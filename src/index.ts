@@ -164,6 +164,18 @@ function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
 const ROLEBOX_SKILL_PREFIX = "rolebox--";
 
 /**
+ * Determine the opencode global config directory.
+ * Respects XDG_CONFIG_HOME if set, otherwise defaults to ~/.config/opencode.
+ */
+function getOpencodeConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg) {
+    return path.join(xdg, "opencode");
+  }
+  return path.join(os.homedir(), ".config", "opencode");
+}
+
+/**
  * Sync rolebox skills into ~/.config/opencode/skills/ for oh-my-openagent discovery.
  *
  * oh-my-openagent's loadSkillsFromDir treats symlinks as directories:
@@ -230,7 +242,7 @@ function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: strin
  */
 const RoleboxPlugin: Plugin = async (ctx) => {
   const roleboxDir = path.join(ctx.directory, "rolebox");
-  const globalSkillsDir = path.join(ctx.directory, "skills");
+  const globalSkillsDir = path.join(getOpencodeConfigDir(), "skills");
 
   // Discover all roles from the rolebox directory.
   // Returns an empty Map when the directory does not exist or is empty.

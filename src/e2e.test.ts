@@ -197,6 +197,9 @@ describe("End-to-end", () => {
       const roleboxDir = path.join(tmpDir, "rolebox");
       mkdirSync(roleboxDir, { recursive: true });
 
+      const originalXdg = process.env.XDG_CONFIG_HOME;
+      process.env.XDG_CONFIG_HOME = tmpDir;
+
       try {
         cpSync(
           path.join(examplesDir, "code-reviewer"),
@@ -237,6 +240,7 @@ describe("End-to-end", () => {
         expect("model" in tw).toBe(false);
         expect("color" in tw).toBe(false);
       } finally {
+        process.env.XDG_CONFIG_HOME = originalXdg;
         rmSync(tmpDir, { recursive: true, force: true });
       }
     });
