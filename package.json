@@ -1,7 +1,7 @@
 {
   "name": "rolebox",
-  "version": "0.0.1",
-  "description": "OpenCode custom agent role plugin — define roles via YAML config with custom prompts, models, skills, and permissions",
+  "version": "0.1.0",
+  "description": "OpenCode plugin — define custom AI agent roles via YAML with per-role prompts, models, skills, and permissions",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,10 +12,28 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "examples"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "ai-agent",
+    "yaml",
+    "role",
+    "prompt"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EricMoin/rolebox"
   },
   "dependencies": {
     "fast-glob": "^3.3.0",
