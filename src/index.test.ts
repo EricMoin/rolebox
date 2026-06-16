@@ -8,12 +8,16 @@ import type { Config } from "@opencode-ai/sdk";
 import RoleboxPlugin from "./index";
 
 let tmpDir: string;
+let originalXdg: string | undefined;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(osTmpdir(), "rolebox-idx-test-"));
+  originalXdg = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = tmpDir;
 });
 
 afterEach(() => {
+  process.env.XDG_CONFIG_HOME = originalXdg;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
