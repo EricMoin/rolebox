@@ -241,8 +241,14 @@ function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: strin
  * configuration files with custom prompts, models, skills, and permissions.
  */
 const RoleboxPlugin: Plugin = async (ctx) => {
-  const roleboxDir = path.join(ctx.directory, "rolebox");
-  const globalSkillsDir = path.join(getOpencodeConfigDir(), "skills");
+  const configDir = getOpencodeConfigDir();
+  // Prefer ctx.directory/rolebox if it exists (e.g. when ctx.directory IS the
+  // config dir), otherwise fall back to the well-known config location.
+  const ctxRoleboxDir = path.join(ctx.directory, "rolebox");
+  const roleboxDir = existsSync(ctxRoleboxDir)
+    ? ctxRoleboxDir
+    : path.join(configDir, "rolebox");
+  const globalSkillsDir = path.join(configDir, "skills");
 
   // Discover all roles from the rolebox directory.
   // Returns an empty Map when the directory does not exist or is empty.
