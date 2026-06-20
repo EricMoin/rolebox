@@ -1,12 +1,25 @@
 import path from "node:path";
 import os from "node:os";
 import { writeFileSync, readFileSync, mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { Plugin } from "@opencode-ai/plugin";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import type { AgentConfig } from "@opencode-ai/sdk";
 import { discoverRoles } from "./role-loader";
 import { resolveSkills } from "./skill-resolver";
-import { buildAgentPrompt } from "./prompt-builder";
-import type { RoleConfig, ResolvedRole, ResolvedSkill } from "./types";
+import { resolveFunctions } from "./function-resolver";
+import { parseFunctionActivation } from "./function-parser";
+import { functionSessionState } from "./session-state";
+import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder";
+import type { RoleConfig, ResolvedRole, ResolvedSkill, ResolvedFunction } from "./types";
+
+/**
+ * Map of roleId → ResolvedFunction[] built at startup.
+ * Exported so tests and hooks can query role-level function resolution.
+ */
+export const roleFunctionsMap = new Map<string, ResolvedFunction[]>();
 
 /**
  * Resolve all discovered roles into ResolvedRole objects.
@@ -15,8 +28,9 @@ import type { RoleConfig, ResolvedRole, ResolvedSkill } from "./types";
  *  1. Gather both role-local skills (skills[]) and opencode-global skills
  *     (opencode_skills[]) into a single name list.
  *  2. Resolve those names to file paths via the 4-candidate priority system.
- *  3. Build the final agent prompt with <available_skills> XML block.
- *  4. Return a ResolvedRole object for each successfully-resolved role.
+ *  3. Gather function names, filter disabled ones, and resolve function files.
+ *  4. Build the final agent prompt with <available_skills> XML block.
+ *  5. Return a ResolvedRole object for each successfully-resolved role.
  *
  * Errors from individual role resolution are caught and the failing role is
  * silently skipped (the returned array omits it).
@@ -25,6 +39,7 @@ async function resolveAllRoles(
   roles: Map<string, RoleConfig>,
   roleboxDir: string,
   globalSkillsDir: string,
+  configDir: string,
 ): Promise<ResolvedRole[]> {
   const resolved: ResolvedRole[] = [];
 
@@ -42,9 +57,23 @@ async function resolveAllRoles(
         skills = await resolveSkills(allSkillNames, roleDir, globalSkillsDir);
       }
 
+      const globalFunctionsDir = path.join(configDir, "functions");
+      const builtinDir = path.join(__dirname, "..", "functions");
+
+      const functionNames = config.functions ?? ["plan", "execute"];
+      const enabledFunctions = functionNames.filter(
+        (fn) => !(config.disable_functions ?? []).includes(fn),
+      );
+
+      let functions: ResolvedFunction[] = [];
+      if (enabledFunctions.length > 0) {
+        functions = await resolveFunctions(enabledFunctions, roleDir, globalFunctionsDir, builtinDir);
+      }
+
       const prompt = buildAgentPrompt(config, skills);
 
-      resolved.push({ id: roleId, config, prompt, skills, functions: [] });
+      resolved.push({ id: roleId, config, prompt, skills, functions });
+      roleFunctionsMap.set(roleId, functions);
     } catch {
       // Silently skip roles that fail during resolution.
     }
@@ -259,6 +288,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     roles,
     roleboxDir,
     globalSkillsDir,
+    configDir,
   );
 
   // Sync agent files to ~/.claude/agents/ for oh-my-openagent compatibility.
@@ -275,6 +305,54 @@ const RoleboxPlugin: Plugin = async (ctx) => {
         config.agent ??= {};
         config.agent[resolved.id] = agentConfig;
       }
+    },
+    "chat.message": async (input, output) => {
+      const textPartIndex = output.parts.findIndex(
+        (p: { type: string; text?: string }) => p.type === "text" && "text" in p,
+      );
+      if (textPartIndex === -1) return;
+
+      const part = output.parts[textPartIndex] as { type: string; text: string };
+      const { functions: parsedFunctions, cleanedText } = parseFunctionActivation(part.text);
+      if (parsedFunctions.length === 0) return;
+
+      part.text = cleanedText;
+
+      const roleId = input.agent;
+      const roleFunctions = roleId ? roleFunctionsMap.get(roleId) : null;
+
+      if (roleFunctions) {
+        const validNames = new Set(roleFunctions.map((f) => f.name));
+        const validFunctions = parsedFunctions.filter((fn) => validNames.has(fn));
+        functionSessionState.activate(input.sessionID, validFunctions);
+      } else {
+        functionSessionState.activate(input.sessionID, parsedFunctions);
+      }
+    },
+    "experimental.chat.system.transform": async (input, output) => {
+      if (!input.sessionID) return;
+
+      const activeNames = functionSessionState.getActive(input.sessionID);
+      if (activeNames.size === 0) return;
+
+      const allFunctions: ResolvedFunction[] = [];
+      for (const funcs of roleFunctionsMap.values()) {
+        allFunctions.push(...funcs);
+      }
+
+      const seen = new Set<string>();
+      const activeFunctions: ResolvedFunction[] = [];
+      for (const fn of allFunctions) {
+        if (activeNames.has(fn.name) && !seen.has(fn.name)) {
+          activeFunctions.push(fn);
+          seen.add(fn.name);
+        }
+      }
+
+      if (activeFunctions.length === 0) return;
+
+      const block = buildFunctionBlock(activeFunctions);
+      output.system.push(block);
     },
   };
 };
