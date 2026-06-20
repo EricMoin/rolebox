@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import type { RoleConfig, ResolvedSkill } from "./types";
-import { buildAgentPrompt } from "./prompt-builder";
+import type { RoleConfig, ResolvedSkill, ResolvedFunction } from "./types";
+import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -137,5 +137,63 @@ describe("buildAgentPrompt", () => {
     expect(result).toContain(
       "Skills provide specialized instructions. Use the skill tool to load when task matches.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildFunctionBlock helpers
+// ---------------------------------------------------------------------------
+
+function makeFunction(overrides: Partial<ResolvedFunction> = {}): ResolvedFunction {
+  return {
+    name: "plan",
+    description: "Planning capability",
+    content: "Plan carefully and methodically.",
+    filePath: "/fake/path/plan.md",
+    source: "global",
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildFunctionBlock tests
+// ---------------------------------------------------------------------------
+
+describe("buildFunctionBlock", () => {
+  it("returns empty string for empty array", () => {
+    expect(buildFunctionBlock([])).toBe("");
+  });
+
+  it("generates active_functions XML with one function", () => {
+    const result = buildFunctionBlock([makeFunction()]);
+    expect(result).toContain("<active_functions>");
+    expect(result).toContain("<name>plan</name>");
+    expect(result).toContain("<description>Planning capability</description>");
+    expect(result).toContain("<![CDATA[");
+    expect(result).toContain("Plan carefully and methodically.");
+    expect(result).toContain("]]>");
+    expect(result).toContain("</active_functions>");
+  });
+
+  it("wraps content with special characters in CDATA", () => {
+    const fn = makeFunction({
+      content: "Use <script> and & stuff",
+    });
+    const result = buildFunctionBlock([fn]);
+    expect(result).toContain("<![CDATA[");
+    expect(result).toContain("Use <script> and & stuff");
+    expect(result).toContain("]]>");
+  });
+
+  it("includes multiple functions", () => {
+    const functions = [
+      makeFunction({ name: "plan", description: "Plan things", content: "Plan content" }),
+      makeFunction({ name: "execute", description: "Execute things", content: "Execute content" }),
+    ];
+    const result = buildFunctionBlock(functions);
+    expect(result).toContain("<name>plan</name>");
+    expect(result).toContain("<name>execute</name>");
+    expect(result).toContain("Plan content");
+    expect(result).toContain("Execute content");
   });
 });
