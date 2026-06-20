@@ -44,7 +44,7 @@ async function resolveAllRoles(
 
       const prompt = buildAgentPrompt(config, skills);
 
-      resolved.push({ id: roleId, config, prompt, skills });
+      resolved.push({ id: roleId, config, prompt, skills, functions: [] });
     } catch {
       // Silently skip roles that fail during resolution.
     }

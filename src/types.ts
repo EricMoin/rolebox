@@ -43,6 +43,10 @@ export interface RoleConfig {
   temperature?: number;
   /** Top-p nucleus sampling parameter (0.0 - 1.0) */
   top_p?: number;
+  /** Names of functions this role supports */
+  functions?: string[];
+  /** Names of default functions to disable */
+  disable_functions?: string[];
 }
 
 /**
@@ -61,6 +65,23 @@ export interface ResolvedSkill {
 }
 
 /**
+ * A resolved function reference after locating the corresponding function file
+ * in either the role's local functions directory or a global functions directory.
+ */
+export interface ResolvedFunction {
+  /** Function name */
+  name: string;
+  /** Human-readable description */
+  description: string;
+  /** Raw function content (the actual system message / tool definition) */
+  content: string;
+  /** Absolute filesystem path to the function file */
+  filePath: string;
+  /** Source indicating where the function was found */
+  source: "role-local" | "global" | "built-in";
+}
+
+/**
  * A fully resolved role with all configuration materialized.
  * Environment variables have been substituted, prompt_file content has been
  * loaded into the prompt field, and all skill references have been resolved
@@ -75,6 +96,8 @@ export interface ResolvedRole {
   prompt: string;
   /** Resolved skill references */
   skills: ResolvedSkill[];
+  /** Resolved function references */
+  functions: ResolvedFunction[];
 }
 
 /**
@@ -94,4 +117,15 @@ export interface SkillMetadata {
   compatibility?: string;
   /** Allowed tools, either as a comma-separated string or an array */
   "allowed-tools"?: string | string[];
+}
+
+/**
+ * YAML frontmatter metadata parsed from function files.
+ * Fields follow a simpler subset of the skill frontmatter schema.
+ */
+export interface FunctionMetadata {
+  /** Function name */
+  name?: string;
+  /** Human-readable description */
+  description?: string;
 }
