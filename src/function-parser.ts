@@ -8,19 +8,22 @@ export function parseFunctionActivation(text: string): {
   functions: string[];
   cleanedText: string;
 } {
-  const functions: string[] = [];
-  let remaining = text;
-  const pattern = /^\|([a-z][a-z0-9-]*)\|/;
+  // Matches consecutive |fn| patterns at the start. Handles both:
+  //   shared-pipe:  |plan|review|    — one | closes plan AND opens review
+  //   double-pipe:  |plan||execute|  — separate | for closing and opening
+  // After the first |name|, each additional name pattern can optionally
+  // start with | (double-pipe) or not (shared-pipe), followed by name and |.
+  const fullPattern =
+    /^\|[a-z][a-z0-9-]*\|(?:\|?[a-z][a-z0-9-]*\|)*/;
+  const match = text.match(fullPattern);
 
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(remaining)) !== null) {
-    functions.push(match[1]);
-    remaining = remaining.slice(match[0].length);
+  if (!match) {
+    return { functions: [], cleanedText: text };
   }
 
-  if (functions.length > 0) {
-    remaining = remaining.trimStart();
-  }
+  const matched = match[0];
+  const functions = matched.split("|").filter(Boolean);
+  const cleanedText = text.slice(matched.length).trimStart();
 
-  return { functions, cleanedText: remaining };
+  return { functions, cleanedText };
 }
