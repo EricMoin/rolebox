@@ -1,6 +1,6 @@
 {
   "name": "rolebox",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "OpenCode plugin — define custom AI agent roles via YAML with per-role prompts, models, skills, and permissions",
   "type": "module",
   "main": "dist/index.js",
@@ -14,7 +14,8 @@
   },
   "files": [
     "dist",
-    "examples"
+    "examples",
+    "functions"
   ],
   "scripts": {
     "build": "tsc",
