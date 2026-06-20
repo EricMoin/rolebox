@@ -17,6 +17,8 @@ prompt: |
   Always provide specific, actionable feedback.
 skills:
   - review-checklist
+functions:
+  - plan
 permission:
   allow:
     - Read
