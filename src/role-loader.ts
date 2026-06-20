@@ -159,6 +159,12 @@ async function loadOneRole(
     ...(typeof resolved.top_p === "number"
       ? { top_p: resolved.top_p }
       : {}),
+    ...(Array.isArray(resolved.functions)
+      ? { functions: resolved.functions as string[] }
+      : {}),
+    ...(Array.isArray(resolved.disable_functions)
+      ? { disable_functions: resolved.disable_functions as string[] }
+      : {}),
   };
 
   return config;
