@@ -1,4 +1,4 @@
-import type { RoleConfig, ResolvedSkill } from "./types";
+import type { RoleConfig, ResolvedFunction, ResolvedSkill } from "./types";
 
 /**
  * Build the final system prompt for a role.
@@ -35,4 +35,34 @@ export function buildAgentPrompt(
 Skills provide specialized instructions. Use the skill tool to load when task matches.
 ${skillBlocks}
 </available_skills>`;
+}
+
+/**
+ * Build an XML block listing active functions for system prompt injection.
+ *
+ * Each function's content is wrapped in CDATA to prevent XML parsing issues.
+ * Returns empty string when the functions array is empty.
+ */
+export function buildFunctionBlock(functions: ResolvedFunction[]): string {
+  if (functions.length === 0) {
+    return "";
+  }
+
+  const blocks = functions
+    .map(
+      (fn) =>
+        `  <function>
+    <name>${fn.name}</name>
+    <description>${fn.description}</description>
+    <instructions><![CDATA[
+${fn.content}
+    ]]></instructions>
+  </function>`,
+    )
+    .join("\n");
+
+  return `<active_functions>
+These functions are currently active for this session. Follow their instructions.
+${blocks}
+</active_functions>`;
 }
