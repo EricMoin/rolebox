@@ -21,7 +21,8 @@ import type { Config } from "@opencode-ai/sdk";
 import { discoverRoles } from "./role-loader";
 import { resolveSkills } from "./skill-resolver";
 import { buildAgentPrompt } from "./prompt-builder";
-import RoleboxPlugin from "./index";
+import RoleboxModule from "./index";
+const RoleboxPlugin = RoleboxModule.server;
 
 const examplesDir = path.join(import.meta.dir, "..", "examples");
 

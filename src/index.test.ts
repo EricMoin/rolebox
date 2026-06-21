@@ -5,7 +5,8 @@ import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
-import RoleboxPlugin from "./index";
+import RoleboxModule from "./index";
+const RoleboxPlugin = RoleboxModule.server;
 
 let tmpDir: string;
 let originalXdg: string | undefined;
