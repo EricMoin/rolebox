@@ -1,5 +1,6 @@
 import type { FunctionMetadata, ResolvedFunction } from "./types";
 import { parseFrontmatter } from "./skill-resolver";
+import type { FunctionCall } from "./function-parser";
 
 /**
  * Resolve function names to their file locations using Bun.file().exists().
@@ -55,6 +56,7 @@ export async function resolveFunctions(
         content: body,
         filePath: candidate.path,
         source: candidate.source,
+        params: (metadata as FunctionMetadata).params,
       });
 
       matched = true;
@@ -69,6 +71,50 @@ export async function resolveFunctions(
   }
 
   return resolved;
+}
+
+/**
+ * Apply parameter substitution to a function's content.
+ *
+ * Replaces `{param_name}` placeholders with values from the activation call.
+ * Positional args (from colon syntax) are mapped to param declaration order.
+ * Missing params fall back to their declared default values.
+ * Unresolved placeholders (no value, no default) are left as-is.
+ */
+export function applyParams(
+  fn: ResolvedFunction,
+  call: FunctionCall,
+): string {
+  if (!fn.params || Object.keys(fn.params).length === 0) {
+    return fn.content;
+  }
+
+  const paramNames = Object.keys(fn.params);
+  const resolved: Record<string, string> = {};
+
+  // Map positional args (_0, _1, ...) to declared param order
+  for (let i = 0; i < paramNames.length; i++) {
+    const paramName = paramNames[i];
+    if (call.args[paramName] !== undefined) {
+      // Named arg takes priority
+      resolved[paramName] = call.args[paramName];
+    } else if (call.args[`_${i}`] !== undefined) {
+      // Positional arg by index
+      resolved[paramName] = call.args[`_${i}`];
+    } else {
+      // Fall back to default from frontmatter
+      resolved[paramName] = fn.params[paramName];
+    }
+  }
+
+  let content = fn.content;
+  for (const [key, value] of Object.entries(resolved)) {
+    if (value !== undefined && value !== "") {
+      content = content.replaceAll(`{${key}}`, value);
+    }
+  }
+
+  return content;
 }
 
 /**
