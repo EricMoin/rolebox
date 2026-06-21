@@ -79,6 +79,8 @@ export interface ResolvedFunction {
   filePath: string;
   /** Source indicating where the function was found */
   source: "role-local" | "global" | "built-in";
+  /** Parameter declarations from frontmatter (name → default value) */
+  params?: Record<string, string>;
 }
 
 /**
@@ -128,4 +130,6 @@ export interface FunctionMetadata {
   name?: string;
   /** Human-readable description */
   description?: string;
+  /** Parameter declarations: name → default value or description */
+  params?: Record<string, string>;
 }
