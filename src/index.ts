@@ -365,4 +365,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
   };
 };
 
-export default RoleboxPlugin;
+export default {
+  id: "rolebox",
+  server: RoleboxPlugin,
+};
