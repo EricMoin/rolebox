@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { parseFunctionActivation } from "./function-parser";
+import type { FunctionCall } from "./function-parser";
 
 describe("parseFunctionActivation", () => {
   it("extracts single function from start", () => {
@@ -72,5 +73,59 @@ describe("parseFunctionActivation", () => {
     const result = parseFunctionActivation("|plan|   spaced text");
     expect(result.functions).toEqual(["plan"]);
     expect(result.cleanedText).toBe("spaced text");
+  });
+
+  it("returns empty calls array for plain functions", () => {
+    const result = parseFunctionActivation("|plan| do it");
+    expect(result.calls).toEqual([{ name: "plan", args: {} }]);
+  });
+});
+
+describe("parseFunctionActivation — parameterized", () => {
+  it("parses colon positional args: |review:security|", () => {
+    const result = parseFunctionActivation("|review:security| check code");
+    expect(result.functions).toEqual(["review"]);
+    expect(result.calls[0].name).toBe("review");
+    expect(result.calls[0].args).toEqual({ _0: "security" });
+    expect(result.cleanedText).toBe("check code");
+  });
+
+  it("parses multiple positional args: |review:security,strict|", () => {
+    const result = parseFunctionActivation("|review:security,strict| go");
+    expect(result.functions).toEqual(["review"]);
+    expect(result.calls[0].args).toEqual({ _0: "security", _1: "strict" });
+    expect(result.cleanedText).toBe("go");
+  });
+
+  it("parses key=value args: |review focus=security|", () => {
+    const result = parseFunctionActivation("|review focus=security| go");
+    expect(result.functions).toEqual(["review"]);
+    expect(result.calls[0].args).toEqual({ focus: "security" });
+    expect(result.cleanedText).toBe("go");
+  });
+
+  it("parses multiple key=value args", () => {
+    const result = parseFunctionActivation("|review focus=security severity=strict| go");
+    expect(result.functions).toEqual(["review"]);
+    expect(result.calls[0].args).toEqual({ focus: "security", severity: "strict" });
+  });
+
+  it("parses quoted values: |review focus=\"all areas\"|", () => {
+    const result = parseFunctionActivation('|review focus="all areas"| go');
+    expect(result.calls[0].args).toEqual({ focus: "all areas" });
+  });
+
+  it("mixes plain and parameterized: |plan|review:security|", () => {
+    const result = parseFunctionActivation("|plan|review:security| go");
+    expect(result.functions).toEqual(["plan", "review"]);
+    expect(result.calls[0]).toEqual({ name: "plan", args: {} });
+    expect(result.calls[1]).toEqual({ name: "review", args: { _0: "security" } });
+  });
+
+  it("handles parameterized function with no trailing text", () => {
+    const result = parseFunctionActivation("|review:perf|");
+    expect(result.functions).toEqual(["review"]);
+    expect(result.calls[0].args).toEqual({ _0: "perf" });
+    expect(result.cleanedText).toBe("");
   });
 });
