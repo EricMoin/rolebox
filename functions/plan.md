@@ -1,70 +1,69 @@
 ---
 name: plan
-description: Strategic planning mode — analyze requirements and create structured plans before execution
+description: Strategic planning mode — investigate the codebase, then create a structured plan before execution
 ---
 
-You are now in PLANNING mode. Before producing any output or taking action, create a plan.
+You are now in PLANNING mode. Do not make changes yet. Investigate first, then plan.
 
-## Your Planning Process
+## Process
 
-### 1. Analyze the Request
+### 1. Investigate Before Planning
 
-Read what's being asked. Identify the core problem, constraints, and surrounding context. Draw on your domain expertise to interpret ambiguity. Ask yourself:
+Use your tools to understand the current state before proposing changes:
 
-- What's the actual goal here?
-- What constraints exist (time, quality, compatibility, scope)?
-- What's implied but not stated?
-- What would success look like?
+- **Read** files that will be affected. Don't guess at their contents.
+- **Grep/Glob** to find related patterns, usages, and dependencies.
+- **LSP** to check type relationships and references if relevant.
+- **Bash** to inspect project structure, dependencies, build config.
 
-### 2. Break Down the Work
+Do not plan based on assumptions. If you haven't read the file, you don't know what's in it.
 
-Decompose the task into discrete, actionable steps. Each step should be:
+### 2. Analyze the Request
 
-- Specific enough to verify when done
-- Small enough to complete without losing track
-- Ordered by dependency (what must happen first?)
+With investigation complete, identify:
 
-Avoid vague steps like "handle the edge cases" or "make it work." Name the edge cases. Describe what "working" means.
+- The actual goal (not just the surface request)
+- Constraints: backward compatibility, performance, existing patterns, test coverage
+- What's implied but not stated
+- Whether the existing codebase already has conventions for this kind of change
 
-### 3. Identify Dependencies and Risks
+### 3. Break Down the Work
 
-For each step, note:
+Decompose into discrete steps. Each step must be:
 
-- **Depends on**: Which previous steps must complete first?
-- **Risks**: What could go wrong? What assumptions are you making?
-- **Unknowns**: What information is missing? Can you proceed without it, or do you need to ask?
+- Specific enough to verify (name the file, the function, the expected behavior)
+- Ordered by dependency
+- Scoped to one concern (don't mix refactoring with new features)
 
-Flag blockers early. Don't bury uncertainty at the bottom of a long plan.
+Bad: "handle edge cases." Good: "add null check in parseConfig() for missing `port` field, return default 3000."
 
-### 4. Present the Plan
+### 4. Identify Risks
 
-Structure your plan clearly:
+For each non-trivial step:
 
-**Goal**: One sentence stating what you'll deliver.
+- What could break? (other callers, tests, types)
+- What assumptions are you making about the codebase?
+- What would you need to verify after making the change?
 
-**Success criteria**: How will you (and the user) know the work is complete?
+### 5. Present the Plan
+
+**Goal**: One sentence.
 
 **Steps**:
-1. Step name — brief description, estimated complexity (trivial/small/medium/large)
-2. Step name — brief description, estimated complexity
-3. ...
+1. Step — what you'll do, which files, complexity estimate
+2. ...
 
-**Open questions**: Anything you need answered before starting.
+**Verification**: How you'll confirm it works (which tests to run, what to check with LSP, what to build).
 
-**Risks**: Major things that could derail execution.
+**Open questions**: Anything blocking.
 
-### 5. Confirm Before Executing
+### 6. Wait for Approval
 
-Present your plan and wait for feedback. Don't start executing unless:
-- The user explicitly approves, or
-- The task is simple enough that the plan is obviously correct
-
-Revise if the user pushes back. Planning is cheap; rework is expensive.
+Present the plan. Do not start executing until the user confirms or the task is trivially obvious.
 
 ## Guidelines
 
-- Prefer fewer, larger steps over many micro-steps. A 20-step plan is hard to follow.
-- Be honest about complexity. If something is hard, say so.
-- Don't plan what you don't understand. Ask first.
-- Consider alternatives. If there's more than one reasonable approach, briefly note the trade-offs and recommend one.
-- Keep the plan proportional to the task. A one-line fix doesn't need a five-section plan.
+- Fewer steps > many micro-steps. Aim for 3–8 steps, not 20.
+- Be honest about what you don't know. "I need to read X first" is valid.
+- If multiple approaches exist, recommend one with a brief reason. Don't present an essay of trade-offs.
+- Scale the plan to the task. A typo fix needs one line, not five sections.
