@@ -9,8 +9,9 @@ const __dirname = path.dirname(__filename);
 import type { AgentConfig } from "@opencode-ai/sdk";
 import { discoverRoles } from "./role-loader";
 import { resolveSkills } from "./skill-resolver";
-import { resolveFunctions } from "./function-resolver";
+import { resolveFunctions, applyParams } from "./function-resolver";
 import { parseFunctionActivation } from "./function-parser";
+import type { FunctionCall } from "./function-parser";
 import { functionSessionState } from "./session-state";
 import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder";
 import type { RoleConfig, ResolvedRole, ResolvedSkill, ResolvedFunction } from "./types";
@@ -313,7 +314,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
       if (textPartIndex === -1) return;
 
       const part = output.parts[textPartIndex] as { type: string; text: string };
-      const { functions: parsedFunctions, cleanedText } = parseFunctionActivation(part.text);
+      const { functions: parsedFunctions, calls, cleanedText } = parseFunctionActivation(part.text);
       if (parsedFunctions.length === 0) return;
 
       part.text = cleanedText;
@@ -324,9 +325,10 @@ const RoleboxPlugin: Plugin = async (ctx) => {
       if (roleFunctions) {
         const validNames = new Set(roleFunctions.map((f) => f.name));
         const validFunctions = parsedFunctions.filter((fn) => validNames.has(fn));
-        functionSessionState.activate(input.sessionID, validFunctions);
+        const validCalls = calls.filter((c) => validNames.has(c.name));
+        functionSessionState.activate(input.sessionID, validFunctions, validCalls);
       } else {
-        functionSessionState.activate(input.sessionID, parsedFunctions);
+        functionSessionState.activate(input.sessionID, parsedFunctions, calls);
       }
     },
     "experimental.chat.system.transform": async (input, output) => {
@@ -344,7 +346,13 @@ const RoleboxPlugin: Plugin = async (ctx) => {
       const activeFunctions: ResolvedFunction[] = [];
       for (const fn of allFunctions) {
         if (activeNames.has(fn.name) && !seen.has(fn.name)) {
-          activeFunctions.push(fn);
+          // Apply parameter substitution if the function was called with args
+          const call = functionSessionState.getCall(input.sessionID, fn.name);
+          if (call && fn.params && Object.keys(call.args).length > 0) {
+            activeFunctions.push({ ...fn, content: applyParams(fn, call) });
+          } else {
+            activeFunctions.push(fn);
+          }
           seen.add(fn.name);
         }
       }
