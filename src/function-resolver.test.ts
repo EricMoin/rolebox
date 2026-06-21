@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveFunctions, loadFunctionContent } from "./function-resolver";
+import { resolveFunctions, loadFunctionContent, applyParams } from "./function-resolver";
+import type { ResolvedFunction } from "./types";
+import type { FunctionCall } from "./function-parser";
 
 let tmpRoots: string[] = [];
 
@@ -401,5 +403,87 @@ describe("loadFunctionContent", () => {
     expect(result.metadata.name).toBeUndefined();
     expect(result.metadata.description).toBe("");
     expect(result.content).toBe("Just plain body content.");
+  });
+});
+
+describe("applyParams", () => {
+  function makeFn(content: string, params?: Record<string, string>): ResolvedFunction {
+    return {
+      name: "test-fn",
+      description: "",
+      content,
+      filePath: "/tmp/fake.md",
+      source: "built-in",
+      params,
+    };
+  }
+
+  function makeCall(name: string, args: Record<string, string>): FunctionCall {
+    return { name, args };
+  }
+
+  it("replaces named params with call args", () => {
+    const fn = makeFn("Focus on {focus} with {severity} level.", {
+      focus: "correctness",
+      severity: "normal",
+    });
+    const call = makeCall("test-fn", { focus: "security", severity: "strict" });
+
+    expect(applyParams(fn, call)).toBe("Focus on security with strict level.");
+  });
+
+  it("maps positional args to param declaration order", () => {
+    const fn = makeFn("Focus on {focus} with {severity} level.", {
+      focus: "correctness",
+      severity: "normal",
+    });
+    const call = makeCall("test-fn", { _0: "performance", _1: "lenient" });
+
+    expect(applyParams(fn, call)).toBe("Focus on performance with lenient level.");
+  });
+
+  it("falls back to default when arg not provided", () => {
+    const fn = makeFn("Focus on {focus} with {severity} level.", {
+      focus: "correctness",
+      severity: "normal",
+    });
+    const call = makeCall("test-fn", { focus: "security" });
+
+    expect(applyParams(fn, call)).toBe("Focus on security with normal level.");
+  });
+
+  it("named args take priority over positional", () => {
+    const fn = makeFn("{focus}", { focus: "default" });
+    const call = makeCall("test-fn", { _0: "positional", focus: "named" });
+
+    expect(applyParams(fn, call)).toBe("named");
+  });
+
+  it("returns content unchanged when fn has no params", () => {
+    const fn = makeFn("No params here {foo}.");
+    const call = makeCall("test-fn", { foo: "bar" });
+
+    expect(applyParams(fn, call)).toBe("No params here {foo}.");
+  });
+
+  it("returns content unchanged when params is empty object", () => {
+    const fn = makeFn("Content {x}.", {});
+    const call = makeCall("test-fn", { x: "val" });
+
+    expect(applyParams(fn, call)).toBe("Content {x}.");
+  });
+
+  it("leaves placeholder as-is when no value and no default", () => {
+    const fn = makeFn("Focus on {focus}.", { focus: "" });
+    const call = makeCall("test-fn", {});
+
+    expect(applyParams(fn, call)).toBe("Focus on {focus}.");
+  });
+
+  it("replaces all occurrences of the same param", () => {
+    const fn = makeFn("{x} and {x} again.", { x: "default" });
+    const call = makeCall("test-fn", { x: "value" });
+
+    expect(applyParams(fn, call)).toBe("value and value again.");
   });
 });
