@@ -1,4 +1,4 @@
-import { loadLock } from "../config";
+import { loadLock } from "../config.js";
 
 /**
  * List installed roles from the lock file.

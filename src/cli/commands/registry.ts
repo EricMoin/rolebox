@@ -1,5 +1,5 @@
-import { loadConfig, saveConfig, loadLock } from "../config";
-import { parseGitHubUrl, fetchRegistryManifest } from "../registry-client";
+import { loadConfig, saveConfig, loadLock } from "../config.js";
+import { parseGitHubUrl, fetchRegistryManifest } from "../registry-client.js";
 
 /**
  * Registry management command dispatcher.

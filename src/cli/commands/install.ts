@@ -1,7 +1,7 @@
-import { loadConfig, loadLock, addToLock, findInLock } from "../config";
-import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client";
-import { getRolePath } from "../paths";
-import type { LockEntry } from "../types";
+import { loadConfig, loadLock, addToLock, findInLock } from "../config.js";
+import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.js";
+import { getRolePath } from "../paths.js";
+import type { LockEntry } from "../types.js";
 import { existsSync, renameSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 

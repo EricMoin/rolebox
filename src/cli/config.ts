@@ -1,9 +1,9 @@
 import { dump } from "js-yaml";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { getConfigDir } from "./paths";
-import { parseConfigFromYaml, parseLockFileFromYaml } from "./schemas";
-import type { RoleboxConfig, LockFile, LockEntry } from "./types";
+import { getConfigDir } from "./paths.js";
+import { parseConfigFromYaml, parseLockFileFromYaml } from "./schemas.js";
+import type { RoleboxConfig, LockFile, LockEntry } from "./types.js";
 
 const DEFAULT_CONFIG: RoleboxConfig = {
   registries: [

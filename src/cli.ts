@@ -55,38 +55,38 @@ async function main(): Promise<void> {
   try {
     switch (command) {
       case "install": {
-        const { install } = await import("./cli/commands/install");
+        const { install } = await import("./cli/commands/install.js");
         await install(args.slice(1));
         break;
       }
       case "uninstall": {
-        const { uninstall } = await import("./cli/commands/uninstall");
+        const { uninstall } = await import("./cli/commands/uninstall.js");
         await uninstall(args.slice(1));
         break;
       }
       case "sync": {
         // Alias to avoid shadowing Bun.sync global
-        const { sync: syncCmd } = await import("./cli/commands/sync");
+        const { sync: syncCmd } = await import("./cli/commands/sync.js");
         await syncCmd(args.slice(1));
         break;
       }
       case "list": {
-        const { list } = await import("./cli/commands/list");
+        const { list } = await import("./cli/commands/list.js");
         list(args.slice(1));
         break;
       }
       case "search": {
-        const { search } = await import("./cli/commands/search");
+        const { search } = await import("./cli/commands/search.js");
         await search(args.slice(1));
         break;
       }
       case "update": {
-        const { update } = await import("./cli/commands/update");
+        const { update } = await import("./cli/commands/update.js");
         await update(args.slice(1));
         break;
       }
       case "registry": {
-        const { registry } = await import("./cli/commands/registry");
+        const { registry } = await import("./cli/commands/registry.js");
         await registry(args.slice(1));
         break;
       }

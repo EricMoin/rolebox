@@ -1,6 +1,6 @@
-import type { FunctionMetadata, ResolvedFunction } from "./types";
-import { parseFrontmatter } from "./skill-resolver";
-import type { FunctionCall } from "./function-parser";
+import type { FunctionMetadata, ResolvedFunction } from "./types.js";
+import { parseFrontmatter } from "./skill-resolver.js";
+import type { FunctionCall } from "./function-parser.js";
 
 /**
  * Resolve function names to their file locations using Bun.file().exists().

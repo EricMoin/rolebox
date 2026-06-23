@@ -1,5 +1,5 @@
-import { loadLock } from "../config";
-import { getSyncTarget, getRolePath } from "../paths";
+import { loadLock } from "../config.js";
+import { getSyncTarget, getRolePath } from "../paths.js";
 import {
   existsSync,
   mkdirSync,
