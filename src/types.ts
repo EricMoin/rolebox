@@ -47,6 +47,8 @@ export interface RoleConfig {
   functions?: string[];
   /** Names of default functions to disable */
   disable_functions?: string[];
+  /** Semantic version string for the role (e.g., "1.0.0") */
+  version?: string;
 }
 
 /**
