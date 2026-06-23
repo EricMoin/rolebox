@@ -16,6 +16,101 @@ Add to `opencode.jsonc`:
 }
 ```
 
+## CLI
+
+rolebox includes a command-line interface for installing and managing AI agent roles from remote registries.
+
+### Usage
+
+```bash
+npx rolebox <command> [options]
+```
+
+Or if installed globally:
+
+```bash
+rolebox <command> [options]
+```
+
+### Commands
+
+#### `install <role>[@version]`
+
+Install a role from a registry. The role specifier can be in several formats:
+
+- `rolebox install software-architect` — install latest version from default registry
+- `rolebox install software-architect@1.0.0` — install specific version
+- `rolebox install my-registry:custom-role` — install from named registry
+- `rolebox install my-registry:role@2.0.0` — install specific version from named registry
+
+After installing, run `rolebox sync opencode` to deploy the role.
+
+#### `uninstall <role>`
+
+Remove an installed role and clean up any symlinks.
+
+```bash
+rolebox uninstall software-architect
+```
+
+#### `sync <target>`
+
+Deploy installed roles to a target tool's configuration directory. Currently only supports `opencode`.
+
+```bash
+rolebox sync opencode
+```
+
+This creates symlinks: `~/.config/opencode/rolebox/{roleId}` → `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`
+
+If a manual role (regular directory) already exists at the target path, it is preserved with a warning.
+
+#### `list`
+
+Show all installed roles with versions and their source registries.
+
+```bash
+rolebox list
+rolebox list --json   # JSON output for scripting
+```
+
+#### `search [query]`
+
+Search available roles across all configured registries.
+
+```bash
+rolebox search               # List all available roles
+rolebox search react         # Search for roles matching "react"
+```
+
+Matches against role names, descriptions, and tags (case-insensitive).
+
+#### `update [role]`
+
+Update installed roles to the latest versions available in their registries.
+
+```bash
+rolebox update                # Update all installed roles
+rolebox update software-architect  # Update a specific role
+```
+
+#### `registry <subcommand>`
+
+Manage registry sources.
+
+```bash
+rolebox registry list                    # Show all configured registries
+rolebox registry add https://github.com/user/my-roles  # Add a registry
+rolebox registry remove my-roles         # Remove a registry (not the default)
+```
+
+### Configuration
+
+The CLI stores its state in two files:
+
+- `~/.config/rolebox/config.yaml` — registry configuration (default registry: oh-my-role)
+- `~/.config/rolebox/rolebox.lock` — installed role manifest with version and integrity tracking
+
 ## Create a role
 
 ```bash
@@ -287,3 +382,52 @@ Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skil
 - No runtime role switching
 - Functions persist for the entire session (no per-message deactivation yet)
 - No conditional functions based on project context
+
+## Creating a Registry
+
+A registry is a GitHub repository with a specific structure:
+
+```
+registry-repo/
+├── registry.yaml
+└── roles/
+    ├── role-a/
+    │   ├── role.yaml
+    │   └── skills/
+    └── role-b/
+        ├── role.yaml
+        └── skills/
+```
+
+The `registry.yaml` file must follow this format:
+
+```yaml
+name: my-registry
+description: Description of the registry
+url: https://github.com/user/my-registry
+roles:
+  role-a:
+    version: "1.0.0"
+    description: Role description
+    tags: [tag1, tag2]
+  role-b:
+    version: "1.1.0"
+    description: Another role
+    tags: [tag3]
+```
+
+To publish your own registry:
+1. Create a GitHub repository with the structure above
+2. Add roles as subdirectories under `roles/`
+3. Version management: use git tags on the repository (e.g., `v1.0.0`)
+4. Users can add it: `rolebox registry add https://github.com/your-org/your-registry`
+
+### Default Registry
+
+The default registry is [oh-my-role](https://github.com/EricMoin/oh-my-role), which provides a curated set of roles:
+
+- `software-architect` — System design and architecture
+- `react-frontend` — React/Next.js frontend development
+- `ai-designer` — AI application design
+- `tauri` — Desktop app development with Tauri
+- `dart-flutter` — Cross-platform mobile and desktop with Flutter

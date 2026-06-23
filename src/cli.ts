@@ -32,7 +32,7 @@ Examples:
 `);
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
@@ -52,8 +52,50 @@ function main(): void {
     process.exit(1);
   }
 
-  console.error(`'${command}' command is not yet implemented.`);
-  process.exit(1);
+  try {
+    switch (command) {
+      case "install": {
+        const { install } = await import("./cli/commands/install");
+        await install(args.slice(1));
+        break;
+      }
+      case "uninstall": {
+        const { uninstall } = await import("./cli/commands/uninstall");
+        await uninstall(args.slice(1));
+        break;
+      }
+      case "sync": {
+        // Alias to avoid shadowing Bun.sync global
+        const { sync: syncCmd } = await import("./cli/commands/sync");
+        await syncCmd(args.slice(1));
+        break;
+      }
+      case "list": {
+        const { list } = await import("./cli/commands/list");
+        list(args.slice(1));
+        break;
+      }
+      case "search": {
+        const { search } = await import("./cli/commands/search");
+        await search(args.slice(1));
+        break;
+      }
+      case "update": {
+        const { update } = await import("./cli/commands/update");
+        await update(args.slice(1));
+        break;
+      }
+      case "registry": {
+        const { registry } = await import("./cli/commands/registry");
+        await registry(args.slice(1));
+        break;
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Error: ${message}`);
+    process.exit(1);
+  }
 }
 
 main();
