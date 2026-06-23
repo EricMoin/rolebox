@@ -1,4 +1,30 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+
+// Override any stale mock.module("./paths", ...) from other test files (e.g. registry-client.test.ts)
+// Bun v1.3.14 mock.module persists across files, so we must re-mock before importing.
+mock.module("./paths", () => ({ ...require("./paths") }));
+
+// Save/restore env vars to prevent pollution from other test files
+let savedVars: Record<string, string | undefined>;
+
+beforeEach(() => {
+  savedVars = {
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+    APPDATA: process.env.APPDATA,
+  };
+  delete process.env.XDG_DATA_HOME;
+  delete process.env.XDG_CONFIG_HOME;
+});
+
+afterEach(() => {
+  Object.entries(savedVars).forEach(([k, v]) => {
+    if (v !== undefined) process.env[k] = v;
+    else delete process.env[k];
+  });
+});
+
 import { getDataDir, getConfigDir, getRolesDir, getSyncTarget, getRolePath } from "./paths";
 
 describe("paths", () => {
