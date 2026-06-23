@@ -13,8 +13,8 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
-import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver";
-import type { RoleConfig } from "./types";
+import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.js";
+import type { RoleConfig } from "./types.js";
 
 /**
  * Discover roles by scanning `roleboxDir` for subdirectories containing

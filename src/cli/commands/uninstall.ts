@@ -1,5 +1,5 @@
-import { findInLock, removeFromLock } from "../config";
-import { getRolePath, getSyncTarget } from "../paths";
+import { findInLock, removeFromLock } from "../config.js";
+import { getRolePath, getSyncTarget } from "../paths.js";
 import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 

@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { getDataDir } from "./paths";
-import { parseRegistryManifestFromYaml } from "./schemas";
-import type { RegistryManifest } from "./types";
+import { getDataDir } from "./paths.js";
+import { parseRegistryManifestFromYaml } from "./schemas.js";
+import type { RegistryManifest } from "./types.js";
 
 // ── GitHub URL Parsing ────────────────────────────────────────────
 

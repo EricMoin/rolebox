@@ -7,14 +7,14 @@ import type { Plugin } from "@opencode-ai/plugin";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 import type { AgentConfig } from "@opencode-ai/sdk";
-import { discoverRoles } from "./role-loader";
-import { resolveSkills } from "./skill-resolver";
-import { resolveFunctions, applyParams } from "./function-resolver";
-import { parseFunctionActivation } from "./function-parser";
-import type { FunctionCall } from "./function-parser";
-import { functionSessionState } from "./session-state";
-import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder";
-import type { RoleConfig, ResolvedRole, ResolvedSkill, ResolvedFunction } from "./types";
+import { discoverRoles } from "./role-loader.js";
+import { resolveSkills } from "./skill-resolver.js";
+import { resolveFunctions, applyParams } from "./function-resolver.js";
+import { parseFunctionActivation } from "./function-parser.js";
+import type { FunctionCall } from "./function-parser.js";
+import { functionSessionState } from "./session-state.js";
+import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder.js";
+import type { RoleConfig, ResolvedRole, ResolvedSkill, ResolvedFunction } from "./types.js";
 
 /**
  * Map of roleId → ResolvedFunction[] built at startup.

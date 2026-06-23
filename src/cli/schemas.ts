@@ -1,5 +1,5 @@
 import { load } from "js-yaml";
-import type { RegistryManifest, RoleboxConfig, LockFile, LockEntry } from "./types";
+import type { RegistryManifest, RoleboxConfig, LockFile, LockEntry } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

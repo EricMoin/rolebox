@@ -1,4 +1,4 @@
-import type { RoleConfig, ResolvedFunction, ResolvedSkill } from "./types";
+import type { RoleConfig, ResolvedFunction, ResolvedSkill } from "./types.js";
 
 /**
  * Build the final system prompt for a role.

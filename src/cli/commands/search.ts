@@ -1,6 +1,6 @@
-import { loadConfig } from "../config";
-import { fetchRegistryManifest } from "../registry-client";
-import type { RegistryManifest } from "../types";
+import { loadConfig } from "../config.js";
+import { fetchRegistryManifest } from "../registry-client.js";
+import type { RegistryManifest } from "../types.js";
 
 /**
  * Search for roles matching a query string across all configured registries.

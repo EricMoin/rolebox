@@ -1,6 +1,6 @@
 import fg from "fast-glob";
 import yaml from "js-yaml";
-import type { ResolvedSkill, SkillMetadata } from "./types";
+import type { ResolvedSkill, SkillMetadata } from "./types.js";
 
 interface Candidate {
   scope: ResolvedSkill["scope"];
