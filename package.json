@@ -3,6 +3,9 @@
   "version": "0.3.1",
   "description": "OpenCode plugin — define custom AI agent roles via YAML with per-role prompts, models, skills, and permissions",
   "type": "module",
+  "bin": {
+    "rolebox": "./dist/cli.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
