@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkForUpdate } from "./cli/version-check.js";
 
 const __dirname = join(fileURLToPath(import.meta.url), "..");
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")) as { version: string };
@@ -91,6 +92,7 @@ async function main(): Promise<void> {
         break;
       }
     }
+    await checkForUpdate(version);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Error: ${message}`);
