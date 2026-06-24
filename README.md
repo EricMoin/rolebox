@@ -329,6 +329,126 @@ Subagents can have their own `skills/` and `functions/` directories (file-based 
 
 Subagents don't nest. A subagent can't define its own subagents. There's no runtime creation of subagents, and subagents can't communicate directly with each other. All coordination goes through the parent.
 
+## Collaboration Graph
+
+By default, the parent role decides who to dispatch to and when. The collaboration graph adds structure: you define a workflow (who passes work to whom), and rolebox handles the routing automatically.
+
+Think of it like a flowchart for your agents.
+
+### Quick start
+
+Add a `collaboration:` block to your role.yaml. The simplest way is to pick a built-in topology:
+
+```yaml
+name: Review Team Lead
+description: Coordinates code review workflow
+prompt: |
+  You are a team lead coordinating a code review workflow.
+  Follow the collaboration graph to dispatch work.
+subagents:
+  - name: Coder
+    description: Implements code changes
+    prompt: You are a senior developer. Write clean, testable code.
+  - name: Reviewer
+    description: Reviews code for quality
+    prompt: You review code for correctness, style, and edge cases.
+collaboration:
+  topology: review-loop
+  agents: [coder, reviewer]
+  max_iterations: 3
+```
+
+That's it. The parent dispatches to Coder first, Coder's output goes to Reviewer, and Reviewer can either loop back to Coder for revisions or finish the workflow. After 3 loops max, the workflow ends automatically.
+
+### Built-in topologies
+
+Three ready-made patterns:
+
+| Topology | Flow | Use case |
+|---|---|---|
+| `pipeline` | parent → A → B → C → parent | Sequential handoff. Each agent builds on the previous one's output. |
+| `review-loop` | parent → A → B → A (loop) → parent | Revision cycles. The last agent can send work back for another pass. |
+| `star` | parent → A, parent → B, parent → C (parallel) | Fan-out. Each agent works independently and reports back. |
+
+```
+# pipeline: A → B → C, done.
+collaboration:
+  topology: pipeline
+  agents: [researcher, writer, editor]
+
+# review-loop: writer ↔ editor, up to 5 rounds.
+collaboration:
+  topology: review-loop
+  agents: [writer, editor]
+  max_iterations: 5
+
+# star: all agents work in parallel.
+collaboration:
+  topology: star
+  agents: [frontend, backend, devops]
+```
+
+### Custom flow
+
+Need more control? Define edges explicitly:
+
+```yaml
+collaboration:
+  flow:
+    - "parent -> researcher"
+    - "researcher -> writer: research findings"
+    - "writer -> editor: draft content"
+    - from: editor
+      to: writer
+      label: revision requests
+    - from: editor
+      to: parent
+      label: approved
+      exit: true
+  max_iterations: 2
+```
+
+Two edge syntaxes (mix freely):
+
+- **String**: `"from -> to"` or `"from -> to: label"`
+- **Object**: `{ from: ..., to: ..., label: ..., exit: true }`
+
+Special rules:
+- `parent` is a reserved name — it means the orchestrator (your main role)
+- Edges pointing to `parent` or marked `exit: true` terminate the workflow
+- `max_iterations` prevents infinite loops in cyclic graphs (defaults to 3 if a cycle is detected)
+
+### Hybrid: topology + custom edges
+
+Start from a template, then override or add edges:
+
+```yaml
+collaboration:
+  topology: pipeline
+  agents: [coder, reviewer]
+  flow:
+    - "reviewer -> coder: needs revision"   # adds a back-edge on top of the pipeline
+  max_iterations: 3
+```
+
+Custom `flow` edges are merged with the template. If a custom edge has the same `from → to` as a template edge, the custom one wins.
+
+### What happens at runtime
+
+You don't need to manage the workflow manually. Rolebox handles it:
+
+1. When a chat starts, the graph state initializes (step 0, status: active)
+2. The orchestrator's system prompt gets a `<collaboration_graph>` block describing the workflow and a `<collaboration_state>` block showing current progress
+3. Each subagent's prompt gets a `<collaboration_role>` block explaining its position (e.g., "You receive work from Coder. Your output goes to Editor.")
+4. Every time `task()` dispatches to a subagent, the state advances to the next step
+5. When an exit edge is reached or max iterations are exceeded, the workflow completes
+
+The orchestrator LLM sees the state on every turn, so it knows which agent to call next without you hardcoding dispatch logic in the prompt.
+
+### No graph? No problem
+
+The `collaboration:` field is optional. Roles with subagents but no graph continue to work exactly as before — the parent decides dispatch order freely via `task()`.
+
 ## Configuration reference
 
 ### role.yaml
@@ -369,6 +489,15 @@ subagents:                    # Inline child agents (see ## Subagents)
     description: string
     prompt: string
     # ... same fields as role.yaml
+
+# Collaboration Graph (see ## Collaboration Graph)
+collaboration:
+  topology: pipeline | review-loop | star  # Built-in topology
+  agents: [agent-a, agent-b]               # Agent slugs (lowercase name)
+  flow:                                     # Custom edges (string or object)
+    - "from -> to: label"
+    - { from: a, to: b, label: x, exit: true }
+  max_iterations: number                   # Loop limit (default: 3 for cycles)
 
 # Permissions
 permission:
