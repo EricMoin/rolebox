@@ -3,38 +3,55 @@ import type { RoleConfig, ResolvedFunction, ResolvedSkill } from "./types.js";
 /**
  * Build the final system prompt for a role.
  *
- * If the skills array is non-empty, the role prompt is followed by an
- * <available_skills> XML block that lists each resolved skill with its
- * name, description, and scope.
+ * If skills are non-empty, the role prompt is followed by an
+ * <available_skills> XML block listing each resolved skill.
  *
- * If the skills array is empty, the raw role prompt is returned as-is
- * without any XML wrapping.
+ * If subagents are non-empty, the prompt is followed (or extended) by an
+ * <available_subagents> XML block listing each subagent.
+ *
+ * When both are present, skills appear first, then subagents.
+ * When neither is present, the raw role prompt is returned as-is.
  */
 export function buildAgentPrompt(
   role: RoleConfig,
   skills: ResolvedSkill[],
+  subagents?: Array<{ id: string; name: string; description: string }>,
 ): string {
-  if (skills.length === 0) {
+  // Fast path: nothing to append
+  if (skills.length === 0 && (!subagents || subagents.length === 0)) {
     return role.prompt;
   }
 
-  const skillBlocks = skills
-    .map(
-      (s) =>
-        `  <skill>
+  let result = role.prompt;
+
+  // Append skills block when present
+  if (skills.length > 0) {
+    const skillBlocks = skills
+      .map(
+        (s) =>
+          `  <skill>
     <name>${s.name}</name>
     <description>${s.description}</description>
     <scope>${s.scope}</scope>
   </skill>`,
-    )
-    .join("\n");
+      )
+      .join("\n");
 
-  return `${role.prompt}
+    result = `${result}
 
 <available_skills>
 Skills provide specialized instructions. Use the skill tool to load when task matches.
 ${skillBlocks}
 </available_skills>`;
+  }
+
+  // Append subagents block when present
+  const subagentBlock = buildSubagentBlock(subagents ?? []);
+  if (subagentBlock) {
+    result = `${result}\n\n${subagentBlock}`;
+  }
+
+  return result;
 }
 
 /**
@@ -64,5 +81,37 @@ ${fn.content}
   return `<active_functions>
 These functions are currently active for this session. Follow their instructions.
 ${blocks}
-</active_functions>`;
+ </active_functions>`;
+}
+
+/**
+ * Build an XML block listing available subagents for system prompt injection.
+ *
+ * Each subagent is listed with its id, name, and description.
+ * Returns empty string when the subagents array is empty.
+ */
+export function buildSubagentBlock(
+  subagents: Array<{ id: string; name: string; description: string }>,
+): string {
+  if (subagents.length === 0) {
+    return "";
+  }
+
+  const blocks = subagents
+    .map(
+      (a) =>
+        `  <subagent>
+    <id>${a.id}</id>
+    <name>${a.name}</name>
+    <description>${a.description}</description>
+  </subagent>`,
+    )
+    .join("\n");
+
+  return `<available_subagents>
+You can delegate tasks to these sub-agents via the task() tool.
+Use task(subagent_type="agent-id", ...) to dispatch.
+
+${blocks}
+</available_subagents>`;
 }
