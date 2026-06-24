@@ -50,6 +50,79 @@ export interface SubAgentConfig {
 }
 
 /**
+ * A directed edge in a collaboration graph between two agent nodes.
+ * Represents a flow of work from one agent to another.
+ */
+export interface FlowEdge {
+  /** Source agent ID */
+  from: string;
+  /** Target agent ID */
+  to: string;
+  /** Optional label describing the transition condition or data flow */
+  label?: string;
+  /** When true, this edge exits the collaboration flow (terminal transition) */
+  exit?: boolean;
+}
+
+/**
+ * Pre-defined collaboration graph topologies.
+ * - "pipeline": sequential chain, one agent feeds the next
+ * - "review-loop": primary agent with reviewers that can send work back
+ * - "star": central coordinator fans out to worker agents
+ */
+export type GraphTemplate = "pipeline" | "review-loop" | "star";
+
+/**
+ * Raw collaboration graph configuration as parsed from role.yaml.
+ * Defines how agents coordinate in a multi-agent workflow.
+ */
+export interface CollaborationConfig {
+  /** Optional named topology shorthand */
+  topology?: GraphTemplate;
+  /** List of agent IDs participating in the collaboration */
+  agents?: string[];
+  /** Explicit flow edges defining work transitions between agents */
+  flow?: FlowEdge[];
+  /** Maximum collaboration iterations before forced termination */
+  max_iterations?: number;
+}
+
+/**
+ * Normalized internal representation of a collaboration graph.
+ * Generated at build-time from CollaborationConfig by resolving
+ * template expansions, deduplicating nodes, and categorizing edges.
+ */
+export interface ResolvedGraph {
+  /** All resolved flow edges (including exit edges) */
+  edges: FlowEdge[];
+  /** Deduplicated list of all agent node IDs in the graph */
+  nodes: string[];
+  /** Maximum iterations (defaulted to a sensible value if not specified) */
+  maxIterations: number;
+  /** Subset of edges marked as exit transitions */
+  exitEdges: FlowEdge[];
+  /** The template that was expanded, if any */
+  template?: GraphTemplate;
+}
+
+/**
+ * Per-agent role metadata within a resolved collaboration graph.
+ * Provides each agent with its connectivity context for routing decisions.
+ */
+export interface GraphNodeRole {
+  /** Agent identifier matching a node in the graph */
+  agentId: string;
+  /** Agents that can send work to this agent */
+  upstream: string[];
+  /** Agents that this agent can send work to */
+  downstream: string[];
+  /** Whether this agent is an entry point for the collaboration flow */
+  isEntryPoint: boolean;
+  /** Whether this agent is an exit point for the collaboration flow */
+  isExitPoint: boolean;
+}
+
+/**
  * Raw role configuration as parsed from a role's YAML file (role.yaml).
  * Contains user-facing settings before any environment variable resolution
  * or file-based prompt loading has occurred.
@@ -91,6 +164,8 @@ export interface RoleConfig {
   disable_functions?: string[];
   /** Explicit reference declarations with optional descriptions */
   references?: Record<string, string | ReferenceEntry>;
+  /** Collaboration graph configuration for multi-agent workflows */
+  collaboration?: CollaborationConfig;
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;
 }
@@ -192,6 +267,8 @@ export interface ResolvedRole {
   references: ResolvedReference[];
   /** Resolved sub-agent definitions (defaults to empty array) */
   subagents: ResolvedSubAgent[];
+  /** Resolved collaboration graph for multi-agent workflows (set when collaboration config is present) */
+  graph?: ResolvedGraph;
 }
 
 /**
