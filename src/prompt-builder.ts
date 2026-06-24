@@ -1,19 +1,11 @@
-import type { RoleConfig, ResolvedFunction, ResolvedSkill } from "./types.js";
+import type { ResolvedFunction, ResolvedSkill } from "./types.js";
 
-/**
- * Build the final system prompt for a role.
- *
- * If skills are non-empty, the role prompt is followed by an
- * <available_skills> XML block listing each resolved skill.
- *
- * If subagents are non-empty, the prompt is followed (or extended) by an
- * <available_subagents> XML block listing each subagent.
- *
- * When both are present, skills appear first, then subagents.
- * When neither is present, the raw role prompt is returned as-is.
- */
+export interface PromptSource {
+  prompt: string;
+}
+
 export function buildAgentPrompt(
-  role: RoleConfig,
+  role: PromptSource,
   skills: ResolvedSkill[],
   subagents?: Array<{ id: string; name: string; description: string }>,
 ): string {

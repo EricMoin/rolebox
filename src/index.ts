@@ -75,11 +75,18 @@ async function resolveAllRoles(
       const resolvedSubagents: ResolvedSubAgent[] = [];
       if (config.subagents && config.subagents.length > 0) {
         for (const saConfig of config.subagents) {
-          const childId = `${roleId}--${saConfig.name.toLowerCase().replace(/\s+/g, "-")}`;
+          const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
+          const childId = `${roleId}--${childSlug}`;
 
-          // File-based: roleDir/subagents/{name} if the directory exists, else use the parent's roleDir
-          const fileBasedDir = path.join(roleDir, "subagents", saConfig.name);
-          const saRoleDir = existsSync(fileBasedDir) ? fileBasedDir : roleDir;
+          // File-based: try the normalized slug first, then the raw name for
+          // backward-compat with directories named exactly like the YAML name.
+          const slugDir = path.join(roleDir, "subagents", childSlug);
+          const nameDir = path.join(roleDir, "subagents", saConfig.name);
+          const saRoleDir = existsSync(slugDir)
+            ? slugDir
+            : existsSync(nameDir)
+              ? nameDir
+              : roleDir;
 
           // Resolve subagent skills
           const saLocalSkills = saConfig.skills ?? [];
@@ -105,23 +112,29 @@ async function resolveAllRoles(
             );
           }
 
-          // Build subagent prompt (no recursive subagent-of-subagent injection)
-          const saPrompt = buildAgentPrompt(
-            saConfig as unknown as RoleConfig,
-            saSkills,
-          );
+          const saPrompt = buildAgentPrompt(saConfig, saSkills);
 
           // Store subagent functions in the global map
           roleFunctionsMap.set(childId, saFunctions);
 
+          const inheritedFrom: Record<string, unknown> = {};
+          const parentObj = config as unknown as Record<string, unknown>;
+          const childObj = saConfig as unknown as Record<string, unknown>;
+          const inheritableKeys = ["model", "color", "variant", "temperature", "top_p", "permission", "tools"] as const;
+          for (const key of inheritableKeys) {
+            if (parentObj[key] !== undefined && childObj[key] === parentObj[key]) {
+              inheritedFrom[key] = parentObj[key];
+            }
+          }
+
           resolvedSubagents.push({
             id: childId,
-            config: saConfig as unknown as RoleConfig,
+            config: saConfig,
             prompt: saPrompt,
             skills: saSkills,
             functions: saFunctions,
             parentId: roleId,
-            inheritedFrom: {},
+            inheritedFrom,
             subagents: [],
           });
         }
@@ -359,7 +372,7 @@ function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: strin
         if (skill.scope !== "rolebox") continue;
         if (!existsSync(skill.filePath)) continue;
 
-        const entryName = `rolebox--${sub.id}--${skill.name}`;
+        const entryName = `${ROLEBOX_SKILL_PREFIX}${sub.id}~${skill.name}`;
         const entryPath = path.join(globalSkillsDir, entryName);
         createSkillEntry(entryPath, skill.filePath);
       }

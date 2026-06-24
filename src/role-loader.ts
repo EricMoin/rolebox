@@ -96,27 +96,44 @@ export async function discoverRoles(
  * @param child  - The raw sub-agent configuration from YAML or file discovery.
  * @returns A new SubAgentConfig with inherited defaults applied.
  */
+export interface InheritanceResult {
+  config: SubAgentConfig;
+  inheritedFields: string[];
+}
+
 export function applyInheritance(
   parent: RoleConfig,
   child: SubAgentConfig,
-): SubAgentConfig {
+): SubAgentConfig;
+export function applyInheritance(
+  parent: RoleConfig,
+  child: SubAgentConfig,
+  trackInheritance: true,
+): InheritanceResult;
+export function applyInheritance(
+  parent: RoleConfig,
+  child: SubAgentConfig,
+  trackInheritance?: boolean,
+): SubAgentConfig | InheritanceResult {
+  const inheritedFields: string[] = [];
+
+  const inheritableFields: Array<{ key: string; childVal: unknown; parentVal: unknown }> = [
+    { key: "model", childVal: child.model, parentVal: parent.model },
+    { key: "color", childVal: child.color, parentVal: parent.color },
+    { key: "variant", childVal: child.variant, parentVal: parent.variant },
+    { key: "temperature", childVal: child.temperature, parentVal: parent.temperature },
+    { key: "top_p", childVal: child.top_p, parentVal: parent.top_p },
+    { key: "permission", childVal: child.permission, parentVal: parent.permission },
+    { key: "tools", childVal: child.tools, parentVal: parent.tools },
+  ];
+
   const merged: Record<string, unknown> = {
-    // Sub-agent-specific fields — never inherited
     name: child.name,
     description: child.description,
     prompt: child.prompt,
     ...(child.prompt_file !== undefined
       ? { prompt_file: child.prompt_file }
       : {}),
-    // Inheritable — child overrides parent when defined
-    model: child.model ?? parent.model,
-    color: child.color ?? parent.color,
-    variant: child.variant ?? parent.variant,
-    temperature: child.temperature ?? parent.temperature,
-    top_p: child.top_p ?? parent.top_p,
-    permission: child.permission ?? parent.permission,
-    tools: child.tools ?? parent.tools,
-    // NOT inherited from parent — child-only
     ...(child.skills !== undefined ? { skills: child.skills } : {}),
     ...(child.opencode_skills !== undefined
       ? { opencode_skills: child.opencode_skills }
@@ -129,9 +146,24 @@ export function applyInheritance(
       : {}),
   };
 
-  return Object.fromEntries(
+  for (const { key, childVal, parentVal } of inheritableFields) {
+    const resolved = childVal ?? parentVal;
+    if (resolved !== undefined) {
+      merged[key] = resolved;
+    }
+    if (childVal === undefined && parentVal !== undefined) {
+      inheritedFields.push(key);
+    }
+  }
+
+  const config = Object.fromEntries(
     Object.entries(merged).filter(([, v]) => v !== undefined),
   ) as unknown as SubAgentConfig;
+
+  if (trackInheritance) {
+    return { config, inheritedFields };
+  }
+  return config;
 }
 
 /**
@@ -198,6 +230,7 @@ async function loadOneRole(
 
   const rawSubagents = resolved.subagents;
   let validSubagents: SubAgentConfig[] = [];
+  const seenSubagentNames = new Set<string>();
   if (Array.isArray(rawSubagents)) {
     for (const raw of rawSubagents) {
       if (typeof raw !== "object" || raw === null) continue;
@@ -309,6 +342,13 @@ async function loadOneRole(
           : {}),
       };
 
+      if (seenSubagentNames.has(subagent.name)) {
+        console.warn(
+          `[role-loader] Duplicate subagent name "${subagent.name}" in "${roleId}": later definition wins`,
+        );
+        validSubagents = validSubagents.filter((s) => s.name !== subagent.name);
+      }
+      seenSubagentNames.add(subagent.name);
       validSubagents.push(subagent);
     }
   }

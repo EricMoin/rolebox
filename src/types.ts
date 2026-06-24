@@ -127,16 +127,15 @@ export interface ResolvedFunction {
   params?: Record<string, string>;
 }
 
-/**
- * A fully resolved sub-agent with all configuration materialized.
- * Extends the ResolvedRole shape with additional metadata about
- * the parent-child relationship and which fields were inherited.
- */
-export interface ResolvedSubAgent extends ResolvedRole {
-  /** ID of the parent role that owns this sub-agent */
+export interface ResolvedSubAgent {
+  id: string;
+  config: SubAgentConfig;
+  prompt: string;
+  skills: ResolvedSkill[];
+  functions: ResolvedFunction[];
+  subagents: ResolvedSubAgent[];
   parentId: string;
-  /** Record of which fields were inherited from the parent (for debugging) */
-  inheritedFrom: Partial<RoleConfig>;
+  inheritedFrom: Partial<Record<string, unknown>>;
 }
 
 /**
