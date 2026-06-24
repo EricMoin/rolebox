@@ -1,4 +1,5 @@
-import type { ResolvedFunction, ResolvedReference, ResolvedSkill } from "./types.js";
+import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph, GraphNodeRole } from "./types.js";
+import { buildCollaborationBlock } from "./graph-prompt-builder.js";
 
 export interface PromptSource {
   prompt: string;
@@ -9,6 +10,8 @@ export function buildAgentPrompt(
   skills: ResolvedSkill[],
   subagents?: Array<{ id: string; name: string; description: string }>,
   references?: ResolvedReference[],
+  graph?: ResolvedGraph,
+  graphNodeRoles?: Map<string, GraphNodeRole>,
 ): string {
   const hasSkills = skills.length > 0;
   const hasSubagents = subagents && subagents.length > 0;
@@ -47,6 +50,13 @@ ${skillBlocks}
   const subagentBlock = buildSubagentBlock(subagents ?? []);
   if (subagentBlock) {
     result = `${result}\n\n${subagentBlock}`;
+  }
+
+  if (graph) {
+    const collaboratonBlock = buildCollaborationBlock(graph, subagents ?? []);
+    if (collaboratonBlock) {
+      result = `${result}\n\n${collaboratonBlock}`;
+    }
   }
 
   return result;
