@@ -554,7 +554,7 @@ describe("RoleboxPlugin subagents", () => {
       tmpDir,
       "opencode",
       "skills",
-      "rolebox--parent--researcher--my-research-skill",
+      "rolebox--parent--researcher~my-research-skill",
     );
     expect(existsSync(skillSymlink)).toBe(true);
     expect(lstatSync(skillSymlink).isSymbolicLink()).toBe(true);
