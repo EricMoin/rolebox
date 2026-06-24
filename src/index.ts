@@ -14,6 +14,8 @@ import { resolveFunctions, applyParams } from "./function-resolver.js";
 import { parseFunctionActivation } from "./function-parser.js";
 import type { FunctionCall } from "./function-parser.js";
 import { functionSessionState } from "./session-state.js";
+import { graphSessionState } from "./graph-state.js";
+import type { GraphExecutionState } from "./graph-state.js";
 import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder.js";
 import { buildSubagentRoleBlock } from "./graph-prompt-builder.js";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole } from "./types.js";
@@ -24,6 +26,12 @@ import { parseCollaboration } from "./graph-parser.js";
  * Exported so tests and hooks can query role-level function resolution.
  */
 export const roleFunctionsMap = new Map<string, ResolvedFunction[]>();
+
+/**
+ * Map of roleId → ResolvedGraph built at startup.
+ * Allows runtime hooks to look up the collaboration graph for a session's agent.
+ */
+export const roleGraphMap = new Map<string, ResolvedGraph>();
 
 /**
  * Compute a subagent's role within a resolved collaboration graph.
@@ -206,6 +214,7 @@ async function resolveAllRoles(
         const resolvedGraph = parseCollaboration(config.collaboration, subagentSlugNames);
         if (resolvedGraph) {
           graph = resolvedGraph;
+          roleGraphMap.set(roleId, resolvedGraph);
         } else {
           console.warn(`[role-loader] Failed to parse collaboration graph for role "${roleId}" — role will load without graph`);
         }
@@ -463,6 +472,27 @@ function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: strin
   }
 }
 
+function buildGraphStateBlock(
+  state: GraphExecutionState,
+  graph: ResolvedGraph,
+): string {
+  const stepInfo = state.status === "active"
+    ? graph.edges[state.currentStep]
+    : null;
+
+  const nextAction = stepInfo
+    ? `Dispatch to ${stepInfo.to}${stepInfo.label ? ` (${stepInfo.label})` : ""}`
+    : "Workflow complete";
+
+  return `<collaboration_state>
+  <status>${state.status}</status>
+  <current_step>${state.currentStep}</current_step>
+  <completed_steps>${state.completedSteps.join(", ") || "none"}</completed_steps>
+  <iteration>${state.iterationCount}/${graph.maxIterations || "unlimited"}</iteration>
+  <next_action>${nextAction}</next_action>
+</collaboration_state>`;
+}
+
 /**
  * OpenCode plugin for rolebox — define custom agent roles via YAML
  * configuration files with custom prompts, models, skills, and permissions.
@@ -545,6 +575,28 @@ const RoleboxPlugin: Plugin = async (ctx) => {
       } else {
         functionSessionState.activate(input.sessionID, parsedFunctions, calls);
       }
+
+      // Init collaboration graph state for graph-enabled roles
+      const agentId = input.agent as string | undefined;
+      if (agentId && input.sessionID && !graphSessionState.getState(input.sessionID)) {
+        const graph = roleGraphMap.get(agentId);
+        if (graph) {
+          graphSessionState.initGraph(input.sessionID, graph);
+        }
+      }
+    },
+    "tool.execute.after": async (input, _output) => {
+      if (!input.sessionID) return;
+      if (input.tool !== "task") return;
+
+      const state = graphSessionState.getState(input.sessionID);
+      if (!state || state.status !== "active") return;
+
+      const args = typeof input.args === "string" ? input.args : JSON.stringify(input.args ?? {});
+      const match = args.match(/subagent_type\s*=\s*["']([^"']+)["']/);
+      if (!match) return;
+
+      graphSessionState.advanceStep(input.sessionID, match[1]);
     },
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return;
@@ -576,6 +628,16 @@ const RoleboxPlugin: Plugin = async (ctx) => {
 
       const block = buildFunctionBlock(activeFunctions);
       output.system.push(block);
+
+      // Inject collaboration graph runtime state
+      const graphState = graphSessionState.getState(input.sessionID);
+      if (graphState) {
+        const graph = graphSessionState.getGraph(input.sessionID);
+        if (graph) {
+          const stateBlock = buildGraphStateBlock(graphState, graph);
+          output.system.push(stateBlock);
+        }
+      }
     },
   };
 };
