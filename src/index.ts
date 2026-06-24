@@ -14,7 +14,7 @@ import { parseFunctionActivation } from "./function-parser.js";
 import type { FunctionCall } from "./function-parser.js";
 import { functionSessionState } from "./session-state.js";
 import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder.js";
-import type { RoleConfig, ResolvedRole, ResolvedSkill, ResolvedFunction } from "./types.js";
+import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction } from "./types.js";
 
 /**
  * Map of roleId → ResolvedFunction[] built at startup.
@@ -71,9 +71,71 @@ async function resolveAllRoles(
         functions = await resolveFunctions(enabledFunctions, roleDir, globalFunctionsDir, builtinDir);
       }
 
-      const prompt = buildAgentPrompt(config, skills);
+      // Process subagents: resolve skills, functions, prompts for each
+      const resolvedSubagents: ResolvedSubAgent[] = [];
+      if (config.subagents && config.subagents.length > 0) {
+        for (const saConfig of config.subagents) {
+          const childId = `${roleId}--${saConfig.name.toLowerCase().replace(/\s+/g, "-")}`;
 
-      resolved.push({ id: roleId, config, prompt, skills, functions });
+          // File-based: roleDir/subagents/{name} if the directory exists, else use the parent's roleDir
+          const fileBasedDir = path.join(roleDir, "subagents", saConfig.name);
+          const saRoleDir = existsSync(fileBasedDir) ? fileBasedDir : roleDir;
+
+          // Resolve subagent skills
+          const saLocalSkills = saConfig.skills ?? [];
+          const saGlobalSkills = saConfig.opencode_skills ?? [];
+          const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
+          let saSkills: ResolvedSkill[] = [];
+          if (saAllSkillNames.length > 0) {
+            saSkills = await resolveSkills(saAllSkillNames, saRoleDir, globalSkillsDir);
+          }
+
+          // Resolve subagent functions
+          const saFunctionNames = saConfig.functions ?? ["plan", "execute"];
+          const saEnabledFunctions = saFunctionNames.filter(
+            (fn) => !(saConfig.disable_functions ?? []).includes(fn),
+          );
+          let saFunctions: ResolvedFunction[] = [];
+          if (saEnabledFunctions.length > 0) {
+            saFunctions = await resolveFunctions(
+              saEnabledFunctions,
+              saRoleDir,
+              globalFunctionsDir,
+              builtinDir,
+            );
+          }
+
+          // Build subagent prompt (no recursive subagent-of-subagent injection)
+          const saPrompt = buildAgentPrompt(
+            saConfig as unknown as RoleConfig,
+            saSkills,
+          );
+
+          // Store subagent functions in the global map
+          roleFunctionsMap.set(childId, saFunctions);
+
+          resolvedSubagents.push({
+            id: childId,
+            config: saConfig as unknown as RoleConfig,
+            prompt: saPrompt,
+            skills: saSkills,
+            functions: saFunctions,
+            parentId: roleId,
+            inheritedFrom: {},
+            subagents: [],
+          });
+        }
+      }
+
+      // Build parent prompt with subagent metadata injected
+      const subagentMetadata = resolvedSubagents.map((sa) => ({
+        id: sa.id,
+        name: sa.config.name,
+        description: sa.config.description,
+      }));
+      const prompt = buildAgentPrompt(config, skills, subagentMetadata);
+
+      resolved.push({ id: roleId, config, prompt, skills, functions, subagents: resolvedSubagents });
       roleFunctionsMap.set(roleId, functions);
     } catch {
       // Silently skip roles that fail during resolution.
@@ -148,6 +210,37 @@ function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
     return; // Can't write — skip silently
   }
 
+  interface AgentEntry {
+    id: string;
+    name: string;
+    description: string;
+    prompt: string;
+    mode: string;
+    model?: string;
+  }
+
+  const allAgents: AgentEntry[] = [];
+  for (const role of resolvedRoles) {
+    allAgents.push({
+      id: role.id,
+      name: role.config.name,
+      description: role.config.description,
+      prompt: role.prompt,
+      mode: role.config.mode ?? "primary",
+      model: role.config.model,
+    });
+    for (const sub of role.subagents) {
+      allAgents.push({
+        id: sub.id,
+        name: sub.config.name,
+        description: sub.config.description,
+        prompt: sub.prompt,
+        mode: "subagent",
+        model: sub.config.model,
+      });
+    }
+  }
+
   try {
     const existing = readdirSync(agentsDir);
     for (const file of existing) {
@@ -157,7 +250,7 @@ function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
         const text = readFileSync(filePath, "utf-8");
         if (text.includes(ROLEBOX_MARKER)) {
           const roleId = file.replace(/\.md$/, "");
-          if (!resolvedRoles.some((r) => r.id === roleId)) {
+          if (!allAgents.some((a) => a.id === roleId)) {
             unlinkSync(filePath);
           }
         }
@@ -169,20 +262,18 @@ function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
     // Directory not readable — skip cleanup
   }
 
-  // Write current roles
-  for (const resolved of resolvedRoles) {
-    const { config } = resolved;
+  for (const agent of allAgents) {
     const lines = [
       ROLEBOX_MARKER,
       "---",
-      `name: ${config.name}`,
-      `description: ${config.description}`,
-      `mode: ${config.mode ?? "primary"}`,
+      `name: ${agent.name}`,
+      `description: ${agent.description}`,
+      `mode: ${agent.mode}`,
     ];
-    if (config.model) lines.push(`model: ${config.model}`);
-    lines.push("---", "", resolved.prompt);
+    if (agent.model) lines.push(`model: ${agent.model}`);
+    lines.push("---", "", agent.prompt);
 
-    const filePath = path.join(agentsDir, `${resolved.id}.md`);
+    const filePath = path.join(agentsDir, `${agent.id}.md`);
     try {
       writeFileSync(filePath, lines.join("\n"), "utf-8");
     } catch {
@@ -203,6 +294,18 @@ function getOpencodeConfigDir(): string {
     return path.join(xdg, "opencode");
   }
   return path.join(os.homedir(), ".config", "opencode");
+}
+
+function createSkillEntry(entryPath: string, filePath: string): void {
+  const isDirectorySkill = path.basename(filePath).toLowerCase() === "skill.md";
+  try {
+    if (isDirectorySkill) {
+      symlinkSync(path.dirname(filePath), entryPath);
+    } else {
+      mkdirSync(entryPath, { recursive: true });
+      symlinkSync(filePath, path.join(entryPath, "SKILL.md"));
+    }
+  } catch {}
 }
 
 /**
@@ -242,7 +345,6 @@ function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: strin
     }
   } catch {}
 
-  // Create entries for all resolved role-local skills
   for (const role of resolvedRoles) {
     for (const skill of role.skills) {
       if (skill.scope !== "rolebox") continue;
@@ -250,18 +352,17 @@ function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: strin
 
       const entryName = `${ROLEBOX_SKILL_PREFIX}${skill.name}`;
       const entryPath = path.join(globalSkillsDir, entryName);
-      const isDirectorySkill = path.basename(skill.filePath).toLowerCase() === "skill.md";
+      createSkillEntry(entryPath, skill.filePath);
+    }
+    for (const sub of role.subagents) {
+      for (const skill of sub.skills) {
+        if (skill.scope !== "rolebox") continue;
+        if (!existsSync(skill.filePath)) continue;
 
-      try {
-        if (isDirectorySkill) {
-          // Symlink to the directory containing SKILL.md
-          symlinkSync(path.dirname(skill.filePath), entryPath);
-        } else {
-          // Create wrapper directory with SKILL.md symlink inside
-          mkdirSync(entryPath, { recursive: true });
-          symlinkSync(skill.filePath, path.join(entryPath, "SKILL.md"));
-        }
-      } catch {}
+        const entryName = `rolebox--${sub.id}--${skill.name}`;
+        const entryPath = path.join(globalSkillsDir, entryName);
+        createSkillEntry(entryPath, skill.filePath);
+      }
     }
   }
 }
@@ -305,6 +406,24 @@ const RoleboxPlugin: Plugin = async (ctx) => {
         const agentConfig = buildAgentConfig(resolved);
         config.agent ??= {};
         config.agent[resolved.id] = agentConfig;
+
+        for (const sub of resolved.subagents) {
+          const subAgentCfg: Record<string, unknown> = {
+            prompt: sub.prompt,
+            mode: "subagent",
+            hidden: true,
+          };
+          if (sub.config.description) subAgentCfg.description = sub.config.description;
+          if (sub.config.model) subAgentCfg.model = sub.config.model;
+          if (sub.config.color) subAgentCfg.color = sub.config.color;
+          if (sub.config.variant) subAgentCfg.variant = sub.config.variant;
+          if (sub.config.temperature !== undefined) subAgentCfg.temperature = sub.config.temperature;
+          if (sub.config.top_p !== undefined) subAgentCfg.top_p = sub.config.top_p;
+          if (sub.config.tools) subAgentCfg.tools = sub.config.tools;
+          if (sub.config.permission) subAgentCfg.permission = sub.config.permission;
+
+          config.agent[sub.id] = subAgentCfg as AgentConfig;
+        }
       }
     },
     "chat.message": async (input, output) => {

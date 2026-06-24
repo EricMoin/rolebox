@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, lstatSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { tmpdir as osTmpdir } from "node:os";
+import { tmpdir as osTmpdir, homedir as osHomedir } from "node:os";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
-import RoleboxModule from "./index";
+import RoleboxModule, { roleFunctionsMap } from "./index";
 const RoleboxPlugin = RoleboxModule.server;
 
 let tmpDir: string;
@@ -335,5 +335,376 @@ describe("RoleboxPlugin config hook", () => {
     expect(lines).toContain("    <scope>rolebox</scope>");
     expect(lines).toContain("  </skill>");
     expect(lines).toContain("</available_skills>");
+  });
+});
+
+describe("RoleboxPlugin subagents", () => {
+  // Scenario 9: role with inline subagent → registered as subagent agent
+  it("registers subagent in config.agent with mode subagent and hidden", async () => {
+    await writeRole(
+      "parent",
+      [
+        "name: Parent Role",
+        "description: Has child agents",
+        "prompt: You are the parent.",
+        "subagents:",
+        "  - name: Child One",
+        "    description: A child agent",
+        "    prompt: You are the child.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const agentKeys = Object.keys(cfg.agent ?? {});
+    expect(agentKeys).toContain("parent");
+    expect(agentKeys).toContain("parent--child-one");
+
+    const child = cfg.agent!["parent--child-one"]!;
+    expect(child.mode).toBe("subagent");
+    expect((child as Record<string, unknown>).hidden).toBe(true);
+    expect(child.prompt).toBe("You are the child.");
+    expect(child.description).toBe("A child agent");
+  });
+
+  // Scenario 10: parent prompt contains <available_subagents> block
+  it("includes <available_subagents> in parent prompt when role has subagents", async () => {
+    await writeRole(
+      "orchestrator",
+      [
+        "name: Orchestrator",
+        "description: Delegates work",
+        "prompt: Delegate tasks.",
+        "subagents:",
+        "  - name: Worker Bee",
+        "    description: Does the actual work",
+        "    prompt: Work hard.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const parentPrompt = cfg.agent!.orchestrator!.prompt!;
+    expect(parentPrompt).toContain("<available_subagents>");
+    expect(parentPrompt).toContain("<id>orchestrator--worker-bee</id>");
+    expect(parentPrompt).toContain("<name>Worker Bee</name>");
+    expect(parentPrompt).toContain("<description>Does the actual work</description>");
+    expect(parentPrompt).toContain("</available_subagents>");
+  });
+
+  // Scenario 11: subagent with own skills → prompt has <available_skills>
+  it("includes <available_skills> in subagent prompt when subagent has skills", async () => {
+    await writeRole(
+      "boss",
+      [
+        "name: Boss",
+        "description: Manages",
+        "prompt: Manage team.",
+        "subagents:",
+        "  - name: Analyst",
+        "    description: Analyzes data",
+        "    prompt: Analyze carefully.",
+        "    skills:",
+        "      - data-review",
+      ].join("\n"),
+    );
+    await writeRoleSkill(
+      "boss",
+      "data-review",
+      [
+        "---",
+        "name: data-review",
+        "description: Data review patterns",
+        "---",
+        "# Data Review",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const subPrompt = cfg.agent!["boss--analyst"]!.prompt!;
+    expect(subPrompt).toContain("<available_skills>");
+    expect(subPrompt).toContain("<name>data-review</name>");
+    expect(subPrompt).toContain("<description>Data review patterns</description>");
+    expect(subPrompt).toContain("<scope>rolebox</scope>");
+    expect(subPrompt).toContain("</available_skills>");
+  });
+
+  // Scenario 12: multiple subagents → all registered
+  it("registers all subagents from a role with multiple children", async () => {
+    await writeRole(
+      "lead",
+      [
+        "name: Team Lead",
+        "description: Leads a team",
+        "prompt: Lead the team.",
+        "subagents:",
+        "  - name: Coder",
+        "    description: Writes code",
+        "    prompt: Write code.",
+        "  - name: Tester",
+        "    description: Runs tests",
+        "    prompt: Run tests.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const agentKeys = Object.keys(cfg.agent ?? {}).sort();
+    expect(agentKeys).toContain("lead");
+    expect(agentKeys).toContain("lead--coder");
+    expect(agentKeys).toContain("lead--tester");
+
+    expect(cfg.agent!["lead--coder"]!.mode).toBe("subagent");
+    expect(cfg.agent!["lead--tester"]!.mode).toBe("subagent");
+  });
+
+  // Scenario 13: roleFunctionsMap has subagent entry
+  it("stores subagent functions in roleFunctionsMap", async () => {
+    await writeRole(
+      "manager",
+      [
+        "name: Manager",
+        "description: Manages things",
+        "prompt: Manage.",
+        "subagents:",
+        "  - name: Helper",
+        "    description: Helps out",
+        "    prompt: Help.",
+      ].join("\n"),
+    );
+
+    await RoleboxPlugin(createPluginInput(tmpDir));
+
+    const funcs = roleFunctionsMap.get("manager--helper");
+    expect(funcs).toBeDefined();
+    expect(funcs!.length).toBeGreaterThanOrEqual(1);
+
+    const names = funcs!.map((f) => f.name);
+    expect(names).toContain("plan");
+    expect(names).toContain("execute");
+  });
+
+  // Scenario 14: no recursive subagent injection in subagent prompts
+  it("does not inject <available_subagents> into subagent prompts", async () => {
+    await writeRole(
+      "root",
+      [
+        "name: Root",
+        "description: Top level",
+        "prompt: I am root.",
+        "subagents:",
+        "  - name: Leaf",
+        "    description: A leaf agent",
+        "    prompt: I am a leaf.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const subPrompt = cfg.agent!["root--leaf"]!.prompt!;
+    expect(subPrompt).not.toContain("<available_subagents>");
+  });
+
+  // Scenario 15: subagent skill symlinks created with correct prefix
+  it("creates skill symlinks for subagent skills", async () => {
+    await writeRole(
+      "parent",
+      [
+        "name: Parent",
+        "description: Has child with skill",
+        "prompt: Parent prompt.",
+        "subagents:",
+        "  - name: Researcher",
+        "    description: Researches things",
+        "    prompt: Research prompt.",
+        "    skills:",
+        "      - my-research-skill",
+      ].join("\n"),
+    );
+    await writeRoleSkill(
+      "parent",
+      "my-research-skill",
+      [
+        "---",
+        "name: my-research-skill",
+        "description: Research skill",
+        "---",
+        "",
+        "# Research Skill",
+        "Research content.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const skillSymlink = path.join(
+      tmpDir,
+      "opencode",
+      "skills",
+      "rolebox--parent--researcher--my-research-skill",
+    );
+    expect(existsSync(skillSymlink)).toBe(true);
+    expect(lstatSync(skillSymlink).isSymbolicLink()).toBe(true);
+  });
+
+  // Scenario 16: subagent .md file written with mode subagent
+  it("writes .md files for subagents with mode subagent", async () => {
+    await writeRole(
+      "orchestrator",
+      [
+        "name: Orchestrator",
+        "description: Delegates work",
+        "prompt: Orchestrate tasks.",
+        "subagents:",
+        "  - name: Worker",
+        "    description: Does the work",
+        "    prompt: Work hard.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const agentFilePath = path.join(
+      osHomedir(),
+      ".claude",
+      "agents",
+      "orchestrator--worker.md",
+    );
+    expect(existsSync(agentFilePath)).toBe(true);
+
+    const content = readFileSync(agentFilePath, "utf-8");
+    expect(content).toContain("<!-- rolebox-managed -->");
+    expect(content).toContain("mode: subagent");
+    expect(content).toContain("Work hard.");
+  });
+
+  // Scenario 17: role with empty subagents array → no subagents, parent still works
+  it("handles empty subagents array gracefully with no subagents registered", async () => {
+    await writeRole(
+      "solo",
+      [
+        "name: Solo Role",
+        "description: Has an empty subagents list",
+        "prompt: I work alone.",
+        "subagents: []",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const agentKeys = Object.keys(cfg.agent ?? {}).sort();
+    expect(agentKeys).toEqual(["solo"]);
+    expect(cfg.agent!.solo!.prompt).toBe("I work alone.");
+    expect(cfg.agent!.solo!.prompt).not.toContain("<available_subagents>");
+  });
+
+  // Scenario 18: subagent with skills has <available_skills> in prompt
+  it("includes <available_skills> in subagent prompt from file-based subagent", async () => {
+    await writeRole(
+      "manager",
+      [
+        "name: Manager",
+        "description: Manages the team",
+        "prompt: Manage work.",
+        "subagents:",
+        "  - name: Analyst",
+        "    description: Analyzes data",
+        "    prompt: Analyze carefully.",
+        "    skills:",
+        "      - data-analysis",
+      ].join("\n"),
+    );
+    await writeRoleSkill(
+      "manager",
+      "data-analysis",
+      [
+        "---",
+        "name: data-analysis",
+        "description: Data analysis patterns and methodology",
+        "---",
+        "",
+        "# Data Analysis",
+        "Analysis methodology.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const subPrompt = cfg.agent!["manager--analyst"]!.prompt!;
+    expect(subPrompt).toContain("<available_skills>");
+    expect(subPrompt).toContain("<name>data-analysis</name>");
+    expect(subPrompt).toContain("<description>Data analysis patterns and methodology</description>");
+    expect(subPrompt).toContain("<scope>rolebox</scope>");
+  });
+
+  // Scenario 19: parent and subagent with same skill name → resolve independently
+  it("resolves same skill name for parent and subagent independently", async () => {
+    await writeRole(
+      "dual",
+      [
+        "name: Dual Role",
+        "description: Parent with same skill as child",
+        "prompt: Parent prompt.",
+        "skills:",
+        "  - shared-skill",
+        "subagents:",
+        "  - name: Child",
+        "    description: Child agent",
+        "    prompt: Child prompt.",
+        "    skills:",
+        "      - shared-skill",
+      ].join("\n"),
+    );
+    // Write the skill once — it resolves for both parent and subagent
+    await writeRoleSkill(
+      "dual",
+      "shared-skill",
+      [
+        "---",
+        "name: shared-skill",
+        "description: A skill shared by parent and child",
+        "---",
+        "",
+        "# Shared Skill",
+        "This skill is used by both parent and subagent.",
+      ].join("\n"),
+    );
+
+    const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+    const cfg = emptyConfig();
+    await hooks.config!(cfg);
+
+    const parentPrompt = cfg.agent!.dual!.prompt!;
+    expect(parentPrompt).toContain("<available_skills>");
+    expect(parentPrompt).toContain("<name>shared-skill</name>");
+
+    const childPrompt = cfg.agent!["dual--child"]!.prompt!;
+    expect(childPrompt).toContain("<available_skills>");
+    expect(childPrompt).toContain("<name>shared-skill</name>");
+
+    // Both parent and child should have the skill independently
+    const parentSkillCount = (parentPrompt.match(/<name>shared-skill<\/name>/g) ?? []).length;
+    const childSkillCount = (childPrompt.match(/<name>shared-skill<\/name>/g) ?? []).length;
+    expect(parentSkillCount).toBe(1);
+    expect(childSkillCount).toBe(1);
   });
 });
