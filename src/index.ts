@@ -9,12 +9,13 @@ const __dirname = path.dirname(__filename);
 import type { AgentConfig } from "@opencode-ai/sdk";
 import { discoverRoles } from "./role-loader.js";
 import { resolveSkills } from "./skill-resolver.js";
+import { resolveAllReferences } from "./reference-resolver.js";
 import { resolveFunctions, applyParams } from "./function-resolver.js";
 import { parseFunctionActivation } from "./function-parser.js";
 import type { FunctionCall } from "./function-parser.js";
 import { functionSessionState } from "./session-state.js";
 import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder.js";
-import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction } from "./types.js";
+import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference } from "./types.js";
 
 /**
  * Map of roleId → ResolvedFunction[] built at startup.
@@ -57,6 +58,17 @@ async function resolveAllRoles(
       if (allSkillNames.length > 0) {
         skills = await resolveSkills(allSkillNames, roleDir, globalSkillsDir);
       }
+
+      // Resolve role-level references (auto-discover + explicit declarations)
+      const roleReferences = await resolveAllReferences(
+        roleDir,
+        "role",
+        config.references as RoleConfig["references"],
+      );
+
+      // Aggregate skill-level references into a combined list for the role
+      const skillReferences = skills.flatMap((s) => s.references);
+      const allReferences = [...roleReferences, ...skillReferences];
 
       const globalFunctionsDir = path.join(configDir, "functions");
       const builtinDir = path.join(__dirname, "..", "functions");
@@ -112,7 +124,12 @@ async function resolveAllRoles(
             );
           }
 
-          const saPrompt = buildAgentPrompt(saConfig, saSkills);
+          // Resolve subagent references: own + inherited from parent role + skill-level
+          const saOwnRefs = await resolveAllReferences(saRoleDir, "role");
+          const saSkillRefs = saSkills.flatMap((s) => s.references);
+          const saReferences = [...roleReferences, ...saOwnRefs, ...saSkillRefs];
+
+          const saPrompt = buildAgentPrompt(saConfig, saSkills, undefined, saReferences);
 
           // Store subagent functions in the global map
           roleFunctionsMap.set(childId, saFunctions);
@@ -133,6 +150,7 @@ async function resolveAllRoles(
             prompt: saPrompt,
             skills: saSkills,
             functions: saFunctions,
+            references: saReferences,
             parentId: roleId,
             inheritedFrom,
             subagents: [],
@@ -146,9 +164,9 @@ async function resolveAllRoles(
         name: sa.config.name,
         description: sa.config.description,
       }));
-      const prompt = buildAgentPrompt(config, skills, subagentMetadata);
+      const prompt = buildAgentPrompt(config, skills, subagentMetadata, allReferences);
 
-      resolved.push({ id: roleId, config, prompt, skills, functions, subagents: resolvedSubagents });
+      resolved.push({ id: roleId, config, prompt, skills, functions, references: allReferences, subagents: resolvedSubagents });
       roleFunctionsMap.set(roleId, functions);
     } catch {
       // Silently skip roles that fail during resolution.

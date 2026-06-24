@@ -1,4 +1,4 @@
-import type { ResolvedFunction, ResolvedSkill } from "./types.js";
+import type { ResolvedFunction, ResolvedReference, ResolvedSkill } from "./types.js";
 
 export interface PromptSource {
   prompt: string;
@@ -8,16 +8,23 @@ export function buildAgentPrompt(
   role: PromptSource,
   skills: ResolvedSkill[],
   subagents?: Array<{ id: string; name: string; description: string }>,
+  references?: ResolvedReference[],
 ): string {
-  // Fast path: nothing to append
-  if (skills.length === 0 && (!subagents || subagents.length === 0)) {
+  const hasSkills = skills.length > 0;
+  const hasSubagents = subagents && subagents.length > 0;
+  const hasReferences = references && references.length > 0;
+
+  if (!hasSkills && !hasSubagents && !hasReferences) {
     return role.prompt;
   }
 
   let result = role.prompt;
 
-  // Append skills block when present
-  if (skills.length > 0) {
+  if (hasReferences) {
+    result = `${result}\n\n${buildReferenceBlock(references)}`;
+  }
+
+  if (hasSkills) {
     const skillBlocks = skills
       .map(
         (s) =>
@@ -37,7 +44,6 @@ ${skillBlocks}
 </available_skills>`;
   }
 
-  // Append subagents block when present
   const subagentBlock = buildSubagentBlock(subagents ?? []);
   if (subagentBlock) {
     result = `${result}\n\n${subagentBlock}`;
@@ -74,6 +80,28 @@ ${fn.content}
 These functions are currently active for this session. Follow their instructions.
 ${blocks}
  </active_functions>`;
+}
+
+export function buildReferenceBlock(references: ResolvedReference[]): string {
+  if (references.length === 0) {
+    return "";
+  }
+
+  const blocks = references
+    .map(
+      (r) =>
+        `  <reference>
+    <name>${r.name}</name>
+    <path>${r.filePath}</path>
+    <description>${r.description}</description>
+  </reference>`,
+    )
+    .join("\n");
+
+  return `<available_references>
+Reference documents provide deep knowledge. Use the Read tool to load full content when needed.
+${blocks}
+</available_references>`;
 }
 
 /**

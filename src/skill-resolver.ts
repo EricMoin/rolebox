@@ -1,6 +1,8 @@
+import { dirname } from "node:path";
 import fg from "fast-glob";
 import yaml from "js-yaml";
-import type { ResolvedSkill, SkillMetadata } from "./types.js";
+import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "./types.js";
+import { resolveAllReferences } from "./reference-resolver.js";
 
 interface Candidate {
   scope: ResolvedSkill["scope"];
@@ -47,14 +49,23 @@ export async function resolveSkills(
       if (matches.length > 0) {
         const filePath = matches[0];
         let description = "";
+        let references: ResolvedReference[] = [];
         try {
           const content = await Bun.file(filePath).text();
           const { metadata } = parseFrontmatter(content);
           description = metadata.description ?? "";
+
+          // Resolve references for this skill from its directory
+          const skillDir = dirname(filePath);
+          references = await resolveAllReferences(
+            skillDir,
+            "skill",
+            metadata.references as SkillMetadata["references"],
+          );
         } catch {
           // If the file can't be read, use empty description
         }
-        resolved.push({ name, description, scope: candidate.scope, filePath });
+        resolved.push({ name, description, scope: candidate.scope, filePath, references });
         break;
       }
     }
