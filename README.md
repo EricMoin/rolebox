@@ -245,6 +245,90 @@ When reviewing code, check:
 | Purpose | Reference knowledge | Behavior modification |
 | Injection | On-demand into context | Always in system prompt while active |
 
+## Subagents
+
+Subagents are child agents that a parent role can delegate to via `task()`. They let you build roles that coordinate specialist sub-agents, each with its own prompt, skills, and configuration.
+
+### When to use
+
+Use subagents when a role needs to break work across multiple specialists. A team lead might delegate research to one sub-agent and implementation to another, each tuned for its domain.
+
+### Inline declaration
+
+Define subagents directly in the parent's `role.yaml`:
+
+```yaml
+# team-lead/role.yaml
+name: Team Lead
+description: Delegates work to specialist sub-agents
+model: gpt-4
+prompt: |
+  You are a team lead. Delegate tasks to the appropriate specialist.
+subagents:
+  - name: Implementer
+    description: Writes production code
+    prompt: |
+      You are a senior software engineer. Write clean, testable code.
+    temperature: 0.1
+```
+
+Each entry in `subagents:` takes the same fields as a regular `role.yaml` (name, description, prompt, model, etc.).
+
+### File-based declaration
+
+For subagents with their own skills or functions, use a directory structure:
+
+```
+team-lead/
+├── role.yaml
+└── subagents/
+    └── researcher/
+        ├── role.yaml
+        └── skills/
+            └── research-checklist/
+                └── SKILL.md
+```
+
+File-based subagents are discovered automatically from the `subagents/` directory. You can mix both approaches: some subagents inline, others file-based.
+
+### Config inheritance
+
+Subagents inherit certain fields from the parent when not explicitly set.
+
+| Inherited | Not inherited |
+|---|---|
+| model | name |
+| color | description |
+| variant | prompt |
+| temperature | prompt_file |
+| top_p | skills |
+| permission | functions |
+| tools | |
+
+The `mode` field is always forced to `"subagent"` for child agents.
+
+### Naming convention
+
+Subagent IDs follow the pattern `{parentId}--{childId}`. The child ID is derived from the name field (lowercased, spaces replaced with dashes). For example, a "Team Lead" role with an "Implementer" subagent produces the ID `team-lead--implementer`.
+
+The `--` separator is reserved. Don't use it in regular role IDs.
+
+### Dispatch
+
+The parent dispatches work to a subagent using `task()` in its prompt:
+
+```
+task(subagent_type="team-lead--implementer", prompt="Implement the auth module", run_in_background=true)
+```
+
+### Subagent skills and functions
+
+Subagents can have their own `skills/` and `functions/` directories (file-based declaration only). Skills from subagents are symlinked into opencode as `rolebox--{parentId}--{childId}--{skillName}`.
+
+### Limitations
+
+Subagents don't nest. A subagent can't define its own subagents. There's no runtime creation of subagents, and subagents can't communicate directly with each other. All coordination goes through the parent.
+
 ## Configuration reference
 
 ### role.yaml
@@ -278,6 +362,13 @@ functions:                    # Available functions (default: [plan, execute])
   - my-custom-fn
 disable_functions:            # Remove specific defaults
   - execute
+
+# Subagents
+subagents:                    # Inline child agents (see ## Subagents)
+  - name: string
+    description: string
+    prompt: string
+    # ... same fields as role.yaml
 
 # Permissions
 permission:
@@ -314,6 +405,14 @@ prompt: |
 │   │   │   └── review-checklist.md
 │   │   └── functions/
 │   │       └── plan.md          # Role-local override of built-in plan
+│   ├── team-lead/
+│   │   ├── role.yaml            # Parent role (can have inline subagents)
+│   │   └── subagents/           # File-based subagents
+│   │       └── researcher/
+│   │           ├── role.yaml
+│   │           └── skills/
+│   │               └── research-checklist/
+│   │                   └── SKILL.md
 │   └── ...
 ├── functions/                    # Global user-defined functions
 │   └── my-custom-fn.md
@@ -382,6 +481,8 @@ Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skil
 - No runtime role switching
 - Functions persist for the entire session (no per-message deactivation yet)
 - No conditional functions based on project context
+- No recursive subagent nesting (subagents can't have their own subagents)
+- `--` is reserved in role IDs (used as the parent/child separator)
 
 ## Creating a Registry
 

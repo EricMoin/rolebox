@@ -1,0 +1,13 @@
+name: Team Lead
+description: Delegates work to specialist sub-agents
+model: gpt-4
+temperature: 0.3
+prompt: |
+  You are a team lead. You coordinate work across your sub-agents.
+  Delegate tasks to the appropriate specialist when needed.
+subagents:
+  - name: Implementer
+    description: Writes production code
+    prompt: |
+      You are a senior software engineer. Write clean, testable code.
+    temperature: 0.1
