@@ -14,7 +14,21 @@ import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.js";
-import type { RoleConfig } from "./types.js";
+import type { RoleConfig, SubAgentConfig } from "./types.js";
+
+/**
+ * Validate a role ID string.
+ *
+ * Rejects IDs that are empty or contain `--` (double dash), which would be
+ * ambiguous in certain contexts (e.g. CLI argument parsing).
+ *
+ * @param id - The role ID to validate (typically a directory name).
+ * @returns `true` if the ID is valid, `false` otherwise.
+ */
+export function validateRoleId(id: string): boolean {
+  if (id === "") return false;
+  return !id.includes("--");
+}
 
 /**
  * Discover roles by scanning `roleboxDir` for subdirectories containing
@@ -43,6 +57,13 @@ export async function discoverRoles(
   for (const yamlPath of matches) {
     const roleId = basename(dirname(yamlPath));
 
+    if (!validateRoleId(roleId)) {
+      console.warn(
+        `[role-loader] Skipping "${roleId}": role ID must not contain "--"`,
+      );
+      continue;
+    }
+
     try {
       const config = await loadOneRole(yamlPath, roleId);
       if (config !== null) {
@@ -57,6 +78,60 @@ export async function discoverRoles(
   }
 
   return roles;
+}
+
+/**
+ * Merge parent RoleConfig defaults into a child SubAgentConfig.
+ *
+ * For each inheritable field, the child's explicit value takes priority.
+ * If the child omits a field (undefined), the parent's value is used as
+ * a fallback. Fields that are specific to the sub-agent (name, description,
+ * prompt, prompt_file, skills, opencode_skills, functions, disable_functions)
+ * are NEVER inherited from the parent.
+ *
+ * Inheritable fields: model, color, variant, temperature, top_p,
+ * permission, tools.
+ *
+ * @param parent - The resolved parent role configuration.
+ * @param child  - The raw sub-agent configuration from YAML or file discovery.
+ * @returns A new SubAgentConfig with inherited defaults applied.
+ */
+export function applyInheritance(
+  parent: RoleConfig,
+  child: SubAgentConfig,
+): SubAgentConfig {
+  const merged: Record<string, unknown> = {
+    // Sub-agent-specific fields — never inherited
+    name: child.name,
+    description: child.description,
+    prompt: child.prompt,
+    ...(child.prompt_file !== undefined
+      ? { prompt_file: child.prompt_file }
+      : {}),
+    // Inheritable — child overrides parent when defined
+    model: child.model ?? parent.model,
+    color: child.color ?? parent.color,
+    variant: child.variant ?? parent.variant,
+    temperature: child.temperature ?? parent.temperature,
+    top_p: child.top_p ?? parent.top_p,
+    permission: child.permission ?? parent.permission,
+    tools: child.tools ?? parent.tools,
+    // NOT inherited from parent — child-only
+    ...(child.skills !== undefined ? { skills: child.skills } : {}),
+    ...(child.opencode_skills !== undefined
+      ? { opencode_skills: child.opencode_skills }
+      : {}),
+    ...(child.functions !== undefined
+      ? { functions: child.functions }
+      : {}),
+    ...(child.disable_functions !== undefined
+      ? { disable_functions: child.disable_functions }
+      : {}),
+  };
+
+  return Object.fromEntries(
+    Object.entries(merged).filter(([, v]) => v !== undefined),
+  ) as unknown as SubAgentConfig;
 }
 
 /**
@@ -121,6 +196,138 @@ async function loadOneRole(
   prompt = resolveEnvVars(prompt);
   const resolved = resolveEnvVarsDeep(obj) as Record<string, unknown>;
 
+  const rawSubagents = resolved.subagents;
+  let validSubagents: SubAgentConfig[] = [];
+  if (Array.isArray(rawSubagents)) {
+    for (const raw of rawSubagents) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const entry = raw as Record<string, unknown>;
+
+      if (
+        !entry.name ||
+        typeof entry.name !== "string" ||
+        entry.name.trim() === ""
+      ) {
+        console.warn(
+          `[role-loader] Skipping subagent in "${roleId}": missing or invalid "name"`,
+        );
+        continue;
+      }
+
+      if (!validateRoleId(entry.name as string)) {
+        console.warn(
+          `[role-loader] Skipping subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
+        );
+        continue;
+      }
+
+      if ("subagents" in entry) {
+        console.warn(
+          `[role-loader] Stripping nested "subagents" from subagent "${entry.name}" in "${roleId}"`,
+        );
+      }
+
+      let subPrompt: string;
+      if (
+        typeof entry.prompt_file === "string" &&
+        entry.prompt_file.trim() !== ""
+      ) {
+        const promptFilePath = pathResolve(
+          dirname(yamlPath),
+          entry.prompt_file,
+        );
+        try {
+          subPrompt = await readFile(promptFilePath, "utf-8");
+          subPrompt = resolveEnvVars(subPrompt);
+        } catch {
+          console.warn(
+            `[role-loader] Skipping subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
+          );
+          continue;
+        }
+      } else if (
+        typeof entry.prompt === "string" &&
+        entry.prompt.trim() !== ""
+      ) {
+        subPrompt = entry.prompt;
+      } else {
+        console.warn(
+          `[role-loader] Skipping subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
+        );
+        continue;
+      }
+
+      const subagent: SubAgentConfig = {
+        name: entry.name as string,
+        description: (entry.description as string) ?? "",
+        prompt: subPrompt,
+        ...(typeof entry.prompt_file === "string"
+          ? { prompt_file: entry.prompt_file }
+          : {}),
+        ...(typeof entry.model === "string"
+          ? { model: entry.model }
+          : {}),
+        ...(typeof entry.color === "string"
+          ? { color: entry.color }
+          : {}),
+        ...(typeof entry.variant === "string"
+          ? { variant: entry.variant }
+          : {}),
+        ...(typeof entry.temperature === "number"
+          ? { temperature: entry.temperature }
+          : {}),
+        ...(typeof entry.top_p === "number"
+          ? { top_p: entry.top_p }
+          : {}),
+        ...(entry.permission != null &&
+        typeof entry.permission === "object"
+          ? {
+              permission:
+                entry.permission as SubAgentConfig["permission"],
+            }
+          : {}),
+        ...(entry.tools != null && typeof entry.tools === "object"
+          ? { tools: entry.tools as Record<string, boolean> }
+          : {}),
+        ...(Array.isArray(entry.skills)
+          ? { skills: entry.skills as string[] }
+          : {}),
+        ...(Array.isArray(entry.opencode_skills)
+          ? {
+              opencode_skills:
+                entry.opencode_skills as string[],
+            }
+          : {}),
+        ...(Array.isArray(entry.functions)
+          ? { functions: entry.functions as string[] }
+          : {}),
+        ...(Array.isArray(entry.disable_functions)
+          ? {
+              disable_functions:
+                entry.disable_functions as string[],
+            }
+          : {}),
+      };
+
+      validSubagents.push(subagent);
+    }
+  }
+
+  const roleDir = dirname(yamlPath);
+  const fileBasedSubagents = await discoverFileBasedSubagents(roleDir, roleId);
+
+  const mergedMap = new Map<string, SubAgentConfig>();
+  for (const sa of validSubagents) {
+    mergedMap.set(sa.name, sa);
+  }
+  for (const sa of fileBasedSubagents) {
+    if (!mergedMap.has(sa.name)) {
+      mergedMap.set(sa.name, sa);
+    }
+  }
+
+  const mergedSubagents = mergedMap.size > 0 ? Array.from(mergedMap.values()) : undefined;
+
   const config: RoleConfig = {
     name: resolved.name as string,
     description: (resolved.description as string) ?? "",
@@ -167,5 +374,182 @@ async function loadOneRole(
       : {}),
   };
 
+  if (mergedSubagents) {
+    config.subagents = mergedSubagents.map((sa) => applyInheritance(config, sa));
+  }
+
   return config;
+}
+
+/**
+ * Discover file-based subagents by scanning `{roleDir}/subagents/* / role.yaml`.
+ *
+ * Each matching directory is treated as a sub-agent definition. The directory
+ * name becomes the sub-agent ID (used for logging / validation context), and
+ * the role.yaml is parsed with the same rules as inline sub-agents.
+ *
+ * Non-existent or empty `subagents/` directories return an empty array
+ * silently (not an error).
+ *
+ * @param roleDir - Absolute path to the role's directory (contains role.yaml).
+ * @param roleId - Parent role ID (used for log messages only).
+ * @returns Array of valid file-based sub-agent configs.
+ */
+async function discoverFileBasedSubagents(
+  roleDir: string,
+  roleId: string,
+): Promise<SubAgentConfig[]> {
+  let matches: string[];
+  try {
+    matches = await fglob("subagents/*/role.yaml", {
+      cwd: roleDir,
+      absolute: true,
+      deep: 2,
+    });
+  } catch {
+    // subagents/ doesn't exist or glob fails — silently return empty
+    return [];
+  }
+
+  const subagents: SubAgentConfig[] = [];
+
+  for (const yamlPath of matches) {
+    const childId = basename(dirname(yamlPath));
+
+    let raw: unknown;
+    try {
+      const content = await readFile(yamlPath, "utf-8");
+      raw = yaml.load(content);
+    } catch (err) {
+      console.warn(
+        `[role-loader] Skipping file-based subagent "${childId}" in "${roleId}": invalid YAML — ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      continue;
+    }
+
+    if (raw === null || raw === undefined || typeof raw !== "object") {
+      console.warn(
+        `[role-loader] Skipping file-based subagent "${childId}" in "${roleId}": YAML does not contain an object`,
+      );
+      continue;
+    }
+
+    const entry = raw as Record<string, unknown>;
+
+    // Validate name
+    if (
+      !entry.name ||
+      typeof entry.name !== "string" ||
+      entry.name.trim() === ""
+    ) {
+      console.warn(
+        `[role-loader] Skipping file-based subagent "${childId}" in "${roleId}": missing or invalid "name"`,
+      );
+      continue;
+    }
+
+    // Validate name does not contain --
+    if (!validateRoleId(entry.name as string)) {
+      console.warn(
+        `[role-loader] Skipping file-based subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
+      );
+      continue;
+    }
+
+    // Reject nested subagents
+    if ("subagents" in entry) {
+      console.warn(
+        `[role-loader] Stripping nested "subagents" from file-based subagent "${entry.name}" in "${roleId}"`,
+      );
+    }
+
+    // Validate prompt (resolve prompt_file relative to subagent directory)
+    const subagentDir = dirname(yamlPath);
+    let subPrompt: string;
+    let promptFilePath: string | undefined;
+    if (
+      typeof entry.prompt_file === "string" &&
+      entry.prompt_file.trim() !== ""
+    ) {
+      promptFilePath = pathResolve(subagentDir, entry.prompt_file);
+      try {
+        subPrompt = await readFile(promptFilePath, "utf-8");
+        subPrompt = resolveEnvVars(subPrompt);
+      } catch {
+        console.warn(
+          `[role-loader] Skipping file-based subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
+        );
+        continue;
+      }
+    } else if (
+      typeof entry.prompt === "string" &&
+      entry.prompt.trim() !== ""
+    ) {
+      subPrompt = entry.prompt;
+      subPrompt = resolveEnvVars(subPrompt);
+    } else {
+      console.warn(
+        `[role-loader] Skipping file-based subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
+      );
+      continue;
+    }
+
+    const subagent: SubAgentConfig = {
+      name: entry.name as string,
+      description: (entry.description as string) ?? "",
+      prompt: subPrompt,
+      ...(typeof entry.prompt_file === "string"
+        ? { prompt_file: entry.prompt_file }
+        : {}),
+      ...(typeof entry.model === "string"
+        ? { model: entry.model }
+        : {}),
+      ...(typeof entry.color === "string"
+        ? { color: entry.color }
+        : {}),
+      ...(typeof entry.variant === "string"
+        ? { variant: entry.variant }
+        : {}),
+      ...(typeof entry.temperature === "number"
+        ? { temperature: entry.temperature }
+        : {}),
+      ...(typeof entry.top_p === "number"
+        ? { top_p: entry.top_p }
+        : {}),
+      ...(entry.permission != null &&
+      typeof entry.permission === "object"
+        ? {
+            permission:
+              entry.permission as SubAgentConfig["permission"],
+          }
+        : {}),
+      ...(entry.tools != null && typeof entry.tools === "object"
+        ? { tools: entry.tools as Record<string, boolean> }
+        : {}),
+      ...(Array.isArray(entry.skills)
+        ? { skills: entry.skills as string[] }
+        : {}),
+      ...(Array.isArray(entry.opencode_skills)
+        ? {
+            opencode_skills:
+              entry.opencode_skills as string[],
+          }
+        : {}),
+      ...(Array.isArray(entry.functions)
+        ? { functions: entry.functions as string[] }
+        : {}),
+      ...(Array.isArray(entry.disable_functions)
+        ? {
+            disable_functions:
+              entry.disable_functions as string[],
+          }
+        : {}),
+    };
+
+    subagents.push(subagent);
+  }
+
+  return subagents;
 }
