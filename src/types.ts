@@ -10,6 +10,46 @@ export interface PermissionConfig {
 }
 
 /**
+ * Configuration for a sub-agent within a role.
+ * Sub-agents are child agents that the parent role can delegate tasks to.
+ * Fields here override the parent's defaults for the sub-agent.
+ * The `subagents` field is NOT permitted on SubAgentConfig itself
+ * (enforced at parse-time, not at the type level).
+ */
+export interface SubAgentConfig {
+  /** Sub-agent name (used for display and delegation routing) */
+  name: string;
+  /** Brief description of the sub-agent's purpose and capabilities */
+  description: string;
+  /** System prompt text for the sub-agent (mutually exclusive with prompt_file) */
+  prompt: string;
+  /** Path to a file containing the system prompt (mutually exclusive with prompt) */
+  prompt_file?: string;
+  /** LLM model override for this sub-agent */
+  model?: string;
+  /** Display color override */
+  color?: string;
+  /** Model variant / configuration flavor override */
+  variant?: string;
+  /** Sampling temperature override (0.0 - 2.0) */
+  temperature?: number;
+  /** Top-p nucleus sampling parameter override (0.0 - 1.0) */
+  top_p?: number;
+  /** Permission overrides for tool access */
+  permission?: PermissionConfig;
+  /** Map of tool names to enabled/disabled state override */
+  tools?: Record<string, boolean>;
+  /** Names of rolebox-local skills to load for this sub-agent */
+  skills?: string[];
+  /** Names of opencode-global skills to load for this sub-agent */
+  opencode_skills?: string[];
+  /** Names of functions available to this sub-agent */
+  functions?: string[];
+  /** Names of default functions to disable for this sub-agent */
+  disable_functions?: string[];
+}
+
+/**
  * Raw role configuration as parsed from a role's YAML file (role.yaml).
  * Contains user-facing settings before any environment variable resolution
  * or file-based prompt loading has occurred.
@@ -37,6 +77,8 @@ export interface RoleConfig {
   opencode_skills?: string[];
   /** Permission controls for tool access */
   permission?: PermissionConfig;
+  /** Sub-agent definitions for task delegation within this role */
+  subagents?: SubAgentConfig[];
   /** Map of tool names to enabled/disabled state */
   tools?: Record<string, boolean>;
   /** Sampling temperature for the LLM (0.0 - 2.0) */
@@ -86,6 +128,18 @@ export interface ResolvedFunction {
 }
 
 /**
+ * A fully resolved sub-agent with all configuration materialized.
+ * Extends the ResolvedRole shape with additional metadata about
+ * the parent-child relationship and which fields were inherited.
+ */
+export interface ResolvedSubAgent extends ResolvedRole {
+  /** ID of the parent role that owns this sub-agent */
+  parentId: string;
+  /** Record of which fields were inherited from the parent (for debugging) */
+  inheritedFrom: Partial<RoleConfig>;
+}
+
+/**
  * A fully resolved role with all configuration materialized.
  * Environment variables have been substituted, prompt_file content has been
  * loaded into the prompt field, and all skill references have been resolved
@@ -102,6 +156,8 @@ export interface ResolvedRole {
   skills: ResolvedSkill[];
   /** Resolved function references */
   functions: ResolvedFunction[];
+  /** Resolved sub-agent definitions (defaults to empty array) */
+  subagents: ResolvedSubAgent[];
 }
 
 /**
