@@ -412,6 +412,9 @@ async function loadOneRole(
     ...(Array.isArray(resolved.disable_functions)
       ? { disable_functions: resolved.disable_functions as string[] }
       : {}),
+    ...(resolved.collaboration != null && typeof resolved.collaboration === "object"
+      ? { collaboration: resolved.collaboration as RoleConfig["collaboration"] }
+      : {}),
   };
 
   if (mergedSubagents) {

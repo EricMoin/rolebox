@@ -15,13 +15,52 @@ import { parseFunctionActivation } from "./function-parser.js";
 import type { FunctionCall } from "./function-parser.js";
 import { functionSessionState } from "./session-state.js";
 import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder.js";
-import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference } from "./types.js";
+import { buildSubagentRoleBlock } from "./graph-prompt-builder.js";
+import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole } from "./types.js";
+import { parseCollaboration } from "./graph-parser.js";
 
 /**
  * Map of roleId → ResolvedFunction[] built at startup.
  * Exported so tests and hooks can query role-level function resolution.
  */
 export const roleFunctionsMap = new Map<string, ResolvedFunction[]>();
+
+/**
+ * Compute a subagent's role within a resolved collaboration graph.
+ *
+ * Matches the agent against graph edges by its child slug (the dashed,
+ * lowercased name used in YAML collaboration config). Returns null when
+ * the agent does not appear in any edge — its prompt is left unchanged.
+ */
+function computeNodeRole(
+  graph: ResolvedGraph,
+  agentId: string,
+  childSlug: string,
+): GraphNodeRole | null {
+  const downstream = graph.edges
+    .filter((e) => e.from === childSlug && e.to !== "parent")
+    .map((e) => e.to);
+  const upstream = graph.edges
+    .filter((e) => e.to === childSlug && e.from !== "parent")
+    .map((e) => e.from);
+  const isEntryPoint = graph.edges.some(
+    (e) => e.from === "parent" && e.to === childSlug,
+  );
+  const isExitPoint = graph.edges.some(
+    (e) => e.from === childSlug && (e.to === "parent" || e.exit === true),
+  );
+
+  if (
+    upstream.length === 0 &&
+    downstream.length === 0 &&
+    !isEntryPoint &&
+    !isExitPoint
+  ) {
+    return null;
+  }
+
+  return { agentId, upstream, downstream, isEntryPoint, isExitPoint };
+}
 
 /**
  * Resolve all discovered roles into ResolvedRole objects.
@@ -158,15 +197,41 @@ async function resolveAllRoles(
         }
       }
 
+      // Parse collaboration graph if configured
+      let graph: ResolvedGraph | undefined;
+      if (config.collaboration) {
+        const subagentSlugNames = (config.subagents ?? []).map(sa =>
+          sa.name.toLowerCase().replace(/\s+/g, "-")
+        );
+        const resolvedGraph = parseCollaboration(config.collaboration, subagentSlugNames);
+        if (resolvedGraph) {
+          graph = resolvedGraph;
+        } else {
+          console.warn(`[role-loader] Failed to parse collaboration graph for role "${roleId}" — role will load without graph`);
+        }
+      }
+
+      // Inject collaboration role blocks into subagent prompts
+      if (graph) {
+        for (const sa of resolvedSubagents) {
+          const childSlug = sa.config.name.toLowerCase().replace(/\s+/g, "-");
+          const nodeRole = computeNodeRole(graph, sa.id, childSlug);
+          if (nodeRole) {
+            const roleBlock = buildSubagentRoleBlock(nodeRole);
+            sa.prompt = `${sa.prompt}\n\n${roleBlock}`;
+          }
+        }
+      }
+
       // Build parent prompt with subagent metadata injected
       const subagentMetadata = resolvedSubagents.map((sa) => ({
         id: sa.id,
         name: sa.config.name,
         description: sa.config.description,
       }));
-      const prompt = buildAgentPrompt(config, skills, subagentMetadata, allReferences);
+      const prompt = buildAgentPrompt(config, skills, subagentMetadata, allReferences, graph);
 
-      resolved.push({ id: roleId, config, prompt, skills, functions, references: allReferences, subagents: resolvedSubagents });
+      resolved.push({ id: roleId, config, prompt, skills, functions, references: allReferences, subagents: resolvedSubagents, graph });
       roleFunctionsMap.set(roleId, functions);
     } catch {
       // Silently skip roles that fail during resolution.
