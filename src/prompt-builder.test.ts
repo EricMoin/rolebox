@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { RoleConfig, ResolvedSkill, ResolvedFunction } from "./types";
-import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder";
+import { buildAgentPrompt, buildFunctionBlock, buildSubagentBlock } from "./prompt-builder";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -138,6 +138,67 @@ describe("buildAgentPrompt", () => {
       "Skills provide specialized instructions. Use the skill tool to load when task matches.",
     );
   });
+
+  it("returns raw prompt when neither skills nor subagents are provided", () => {
+    const role = makeRole({ prompt: "Just the prompt." });
+    const result = buildAgentPrompt(role, [], []);
+    expect(result).toBe("Just the prompt.");
+  });
+
+  it("returns raw prompt when skills empty and subagents undefined", () => {
+    const role = makeRole({ prompt: "Just the prompt." });
+    const result = buildAgentPrompt(role, []);
+    expect(result).toBe("Just the prompt.");
+  });
+
+  it("appends <available_subagents> block when subagents are present but skills are empty", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], [
+      { id: "parent--child", name: "Child", description: "Does work" },
+    ]);
+    expect(result).toContain("<available_subagents>");
+    expect(result).toContain("<id>parent--child</id>");
+    expect(result).toContain("<name>Child</name>");
+    expect(result).toContain("<description>Does work</description>");
+    expect(result).not.toContain("<available_skills>");
+  });
+
+  it("includes both skills and subagents blocks when both are present (skills first)", () => {
+    const role = makeRole();
+    const skills = [makeSkill({ name: "my-skill" })];
+    const result = buildAgentPrompt(role, skills, [
+      { id: "parent--child", name: "Child", description: "Does work" },
+    ]);
+    expect(result).toContain("<available_skills>");
+    expect(result).toContain("<available_subagents>");
+    // Skills block appears before subagents block
+    const skillsIdx = result.indexOf("<available_skills>");
+    const subIdx = result.indexOf("<available_subagents>");
+    expect(skillsIdx).toBeLessThan(subIdx);
+  });
+
+  it("includes static subagents instruction text", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], [
+      { id: "a", name: "A", description: "Agent A" },
+    ]);
+    expect(result).toContain(
+      "You can delegate tasks to these sub-agents via the task() tool.",
+    );
+    expect(result).toContain(
+      'Use task(subagent_type="agent-id", ...) to dispatch.',
+    );
+  });
+
+  it("includes multiple subagents", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], [
+      { id: "alpha", name: "Alpha", description: "First agent" },
+      { id: "beta", name: "Beta", description: "Second agent" },
+    ]);
+    expect(result).toContain("<id>alpha</id>");
+    expect(result).toContain("<name>Beta</name>");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -195,5 +256,71 @@ describe("buildFunctionBlock", () => {
     expect(result).toContain("<name>execute</name>");
     expect(result).toContain("Plan content");
     expect(result).toContain("Execute content");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildSubagentBlock helpers
+// ---------------------------------------------------------------------------
+
+function makeSubagent(
+  overrides: Partial<{ id: string; name: string; description: string }> = {},
+): { id: string; name: string; description: string } {
+  return {
+    id: "test--child",
+    name: "Test Child",
+    description: "Does things",
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildSubagentBlock tests
+// ---------------------------------------------------------------------------
+
+describe("buildSubagentBlock", () => {
+  it("returns empty string for empty array", () => {
+    expect(buildSubagentBlock([])).toBe("");
+  });
+
+  it("generates <available_subagents> XML with one subagent", () => {
+    const result = buildSubagentBlock([makeSubagent()]);
+    expect(result).toContain("<available_subagents>");
+    expect(result).toContain("</available_subagents>");
+    expect(result).toContain("<subagent>");
+    expect(result).toContain("</subagent>");
+    expect(result).toContain("<id>test--child</id>");
+    expect(result).toContain("<name>Test Child</name>");
+    expect(result).toContain("<description>Does things</description>");
+  });
+
+  it("includes all subagents when multiple are provided", () => {
+    const subagents = [
+      makeSubagent({ id: "alpha", name: "Alpha", description: "First agent" }),
+      makeSubagent({ id: "beta", name: "Beta", description: "Second agent" }),
+      makeSubagent({ id: "gamma", name: "Gamma", description: "Third agent" }),
+    ];
+    const result = buildSubagentBlock(subagents);
+
+    expect(result).toContain("<id>alpha</id>");
+    expect(result).toContain("<name>Beta</name>");
+    expect(result).toContain("<description>Third agent</description>");
+  });
+
+  it("contains the static instruction text", () => {
+    const result = buildSubagentBlock([makeSubagent()]);
+    expect(result).toContain(
+      "You can delegate tasks to these sub-agents via the task() tool.",
+    );
+    expect(result).toContain(
+      'Use task(subagent_type="agent-id", ...) to dispatch.',
+    );
+  });
+
+  it("handles special characters in description", () => {
+    const result = buildSubagentBlock([
+      makeSubagent({ description: "Handles <script> & <style> tags" }),
+    ]);
+    expect(result).toContain("<description>Handles <script> & <style> tags</description>");
   });
 });
