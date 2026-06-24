@@ -57,9 +57,10 @@ describe("End-to-end", () => {
     it("discovers both example roles from examples/", async () => {
       const roles = await discoverRoles(examplesDir);
 
-      expect(roles.size).toBe(2);
+      expect(roles.size).toBe(3);
       expect(roles.has("code-reviewer")).toBe(true);
       expect(roles.has("tech-writer")).toBe(true);
+      expect(roles.has("team-lead")).toBe(true);
     });
 
     it("returns an empty Map for a non-existent directory", async () => {
@@ -116,6 +117,35 @@ describe("End-to-end", () => {
     });
   });
 
+    it("team-lead has model, temperature, and two subagents", async () => {
+      const roles = await discoverRoles(examplesDir);
+      const tl = roles.get("team-lead")!;
+
+      expect(tl.name).toBe("Team Lead");
+      expect(tl.description).toBe("Delegates work to specialist sub-agents");
+      expect(tl.model).toBe("gpt-4");
+      expect(tl.temperature).toBe(0.3);
+      expect(tl.prompt).toContain("You are a team lead");
+      expect(tl.prompt).toContain("coordinate work across your sub-agents");
+
+      const subagents = tl.subagents;
+      expect(subagents).toBeDefined();
+      expect(subagents!.length).toBe(2);
+
+      const implementer = subagents!.find((s) => s.name === "Implementer")!;
+      expect(implementer).toBeDefined();
+      expect(implementer.description).toBe("Writes production code");
+      expect(implementer.prompt).toContain("You are a senior software engineer");
+      expect(implementer.temperature).toBe(0.1);
+
+      const researcher = subagents!.find((s) => s.name === "Researcher")!;
+      expect(researcher).toBeDefined();
+      expect(researcher.description).toBe("Finds and synthesizes information");
+      expect(researcher.prompt).toContain("You are a research specialist");
+      expect(researcher.skills).toEqual(["research-checklist"]);
+    });
+  });
+
   // ── Skill resolution ───────────────────────────────────────
 
   describe("skill resolution", () => {
@@ -147,6 +177,30 @@ describe("End-to-end", () => {
       );
 
       expect(skills.length).toBe(0);
+    });
+
+    it("resolves research-checklist from team-lead's file-based subagent skills/ dir", async () => {
+      const roleDir = path.join(
+        examplesDir,
+        "team-lead",
+        "subagents",
+        "researcher",
+      );
+      const skills = await resolveSkills(
+        ["research-checklist"],
+        roleDir,
+        "/nonexistent/global/skills",
+      );
+
+      expect(skills.length).toBe(1);
+
+      const skill = skills[0];
+      expect(skill.name).toBe("research-checklist");
+      expect(skill.scope).toBe("rolebox");
+      expect(skill.description).toContain(
+        "Thorough research verification checklist",
+      );
+      expect(skill.filePath).toContain("research-checklist/SKILL.md");
     });
   });
 
@@ -187,6 +241,27 @@ describe("End-to-end", () => {
       expect(prompt).not.toContain("<available_skills>");
       expect(prompt).toContain("You are a technical writer");
       expect(prompt).toContain("accurate, well-structured");
+    });
+
+    it("team-lead prompt includes <available_subagents> XML block", async () => {
+      const roles = await discoverRoles(examplesDir);
+      const tl = roles.get("team-lead")!;
+
+      const subagentMetadata = [
+        { id: "team-lead--implementer", name: "Implementer", description: "Writes production code" },
+        { id: "team-lead--researcher", name: "Researcher", description: "Finds and synthesizes information" },
+      ];
+
+      const prompt = buildAgentPrompt(tl, [], subagentMetadata);
+
+      expect(prompt).toContain("You are a team lead");
+
+      expect(prompt).toContain("<available_subagents>");
+      expect(prompt).toContain("<id>team-lead--implementer</id>");
+      expect(prompt).toContain("<name>Implementer</name>");
+      expect(prompt).toContain("<id>team-lead--researcher</id>");
+      expect(prompt).toContain("<name>Researcher</name>");
+      expect(prompt).toContain("</available_subagents>");
     });
   });
 
@@ -245,5 +320,62 @@ describe("End-to-end", () => {
         rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it("registers team-lead role with inline and file-based subagents", async () => {
+      const tmpDir = mkdtempSync(path.join(osTmpdir(), "rolebox-e2e-"));
+      const roleboxDir = path.join(tmpDir, "rolebox");
+      mkdirSync(roleboxDir, { recursive: true });
+
+      const originalXdg = process.env.XDG_CONFIG_HOME;
+      process.env.XDG_CONFIG_HOME = tmpDir;
+
+      try {
+        cpSync(
+          path.join(examplesDir, "team-lead"),
+          path.join(roleboxDir, "team-lead"),
+          { recursive: true },
+        );
+
+        const hooks = await RoleboxPlugin(createPluginInput(tmpDir));
+        const cfg = emptyConfig();
+        await hooks.config!(cfg);
+
+        const agents = cfg.agent ?? {};
+
+        // Parent registered
+        const tl = agents["team-lead"]!;
+        expect(tl).toBeDefined();
+        expect(tl.prompt).toContain("You are a team lead");
+        expect(tl.prompt).toContain("<available_subagents>");
+        expect(tl.prompt).toContain("<id>team-lead--implementer</id>");
+        expect(tl.prompt).toContain("<id>team-lead--researcher</id>");
+        expect(tl.mode).toBe("primary");
+        expect(tl.model).toBe("gpt-4");
+        expect(tl.temperature).toBe(0.3);
+
+        // Inline subagent registered
+        const impl = agents["team-lead--implementer"]!;
+        expect(impl).toBeDefined();
+        expect(impl.mode).toBe("subagent");
+        expect((impl as Record<string, unknown>).hidden).toBe(true);
+        expect(impl.prompt).toContain("You are a senior software engineer");
+        expect(impl.temperature).toBe(0.1);
+
+        // File-based subagent registered
+        const res = agents["team-lead--researcher"]!;
+        expect(res).toBeDefined();
+        expect(res.mode).toBe("subagent");
+        expect((res as Record<string, unknown>).hidden).toBe(true);
+        expect(res.prompt).toContain("You are a research specialist");
+        expect(res.prompt).toContain("<available_skills>");
+        expect(res.prompt).toContain("<name>research-checklist</name>");
+
+        // Subagents should NOT have recursive <available_subagents>
+        expect(impl.prompt).not.toContain("<available_subagents>");
+        expect(res.prompt).not.toContain("<available_subagents>");
+      } finally {
+        process.env.XDG_CONFIG_HOME = originalXdg;
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
-});
