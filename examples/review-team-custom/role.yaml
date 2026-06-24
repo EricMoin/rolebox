@@ -1,0 +1,26 @@
+name: Custom Pipeline Lead
+description: Custom multi-step workflow
+prompt: You coordinate a custom pipeline.
+subagents:
+  - name: Researcher
+    description: Researches topics
+    prompt: You research and summarize.
+  - name: Writer
+    description: Writes content
+    prompt: You write clear content.
+  - name: Editor
+    description: Edits for quality
+    prompt: You edit for clarity and correctness.
+collaboration:
+  flow:
+    - "parent -> researcher"
+    - "researcher -> writer: research findings"
+    - "writer -> editor: draft content"
+    - from: editor
+      to: writer
+      label: revision requests
+    - from: editor
+      to: parent
+      label: approved
+      exit: true
+  max_iterations: 2
