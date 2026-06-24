@@ -73,6 +73,10 @@ export class GraphSessionState {
     return this.states.get(sessionID);
   }
 
+  getGraph(sessionID: string): ResolvedGraph | undefined {
+    return this.graphs.get(sessionID);
+  }
+
   isComplete(sessionID: string): boolean {
     const state = this.states.get(sessionID);
     if (!state) return false;
