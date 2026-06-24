@@ -21,6 +21,7 @@ function makeSkill(overrides: Partial<ResolvedSkill> = {}): ResolvedSkill {
     description: "A test skill",
     scope: "rolebox",
     filePath: "/fake/path/SKILL.md",
+    references: [],
     ...overrides,
   };
 }

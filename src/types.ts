@@ -89,6 +89,8 @@ export interface RoleConfig {
   functions?: string[];
   /** Names of default functions to disable */
   disable_functions?: string[];
+  /** Explicit reference declarations with optional descriptions */
+  references?: Record<string, string | ReferenceEntry>;
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;
 }
@@ -106,6 +108,8 @@ export interface ResolvedSkill {
   scope: "rolebox" | "opencode";
   /** Absolute filesystem path to the SKILL.md file */
   filePath: string;
+  /** Resolved references discovered in the skill's references/ directory */
+  references: ResolvedReference[];
 }
 
 /**
@@ -127,12 +131,41 @@ export interface ResolvedFunction {
   params?: Record<string, string>;
 }
 
+/**
+ * A single reference entry as declared in role.yaml `references:` field.
+ * Allows explicit metadata (description) for auto-discovered reference files.
+ */
+export interface ReferenceEntry {
+  /** Relative path from the role/skill directory to the reference file */
+  path: string;
+  /** Human-readable description surfaced in <available_references> */
+  description?: string;
+}
+
+/**
+ * A fully resolved reference file with absolute path and metadata.
+ * References are deep-knowledge documents that agents can read on demand.
+ */
+export interface ResolvedReference {
+  /** Identifier derived from file path (e.g., "theory/psychology") */
+  name: string;
+  /** Absolute filesystem path to the reference file */
+  filePath: string;
+  /** Human-readable description (from frontmatter, role.yaml, or auto-generated) */
+  description: string;
+  /** Where the reference was found */
+  scope: "role" | "skill";
+  /** Relative path from the owning directory (for display) */
+  relativePath: string;
+}
+
 export interface ResolvedSubAgent {
   id: string;
   config: SubAgentConfig;
   prompt: string;
   skills: ResolvedSkill[];
   functions: ResolvedFunction[];
+  references: ResolvedReference[];
   subagents: ResolvedSubAgent[];
   parentId: string;
   inheritedFrom: Partial<Record<string, unknown>>;
@@ -155,6 +188,8 @@ export interface ResolvedRole {
   skills: ResolvedSkill[];
   /** Resolved function references */
   functions: ResolvedFunction[];
+  /** Resolved reference documents (role-level + aggregated from skills) */
+  references: ResolvedReference[];
   /** Resolved sub-agent definitions (defaults to empty array) */
   subagents: ResolvedSubAgent[];
 }
@@ -176,6 +211,8 @@ export interface SkillMetadata {
   compatibility?: string;
   /** Allowed tools, either as a comma-separated string or an array */
   "allowed-tools"?: string | string[];
+  /** Explicit reference declarations for the skill */
+  references?: Record<string, string | ReferenceEntry>;
 }
 
 /**
