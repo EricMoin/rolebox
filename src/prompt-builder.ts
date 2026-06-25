@@ -1,5 +1,5 @@
 import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph, GraphNodeRole } from "./types.js";
-import { buildCollaborationBlock } from "./graph-prompt-builder.js";
+import { buildCollaborationBlock } from "./graph/index.js";
 
 export interface PromptSource {
   prompt: string;

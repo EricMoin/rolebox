@@ -2,9 +2,9 @@ import type {
   FlowEdge,
   ResolvedGraph,
   GraphTemplate,
-} from "./types.js";
-import { expandTemplate } from "./graph-templates.js";
-import { validateGraph } from "./graph-validator.js";
+} from "../types.js";
+import { expandTemplate } from "./templates.js";
+import { validateGraph } from "./validator.js";
 
 const PARENT = "parent";
 const VALID_TEMPLATES = new Set<string>(["pipeline", "review-loop", "star"]);

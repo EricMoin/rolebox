@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { validateGraph } from "./graph-validator";
-import type { ResolvedGraph, FlowEdge } from "./types";
+import { validateGraph } from "./validator";
+import type { ResolvedGraph, FlowEdge } from "../types";
 
 function makeGraph(overrides?: Partial<ResolvedGraph>): ResolvedGraph {
   return {

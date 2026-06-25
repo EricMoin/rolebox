@@ -1,4 +1,4 @@
-import type { FlowEdge, GraphTemplate } from "./types.js";
+import type { FlowEdge, GraphTemplate } from "../types.js";
 
 const PARENT = "parent";
 

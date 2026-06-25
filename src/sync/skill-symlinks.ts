@@ -1,0 +1,74 @@
+import path from "node:path";
+import { mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync } from "node:fs";
+import type { ResolvedRole } from "../types.js";
+
+const ROLEBOX_SKILL_PREFIX = "rolebox--";
+
+function createSkillEntry(entryPath: string, filePath: string): void {
+  const isDirectorySkill = path.basename(filePath).toLowerCase() === "skill.md";
+  try {
+    if (isDirectorySkill) {
+      symlinkSync(path.dirname(filePath), entryPath);
+    } else {
+      mkdirSync(entryPath, { recursive: true });
+      symlinkSync(filePath, path.join(entryPath, "SKILL.md"));
+    }
+  } catch {}
+}
+
+/**
+ * Sync rolebox skills into ~/.config/opencode/skills/ for oh-my-openagent discovery.
+ *
+ * oh-my-openagent's loadSkillsFromDir treats symlinks as directories:
+ * it resolves them and looks for SKILL.md inside. So:
+ * - Directory skills (with SKILL.md): create symlink to the directory
+ * - Single-file skills (.md): create a wrapper directory with SKILL.md symlink inside
+ */
+export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: string): void {
+  try {
+    mkdirSync(globalSkillsDir, { recursive: true });
+  } catch {
+    return;
+  }
+
+  try {
+    const existing = readdirSync(globalSkillsDir);
+    for (const entry of existing) {
+      if (!entry.startsWith(ROLEBOX_SKILL_PREFIX)) continue;
+      const entryPath = path.join(globalSkillsDir, entry);
+      try {
+        const stat = lstatSync(entryPath);
+        if (stat.isSymbolicLink()) {
+          unlinkSync(entryPath);
+        } else if (stat.isDirectory()) {
+          const inner = path.join(entryPath, "SKILL.md");
+          try { unlinkSync(inner); } catch {}
+          try { rmdirSync(entryPath); } catch {}
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {}
+
+  for (const role of resolvedRoles) {
+    for (const skill of role.skills) {
+      if (skill.scope !== "rolebox") continue;
+      if (!existsSync(skill.filePath)) continue;
+
+      const entryName = `${ROLEBOX_SKILL_PREFIX}${skill.name}`;
+      const entryPath = path.join(globalSkillsDir, entryName);
+      createSkillEntry(entryPath, skill.filePath);
+    }
+    for (const sub of role.subagents) {
+      for (const skill of sub.skills) {
+        if (skill.scope !== "rolebox") continue;
+        if (!existsSync(skill.filePath)) continue;
+
+        const entryName = `${ROLEBOX_SKILL_PREFIX}${sub.id}~${skill.name}`;
+        const entryPath = path.join(globalSkillsDir, entryName);
+        createSkillEntry(entryPath, skill.filePath);
+      }
+    }
+  }
+}

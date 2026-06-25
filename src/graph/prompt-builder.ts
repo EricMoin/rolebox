@@ -1,4 +1,4 @@
-import type { ResolvedGraph, GraphNodeRole } from "./types.js";
+import type { ResolvedGraph, GraphNodeRole } from "../types.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

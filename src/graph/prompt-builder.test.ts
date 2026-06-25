@@ -2,8 +2,8 @@ import { describe, it, expect } from "bun:test";
 import {
   buildCollaborationBlock,
   buildSubagentRoleBlock,
-} from "./graph-prompt-builder";
-import type { ResolvedGraph, GraphNodeRole } from "./types";
+} from "./prompt-builder";
+import type { ResolvedGraph, GraphNodeRole } from "../types";
 
 function graph(overrides: Partial<ResolvedGraph> = {}): ResolvedGraph {
   return {
