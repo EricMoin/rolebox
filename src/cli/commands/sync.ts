@@ -1,5 +1,6 @@
 import { loadLock } from "../config.js";
 import { getSyncTarget, getRolePath } from "../paths.js";
+import { SyncTarget } from "../../constants.js";
 import {
   existsSync,
   mkdirSync,
@@ -25,7 +26,7 @@ import { join } from "node:path";
  *   7. Print summary
  */
 export async function sync(args: string[]): Promise<void> {
-  const target = args[0] || "opencode";
+  const target = args[0] || SyncTarget.Opencode;
 
   let syncTarget: string;
   try {

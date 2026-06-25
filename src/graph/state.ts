@@ -1,4 +1,5 @@
 import type { FlowEdge, ResolvedGraph } from "../types.js";
+import { PARENT_NODE } from "../constants.js";
 
 export interface GraphExecutionState {
   currentStep: number;
@@ -44,7 +45,7 @@ export class GraphSessionState {
 
     const nextEdge = graph.edges[nextIdx];
 
-    if (nextEdge.exit || nextEdge.to === "parent") {
+    if (nextEdge.exit || nextEdge.to === PARENT_NODE) {
       state.currentStep = nextIdx;
       state.status = "complete";
       return;

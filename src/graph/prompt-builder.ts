@@ -1,4 +1,5 @@
 import type { ResolvedGraph, GraphNodeRole } from "../types.js";
+import { GraphTemplate as GT, PARENT_NODE } from "../constants.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -34,11 +35,11 @@ function traceLinearPath(graph: ResolvedGraph): string[] {
 
   const path: string[] = [];
   const visited = new Set<string>();
-  let current = "parent";
+  let current = PARENT_NODE;
 
   while (true) {
     const nextNodes = (adj.get(current) ?? []).filter(
-      (n) => n !== "parent",
+      (n) => n !== PARENT_NODE,
     );
     if (nextNodes.length === 0) break;
     // Prefer the first unvisited node (non-loop edge); fall back to first
@@ -74,8 +75,8 @@ function findLoopEdges(
 /** Agents in a star topology (have edges from parent and back to parent). */
 function getStarWorkers(graph: ResolvedGraph): string[] {
   return graph.nodes.filter((n) => {
-    const fromParent = graph.edges.some((e) => e.from === "parent" && e.to === n);
-    const toParent = graph.edges.some((e) => e.from === n && e.to === "parent");
+    const fromParent = graph.edges.some((e) => e.from === PARENT_NODE && e.to === n);
+    const toParent = graph.edges.some((e) => e.from === n && e.to === PARENT_NODE);
     return fromParent && toParent;
   });
 }
@@ -188,13 +189,13 @@ function buildCustomXml(
   meta: Map<string, { name: string; description: string }>,
 ): string {
   const routingEdges = graph.edges.filter(
-    (e) => e.from !== "parent" && e.to !== "parent",
+    (e) => e.from !== PARENT_NODE && e.to !== PARENT_NODE,
   );
   const parentEdges = graph.edges.filter(
-    (e) => e.from === "parent",
+    (e) => e.from === PARENT_NODE,
   );
   const exitEdges = graph.edges.filter(
-    (e) => e.exit === true || e.to === "parent",
+    (e) => e.exit === true || e.to === PARENT_NODE,
   );
 
   const parts: string[] = [];
@@ -214,7 +215,7 @@ function buildCustomXml(
 
   if (exitEdges.length > 0) {
     const exitNames = [...new Set(
-      exitEdges.filter((e) => e.from !== "parent").map((e) => agentName(e.from, meta)),
+      exitEdges.filter((e) => e.from !== PARENT_NODE).map((e) => agentName(e.from, meta)),
     )];
     parts.push(
       `Exit points: ${exitNames.join(", ")}. Their output completes the workflow.`,
@@ -253,20 +254,20 @@ export function buildCollaborationBlock(
 
   let routingXml: string;
   switch (template) {
-    case "pipeline":
+    case GT.Pipeline:
       routingXml = buildPipelineXml(
         traceLinearPath(graph),
         meta,
         graph.maxIterations,
       );
       break;
-    case "review-loop": {
+    case GT.ReviewLoop: {
       const path = traceLinearPath(graph);
       const loopEdges = findLoopEdges(graph, path);
       routingXml = buildReviewLoopXml(path, loopEdges, meta, graph.maxIterations);
       break;
     }
-    case "star":
+    case GT.Star:
       routingXml = buildStarXml(
         getStarWorkers(graph),
         meta,

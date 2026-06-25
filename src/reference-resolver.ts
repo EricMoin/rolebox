@@ -2,6 +2,7 @@ import { resolve as pathResolve, relative, dirname, basename, extname } from "no
 import fg from "fast-glob";
 import yaml from "js-yaml";
 import type { ReferenceEntry, ResolvedReference } from "./types.js";
+import type { ReferenceScope } from "./constants.js";
 
 /**
  * Derive a human-readable name from a reference file path.
@@ -62,7 +63,7 @@ async function extractFrontmatterDescription(
  */
 export async function discoverReferences(
   baseDir: string,
-  scope: ResolvedReference["scope"],
+  scope: ReferenceScope,
 ): Promise<ResolvedReference[]> {
   const refsDir = pathResolve(baseDir, "references");
   let matches: string[];
@@ -101,7 +102,7 @@ export async function discoverReferences(
 export async function resolveExplicitReferences(
   declarations: Record<string, string | ReferenceEntry>,
   baseDir: string,
-  scope: ResolvedReference["scope"],
+  scope: ReferenceScope,
 ): Promise<ResolvedReference[]> {
   const resolved: ResolvedReference[] = [];
 
@@ -150,7 +151,7 @@ export async function resolveExplicitReferences(
  */
 export async function resolveAllReferences(
   baseDir: string,
-  scope: ResolvedReference["scope"],
+  scope: ReferenceScope,
   explicitDeclarations?: Record<string, string | ReferenceEntry>,
 ): Promise<ResolvedReference[]> {
   const discovered = await discoverReferences(baseDir, scope);

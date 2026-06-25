@@ -2,6 +2,7 @@ import { findInLock, removeFromLock } from "../config.js";
 import { getRolePath, getSyncTarget } from "../paths.js";
 import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { SyncTarget } from "../../constants.js";
 
 export async function uninstall(args: string[]): Promise<void> {
   const roleId = args[0];
@@ -26,7 +27,7 @@ export async function uninstall(args: string[]): Promise<void> {
   }
 
   try {
-    const syncTarget = getSyncTarget("opencode");
+    const syncTarget = getSyncTarget(SyncTarget.Opencode);
     if (existsSync(syncTarget)) {
       const entries = readdirSync(syncTarget);
       for (const entry of entries) {

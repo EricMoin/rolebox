@@ -1,4 +1,5 @@
 import type { FunctionMetadata, ResolvedFunction } from "./types.js";
+import { FunctionSource } from "./constants.js";
 import { parseFrontmatter } from "./skill-resolver.js";
 import type { FunctionCall } from "./function-parser.js";
 
@@ -25,9 +26,9 @@ export async function resolveFunctions(
 
   for (const name of names) {
     const candidates: { source: ResolvedFunction["source"]; path: string }[] = [
-      { source: "role-local", path: `${roleDir}/functions/${name}.md` },
-      { source: "global", path: `${globalFunctionsDir}/${name}.md` },
-      { source: "built-in", path: `${builtinDir}/${name}.md` },
+      { source: FunctionSource.RoleLocal, path: `${roleDir}/functions/${name}.md` },
+      { source: FunctionSource.Global, path: `${globalFunctionsDir}/${name}.md` },
+      { source: FunctionSource.BuiltIn, path: `${builtinDir}/${name}.md` },
     ];
 
     let matched = false;

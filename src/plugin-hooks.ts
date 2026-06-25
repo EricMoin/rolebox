@@ -9,6 +9,7 @@ import { buildAgentConfig } from "./prompt/agent-config.js";
 import { DispatchManager } from "./dispatch/manager.js";
 import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.js";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.js";
+import { RoleMode } from "./constants.js";
 
 export function createPluginHooks(
   resolvedRoles: ResolvedRole[],
@@ -40,7 +41,7 @@ export function createPluginHooks(
         for (const sub of resolved.subagents) {
           const subAgentCfg: Record<string, unknown> = {
             prompt: sub.prompt,
-            mode: "subagent",
+            mode: RoleMode.Subagent,
             hidden: true,
           };
           if (sub.config.description) subAgentCfg.description = sub.config.description;

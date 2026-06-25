@@ -1,5 +1,6 @@
 import type { AgentConfig } from "@opencode-ai/sdk";
 import type { ResolvedRole } from "../types.js";
+import { RoleMode } from "../constants.js";
 
 /**
  * Build an SDK-compatible AgentConfig from a ResolvedRole.
@@ -12,7 +13,7 @@ export function buildAgentConfig(resolved: ResolvedRole): AgentConfig {
 
   const agent: AgentConfig = {
     prompt: resolved.prompt,
-    mode: config.mode ?? "primary",
+    mode: config.mode ?? RoleMode.Primary,
   };
   if (config.model !== undefined) {
     agent.model = config.model;

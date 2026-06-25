@@ -15,6 +15,7 @@ import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.js";
 import type { RoleConfig, SubAgentConfig } from "./types.js";
+import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR } from "./constants.js";
 
 /**
  * Validate a role ID string.
@@ -27,7 +28,7 @@ import type { RoleConfig, SubAgentConfig } from "./types.js";
  */
 export function validateRoleId(id: string): boolean {
   if (id === "") return false;
-  return !id.includes("--");
+  return !id.includes(SUBAGENT_ID_SEPARATOR);
 }
 
 /**
@@ -379,8 +380,8 @@ async function loadOneRole(
       ? { model: resolved.model }
       : {}),
     ...(typeof resolved.mode === "string" &&
-      ["primary", "subagent", "all"].includes(resolved.mode)
-      ? { mode: resolved.mode as "primary" | "subagent" | "all" }
+      ROLE_MODE_VALUES.includes(resolved.mode as RoleMode)
+      ? { mode: resolved.mode as RoleMode }
       : {}),
     ...(typeof resolved.color === "string"
       ? { color: resolved.color }

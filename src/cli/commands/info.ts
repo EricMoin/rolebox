@@ -4,6 +4,7 @@ import yaml from "js-yaml";
 import { loadLock, findInLock } from "../config.js";
 import { getSyncTarget, getRolePath } from "../paths.js";
 import { computeIntegrity } from "../registry-client.js";
+import { DEFAULT_FUNCTIONS, RoleMode, SyncTarget } from "../../constants.js";
 import {
   bold,
   dim,
@@ -95,14 +96,14 @@ export async function info(args: string[]): Promise<void> {
     }
   }
 
-  const syncTarget = getSyncTarget("opencode");
+  const syncTarget = getSyncTarget(SyncTarget.Opencode);
   const linkPath = join(syncTarget, entry.role);
   const sym = checkSymlink(linkPath, entry.role);
   const synced = sym.exists && sym.isSymlink;
   const symlinkValid = synced && sym.targetExists;
 
   const allSkills = [...(roleConfig.skills || []), ...(roleConfig.opencode_skills || [])];
-  const allFunctions = roleConfig.functions || ["plan", "execute"];
+  const allFunctions = roleConfig.functions || [...DEFAULT_FUNCTIONS];
   const subagents = [
     ...(roleConfig.subagents || []).map((s) => ({ name: s.name || "unnamed", description: s.description })),
     ...discoverFileSubagents(rolePath),
@@ -165,7 +166,7 @@ export async function info(args: string[]): Promise<void> {
   if (roleConfig.model || roleConfig.mode || roleConfig.temperature) {
     printHeader("Model");
     if (roleConfig.model) printField("Model", roleConfig.model);
-    printField("Mode", roleConfig.mode || "primary");
+    printField("Mode", roleConfig.mode || RoleMode.Primary);
     if (roleConfig.temperature != null) printField("Temperature", String(roleConfig.temperature));
     if (roleConfig.top_p != null) printField("Top P", String(roleConfig.top_p));
     if (roleConfig.variant) printField("Variant", roleConfig.variant);

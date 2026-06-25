@@ -1,3 +1,11 @@
+import type {
+  RoleMode,
+  SkillScope,
+  FunctionSource,
+  ReferenceScope,
+  GraphTemplate,
+} from "./constants.js";
+
 /**
  * Permission configuration, mirroring opencode's PermissionConfig structure.
  * Controls which tools a role is allowed or denied from using.
@@ -64,13 +72,7 @@ export interface FlowEdge {
   exit?: boolean;
 }
 
-/**
- * Pre-defined collaboration graph topologies.
- * - "pipeline": sequential chain, one agent feeds the next
- * - "review-loop": primary agent with reviewers that can send work back
- * - "star": central coordinator fans out to worker agents
- */
-export type GraphTemplate = "pipeline" | "review-loop" | "star";
+export type { GraphTemplate } from "./constants.js";
 
 /**
  * Raw collaboration graph configuration as parsed from role.yaml.
@@ -135,7 +137,7 @@ export interface RoleConfig {
   /** LLM model identifier (e.g., "gpt-4", "claude-3-sonnet") */
   model?: string;
   /** Role mode: "primary" (default), "subagent", or "all" */
-  mode?: "primary" | "subagent" | "all";
+  mode?: RoleMode;
   /** Display color for the role in the UI */
   color?: string;
   /** Model variant / configuration flavor */
@@ -180,7 +182,7 @@ export interface ResolvedSkill {
   /** Human-readable description from SKILL.md frontmatter */
   description: string;
   /** Scope indicating where the skill was found */
-  scope: "rolebox" | "opencode";
+  scope: SkillScope;
   /** Absolute filesystem path to the SKILL.md file */
   filePath: string;
   /** Resolved references discovered in the skill's references/ directory */
@@ -201,7 +203,7 @@ export interface ResolvedFunction {
   /** Absolute filesystem path to the function file */
   filePath: string;
   /** Source indicating where the function was found */
-  source: "role-local" | "global" | "built-in";
+  source: FunctionSource;
   /** Parameter declarations from frontmatter (name → default value) */
   params?: Record<string, string>;
 }
@@ -229,7 +231,7 @@ export interface ResolvedReference {
   /** Human-readable description (from frontmatter, role.yaml, or auto-generated) */
   description: string;
   /** Where the reference was found */
-  scope: "role" | "skill";
+  scope: ReferenceScope;
   /** Relative path from the owning directory (for display) */
   relativePath: string;
 }

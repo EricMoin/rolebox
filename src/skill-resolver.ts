@@ -2,6 +2,7 @@ import { dirname } from "node:path";
 import fg from "fast-glob";
 import yaml from "js-yaml";
 import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "./types.js";
+import { SkillScope, ReferenceScope } from "./constants.js";
 import { resolveAllReferences } from "./reference-resolver.js";
 
 interface Candidate {
@@ -20,10 +21,10 @@ function buildCandidates(
   globalSkillsDir: string,
 ): Candidate[] {
   return [
-    { scope: "rolebox", pattern: `${roleDir}/skills/${name}/SKILL.md` },
-    { scope: "rolebox", pattern: `${roleDir}/skills/${name}.md` },
-    { scope: "opencode", pattern: `${globalSkillsDir}/${name}/SKILL.md` },
-    { scope: "opencode", pattern: `${globalSkillsDir}/${name}.md` },
+    { scope: SkillScope.Rolebox, pattern: `${roleDir}/skills/${name}/SKILL.md` },
+    { scope: SkillScope.Rolebox, pattern: `${roleDir}/skills/${name}.md` },
+    { scope: SkillScope.Opencode, pattern: `${globalSkillsDir}/${name}/SKILL.md` },
+    { scope: SkillScope.Opencode, pattern: `${globalSkillsDir}/${name}.md` },
   ];
 }
 
@@ -59,7 +60,7 @@ export async function resolveSkills(
           const skillDir = dirname(filePath);
           references = await resolveAllReferences(
             skillDir,
-            "skill",
+            ReferenceScope.Skill,
             metadata.references as SkillMetadata["references"],
           );
         } catch {
