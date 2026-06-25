@@ -20,6 +20,9 @@ import { buildAgentPrompt, buildFunctionBlock } from "./prompt-builder.js";
 import { buildSubagentRoleBlock } from "./graph-prompt-builder.js";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole } from "./types.js";
 import { parseCollaboration } from "./graph-parser.js";
+import { DispatchManager } from "./dispatch/manager.js";
+import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.js";
+import type { DispatchTask, DispatchInput } from "./dispatch/types.js";
 
 /**
  * Map of roleId → ResolvedFunction[] built at startup.
@@ -526,7 +529,23 @@ const RoleboxPlugin: Plugin = async (ctx) => {
   // oh-my-openagent's skill tool can discover and load them.
   syncSkillSymlinks(resolvedRoles, globalSkillsDir);
 
+  // Build resolvedSubagents map: subagent ID → parent role ID
+  const resolvedSubagents = new Map<string, string>();
+  for (const role of resolvedRoles) {
+    for (const sub of role.subagents) {
+      resolvedSubagents.set(sub.id, role.id);
+    }
+  }
+
+  // Create dispatch manager backed by the opencode client
+  const dispatchManager = new DispatchManager(ctx.client);
+
   return {
+    tool: {
+      dispatch: createDispatchTool(dispatchManager, resolvedSubagents),
+      dispatch_output: createDispatchOutputTool(dispatchManager),
+      dispatch_cancel: createDispatchCancelTool(dispatchManager),
+    },
     config: async (config) => {
       for (const resolved of resolvedRoles) {
         const agentConfig = buildAgentConfig(resolved);
@@ -587,16 +606,21 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     },
     "tool.execute.after": async (input, _output) => {
       if (!input.sessionID) return;
-      if (input.tool !== "task") return;
+      if (input.tool !== "task" && input.tool !== "dispatch") return;
 
       const state = graphSessionState.getState(input.sessionID);
       if (!state || state.status !== "active") return;
 
       const args = typeof input.args === "string" ? input.args : JSON.stringify(input.args ?? {});
-      const match = args.match(/subagent_type\s*=\s*["']([^"']+)["']/);
-      if (!match) return;
+      let agentMatch: RegExpMatchArray | null = null;
+      if (input.tool === "task") {
+        agentMatch = args.match(/subagent_type\s*=\s*["']([^"']+)["']/);
+      } else {
+        agentMatch = args.match(/subagent\s*=\s*["']([^"']+)["']/);
+      }
+      if (!agentMatch) return;
 
-      graphSessionState.advanceStep(input.sessionID, match[1]);
+      graphSessionState.advanceStep(input.sessionID, agentMatch[1]);
     },
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return;
