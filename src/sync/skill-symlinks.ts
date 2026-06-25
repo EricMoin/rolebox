@@ -1,8 +1,7 @@
 import path from "node:path";
 import { mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync } from "node:fs";
 import type { ResolvedRole } from "../types.js";
-
-const ROLEBOX_SKILL_PREFIX = "rolebox--";
+import { SkillScope, ROLEBOX_SKILL_PREFIX } from "../constants.js";
 
 function createSkillEntry(entryPath: string, filePath: string): void {
   const isDirectorySkill = path.basename(filePath).toLowerCase() === "skill.md";
@@ -53,7 +52,7 @@ export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir
 
   for (const role of resolvedRoles) {
     for (const skill of role.skills) {
-      if (skill.scope !== "rolebox") continue;
+      if (skill.scope !== SkillScope.Rolebox) continue;
       if (!existsSync(skill.filePath)) continue;
 
       const entryName = `${ROLEBOX_SKILL_PREFIX}${skill.name}`;
@@ -62,7 +61,7 @@ export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir
     }
     for (const sub of role.subagents) {
       for (const skill of sub.skills) {
-        if (skill.scope !== "rolebox") continue;
+        if (skill.scope !== SkillScope.Rolebox) continue;
         if (!existsSync(skill.filePath)) continue;
 
         const entryName = `${ROLEBOX_SKILL_PREFIX}${sub.id}~${skill.name}`;

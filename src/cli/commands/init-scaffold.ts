@@ -12,6 +12,7 @@ import { dump } from "js-yaml";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { templates, type InitConfig, type TemplateType } from "../templates/index.js";
+import { DEFAULT_FUNCTIONS, GraphTemplate } from "../../constants.js";
 
 // ---------------------------------------------------------------------------
 // YAML helpers
@@ -81,7 +82,7 @@ export function generateRoleYaml(
           ...base,
           ...extras,
           skills: [] as string[],
-          functions: ["plan", "execute"],
+          functions: [...DEFAULT_FUNCTIONS],
         },
         YAML_OPTS,
       );
@@ -99,7 +100,7 @@ export function generateRoleYaml(
           ...base,
           ...extras,
           skills: [] as string[],
-          functions: ["plan", "execute"],
+          functions: [...DEFAULT_FUNCTIONS],
           subagents,
         },
         YAML_OPTS,
@@ -120,10 +121,10 @@ export function generateRoleYaml(
           ...base,
           ...extras,
           skills: [] as string[],
-          functions: ["plan", "execute"],
+          functions: [...DEFAULT_FUNCTIONS],
           subagents,
           collaboration: {
-            topology: config.topology ?? "pipeline",
+            topology: config.topology ?? GraphTemplate.Pipeline,
             agents,
             max_iterations: 3,
           },
@@ -225,7 +226,7 @@ export function generatePromptFile(
 
     // ── collaboration ────────────────────────────────────────────────────
     case "collaboration": {
-      const topology = config.topology ?? "pipeline";
+      const topology = config.topology ?? GraphTemplate.Pipeline;
       return [
         `# ${name}`,
         "",

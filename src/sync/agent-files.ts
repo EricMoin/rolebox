@@ -2,12 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { writeFileSync, readFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import type { ResolvedRole } from "../types.js";
-
-/**
- * Marker prefix used in agent .md files to identify rolebox-managed agents.
- * This allows cleanup of stale agents when roles are removed from rolebox.
- */
-const ROLEBOX_MARKER = "<!-- rolebox-managed -->";
+import { RoleMode, ROLEBOX_AGENT_MARKER } from "../constants.js";
 
 interface AgentEntry {
   id: string;
@@ -42,7 +37,7 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
       name: role.config.name,
       description: role.config.description,
       prompt: role.prompt,
-      mode: role.config.mode ?? "primary",
+      mode: role.config.mode ?? RoleMode.Primary,
       model: role.config.model,
     });
     for (const sub of role.subagents) {
@@ -51,7 +46,7 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
         name: sub.config.name,
         description: sub.config.description,
         prompt: sub.prompt,
-        mode: "subagent",
+        mode: RoleMode.Subagent,
         model: sub.config.model,
       });
     }
@@ -64,7 +59,7 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
       const filePath = path.join(agentsDir, file);
       try {
         const text = readFileSync(filePath, "utf-8");
-        if (text.includes(ROLEBOX_MARKER)) {
+        if (text.includes(ROLEBOX_AGENT_MARKER)) {
           const roleId = file.replace(/\.md$/, "");
           if (!allAgents.some((a) => a.id === roleId)) {
             unlinkSync(filePath);
@@ -80,7 +75,7 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
 
   for (const agent of allAgents) {
     const lines = [
-      ROLEBOX_MARKER,
+      ROLEBOX_AGENT_MARKER,
       "---",
       `name: ${agent.name}`,
       `description: ${agent.description}`,

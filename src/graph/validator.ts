@@ -1,4 +1,5 @@
 import type { ResolvedGraph, FlowEdge } from "../types.js";
+import { PARENT_NODE } from "../constants.js";
 
 /**
  * Validate a collaboration graph against a set of available agents.
@@ -45,7 +46,7 @@ function validateNodesExist(
   availableAgents: string[],
   warnings: string[],
 ): void {
-  const knownAgents = new Set([...availableAgents, "parent"]);
+  const knownAgents = new Set([...availableAgents, PARENT_NODE]);
 
   for (const edge of edges) {
     if (!knownAgents.has(edge.from)) {
@@ -75,7 +76,7 @@ function validateExitEdgeExists(
   warnings: string[],
 ): void {
   const hasExit = graph.edges.some(
-    (e) => e.exit === true || e.to === "parent",
+    (e) => e.exit === true || e.to === PARENT_NODE,
   );
   if (!hasExit) {
     const msg = "No exit edge found: graph has no termination path";
@@ -91,7 +92,7 @@ function validateEntryPointExists(
   graph: ResolvedGraph,
   warnings: string[],
 ): void {
-  const hasEntry = graph.edges.some((e) => e.from === "parent");
+  const hasEntry = graph.edges.some((e) => e.from === PARENT_NODE);
   if (!hasEntry) {
     const msg =
       'No entry point found: graph must have at least one edge from "parent"';
@@ -111,8 +112,8 @@ function validateOrphanAgents(
 ): void {
   const agentsInEdges = new Set<string>();
   for (const edge of edges) {
-    if (edge.from !== "parent") agentsInEdges.add(edge.from);
-    if (edge.to !== "parent") agentsInEdges.add(edge.to);
+    if (edge.from !== PARENT_NODE) agentsInEdges.add(edge.from);
+    if (edge.to !== PARENT_NODE) agentsInEdges.add(edge.to);
   }
 
   for (const agent of availableAgents) {
@@ -150,15 +151,15 @@ function validateCycles(
 function hasCycle(edges: FlowEdge[]): boolean {
   const nodes = new Set<string>();
   for (const e of edges) {
-    if (e.from !== "parent") nodes.add(e.from);
-    if (e.to !== "parent") nodes.add(e.to);
+    if (e.from !== PARENT_NODE) nodes.add(e.from);
+    if (e.to !== PARENT_NODE) nodes.add(e.to);
   }
 
   // Build adjacency list (only agent-to-agent edges)
   const adj = new Map<string, string[]>();
   for (const n of nodes) adj.set(n, []);
   for (const e of edges) {
-    if (e.from !== "parent" && e.to !== "parent") {
+    if (e.from !== PARENT_NODE && e.to !== PARENT_NODE) {
       adj.get(e.from)!.push(e.to);
     }
   }

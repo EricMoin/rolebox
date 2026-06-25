@@ -6,6 +6,7 @@ import { resolveFunctions } from "../function-resolver.js";
 import { buildSubagentRoleBlock, parseCollaboration } from "../graph/index.js";
 import { buildAgentPrompt } from "../prompt-builder.js";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedGraph, GraphNodeRole } from "../types.js";
+import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.js";
 
 export function computeNodeRole(
   graph: ResolvedGraph,
@@ -13,16 +14,16 @@ export function computeNodeRole(
   childSlug: string,
 ): GraphNodeRole | null {
   const downstream = graph.edges
-    .filter((e) => e.from === childSlug && e.to !== "parent")
+    .filter((e) => e.from === childSlug && e.to !== PARENT_NODE)
     .map((e) => e.to);
   const upstream = graph.edges
-    .filter((e) => e.to === childSlug && e.from !== "parent")
+    .filter((e) => e.to === childSlug && e.from !== PARENT_NODE)
     .map((e) => e.from);
   const isEntryPoint = graph.edges.some(
-    (e) => e.from === "parent" && e.to === childSlug,
+    (e) => e.from === PARENT_NODE && e.to === childSlug,
   );
   const isExitPoint = graph.edges.some(
-    (e) => e.from === childSlug && (e.to === "parent" || e.exit === true),
+    (e) => e.from === childSlug && (e.to === PARENT_NODE || e.exit === true),
   );
 
   if (
@@ -67,7 +68,7 @@ export async function resolveAllRoles(
 
       const roleReferences = await resolveAllReferences(
         roleDir,
-        "role",
+        ReferenceScope.Role,
         config.references as RoleConfig["references"],
       );
 
@@ -76,7 +77,7 @@ export async function resolveAllRoles(
 
       const globalFunctionsDir = path.join(ctx.configDir, "functions");
 
-      const functionNames = config.functions ?? ["plan", "execute"];
+      const functionNames = config.functions ?? [...DEFAULT_FUNCTIONS];
       const enabledFunctions = functionNames.filter(
         (fn) => !(config.disable_functions ?? []).includes(fn),
       );
@@ -90,7 +91,7 @@ export async function resolveAllRoles(
       if (config.subagents && config.subagents.length > 0) {
         for (const saConfig of config.subagents) {
           const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
-          const childId = `${roleId}--${childSlug}`;
+          const childId = `${roleId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
 
           const slugDir = path.join(roleDir, "subagents", childSlug);
           const nameDir = path.join(roleDir, "subagents", saConfig.name);
@@ -108,7 +109,7 @@ export async function resolveAllRoles(
             saSkills = await resolveSkills(saAllSkillNames, saRoleDir, ctx.globalSkillsDir);
           }
 
-          const saFunctionNames = saConfig.functions ?? ["plan", "execute"];
+          const saFunctionNames = saConfig.functions ?? [...DEFAULT_FUNCTIONS];
           const saEnabledFunctions = saFunctionNames.filter(
             (fn) => !(saConfig.disable_functions ?? []).includes(fn),
           );
@@ -122,7 +123,7 @@ export async function resolveAllRoles(
             );
           }
 
-          const saOwnRefs = await resolveAllReferences(saRoleDir, "role");
+          const saOwnRefs = await resolveAllReferences(saRoleDir, ReferenceScope.Role);
           const saSkillRefs = saSkills.flatMap((s) => s.references);
           const saReferences = [...roleReferences, ...saOwnRefs, ...saSkillRefs];
 

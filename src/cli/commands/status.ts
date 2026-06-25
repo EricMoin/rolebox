@@ -6,6 +6,7 @@ import { loadLock, loadConfig, getConfigPath, getLockPath } from "../config.js";
 import { getSyncTarget, getRolePath } from "../paths.js";
 import { fetchRegistryManifest } from "../registry-client.js";
 import { compareVersions } from "./update.js";
+import { SyncTarget, PLUGIN_ID } from "../../constants.js";
 import {
   bold,
   dim,
@@ -54,7 +55,7 @@ export async function status(args: string[]): Promise<void> {
   const config = loadConfig();
   const lock = loadLock();
   const configPath = getConfigPath();
-  const syncTarget = getSyncTarget("opencode");
+  const syncTarget = getSyncTarget(SyncTarget.Opencode);
   const opencodeConfigPath = getOpencodeConfigPath();
 
   const pluginRegistered = checkPluginRegistered(opencodeConfigPath);
@@ -225,7 +226,7 @@ function checkPluginRegistered(configPath: string): boolean {
     const stripped = stripJsonComments(content);
     const parsed = JSON.parse(stripped) as { plugin?: string[] };
     if (!Array.isArray(parsed.plugin)) return false;
-    return parsed.plugin.some((p) => p === "rolebox" || p.startsWith("rolebox@"));
+    return parsed.plugin.some((p) => p === PLUGIN_ID || p.startsWith(`${PLUGIN_ID}@`));
   } catch {
     return false;
   }

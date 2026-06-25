@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { SyncTarget } from "../constants.js";
 
 /**
  * Returns the rolebox data directory.
@@ -42,7 +43,7 @@ export function getRolesDir(): string {
  * Extensible for future targets.
  */
 export function getSyncTarget(target: string): string {
-  if (target === "opencode") {
+  if (target === SyncTarget.Opencode) {
     const xdg = process.env.XDG_CONFIG_HOME;
     if (xdg) return join(xdg, "opencode", "rolebox");
     return join(homedir(), ".config", "opencode", "rolebox");

@@ -9,6 +9,7 @@ import { syncAgentFiles } from "./sync/agent-files.js";
 import { syncSkillSymlinks } from "./sync/skill-symlinks.js";
 import { createPluginHooks } from "./plugin-hooks.js";
 import type { ResolvedFunction, ResolvedGraph } from "./types.js";
+import { PLUGIN_ID } from "./constants.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,6 +52,6 @@ const RoleboxPlugin: Plugin = async (ctx) => {
 };
 
 export default {
-  id: "rolebox",
+  id: PLUGIN_ID,
   server: RoleboxPlugin,
 };

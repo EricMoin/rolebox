@@ -3,11 +3,9 @@ import type {
   ResolvedGraph,
   GraphTemplate,
 } from "../types.js";
+import { PARENT_NODE, GRAPH_TEMPLATE_VALUES } from "../constants.js";
 import { expandTemplate } from "./templates.js";
 import { validateGraph } from "./validator.js";
-
-const PARENT = "parent";
-const VALID_TEMPLATES = new Set<string>(["pipeline", "review-loop", "star"]);
 
 // Regex for string edge syntax: "agent-a -> agent-b" or "agent-a -> agent-b: label text"
 // Agent names must match \w+(?:-\w+)*  (words separated by hyphens, no trailing hyphens)
@@ -101,8 +99,8 @@ export function parseCollaboration(
   // ── Build deduplicated node list (exclude "parent" sentinel) ──
   const nodeSet = new Set<string>();
   for (const edge of edges) {
-    if (edge.from !== PARENT) nodeSet.add(edge.from);
-    if (edge.to !== PARENT) nodeSet.add(edge.to);
+    if (edge.from !== PARENT_NODE) nodeSet.add(edge.from);
+    if (edge.to !== PARENT_NODE) nodeSet.add(edge.to);
   }
   const nodes = Array.from(nodeSet);
 
@@ -118,7 +116,7 @@ export function parseCollaboration(
 
   // ── Identify exit edges ──
   const exitEdges = edges.filter(
-    (e) => e.to === PARENT || e.exit === true,
+    (e) => e.to === PARENT_NODE || e.exit === true,
   );
 
   // ── Assemble resolved graph ──
@@ -172,7 +170,7 @@ function validateTopology(
   }
 
   const trimmed = raw.trim();
-  if (!VALID_TEMPLATES.has(trimmed)) {
+  if (!GRAPH_TEMPLATE_VALUES.has(trimmed)) {
     console.warn(`[graph-parser] unknown topology: "${trimmed}"`);
     return null;
   }
@@ -245,7 +243,7 @@ function parseStringEdge(text: string): FlowEdge | null {
   };
 
   // For consistency with template expansion, edges to "parent" get exit: true.
-  if (to === PARENT) {
+  if (to === PARENT_NODE) {
     edge.exit = true;
   }
 
@@ -308,15 +306,15 @@ function mergeEdges(
 function hasCycle(edges: FlowEdge[]): boolean {
   const nodes = new Set<string>();
   for (const e of edges) {
-    if (e.from !== PARENT) nodes.add(e.from);
-    if (e.to !== PARENT) nodes.add(e.to);
+    if (e.from !== PARENT_NODE) nodes.add(e.from);
+    if (e.to !== PARENT_NODE) nodes.add(e.to);
   }
 
   // Build adjacency list — only agent-to-agent edges
   const adj = new Map<string, string[]>();
   for (const n of nodes) adj.set(n, []);
   for (const e of edges) {
-    if (e.from !== PARENT && e.to !== PARENT) {
+    if (e.from !== PARENT_NODE && e.to !== PARENT_NODE) {
       adj.get(e.from)!.push(e.to);
     }
   }
