@@ -85,20 +85,9 @@ export interface DispatchResult {
 
 /**
  * Configurable limits and intervals for the dispatch manager.
- * These control polling frequency, timeouts, concurrency, and cleanup.
+ * Re-exported from config.ts for backward compatibility.
  */
-export interface DispatchManagerConfig {
-  /** Interval (ms) between status-polling heartbeats — default: 3000 */
-  pollIntervalMs: number;
-  /** Maximum wall-clock time (ms) before a running task is considered stale — default: 45 minutes */
-  staleTimeoutMs: number;
-  /** Minimum wall-clock time (ms) before a task can be reaped — default: 5000 */
-  minRuntimeMs: number;
-  /** Maximum number of concurrent background tasks — default: 5 */
-  maxConcurrent: number;
-  /** Time-to-live (ms) for completed task records before cleanup — default: 10 minutes */
-  taskTtlMs: number;
-}
+export type { DispatchManagerConfig } from "./config.js";
 
 /**
  * Payload for task lifecycle notifications emitted to the parent agent.
@@ -115,4 +104,28 @@ export interface NotificationPayload {
   status: DispatchTaskStatus;
   /** Number of remaining in-flight or queued background tasks */
   remainingTasks: number;
+}
+
+// ─── Global Poller Internal Types ─────────────────────────────────────────
+
+/** Signal emitted by the completion detector */
+export type CompletionSignal =
+  | { type: "completed" }
+  | { type: "error"; message: string }
+  | { type: "not_ready" }
+  | { type: "stabilizing" };
+
+/** Structured message data for completion detection */
+export interface SessionMessageSnapshot {
+  info: { role: string; id: string; finish?: string; error?: unknown };
+  parts: Array<{ type: string; state?: string; text?: string }>;
+}
+
+/** Per-task polling metadata tracked by global poller */
+export interface TaskPollState {
+  consecutiveMissedPolls: number;
+  stableIdlePolls: number;
+  lastMessageCount: number;
+  lastProgressUpdate: number;
+  hasProducedOutput: boolean;
 }
