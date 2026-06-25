@@ -1,25 +1,15 @@
 import type { OpencodeClient, SessionStatus } from "@opencode-ai/sdk";
-
-export interface PollerConfig {
-  pollIntervalMs: number;
-  staleTimeoutMs: number;
-  minRuntimeMs: number;
-}
-
-const DEFAULT_CONFIG: PollerConfig = {
-  pollIntervalMs: 3000,
-  staleTimeoutMs: 45 * 60 * 1000,
-  minRuntimeMs: 5000,
-};
+import type { DispatchManagerConfig } from "./config.js";
+import { DEFAULT_CONFIG } from "./config.js";
 
 export class SessionPoller {
   private client: OpencodeClient;
-  private config: PollerConfig;
+  private config: DispatchManagerConfig;
   private intervals = new Map<string, ReturnType<typeof setInterval>>();
   private taskStartTimes = new Map<string, number>();
   private lastProgress = new Map<string, number>();
 
-  constructor(client: OpencodeClient, config?: Partial<PollerConfig>) {
+  constructor(client: OpencodeClient, config?: Partial<DispatchManagerConfig>) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
   }

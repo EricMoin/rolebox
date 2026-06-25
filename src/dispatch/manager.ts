@@ -4,21 +4,12 @@ import type {
   DispatchTask,
   DispatchManagerConfig,
 } from "./types.js";
+import { DEFAULT_CONFIG } from "./config.js";
 import { ConcurrencyManager } from "./concurrency.js";
 import { SessionPoller } from "./poller.js";
 import { notifyParent } from "./notification.js";
 
-const FORTY_FIVE_MINUTES_MS = 2_700_000;
-const TEN_MINUTES_MS = 600_000;
 const DEFAULT_CONCURRENCY_KEY = "default";
-
-const DEFAULTS: DispatchManagerConfig = {
-  pollIntervalMs: 3000,
-  staleTimeoutMs: FORTY_FIVE_MINUTES_MS,
-  minRuntimeMs: 5000,
-  maxConcurrent: 5,
-  taskTtlMs: TEN_MINUTES_MS,
-};
 
 export class DispatchManager {
   private tasks: Map<string, DispatchTask> = new Map();
@@ -30,7 +21,7 @@ export class DispatchManager {
 
   constructor(client: OpencodeClient, config?: Partial<DispatchManagerConfig>) {
     this.client = client;
-    this.config = { ...DEFAULTS, ...config };
+    this.config = { ...DEFAULT_CONFIG, ...config };
     this.concurrency = new ConcurrencyManager(this.config.maxConcurrent);
     this.poller = new SessionPoller(client, this.config);
   }
