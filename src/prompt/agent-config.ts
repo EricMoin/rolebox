@@ -14,7 +14,6 @@ export function buildAgentConfig(resolved: ResolvedRole): AgentConfig {
     prompt: resolved.prompt,
     mode: config.mode ?? "primary",
   };
-
   if (config.model !== undefined) {
     agent.model = config.model;
   }
