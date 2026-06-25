@@ -24,9 +24,12 @@ export function compareVersions(a: string, b: string): number {
  * `args[0]` optional — if provided, update only that role. Otherwise update all.
  */
 export async function update(args: string[]): Promise<void> {
+  const noCache = args.includes("--no-cache");
+  const filteredArgs = args.filter((a) => a !== "--no-cache");
+
   const config = loadConfig();
   const lock = loadLock();
-  const specificRole = args[0];
+  const specificRole = filteredArgs[0];
 
   let updated = 0;
   let upToDate = 0;
@@ -53,7 +56,7 @@ export async function update(args: string[]): Promise<void> {
 
     let manifest;
     try {
-      manifest = await fetchRegistryManifest(registryConfig);
+      manifest = await fetchRegistryManifest(registryConfig, undefined, { noCache });
     } catch (err) {
       console.warn(`Warning: could not fetch registry '${entry.registry}': ${(err as Error).message}`);
       continue;
