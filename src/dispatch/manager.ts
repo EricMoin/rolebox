@@ -16,6 +16,8 @@ const DEFAULT_CONCURRENCY_KEY = "default";
 export class DispatchManager {
   private tasks: Map<string, DispatchTask> = new Map();
   private cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private pendingNotifications: Set<string> = new Set();
+  private cleanedUpTasks: Set<string> = new Set();
   private concurrency: ConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: OpencodeClient;
@@ -175,7 +177,12 @@ export class DispatchManager {
 
   async getResult(taskId: string): Promise<string> {
     const task = this.tasks.get(taskId);
-    if (!task) return "";
+    if (!task) {
+      if (this.cleanedUpTasks.has(taskId)) {
+        return ""; // Task was cleaned up after completion — result no longer available
+      }
+      return ""; // Task never existed
+    }
 
     const messagesResult = await this.client.session.messages({
       path: { id: task.sessionId },
@@ -200,6 +207,7 @@ export class DispatchManager {
 
   cleanupTask(taskId: string): void {
     this.tasks.delete(taskId);
+    this.cleanedUpTasks.add(taskId);
     const timer = this.cleanupTimers.get(taskId);
     if (timer) {
       clearTimeout(timer);
@@ -214,7 +222,12 @@ export class DispatchManager {
         (t.status === "pending" || t.status === "running"),
     ).length;
 
-    await notifyParent(this.client, task, remainingCount);
+    this.pendingNotifications.add(task.id);
+    try {
+      await notifyParent(this.client, task, remainingCount);
+    } finally {
+      this.pendingNotifications.delete(task.id);
+    }
   }
 
   private handleTaskCompleted(taskId: string): void {
@@ -251,6 +264,10 @@ export class DispatchManager {
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
+      if (this.pendingNotifications.has(taskId)) {
+        this.scheduleCleanup(taskId);
+        return;
+      }
       this.cleanupTask(taskId);
     }, this.config.taskTtlMs);
 
