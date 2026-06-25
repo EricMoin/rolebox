@@ -62,6 +62,31 @@ export class GlobalPoller {
   getTaskCount(): number { return this.tasks.size; }
   isRunning(): boolean { return this.isRunningFlag; }
 
+  /** Run one poll cycle (exposed for deterministic testing). */
+  pollCycle(): Promise<void> { return this._pollCycle(); }
+
+  /** Get a task's poll state for inspection (returns undefined if not registered). */
+  getTaskPollState(taskId: string): (TaskPollState & { registeredAt: number }) | undefined {
+    const t = this.tasks.get(taskId);
+    if (!t) return undefined;
+    return { ...t.pollState, registeredAt: t.registeredAt };
+  }
+
+  /** Override a task's internal timing for testing timeout scenarios. */
+  setTaskTiming(taskId: string, overrides: { registeredAt?: number; lastProgressUpdate?: number; hasProducedOutput?: boolean }): void {
+    const t = this.tasks.get(taskId);
+    if (!t) return;
+    if (overrides.registeredAt !== undefined) t.registeredAt = overrides.registeredAt;
+    if (overrides.lastProgressUpdate !== undefined) t.pollState.lastProgressUpdate = overrides.lastProgressUpdate;
+    if (overrides.hasProducedOutput !== undefined) t.pollState.hasProducedOutput = overrides.hasProducedOutput;
+  }
+
+  /** Reset a task's lastMessageCount to force re-fetch on next cycle (for testing). */
+  resetMessageCount(taskId: string): void {
+    const t = this.tasks.get(taskId);
+    if (t) t.pollState.lastMessageCount = 0;
+  }
+
   start(): void {
     if (this.isRunningFlag) return;
     this.isRunningFlag = true;

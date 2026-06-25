@@ -90,7 +90,7 @@ function makePoller(m: PollerMocks, maxConcurrent = DEFAULT_MAX_CONCURRENT): Glo
 }
 
 async function runCycle(poller: GlobalPoller): Promise<void> {
-  await (poller as unknown as { _pollCycle(): Promise<void> })._pollCycle();
+  await poller.pollCycle();
 }
 
 function idleMsg(finish?: string): SessionMessageSnapshot {
@@ -266,13 +266,10 @@ describe("BUG-5: layered timeouts", () => {
     const poller = makePoller(m);
     poller.registerTask("t1", "s1");
 
-    // Access internal task map to set registeredAt far in the past
-    const tasks = (poller as unknown as {
-      tasks: Map<string, { registeredAt: number; pollState: TaskPollState }>;
-    }).tasks;
-    const task = tasks.get("t1")!;
-    task.registeredAt = Date.now() - MESSAGE_STALENESS_TIMEOUT_MS - 1000;
-    task.pollState.hasProducedOutput = false;
+    poller.setTaskTiming("t1", {
+      registeredAt: Date.now() - MESSAGE_STALENESS_TIMEOUT_MS - 1000,
+      hasProducedOutput: false,
+    });
 
     await runCycle(poller);
 
@@ -287,13 +284,10 @@ describe("BUG-5: layered timeouts", () => {
     const poller = makePoller(m);
     poller.registerTask("t1", "s1");
 
-    // Access internal task map — this task DID produce output but stalled
-    const tasks = (poller as unknown as {
-      tasks: Map<string, { registeredAt: number; pollState: TaskPollState }>;
-    }).tasks;
-    const task = tasks.get("t1")!;
-    task.pollState.hasProducedOutput = true;
-    task.pollState.lastProgressUpdate = Date.now() - 3_000_000; // 3M ms > staleTimeoutMs (2.7M ms)
+    poller.setTaskTiming("t1", {
+      hasProducedOutput: true,
+      lastProgressUpdate: Date.now() - 3_000_000,
+    });
 
     await runCycle(poller);
 
@@ -308,13 +302,10 @@ describe("BUG-5: layered timeouts", () => {
     const poller = makePoller(m);
     poller.registerTask("t1", "s1");
 
-    const tasks = (poller as unknown as {
-      tasks: Map<string, { registeredAt: number; pollState: TaskPollState }>;
-    }).tasks;
-    const task = tasks.get("t1")!;
-    // hasProducedOutput=true but lastProgressUpdate is recent → no timeout yet
-    task.pollState.hasProducedOutput = true;
-    task.pollState.lastProgressUpdate = Date.now() - 1000; // Only 1s stale, well under threshold
+    poller.setTaskTiming("t1", {
+      hasProducedOutput: true,
+      lastProgressUpdate: Date.now() - 1000,
+    });
 
     await runCycle(poller);
 
@@ -482,12 +473,7 @@ describe("integration: session flapping", () => {
     await runCycle(poller);
     expect(m.onCompleted).toHaveBeenCalledTimes(0);
 
-    // After flapping, the status key is cached ("active:idle" unchanged),
-    // so we need to reset lastMessageCount to force re-fetch
-    const tasks = (poller as unknown as {
-      tasks: Map<string, { pollState: TaskPollState }>;
-    }).tasks;
-    tasks.get("t1")!.pollState.lastMessageCount = 0;
+    poller.resetMessageCount("t1");
 
     // Cycle 4: idle again, triggers re-fetch → stabilizing → stableIdlePolls=1
     m.statusFn.mockImplementation(() => sdkResult({ s1: { type: "idle" } }));
