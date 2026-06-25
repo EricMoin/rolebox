@@ -9,7 +9,7 @@ const __dirname = join(fileURLToPath(import.meta.url), "..");
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")) as { version: string };
 const version = pkg.version;
 
-const commands = ["init", "install", "uninstall", "sync", "list", "search", "update", "registry"] as const;
+const commands = ["init", "install", "uninstall", "sync", "list", "search", "update", "registry", "status", "info"] as const;
 
 function printHelp(): void {
   console.log(`rolebox v${version} — AI role manager for opencode
@@ -25,6 +25,8 @@ Commands:
   search [query]              Search available roles in registries
   update [role]               Update installed roles to latest versions
   registry <sub>              Manage registries (add, remove, list)
+  status [-u]                 Show overall health and opencode integration
+  info <role> [--check]       Show detailed info for an installed role
 
 Examples:
   rolebox install software-architect
@@ -95,6 +97,16 @@ async function main(): Promise<void> {
       case "registry": {
         const { registry } = await import("./cli/commands/registry.js");
         await registry(args.slice(1));
+        break;
+      }
+      case "status": {
+        const { status } = await import("./cli/commands/status.js");
+        await status(args.slice(1));
+        break;
+      }
+      case "info": {
+        const { info } = await import("./cli/commands/info.js");
+        await info(args.slice(1));
         break;
       }
     }
