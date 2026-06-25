@@ -9,7 +9,9 @@ function createMockClient(overrides?: {
   sessionPrompt?: () => unknown;
   sessionPromptAsync?: () => unknown;
   sessionMessages?: () => unknown;
+  sessionStatus?: () => unknown;
   sessionAbort?: () => unknown;
+  sessionGet?: () => unknown;
 }) {
   return {
     session: {
@@ -49,11 +51,27 @@ function createMockClient(overrides?: {
               error: undefined,
             })),
       ),
+      status: mock(
+        overrides?.sessionStatus ??
+          (() =>
+            Promise.resolve({
+              data: {},
+              error: undefined,
+            })),
+      ),
       abort: mock(
         overrides?.sessionAbort ??
           (() =>
             Promise.resolve({
               data: undefined,
+              error: undefined,
+            })),
+      ),
+      get: mock(
+        overrides?.sessionGet ??
+          (() =>
+            Promise.resolve({
+              data: { id: "test-session-1" },
               error: undefined,
             })),
       ),
@@ -70,8 +88,6 @@ function parentContext() {
 }
 
 const fastConfig = {
-  pollIntervalMs: 10,
-  minRuntimeMs: 0,
   staleTimeoutMs: 500,
   maxConcurrent: 5,
   taskTtlMs: 100,
@@ -86,7 +102,7 @@ describe("DispatchManager", () => {
 
   // ── 1. launch() ──────────────────────────────────────────────
 
-  it("launch() creates a task and starts polling when run_in_background is true", async () => {
+  it("launch() creates a task and registers with global poller when run_in_background is true", async () => {
     const client = createMockClient();
     const manager = new DispatchManager(client, fastConfig);
 
