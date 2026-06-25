@@ -127,10 +127,12 @@ describe("BUG-1: session vanishes", () => {
   });
 });
 
-// ── BUG-2: Completion requires info.finish (not just "has text") ─────────
+// ── BUG-2: Completion detection uses session-status-first approach ────────
+// Previous behavior required exact finish="end_turn" which broke for non-Claude models.
+// New behavior: session idle + assistant output + no pending tools = completed.
 
-describe("BUG-2: finish is required", () => {
-  it("BUG-2: no finish field → not_ready (old bug: text-only detection)", () => {
+describe("BUG-2: session-idle-first completion (model-agnostic)", () => {
+  it("BUG-2: no finish field + session idle + has output → completed", () => {
     const msgs: SessionMessageSnapshot[] = [
       { info: { role: "user", id: "u1" }, parts: [{ type: "text", text: "hello" }] },
       { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: "I have produced text output" }] },
@@ -141,12 +143,11 @@ describe("BUG-2: finish is required", () => {
       lastMessageCount: 0, lastProgressUpdate: Date.now(), hasProducedOutput: true,
     };
 
-    // No finish field → should return not_ready
     const result = detectCompletion(msgs, status, ps);
-    expect(result.type).toBe("not_ready");
+    expect(result.type).toBe("completed");
   });
 
-  it("BUG-2: finish=end_turn → completed (proves text-only bug is fixed)", () => {
+  it("BUG-2: finish=end_turn → completed (Claude-style)", () => {
     const msgs: SessionMessageSnapshot[] = [
       { info: { role: "user", id: "u1" }, parts: [{ type: "text", text: "hello" }] },
       { info: { role: "assistant", id: "a1", finish: "end_turn" }, parts: [{ type: "text", text: "Done." }] },
@@ -157,14 +158,27 @@ describe("BUG-2: finish is required", () => {
       lastMessageCount: 0, lastProgressUpdate: Date.now(), hasProducedOutput: true,
     };
 
-    // Has finish=end_turn + enough stability → should complete
     const result = detectCompletion(msgs, status, ps);
     expect(result.type).toBe("completed");
   });
 
-  it("BUG-2: finish=stop (non-terminal) still returns not_ready", () => {
+  it("BUG-2: finish=stop → completed (OpenAI-style terminal)", () => {
     const msgs: SessionMessageSnapshot[] = [
       { info: { role: "assistant", id: "a1", finish: "stop" }, parts: [{ type: "text", text: "Output" }] },
+    ];
+    const status = { type: "idle" };
+    const ps: TaskPollState = {
+      consecutiveMissedPolls: 0, stableIdlePolls: MIN_STABILITY_POLLS,
+      lastMessageCount: 0, lastProgressUpdate: Date.now(), hasProducedOutput: true,
+    };
+
+    const result = detectCompletion(msgs, status, ps);
+    expect(result.type).toBe("completed");
+  });
+
+  it("BUG-2: finish=tool-calls → not_ready (tools need execution)", () => {
+    const msgs: SessionMessageSnapshot[] = [
+      { info: { role: "assistant", id: "a1", finish: "tool-calls" }, parts: [{ type: "text", text: "Output" }] },
     ];
     const status = { type: "idle" };
     const ps: TaskPollState = {

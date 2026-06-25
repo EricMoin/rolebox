@@ -245,8 +245,10 @@ export class DispatchManager {
     if (!t) return;
     t.status = "error";
     t.error = error;
+    t.completedAt = new Date();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.scheduleCleanup(taskId);
+    void this.notifyCompletion(t);
   }
 
   private handleTaskTimeout(taskId: string, reason: string): void {
@@ -257,6 +259,7 @@ export class DispatchManager {
     t.error = reason;
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.scheduleCleanup(taskId);
+    void this.notifyCompletion(t);
   }
 
   private scheduleCleanup(taskId: string): void {

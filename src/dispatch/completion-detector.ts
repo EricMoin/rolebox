@@ -2,10 +2,16 @@
  * Pure-function completion detector for the global poller.
  *
  * Determines whether a dispatched background task session has reached
- * a final state by inspecting the message sequence and session status.
+ * a final state by inspecting the session status and message state.
  *
  * This module has NO side effects and NO SDK calls — it operates
  * exclusively on the structured snapshots provided by the caller.
+ *
+ * Detection strategy (aligned with oh-my-openagent):
+ *   - Primary signal: session status (idle = potentially done, busy/retry = working)
+ *   - Secondary signal: has assistant output + no pending tools
+ *   - Does NOT rely on specific `finish` field values since different models
+ *     use different finish reasons ("end_turn" for Claude, "stop" for OpenAI, etc.)
  */
 
 import type { CompletionSignal, SessionMessageSnapshot, TaskPollState } from "./types.js";
@@ -14,21 +20,23 @@ import { MIN_STABILITY_POLLS } from "./config.js";
 // ── Public Types ───────────────────────────────────────────────────────
 
 /**
- * Finish reasons returned by the model provider that are NOT terminal.
- *
- * Only `"end_turn"` signals natural completion.  Everything else means
- * the model stopped mid-work (length limit, safety, tool requests, etc.)
- * and may produce more output.
+ * Finish reasons that definitively indicate the model is still working
+ * and will produce more output (tool execution pending).
  */
-export type NonTerminalFinishReason = "tool-calls" | "stop" | "length" | "unknown";
+export type NonTerminalFinishReason = "tool-calls";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const NON_TERMINAL: ReadonlySet<string> = new Set([
-  "tool-calls",
-  "stop",
-  "length",
-  "unknown",
+/** Session status types that indicate active processing. */
+const ACTIVE_SESSION_STATUSES: ReadonlySet<string> = new Set([
+  "busy",
+  "retry",
+  "running",
+]);
+
+/** Session status types that are terminally done (not idle). */
+const TERMINAL_SESSION_STATUSES: ReadonlySet<string> = new Set([
+  "interrupted",
 ]);
 
 // ── Core Detection ────────────────────────────────────────────────────
@@ -37,11 +45,13 @@ const NON_TERMINAL: ReadonlySet<string> = new Set([
  * Evaluate whether a background task session has reached completion.
  *
  * The decision follows a fixed priority order:
- *   1. Session status checks (gone / busy / wrong state)
- *   2. Error detection on the last assistant message
- *   3. Finish-signal inspection (end_turn vs non-terminal)
- *   4. Tool-execution-in-progress guard
- *   5. Stability gating (MIN_STABILITY_POLLS consecutive idle polls)
+ *   1. Session gone → defer to session monitor
+ *   2. Session actively processing → not ready
+ *   3. Session in terminal status (interrupted) → completed
+ *   4. Session idle → check for assistant output
+ *   5. Error detection on last assistant message
+ *   6. Tool-execution-in-progress guard
+ *   7. Stability gating (MIN_STABILITY_POLLS consecutive idle polls)
  *
  * @param messages  Chronological message snapshots from the sub-agent session
  * @param sessionStatus  Current session status (type field: "idle", "busy", "retry", etc.)
@@ -59,16 +69,19 @@ export function detectCompletion(
   }
 
   // 2. Session is actively processing
-  if (sessionStatus.type === "busy" || sessionStatus.type === "retry") {
+  if (ACTIVE_SESSION_STATUSES.has(sessionStatus.type)) {
     return { type: "not_ready" };
   }
 
-  // 3. Unexpected / unknown session status
-  if (sessionStatus.type !== "idle") {
-    return { type: "not_ready" };
+  // 3. Terminal session status (e.g., "interrupted") → task is done
+  if (TERMINAL_SESSION_STATUSES.has(sessionStatus.type)) {
+    return { type: "completed" };
   }
 
-  // 4. Find the LAST assistant message (reverse scan)
+  // 4. For idle sessions: verify we have assistant output
+  //    (non-idle, non-active, non-terminal statuses are treated as idle-like)
+
+  // 5. Find the LAST assistant message (reverse scan)
   let lastAssistant: SessionMessageSnapshot | undefined;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].info.role === "assistant") {
@@ -77,27 +90,17 @@ export function detectCompletion(
     }
   }
 
-  // 5. No assistant message found — hasn't started generating
+  // 6. No assistant message found — hasn't started generating
   if (!lastAssistant) {
     return { type: "not_ready" };
   }
 
-  // 6. Error on the last assistant message
+  // 7. Error on the last assistant message
   if (lastAssistant.info.error) {
     return { type: "error", message: extractAssistantError(lastAssistant.info.error) };
   }
 
-  // 7. No finish signal yet — still generating
-  if (lastAssistant.info.finish === undefined) {
-    return { type: "not_ready" };
-  }
-
-  // 8. Non-terminal finish reason — still working or stopped mid-way
-  if (NON_TERMINAL.has(lastAssistant.info.finish)) {
-    return { type: "not_ready" };
-  }
-
-  // 9. Tool execution in progress (pending or running)
+  // 8. Tool execution in progress (pending or running)
   for (const part of lastAssistant.parts) {
     if (part.type === "tool") {
       if (part.state === "pending" || part.state === "running") {
@@ -106,7 +109,13 @@ export function detectCompletion(
     }
   }
 
-  // 10. Not enough stable idle polls yet
+  // 9. If finish is explicitly "tool-calls", model expects tool execution → not ready
+  if (lastAssistant.info.finish === "tool-calls") {
+    return { type: "not_ready" };
+  }
+
+  // 10. Session is idle, has assistant output, no pending tools.
+  //     Apply stability gating to avoid premature completion detection.
   if (pollState.stableIdlePolls < MIN_STABILITY_POLLS) {
     return { type: "stabilizing" };
   }

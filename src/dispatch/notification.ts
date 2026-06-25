@@ -72,7 +72,8 @@ export async function notifyParent(
   };
 
   const text = buildNotificationText(payload);
-  const isFinal = remainingCount === 0;
+  const isTaskFailure = task.status === "error" || task.status === "cancelled" || task.status === "timeout";
+  const shouldReply = remainingCount === 0 || isTaskFailure;
 
   const doNotify = async (): Promise<void> => {
     try {
@@ -80,7 +81,7 @@ export async function notifyParent(
         path: { id: task.parentSessionId },
         body: {
           parts: [{ type: "text", text }],
-          noReply: !isFinal, // true for intermediate, false for final
+          noReply: !shouldReply,
         },
       });
     } catch (err) {
