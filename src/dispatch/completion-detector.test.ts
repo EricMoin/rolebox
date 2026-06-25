@@ -91,13 +91,13 @@ describe("detectCompletion", () => {
     expect(result).toEqual({ type: "not_ready" });
   });
 
-  it("returns not_ready for unexpected session status", () => {
+  it("returns completed for unexpected session status (treated as idle-like)", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       { type: "unknown_status" },
       pollState(),
     );
-    expect(result).toEqual({ type: "not_ready" });
+    expect(result).toEqual({ type: "completed" });
   });
 
   // ── Missing / Incomplete Messages ─────────────────────────────────
@@ -150,40 +150,40 @@ describe("detectCompletion", () => {
     expect(result).toEqual({ type: "not_ready" });
   });
 
-  it("returns not_ready when finish is stop", () => {
+  it("returns completed when finish is stop (OpenAI-style terminal)", () => {
     const result = detectCompletion(
       [msg({ finish: "stop" })],
       idle(),
       pollState(),
     );
-    expect(result).toEqual({ type: "not_ready" });
+    expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns not_ready when finish is length", () => {
+  it("returns completed when finish is length (session idle with output)", () => {
     const result = detectCompletion(
       [msg({ finish: "length" })],
       idle(),
       pollState(),
     );
-    expect(result).toEqual({ type: "not_ready" });
+    expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns not_ready when finish is unknown", () => {
+  it("returns completed when finish is unknown (session idle with output)", () => {
     const result = detectCompletion(
       [msg({ finish: "unknown" })],
       idle(),
       pollState(),
     );
-    expect(result).toEqual({ type: "not_ready" });
+    expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns not_ready when finish is undefined", () => {
+  it("returns completed when finish is undefined (session idle with output)", () => {
     const result = detectCompletion(
       [msg({})], // no finish field
       idle(),
       pollState(),
     );
-    expect(result).toEqual({ type: "not_ready" });
+    expect(result).toEqual({ type: "completed" });
   });
 
   // ── Tool Execution Guard ───────────────────────────────────────────

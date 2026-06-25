@@ -87,7 +87,9 @@ export function createDispatchTool(
           `Session ID: ${task.sessionId}`,
           `Description: ${input.description || "N/A"}`,
           "",
-          "Use `dispatch_output` with the task ID to retrieve results when complete.",
+          "You will receive a <system-reminder> notification when this task completes.",
+          "Do NOT call dispatch_output to poll — wait for the notification first.",
+          "Use dispatch_output(task_id=\"" + task.id + "\") only AFTER receiving the <system-reminder>.",
         ].join("\n");
       }
 
@@ -105,7 +107,7 @@ export function createDispatchTool(
 export function createDispatchOutputTool(manager: DispatchManager) {
   return tool({
     description:
-      "Retrieve output from a background task. Blocks until complete when block=true.",
+      "Retrieve output from a completed background task. Only call AFTER receiving a <system-reminder> notification for the task. Do NOT use this to poll for status.",
     args: {
       task_id: z
         .string()
@@ -165,7 +167,9 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           `Description: ${task.description || "N/A"}`,
           `Status: ${task.status}`,
           "",
-          "Task is still running. Use block=true to wait for completion.",
+          "Task is still running. Do NOT poll dispatch_output repeatedly.",
+          "You will receive a <system-reminder> notification when this task completes.",
+          "Wait for the notification, then call dispatch_output to retrieve results.",
         ].join("\n");
       }
 

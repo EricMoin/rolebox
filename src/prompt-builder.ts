@@ -142,7 +142,9 @@ export function buildSubagentBlock(
 You can delegate tasks to these sub-agents via the dispatch() tool.
 Use dispatch(subagent="agent-id", prompt="...", run_in_background=false) for synchronous execution.
 Use dispatch(subagent="agent-id", prompt="...", run_in_background=true) for background execution.
-Use dispatch_output(task_id="bg_xxx") to retrieve background task results.
+IMPORTANT: When run_in_background=true, you will receive a <system-reminder> notification when the task completes.
+Do NOT call dispatch_output to poll for results. Wait for the <system-reminder> notification first.
+Use dispatch_output(task_id="bg_xxx") ONLY after receiving the completion notification.
 Use dispatch_cancel(task_id="bg_xxx") to cancel a running background task.
 
 ${blocks}
