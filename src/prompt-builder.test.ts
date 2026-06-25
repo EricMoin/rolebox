@@ -184,10 +184,10 @@ describe("buildAgentPrompt", () => {
       { id: "a", name: "A", description: "Agent A" },
     ]);
     expect(result).toContain(
-      "You can delegate tasks to these sub-agents via the task() tool.",
+      "You can delegate tasks to these sub-agents via the dispatch() tool.",
     );
     expect(result).toContain(
-      'Use task(subagent_type="agent-id", ...) to dispatch.',
+      'dispatch(subagent=',
     );
   });
 
@@ -311,10 +311,10 @@ describe("buildSubagentBlock", () => {
   it("contains the static instruction text", () => {
     const result = buildSubagentBlock([makeSubagent()]);
     expect(result).toContain(
-      "You can delegate tasks to these sub-agents via the task() tool.",
+      "You can delegate tasks to these sub-agents via the dispatch() tool.",
     );
     expect(result).toContain(
-      'Use task(subagent_type="agent-id", ...) to dispatch.',
+      'dispatch(subagent=',
     );
   });
 

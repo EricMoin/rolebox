@@ -139,8 +139,11 @@ export function buildSubagentBlock(
     .join("\n");
 
   return `<available_subagents>
-You can delegate tasks to these sub-agents via the task() tool.
-Use task(subagent_type="agent-id", ...) to dispatch.
+You can delegate tasks to these sub-agents via the dispatch() tool.
+Use dispatch(subagent="agent-id", prompt="...", run_in_background=false) for synchronous execution.
+Use dispatch(subagent="agent-id", prompt="...", run_in_background=true) for background execution.
+Use dispatch_output(task_id="bg_xxx") to retrieve background task results.
+Use dispatch_cancel(task_id="bg_xxx") to cancel a running background task.
 
 ${blocks}
 </available_subagents>`;
