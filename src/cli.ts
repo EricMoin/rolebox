@@ -9,7 +9,7 @@ const __dirname = join(fileURLToPath(import.meta.url), "..");
 const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")) as { version: string };
 const version = pkg.version;
 
-const commands = ["install", "uninstall", "sync", "list", "search", "update", "registry"] as const;
+const commands = ["init", "install", "uninstall", "sync", "list", "search", "update", "registry"] as const;
 
 function printHelp(): void {
   console.log(`rolebox v${version} — AI role manager for opencode
@@ -17,6 +17,7 @@ function printHelp(): void {
 Usage: rolebox <command> [options]
 
 Commands:
+  init [name] [--yes] [--template <type>]  Scaffold a new role interactively
   install <role>[@version]    Install a role from a registry
   uninstall <role>            Remove an installed role
   sync <target>               Deploy roles to target tool (e.g. opencode)
@@ -55,6 +56,11 @@ async function main(): Promise<void> {
 
   try {
     switch (command) {
+      case "init": {
+        const { init } = await import("./cli/commands/init.js");
+        await init(args.slice(1));
+        break;
+      }
       case "install": {
         const { install } = await import("./cli/commands/install.js");
         await install(args.slice(1));
