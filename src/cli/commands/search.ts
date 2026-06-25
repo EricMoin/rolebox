@@ -8,15 +8,18 @@ import type { RegistryManifest } from "../types.js";
  * Matches against role ID, name, description, and tags.
  */
 export async function search(args: string[]): Promise<void> {
+  const noCache = args.includes("--no-cache");
+  const filteredArgs = args.filter((a) => a !== "--no-cache");
+
   const config = loadConfig();
-  const query = args[0]?.toLowerCase();
+  const query = filteredArgs[0]?.toLowerCase();
 
   let foundAny = false;
 
   for (const registry of config.registries) {
     let manifest: RegistryManifest;
     try {
-      manifest = await fetchRegistryManifest(registry);
+      manifest = await fetchRegistryManifest(registry, undefined, { noCache });
     } catch (err) {
       console.warn(
         `Warning: could not fetch registry "${registry.name}": ${(err as Error).message}`,

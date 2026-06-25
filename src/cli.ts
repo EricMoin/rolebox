@@ -22,8 +22,8 @@ Commands:
   uninstall <role>            Remove an installed role
   sync <target>               Deploy roles to target tool (e.g. opencode)
   list                        Show installed roles
-  search [query]              Search available roles in registries
-  update [role]               Update installed roles to latest versions
+  search [query] [--no-cache] Search available roles in registries
+  update [role] [--no-cache]  Update installed roles to latest versions
   registry <sub>              Manage registries (add, remove, list)
   status [-u]                 Show overall health and opencode integration
   info <role> [--check]       Show detailed info for an installed role
