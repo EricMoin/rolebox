@@ -90,6 +90,9 @@ export class DispatchManager {
           (completedId: string) => {
             const t = this.tasks.get(completedId);
             if (t) {
+              t.status = "completed";
+              t.completedAt = new Date();
+              this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
               this.scheduleCleanup(completedId);
               void this.notifyCompletion(t);
             }
@@ -193,6 +196,7 @@ export class DispatchManager {
     task.completedAt = new Date();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.poller.stop(taskId);
+    void this.notifyCompletion(task);
     this.scheduleCleanup(taskId);
 
     return true;
