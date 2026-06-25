@@ -6,7 +6,9 @@ import type {
 } from "./types.js";
 import { DEFAULT_CONFIG } from "./config.js";
 import { ConcurrencyManager } from "./concurrency.js";
-import { SessionPoller } from "./poller.js";
+import { GlobalPoller } from "./global-poller.js";
+import { SessionMonitor } from "./session-monitor.js";
+import { detectCompletion } from "./completion-detector.js";
 import { notifyParent } from "./notification.js";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
@@ -17,13 +19,21 @@ export class DispatchManager {
   private concurrency: ConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: OpencodeClient;
-  private poller: SessionPoller;
+  private poller: GlobalPoller;
+  private sessionMonitor: SessionMonitor;
 
   constructor(client: OpencodeClient, config?: Partial<DispatchManagerConfig>) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.concurrency = new ConcurrencyManager(this.config.maxConcurrent);
-    this.poller = new SessionPoller(client, this.config);
+    this.sessionMonitor = new SessionMonitor();
+    this.poller = new GlobalPoller(client, this.config, {
+      completionDetector: detectCompletion,
+      sessionMonitor: this.sessionMonitor,
+      onTaskCompleted: (taskId) => this.handleTaskCompleted(taskId),
+      onTaskError: (taskId, error) => this.handleTaskError(taskId, error),
+      onTaskTimeout: (taskId, reason) => this.handleTaskTimeout(taskId, reason),
+    });
   }
 
   async launch(
@@ -75,38 +85,7 @@ export class DispatchManager {
           },
         });
 
-        this.poller.start(
-          taskId,
-          session.id,
-          (completedId: string) => {
-            const t = this.tasks.get(completedId);
-            if (t) {
-              t.status = "completed";
-              t.completedAt = new Date();
-              this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
-              this.scheduleCleanup(completedId);
-              void this.notifyCompletion(t);
-            }
-          },
-          (erroredId: string, errMsg: string) => {
-            const t = this.tasks.get(erroredId);
-            if (t) {
-              t.status = "error";
-              t.error = errMsg;
-              this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
-              this.scheduleCleanup(erroredId);
-            }
-          },
-          (timedOutId: string) => {
-            const t = this.tasks.get(timedOutId);
-            if (t) {
-              t.status = "timeout";
-              t.completedAt = new Date();
-              this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
-              this.scheduleCleanup(timedOutId);
-            }
-          },
-        );
+        this.poller.registerTask(taskId, session.id);
       }
     } catch (err) {
       task.status = "error";
@@ -186,7 +165,8 @@ export class DispatchManager {
     task.status = "cancelled";
     task.completedAt = new Date();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
-    this.poller.stop(taskId);
+    this.poller.unregisterTask(taskId);
+    this.sessionMonitor.clearTask(taskId);
     void this.notifyCompletion(task);
     this.scheduleCleanup(taskId);
 
@@ -235,6 +215,35 @@ export class DispatchManager {
     ).length;
 
     await notifyParent(this.client, task, remainingCount);
+  }
+
+  private handleTaskCompleted(taskId: string): void {
+    const t = this.tasks.get(taskId);
+    if (!t) return;
+    t.status = "completed";
+    t.completedAt = new Date();
+    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+    this.scheduleCleanup(taskId);
+    void this.notifyCompletion(t);
+  }
+
+  private handleTaskError(taskId: string, error: string): void {
+    const t = this.tasks.get(taskId);
+    if (!t) return;
+    t.status = "error";
+    t.error = error;
+    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+    this.scheduleCleanup(taskId);
+  }
+
+  private handleTaskTimeout(taskId: string, reason: string): void {
+    const t = this.tasks.get(taskId);
+    if (!t) return;
+    t.status = "timeout";
+    t.completedAt = new Date();
+    t.error = reason;
+    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+    this.scheduleCleanup(taskId);
   }
 
   private scheduleCleanup(taskId: string): void {
