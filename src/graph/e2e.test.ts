@@ -11,15 +11,15 @@ import { tmpdir as osTmpdir } from "node:os";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
 
-import { discoverRoles } from "./role-loader";
-import { parseCollaboration } from "./graph-parser";
-import { graphSessionState } from "./graph-state";
-import { buildSubagentRoleBlock } from "./graph-prompt-builder";
-import type { ResolvedGraph, GraphNodeRole } from "./types";
-import RoleboxModule from "./index";
+import { discoverRoles } from "../role-loader";
+import { parseCollaboration } from "./parser";
+import { graphSessionState } from "./state";
+import { buildSubagentRoleBlock } from "./prompt-builder";
+import type { ResolvedGraph, GraphNodeRole } from "../types";
+import RoleboxModule from "../index";
 const RoleboxPlugin = RoleboxModule.server;
 
-const examplesDir = path.join(import.meta.dir, "..", "examples");
+const examplesDir = path.join(import.meta.dir, "..", "..", "examples");
 
 // ── helpers ──────────────────────────────────────────────────────
 

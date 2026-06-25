@@ -1,4 +1,4 @@
-import type { FlowEdge, ResolvedGraph } from "./types.js";
+import type { FlowEdge, ResolvedGraph } from "../types.js";
 
 export interface GraphExecutionState {
   currentStep: number;
@@ -90,3 +90,24 @@ export class GraphSessionState {
 }
 
 export const graphSessionState = new GraphSessionState();
+
+export function buildGraphStateBlock(
+  state: GraphExecutionState,
+  graph: ResolvedGraph,
+): string {
+  const stepInfo = state.status === "active"
+    ? graph.edges[state.currentStep]
+    : null;
+
+  const nextAction = stepInfo
+    ? `Dispatch to ${stepInfo.to}${stepInfo.label ? ` (${stepInfo.label})` : ""}`
+    : "Workflow complete";
+
+  return `<collaboration_state>
+  <status>${state.status}</status>
+  <current_step>${state.currentStep}</current_step>
+  <completed_steps>${state.completedSteps.join(", ") || "none"}</completed_steps>
+  <iteration>${state.iterationCount}/${graph.maxIterations || "unlimited"}</iteration>
+  <next_action>${nextAction}</next_action>
+</collaboration_state>`;
+}

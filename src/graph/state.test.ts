@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { GraphSessionState, graphSessionState } from "./graph-state";
-import type { ResolvedGraph, FlowEdge } from "./types";
+import { GraphSessionState, graphSessionState } from "./state";
+import type { ResolvedGraph, FlowEdge } from "../types";
 
 function makeGraph(overrides?: Partial<ResolvedGraph>): ResolvedGraph {
   return {

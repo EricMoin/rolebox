@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { parseCollaboration } from "./graph-parser";
-import type { FlowEdge } from "./types";
+import { parseCollaboration } from "./parser";
+import type { FlowEdge } from "../types";
 
 function edge(from: string, to: string, extras?: Partial<FlowEdge>): FlowEdge {
   return { from, to, ...extras };

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { expandTemplate } from "./graph-templates";
-import type { FlowEdge } from "./types";
+import { expandTemplate } from "./templates";
+import type { FlowEdge } from "../types";
 
 function edge(from: string, to: string, extras?: Partial<FlowEdge>): FlowEdge {
   return { from, to, ...extras };

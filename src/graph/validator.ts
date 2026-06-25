@@ -1,4 +1,4 @@
-import type { ResolvedGraph, FlowEdge } from "./types.js";
+import type { ResolvedGraph, FlowEdge } from "../types.js";
 
 /**
  * Validate a collaboration graph against a set of available agents.
