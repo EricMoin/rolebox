@@ -2,6 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import type {
   DispatchInput,
   DispatchTask,
+  DispatchTaskStatus,
   DispatchManagerConfig,
 } from "./types.ts";
 import { DEFAULT_CONFIG } from "./config.ts";
@@ -67,6 +68,7 @@ export class DispatchManager {
     debugLog("launch", taskId, `agent=${input.subagent} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
     await this.concurrency.acquire(DEFAULT_CONCURRENCY_KEY);
+    task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
 
     try {
       const createResult = await this.client.session.create({
@@ -194,15 +196,14 @@ export class DispatchManager {
       debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    task.status = "cancelled";
-    task.completedAt = new Date();
+    if (!this.transition(taskId, ["pending", "running"], "cancelled")) return false;
+    const t = this.tasks.get(taskId)!;
+    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     this.persistState();
-    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.poller.unregisterTask(taskId);
     this.sessionMonitor.clearTask(taskId);
-    void this.notifyCompletion(task);
+    void this.notifyCompletion(t);
     this.scheduleCleanup(taskId);
-
     return true;
   }
 
@@ -312,9 +313,19 @@ export class DispatchManager {
           path: { id: task.sessionId },
         });
         if (result.data) {
-          this.concurrency.forceOccupy("default");
-          this.poller.registerTask(task.id, task.sessionId);
-          debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
+          const occupied = this.concurrency.forceOccupy(DEFAULT_CONCURRENCY_KEY);
+          if (occupied === 1) {
+            task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
+            this.poller.registerTask(task.id, task.sessionId);
+            debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
+          } else {
+            // Would exceed concurrency limit — error the task out
+            this.transition(task.id, ["running"], "error", {
+              error: "Exceeded concurrency limit on recovery",
+            });
+            this.scheduleCleanup(task.id);
+            debugLog("recover", task.id, "dropped — concurrency limit exceeded on recovery");
+          }
         } else {
           task.status = "error";
           task.error = "Session lost after process restart";
@@ -425,50 +436,66 @@ export class DispatchManager {
       }
 
       debugLog("event", targetTaskId, "session.idle validated — completing task");
+      // Gate through transition: only the winner proceeds
+      if (!this.transition(targetTaskId, ["running"], "completed")) {
+        debugLog("event", targetTaskId, "session.idle race lost — poller already completed this task");
+        return;
+      }
+      // Winner: unregister (idle handler's responsibility) + finalize
       this.poller.unregisterTask(targetTaskId);
-      this.handleTaskCompleted(targetTaskId);
+      this.finalizeCompletion(targetTaskId);
     } catch (err) {
       debugLog("event", targetTaskId, "handleSessionIdle error: " + (err instanceof Error ? err.message : String(err)));
     }
   }
 
-  private handleTaskCompleted(taskId: string): void {
+  /** Atomic compare-and-swap status transition. Returns true iff THIS call won the race. */
+  private transition(
+    taskId: string,
+    from: DispatchTaskStatus[],
+    to: DispatchTaskStatus,
+    fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>,
+  ): boolean {
     const t = this.tasks.get(taskId);
-    if (!t) return;
-    if (t.status !== "pending" && t.status !== "running") return;
+    if (!t) return false;
+    if (!from.includes(t.status)) return false;
+    t.status = to;
+    t.completedAt = fields?.completedAt ?? new Date();
+    if (fields?.error !== undefined) t.error = fields.error;
+    return true;
+  }
+
+  private handleTaskCompleted(taskId: string): void {
+    if (!this.transition(taskId, ["pending", "running"], "completed")) return;
     debugLog("lifecycle", taskId, "✓ COMPLETED");
-    t.status = "completed";
-    t.completedAt = new Date();
-    this.persistState();
-    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
-    this.scheduleCleanup(taskId);
-    void this.notifyCompletion(t);
+    this.finalizeCompletion(taskId);
   }
 
   private handleTaskError(taskId: string, error: string): void {
-    const t = this.tasks.get(taskId);
-    if (!t) return;
-    if (t.status !== "pending" && t.status !== "running") return;
+    if (!this.transition(taskId, ["pending", "running"], "error", { error })) return;
+    const t = this.tasks.get(taskId)!;
     debugLog("lifecycle", taskId, `✗ ERROR: ${error}`);
-    t.status = "error";
-    t.error = error;
-    t.completedAt = new Date();
+    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     this.persistState();
-    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
   }
 
   private handleTaskTimeout(taskId: string, reason: string): void {
-    const t = this.tasks.get(taskId);
-    if (!t) return;
-    if (t.status !== "pending" && t.status !== "running") return;
+    if (!this.transition(taskId, ["pending", "running"], "timeout", { error: reason })) return;
+    const t = this.tasks.get(taskId)!;
     debugLog("lifecycle", taskId, `⏱ TIMEOUT: ${reason}`);
-    t.status = "timeout";
-    t.completedAt = new Date();
-    t.error = reason;
+    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     this.persistState();
-    this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+    this.scheduleCleanup(taskId);
+    void this.notifyCompletion(t);
+  }
+
+  /** Shared winner-branch side effects after a successful transition. */
+  private finalizeCompletion(taskId: string): void {
+    const t = this.tasks.get(taskId)!;
+    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
+    this.persistState();
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
   }

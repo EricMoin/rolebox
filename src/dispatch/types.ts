@@ -49,6 +49,8 @@ export interface DispatchTask {
   error?: string;
   /** Runtime progress metrics */
   progress: TaskProgress;
+  /** Optional concurrency key, set during launch for recovered tasks */
+  concurrencyKey?: string;
 }
 
 /**
