@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, appendFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Logger } from "tslog";
@@ -10,7 +10,9 @@ import {
   createSubLogger,
   formatError,
   getLogFilePath,
+  getRootLogger,
   rootLogger,
+  __resetForTest,
 } from "../src/logger";
 
 function captureTransport(logger: Logger<ILogObj>): ILogObj[] {
@@ -19,6 +21,10 @@ function captureTransport(logger: Logger<ILogObj>): ILogObj[] {
     entries.push(logObj);
   });
   return entries;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ── Level filtering ──────────────────────────────────────────
@@ -53,42 +59,49 @@ describe("level filtering", () => {
   });
 });
 
-// ── File transport ───────────────────────────────────────────
+// ── Async file transport ─────────────────────────────────────
 
-describe("file transport", () => {
+describe("async file transport", () => {
   let tmpDir: string;
+  const origLogFile = process.env.ROLEBOX_LOG_FILE;
+  const origLogLevel = process.env.ROLEBOX_LOG_LEVEL;
+  const origMaxBytes = process.env.ROLEBOX_LOG_MAX_BYTES;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "rolebox-log-test-"));
+    __resetForTest();
   });
 
   afterEach(() => {
+    __resetForTest();
     rmSync(tmpDir, { recursive: true, force: true });
+    if (origLogFile) process.env.ROLEBOX_LOG_FILE = origLogFile;
+    else delete process.env.ROLEBOX_LOG_FILE;
+    if (origLogLevel) process.env.ROLEBOX_LOG_LEVEL = origLogLevel;
+    else delete process.env.ROLEBOX_LOG_LEVEL;
+    if (origMaxBytes) process.env.ROLEBOX_LOG_MAX_BYTES = origMaxBytes;
+    else delete process.env.ROLEBOX_LOG_MAX_BYTES;
   });
 
-  it("writes JSON log entries to file via attached transport", () => {
+  it("writes JSON log entries to file via async stream", async () => {
     const logFile = join(tmpDir, "app.log");
-    const logger = new Logger<ILogObj>({ type: "hidden", name: "file-test" });
+    process.env.ROLEBOX_LOG_FILE = logFile;
+    process.env.ROLEBOX_LOG_LEVEL = "info";
 
-    logger.attachTransport((logObj) => {
-      try {
-        const entry = JSON.stringify({ ...logObj, pid: process.pid }) + "\n";
-        appendFileSync(logFile, entry);
-      } catch {
-        // ignore
-      }
-    });
-
-    logger.info("hello file transport");
+    const logger = getRootLogger();
+    logger.info("hello async transport");
     logger.warn("warning message");
+
+    // Allow async stream to flush
+    await wait(100);
 
     const content = readFileSync(logFile, "utf-8");
     const lines = content.trim().split("\n");
     expect(lines.length).toBe(2);
 
     const first = JSON.parse(lines[0]!);
-    expect(first[0]).toBe("hello file transport");
-    expect(first._meta.name).toBe("file-test");
+    expect(first[0]).toBe("hello async transport");
+    expect(first._meta.name).toBe("rolebox");
     expect(first._meta.logLevelName).toBe("INFO");
     expect(first.pid).toBe(process.pid);
 
@@ -97,26 +110,88 @@ describe("file transport", () => {
     expect(second._meta.logLevelName).toBe("WARN");
   });
 
-  it("does not write entries below minLevel", () => {
+  it("does not write entries below minLevel", async () => {
     const logFile = join(tmpDir, "filtered.log");
-    const logger = new Logger<ILogObj>({ type: "hidden", name: "filtered-test", minLevel: 4 });
+    process.env.ROLEBOX_LOG_FILE = logFile;
+    process.env.ROLEBOX_LOG_LEVEL = "warn";
 
-    logger.attachTransport((logObj) => {
-      try {
-        const entry = JSON.stringify({ ...logObj, pid: process.pid }) + "\n";
-        appendFileSync(logFile, entry);
-      } catch {
-        // ignore
-      }
-    });
-
+    const logger = getRootLogger();
     logger.info("should be filtered");
     logger.warn("should appear");
+
+    await wait(100);
 
     const content = readFileSync(logFile, "utf-8");
     const lines = content.trim().split("\n");
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("should appear");
+  });
+});
+
+// ── Log rotation ─────────────────────────────────────────────
+
+describe("log rotation", () => {
+  let tmpDir: string;
+  const origLogFile = process.env.ROLEBOX_LOG_FILE;
+  const origLogLevel = process.env.ROLEBOX_LOG_LEVEL;
+  const origMaxBytes = process.env.ROLEBOX_LOG_MAX_BYTES;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "rolebox-rotation-test-"));
+    __resetForTest();
+  });
+
+  afterEach(() => {
+    __resetForTest();
+    rmSync(tmpDir, { recursive: true, force: true });
+    if (origLogFile) process.env.ROLEBOX_LOG_FILE = origLogFile;
+    else delete process.env.ROLEBOX_LOG_FILE;
+    if (origLogLevel) process.env.ROLEBOX_LOG_LEVEL = origLogLevel;
+    else delete process.env.ROLEBOX_LOG_LEVEL;
+    if (origMaxBytes) process.env.ROLEBOX_LOG_MAX_BYTES = origMaxBytes;
+    else delete process.env.ROLEBOX_LOG_MAX_BYTES;
+  });
+
+  it("rotates log file when size exceeds max bytes", async () => {
+    const logFile = join(tmpDir, "rotatable.log");
+    process.env.ROLEBOX_LOG_FILE = logFile;
+    process.env.ROLEBOX_LOG_LEVEL = "info";
+    process.env.ROLEBOX_LOG_MAX_BYTES = "200";
+
+    const logger = getRootLogger();
+
+    for (let i = 0; i < 30; i++) {
+      logger.info(`rotation test entry ${i} with padding ${"x".repeat(100)}`);
+      // Small yield to let the stream flush between writes
+      if (i % 5 === 4) await wait(50);
+    }
+
+    await wait(300);
+
+    expect(existsSync(logFile)).toBe(true);
+    const mainContent = readFileSync(logFile, "utf-8");
+    expect(mainContent.length).toBeGreaterThan(0);
+
+    expect(existsSync(`${logFile}.1`)).toBe(true);
+  });
+
+  it("pre-existing oversized file triggers rotation on init", async () => {
+    const logFile = join(tmpDir, "preexisting.log");
+    process.env.ROLEBOX_LOG_FILE = logFile;
+    process.env.ROLEBOX_LOG_LEVEL = "info";
+    process.env.ROLEBOX_LOG_MAX_BYTES = "100";
+
+    // Create oversized file before logger init
+    writeFileSync(logFile, "x".repeat(200));
+
+    getRootLogger();
+
+    await wait(50);
+
+    // Original content should be rotated
+    expect(existsSync(`${logFile}.1`)).toBe(true);
+    const rotatedContent = readFileSync(`${logFile}.1`, "utf-8");
+    expect(rotatedContent).toBe("x".repeat(200));
   });
 });
 
@@ -304,7 +379,7 @@ describe("resolveLogFilePath", () => {
     expect(resolved).not.toBeNull();
   });
 
-  it("returns a path under /tmp/rolebox.log if config dir is unavailable", () => {
+  it("uses os.tmpdir() based fallback when config dir is unavailable", () => {
     delete process.env.ROLEBOX_LOG_FILE;
     const resolved = resolveLogFilePath();
     expect(resolved).not.toBeNull();
@@ -337,23 +412,64 @@ describe("transport safety", () => {
     expect(() => logger.info("safe")).not.toThrow();
     expect(caught).toBe(true);
   });
+});
 
-  it("unwrapped transport exceptions propagate (tslog does not shield)", () => {
-    const logger = new Logger<ILogObj>({ type: "hidden", name: "raw-safety-test" });
+// ── Lazy initialization ──────────────────────────────────────
 
-    logger.attachTransport(() => {
-      appendFileSync("/this/path/does/not/exist/file.log", "data");
-    });
+describe("lazy initialization", () => {
+  const origLogFile = process.env.ROLEBOX_LOG_FILE;
+  const origLogLevel = process.env.ROLEBOX_LOG_LEVEL;
 
-    expect(() => logger.info("test")).toThrow();
+  beforeEach(() => {
+    __resetForTest();
+  });
+
+  afterEach(() => {
+    __resetForTest();
+    if (origLogFile) process.env.ROLEBOX_LOG_FILE = origLogFile;
+    else delete process.env.ROLEBOX_LOG_FILE;
+    if (origLogLevel) process.env.ROLEBOX_LOG_LEVEL = origLogLevel;
+    else delete process.env.ROLEBOX_LOG_LEVEL;
+  });
+
+  it("__resetForTest allows re-initialization with different env vars", async () => {
+    const logFile1 = join(mkdtempSync(join(tmpdir(), "rolebox-lazy-1-")), "first.log");
+    process.env.ROLEBOX_LOG_FILE = logFile1;
+    process.env.ROLEBOX_LOG_LEVEL = "info";
+
+    const path1 = getLogFilePath();
+    expect(path1).toBe(logFile1);
+
+    __resetForTest();
+
+    const logFile2 = join(mkdtempSync(join(tmpdir(), "rolebox-lazy-2-")), "second.log");
+    process.env.ROLEBOX_LOG_FILE = logFile2;
+
+    const path2 = getLogFilePath();
+    expect(path2).toBe(logFile2);
+    expect(path2).not.toBe(path1);
+  });
+
+  it("rootLogger proxy delegates to lazy-initialized instance", () => {
+    expect(rootLogger).toBeDefined();
+    expect(typeof rootLogger.info).toBe("function");
+  });
+
+  it("getRootLogger returns a Logger instance", () => {
+    const logger = getRootLogger();
+    expect(logger).toBeInstanceOf(Logger);
   });
 });
 
 // ── Exported API surface ─────────────────────────────────────
 
 describe("exported API", () => {
-  it("exports rootLogger as a Logger instance", () => {
-    expect(rootLogger).toBeInstanceOf(Logger);
+  it("exports getRootLogger as a function", () => {
+    expect(typeof getRootLogger).toBe("function");
+  });
+
+  it("exports rootLogger as a proxy", () => {
+    expect(rootLogger).toBeDefined();
   });
 
   it("exports createSubLogger as a function", () => {
@@ -375,5 +491,9 @@ describe("exported API", () => {
 
   it("exports resolveLogFilePath as a function", () => {
     expect(typeof resolveLogFilePath).toBe("function");
+  });
+
+  it("exports __resetForTest as a function", () => {
+    expect(typeof __resetForTest).toBe("function");
   });
 });
