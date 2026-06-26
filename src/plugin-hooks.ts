@@ -127,8 +127,31 @@ export function createPluginHooks(
     ) => {
       if (!input.sessionID) return;
 
+      // Lazy-init graph state if not yet initialized (system.transform fires before chat.message on first turn)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const maybeAgent = (input as any).agent as string | undefined;
+      const agentId = maybeAgent;
+      let graphState = graphSessionState.getState(input.sessionID);
+      if (!graphState && agentId) {
+        const graph = roleGraphMap.get(agentId);
+        if (graph) {
+          graphSessionState.initGraph(input.sessionID, graph);
+          graphState = graphSessionState.getState(input.sessionID);
+        }
+      }
+
       const activeNames = functionSessionState.getActive(input.sessionID);
-      if (activeNames.size === 0) return;
+      if (activeNames.size === 0) {
+        // Still inject graph state block even without active functions
+        if (graphState) {
+          const graph = graphSessionState.getGraph(input.sessionID);
+          if (graph) {
+            const stateBlock = buildGraphStateBlock(graphState, graph);
+            output.system.push(stateBlock);
+          }
+        }
+        return;
+      }
 
       const allFunctions: ResolvedFunction[] = [];
       for (const funcs of roleFunctionsMap.values()) {
@@ -149,12 +172,22 @@ export function createPluginHooks(
         }
       }
 
-      if (activeFunctions.length === 0) return;
+      if (activeFunctions.length === 0) {
+        // Inject graph state block even when functions are active but empty
+        if (graphState) {
+          const graph = graphSessionState.getGraph(input.sessionID);
+          if (graph) {
+            const stateBlock = buildGraphStateBlock(graphState, graph);
+            output.system.push(stateBlock);
+          }
+        }
+        return;
+      }
 
       const block = buildFunctionBlock(activeFunctions);
       output.system.push(block);
 
-      const graphState = graphSessionState.getState(input.sessionID);
+      // graphState already resolved above
       if (graphState) {
         const graph = graphSessionState.getGraph(input.sessionID);
         if (graph) {
