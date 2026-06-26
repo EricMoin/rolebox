@@ -33,6 +33,8 @@ export class DispatchManager {
   private _recovered = false;
   private inflightByParent = new Map<string, number>();
   private subagentModelKey: Map<string, string>;
+  private _dirty = false;
+  private _persistTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     client: OpencodeClient,
@@ -438,7 +440,33 @@ export class DispatchManager {
   }
 
   private persistState(): void {
-    this.store.save(this.tasks);
+    this._dirty = true;
+    if (this._persistTimer) return; // Already scheduled
+    this._persistTimer = setTimeout(async () => {
+      this._persistTimer = undefined;
+      if (!this._dirty) return;
+      this._dirty = false;
+      try {
+        await this.store.save(this.tasks);
+      } catch (err) {
+        debugLog("persist", "*", `async save failed: ${err}`);
+      }
+    }, 500);
+  }
+
+  /**
+   * Force synchronous flush of any pending persistState writes.
+   * Use before process exit or recover to ensure no terminal state is lost.
+   */
+  async flushPersist(): Promise<void> {
+    if (this._persistTimer) {
+      clearTimeout(this._persistTimer);
+      this._persistTimer = undefined;
+    }
+    if (this._dirty) {
+      this._dirty = false;
+      await this.store.save(this.tasks);
+    }
   }
 
   private restoreState(): void {
@@ -495,9 +523,10 @@ export class DispatchManager {
           path: { id: task.sessionId },
         });
         if (result.data) {
-          const occupied = this.concurrency.forceOccupyBackground(DEFAULT_CONCURRENCY_KEY);
+          const key = task.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY;
+          const occupied = this.concurrency.forceOccupyBackground(key);
           if (occupied === 1) {
-            task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
+            task.concurrencyKey = key;
             this.poller.registerTask(task.id, task.sessionId);
             this.incInflight(task.parentSessionId);
             debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);

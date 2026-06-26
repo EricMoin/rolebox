@@ -1,5 +1,6 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
 import { DispatchManager } from "../../src/dispatch/manager";
+import type { DispatchTask } from "../../src/dispatch/types";
 import { TaskStateStore } from "../../src/dispatch/task-store.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -1461,7 +1462,7 @@ describe("recover()", () => {
       progress: { lastUpdate: new Date(), toolCalls: 0 },
     };
     tasks.set(runningTask.id, runningTask);
-    store.save(tasks);
+    await store.save(tasks);
 
     // Create manager simulating restart
     const manager = new DispatchManager(client, fastConfig);
@@ -1500,7 +1501,7 @@ describe("recover()", () => {
       progress: { lastUpdate: new Date(), toolCalls: 0 },
     };
     tasks.set(runningTask.id, runningTask);
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
@@ -1536,7 +1537,7 @@ describe("recover()", () => {
       progress: { lastUpdate: new Date(), toolCalls: 0 },
     };
     tasks.set(runningTask.id, runningTask);
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
@@ -1568,7 +1569,7 @@ describe("recover()", () => {
       progress: { lastUpdate: new Date(), toolCalls: 0 },
     };
     tasks.set(pendingTask.id, pendingTask);
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
@@ -1599,7 +1600,7 @@ describe("recover()", () => {
       };
       tasks.set(t.id, t);
     }
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
     manager.setStoreDirectory(tempDir);
@@ -1633,7 +1634,7 @@ describe("recover()", () => {
       };
       tasks.set(t.id, t);
     }
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 0 });
     manager.setStoreDirectory(tempDir);
@@ -1673,7 +1674,7 @@ describe("recover()", () => {
       };
       tasks.set(t.id, t);
     }
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
     manager.setStoreDirectory(tempDir);
@@ -1681,6 +1682,139 @@ describe("recover()", () => {
 
     const mgr = manager as any;
     expect(mgr.inflightByParent.get("ses_parent")).toBe(3);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover uses each task's persisted concurrencyKey for forceOccupy", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+
+    // Two tasks with different concurrency keys
+    const openaiTask: DispatchTask = {
+      id: "bg_openai",
+      sessionId: "ses_openai",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "agent-openai",
+      prompt: "work",
+      concurrencyKey: "openai/gpt-4",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    const claudeTask: DispatchTask = {
+      id: "bg_claude",
+      sessionId: "ses_claude",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "agent-claude",
+      prompt: "work",
+      concurrencyKey: "anthropic/claude-3",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(openaiTask.id, openaiTask);
+    tasks.set(claudeTask.id, claudeTask);
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 2, syncReservedSlots: 0 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    // Each task occupies its own key's pool, not the default pool
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(1);
+    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+
+    // Both tasks are running
+    expect(manager.getTask("bg_openai")?.status).toBe("running");
+    expect(manager.getTask("bg_claude")?.status).toBe("running");
+    expect(mgr.poller.getTaskCount()).toBe(2);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover uses default key when persisted concurrencyKey is missing", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+
+    const legacyTask: DispatchTask = {
+      id: "bg_legacy",
+      sessionId: "ses_legacy",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "helper",
+      prompt: "work",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(legacyTask.id, legacyTask);
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 2, syncReservedSlots: 0 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+    expect(manager.getTask("bg_legacy")?.concurrencyKey).toBe("default");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover with per-key tasks respects limits independently", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+
+    // 2 openai tasks but limit=1 per key
+    const openai1: DispatchTask = {
+      id: "bg_openai_1",
+      sessionId: "ses_o1",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "agent-openai",
+      prompt: "work",
+      concurrencyKey: "openai/gpt-4",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    const openai2: DispatchTask = {
+      id: "bg_openai_2",
+      sessionId: "ses_o2",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "agent-openai",
+      prompt: "work",
+      concurrencyKey: "openai/gpt-4",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(openai1.id, openai1);
+    tasks.set(openai2.id, openai2);
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, syncReservedSlots: 0 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    // Only 1 task occupies the openai pool (limit=1, reserved=0)
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+
+    // One should be running, the other errored
+    const t1 = manager.getTask("bg_openai_1");
+    const t2 = manager.getTask("bg_openai_2");
+    const running = [t1, t2].filter(t => t?.status === "running").length;
+    const errored = [t1, t2].filter(t => t?.status === "error" && t?.error?.includes("Exceeded concurrency limit")).length;
+    expect(running).toBe(1);
+    expect(errored).toBe(1);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -2079,7 +2213,7 @@ describe("reserved sync lane", () => {
       };
       tasks.set(t.id, t);
     }
-    store.save(tasks);
+    await store.save(tasks);
 
     const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 1 });
     manager.setStoreDirectory(tempDir);
@@ -2106,5 +2240,97 @@ describe("reserved sync lane", () => {
     expect(mgr.concurrency.getActiveCount("default")).toBe(5);
 
     rmSync(tempDir, { recursive: true, force: true });
+  });
+});
+
+// ── 18. Debounced async state persistence ──────────────────────
+
+describe("debounced persistence", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("multiple consecutive persistState calls within debounce window → only 1 actual save", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const saveSpy = mock(() => Promise.resolve());
+    mgr.store.save = saveSpy;
+
+    // Call persistState 5 times directly (no launch overhead, no poller)
+    for (let i = 0; i < 5; i++) {
+      mgr.persistState();
+    }
+
+    expect(mgr._dirty).toBe(true);
+    expect(mgr._persistTimer).toBeDefined();
+
+    // Wait for the debounce timer to fire (500ms window)
+    await new Promise((r) => setTimeout(r, 600));
+
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushPersist() immediately writes all pending data without waiting for debounce", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const saveSpy = mock(() => Promise.resolve());
+    mgr.store.save = saveSpy;
+
+    // Trigger persistState directly
+    mgr.persistState();
+
+    expect(mgr._dirty).toBe(true);
+    expect(mgr._persistTimer).toBeDefined();
+
+    // Flush immediately — bypasses debounce
+    await manager.flushPersist();
+
+    // save should have been called immediately
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+
+    // Dirty flag cleared, timer cancelled
+    expect(mgr._dirty).toBe(false);
+    expect(mgr._persistTimer).toBeUndefined();
+  });
+
+  it("flushPersist() is idempotent — calling twice only saves once", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const saveSpy = mock(() => Promise.resolve());
+    mgr.store.save = saveSpy;
+
+    mgr.persistState();
+
+    // Flush twice
+    await manager.flushPersist();
+    await manager.flushPersist();
+
+    // Only 1 save — second call finds _dirty = false
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("concurrent persistState and flushPersist do not race", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const saveSpy = mock(() => Promise.resolve());
+    mgr.store.save = saveSpy;
+
+    mgr.persistState();
+
+    // Flush consumes the dirty state
+    await manager.flushPersist();
+    // Advance past the debounce window — timer was already cancelled by flush
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Only 1 save — flush already consumed it
+    expect(saveSpy).toHaveBeenCalledTimes(1);
   });
 });
