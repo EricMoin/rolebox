@@ -3,6 +3,9 @@ import { writeFileSync, readFileSync, mkdirSync, readdirSync, unlinkSync } from 
 import type { ResolvedRole } from "../types.ts";
 import { RoleMode, ROLEBOX_AGENT_MARKER } from "../constants.ts";
 import { agentsDir, agentFilePath } from "../paths.ts";
+import { createSubLogger, formatError } from "../logger.ts";
+
+const log = createSubLogger("sync");
 
 interface AgentEntry {
   id: string;
@@ -26,7 +29,8 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
 
   try {
     mkdirSync(agentsDirPath, { recursive: true });
-  } catch {
+  } catch (err) {
+    log.debug("Failed to create agent directory", { dir: agentsDirPath, error: formatError(err) });
     return;
   }
 
@@ -65,11 +69,14 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
             unlinkSync(filePath);
           }
         }
-      } catch {
+      } catch (err) {
+        log.debug("Failed to read entry", { path: filePath, error: formatError(err) });
         continue;
       }
     }
-  } catch {}
+  } catch (err) {
+    log.debug("Failed to read directory", { dir: agentsDirPath, error: formatError(err) });
+  }
 
   for (const agent of allAgents) {
     const lines = [
@@ -85,6 +92,8 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
     const filePath = agentFilePath(agent.id);
     try {
       writeFileSync(filePath, lines.join("\n"), "utf-8");
-    } catch {}
+    } catch (err) {
+      log.warn("Failed to write agent file", { file: filePath, error: formatError(err) });
+    }
   }
 }
