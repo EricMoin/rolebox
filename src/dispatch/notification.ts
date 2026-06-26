@@ -1,5 +1,8 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { DispatchTask, NotificationPayload } from "./types.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("dispatch:notify");
 
 /** Per-parent-session queue for serializing notification sends. */
 const parentQueues = new Map<string, Promise<void>>();
@@ -85,10 +88,9 @@ export async function notifyParent(
         },
       });
     } catch (err) {
-      console.warn(
-        `[dispatch] Failed to notify parent session ${task.parentSessionId} ` +
-          `about task ${task.id}:`,
-        err instanceof Error ? err.message : err,
+      log.warn(
+        `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
+        err,
       );
     }
   };

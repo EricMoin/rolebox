@@ -9,7 +9,9 @@ import {
 } from "./config.ts";
 
 import { debugLog } from "./debug-log.ts";
+import { createSubLogger } from "../logger.ts";
 
+const log = createSubLogger("dispatch:poller");
 const DEBUG = !!process.env.ROLEBOX_DEBUG;
 
 export interface GlobalPollerDeps {
@@ -124,8 +126,7 @@ export class GlobalPoller {
       this._adjustInterval();
       if (this.isRunningFlag) this._scheduleNext();
     } catch (err: unknown) {
-      console.error("[GlobalPoller] poll cycle error:",
-        err instanceof Error ? err.message : err);
+      log.error(err);
       if (this.isRunningFlag) this._scheduleNext();
     } finally { this.isPolling = false; }
   }
