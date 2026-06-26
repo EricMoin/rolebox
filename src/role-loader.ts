@@ -16,6 +16,15 @@ import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.ts";
 import type { RoleConfig, SubAgentConfig } from "./types.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR } from "./constants.ts";
+import { createSubLogger, formatError } from "./logger.ts";
+import type { Logger } from "tslog";
+import type { ILogObj } from "tslog";
+
+let log: Logger<ILogObj> = createSubLogger("role-loader");
+
+export function __setLoggerForTest(mockLogger: Logger<ILogObj>): void {
+  log = mockLogger;
+}
 
 /**
  * Validate a role ID string.
@@ -59,8 +68,8 @@ export async function discoverRoles(
     const roleId = basename(dirname(yamlPath));
 
     if (!validateRoleId(roleId)) {
-      console.warn(
-        `[role-loader] Skipping "${roleId}": role ID must not contain "--"`,
+      log.warn(
+        `Skipping "${roleId}": role ID must not contain "--"`,
       );
       continue;
     }
@@ -70,10 +79,11 @@ export async function discoverRoles(
       if (config !== null) {
         roles.set(roleId, config);
       }
-    } catch {
+    } catch (err) {
       // Unexpected errors during loadOneRole; skip and continue
-      console.warn(
-        `[role-loader] Skipping "${roleId}": unexpected error during load`,
+      log.warn(
+        `Skipping "${roleId}": unexpected error during load`,
+        formatError(err),
       );
     }
   }
@@ -171,7 +181,7 @@ export function applyInheritance(
  * Parse and validate a single role.yaml file.
  *
  * @returns RoleConfig on success, null if the role should be skipped
- *          (validation failure already logged via console.warn).
+ *          (validation failure already logged via the sub-logger).
  */
 async function loadOneRole(
   yamlPath: string,
@@ -182,17 +192,16 @@ async function loadOneRole(
     const content = await readFile(yamlPath, "utf-8");
     raw = yaml.load(content);
   } catch (err) {
-    console.warn(
-      `[role-loader] Skipping "${roleId}": invalid YAML — ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+    log.warn(
+      `Skipping "${roleId}": invalid YAML`,
+      formatError(err),
     );
     return null;
   }
 
   if (raw === null || raw === undefined || typeof raw !== "object") {
-    console.warn(
-      `[role-loader] Skipping "${roleId}": YAML does not contain an object`,
+    log.warn(
+      `Skipping "${roleId}": YAML does not contain an object`,
     );
     return null;
   }
@@ -200,8 +209,8 @@ async function loadOneRole(
   const obj = raw as Record<string, unknown>;
 
   if (!obj.name || typeof obj.name !== "string" || obj.name.trim() === "") {
-    console.warn(
-      `[role-loader] Skipping "${roleId}": missing or invalid "name" field`,
+    log.warn(
+      `Skipping "${roleId}": missing or invalid "name" field`,
     );
     return null;
   }
@@ -211,17 +220,17 @@ async function loadOneRole(
     const promptFilePath = pathResolve(dirname(yamlPath), obj.prompt_file);
     try {
       prompt = await readFile(promptFilePath, "utf-8");
-    } catch {
-      console.warn(
-        `[role-loader] Skipping "${roleId}": prompt_file "${obj.prompt_file}" not found`,
-      );
-      return null;
-    }
+      } catch {
+        log.warn(
+          `Skipping "${roleId}": prompt_file "${obj.prompt_file}" not found`,
+        );
+        return null;
+      }
   } else if (typeof obj.prompt === "string" && obj.prompt.trim() !== "") {
     prompt = obj.prompt;
   } else {
-    console.warn(
-      `[role-loader] Skipping "${roleId}": must provide "prompt" or "prompt_file"`,
+    log.warn(
+      `Skipping "${roleId}": must provide "prompt" or "prompt_file"`,
     );
     return null;
   }
@@ -242,22 +251,22 @@ async function loadOneRole(
         typeof entry.name !== "string" ||
         entry.name.trim() === ""
       ) {
-        console.warn(
-          `[role-loader] Skipping subagent in "${roleId}": missing or invalid "name"`,
+        log.warn(
+          `Skipping subagent in "${roleId}": missing or invalid "name"`,
         );
         continue;
       }
 
       if (!validateRoleId(entry.name as string)) {
-        console.warn(
-          `[role-loader] Skipping subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
+        log.warn(
+          `Skipping subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
         );
         continue;
       }
 
       if ("subagents" in entry) {
-        console.warn(
-          `[role-loader] Stripping nested "subagents" from subagent "${entry.name}" in "${roleId}"`,
+        log.warn(
+          `Stripping nested "subagents" from subagent "${entry.name}" in "${roleId}"`,
         );
       }
 
@@ -274,8 +283,8 @@ async function loadOneRole(
           subPrompt = await readFile(promptFilePath, "utf-8");
           subPrompt = resolveEnvVars(subPrompt);
         } catch {
-          console.warn(
-            `[role-loader] Skipping subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
+          log.warn(
+            `Skipping subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
           );
           continue;
         }
@@ -285,8 +294,8 @@ async function loadOneRole(
       ) {
         subPrompt = entry.prompt;
       } else {
-        console.warn(
-          `[role-loader] Skipping subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
+        log.warn(
+          `Skipping subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
         );
         continue;
       }
@@ -344,8 +353,8 @@ async function loadOneRole(
       };
 
       if (seenSubagentNames.has(subagent.name)) {
-        console.warn(
-          `[role-loader] Duplicate subagent name "${subagent.name}" in "${roleId}": later definition wins`,
+        log.warn(
+          `Duplicate subagent name "${subagent.name}" in "${roleId}": later definition wins`,
         );
         validSubagents = validSubagents.filter((s) => s.name !== subagent.name);
       }
@@ -465,17 +474,16 @@ async function discoverFileBasedSubagents(
       const content = await readFile(yamlPath, "utf-8");
       raw = yaml.load(content);
     } catch (err) {
-      console.warn(
-        `[role-loader] Skipping file-based subagent "${childId}" in "${roleId}": invalid YAML — ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+      log.warn(
+        `Skipping file-based subagent "${childId}" in "${roleId}": invalid YAML`,
+        formatError(err),
       );
       continue;
     }
 
     if (raw === null || raw === undefined || typeof raw !== "object") {
-      console.warn(
-        `[role-loader] Skipping file-based subagent "${childId}" in "${roleId}": YAML does not contain an object`,
+      log.warn(
+        `Skipping file-based subagent "${childId}" in "${roleId}": YAML does not contain an object`,
       );
       continue;
     }
@@ -488,24 +496,24 @@ async function discoverFileBasedSubagents(
       typeof entry.name !== "string" ||
       entry.name.trim() === ""
     ) {
-      console.warn(
-        `[role-loader] Skipping file-based subagent "${childId}" in "${roleId}": missing or invalid "name"`,
+      log.warn(
+        `Skipping file-based subagent "${childId}" in "${roleId}": missing or invalid "name"`,
       );
       continue;
     }
 
     // Validate name does not contain --
     if (!validateRoleId(entry.name as string)) {
-      console.warn(
-        `[role-loader] Skipping file-based subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
+      log.warn(
+        `Skipping file-based subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
       );
       continue;
     }
 
     // Reject nested subagents
     if ("subagents" in entry) {
-      console.warn(
-        `[role-loader] Stripping nested "subagents" from file-based subagent "${entry.name}" in "${roleId}"`,
+      log.warn(
+        `Stripping nested "subagents" from file-based subagent "${entry.name}" in "${roleId}"`,
       );
     }
 
@@ -522,8 +530,8 @@ async function discoverFileBasedSubagents(
         subPrompt = await readFile(promptFilePath, "utf-8");
         subPrompt = resolveEnvVars(subPrompt);
       } catch {
-        console.warn(
-          `[role-loader] Skipping file-based subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
+        log.warn(
+          `Skipping file-based subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
         );
         continue;
       }
@@ -534,8 +542,8 @@ async function discoverFileBasedSubagents(
       subPrompt = entry.prompt;
       subPrompt = resolveEnvVars(subPrompt);
     } else {
-      console.warn(
-        `[role-loader] Skipping file-based subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
+      log.warn(
+        `Skipping file-based subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
       );
       continue;
     }
