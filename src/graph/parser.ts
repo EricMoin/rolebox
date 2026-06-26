@@ -67,7 +67,7 @@ export function parseCollaboration(
   // ── Extract user-specified maxIterations ──
   const maxIterationsUser =
     typeof obj.max_iterations === "number"
-      ? obj.max_iterations
+      ? Math.max(0, obj.max_iterations)
       : undefined;
 
   // ── Parse explicit flow edges (string or object syntax) ──
