@@ -31,13 +31,19 @@ export class DispatchManager {
   private store: TaskStateStore;
   private _recovered = false;
   private inflightByParent = new Map<string, number>();
+  private subagentModelKey: Map<string, string>;
 
-  constructor(client: OpencodeClient, config?: Partial<DispatchManagerConfig>) {
+  constructor(
+    client: OpencodeClient,
+    config?: Partial<DispatchManagerConfig>,
+    subagentModelKey?: Map<string, string>,
+  ) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.concurrency = new ConcurrencyManager(this.config.maxConcurrent);
     this.sessionMonitor = new SessionMonitor();
     this.store = new TaskStateStore(process.cwd());
+    this.subagentModelKey = subagentModelKey ?? new Map();
     this.poller = new GlobalPoller(client, this.config, {
       completionDetector: detectCompletion,
       sessionMonitor: this.sessionMonitor,
@@ -47,11 +53,16 @@ export class DispatchManager {
     });
   }
 
+  private deriveKey(subagentId: string): string {
+    return this.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
+  }
+
   async launch(
     input: DispatchInput,
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<DispatchTask> {
     const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    const concurrencyKey = this.deriveKey(input.subagent);
 
     const task: DispatchTask = {
       id: taskId,
@@ -67,22 +78,22 @@ export class DispatchManager {
 
     this.tasks.set(taskId, task);
 
-    debugLog("launch", taskId, `agent=${input.subagent} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
+    debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
     // Pool-full fast-fail: reject immediately if all slots are occupied
-    if (this.concurrency.getActiveCount(DEFAULT_CONCURRENCY_KEY) >= this.concurrency.getLimit(DEFAULT_CONCURRENCY_KEY)) {
+    if (this.concurrency.getActiveCount(concurrencyKey) >= this.concurrency.getLimit(concurrencyKey)) {
       metrics.counter("dispatch_rejected_total", { reason: "pool-full" }).inc();
       task.status = "error";
       task.error = "Pool is full — all concurrent slots occupied";
       task.completedAt = new Date();
-      debugLog("launch", taskId, `REJECTED: pool-full (${this.concurrency.getActiveCount(DEFAULT_CONCURRENCY_KEY)}/${this.concurrency.getLimit(DEFAULT_CONCURRENCY_KEY)})`);
+      debugLog("launch", taskId, `REJECTED: pool-full (${this.concurrency.getActiveCount(concurrencyKey)}/${this.concurrency.getLimit(concurrencyKey)})`);
       this.scheduleCleanup(taskId);
       void this.notifyCompletion(task);
       return task;
     }
 
-    await this.concurrency.acquire(DEFAULT_CONCURRENCY_KEY);
-    task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
+    await this.concurrency.acquire(concurrencyKey);
+    task.concurrencyKey = concurrencyKey;
 
     let didMarkRunning = false;
 
@@ -131,7 +142,7 @@ export class DispatchManager {
       if (didMarkRunning) {
         this.leaveRunning(taskId);
       } else {
-        this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+        this.concurrency.release(concurrencyKey);
         this.scheduleCleanup(taskId);
       }
     }
@@ -155,10 +166,11 @@ export class DispatchManager {
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<string> {
     const timeoutMs = this.config.syncTimeoutMs ?? SYNC_TIMEOUT_MS;
+    const concurrencyKey = this.deriveKey(input.subagent);
     let didAcquire = false;
 
     // Step 1: Cancelable acquire covering the wait phase
-    const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireCancelable(DEFAULT_CONCURRENCY_KEY);
+    const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireCancelable(concurrencyKey);
     let acqTimer: ReturnType<typeof setTimeout> | undefined;
     const acqTimeout = new Promise<"timeout">((r) => {
       acqTimer = setTimeout(() => r("timeout"), timeoutMs);
@@ -221,7 +233,7 @@ export class DispatchManager {
       }
     } finally {
       if (didAcquire) {
-        this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+        this.concurrency.release(concurrencyKey);
       }
     }
   }

@@ -22,13 +22,18 @@ export async function createPluginHooks(
   directory?: string,
 ) {
   const resolvedSubagents = new Map<string, string>();
+  const subagentModelKey = new Map<string, string>();
   for (const role of resolvedRoles) {
     for (const sub of role.subagents) {
       resolvedSubagents.set(sub.id, role.id);
+      const model = sub.config.model ?? role.config.model;
+      const key = model ? model : "default";
+      subagentModelKey.set(sub.id, key);
+      log.debug("model key", { subagent: sub.id, key });
     }
   }
 
-  const dispatchManager = new DispatchManager(client);
+  const dispatchManager = new DispatchManager(client, undefined, subagentModelKey);
   if (directory) {
     dispatchManager.setStoreDirectory(directory);
   }
@@ -36,7 +41,7 @@ export async function createPluginHooks(
 
   return {
     tool: {
-      dispatch: createDispatchTool(dispatchManager, resolvedSubagents),
+      dispatch: createDispatchTool(dispatchManager, resolvedSubagents, subagentModelKey),
       dispatch_output: createDispatchOutputTool(dispatchManager),
       dispatch_cancel: createDispatchCancelTool(dispatchManager),
       dispatch_metrics: createDispatchMetricsTool(),
