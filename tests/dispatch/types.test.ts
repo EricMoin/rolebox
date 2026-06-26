@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import * as types from "../../src/dispatch/types.js";
+import * as types from "../../src/dispatch/types.ts";
 
 /**
  * Smoke test for dispatch type modules.

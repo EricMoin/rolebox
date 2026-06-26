@@ -1,5 +1,5 @@
-import type { FlowEdge, ResolvedGraph } from "../types.js";
-import { PARENT_NODE } from "../constants.js";
+import type { FlowEdge, ResolvedGraph } from "../types.ts";
+import { PARENT_NODE } from "../constants.ts";
 
 export interface GraphExecutionState {
   currentStep: number;

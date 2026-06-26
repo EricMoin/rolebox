@@ -2,10 +2,10 @@ import type {
   FlowEdge,
   ResolvedGraph,
   GraphTemplate,
-} from "../types.js";
-import { PARENT_NODE, GRAPH_TEMPLATE_VALUES } from "../constants.js";
-import { expandTemplate } from "./templates.js";
-import { validateGraph } from "./validator.js";
+} from "../types.ts";
+import { PARENT_NODE, GRAPH_TEMPLATE_VALUES } from "../constants.ts";
+import { expandTemplate } from "./templates.ts";
+import { validateGraph } from "./validator.ts";
 
 // Regex for string edge syntax: "agent-a -> agent-b" or "agent-a -> agent-b: label text"
 // Agent names must match \w+(?:-\w+)*  (words separated by hyphens, no trailing hyphens)

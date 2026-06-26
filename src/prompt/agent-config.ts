@@ -1,6 +1,18 @@
 import type { AgentConfig } from "@opencode-ai/sdk";
-import type { ResolvedRole } from "../types.js";
-import { RoleMode } from "../constants.js";
+import type { ResolvedRole } from "../types.ts";
+import { RoleMode } from "../constants.ts";
+
+function assignDefined<T extends Record<string, unknown>>(
+  target: T,
+  source: Partial<T>,
+): T {
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined) {
+      (target as Record<string, unknown>)[key] = value;
+    }
+  }
+  return target;
+}
 
 /**
  * Build an SDK-compatible AgentConfig from a ResolvedRole.
@@ -11,34 +23,20 @@ import { RoleMode } from "../constants.js";
 export function buildAgentConfig(resolved: ResolvedRole): AgentConfig {
   const { config } = resolved;
 
-  const agent: AgentConfig = {
-    prompt: resolved.prompt,
-    mode: config.mode ?? RoleMode.Primary,
-  };
-  if (config.model !== undefined) {
-    agent.model = config.model;
-  }
-  if (config.description !== undefined) {
-    agent.description = config.description;
-  }
-  if (config.color !== undefined) {
-    agent.color = config.color;
-  }
-  if (config.variant !== undefined) {
-    agent.variant = config.variant;
-  }
-  if (config.temperature !== undefined) {
-    agent.temperature = config.temperature;
-  }
-  if (config.top_p !== undefined) {
-    agent.top_p = config.top_p;
-  }
-  if (config.tools !== undefined) {
-    agent.tools = config.tools;
-  }
-  if (config.permission !== undefined) {
-    agent.permission = config.permission as AgentConfig["permission"];
-  }
-
-  return agent;
+  return assignDefined<AgentConfig>(
+    {
+      prompt: resolved.prompt,
+      mode: config.mode ?? RoleMode.Primary,
+    },
+    {
+      model: config.model,
+      description: config.description,
+      color: config.color,
+      variant: config.variant,
+      temperature: config.temperature,
+      top_p: config.top_p,
+      tools: config.tools,
+      permission: config.permission as AgentConfig["permission"],
+    },
+  );
 }

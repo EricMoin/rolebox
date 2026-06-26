@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { discoverRoles, applyInheritance } from "../src/role-loader";
-import type { RoleConfig, SubAgentConfig } from "../src/types.js";
+import type { RoleConfig, SubAgentConfig } from "../src/types.ts";
 
 let tmpDir: string;
 let warnMock: ReturnType<typeof mock>;

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getDataDir } from "./paths.js";
-import { compareVersions } from "./commands/update.js";
+import { getDataDir } from "./paths.ts";
+import { compareVersions } from "./commands/update.ts";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 

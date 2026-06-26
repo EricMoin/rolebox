@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
-import type { DispatchManager } from "./manager.js";
-import type { DispatchInput, DispatchTask } from "./types.js";
+import type { DispatchManager } from "./manager.ts";
+import type { DispatchInput, DispatchTask } from "./types.ts";
 
 function formatDuration(task: DispatchTask): string {
   const end = task.completedAt ?? new Date();

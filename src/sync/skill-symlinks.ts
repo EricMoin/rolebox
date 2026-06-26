@@ -1,7 +1,7 @@
 import path from "node:path";
 import { mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync } from "node:fs";
-import type { ResolvedRole } from "../types.js";
-import { SkillScope, ROLEBOX_SKILL_PREFIX } from "../constants.js";
+import type { ResolvedRole } from "../types.ts";
+import { SkillScope, ROLEBOX_SKILL_PREFIX } from "../constants.ts";
 
 function createSkillEntry(entryPath: string, filePath: string): void {
   const isDirectorySkill = path.basename(filePath).toLowerCase() === "skill.md";

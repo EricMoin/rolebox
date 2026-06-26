@@ -1,15 +1,15 @@
 import type { AgentConfig } from "@opencode-ai/sdk";
 import type { PluginInput, Config } from "@opencode-ai/plugin";
-import { applyParams } from "./function-resolver.js";
-import { parseFunctionActivation } from "./function-parser.js";
-import { functionSessionState } from "./session-state.js";
-import { graphSessionState, buildGraphStateBlock } from "./graph/index.js";
-import { buildFunctionBlock } from "./prompt-builder.js";
-import { buildAgentConfig } from "./prompt/agent-config.js";
-import { DispatchManager } from "./dispatch/manager.js";
-import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.js";
-import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.js";
-import { RoleMode } from "./constants.js";
+import { applyParams } from "./function-resolver.ts";
+import { parseFunctionActivation } from "./function-parser.ts";
+import { functionSessionState } from "./session-state.ts";
+import { graphSessionState, buildGraphStateBlock } from "./graph/index.ts";
+import { buildFunctionBlock } from "./prompt-builder.ts";
+import { buildAgentConfig } from "./prompt/agent-config.ts";
+import { DispatchManager } from "./dispatch/manager.ts";
+import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.ts";
+import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
+import { RoleMode } from "./constants.ts";
 
 export function createPluginHooks(
   resolvedRoles: ResolvedRole[],

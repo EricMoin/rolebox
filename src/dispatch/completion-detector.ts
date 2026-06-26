@@ -14,8 +14,8 @@
  *     use different finish reasons ("end_turn" for Claude, "stop" for OpenAI, etc.)
  */
 
-import type { CompletionSignal, SessionMessageSnapshot, TaskPollState } from "./types.js";
-import { MIN_STABILITY_POLLS } from "./config.js";
+import type { CompletionSignal, SessionMessageSnapshot, TaskPollState } from "./types.ts";
+import { MIN_STABILITY_POLLS } from "./config.ts";
 
 // ── Public Types ───────────────────────────────────────────────────────
 

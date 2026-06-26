@@ -1,6 +1,6 @@
 import * as clack from '@clack/prompts';
-import type { InitConfig, TemplateType } from '../templates/index.js';
-import { validateInitRoleId } from './init-utils.js';
+import type { InitConfig, TemplateType } from '../templates/index.ts';
+import { validateInitRoleId } from './init-utils.ts';
 
 /**
  * Interactive wizard for `rolebox init` — collects role configuration via

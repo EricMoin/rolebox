@@ -1,5 +1,5 @@
-import type { ResolvedGraph, FlowEdge } from "../types.js";
-import { PARENT_NODE } from "../constants.js";
+import type { ResolvedGraph, FlowEdge } from "../types.ts";
+import { PARENT_NODE } from "../constants.ts";
 
 /**
  * Validate a collaboration graph against a set of available agents.

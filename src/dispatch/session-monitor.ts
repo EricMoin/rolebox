@@ -7,7 +7,7 @@
  */
 
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { MIN_SESSION_GONE_POLLS } from "./config.js";
+import { MIN_SESSION_GONE_POLLS } from "./config.ts";
 
 // ── Public Types ───────────────────────────────────────────────────────
 

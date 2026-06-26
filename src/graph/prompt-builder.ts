@@ -1,5 +1,5 @@
-import type { ResolvedGraph, GraphNodeRole } from "../types.js";
-import { GraphTemplate as GT, PARENT_NODE } from "../constants.js";
+import type { ResolvedGraph, GraphNodeRole } from "../types.ts";
+import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

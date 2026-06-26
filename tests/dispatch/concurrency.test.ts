@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { ConcurrencyManager } from "../../src/dispatch/concurrency.js";
+import { ConcurrencyManager } from "../../src/dispatch/concurrency.ts";
 
 describe("ConcurrencyManager", () => {
   it("acquire within limit resolves immediately", async () => {

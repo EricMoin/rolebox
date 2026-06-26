@@ -1,5 +1,5 @@
-import type { FlowEdge, GraphTemplate } from "../types.js";
-import { GraphTemplate as GT, PARENT_NODE } from "../constants.js";
+import type { FlowEdge, GraphTemplate } from "../types.ts";
+import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
 
 export function expandTemplate(
   topology: GraphTemplate,

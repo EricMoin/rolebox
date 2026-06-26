@@ -1,6 +1,6 @@
-import { FunctionSessionState } from "./session-state.js";
-import { GraphSessionState } from "./graph/index.js";
-import type { ResolvedFunction, ResolvedGraph } from "./types.js";
+import { FunctionSessionState } from "./session-state.ts";
+import { GraphSessionState } from "./graph/index.ts";
+import type { ResolvedFunction, ResolvedGraph } from "./types.ts";
 
 export const stateRegistry = {
   functions: new FunctionSessionState(),

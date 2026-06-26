@@ -1,7 +1,9 @@
-import type { FunctionMetadata, ResolvedFunction } from "./types.js";
-import { FunctionSource } from "./constants.js";
-import { parseFrontmatter } from "./skill-resolver.js";
-import type { FunctionCall } from "./function-parser.js";
+import { join } from "node:path";
+import type { FunctionMetadata, ResolvedFunction } from "./types.ts";
+import { FunctionSource } from "./constants.ts";
+import { parseFrontmatter } from "./skill-resolver.ts";
+import { functionPath } from "./paths.ts";
+import type { FunctionCall } from "./function-parser.ts";
 
 /**
  * Resolve function names to their file locations using Bun.file().exists().
@@ -25,10 +27,11 @@ export async function resolveFunctions(
   const resolved: ResolvedFunction[] = [];
 
   for (const name of names) {
+    const roleFunctionsDir = join(roleDir, "functions");
     const candidates: { source: ResolvedFunction["source"]; path: string }[] = [
-      { source: FunctionSource.RoleLocal, path: `${roleDir}/functions/${name}.md` },
-      { source: FunctionSource.Global, path: `${globalFunctionsDir}/${name}.md` },
-      { source: FunctionSource.BuiltIn, path: `${builtinDir}/${name}.md` },
+      { source: FunctionSource.RoleLocal, path: functionPath(roleFunctionsDir, name) },
+      { source: FunctionSource.Global, path: functionPath(globalFunctionsDir, name) },
+      { source: FunctionSource.BuiltIn, path: functionPath(builtinDir, name) },
     ];
 
     let matched = false;

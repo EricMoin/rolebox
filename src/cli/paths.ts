@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { SyncTarget } from "../constants.js";
+import { SyncTarget } from "../constants.ts";
 
 /**
  * Returns the rolebox data directory.

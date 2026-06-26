@@ -1,6 +1,6 @@
-export { parseCollaboration } from "./parser.js";
-export { validateGraph } from "./validator.js";
-export { expandTemplate } from "./templates.js";
-export { GraphSessionState, graphSessionState, buildGraphStateBlock } from "./state.js";
-export type { GraphExecutionState } from "./state.js";
-export { buildCollaborationBlock, buildSubagentRoleBlock } from "./prompt-builder.js";
+export { parseCollaboration } from "./parser.ts";
+export { validateGraph } from "./validator.ts";
+export { expandTemplate } from "./templates.ts";
+export { GraphSessionState, graphSessionState, buildGraphStateBlock } from "./state.ts";
+export type { GraphExecutionState } from "./state.ts";
+export { buildCollaborationBlock, buildSubagentRoleBlock } from "./prompt-builder.ts";
