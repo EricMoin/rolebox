@@ -469,7 +469,10 @@ export class DispatchManager {
     if (!targetTask || !targetTaskId) return;
 
     const elapsed = Date.now() - targetTask.startedAt.getTime();
-    if (elapsed < 3000) {
+    // Different from the hasAssistantOutput check below: this debounces idle events
+    // for tasks that are too young to have produced any output. The output check
+    // determines whether the model has actually responded.
+    if (elapsed < this.config.minRuntimeMs) {
       debugLog("event", targetTaskId, `session.idle too early (${elapsed}ms), deferring`);
       return;
     }
