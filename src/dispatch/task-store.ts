@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -33,6 +34,7 @@ export interface SerializedDispatchTask {
   completedAt?: string;
   error?: string;
   progress: SerializedTaskProgress;
+  concurrencyKey?: string;
   continuationOf?: string;
   messageCountAtStart?: number;
 }
@@ -42,7 +44,7 @@ export interface SerializedDispatchTask {
  * Version field enables future schema migrations.
  */
 interface DispatchStateFile {
-  version: 1;
+  version: 1 | 2;
   tasks: SerializedDispatchTask[];
 }
 
@@ -53,15 +55,16 @@ const log = createSubLogger("dispatch:store");
 /**
  * File-based persistence for DispatchManager task state.
  *
- * Writes are synchronous (writeFileSync) — acceptable for ≤5 concurrent
- * tasks with infrequent mutations.  Uses atomic write pattern (.tmp + renameSync)
- * to prevent file corruption from partial writes.
+ * Writes are asynchronous (fs.promises.writeFile) with a serialization lock
+ * to prevent concurrent writes from corrupting the state file.  Uses atomic
+ * write pattern (.tmp + renameSync) to prevent file corruption from partial writes.
  *
  * Multi-instance isolation: each workspace directory gets its own state file
  * keyed by a 12-character sha256 hash of the directory path.
  */
 export class TaskStateStore {
   private dirHash: string;
+  private _saveLock: Promise<void> = Promise.resolve();
 
   constructor(directory: string) {
     this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
@@ -70,11 +73,20 @@ export class TaskStateStore {
   // ── Public API ──────────────────────────────────────────────────────────
 
   /**
-   * Persist the current task map to disk.
+   * Persist the current task map to disk asynchronously.
    * Uses atomic write: write to .tmp, unlink existing, rename.
    * Never throws — logs a warning on failure and degrades gracefully.
+   *
+   * Serialization lock ensures only one write is in-flight at a time;
+   * concurrent callers queue up behind the previous save.
    */
-  save(tasks: Map<string, DispatchTask>): void {
+  async save(tasks: Map<string, DispatchTask>): Promise<void> {
+    // Chain onto the previous save to serialize writes
+    this._saveLock = this._saveLock.then(() => this._doSave(tasks), () => this._doSave(tasks));
+    return this._saveLock;
+  }
+
+  private async _doSave(tasks: Map<string, DispatchTask>): Promise<void> {
     try {
       const json = this.serialize(tasks);
       const statePath = this.getStatePath();
@@ -83,7 +95,7 @@ export class TaskStateStore {
       mkdirSync(stateDir, { recursive: true });
 
       const tmp = statePath + ".tmp";
-      writeFileSync(tmp, json, "utf-8");
+      await writeFile(tmp, json, "utf-8");
 
       try { unlinkSync(statePath); } catch {}
 
@@ -120,11 +132,12 @@ export class TaskStateStore {
     if (!parsed) return null;
 
     const { version, tasks } = parsed;
-    if (version !== 1) {
+    if (version !== 1 && version !== 2) {
       log.warn(`Unsupported dispatch state schema version ${version}, starting fresh`);
       return null;
     }
 
+    // Build the task map, applying v1→v2 defaults when migrating
     const map = new Map<string, DispatchTask>();
     for (const st of tasks) {
       map.set(st.id, {
@@ -142,9 +155,16 @@ export class TaskStateStore {
           lastUpdate: new Date(st.progress.lastUpdate),
           toolCalls: st.progress.toolCalls,
         },
-        continuationOf: st.continuationOf,
-        messageCountAtStart: st.messageCountAtStart,
+        concurrencyKey: version === 1 ? "default" : st.concurrencyKey,
+        continuationOf: version === 1 ? undefined : st.continuationOf,
+        messageCountAtStart: version === 1 ? 0 : st.messageCountAtStart,
       });
+    }
+
+    // Re-save as v2 after single-shot migration (fire-and-forget —
+    // will be picked up on next persist cycle even if this write fails)
+    if (version === 1) {
+      void this.save(map);
     }
 
     return map;
@@ -187,13 +207,14 @@ export class TaskStateStore {
           lastUpdate: task.progress.lastUpdate.toISOString(),
           toolCalls: task.progress.toolCalls,
         },
+        concurrencyKey: task.concurrencyKey,
         continuationOf: task.continuationOf,
         messageCountAtStart: task.messageCountAtStart,
       });
     }
 
     const file: DispatchStateFile = {
-      version: 1,
+      version: 2,
       tasks: serialized,
     };
 
@@ -222,7 +243,7 @@ export class TaskStateStore {
 function isDispatchStateFile(value: unknown): value is DispatchStateFile {
   if (typeof value !== "object" || value === null) return false;
   const obj = value as Record<string, unknown>;
-  if (obj.version !== 1) return false;
+  if (obj.version !== 1 && obj.version !== 2) return false;
   if (!Array.isArray(obj.tasks)) return false;
   return true;
 }
