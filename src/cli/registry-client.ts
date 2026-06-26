@@ -69,10 +69,8 @@ export async function fetchRegistryManifest(
           return parseRegistryManifestFromYaml(cached);
         }
       }
-    } catch (err) {
-      // Cache read failure: proceed to fetch
-      const _msg = err instanceof Error ? err.message : String(err);
-      void _msg;
+    } catch {
+      // Cache read failed — skip cache, continue without
     }
   }
 
