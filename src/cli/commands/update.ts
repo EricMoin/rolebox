@@ -51,7 +51,7 @@ export async function update(specificRole: string | undefined, noCache: boolean)
     try {
       manifest = await fetchRegistryManifest(registryConfig, undefined, { noCache });
     } catch (err) {
-      console.warn(`Warning: could not fetch registry '${entry.registry}': ${(err as Error).message}`);
+      console.warn(`Warning: could not fetch registry '${entry.registry}': ${(err as Error).message}. Check your network connection, or verify the registry URL with: rolebox registry list`);
       continue;
     }
 

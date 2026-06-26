@@ -71,7 +71,14 @@ export async function resolveFunctions(
     }
 
     if (!matched) {
-      log.warn(`Function "${name}" not found in any of the searched locations.`);
+      const roleFuncDir = join(roleDir, "functions");
+      log.warn(
+        `Function "${name}" not found. Searched:\n` +
+          `  1. ${functionPath(roleFuncDir, name)}\n` +
+          `  2. ${functionPath(globalFunctionsDir, name)}\n` +
+          `  3. ${functionPath(builtinDir, name)}\n` +
+          `Create the file at any of these locations to enable this function.`,
+      );
     }
   }
 

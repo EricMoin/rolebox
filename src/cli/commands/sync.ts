@@ -30,7 +30,7 @@ export async function sync(target: string): Promise<void> {
 
     if (!existsSync(sourcePath)) {
       console.warn(
-        `Warning: source for '${role}' not found at ${sourcePath}, skipping`,
+        `Warning: source for '${role}' not found at ${sourcePath}, skipping. Try reinstalling: rolebox install ${role}`,
       );
       skipped++;
       continue;

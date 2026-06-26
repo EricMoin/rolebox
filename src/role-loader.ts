@@ -69,7 +69,7 @@ export async function discoverRoles(
 
     if (!validateRoleId(roleId)) {
       log.warn(
-        `Skipping "${roleId}": role ID must not contain "--"`,
+        `Skipping "${roleId}": role ID must not contain "--". Rename the directory to avoid the "--" separator.`,
       );
       continue;
     }
@@ -210,7 +210,7 @@ async function loadOneRole(
 
   if (!obj.name || typeof obj.name !== "string" || obj.name.trim() === "") {
     log.warn(
-      `Skipping "${roleId}": missing or invalid "name" field`,
+      `Skipping "${roleId}": missing or invalid "name" field. Add a "name:" field to ${yamlPath}`,
     );
     return null;
   }
@@ -230,7 +230,7 @@ async function loadOneRole(
     prompt = obj.prompt;
   } else {
     log.warn(
-      `Skipping "${roleId}": must provide "prompt" or "prompt_file"`,
+      `Skipping "${roleId}": must provide "prompt" or "prompt_file". Add either "prompt:" or "prompt_file:" to ${yamlPath}`,
     );
     return null;
   }
