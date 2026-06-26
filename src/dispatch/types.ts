@@ -51,6 +51,10 @@ export interface DispatchTask {
   progress: TaskProgress;
   /** Optional concurrency key, set during launch for recovered tasks */
   concurrencyKey?: string;
+  /** Task ID this continues from (set on re-prompt continuation) */
+  continuationOf?: string;
+  /** Message count at continuation time — used as lower bound for output detection */
+  messageCountAtStart?: number;
 }
 
 /**
@@ -130,4 +134,6 @@ export interface TaskPollState {
   lastMessageCount: number;
   lastProgressUpdate: number;
   hasProducedOutput: boolean;
+  /** Lower bound for completion detection — only messages after this count are from the current run */
+  messageCountAtStart: number;
 }

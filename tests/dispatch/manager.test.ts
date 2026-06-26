@@ -367,18 +367,21 @@ describe("DispatchManager", () => {
     );
 
     const result = await manager.getResult(task.id);
-    expect(result).toBe("Analysis:Complete.");
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("Analysis:Complete.");
   });
 
-  it("getResult() returns empty string for unknown task", async () => {
+  it("getResult() returns not_found kind for unknown task", async () => {
     const client = createMockClient();
     const manager = new DispatchManager(client);
 
     const result = await manager.getResult("unknown");
-    expect(result).toBe("");
+    expect(result.kind).toBe("not_found");
+    expect(result.error).toBe("Task never existed");
+    expect(result.text).toBe("");
   });
 
-  it("getResult() returns error indicator string when messages API returns error", async () => {
+  it("getResult() returns fetch_error kind when messages API returns error", async () => {
     const client = createMockClient({
       sessionMessages: () =>
         Promise.resolve({
@@ -398,8 +401,88 @@ describe("DispatchManager", () => {
     );
 
     const result = await manager.getResult(task.id);
-    expect(result).toContain("[Error");
-    expect(result).not.toBe("");
+    expect(result.kind).toBe("fetch_error");
+    expect(result.error).toContain("Error retrieving task output");
+    expect(result.text).toBe("");
+  });
+
+  it("T10: getResult() on continued task only returns output after messageCountAtStart boundary", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "old prompt" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "Old round output." }],
+            },
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "continue this" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "Continuation output." }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+
+    // launch a task so getResult has a session to query
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.messageCountAtStart = 2;
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("Continuation output.");
+    expect(result.text).not.toContain("Old round output.");
+  });
+
+  it("getResult() on non-continued task returns all assistant text (regression)", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "prompt" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [
+                { type: "text" as const, text: "Analysis:" },
+                { type: "text" as const, text: "Complete." },
+              ],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.messageCountAtStart = undefined;
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("Analysis:Complete.");
   });
 
   // ── 5. getTask() ─────────────────────────────────────────────
@@ -481,7 +564,7 @@ describe("DispatchManager", () => {
     expect(manager.getTask(task.id)).toBeUndefined();
   });
 
-  it("cleanupTask → getResult() returns empty string for cleaned-up task", async () => {
+  it("cleanupTask → getResult() returns expired kind for cleaned-up task", async () => {
     const client = createMockClient();
     const manager = new DispatchManager(client, fastConfig);
 
@@ -495,7 +578,9 @@ describe("DispatchManager", () => {
     expect(manager.getTask(tid)).toBeUndefined();
 
     const result = await manager.getResult(tid);
-    expect(result).toBe("");
+    expect(result.kind).toBe("expired");
+    expect(result.error).toContain("cleaned up");
+    expect(result.text).toBe("");
   });
 
   it("cleanupTask FIFO trim at 501 entries keeps size 500 and evicts oldest", () => {
@@ -1129,6 +1214,215 @@ describe("DispatchManager", () => {
       mgr.handleTaskCompleted(t1.id);
       expect(g.peek()).toBe(baseline);
     });
+  });
+});
+
+// ── 17. session_id continuation (reopenForContinuation) ──────────
+
+describe("reopenForContinuation", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("reopens a completed task: reuses session, no new session.create, re-prompts, poller re-registered", async () => {
+    const sessionCreate: any[] = [];
+    const promptAsyncCalls: Array<{ path: { id: string }; body: any }> = [];
+    const msgResult = {
+      data: [
+        { info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
+        { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+      ],
+      error: undefined,
+    };
+
+    const client = createMockClient({
+      sessionCreate: () => {
+        sessionCreate.push({});
+        return Promise.resolve({ data: { id: "ses_original" }, error: undefined });
+      },
+      sessionPromptAsync: (args: any) => {
+        promptAsyncCalls.push(args);
+        return Promise.resolve({ data: undefined, error: undefined });
+      },
+      sessionMessages: () => Promise.resolve(msgResult),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const t1 = await manager.launch(
+      { subagent: "helper", prompt: "do it", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+    const originalSessionId = t1.sessionId;
+
+    mgr.handleTaskCompleted(t1.id);
+    expect(t1.status).toBe("completed");
+
+    const createCountBefore = sessionCreate.length;
+
+    const t2 = await manager.reopenForContinuation(
+      t1.id,
+      { subagent: "helper", prompt: "continue this", run_in_background: true },
+      parentContext(),
+    );
+
+    expect(t2.status).toBe("running");
+    expect(t2.sessionId).toBe(originalSessionId);
+
+    // No new session.create
+    expect(sessionCreate.length).toBe(createCountBefore);
+
+    // Last promptAsync call targets the original session (reopen)
+    const lastCall = promptAsyncCalls[promptAsyncCalls.length - 1];
+    expect(lastCall.path.id).toBe(originalSessionId);
+    expect(lastCall.body.parts[0].text).toBe("continue this");
+
+    // messageCountAtStart set (2 messages in msgResult)
+    expect(t2.messageCountAtStart).toBe(2);
+
+    // Poller re-registered
+    expect(mgr.poller.getTaskCount()).toBe(1);
+
+    // Task state reset
+    expect(t2.startedAt).toBeInstanceOf(Date);
+    expect(t2.progress.toolCalls).toBe(0);
+    expect(t2.error).toBeUndefined();
+    expect(t2.completedAt).toBeUndefined();
+  });
+
+  it("throws when session_id points to non-existent task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    await expect(
+      manager.reopenForContinuation(
+        "nonexistent",
+        { subagent: "helper", prompt: "p", run_in_background: true },
+        parentContext(),
+      ),
+    ).rejects.toThrow("not found");
+  });
+
+  it("throws when session_id points to cleaned-up task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const t1 = await manager.launch(
+      { subagent: "helper", prompt: "do it", run_in_background: true },
+      parentContext(),
+    );
+    mgr.handleTaskCompleted(t1.id);
+    manager.cleanupTask(t1.id);
+
+    await expect(
+      manager.reopenForContinuation(
+        t1.id,
+        { subagent: "helper", prompt: "p", run_in_background: true },
+        parentContext(),
+      ),
+    ).rejects.toThrow("cleaned up");
+  });
+
+  it("throws when session_id subagent mismatches", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const t1 = await manager.launch(
+      { subagent: "helper", prompt: "do it", run_in_background: true },
+      parentContext(),
+    );
+    mgr.handleTaskCompleted(t1.id);
+
+    await expect(
+      manager.reopenForContinuation(
+        t1.id,
+        { subagent: "different-agent", prompt: "p", run_in_background: true },
+        parentContext(),
+      ),
+    ).rejects.toThrow("agent mismatch");
+  });
+
+  it("reopens from error status back to running", async () => {
+    const client = createMockClient({
+      sessionMessages: () => Promise.resolve({ data: [], error: undefined }),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const t1 = await manager.launch(
+      { subagent: "helper", prompt: "do it", run_in_background: true },
+      parentContext(),
+    );
+    mgr.handleTaskError(t1.id, "something broke");
+    expect(t1.status).toBe("error");
+
+    const t2 = await manager.reopenForContinuation(
+      t1.id,
+      { subagent: "helper", prompt: "retry", run_in_background: true },
+      parentContext(),
+    );
+
+    expect(t2.status).toBe("running");
+    expect(t2.error).toBeUndefined();
+  });
+
+  it("reopens from timeout status back to running", async () => {
+    const client = createMockClient({
+      sessionMessages: () => Promise.resolve({ data: [], error: undefined }),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const t1 = await manager.launch(
+      { subagent: "helper", prompt: "do it", run_in_background: true },
+      parentContext(),
+    );
+    mgr.handleTaskTimeout(t1.id, "timeout reason");
+    expect(t1.status).toBe("timeout");
+
+    const t2 = await manager.reopenForContinuation(
+      t1.id,
+      { subagent: "helper", prompt: "retry", run_in_background: true },
+      parentContext(),
+    );
+
+    expect(t2.status).toBe("running");
+    expect(t2.error).toBeUndefined();
+  });
+
+  it("continuation handles queue-full rejection gracefully", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 1,
+      maxQueueDepth: 0,
+      syncReservedSlots: 0,
+    });
+    const mgr = manager as any;
+
+    const t1 = await manager.launch(
+      { subagent: "helper", prompt: "do it", run_in_background: true },
+      parentContext(),
+    );
+    mgr.handleTaskCompleted(t1.id);
+
+    // Fill the slot
+    await mgr.concurrency.acquire("default");
+
+    const t2 = await manager.reopenForContinuation(
+      t1.id,
+      { subagent: "helper", prompt: "retry", run_in_background: true },
+      parentContext(),
+    );
+
+    expect(t2.status).toBe("error");
+    const parsed = JSON.parse(t2.error!);
+    expect(parsed.error).toBe("Queue is full");
+
+    mgr.concurrency.release("default");
   });
 });
 

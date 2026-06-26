@@ -113,7 +113,9 @@ describe("createDispatchOutputTool", () => {
     const completed = makeTask({ status: "completed" });
     const manager = {
       getTask: mock(() => completed),
-      getResult: mock(() => Promise.resolve("test content")),
+      getResult: mock(() =>
+        Promise.resolve({ kind: "ok", text: "test content" }),
+      ),
     } as unknown as DispatchManager;
     const tool = createDispatchOutputTool(manager);
 
@@ -126,9 +128,16 @@ describe("createDispatchOutputTool", () => {
     expect(result).toContain("test content");
   });
 
-  it("returns error for unknown task", async () => {
+  it("returns not_found for unknown task", async () => {
     const manager = {
       getTask: mock(() => undefined),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "not_found",
+          text: "",
+          error: "Task never existed",
+        }),
+      ),
     } as unknown as DispatchManager;
     const tool = createDispatchOutputTool(manager);
 
@@ -137,7 +146,8 @@ describe("createDispatchOutputTool", () => {
       mockToolContext,
     );
 
-    expect(result).toContain("not found");
+    expect(result).toContain("Task Not Found");
+    expect(result).toContain("nonexistent");
   });
 
   it("returns status for running task with block=false", async () => {
@@ -171,7 +181,9 @@ describe("createDispatchOutputTool", () => {
         if (callCount <= 2) return running;
         return completed;
       }),
-      getResult: mock(() => Promise.resolve("blocked result")),
+      getResult: mock(() =>
+        Promise.resolve({ kind: "ok", text: "blocked result" }),
+      ),
     } as unknown as DispatchManager;
 
     const tool = createDispatchOutputTool(manager);
@@ -183,6 +195,134 @@ describe("createDispatchOutputTool", () => {
 
     expect(result).toContain("Task Result");
     expect(result).toContain("blocked result");
+  });
+
+  it("T11: 6 distinct task states produce 6 distinguishable outputs", async () => {
+    // completed
+    const completedTask = makeTask({ id: "bg_comp", status: "completed" });
+    const manager1 = {
+      getTask: mock(() => completedTask),
+      getResult: mock(() =>
+        Promise.resolve({ kind: "ok", text: "result text" }),
+      ),
+    } as unknown as DispatchManager;
+    const r1 = await createDispatchOutputTool(manager1).execute(
+      { task_id: "bg_comp", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    expect(r1).toContain("Task Result");
+
+    // error
+    const errorTask = makeTask({ id: "bg_err", status: "error", error: "boom" });
+    const manager2 = {
+      getTask: mock(() => errorTask),
+      getResult: mock(() =>
+        Promise.resolve({ kind: "not_found", text: "", error: "" }),
+      ),
+    } as unknown as DispatchManager;
+    const r2 = await createDispatchOutputTool(manager2).execute(
+      { task_id: "bg_err", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    expect(r2).toContain("Task Error");
+    expect(r2).toContain("boom");
+
+    // timeout
+    const timeoutTask = makeTask({
+      id: "bg_timeout",
+      status: "timeout",
+      error: "timed out after 30s",
+    });
+    const manager3 = {
+      getTask: mock(() => timeoutTask),
+      getResult: mock(() =>
+        Promise.resolve({ kind: "not_found", text: "", error: "" }),
+      ),
+    } as unknown as DispatchManager;
+    const r3 = await createDispatchOutputTool(manager3).execute(
+      { task_id: "bg_timeout", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    expect(r3).toContain("Task Timeout");
+    expect(r3).toContain("timed out after 30s");
+
+    // cancelled
+    const cancelledTask = makeTask({ id: "bg_cancel", status: "cancelled" });
+    const manager4 = {
+      getTask: mock(() => cancelledTask),
+      getResult: mock(() =>
+        Promise.resolve({ kind: "not_found", text: "", error: "" }),
+      ),
+    } as unknown as DispatchManager;
+    const r4 = await createDispatchOutputTool(manager4).execute(
+      { task_id: "bg_cancel", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    expect(r4).toContain("Task Cancelled");
+
+    // expired (task was cleaned up)
+    const manager5 = {
+      getTask: mock(() => undefined),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "expired",
+          text: "",
+          error: "Task result no longer available (was cleaned up)",
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const r5 = await createDispatchOutputTool(manager5).execute(
+      { task_id: "bg_expired", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    expect(r5).toContain("Task Expired");
+    expect(r5).toContain("cleaned up");
+
+    // not_found (task never existed)
+    const manager6 = {
+      getTask: mock(() => undefined),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "not_found",
+          text: "",
+          error: "Task never existed",
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const r6 = await createDispatchOutputTool(manager6).execute(
+      { task_id: "nonexistent", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    expect(r6).toContain("Task Not Found");
+
+    // All outputs are distinguishable
+    const all = [r1, r2, r3, r4, r5, r6];
+    const uniqueSet = new Set(all);
+    expect(uniqueSet.size).toBe(6);
+  });
+
+  it("T11: fetch_error does not appear in completed result text", async () => {
+    const completedTask = makeTask({ id: "bg_fe", status: "completed" });
+    const manager = {
+      getTask: mock(() => completedTask),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "fetch_error",
+          text: "",
+          error: "Error retrieving task output: some error",
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+    const result = await tool.execute(
+      { task_id: "bg_fe", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+    // fetch_error should NOT appear in result body as text
+    expect(result).not.toContain("Error retrieving task output");
+    // The completed format should just have whatever text the result provides (empty)
+    expect(result).not.toContain("fetch_error");
+    expect(result).not.toContain("[Error");
   });
 });
 
