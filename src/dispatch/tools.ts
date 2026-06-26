@@ -64,15 +64,8 @@ export function createDispatchTool(
         prompt: input.prompt,
         run_in_background: input.run_in_background,
         description: input.description,
-        session_id: input.session_id,
+        session_id: input.session_id, // session_id: reserved for future re-prompt functionality
       };
-
-      if (input.session_id) {
-        const existing = manager.getTask(input.session_id);
-        if (!existing) {
-          return `Task '${input.session_id}' not found. Provide a valid task ID from a previous dispatch call.`;
-        }
-      }
 
       if (input.run_in_background) {
         const task = await manager.launch(dispatchInput, parentCtx);
