@@ -654,6 +654,169 @@ describe("DispatchManager", () => {
     }
   });
 
+  // ── 9b. inflight counter ─────────────────────────────────────
+
+  describe("inflight counter", () => {
+    it("tracks remaining tasks per parent, decrements on completion", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const ctx = parentContext();
+      const mgr = manager as any;
+
+      const t1 = await manager.launch(
+        { subagent: "h", prompt: "p1", run_in_background: true },
+        ctx,
+      );
+      const t2 = await manager.launch(
+        { subagent: "h", prompt: "p2", run_in_background: true },
+        ctx,
+      );
+      const t3 = await manager.launch(
+        { subagent: "h", prompt: "p3", run_in_background: true },
+        ctx,
+      );
+
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(3);
+
+      // Complete first
+      mgr.handleTaskCompleted(t1.id);
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(2);
+
+      // Complete second
+      mgr.handleTaskCompleted(t2.id);
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+
+      // Complete third — counter cleaned up at 0
+      mgr.handleTaskCompleted(t3.id);
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    });
+
+    it("handles multiple parents independently", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const ctx1 = { sessionID: "parent-A", agent: "a", directory: "/tmp" };
+      const ctx2 = { sessionID: "parent-B", agent: "b", directory: "/tmp" };
+
+      const tA = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx1,
+      );
+      const tB1 = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx2,
+      );
+      const tB2 = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx2,
+      );
+
+      expect(mgr.inflightByParent.get("parent-A")).toBe(1);
+      expect(mgr.inflightByParent.get("parent-B")).toBe(2);
+
+      mgr.handleTaskCompleted(tA.id);
+      expect(mgr.inflightByParent.get("parent-A")).toBeUndefined();
+      expect(mgr.inflightByParent.get("parent-B")).toBe(2);
+
+      mgr.handleTaskCompleted(tB1.id);
+      expect(mgr.inflightByParent.get("parent-B")).toBe(1);
+    });
+
+    it("decrements on task error", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const ctx = parentContext();
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx,
+      );
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+
+      mgr.handleTaskError(task.id, "something broke");
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    });
+
+    it("decrements on task timeout", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const ctx = parentContext();
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx,
+      );
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+
+      mgr.handleTaskTimeout(task.id, "timed out");
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    });
+
+    it("decrements on cancel", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const ctx = parentContext();
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx,
+      );
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+
+      await manager.cancelTask(task.id);
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    });
+
+    it("does not double-decrement on double-completion", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const ctx = parentContext();
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx,
+      );
+      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+
+      mgr.handleTaskCompleted(task.id);
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+
+      // Second completion is no-op (transition fails), counter stays gone
+      mgr.handleTaskCompleted(task.id);
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    });
+
+    it("reverts inflight count when launch fails after reaching running", async () => {
+      const client = createMockClient({
+        sessionPromptAsync: () => Promise.reject(new Error("promptAsync failed")),
+      });
+      const manager = new DispatchManager(client, fastConfig);
+      const ctx = parentContext();
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        ctx,
+      );
+
+      expect(task.status).toBe("error");
+      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    });
+
+    it("getInflight returns 0 for unknown parent", () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      expect(mgr.getInflight("nonexistent-parent")).toBe(0);
+    });
+  });
+
   // ── 10. double-completion guard ──────────────────────────────
 
   describe("double-completion guard", () => {
@@ -1042,6 +1205,36 @@ describe("recover()", () => {
       }
     }
     expect(errorCount).toBe(1);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("inflight counter reflects recovered running tasks", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    for (let i = 0; i < 3; i++) {
+      const t: DispatchTask = {
+        id: `bg_inf_${i}`,
+        sessionId: `ses_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    expect(mgr.inflightByParent.get("ses_parent")).toBe(3);
 
     rmSync(tempDir, { recursive: true, force: true });
   });

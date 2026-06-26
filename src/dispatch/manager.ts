@@ -29,6 +29,7 @@ export class DispatchManager {
   private sessionMonitor: SessionMonitor;
   private store: TaskStateStore;
   private _recovered = false;
+  private inflightByParent = new Map<string, number>();
 
   constructor(client: OpencodeClient, config?: Partial<DispatchManagerConfig>) {
     this.client = client;
@@ -70,6 +71,8 @@ export class DispatchManager {
     await this.concurrency.acquire(DEFAULT_CONCURRENCY_KEY);
     task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
 
+    let didMarkRunning = false;
+
     try {
       const createResult = await this.client.session.create({
         body: {
@@ -86,6 +89,8 @@ export class DispatchManager {
       }
       task.sessionId = session.id;
       task.status = "running";
+      didMarkRunning = true;
+      this.incInflight(task.parentSessionId);
       task.progress.lastUpdate = new Date();
       this.persistState();
 
@@ -107,6 +112,9 @@ export class DispatchManager {
       task.status = "error";
       task.error = err instanceof Error ? err.message : String(err);
       debugLog("launch", taskId, `ERROR: ${task.error}`);
+      if (didMarkRunning) {
+        this.decInflight(task.parentSessionId);
+      }
       this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
       this.scheduleCleanup(taskId);
     }
@@ -246,6 +254,7 @@ export class DispatchManager {
     if (!this.transition(taskId, ["pending", "running"], "cancelled")) return false;
     const t = this.tasks.get(taskId)!;
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
+    this.decInflight(t.parentSessionId);
     this.persistState();
     this.poller.unregisterTask(taskId);
     this.sessionMonitor.clearTask(taskId);
@@ -365,6 +374,7 @@ export class DispatchManager {
           if (occupied === 1) {
             task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
             this.poller.registerTask(task.id, task.sessionId);
+            this.incInflight(task.parentSessionId);
             debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
           } else {
             // Would exceed concurrency limit — error the task out
@@ -412,11 +422,7 @@ export class DispatchManager {
   }
 
   async notifyCompletion(task: DispatchTask): Promise<void> {
-    const remainingCount = [...this.tasks.values()].filter(
-      (t) =>
-        t.parentSessionId === task.parentSessionId &&
-        (t.status === "pending" || t.status === "running"),
-    ).length;
+    const remainingCount = this.getInflight(task.parentSessionId);
 
     this.pendingNotifications.add(task.id);
     try {
@@ -497,6 +503,24 @@ export class DispatchManager {
     }
   }
 
+  private incInflight(parentSessionId: string): void {
+    this.inflightByParent.set(parentSessionId, (this.inflightByParent.get(parentSessionId) ?? 0) + 1);
+  }
+
+  private decInflight(parentSessionId: string): void {
+    const current = this.inflightByParent.get(parentSessionId);
+    if (current === undefined) return;
+    if (current <= 1) {
+      this.inflightByParent.delete(parentSessionId);
+    } else {
+      this.inflightByParent.set(parentSessionId, current - 1);
+    }
+  }
+
+  private getInflight(parentSessionId: string): number {
+    return this.inflightByParent.get(parentSessionId) ?? 0;
+  }
+
   /** Atomic compare-and-swap status transition. Returns true iff THIS call won the race. */
   private transition(
     taskId: string,
@@ -524,6 +548,7 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     debugLog("lifecycle", taskId, `✗ ERROR: ${error}`);
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
+    this.decInflight(t.parentSessionId);
     this.persistState();
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
@@ -534,6 +559,7 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     debugLog("lifecycle", taskId, `⏱ TIMEOUT: ${reason}`);
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
+    this.decInflight(t.parentSessionId);
     this.persistState();
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
@@ -543,6 +569,7 @@ export class DispatchManager {
   private finalizeCompletion(taskId: string): void {
     const t = this.tasks.get(taskId)!;
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
+    this.decInflight(t.parentSessionId);
     this.persistState();
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
