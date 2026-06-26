@@ -1,5 +1,8 @@
 import type { ResolvedGraph, FlowEdge } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("graph-validator");
 
 /**
  * Validate a collaboration graph against a set of available agents.
@@ -64,8 +67,8 @@ function validateNodesExist(
   }
 
   if (warnings.length > 0) {
-    console.warn(
-      `[graph-validator] Validation failed: ${warnings.join("; ")}`,
+    log.warn(
+      `Validation failed: ${warnings.join("; ")}`,
     );
   }
 }
@@ -83,7 +86,7 @@ function validateExitEdgeExists(
   if (!hasExit) {
     const msg = "No exit edge found: graph has no termination path";
     warnings.push(msg);
-    console.warn(`[graph-validator] ${msg}`);
+    log.warn(msg);
   }
 }
 
@@ -99,7 +102,7 @@ function validateEntryPointExists(
     const msg =
       'No entry point found: graph must have at least one edge from "parent"';
     warnings.push(msg);
-    console.warn(`[graph-validator] ${msg}`);
+    log.warn(msg);
   }
 }
 
@@ -122,7 +125,7 @@ function validateOrphanAgents(
     if (!agentsInEdges.has(agent)) {
       const msg = `Orphan agent "${agent}" is not referenced in any edge`;
       warnings.push(msg);
-      console.warn(`[graph-validator] ${msg}`);
+      log.warn(msg);
     }
   }
 }
@@ -152,7 +155,7 @@ function validateConnectivity(
     if (!reachable.has(node)) {
       const msg = `Disconnected node "${node}" is not reachable from parent entry point`;
       warnings.push(msg);
-      console.warn(`[graph-validator] ${msg}`);
+      log.warn(msg);
     }
   }
 }
@@ -171,7 +174,7 @@ function validateCycles(
     const msg =
       "Cycle detected in graph but maxIterations is not set, defaulting to 3";
     warnings.push(msg);
-    console.warn(`[graph-validator] ${msg}`);
+    log.warn(msg);
   }
 }
 

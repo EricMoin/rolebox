@@ -6,6 +6,9 @@ import type {
 import { PARENT_NODE, GRAPH_TEMPLATE_VALUES } from "../constants.ts";
 import { expandTemplate } from "./templates.ts";
 import { validateGraph } from "./validator.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("graph-parser");
 
 // Regex for string edge syntax: "agent-a -> agent-b" or "agent-a -> agent-b: label text"
 // Agent names match any characters except whitespace, '>' and ':' —
@@ -28,7 +31,7 @@ const STRING_EDGE_RE =
  *
  * Returns `null` on any configuration-level failure (missing agents for a
  * template, unknown topology, validation failure). Logs details via
- * `console.warn` with the `[graph-parser]` prefix.
+ * `log.warn` via the `graph-parser` sub-logger.
  *
  * @param raw - The raw `collaboration:` value parsed from YAML (can be any shape).
  * @param availableSubagentNames - All agent IDs known to the system; used to
@@ -41,7 +44,7 @@ export function parseCollaboration(
 ): ResolvedGraph | null {
   // ── Guard: must be a non-null, plain object ──
   if (raw === null || raw === undefined || typeof raw !== "object") {
-    console.warn("[graph-parser] collaboration config is not an object");
+    log.warn("collaboration config is not an object");
     return null;
   }
 
@@ -58,8 +61,8 @@ export function parseCollaboration(
 
   // ── Template requires at least one agent ──
   if (topology !== undefined && agents.length === 0) {
-    console.warn(
-      "[graph-parser] topology requires at least one agent in 'agents' field",
+    log.warn(
+      "topology requires at least one agent in 'agents' field",
     );
     return null;
   }
@@ -79,8 +82,8 @@ export function parseCollaboration(
     try {
       templateEdges = expandTemplate(topology, agents);
     } catch (err) {
-      console.warn(
-        `[graph-parser] expandTemplate failed: ${
+      log.warn(
+        `expandTemplate failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -92,8 +95,8 @@ export function parseCollaboration(
   const edges = mergeEdges(templateEdges, flowEdges);
 
   if (edges.length === 0) {
-    console.warn(
-      "[graph-parser] no edges defined — provide topology+agents or flow",
+    log.warn(
+      "no edges defined — provide topology+agents or flow",
     );
     return null;
   }
@@ -138,15 +141,15 @@ export function parseCollaboration(
 
   if (!valid) {
     // validateGraph already logs its own warnings; surface here too
-    console.warn(
-      `[graph-parser] validation failed: ${warnings.join("; ")}`,
+    log.warn(
+      `validation failed: ${warnings.join("; ")}`,
     );
     return null;
   }
 
   // Forward non-fatal warnings from the validator
   for (const warning of warnings) {
-    console.warn(`[graph-parser] ${warning}`);
+    log.warn(warning);
   }
 
   return resolvedGraph;
@@ -165,15 +168,15 @@ function validateTopology(
   if (raw === undefined || raw === null) return undefined;
 
   if (typeof raw !== "string" || raw.trim() === "") {
-    console.warn(
-      `[graph-parser] invalid topology — expected a string, got ${typeof raw}`,
+    log.warn(
+      `invalid topology — expected a string, got ${typeof raw}`,
     );
     return null;
   }
 
   const trimmed = raw.trim();
   if (!GRAPH_TEMPLATE_VALUES.has(trimmed)) {
-    console.warn(`[graph-parser] unknown topology: "${trimmed}"`);
+    log.warn(`unknown topology: "${trimmed}"`);
     return null;
   }
 
@@ -206,8 +209,8 @@ function parseFlow(raw: unknown): FlowEdge[] {
       if (parsed) {
         edges.push(parsed);
       } else {
-        console.warn(
-          `[graph-parser] invalid flow edge string: "${item}"`,
+        log.warn(
+          `invalid flow edge string: "${item}"`,
         );
       }
     } else if (typeof item === "object" && item !== null) {
@@ -215,11 +218,11 @@ function parseFlow(raw: unknown): FlowEdge[] {
       if (parsed) {
         edges.push(parsed);
       } else {
-        console.warn("[graph-parser] invalid flow edge object");
+        log.warn("invalid flow edge object");
       }
     } else {
-      console.warn(
-        `[graph-parser] unsupported flow entry type: ${typeof item}`,
+      log.warn(
+        `unsupported flow entry type: ${typeof item}`,
       );
     }
   }
