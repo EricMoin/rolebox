@@ -378,4 +378,36 @@ describe("GlobalPoller", () => {
       expect(p.getTaskCount()).toBe(1);
     });
   });
+
+  describe("messages fetch failure (Bug #6)", () => {
+    it("17. updates lastProgressUpdate on messages fetch error to prevent false timeout", async () => {
+      const p = makePoller(m);
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "idle" },
+      }));
+      // First cycle: fetch succeeds to set up prevStatusKey
+      p.registerTask(TASK_A, SESSION_A);
+      m.messagesFn.mockImplementation(() => sdkResult([idleMsg()]));
+      await runCycle(p);
+
+      // Second cycle: mock messages to fail (force needsFetch via "uncertain" status)
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "uncertain" },
+      }));
+      m.messagesFn.mockImplementation(() => sdkError());
+
+      const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState }> }).tasks;
+      const task = taskMap.get(TASK_A)!;
+      const staleTimeoutMs = 2700000;
+      task.pollState.lastProgressUpdate = Date.now() - staleTimeoutMs + 1000; // 1s from stale
+      task.pollState.hasProducedOutput = true;
+
+      await runCycle(p);
+
+      // Should NOT have timed out — lastProgressUpdate was refreshed
+      expect(m.onTimeout).toHaveBeenCalledTimes(0);
+      // lastProgressUpdate should be updated close to now
+      expect(task.pollState.lastProgressUpdate).toBeGreaterThan(Date.now() - 1000);
+    });
+  });
 });
