@@ -19,7 +19,7 @@ export class DispatchManager {
   private tasks: Map<string, DispatchTask> = new Map();
   private cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private pendingNotifications: Set<string> = new Set();
-  private cleanedUpTasks: Set<string> = new Set();
+  private cleanedUpTasks: string[] = [];
   private concurrency: ConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: OpencodeClient;
@@ -186,7 +186,7 @@ export class DispatchManager {
   async getResult(taskId: string): Promise<string> {
     const task = this.tasks.get(taskId);
     if (!task) {
-      if (this.cleanedUpTasks.has(taskId)) {
+      if (this.cleanedUpTasks.includes(taskId)) {
         return ""; // Task was cleaned up after completion — result no longer available
       }
       return ""; // Task never existed
@@ -215,7 +215,10 @@ export class DispatchManager {
 
   cleanupTask(taskId: string): void {
     this.tasks.delete(taskId);
-    this.cleanedUpTasks.add(taskId);
+    this.cleanedUpTasks.push(taskId);
+    if (this.cleanedUpTasks.length > 500) {
+      this.cleanedUpTasks.shift();
+    }
     const timer = this.cleanupTimers.get(taskId);
     if (timer) {
       clearTimeout(timer);

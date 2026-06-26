@@ -381,4 +381,35 @@ describe("DispatchManager", () => {
     await expect(manager.handleSessionIdle("some-session-id")).resolves.toBeUndefined();
     expect(taskRef.status).toBe("running");
   });
+
+  // ── 9. bounded cleanedUpTasks ─────────────────────────────
+
+  it("does not grow unbounded (FIFO eviction at 500)", () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    // Directly populate cleanedUpTasks through cleanupTask
+    // by first populating the tasks map so cleanupTask can delete them
+    const mgr = manager as any;
+    const taskIds: string[] = [];
+    for (let i = 0; i < 600; i++) {
+      const tid = `task_${i}`;
+      taskIds.push(tid);
+      mgr.tasks.set(tid, { id: tid });
+      manager.cleanupTask(tid);
+    }
+
+    const cleaned = mgr.cleanedUpTasks as string[];
+    expect(cleaned.length).toBe(500);
+
+    // Most recent 500 entries should still be recognized
+    for (let i = 100; i < 600; i++) {
+      expect(cleaned.includes(taskIds[i])).toBe(true);
+    }
+
+    // Oldest entries (first 100) should have been evicted
+    for (let i = 0; i < 100; i++) {
+      expect(cleaned.includes(taskIds[i])).toBe(false);
+    }
+  });
 });
