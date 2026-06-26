@@ -131,6 +131,35 @@ describe("buildCollaborationBlock", () => {
       expect(result).toContain("<exit_conditions>");
       expect(result).toContain("max 5 iteration(s) reached");
     });
+
+    it("falls back to custom when fan-out exists (Bug #11)", () => {
+      // Pipeline [coder, reviewer, editor] with coder -> editor fan-out edge.
+      // traceLinearPath follows coder -> reviewer (first edge), missing editor.
+      const g = graph({
+        template: "pipeline",
+        nodes: ["coder", "reviewer", "editor"],
+        edges: [
+          { from: "parent", to: "coder" },
+          { from: "coder", to: "reviewer" },
+          { from: "coder", to: "editor" },         // fan-out branch
+          { from: "reviewer", to: "parent", exit: true },
+          { from: "editor", to: "parent", exit: true },
+        ],
+        exitEdges: [
+          { from: "reviewer", to: "parent", exit: true },
+          { from: "editor", to: "parent", exit: true },
+        ],
+        maxIterations: 3,
+      });
+
+      const result = buildCollaborationBlock(g, meta);
+
+      // Falls back to custom because path.length (2) < nodes.length (3)
+      expect(result).toContain("<topology>custom</topology>");
+      expect(result).toContain("Editor");           // fan-out target included
+      expect(result).toContain("Coder");
+      expect(result).toContain("Reviewer");
+    });
   });
 
   describe("review-loop", () => {
@@ -179,6 +208,37 @@ describe("buildCollaborationBlock", () => {
       expect(result).toContain("Researcher");
       expect(result).toContain("Writer");
       expect(result).toContain('task(subagent_type="editor"');
+    });
+
+    it("falls back to custom when fan-out exists (Bug #11)", () => {
+      // Review-loop [coder, reviewer, editor] with coder -> editor fan-out edge.
+      // traceLinearPath follows coder -> reviewer, missing editor.
+      const g = graph({
+        template: "review-loop",
+        nodes: ["coder", "reviewer", "editor"],
+        edges: [
+          { from: "parent", to: "coder" },
+          { from: "coder", to: "reviewer" },
+          { from: "coder", to: "editor" },             // fan-out branch
+          { from: "reviewer", to: "coder", label: "loop" },
+          { from: "reviewer", to: "parent", exit: true },
+          { from: "editor", to: "parent", exit: true },
+        ],
+        exitEdges: [
+          { from: "reviewer", to: "parent", exit: true },
+          { from: "editor", to: "parent", exit: true },
+        ],
+        maxIterations: 3,
+      });
+
+      const result = buildCollaborationBlock(g, meta);
+
+      // Falls back to custom because path.length (2) < nodes.length (3)
+      expect(result).toContain("<topology>custom</topology>");
+      expect(result).toContain("Editor");               // fan-out target included
+      expect(result).toContain("Coder");
+      expect(result).toContain("Reviewer");
+      expect(result).not.toContain("<topology>review-loop</topology>");
     });
   });
 
