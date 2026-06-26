@@ -369,6 +369,30 @@ describe("DispatchManager", () => {
     expect(result).toBe("");
   });
 
+  it("getResult() returns error indicator string when messages API returns error", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: undefined,
+          error: { message: "session expired" },
+        }),
+    });
+    const manager = new DispatchManager(client);
+
+    const task = await manager.launch(
+      {
+        subagent: "helper",
+        prompt: "analyze",
+        run_in_background: false,
+      },
+      parentContext(),
+    );
+
+    const result = await manager.getResult(task.id);
+    expect(result).toContain("[Error");
+    expect(result).not.toBe("");
+  });
+
   // ── 5. getTask() ─────────────────────────────────────────────
 
   it("getTask() returns undefined for unknown task", () => {
