@@ -6,7 +6,20 @@
  * is preserved and a warning is logged.
  */
 
+import { createSubLogger } from "./logger.ts";
+
 const ENV_VAR_PATTERN = /(?<!\{env:)\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g;
+
+let log = createSubLogger("env-resolver");
+
+export function __setLoggerForTest(mockLog: {
+  warn: (...args: unknown[]) => void;
+  debug: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+}): void {
+  log = mockLog as any;
+}
 
 /**
  * Replace `{env:VARIABLE_NAME}` placeholders with actual environment values.
@@ -19,7 +32,7 @@ export function resolveEnvVars(value: string): string {
   return value.replace(ENV_VAR_PATTERN, (match, varName: string) => {
     const envValue = process.env[varName];
     if (envValue === undefined) {
-      console.warn(`[env-resolver] Environment variable "${varName}" is not set; keeping placeholder "${match}"`);
+      log.warn(`Environment variable "${varName}" is not set; keeping placeholder "${match}"`);
       return match;
     }
     return envValue;
