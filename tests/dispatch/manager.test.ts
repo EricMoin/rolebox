@@ -565,6 +565,42 @@ describe("DispatchManager", () => {
     expect(manager.getTask(task.id)).toBeUndefined();
   });
 
+  it("cleanupTask → getResult() returns empty string for cleaned-up task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: false },
+      parentContext(),
+    );
+
+    const tid = task.id;
+    manager.cleanupTask(tid);
+    expect(manager.getTask(tid)).toBeUndefined();
+
+    const result = await manager.getResult(tid);
+    expect(result).toBe("");
+  });
+
+  it("cleanupTask FIFO trim at 501 entries keeps size 500 and evicts oldest", () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const taskIds: string[] = [];
+    for (let i = 0; i < 501; i++) {
+      const tid = `fifo_task_${i}`;
+      taskIds.push(tid);
+      mgr.tasks.set(tid, { id: tid });
+      manager.cleanupTask(tid);
+    }
+
+    const cleaned = mgr.cleanedUpTasks as Set<string>;
+    expect(cleaned.size).toBe(500);
+    expect(cleaned.has(taskIds[0])).toBe(false);
+    expect(cleaned.has(taskIds[500])).toBe(true);
+  });
+
   // ── 8. handleSessionIdle() ────────────────────────────────────
 
   it("handleSessionIdle swallows messages API error", async () => {
@@ -604,17 +640,17 @@ describe("DispatchManager", () => {
       manager.cleanupTask(tid);
     }
 
-    const cleaned = mgr.cleanedUpTasks as string[];
-    expect(cleaned.length).toBe(500);
+    const cleaned = mgr.cleanedUpTasks as Set<string>;
+    expect(cleaned.size).toBe(500);
 
     // Most recent 500 entries should still be recognized
     for (let i = 100; i < 600; i++) {
-      expect(cleaned.includes(taskIds[i])).toBe(true);
+      expect(cleaned.has(taskIds[i])).toBe(true);
     }
 
     // Oldest entries (first 100) should have been evicted
     for (let i = 0; i < 100; i++) {
-      expect(cleaned.includes(taskIds[i])).toBe(false);
+      expect(cleaned.has(taskIds[i])).toBe(false);
     }
   });
 
