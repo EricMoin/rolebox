@@ -5,7 +5,7 @@ import type {
   DispatchTaskStatus,
   DispatchManagerConfig,
 } from "./types.ts";
-import { DEFAULT_CONFIG } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS } from "./config.ts";
 import { ConcurrencyManager } from "./concurrency.ts";
 import { GlobalPoller } from "./global-poller.ts";
 import { SessionMonitor } from "./session-monitor.ts";
@@ -114,43 +114,90 @@ export class DispatchManager {
     return task;
   }
 
+  /**
+   * Execute a synchronous (blocking) dispatch. NOT tracked in this.tasks,
+   * NOT persisted, NOT registered with the poller. Protected by:
+   * - Cancelable concurrency acquire (shared "default" pool with background tasks)
+   * - syncTimeoutMs config for both acquire-wait and prompt phases
+   * - AbortController + session.abort() for prompt timeout
+   * - Leak-free: cancelAcq on acquire timeout, didAcquire guard on release
+   *
+   * Returns the joined text of all assistant text parts.
+   * Throws on timeout or network/session error.
+   */
   async executeSync(
     input: DispatchInput,
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<string> {
-    const createResult = await this.client.session.create({
-      body: {
-        parentID: parentContext.sessionID,
-      },
-      query: {
-        directory: parentContext.directory,
-      },
+    const timeoutMs = this.config.syncTimeoutMs ?? SYNC_TIMEOUT_MS;
+    let didAcquire = false;
+
+    // Step 1: Cancelable acquire covering the wait phase
+    const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireCancelable(DEFAULT_CONCURRENCY_KEY);
+    let acqTimer: ReturnType<typeof setTimeout> | undefined;
+    const acqTimeout = new Promise<"timeout">((r) => {
+      acqTimer = setTimeout(() => r("timeout"), timeoutMs);
     });
+    const acqResult = await Promise.race([acq.then(() => "acquired" as const), acqTimeout]);
+    clearTimeout(acqTimer);
 
-    const session = createResult.data;
-    if (!session) {
-      throw new Error("Failed to create session: empty response");
+    if (acqResult === "timeout") {
+      cancelAcq();
+      throw new Error(`executeSync timed out waiting for a concurrency slot after ${timeoutMs}ms`);
     }
+    didAcquire = true;
 
-    const promptResult = await this.client.session.prompt({
-      path: { id: session.id },
-      body: {
-        agent: input.subagent,
-        parts: [{ type: "text", text: input.prompt }],
-      },
-    });
+    try {
+      // Step 2: Session create
+      const createResult = await this.client.session.create({
+        body: { parentID: parentContext.sessionID },
+        query: { directory: parentContext.directory },
+      });
+      const session = createResult.data;
+      if (!session) throw new Error("Failed to create session: empty response");
 
-    const response = promptResult.data;
-    if (!response) {
-      return "";
+      // Step 3: Prompt with abort + timeout
+      const controller = new AbortController();
+      let promptTimer: ReturnType<typeof setTimeout> | undefined;
+      const promptTimeout = new Promise<never>((_, rej) => {
+        promptTimer = setTimeout(() => {
+          controller.abort();
+          void this.client.session.abort({ path: { id: session.id } });
+          rej(new Error(`executeSync prompt timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      });
+
+      try {
+        const promptResult: { data?: { parts: Array<{ type: string; text?: string }> } } = 
+          await Promise.race([
+            this.client.session.prompt({
+              path: { id: session.id },
+              body: {
+                agent: input.subagent,
+                parts: [{ type: "text", text: input.prompt }],
+              },
+              signal: controller.signal,
+            }),
+            promptTimeout,
+          ]);
+
+        clearTimeout(promptTimer);
+
+        const response = promptResult.data;
+        if (!response) return "";
+        const text = response.parts
+          .filter((p) => p.type === "text")
+          .map((p) => (p as { type: "text"; text: string }).text)
+          .join("");
+        return text;
+      } finally {
+        clearTimeout(promptTimer);
+      }
+    } finally {
+      if (didAcquire) {
+        this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+      }
     }
-
-    const text = response.parts
-      .filter((p) => p.type === "text")
-      .map((p) => (p as { type: "text"; text: string }).text)
-      .join("");
-
-    return text;
   }
 
   getTask(taskId: string): DispatchTask | undefined {
