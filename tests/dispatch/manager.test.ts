@@ -539,6 +539,63 @@ describe("DispatchManager", () => {
     expect(taskRef.status).toBe("running");
   });
 
+  it("handleSessionIdle defers when elapsed < minRuntimeMs", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: false },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.sessionId = "early-session";
+    taskRef.status = "running";
+    // Very recent start — elapsed will be < minRuntimeMs (5000)
+    taskRef.startedAt = new Date(Date.now());
+
+    // Spy on messages before calling idle
+    const messagesSpy = client.session.messages;
+
+    await manager.handleSessionIdle("early-session");
+
+    // Should not have fetched messages (too early)
+    expect(messagesSpy).not.toHaveBeenCalled();
+    // Task should still be running
+    expect(taskRef.status).toBe("running");
+  });
+
+  it("handleSessionIdle completes task when elapsed >= minRuntimeMs and assistant output exists", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: false },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.sessionId = "mature-session";
+    taskRef.status = "running";
+    // Old enough to be past minRuntimeMs (5000)
+    taskRef.startedAt = new Date(Date.now() - 6000);
+
+    // Mock messages to return assistant output
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+        ],
+        error: undefined,
+      }),
+    );
+
+    await manager.handleSessionIdle("mature-session");
+
+    // Task should have been completed
+    expect(taskRef.status).toBe("completed");
+  });
+
   // ── 9. bounded cleanedUpTasks ─────────────────────────────
 
   it("does not grow unbounded (FIFO eviction at 500)", () => {
