@@ -715,6 +715,71 @@ describe("Collaboration Graph E2E", () => {
       expect(graphSessionState.getState("nonexistent")).toBeUndefined();
     });
   });
+
+  // ── G. Unquoted agent name regex (Bug #16) ───────────────────
+
+  describe("Unquoted agent name regex (Bug #16)", () => {
+    // The exact regexes from plugin-hooks.ts tool.execute.after handler
+    const taskQuoted = /subagent_type\s*=\s*["']([^"']+)["']/;
+    const taskUnquoted = /subagent_type\s*=\s*([^\s,}\])]+)/;
+    const dispatchQuoted = /subagent\s*=\s*["']([^"']+)["']/;
+    const dispatchUnquoted = /subagent\s*=\s*([^\s,}\])]+)/;
+
+    it("matches quoted subagent_type=\"team-lead--coder\"", () => {
+      const match = 'task(subagent_type="team-lead--coder", prompt="do it")'.match(taskQuoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("team-lead--coder");
+    });
+
+    it("matches single-quoted subagent_type='team-lead--coder'", () => {
+      const match = "task(subagent_type='team-lead--coder', prompt='do it')".match(taskQuoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("team-lead--coder");
+    });
+
+    it("matches unquoted subagent_type=team-lead--coder", () => {
+      // Quoted regex should NOT match, fallback unquoted regex SHOULD
+      const quoted = 'task(subagent_type=team-lead--coder, prompt="do it")'.match(taskQuoted);
+      expect(quoted).toBeNull();
+
+      const match = 'task(subagent_type=team-lead--coder, prompt="do it")'.match(taskUnquoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("team-lead--coder");
+    });
+
+    it("unquoted regex stops at comma/space/bracket", () => {
+      const match = 'task(subagent_type=explore, run_in_background=true)'.match(taskUnquoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("explore");
+    });
+
+    it("matches quoted subagent=\"team-lead--coder\" for dispatch tool", () => {
+      const match = 'some text subagent="team-lead--coder" more'.match(dispatchQuoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("team-lead--coder");
+    });
+
+    it("matches unquoted subagent=team-lead--coder for dispatch tool", () => {
+      const quoted = 'subagent=team-lead--coder'.match(dispatchQuoted);
+      expect(quoted).toBeNull();
+
+      const match = 'subagent=team-lead--coder'.match(dispatchUnquoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("team-lead--coder");
+    });
+
+    it("unquoted regex handles agent name with hyphens and double-dash", () => {
+      const match = 'task(subagent_type=rolebox--impl-agent)'.match(taskUnquoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("rolebox--impl-agent");
+    });
+
+    it("unquoted regex does not match across closing paren", () => {
+      const match = 'subagent_type=explore)'.match(taskUnquoted);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe("explore");
+    });
+  });
 });
 
 function buildGraphStateBlock(

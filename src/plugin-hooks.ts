@@ -113,9 +113,11 @@ export function createPluginHooks(
       const args = typeof input.args === "string" ? input.args : JSON.stringify(input.args ?? {});
       let agentMatch: RegExpMatchArray | null = null;
       if (input.tool === "task") {
-        agentMatch = args.match(/subagent_type\s*=\s*["']([^"']+)["']/);
+        agentMatch = args.match(/subagent_type\s*=\s*["']([^"']+)["']/)
+                   ?? args.match(/subagent_type\s*=\s*([^\s,}\])]+)/);
       } else {
-        agentMatch = args.match(/subagent\s*=\s*["']([^"']+)["']/);
+        agentMatch = args.match(/subagent\s*=\s*["']([^"']+)["']/)
+                   ?? args.match(/subagent\s*=\s*([^\s,}\])]+)/);
       }
       if (!agentMatch) return;
 
