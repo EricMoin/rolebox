@@ -43,7 +43,8 @@
     "@clack/prompts": "^0.9.0",
     "citty": "^0.2.2",
     "fast-glob": "^3.3.0",
-    "js-yaml": "^4.1.0"
+    "js-yaml": "^4.1.0",
+    "tslog": "^4.10.2"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.3.0"
