@@ -213,6 +213,15 @@ export class DispatchManager {
       path: { id: task.sessionId },
     });
 
+    if (messagesResult.error) {
+      const errMsg =
+        typeof messagesResult.error === "object" &&
+        messagesResult.error !== null
+          ? JSON.stringify(messagesResult.error)
+          : String(messagesResult.error);
+      return `[Error retrieving task output: ${errMsg}]`;
+    }
+
     const messages = messagesResult.data ?? [];
 
     const textParts: string[] = [];
