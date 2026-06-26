@@ -66,23 +66,28 @@ export function buildNotificationText(payload: NotificationPayload): string {
 export async function notifyParent(
   client: OpencodeClient,
   task: DispatchTask,
-  remainingCount: number,
+  remainingProvider: (() => number) | number,
 ): Promise<void> {
-  const duration = computeDuration(task.startedAt, task.completedAt);
-
-  const payload: NotificationPayload = {
-    taskId: task.id,
-    description: task.description,
-    duration,
-    status: task.status,
-    remainingTasks: remainingCount,
-  };
-
-  const text = buildNotificationText(payload);
   const isTaskFailure = task.status === "error" || task.status === "cancelled" || task.status === "timeout";
-  const shouldReply = remainingCount === 0 || isTaskFailure;
 
   const doNotify = async (): Promise<void> => {
+    // Resolve remaining count at send time (not enqueue time).
+    const remainingCount = typeof remainingProvider === "function"
+      ? remainingProvider()
+      : remainingProvider;
+    const duration = computeDuration(task.startedAt, task.completedAt);
+
+    const payload: NotificationPayload = {
+      taskId: task.id,
+      description: task.description,
+      duration,
+      status: task.status,
+      remainingTasks: remainingCount,
+    };
+
+    const text = buildNotificationText(payload);
+    const shouldReply = remainingCount === 0 || isTaskFailure;
+
     try {
       await client.session.promptAsync({
         path: { id: task.parentSessionId },

@@ -106,6 +106,30 @@ describe("createDispatchTool", () => {
     expect(result).toContain("Task ID: bg_test123");
     expect(result).toContain("dispatch_output");
   });
+
+  it("passes timeout_ms through to DispatchInput when provided", async () => {
+    const resolved = new Map([["test-agent", "test-role"]]);
+    const task = makeTask({ id: "bg_test123", status: "pending" });
+    const launchSpy = mock(() => Promise.resolve(task));
+    const manager = {
+      launch: launchSpy,
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(manager, resolved);
+
+    await tool.execute(
+      {
+        subagent: "test-agent",
+        prompt: "do it",
+        run_in_background: true,
+        timeout_ms: 5000,
+      },
+      mockToolContext,
+    );
+
+    expect(launchSpy).toHaveBeenCalledTimes(1);
+    const callArgs = launchSpy.mock.calls[0] as [unknown, unknown];
+    expect(callArgs[0]).toMatchObject({ timeout_ms: 5000 });
+  });
 });
 
 // ── createDispatchOutputTool ─────────────────────────────────────────────

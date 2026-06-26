@@ -423,4 +423,123 @@ describe("GlobalPoller", () => {
       expect(task.pollState.lastProgressUpdate).toBeGreaterThan(Date.now() - 1000);
     });
   });
+
+  describe("per-task timeout", () => {
+    it("18. per-task timeout triggers on schedule — never produced output", async () => {
+      const p = makePoller(m);
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "idle" },
+      }));
+      m.completionDetector.mockImplementation(() => ({ type: "not_ready" as const }));
+      p.registerTask(TASK_A, SESSION_A, undefined, 500); // 500ms per-task timeout
+
+      const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState; timeoutMs?: number }> }).tasks;
+      const task = taskMap.get(TASK_A)!;
+      task.registeredAt = Date.now() - 600; // 600ms ago > 500ms timeout
+      task.pollState.hasProducedOutput = false;
+
+      await runCycle(p);
+
+      expect(m.onTimeout).toHaveBeenCalledWith(TASK_A, "Never produced output");
+      expect(p.getTaskCount()).toBe(0);
+    });
+
+    it("19. background default timeout used when no per-task timeout set", async () => {
+      // BACKGROUND_STALE_TIMEOUT_MS = 900_000 (15 min)
+      // This test uses a very small timeout via config override to keep tests fast
+      const p = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 2700000, minRuntimeMs: 5000,
+        maxConcurrent: DEFAULT_MAX_CONCURRENT, taskTtlMs: 1800000,
+        backgroundStaleTimeoutMs: 2000, // 2s for fast test
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "idle" },
+      }));
+      m.completionDetector.mockImplementation(() => ({ type: "not_ready" as const }));
+      p.registerTask(TASK_A, SESSION_A); // no per-task timeout
+
+      const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState; timeoutMs?: number }> }).tasks;
+      const task = taskMap.get(TASK_A)!;
+      task.registeredAt = Date.now() - 3000; // 3s ago > 2s background default
+      task.pollState.hasProducedOutput = false;
+
+      await runCycle(p);
+
+      expect(m.onTimeout).toHaveBeenCalledWith(TASK_A, "Never produced output");
+      expect(p.getTaskCount()).toBe(0);
+    });
+
+    it("20. per-task timeout overrides background default", async () => {
+      const p = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 2700000, minRuntimeMs: 5000,
+        maxConcurrent: DEFAULT_MAX_CONCURRENT, taskTtlMs: 1800000,
+        backgroundStaleTimeoutMs: 2000, // 2s background default
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "idle" },
+      }));
+      m.completionDetector.mockImplementation(() => ({ type: "not_ready" as const }));
+      p.registerTask(TASK_A, SESSION_A, undefined, 500); // per-task 500ms overrides 2s
+
+      const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState; timeoutMs?: number }> }).tasks;
+      const task = taskMap.get(TASK_A)!;
+      task.registeredAt = Date.now() - 600; // 600ms > 500ms per-task, < 2s background
+      task.pollState.hasProducedOutput = false;
+
+      await runCycle(p);
+
+      expect(m.onTimeout).toHaveBeenCalledWith(TASK_A, "Never produced output");
+      expect(p.getTaskCount()).toBe(0);
+    });
+
+    it("21. per-task timeout applies to stalled tasks too", async () => {
+      const p = makePoller(m);
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "idle" },
+      }));
+      m.completionDetector.mockImplementation(() => ({ type: "not_ready" as const }));
+      p.registerTask(TASK_A, SESSION_A, undefined, 500); // 500ms per-task timeout
+
+      const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState; timeoutMs?: number }> }).tasks;
+      const task = taskMap.get(TASK_A)!;
+      task.pollState.hasProducedOutput = true;
+      task.pollState.lastProgressUpdate = Date.now() - 600; // stalled 600ms > 500ms limit
+
+      await runCycle(p);
+
+      expect(m.onTimeout).toHaveBeenCalledWith(TASK_A, "Task stalled");
+      expect(p.getTaskCount()).toBe(0);
+    });
+
+    it("22. task with timeout > elapsed does NOT timeout", async () => {
+      const p = makePoller(m);
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "idle" },
+      }));
+      m.completionDetector.mockImplementation(() => ({ type: "not_ready" as const }));
+      p.registerTask(TASK_A, SESSION_A, undefined, 5000); // 5s timeout
+
+      const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState; timeoutMs?: number }> }).tasks;
+      const task = taskMap.get(TASK_A)!;
+      task.registeredAt = Date.now() - 1000; // only 1s elapsed < 5s timeout
+      task.pollState.hasProducedOutput = false;
+
+      await runCycle(p);
+
+      expect(m.onTimeout).toHaveBeenCalledTimes(0);
+      expect(p.getTaskCount()).toBe(1);
+    });
+  });
 });

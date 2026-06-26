@@ -52,6 +52,14 @@ export function createDispatchTool(
         .describe(
           "Task ID from a previous dispatch to re-prompt and continue work",
         ),
+      timeout_ms: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe(
+          "Per-task timeout in milliseconds. Overrides the background default timeout. Only applies to background tasks.",
+        ),
     },
     async execute(input, context) {
       if (!resolvedSubagents.has(input.subagent)) {
@@ -67,6 +75,7 @@ export function createDispatchTool(
         run_in_background: input.run_in_background,
         description: input.description,
         session_id: input.session_id,
+        timeout_ms: input.timeout_ms,
       };
 
       if (input.run_in_background) {

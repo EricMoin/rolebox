@@ -55,6 +55,8 @@ export interface DispatchTask {
   continuationOf?: string;
   /** Message count at continuation time — used as lower bound for output detection */
   messageCountAtStart?: number;
+  /** Per-task timeout in ms. Overrides background default. Set from DispatchInput.timeout_ms. */
+  timeoutMs?: number;
 }
 
 /**
@@ -72,6 +74,8 @@ export interface DispatchInput {
   description?: string;
   /** Optional session ID to reuse (creates a new session if omitted) */
   session_id?: string;
+  /** Optional per-task timeout in milliseconds (overrides background default). Only applies to background tasks. */
+  timeout_ms?: number;
 }
 
 /**
