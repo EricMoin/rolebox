@@ -1,5 +1,10 @@
 import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "./types.ts";
 import { buildCollaborationBlock } from "./graph/index.ts";
+import { createSubLogger } from "./logger.ts";
+
+const PROMPT_SIZE_WARN_THRESHOLD = 400000;
+
+const log = createSubLogger("prompt-builder");
 
 type XmlChild = XmlNode | string;
 
@@ -91,7 +96,13 @@ export function buildAgentPrompt(
     }
   }
 
-  return parts.join("\n\n");
+  const prompt = parts.join("\n\n");
+  const estimatedTokens = Math.ceil(prompt.length / 4);
+  log.info("Prompt assembled", { chars: prompt.length, estimatedTokens });
+  if (prompt.length > PROMPT_SIZE_WARN_THRESHOLD) {
+    log.warn("Prompt size exceeds recommended limit", { chars: prompt.length, estimatedTokens, threshold: Math.ceil(PROMPT_SIZE_WARN_THRESHOLD / 4) });
+  }
+  return prompt;
 }
 
 export function buildFunctionBlock(functions: ResolvedFunction[]): string {
