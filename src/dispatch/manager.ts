@@ -164,6 +164,23 @@ export class DispatchManager {
     const task = this.tasks.get(taskId);
     if (!task) return false;
 
+    // Don't cancel tasks that have already reached a terminal state
+    if (
+      task.status === "completed" ||
+      task.status === "error" ||
+      task.status === "timeout" ||
+      task.status === "cancelled"
+    ) {
+      debugLog("cancelTask", taskId, `already in terminal status ${task.status} — skipping`);
+      return false;
+    }
+
+    // Don't cancel tasks while a notification is in-flight
+    if (this.pendingNotifications.has(taskId)) {
+      debugLog("cancelTask", taskId, `has in-flight notification — skipping`);
+      return false;
+    }
+
     try {
       await this.client.session.abort({
         path: { id: task.sessionId },
@@ -309,6 +326,7 @@ export class DispatchManager {
   private handleTaskCompleted(taskId: string): void {
     const t = this.tasks.get(taskId);
     if (!t) return;
+    if (t.status !== "pending" && t.status !== "running") return;
     debugLog("lifecycle", taskId, "✓ COMPLETED");
     t.status = "completed";
     t.completedAt = new Date();
@@ -320,6 +338,7 @@ export class DispatchManager {
   private handleTaskError(taskId: string, error: string): void {
     const t = this.tasks.get(taskId);
     if (!t) return;
+    if (t.status !== "pending" && t.status !== "running") return;
     debugLog("lifecycle", taskId, `✗ ERROR: ${error}`);
     t.status = "error";
     t.error = error;
@@ -332,6 +351,7 @@ export class DispatchManager {
   private handleTaskTimeout(taskId: string, reason: string): void {
     const t = this.tasks.get(taskId);
     if (!t) return;
+    if (t.status !== "pending" && t.status !== "running") return;
     debugLog("lifecycle", taskId, `⏱ TIMEOUT: ${reason}`);
     t.status = "timeout";
     t.completedAt = new Date();

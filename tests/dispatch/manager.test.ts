@@ -235,6 +235,94 @@ describe("DispatchManager", () => {
     expect(result).toBe(false);
   });
 
+  it("cancelTask() returns false for completed task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.status = "completed";
+
+    const result = await manager.cancelTask(task.id);
+    expect(result).toBe(false);
+    expect(taskRef.status).toBe("completed"); // unchanged
+    expect(client.session.abort).not.toHaveBeenCalled();
+  });
+
+  it("cancelTask() returns false for errored task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.status = "error";
+
+    const result = await manager.cancelTask(task.id);
+    expect(result).toBe(false);
+    expect(taskRef.status).toBe("error"); // unchanged
+    expect(client.session.abort).not.toHaveBeenCalled();
+  });
+
+  it("cancelTask() returns false for cancelled task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.status = "cancelled";
+
+    const result = await manager.cancelTask(task.id);
+    expect(result).toBe(false);
+    expect(taskRef.status).toBe("cancelled"); // unchanged
+    expect(client.session.abort).not.toHaveBeenCalled();
+  });
+
+  it("cancelTask() returns false for timed out task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.status = "timeout";
+
+    const result = await manager.cancelTask(task.id);
+    expect(result).toBe(false);
+    expect(taskRef.status).toBe("timeout"); // unchanged
+    expect(client.session.abort).not.toHaveBeenCalled();
+  });
+
+  it("cancelTask() returns false when notification is in-flight", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+
+    (manager as any).pendingNotifications.add(task.id);
+
+    const result = await manager.cancelTask(task.id);
+    expect(result).toBe(false);
+    expect(client.session.abort).not.toHaveBeenCalled();
+  });
+
   // ── 4. getResult() ───────────────────────────────────────────
 
   it("getResult() extracts text from assistant messages", async () => {
@@ -411,5 +499,88 @@ describe("DispatchManager", () => {
     for (let i = 0; i < 100; i++) {
       expect(cleaned.includes(taskIds[i])).toBe(false);
     }
+  });
+
+  // ── 10. double-completion guard ──────────────────────────────
+
+  describe("double-completion guard", () => {
+    it("handleTaskCompleted twice does not double-release concurrency", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      const mgr = manager as any;
+      const concurrencyKey = "default";
+
+      expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(1);
+
+      mgr.handleTaskCompleted(task.id);
+      expect(task.status).toBe("completed");
+      expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(0);
+
+      mgr.handleTaskCompleted(task.id);
+      expect(task.status).toBe("completed");
+      expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(0);
+    });
+
+    it("handleTaskCompleted on error-status task is no-op", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      const mgr = manager as any;
+      const t = mgr.tasks.get(task.id);
+      t.status = "error";
+      t.completedAt = new Date("2024-01-01");
+      const origCompletedAt = t.completedAt;
+
+      mgr.handleTaskCompleted(task.id);
+      expect(t.status).toBe("error");
+      expect(t.completedAt).toBe(origCompletedAt);
+    });
+
+    it("handleTaskError on completed-status task is no-op", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      const mgr = manager as any;
+      mgr.handleTaskCompleted(task.id);
+      expect(task.status).toBe("completed");
+
+      mgr.handleTaskError(task.id, "some error");
+      expect(task.status).toBe("completed");
+      expect(task.error).toBeUndefined();
+    });
+
+    it("handleTaskTimeout on cancelled-status task is no-op", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      const mgr = manager as any;
+      mgr.handleTaskCompleted(task.id);
+
+      const t = mgr.tasks.get(task.id);
+      t.status = "cancelled";
+      t.completedAt = new Date("2024-01-01");
+      const origCompletedAt = t.completedAt;
+
+      mgr.handleTaskTimeout(task.id, "timeout reason");
+      expect(t.status).toBe("cancelled");
+      expect(t.completedAt).toBe(origCompletedAt);
+    });
   });
 });
