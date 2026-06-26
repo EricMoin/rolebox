@@ -30,7 +30,6 @@ function parentContextFromTool(context: {
 export function createDispatchTool(
   manager: DispatchManager,
   resolvedSubagents: Map<string, string>,
-  graphAdvancer?: (agentId: string) => void,
 ) {
   return tool({
     description:
@@ -71,10 +70,6 @@ export function createDispatchTool(
       if (input.run_in_background) {
         const task = await manager.launch(dispatchInput, parentCtx);
 
-        if (graphAdvancer) {
-          graphAdvancer(input.subagent);
-        }
-
         return [
           "Background task launched.\n",
           `Task ID: ${task.id}`,
@@ -88,10 +83,6 @@ export function createDispatchTool(
       }
 
       const result = await manager.executeSync(dispatchInput, parentCtx);
-
-      if (graphAdvancer) {
-        graphAdvancer(input.subagent);
-      }
 
       return result;
     },
