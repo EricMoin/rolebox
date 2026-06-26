@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { DispatchTask, NotificationPayload } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
+import { metrics } from "./metrics.ts";
 
 const log = createSubLogger("dispatch:notify");
 
@@ -13,6 +14,7 @@ function enqueueNotify(
 ): void {
   const prev = parentQueues.get(parentSessionId) ?? Promise.resolve();
   const next = prev.then(fn, fn).catch((err) => {
+    metrics.counter("notify_failed_total").inc();
     log.warn("notify chain error", err instanceof Error ? err.message : String(err));
   });
   next.finally(() => {
@@ -89,7 +91,9 @@ export async function notifyParent(
           noReply: !shouldReply,
         },
       });
+      metrics.counter("notify_sent_total").inc();
     } catch (err) {
+      metrics.counter("notify_failed_total").inc();
       log.warn(
         `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
         err,

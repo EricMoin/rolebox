@@ -6,11 +6,13 @@
  */
 
 import { debugLog } from "./debug-log.ts";
+import { metrics } from "./metrics.ts";
 
 interface Waiter {
   resolve: () => void;
   cancelled: boolean;
   id: string;
+  enqueuedAt: number;
 }
 
 interface ConcurrencySlot {
@@ -32,6 +34,7 @@ export class ConcurrencyManager {
     if (!slot) {
       slot = { active: 0, limit: this.defaultLimit, queue: [] };
       this.slots.set(key, slot);
+      metrics.gauge("concurrency_limit", { key }).set(this.defaultLimit);
     }
     return slot;
   }
@@ -44,6 +47,7 @@ export class ConcurrencyManager {
     const slot = this.getOrCreateSlot(key);
     if (slot.active < slot.limit) {
       slot.active++;
+      metrics.gauge("concurrency_active", { key }).set(slot.active);
       return Promise.resolve();
     }
     return this.acquireCancelable(key).promise;
@@ -57,6 +61,7 @@ export class ConcurrencyManager {
     const slot = this.getOrCreateSlot(key);
     if (slot.active < slot.limit) {
       slot.active++;
+      metrics.gauge("concurrency_active", { key }).set(slot.active);
       return { promise: Promise.resolve(), cancel: () => {} };
     }
 
@@ -66,8 +71,10 @@ export class ConcurrencyManager {
       resolveFn = resolve;
     });
 
-    const waiter: Waiter = { resolve: resolveFn!, cancelled: false, id };
+    const waiter: Waiter = { resolve: resolveFn!, cancelled: false, id, enqueuedAt: Date.now() };
     slot.queue.push(waiter);
+    const liveCount = slot.queue.filter(w => !w.cancelled).length;
+    metrics.gauge("concurrency_queued", { key }).set(liveCount);
 
     return {
       promise,
@@ -94,11 +101,17 @@ export class ConcurrencyManager {
     }
 
     slot.active--;
+    metrics.gauge("concurrency_active", { key }).set(slot.active);
 
     while (slot.queue.length > 0) {
       const w = slot.queue.shift()!;
       if (w.cancelled) continue;
+      const waitMs = Date.now() - w.enqueuedAt;
+      metrics.histogram("queue_wait_ms", { key }).observe(waitMs);
       slot.active++;
+      metrics.gauge("concurrency_active", { key }).set(slot.active);
+      const newLiveCount = slot.queue.filter(x => !x.cancelled).length;
+      metrics.gauge("concurrency_queued", { key }).set(newLiveCount);
       w.resolve();
       break;
     }
