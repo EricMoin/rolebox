@@ -14,11 +14,12 @@ import { createSubLogger } from "./logger.ts";
 
 const log = createSubLogger("plugin-hooks");
 
-export function createPluginHooks(
+export async function createPluginHooks(
   resolvedRoles: ResolvedRole[],
   client: PluginInput["client"],
   roleFunctionsMap: Map<string, ResolvedFunction[]>,
   roleGraphMap: Map<string, ResolvedGraph>,
+  directory?: string,
 ) {
   const resolvedSubagents = new Map<string, string>();
   for (const role of resolvedRoles) {
@@ -28,6 +29,10 @@ export function createPluginHooks(
   }
 
   const dispatchManager = new DispatchManager(client);
+  if (directory) {
+    dispatchManager.setStoreDirectory(directory);
+  }
+  await dispatchManager.recover();
 
   return {
     tool: {

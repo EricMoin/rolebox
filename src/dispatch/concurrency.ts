@@ -61,4 +61,17 @@ export class ConcurrencyManager {
   getActiveCount(key: string): number {
     return this.slots.get(key)?.active ?? 0;
   }
+
+  /**
+   * Bypass the acquire queue and directly occupy concurrency slots.
+   * Intended for crash recovery only — caller is responsible for correctness.
+   */
+  forceOccupy(key: string, count: number = 1): void {
+    let slot = this.slots.get(key);
+    if (!slot) {
+      slot = { active: 0, limit: this.defaultLimit, queue: [] };
+      this.slots.set(key, slot);
+    }
+    slot.active += count;
+  }
 }

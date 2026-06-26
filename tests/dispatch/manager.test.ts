@@ -1,6 +1,10 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { DispatchManager } from "../../src/dispatch/manager";
+import { TaskStateStore } from "../../src/dispatch/task-store.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -606,5 +610,161 @@ describe("DispatchManager", () => {
       expect(t.status).toBe("cancelled");
       expect(t.completedAt).toBe(origCompletedAt);
     });
+  });
+});
+
+// ── 11. recover() ─────────────────────────────────────────────
+
+describe("recover()", () => {
+  function createTempDir(): string {
+    return mkdtempSync(join(tmpdir(), "manager-recover-test-"));
+  }
+
+  it("recover() with no persisted state is a no-op", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    await manager.recover();
+
+    expect(manager.getTask("nonexistent")).toBeUndefined();
+  });
+
+  it("recover() restores running tasks and re-registers them with poller", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+
+    // Manually persist tasks via TaskStateStore
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const runningTask: DispatchTask = {
+      id: "bg_recovered",
+      sessionId: "ses_alive",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "helper",
+      prompt: "work",
+      description: "recovered task",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(runningTask.id, runningTask);
+    store.save(tasks);
+
+    // Create manager simulating restart
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+
+    await manager.recover();
+
+    // Running task should be in memory
+    const loaded = manager.getTask("bg_recovered");
+    expect(loaded).toBeDefined();
+    expect(loaded!.status).toBe("running");
+
+    // Poller should have the running task registered
+    expect((manager as any).poller.getTaskCount()).toBe(1);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover() marks dead sessions as error", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient({
+      sessionGet: () =>
+        Promise.resolve({ data: undefined, error: undefined }),
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const runningTask: DispatchTask = {
+      id: "bg_dead",
+      sessionId: "ses_dead",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "helper",
+      prompt: "work",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(runningTask.id, runningTask);
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+
+    await manager.recover();
+
+    const loaded = manager.getTask("bg_dead");
+    expect(loaded).toBeDefined();
+    expect(loaded!.status).toBe("error");
+    expect(loaded!.error).toContain("Session lost");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover() handles session.get API error gracefully", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient({
+      sessionGet: () => {
+        throw new Error("connection failed");
+      },
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const runningTask: DispatchTask = {
+      id: "bg_err",
+      sessionId: "ses_err",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "helper",
+      prompt: "work",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(runningTask.id, runningTask);
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+
+    await manager.recover();
+
+    const loaded = manager.getTask("bg_err");
+    expect(loaded).toBeDefined();
+    expect(loaded!.status).toBe("error");
+    expect(loaded!.error).toContain("verification failed");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover() silently removes pending tasks", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const pendingTask: DispatchTask = {
+      id: "bg_pending",
+      sessionId: "ses_pending",
+      parentSessionId: "ses_parent",
+      status: "pending",
+      agent: "helper",
+      prompt: "work",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(pendingTask.id, pendingTask);
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+
+    await manager.recover();
+
+    // Pending task is silently removed (no error, just absent)
+    expect(manager.getTask("bg_pending")).toBeUndefined();
+
+    rmSync(tempDir, { recursive: true, force: true });
   });
 });

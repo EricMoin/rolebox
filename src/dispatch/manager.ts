@@ -11,6 +11,7 @@ import { SessionMonitor } from "./session-monitor.ts";
 import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent } from "./notification.ts";
 
+import { TaskStateStore } from "./task-store.ts";
 import { debugLog } from "./debug-log.ts";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
@@ -25,12 +26,15 @@ export class DispatchManager {
   private client: OpencodeClient;
   private poller: GlobalPoller;
   private sessionMonitor: SessionMonitor;
+  private store: TaskStateStore;
+  private _recovered = false;
 
   constructor(client: OpencodeClient, config?: Partial<DispatchManagerConfig>) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.concurrency = new ConcurrencyManager(this.config.maxConcurrent);
     this.sessionMonitor = new SessionMonitor();
+    this.store = new TaskStateStore(process.cwd());
     this.poller = new GlobalPoller(client, this.config, {
       completionDetector: detectCompletion,
       sessionMonitor: this.sessionMonitor,
@@ -81,6 +85,7 @@ export class DispatchManager {
       task.sessionId = session.id;
       task.status = "running";
       task.progress.lastUpdate = new Date();
+      this.persistState();
 
       debugLog("launch", taskId, `session created: ${session.id}`);
 
@@ -191,6 +196,7 @@ export class DispatchManager {
 
     task.status = "cancelled";
     task.completedAt = new Date();
+    this.persistState();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.poller.unregisterTask(taskId);
     this.sessionMonitor.clearTask(taskId);
@@ -236,6 +242,7 @@ export class DispatchManager {
 
   cleanupTask(taskId: string): void {
     this.tasks.delete(taskId);
+    this.persistState();
     this.cleanedUpTasks.push(taskId);
     if (this.cleanedUpTasks.length > 500) {
       this.cleanedUpTasks.shift();
@@ -245,6 +252,104 @@ export class DispatchManager {
       clearTimeout(timer);
       this.cleanupTimers.delete(taskId);
     }
+  }
+
+  private persistState(): void {
+    this.store.save(this.tasks);
+  }
+
+  private restoreState(): void {
+    const loaded = this.store.load();
+    if (!loaded) return;
+    for (const [taskId, task] of loaded) {
+      this.tasks.set(taskId, task);
+    }
+  }
+
+  /**
+   * Set the workspace directory used for multi-instance state file isolation.
+   * Must be called before recover() if the default process.cwd() is wrong.
+   */
+  setStoreDirectory(directory: string): void {
+    this.store = new TaskStateStore(directory);
+  }
+
+  async recover(): Promise<void> {
+    if (this._recovered) return;
+    this._recovered = true;
+
+    this.restoreState();
+
+    const runningTasks: DispatchTask[] = [];
+    const toRemove: string[] = [];
+
+    for (const [taskId, task] of this.tasks) {
+      switch (task.status) {
+        case "pending":
+          toRemove.push(taskId);
+          break;
+        case "running":
+          runningTasks.push(task);
+          break;
+        case "completed":
+        case "error":
+        case "timeout":
+        case "cancelled":
+          this.scheduleCleanupFromRecovery(taskId, task);
+          break;
+      }
+    }
+
+    // Remove silent pending tasks
+    for (const id of toRemove) {
+      this.tasks.delete(id);
+    }
+
+    // Verify each running task's session
+    for (const task of runningTasks) {
+      try {
+        const result = await this.client.session.get({
+          path: { id: task.sessionId },
+        });
+        if (result.data) {
+          this.concurrency.forceOccupy("default");
+          this.poller.registerTask(task.id, task.sessionId);
+          debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
+        } else {
+          task.status = "error";
+          task.error = "Session lost after process restart";
+          task.completedAt = new Date();
+          this.scheduleCleanup(task.id);
+          debugLog("recover", task.id, "session gone after restart");
+        }
+      } catch {
+        task.status = "error";
+        task.error = "Session verification failed after restart";
+        task.completedAt = new Date();
+        this.scheduleCleanup(task.id);
+      }
+    }
+
+    if (toRemove.length > 0 || runningTasks.length > 0) {
+      this.persistState();
+    }
+  }
+
+  private scheduleCleanupFromRecovery(taskId: string, task: DispatchTask): void {
+    if (!task.completedAt) {
+      this.scheduleCleanup(taskId);
+      return;
+    }
+    const elapsed = Date.now() - new Date(task.completedAt).getTime();
+    const remaining = Math.max(this.config.taskTtlMs - elapsed, 0);
+    if (remaining === 0) {
+      this.cleanupTask(taskId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.cleanupTask(taskId);
+    }, remaining);
+    this.cleanupTimers.set(taskId, timer);
   }
 
   async notifyCompletion(task: DispatchTask): Promise<void> {
@@ -334,6 +439,7 @@ export class DispatchManager {
     debugLog("lifecycle", taskId, "✓ COMPLETED");
     t.status = "completed";
     t.completedAt = new Date();
+    this.persistState();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
@@ -347,6 +453,7 @@ export class DispatchManager {
     t.status = "error";
     t.error = error;
     t.completedAt = new Date();
+    this.persistState();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
@@ -360,6 +467,7 @@ export class DispatchManager {
     t.status = "timeout";
     t.completedAt = new Date();
     t.error = reason;
+    this.persistState();
     this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
     this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);

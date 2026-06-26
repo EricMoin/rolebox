@@ -61,7 +61,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     log.info("No roles found in rolebox directory");
   }
 
-  return createPluginHooks(resolvedRoles, ctx.client, roleFunctionsMap, roleGraphMap);
+  return createPluginHooks(resolvedRoles, ctx.client, roleFunctionsMap, roleGraphMap, ctx.directory);
 };
 
 export default {
