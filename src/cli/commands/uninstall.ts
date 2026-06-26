@@ -1,22 +1,15 @@
-import { findInLock, removeFromLock } from "../config.js";
-import { getRolePath, getSyncTarget } from "../paths.js";
+import { defineCommand } from "citty";
+import { findInLock, removeFromLock } from "../config.ts";
+import { getRolePath, getSyncTarget } from "../paths.ts";
 import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { SyncTarget } from "../../constants.js";
+import { SyncTarget } from "../../constants.ts";
 
-export async function uninstall(args: string[]): Promise<void> {
-  const roleId = args[0];
-
-  if (!roleId) {
-    console.error("Usage: rolebox uninstall <role-id>");
-    process.exit(1);
-  }
-
+export async function uninstall(roleId: string): Promise<void> {
   const entry = findInLock(roleId);
 
   if (!entry) {
-    console.error(`Role '${roleId}' is not installed`);
-    process.exit(1);
+    throw new Error(`Role '${roleId}' is not installed`);
   }
 
   const { registry, version } = entry;
@@ -47,3 +40,20 @@ export async function uninstall(args: string[]): Promise<void> {
 
   console.log(`✓ Uninstalled ${roleId}@${version}`);
 }
+
+export default defineCommand({
+  meta: {
+    name: "uninstall",
+    description: "Remove an installed role",
+  },
+  args: {
+    role: {
+      type: "positional",
+      description: "Role ID to uninstall",
+      required: true,
+    },
+  },
+  async run({ args }) {
+    await uninstall(args.role);
+  },
+});

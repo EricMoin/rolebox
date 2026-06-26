@@ -211,7 +211,7 @@ describe("update", () => {
     mockComputeIntegrity.mockImplementation(async () => "sha256-abc123");
 
     const { update } = await importUpdate();
-    await update([]);
+    await update(undefined, false);
 
     const expectedPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "software-architect@2.0.0");
     expect(existsSync(expectedPath)).toBe(true);
@@ -231,7 +231,7 @@ describe("update", () => {
 
     const { update } = await importUpdate();
     const { logs, run } = captureLogs(async () => {
-      await update([]);
+      await update(undefined, false);
     });
     await run();
 
@@ -244,7 +244,7 @@ describe("update", () => {
 
     const { update } = await importUpdate();
     const { logs, run } = captureLogs(async () => {
-      await update(["nonexistent-role"]);
+      await update("nonexistent-role", false);
     });
     await run();
 
@@ -256,7 +256,7 @@ describe("update", () => {
 
     const { update } = await importUpdate();
     const { logs, run } = captureLogs(async () => {
-      await update([]);
+      await update(undefined, false);
     });
     await run();
 
@@ -275,7 +275,7 @@ describe("update", () => {
     mockComputeIntegrity.mockImplementation(async () => "sha256-abc123");
 
     const { update } = await importUpdate();
-    await update(["software-architect"]);
+    await update("software-architect", false);
 
     const archPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "software-architect@2.0.0");
     expect(existsSync(archPath)).toBe(true);
@@ -305,7 +305,7 @@ describe("update", () => {
 
     const { update } = await importUpdate();
     const { logs, run } = captureLogs(async () => {
-      await update([]);
+      await update(undefined, false);
     });
     await run();
 
@@ -323,7 +323,7 @@ describe("update", () => {
 
     const { update } = await importUpdate();
     const { logs, run } = captureLogs(async () => {
-      await update([]);
+      await update(undefined, false);
     });
     await run();
 
@@ -336,7 +336,7 @@ describe("update", () => {
 
     const { update } = await importUpdate();
     const { logs, run } = captureLogs(async () => {
-      await update([]);
+      await update(undefined, false);
     });
     await run();
 

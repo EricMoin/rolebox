@@ -123,14 +123,14 @@ describe("CLI E2E", () => {
       expect(lockData.roles[0].role).toBe("test-role");
 
       const { list } = await import("../../src/cli/commands/list");
-      const { logs: ll, run: rl } = captureOutput(async () => { list([]); });
+      const { logs: ll, run: rl } = captureOutput(async () => { list(false); });
       await rl();
       expect(ll.some((l) => l.includes("test-role"))).toBe(true);
       expect(ll.some((l) => l.includes("1.0.0"))).toBe(true);
       expect(ll.some((l) => l.includes("oh-my-role"))).toBe(true);
 
       const { sync } = await import("../../src/cli/commands/sync");
-      const { logs: sl, run: rs } = captureOutput(async () => { await sync(["opencode"]); });
+      const { logs: sl, run: rs } = captureOutput(async () => { await sync("opencode"); });
       await rs();
       const syncTarget = join(configDir, "opencode", "rolebox", "test-role");
       expect(existsSync(syncTarget)).toBe(true);
@@ -139,14 +139,14 @@ describe("CLI E2E", () => {
       expect(sl.some((l) => l.includes("Synced 1 roles"))).toBe(true);
 
       const { uninstall } = await import("../../src/cli/commands/uninstall");
-      const { logs: ul, run: ru } = captureOutput(async () => { await uninstall(["test-role"]); });
+      const { logs: ul, run: ru } = captureOutput(async () => { await uninstall("test-role"); });
       await ru();
       expect(existsSync(rolePath)).toBe(false);
       const la = load(readFileSync(lockPath, "utf-8")) as any;
       expect(la.roles).toHaveLength(0);
       expect(ul.some((l) => l.includes("Uninstalled"))).toBe(true);
 
-      const { logs: lf, run: rf } = captureOutput(async () => { list([]); });
+      const { logs: lf, run: rf } = captureOutput(async () => { list(false); });
       await rf();
       expect(lf.some((l) => l.includes("No roles installed"))).toBe(true);
     });
@@ -154,8 +154,8 @@ describe("CLI E2E", () => {
 
   describe("registry management flow", () => {
     it("shows default oh-my-role on list", async () => {
-      const { registry } = await import("../../src/cli/commands/registry");
-      const c = captureOutput(async () => { await registry(["list"]); });
+      const { registryListFn } = await import("../../src/cli/commands/registry");
+      const c = captureOutput(async () => { await registryListFn(); });
       await c.run();
       expect(c.logs.some((l) => l.includes("oh-my-role"))).toBe(true);
       expect(c.logs.some((l) => l.includes("(default)"))).toBe(true);
@@ -166,8 +166,8 @@ describe("CLI E2E", () => {
         name: "my-repo", description: "Test", url: "https://github.com/my-org/my-repo", roles: {},
       }));
 
-      const { registry } = await import("../../src/cli/commands/registry");
-      const c = captureOutput(async () => { await registry(["add", "https://github.com/my-org/my-repo"]); });
+      const { registryAddFn } = await import("../../src/cli/commands/registry");
+      const c = captureOutput(async () => { await registryAddFn("https://github.com/my-org/my-repo"); });
       await c.run();
       expect(c.logs.some((l) => l.includes("Added"))).toBe(true);
       expect(c.logs.some((l) => l.includes("my-repo"))).toBe(true);
@@ -183,10 +183,10 @@ describe("CLI E2E", () => {
         url: "https://github.com/custom/custom-rolebox", roles: {},
       }));
 
-      const { registry } = await import("../../src/cli/commands/registry");
-      await registry(["add", "https://github.com/custom/custom-rolebox"]);
+      const { registryAddFn, registryListFn } = await import("../../src/cli/commands/registry");
+      await registryAddFn("https://github.com/custom/custom-rolebox");
 
-      const lc = captureOutput(async () => { await registry(["list"]); });
+      const lc = captureOutput(async () => { await registryListFn(); });
       await lc.run();
       expect(lc.logs.some((l) => l.includes("custom-rolebox"))).toBe(true);
       expect(lc.logs.some((l) => l.includes("oh-my-role"))).toBe(true);
@@ -202,8 +202,8 @@ describe("CLI E2E", () => {
         ],
       }), "utf-8");
 
-      const { registry } = await import("../../src/cli/commands/registry");
-      const c = captureOutput(async () => { await registry(["remove", "to-remove"]); });
+      const { registryRemoveFn } = await import("../../src/cli/commands/registry");
+      const c = captureOutput(async () => { await registryRemoveFn("to-remove"); });
       await c.run();
       expect(c.logs.some((l) => l.includes("Removed"))).toBe(true);
 
@@ -214,8 +214,8 @@ describe("CLI E2E", () => {
     });
 
     it("refuses to remove the default registry", async () => {
-      const { registry } = await import("../../src/cli/commands/registry");
-      await expect(registry(["remove", "oh-my-role"])).rejects.toThrow("EXIT");
+      const { registryRemoveFn } = await import("../../src/cli/commands/registry");
+      expect(() => registryRemoveFn("oh-my-role")).toThrow(/Cannot remove default registry/);
     });
   });
 
@@ -224,36 +224,36 @@ describe("CLI E2E", () => {
       globalThis.fetch = mockFetchReturning("", 500);
 
       const { search } = await import("../../src/cli/commands/search");
-      const c = captureOutput(async () => { await search(["anything"]); });
+      const c = captureOutput(async () => { await search("anything", false); });
       await c.run();
       expect(c.warns.some((w) => w.includes("Warning"))).toBe(true);
     });
 
     it("produces error for unknown sync target", async () => {
       const { sync } = await import("../../src/cli/commands/sync");
-      await expect(sync(["unknown-target"])).rejects.toThrow("EXIT");
+      await expect(sync("unknown-target")).rejects.toThrow(/Unknown sync target/);
     });
 
     it("produces error when uninstalling unknown role", async () => {
       const { uninstall } = await import("../../src/cli/commands/uninstall");
-      await expect(uninstall(["nonexistent-role"])).rejects.toThrow("EXIT");
+      await expect(uninstall("nonexistent-role")).rejects.toThrow(/not installed/);
     });
 
     it("produces error when removing default registry", async () => {
-      const { registry } = await import("../../src/cli/commands/registry");
-      await expect(registry(["remove", "oh-my-role"])).rejects.toThrow("EXIT");
+      const { registryRemoveFn } = await import("../../src/cli/commands/registry");
+      expect(() => registryRemoveFn("oh-my-role")).toThrow(/Cannot remove default registry/);
     });
 
     it("handles registry add with invalid URL", async () => {
-      const { registry } = await import("../../src/cli/commands/registry");
-      await expect(registry(["add", "not-a-url"])).rejects.toThrow("EXIT");
+      const { registryAddFn } = await import("../../src/cli/commands/registry");
+      await expect(registryAddFn("not-a-url")).rejects.toThrow(/Invalid GitHub URL/);
     });
   });
 
   describe("sync edge cases", () => {
     it("sync handles empty lock file gracefully", async () => {
       const { sync } = await import("../../src/cli/commands/sync");
-      const c = captureOutput(async () => { await sync(["opencode"]); });
+      const c = captureOutput(async () => { await sync("opencode"); });
       await c.run();
       expect(c.logs.some((l) => l.includes("Synced 0 roles"))).toBe(true);
     });
@@ -272,11 +272,11 @@ describe("CLI E2E", () => {
       }), "utf-8");
 
       const { sync } = await import("../../src/cli/commands/sync");
-      const c1 = captureOutput(async () => { await sync(["opencode"]); });
+      const c1 = captureOutput(async () => { await sync("opencode"); });
       await c1.run();
       expect(c1.logs.some((l) => l.includes("Synced 1 roles"))).toBe(true);
 
-      const c2 = captureOutput(async () => { await sync(["opencode"]); });
+      const c2 = captureOutput(async () => { await sync("opencode"); });
       await c2.run();
       expect(c2.logs.some((l) => l.includes("Synced 1 roles"))).toBe(true);
       expect(c2.warns).toHaveLength(0);
@@ -306,7 +306,7 @@ describe("CLI E2E", () => {
       writeFileSync(join(targetDir, "manual-role", "role.yaml"), "name: Manual\n", "utf-8");
 
       const { sync } = await import("../../src/cli/commands/sync");
-      const c = captureOutput(async () => { await sync(["opencode"]); });
+      const c = captureOutput(async () => { await sync("opencode"); });
       await c.run();
       expect(c.warns.some((w) => w.includes("regular directory"))).toBe(true);
     });
@@ -317,7 +317,7 @@ describe("CLI E2E", () => {
       symlinkSync("/nonexistent/dead/path", join(targetDir, "broken-link"));
 
       const { sync } = await import("../../src/cli/commands/sync");
-      const c = captureOutput(async () => { await sync(["opencode"]); });
+      const c = captureOutput(async () => { await sync("opencode"); });
       await c.run();
       expect(existsSync(join(targetDir, "broken-link"))).toBe(false);
       expect(c.logs.some((l) => l.includes("1 cleaned"))).toBe(true);
@@ -327,7 +327,7 @@ describe("CLI E2E", () => {
   describe("list edge cases", () => {
     it("list --json outputs valid JSON when empty", async () => {
       const { list } = await import("../../src/cli/commands/list");
-      const { logs, run } = captureOutput(async () => { list(["--json"]); });
+      const { logs, run } = captureOutput(async () => { list(true); });
       await run();
       const parsed = JSON.parse(logs.join(""));
       expect(Array.isArray(parsed)).toBe(true);
@@ -343,7 +343,7 @@ describe("CLI E2E", () => {
       mkdirSync(join(dataDir, "rolebox", "roles", "oh-my-role", "test-role@1.0.0"), { recursive: true });
 
       const { list } = await import("../../src/cli/commands/list");
-      const { logs, run } = captureOutput(async () => { list(["--json"]); });
+      const { logs, run } = captureOutput(async () => { list(true); });
       await run();
       const parsed = JSON.parse(logs.join(""));
       expect(Array.isArray(parsed)).toBe(true);
@@ -354,7 +354,7 @@ describe("CLI E2E", () => {
 
     it("list shows empty message when no roles", async () => {
       const { list } = await import("../../src/cli/commands/list");
-      const { logs, run } = captureOutput(async () => { list([]); });
+      const { logs, run } = captureOutput(async () => { list(false); });
       await run();
       expect(logs.some((l) => l.includes("No roles installed"))).toBe(true);
     });
@@ -373,7 +373,7 @@ describe("CLI E2E", () => {
       globalThis.fetch = mockFetchReturning(dump(sampleManifest));
 
       const { search } = await import("../../src/cli/commands/search");
-      const c = captureOutput(async () => { await search(["test-role"]); });
+      const c = captureOutput(async () => { await search("test-role", false); });
       await c.run();
       expect(c.logs.some((l) => l.includes("test-role"))).toBe(true);
     });
@@ -390,7 +390,7 @@ describe("CLI E2E", () => {
       globalThis.fetch = mockFetchReturning(dump(sampleManifest));
 
       const { search } = await import("../../src/cli/commands/search");
-      const c = captureOutput(async () => { await search(["nonexistent"]); });
+      const c = captureOutput(async () => { await search("nonexistent", false); });
       await c.run();
       expect(c.logs.some((l) => l.includes("No roles matching"))).toBe(true);
     });

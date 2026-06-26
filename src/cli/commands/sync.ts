@@ -1,6 +1,7 @@
-import { loadLock } from "../config.js";
-import { getSyncTarget, getRolePath } from "../paths.js";
-import { SyncTarget } from "../../constants.js";
+import { defineCommand } from "citty";
+import { loadLock } from "../config.ts";
+import { getSyncTarget, getRolePath } from "../paths.ts";
+import { SyncTarget } from "../../constants.ts";
 import {
   existsSync,
   mkdirSync,
@@ -12,29 +13,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-/**
- * Sync installed roles to a target tool's configuration directory.
- * Currently only supports "opencode".
- *
- * Flow:
- *   1. Parse args, default to "opencode" if not provided
- *   2. Validate target via getSyncTarget (throws if unknown)
- *   3. Create target directory if it doesn't exist
- *   4. Load lock file to get all installed roles
- *   5. For each installed role, create/update symlink
- *   6. Clean up stale (broken) symlinks
- *   7. Print summary
- */
-export async function sync(args: string[]): Promise<void> {
-  const target = args[0] || SyncTarget.Opencode;
-
-  let syncTarget: string;
-  try {
-    syncTarget = getSyncTarget(target);
-  } catch (err) {
-    console.error((err as Error).message);
-    process.exit(1);
-  }
+export async function sync(target: string): Promise<void> {
+  const syncTarget = getSyncTarget(target);
 
   mkdirSync(syncTarget, { recursive: true });
 
@@ -112,3 +92,20 @@ export async function sync(args: string[]): Promise<void> {
   if (cleaned > 0) parts.push(`${cleaned} cleaned`);
   console.log(parts.join(", "));
 }
+
+export default defineCommand({
+  meta: {
+    name: "sync",
+    description: "Deploy roles to target tool (e.g. opencode)",
+  },
+  args: {
+    target: {
+      type: "positional",
+      description: "Sync target (default: opencode)",
+      default: SyncTarget.Opencode,
+    },
+  },
+  async run({ args }) {
+    await sync(args.target);
+  },
+});

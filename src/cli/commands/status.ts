@@ -1,12 +1,13 @@
+import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
-import { loadLock, loadConfig, getConfigPath, getLockPath } from "../config.js";
-import { getSyncTarget, getRolePath } from "../paths.js";
-import { fetchRegistryManifest } from "../registry-client.js";
-import { compareVersions } from "./update.js";
-import { SyncTarget, PLUGIN_ID } from "../../constants.js";
+import { loadLock, loadConfig, getConfigPath, getLockPath } from "../config.ts";
+import { getSyncTarget, getRolePath } from "../paths.ts";
+import { fetchRegistryManifest } from "../registry-client.ts";
+import { compareVersions } from "./update.ts";
+import { SyncTarget, PLUGIN_ID } from "../../constants.ts";
 import {
   bold,
   dim,
@@ -22,7 +23,7 @@ import {
   printField,
   checkSymlink,
   listSymlinks,
-} from "../format.js";
+} from "../format.ts";
 
 interface StatusJson {
   version: string;
@@ -44,9 +45,7 @@ interface StatusJson {
   };
 }
 
-export async function status(args: string[]): Promise<void> {
-  const checkUpdates = args.includes("-u") || args.includes("--check-updates");
-  const jsonOutput = args.includes("--json");
+export async function status(checkUpdates: boolean, jsonOutput: boolean): Promise<void> {
 
   const pkg = JSON.parse(
     readFileSync(findPackageJson(), "utf-8"),
@@ -300,3 +299,24 @@ async function fetchLatestVersions(
 
   return result;
 }
+
+export default defineCommand({
+  meta: {
+    name: "status",
+    description: "Show overall health and opencode integration",
+  },
+  args: {
+    checkUpdates: {
+      type: "boolean",
+      alias: ["u", "check-updates"],
+      description: "Check for available updates",
+    },
+    json: {
+      type: "boolean",
+      description: "Output as JSON",
+    },
+  },
+  async run({ args }) {
+    await status(args.checkUpdates ?? false, args.json ?? false);
+  },
+});

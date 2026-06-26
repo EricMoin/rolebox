@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
@@ -46,7 +46,6 @@ afterAll(() => {
 const mockFetchManifest = mock();
 
 let tmpConfigDir: string;
-let origExit: typeof process.exit;
 
 beforeEach(() => {
   tmpConfigDir = mkdtempSync(join(tmpdir(), "rolebox-registry-config-"));
@@ -64,16 +63,10 @@ beforeEach(() => {
     },
     fetchRegistryManifest: mockFetchManifest,
   }));
-
-  origExit = process.exit;
-  (process as any).exit = ((_code?: number) => {
-    throw new Error("EXIT");
-  }) as any;
 });
 
 afterEach(() => {
   delete process.env.XDG_CONFIG_HOME;
-  if (origExit) process.exit = origExit;
   rmSync(tmpConfigDir, { recursive: true, force: true });
 });
 
@@ -118,10 +111,6 @@ function capture(
   };
 }
 
-async function importRegistry() {
-  return await import("../../../src/cli/commands/registry");
-}
-
 function configDir(): string {
   return join(tmpConfigDir, "rolebox");
 }
@@ -132,8 +121,8 @@ function configPath(): string {
 
 describe("registry list", () => {
   it("shows the default oh-my-role registry when no config exists", async () => {
-    const { registry } = await importRegistry();
-    const c = capture(async () => registry(["list"]));
+    const { registryListFn } = await import("../../../src/cli/commands/registry");
+    const c = capture(async () => registryListFn());
     await c.run();
 
     expect(c.out.some((l) => l.includes("oh-my-role"))).toBe(true);
@@ -141,8 +130,8 @@ describe("registry list", () => {
   });
 
   it("lists registries without a subcommand (defaults to list)", async () => {
-    const { registry } = await importRegistry();
-    const c = capture(async () => registry([]));
+    const { registryListFn } = await import("../../../src/cli/commands/registry");
+    const c = capture(async () => registryListFn());
     await c.run();
 
     expect(c.out.some((l) => l.includes("oh-my-role"))).toBe(true);
@@ -156,9 +145,9 @@ describe("registry add", () => {
   });
 
   it("adds a new registry and persists to config", async () => {
-    const { registry } = await importRegistry();
+    const { registryAddFn } = await import("../../../src/cli/commands/registry");
     const c = capture(async () =>
-      registry(["add", "https://github.com/my-org/my-repo"]),
+      registryAddFn("https://github.com/my-org/my-repo"),
     );
     await c.run();
 
@@ -171,27 +160,27 @@ describe("registry add", () => {
   });
 
   it("rejects an invalid GitHub URL", async () => {
-    const { registry } = await importRegistry();
-    await expect(registry(["add", "not-a-url"])).rejects.toThrow("EXIT");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    await expect(registryAddFn("not-a-url")).rejects.toThrow(/Invalid GitHub URL/);
   });
 
   it("rejects a duplicate registry name", async () => {
-    const { registry } = await importRegistry();
-    await registry(["add", "https://github.com/owner/dup-registry"]);
+    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    await registryAddFn("https://github.com/owner/dup-registry");
     await expect(
-      registry(["add", "https://github.com/other/dup-registry"]),
-    ).rejects.toThrow("EXIT");
+      registryAddFn("https://github.com/other/dup-registry"),
+    ).rejects.toThrow(/already configured/);
   });
 
   it("rejects when no URL provided", async () => {
-    const { registry } = await importRegistry();
-    await expect(registry(["add"])).rejects.toThrow("EXIT");
+    const { registryAddFn } = await import("../../../src/cli/commands/registry");
+    await expect(registryAddFn("")).rejects.toThrow(/Invalid GitHub URL/);
   });
 
   it("validates the URL by fetching registry.yaml", async () => {
-    const { registry } = await importRegistry();
+    const { registryAddFn } = await import("../../../src/cli/commands/registry");
     const c = capture(async () =>
-      registry(["add", "https://github.com/validated/reg"]),
+      registryAddFn("https://github.com/validated/reg"),
     );
     await c.run();
 
@@ -203,10 +192,10 @@ describe("registry add", () => {
     mockFetchManifest.mockReset();
     mockFetchManifest.mockRejectedValue(new Error("not found"));
 
-    const { registry } = await importRegistry();
+    const { registryAddFn } = await import("../../../src/cli/commands/registry");
     await expect(
-      registry(["add", "https://github.com/bad/registry"]),
-    ).rejects.toThrow("EXIT");
+      registryAddFn("https://github.com/bad/registry"),
+    ).rejects.toThrow(/Could not validate registry/);
   });
 });
 
@@ -231,8 +220,8 @@ describe("registry remove", () => {
       "utf-8",
     );
 
-    const { registry } = await importRegistry();
-    const c = capture(async () => registry(["remove", "custom-registry"]));
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    const c = capture(async () => registryRemoveFn("custom-registry"));
     await c.run();
 
     expect(c.out.some((l) => l.includes("Removed"))).toBe(true);
@@ -244,26 +233,17 @@ describe("registry remove", () => {
   });
 
   it("refuses to remove the default registry", async () => {
-    const { registry } = await importRegistry();
-    await expect(registry(["remove", "oh-my-role"])).rejects.toThrow("EXIT");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    expect(() => registryRemoveFn("oh-my-role")).toThrow(/Cannot remove default registry/);
   });
 
   it("rejects removal of non-existent registry", async () => {
-    const { registry } = await importRegistry();
-    await expect(
-      registry(["remove", "nonexistent-registry"]),
-    ).rejects.toThrow("EXIT");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    expect(() => registryRemoveFn("nonexistent-registry")).toThrow(/not found/);
   });
 
   it("rejects removal when no name provided", async () => {
-    const { registry } = await importRegistry();
-    await expect(registry(["remove"])).rejects.toThrow("EXIT");
-  });
-});
-
-describe("registry unknown subcommand", () => {
-  it("rejects an unknown subcommand", async () => {
-    const { registry } = await importRegistry();
-    await expect(registry(["unknown-sub"])).rejects.toThrow("EXIT");
+    const { registryRemoveFn } = await import("../../../src/cli/commands/registry");
+    expect(() => registryRemoveFn("")).toThrow(/not found/);
   });
 });

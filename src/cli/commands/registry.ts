@@ -1,32 +1,8 @@
-import { loadConfig, saveConfig, loadLock } from "../config.js";
-import { parseGitHubUrl, fetchRegistryManifest } from "../registry-client.js";
+import { defineCommand } from "citty";
+import { loadConfig, saveConfig, loadLock } from "../config.ts";
+import { parseGitHubUrl, fetchRegistryManifest } from "../registry-client.ts";
 
-/**
- * Registry management command dispatcher.
- * args[0] is the subcommand: add, remove, list
- */
-export async function registry(args: string[]): Promise<void> {
-  const subcommand = args[0];
-
-  if (!subcommand || subcommand === "list") {
-    return registryList();
-  }
-
-  if (subcommand === "add") {
-    return registryAdd(args.slice(1));
-  }
-
-  if (subcommand === "remove") {
-    return registryRemove(args.slice(1));
-  }
-
-  console.error(
-    `Unknown registry subcommand '${subcommand}'. Usage: rolebox registry <add|remove|list>`,
-  );
-  process.exit(1);
-}
-
-function registryList(): void {
+export function registryListFn(): void {
   const config = loadConfig();
   console.log("Registries:");
   for (const reg of config.registries) {
@@ -35,19 +11,12 @@ function registryList(): void {
   }
 }
 
-async function registryAdd(args: string[]): Promise<void> {
-  const url = args[0];
-  if (!url) {
-    console.error("Usage: rolebox registry add <url>");
-    process.exit(1);
-  }
-
+export async function registryAddFn(url: string): Promise<void> {
   let owner: string, repo: string;
   try {
     ({ owner, repo } = parseGitHubUrl(url));
   } catch {
-    console.error("Invalid GitHub URL. Expected: https://github.com/owner/repo");
-    process.exit(1);
+    throw new Error("Invalid GitHub URL. Expected: https://github.com/owner/repo");
   }
   const name = repo;
 
@@ -55,45 +24,34 @@ async function registryAdd(args: string[]): Promise<void> {
   try {
     await fetchRegistryManifest(entry, "main", { noCache: true });
   } catch (err) {
-    console.error(`Could not validate registry at ${url}: ${(err as Error).message}`);
-    process.exit(1);
+    throw new Error(`Could not validate registry at ${url}: ${(err as Error).message}`);
   }
 
   const config = loadConfig();
   if (config.registries.some((r) => r.name === name)) {
-    console.error(`Registry '${name}' is already configured`);
-    process.exit(1);
+    throw new Error(`Registry '${name}' is already configured`);
   }
   config.registries.push(entry);
   saveConfig(config);
   console.log(`✓ Added registry '${name}' (${url})`);
 }
 
-function registryRemove(args: string[]): void {
-  const name = args[0];
-  if (!name) {
-    console.error("Usage: rolebox registry remove <name>");
-    process.exit(1);
-  }
-
+export function registryRemoveFn(name: string): void {
   const config = loadConfig();
   const index = config.registries.findIndex((r) => r.name === name);
 
   if (index === -1) {
-    console.error(`Registry '${name}' not found`);
-    process.exit(1);
+    throw new Error(`Registry '${name}' not found`);
   }
 
   if (config.registries[index].default) {
-    console.error(`Cannot remove default registry '${name}'`);
-    process.exit(1);
+    throw new Error(`Cannot remove default registry '${name}'`);
   }
 
   config.registries.splice(index, 1);
   saveConfig(config);
   console.log(`✓ Removed registry '${name}'`);
 
-  // Warn about installed roles from this registry
   const lock = loadLock();
   const affected = lock.roles.filter((r) => r.registry === name);
   if (affected.length > 0) {
@@ -102,3 +60,37 @@ function registryRemove(args: string[]): void {
     );
   }
 }
+
+const registryList = defineCommand({
+  meta: { name: "list", description: "Show all configured registries" },
+  run() { registryListFn(); },
+});
+
+const registryAdd = defineCommand({
+  meta: { name: "add", description: "Add a registry" },
+  args: {
+    url: { type: "positional", description: "GitHub repository URL", required: true },
+  },
+  async run({ args }) { await registryAddFn(args.url); },
+});
+
+const registryRemove = defineCommand({
+  meta: { name: "remove", description: "Remove a registry" },
+  args: {
+    name: { type: "positional", description: "Registry name to remove", required: true },
+  },
+  run({ args }) { registryRemoveFn(args.name); },
+});
+
+export default defineCommand({
+  meta: {
+    name: "registry",
+    description: "Manage registries (add, remove, list)",
+  },
+  subCommands: {
+    list: registryList,
+    add: registryAdd,
+    remove: registryRemove,
+  },
+  default: "list",
+});

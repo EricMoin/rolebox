@@ -1,7 +1,8 @@
-import { loadConfig, loadLock, addToLock, findInLock } from "../config.js";
-import { fetchRegistryManifest, downloadRole, computeIntegrity } from "../registry-client.js";
-import { getRolePath } from "../paths.js";
-import type { LockEntry } from "../types.js";
+import { defineCommand } from "citty";
+import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
+import { fetchRegistryManifest, downloadRole, computeIntegrity } from "../registry-client.ts";
+import { getRolePath } from "../paths.ts";
+import type { LockEntry } from "../types.ts";
 import { existsSync, renameSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -19,17 +20,9 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/**
- * Update installed roles to the latest versions from their registries.
- * `args[0]` optional — if provided, update only that role. Otherwise update all.
- */
-export async function update(args: string[]): Promise<void> {
-  const noCache = args.includes("--no-cache");
-  const filteredArgs = args.filter((a) => a !== "--no-cache");
-
+export async function update(specificRole: string | undefined, noCache: boolean): Promise<void> {
   const config = loadConfig();
   const lock = loadLock();
-  const specificRole = filteredArgs[0];
 
   let updated = 0;
   let upToDate = 0;
@@ -110,3 +103,24 @@ export async function update(args: string[]): Promise<void> {
     console.log("Run `rolebox sync opencode` to deploy changes");
   }
 }
+
+export default defineCommand({
+  meta: {
+    name: "update",
+    description: "Update installed roles to latest versions",
+  },
+  args: {
+    role: {
+      type: "positional",
+      description: "Specific role to update (updates all if omitted)",
+    },
+    noCache: {
+      type: "boolean",
+      alias: ["no-cache"],
+      description: "Bypass registry cache",
+    },
+  },
+  async run({ args }) {
+    await update(args.role, args.noCache ?? false);
+  },
+});

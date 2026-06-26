@@ -119,7 +119,7 @@ describe("sync", () => {
     const sourcePath = setupRoleSource("hub", "test-role", "1.0.0");
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     const targetPath = join(syncTarget(), "test-role");
     expect(existsSync(targetPath)).toBe(true);
@@ -145,7 +145,7 @@ describe("sync", () => {
     writeFileSync(join(manualDir, "role.yaml"), "name: manual\n", "utf-8");
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     expect(lstatSync(manualDir).isDirectory()).toBe(true);
     expect(lstatSync(manualDir).isSymbolicLink()).toBe(false);
@@ -161,7 +161,7 @@ describe("sync", () => {
     symlinkSync("/nonexistent/dead/path", join(targetDir, "broken-link"));
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     expect(existsSync(join(targetDir, "broken-link"))).toBe(false);
     expect(logs.some((l) => l.includes("1 cleaned"))).toBe(true);
@@ -180,12 +180,12 @@ describe("sync", () => {
     setupRoleSource("hub", "idem-role", "1.0.0");
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     logs = [];
     warns = [];
     errors = [];
-    await sync(["opencode"]);
+    await sync("opencode");
 
     expect(logs.some((l) => l.includes("Synced 1 roles"))).toBe(true);
     expect(warns).toHaveLength(0);
@@ -193,21 +193,8 @@ describe("sync", () => {
   });
 
   it("errors on unknown target", async () => {
-    const origExit = process.exit;
-    process.exit = ((code?: number) => {
-      throw new Error(`EXIT_${code}`);
-    }) as typeof process.exit;
-
-    try {
-      const { sync } = await importSync();
-      await expect(sync(["unknown-target"])).rejects.toThrow("EXIT_1");
-      expect(errors.some((e) => e.includes("Unknown sync target"))).toBe(true);
-      expect(
-        errors.some((e) => e.includes("Supported targets: opencode")),
-      ).toBe(true);
-    } finally {
-      process.exit = origExit;
-    }
+    const { sync } = await importSync();
+    await expect(sync("unknown-target")).rejects.toThrow(/Unknown sync target/);
   });
 
   it("warns when source directory is missing", async () => {
@@ -222,7 +209,7 @@ describe("sync", () => {
     ]);
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     expect(
       warns.some((w) => w.includes("source for 'missing-role' not found")),
@@ -235,7 +222,7 @@ describe("sync", () => {
     setupLock([]);
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     expect(logs.some((l) => l.includes("Synced 0 roles"))).toBe(true);
     expect(warns).toHaveLength(0);
@@ -254,7 +241,7 @@ describe("sync", () => {
     const sourcePath = setupRoleSource("hub", "default-role", "1.0.0");
 
     const { sync } = await importSync();
-    await sync([]);
+    await sync("opencode");
 
     const targetPath = join(syncTarget(), "default-role");
     expect(existsSync(targetPath)).toBe(true);
@@ -274,7 +261,7 @@ describe("sync", () => {
     symlinkSync(manualSource, join(targetDir, "manual-symlink"));
 
     const { sync } = await importSync();
-    await sync(["opencode"]);
+    await sync("opencode");
 
     expect(existsSync(join(targetDir, "manual-symlink"))).toBe(true);
   });

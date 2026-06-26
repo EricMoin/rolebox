@@ -1,10 +1,11 @@
+import { defineCommand } from "citty";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import yaml from "js-yaml";
-import { loadLock, findInLock } from "../config.js";
-import { getSyncTarget, getRolePath } from "../paths.js";
-import { computeIntegrity } from "../registry-client.js";
-import { DEFAULT_FUNCTIONS, RoleMode, SyncTarget } from "../../constants.js";
+import { loadLock, findInLock } from "../config.ts";
+import { getSyncTarget, getRolePath } from "../paths.ts";
+import { computeIntegrity } from "../registry-client.ts";
+import { DEFAULT_FUNCTIONS, RoleMode, SyncTarget } from "../../constants.ts";
 import {
   bold,
   dim,
@@ -20,7 +21,7 @@ import {
   printField,
   checkSymlink,
   listSymlinks,
-} from "../format.js";
+} from "../format.ts";
 import { homedir } from "node:os";
 
 interface RoleYaml {
@@ -66,22 +67,10 @@ interface InfoJson {
   integrityCheck?: { passed: boolean; expected: string; actual: string };
 }
 
-export async function info(args: string[]): Promise<void> {
-  const jsonOutput = args.includes("--json");
-  const checkIntegrity = args.includes("--check");
-  const roleId = args.find((a) => !a.startsWith("-"));
-
-  if (!roleId) {
-    console.error("Usage: rolebox info <role> [--json] [--check]");
-    process.exit(1);
-    return;
-  }
-
+export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: boolean): Promise<void> {
   const entry = findInLock(roleId);
   if (!entry) {
-    console.error(`Role "${roleId}" is not installed. Run \`rolebox list\` to see installed roles.`);
-    process.exit(1);
-    return;
+    throw new Error(`Role "${roleId}" is not installed. Run \`rolebox list\` to see installed roles.`);
   }
 
   const rolePath = getRolePath(entry.registry, entry.role, entry.version);
@@ -271,3 +260,28 @@ function shortenPath(p: string): string {
   }
   return p;
 }
+
+export default defineCommand({
+  meta: {
+    name: "info",
+    description: "Show detailed info for an installed role",
+  },
+  args: {
+    role: {
+      type: "positional",
+      description: "Role ID to inspect",
+      required: true,
+    },
+    json: {
+      type: "boolean",
+      description: "Output as JSON",
+    },
+    check: {
+      type: "boolean",
+      description: "Verify integrity hash",
+    },
+  },
+  async run({ args }) {
+    await info(args.role, args.json ?? false, args.check ?? false);
+  },
+});
