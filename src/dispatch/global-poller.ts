@@ -251,7 +251,7 @@ export class GlobalPoller {
 
   private _adjustInterval(): void {
     const tc = this.tasks.size;
-    const max = this.config.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+    const max = Math.max(this.config.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, 1);
     if (tc === 0) { this._intervalMs = MAX_POLL_INTERVAL_MS; return; }
     const ratio = tc / max;
     if (ratio >= 0.8) { this._intervalMs = MIN_POLL_INTERVAL_MS; }

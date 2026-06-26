@@ -248,6 +248,19 @@ describe("GlobalPoller", () => {
       await runCycle(p);
       expect(m.capturedTimeoutValue).toBe(MAX_POLL_INTERVAL_MS);
     });
+
+    it("9b. maxConcurrent=0 does not produce NaN", async () => {
+      const p = makePoller(m, { maxConcurrent: 0 });
+      m.statusFn.mockImplementation(() => sdkResult({
+        [SESSION_A]: { type: "busy" },
+      }));
+      p.registerTask(TASK_A, SESSION_A);
+      await runCycle(p);
+      const interval = (p as any)._intervalMs;
+      expect(Number.isFinite(interval)).toBe(true);
+      expect(interval).toBeGreaterThanOrEqual(MIN_POLL_INTERVAL_MS);
+      expect(interval).toBeLessThanOrEqual(MAX_POLL_INTERVAL_MS);
+    });
   });
 
   describe("error from completion detector", () => {
