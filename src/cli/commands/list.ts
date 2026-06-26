@@ -1,17 +1,13 @@
-import { loadLock } from "../config.js";
+import { defineCommand } from "citty";
+import { loadLock } from "../config.ts";
 
 /**
  * List installed roles from the lock file.
- *
- * Parses args for --json flag.
- * If no roles installed, prints helpful message.
- * Otherwise displays a formatted table.
  */
-export function list(args: string[]): void {
+export function list(json: boolean): void {
   const lock = loadLock();
 
-  // Check for --json flag first (should always output JSON, even if empty)
-  if (args.includes("--json")) {
+  if (json) {
     console.log(JSON.stringify(lock.roles, null, 2));
     return;
   }
@@ -23,8 +19,23 @@ export function list(args: string[]): void {
 
   console.log("Installed roles:");
   for (const entry of lock.roles) {
-    // Pad role name to 22 chars for alignment
     const padded = entry.role.padEnd(22);
     console.log(`  ${padded} ${entry.version}  (${entry.registry})`);
   }
 }
+
+export default defineCommand({
+  meta: {
+    name: "list",
+    description: "Show installed roles",
+  },
+  args: {
+    json: {
+      type: "boolean",
+      description: "Output as JSON",
+    },
+  },
+  run({ args }) {
+    list(args.json ?? false);
+  },
+});

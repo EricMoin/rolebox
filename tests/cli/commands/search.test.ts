@@ -129,7 +129,7 @@ function captureOutput(fn: () => Promise<void>): { logs: string[]; warnings: str
 describe("search", () => {
   it("finds matching roles by name", async () => {
     const { search } = await importSearch();
-    const { logs, run } = captureOutput(async () => { await search(["software"]); });
+    const { logs, run } = captureOutput(async () => { await search("software", false); });
     await run();
 
     expect(logs.some((l) => l.includes("software-architect"))).toBe(true);
@@ -138,7 +138,7 @@ describe("search", () => {
 
   it("matches against description and tags", async () => {
     const { search } = await importSearch();
-    const { logs, run } = captureOutput(async () => { await search(["devops"]); });
+    const { logs, run } = captureOutput(async () => { await search("devops", false); });
     await run();
 
     expect(logs.some((l) => l.includes("devops-engineer"))).toBe(true);
@@ -146,7 +146,7 @@ describe("search", () => {
 
   it("no-match produces helpful message", async () => {
     const { search } = await importSearch();
-    const { logs, run } = captureOutput(async () => { await search(["nonexistent"]); });
+    const { logs, run } = captureOutput(async () => { await search("nonexistent", false); });
     await run();
 
     expect(logs.some((l) => l.includes("No roles matching"))).toBe(true);
@@ -155,7 +155,7 @@ describe("search", () => {
 
   it("no-args lists all available roles", async () => {
     const { search } = await importSearch();
-    const { logs, run } = captureOutput(async () => { await search([]); });
+    const { logs, run } = captureOutput(async () => { await search(undefined, false); });
     await run();
 
     expect(logs.some((l) => l.includes("software-architect"))).toBe(true);
@@ -169,7 +169,7 @@ describe("search", () => {
     });
 
     const { search } = await importSearch();
-    const { warnings, run } = captureOutput(async () => { await search(["anything"]); });
+    const { warnings, run } = captureOutput(async () => { await search("anything", false); });
     await run();
 
     expect(warnings.some((w) => w.includes("Warning"))).toBe(true);
@@ -185,7 +185,7 @@ describe("search", () => {
     }));
 
     const { search } = await importSearch();
-    const { logs, run } = captureOutput(async () => { await search([]); });
+    const { logs, run } = captureOutput(async () => { await search(undefined, false); });
     await run();
 
     expect(logs.some((l) => l.includes("No roles found"))).toBe(true);
@@ -223,7 +223,7 @@ describe("search", () => {
     });
 
     const { search } = await importSearch();
-    const { logs, run } = captureOutput(async () => { await search([]); });
+    const { logs, run } = captureOutput(async () => { await search(undefined, false); });
     await run();
 
     expect(logs.some((l) => l.includes("software-architect"))).toBe(true);

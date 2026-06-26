@@ -64,7 +64,7 @@ describe("uninstall", () => {
     const rolePath = await installRole("my-role", "my-registry", "1.0.0");
 
     const { uninstall } = await import("../../../src/cli/commands/uninstall");
-    await uninstall(["my-role"]);
+    await uninstall("my-role");
 
     expect(existsSync(rolePath)).toBe(false);
   });
@@ -73,7 +73,7 @@ describe("uninstall", () => {
     await installRole("my-role", "my-registry", "1.0.0");
 
     const { uninstall } = await import("../../../src/cli/commands/uninstall");
-    await uninstall(["my-role"]);
+    await uninstall("my-role");
 
     const { findInLock } = await import("../../../src/cli/config");
     expect(findInLock("my-role")).toBeUndefined();
@@ -89,7 +89,7 @@ describe("uninstall", () => {
     expect(existsSync(targetPath)).toBe(true);
 
     const { uninstall } = await import("../../../src/cli/commands/uninstall");
-    await uninstall(["my-role"]);
+    await uninstall("my-role");
 
     expect(existsSync(targetPath)).toBe(false);
   });
@@ -103,7 +103,7 @@ describe("uninstall", () => {
     writeFileSync(join(manualPath, "role.yaml"), "name: manual-role\n");
 
     const { uninstall } = await import("../../../src/cli/commands/uninstall");
-    await uninstall(["my-role"]);
+    await uninstall("my-role");
 
     expect(existsSync(manualPath)).toBe(true);
     expect(existsSync(rolePath)).toBe(false);
@@ -113,7 +113,7 @@ describe("uninstall", () => {
     await installRole("my-role", "my-registry", "1.0.0", false);
 
     const { uninstall } = await import("../../../src/cli/commands/uninstall");
-    await uninstall(["my-role"]);
+    await uninstall("my-role");
 
     const { findInLock } = await import("../../../src/cli/config");
     expect(findInLock("my-role")).toBeUndefined();
@@ -122,21 +122,6 @@ describe("uninstall", () => {
   it("prints error and exits with code 1 when role is not installed", async () => {
     const { uninstall } = await import("../../../src/cli/commands/uninstall");
 
-    const exitSpy = spyOn(process, "exit").mockImplementation((code) => {
-      throw new Error(`exit ${code}`);
-    });
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
-
-    try {
-      await uninstall(["nonexistent"]);
-      expect(true).toBe(false);
-    } catch (e: any) {
-      expect(e.message).toBe("exit 1");
-    }
-
-    expect(errorSpy).toHaveBeenCalledWith("Role 'nonexistent' is not installed");
-
-    exitSpy.mockRestore();
-    errorSpy.mockRestore();
+    await expect(uninstall("nonexistent")).rejects.toThrow("Role 'nonexistent' is not installed");
   });
 });

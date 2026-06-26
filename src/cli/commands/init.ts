@@ -1,54 +1,17 @@
+import { defineCommand } from "citty";
 import { basename } from "node:path";
 import { join } from "node:path";
-import { checkTargetDir, deriveRoleId, validateInitRoleId } from "./init-utils.js";
-import { scaffoldRole } from "./init-scaffold.js";
-import { runInteractiveWizard } from "./init-prompts.js";
-import type { InitConfig, TemplateType } from "../templates/index.js";
+import { checkTargetDir, deriveRoleId, validateInitRoleId } from "./init-utils.ts";
+import { scaffoldRole } from "./init-scaffold.ts";
+import { runInteractiveWizard } from "./init-prompts.ts";
+import type { InitConfig, TemplateType } from "../templates/index.ts";
 
-/**
- * `rolebox init` — Scaffold a new role directory interactively or via flags.
- *
- * Usage:
- *   rolebox init [name] [--yes] [--template <type>] [-t <type>]
- *
- * Flags:
- *   --yes, -y                 Skip prompts, use sensible defaults
- *   --template <type>, -t     Template type (minimal, standard, subagents, collaboration)
- */
-export async function init(args: string[]): Promise<void> {
-  // -----------------------------------------------------------------------
-  // 1. Parse CLI arguments
-  // -----------------------------------------------------------------------
-  let nameArg: string | undefined;
-  let yes = false;
-  let templateArg: string | undefined;
+const VALID_TEMPLATES: TemplateType[] = ["minimal", "standard", "subagents", "collaboration"];
 
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-
-    if (a === "--yes" || a === "-y") {
-      yes = true;
-    } else if (a === "--template" || a === "-t") {
-      i++;
-      templateArg = args[i];
-      if (!templateArg) {
-        throw new Error("Expected a template type after --template/-t (minimal, standard, subagents, collaboration)");
-      }
-    } else if (a.startsWith("--")) {
-      throw new Error(`Unknown flag: ${a}`);
-    } else if (a.startsWith("-") && a !== "-y" && a !== "-t") {
-      throw new Error(`Unknown flag: ${a}`);
-    } else {
-      if (nameArg === undefined) {
-        nameArg = a;
-      }
-    }
-  }
-
+export async function init(nameArg: string | undefined, yes: boolean, templateArg: string | undefined): Promise<void> {
   // -----------------------------------------------------------------------
-  // 2. Validate template type
+  // 1. Validate template type
   // -----------------------------------------------------------------------
-  const VALID_TEMPLATES: TemplateType[] = ["minimal", "standard", "subagents", "collaboration"];
   let templateType: TemplateType = "standard";
 
   if (templateArg) {
@@ -118,3 +81,30 @@ export async function init(args: string[]): Promise<void> {
   console.log(`\u2713 Created ${templateType} role at ${targetDir}`);
   console.log(`Run \`rolebox sync opencode\` to deploy`);
 }
+
+export default defineCommand({
+  meta: {
+    name: "init",
+    description: "Scaffold a new role interactively",
+  },
+  args: {
+    name: {
+      type: "positional",
+      description: "Role name",
+    },
+    yes: {
+      type: "boolean",
+      alias: ["y"],
+      description: "Skip prompts, use sensible defaults",
+    },
+    template: {
+      type: "enum",
+      alias: ["t"],
+      description: "Template type",
+      options: VALID_TEMPLATES,
+    },
+  },
+  async run({ args }) {
+    await init(args.name, args.yes ?? false, args.template);
+  },
+});

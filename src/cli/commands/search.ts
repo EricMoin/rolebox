@@ -1,18 +1,11 @@
-import { loadConfig } from "../config.js";
-import { fetchRegistryManifest } from "../registry-client.js";
-import type { RegistryManifest } from "../types.js";
+import { defineCommand } from "citty";
+import { loadConfig } from "../config.ts";
+import { fetchRegistryManifest } from "../registry-client.ts";
+import type { RegistryManifest } from "../types.ts";
 
-/**
- * Search for roles matching a query string across all configured registries.
- * If no query provided, lists ALL available roles.
- * Matches against role ID, name, description, and tags.
- */
-export async function search(args: string[]): Promise<void> {
-  const noCache = args.includes("--no-cache");
-  const filteredArgs = args.filter((a) => a !== "--no-cache");
-
+export async function search(query: string | undefined, noCache: boolean): Promise<void> {
   const config = loadConfig();
-  const query = filteredArgs[0]?.toLowerCase();
+  const normalizedQuery = query?.toLowerCase();
 
   let foundAny = false;
 
@@ -28,11 +21,11 @@ export async function search(args: string[]): Promise<void> {
     }
 
     const entries = Object.entries(manifest.roles);
-    const filtered = query
+    const filtered = normalizedQuery
       ? entries.filter(([roleId, info]) => {
           const searchText =
             `${roleId} ${info.description} ${info.tags.join(" ")}`.toLowerCase();
-          return searchText.includes(query);
+          return searchText.includes(normalizedQuery);
         })
       : entries;
 
@@ -47,10 +40,31 @@ export async function search(args: string[]): Promise<void> {
   }
 
   if (!foundAny) {
-    if (query) {
-      console.log(`No roles matching '${query}'. Try a different search term.`);
+    if (normalizedQuery) {
+      console.log(`No roles matching '${normalizedQuery}'. Try a different search term.`);
     } else {
       console.log("No roles found in any registry.");
     }
   }
 }
+
+export default defineCommand({
+  meta: {
+    name: "search",
+    description: "Search available roles in registries",
+  },
+  args: {
+    query: {
+      type: "positional",
+      description: "Search query (matches name, description, tags)",
+    },
+    noCache: {
+      type: "boolean",
+      alias: ["no-cache"],
+      description: "Bypass registry cache",
+    },
+  },
+  async run({ args }) {
+    await search(args.query, args.noCache ?? false);
+  },
+});

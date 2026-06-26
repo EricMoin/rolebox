@@ -148,7 +148,7 @@ describe("install", () => {
     setupBasicMocks();
 
     const { install } = await importInstall();
-    await install(["software-architect"]);
+    await install("software-architect");
 
     const expectedPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "software-architect@1.0.0");
     expect(existsSync(expectedPath)).toBe(true);
@@ -158,7 +158,7 @@ describe("install", () => {
     setupBasicMocks();
 
     const { install } = await importInstall();
-    await install(["software-architect"]);
+    await install("software-architect");
 
     const lockPath = join(tmpConfigDir, "rolebox", "rolebox.lock");
     expect(existsSync(lockPath)).toBe(true);
@@ -177,7 +177,7 @@ describe("install", () => {
     setupBasicMocks();
 
     const { install } = await importInstall();
-    const { logs, run } = captureLogs(async () => { await install(["software-architect"]); });
+    const { logs, run } = captureLogs(async () => { await install("software-architect"); });
     await run();
 
     expect(logs.some((c) => c.includes("Installed"))).toBe(true);
@@ -189,9 +189,9 @@ describe("install", () => {
 
     const { install } = await importInstall();
 
-    await install(["software-architect"]);
+    await install("software-architect");
 
-    const { logs, run } = captureLogs(async () => { await install(["software-architect"]); });
+    const { logs, run } = captureLogs(async () => { await install("software-architect"); });
     await run();
 
     expect(logs.some((c) => c.includes("already installed"))).toBe(true);
@@ -202,7 +202,7 @@ describe("install", () => {
 
     const { install } = await importInstall();
 
-    await install(["software-architect@1.0.0"]);
+    await install("software-architect@1.0.0");
 
     const oldPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "software-architect@1.0.0");
     expect(existsSync(oldPath)).toBe(true);
@@ -211,7 +211,7 @@ describe("install", () => {
     mockDownloadRole.mockImplementation(async () => createMockExtractedDir("software-architect-v2"));
     mockComputeIntegrity.mockImplementation(async () => "sha256-def456");
 
-    await install(["software-architect@2.0.0"]);
+    await install("software-architect@2.0.0");
 
     expect(existsSync(oldPath)).toBe(false);
 
@@ -231,7 +231,7 @@ describe("install", () => {
     mockComputeIntegrity.mockImplementation(async () => "sha256-xyz");
 
     const { install } = await importInstall();
-    await install(["code-reviewer@2.0.0"]);
+    await install("code-reviewer@2.0.0");
 
     const expectedPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "code-reviewer@2.0.0");
     expect(existsSync(expectedPath)).toBe(true);
@@ -261,7 +261,7 @@ describe("install", () => {
     mockComputeIntegrity.mockImplementation(async () => "sha256-custom");
 
     const { install } = await importInstall();
-    await install(["custom-registry:code-reviewer@2.0.0"]);
+    await install("custom-registry:code-reviewer@2.0.0");
 
     const expectedPath = join(tmpDataDir, "rolebox", "roles", "custom-registry", "code-reviewer@2.0.0");
     expect(existsSync(expectedPath)).toBe(true);
@@ -278,23 +278,23 @@ describe("install", () => {
     });
 
     const { install } = await importInstall();
-    await expect(install(["nonexistent-role"])).rejects.toThrow(/not found/);
+    await expect(install("nonexistent-role")).rejects.toThrow(/not found/);
   });
 
   it("throws error for non-existent registry", async () => {
     const { install } = await importInstall();
-    await expect(install(["nonexistent-registry:some-role"])).rejects.toThrow(/not found/);
+    await expect(install("nonexistent-registry:some-role")).rejects.toThrow(/not found/);
   });
 
   it("throws error when no role spec is provided", async () => {
     const { install } = await importInstall();
-    await expect(install([])).rejects.toThrow(/usage/);
+    await expect(install("")).rejects.toThrow();
   });
 
   it("throws error for explicitly versioned role not in manifest", async () => {
     mockFetchManifest.mockImplementation(async () => sampleManifest);
 
     const { install } = await importInstall();
-    await expect(install(["missing-role@1.0.0"])).rejects.toThrow(/not found/);
+    await expect(install("missing-role@1.0.0")).rejects.toThrow(/not found/);
   });
 });

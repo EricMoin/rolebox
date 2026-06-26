@@ -1,7 +1,8 @@
-import { loadConfig, loadLock, addToLock, findInLock } from "../config.js";
-import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.js";
-import { getRolePath } from "../paths.js";
-import type { LockEntry } from "../types.js";
+import { defineCommand } from "citty";
+import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
+import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.ts";
+import { getRolePath } from "../paths.ts";
+import type { LockEntry } from "../types.ts";
 import { existsSync, renameSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -40,12 +41,7 @@ export function parseRoleSpec(spec: string): { roleId: string; registry?: string
 /**
  * Install a role from a registry.
  */
-export async function install(args: string[]): Promise<void> {
-  const spec = args[0];
-  if (!spec) {
-    throw new Error("usage: rolebox install <role>[@version]");
-  }
-
+export async function install(spec: string): Promise<void> {
   // 1. Parse role spec
   const parsed = parseRoleSpec(spec);
 
@@ -132,3 +128,20 @@ export async function install(args: string[]): Promise<void> {
   // 13. Print hint
   console.log(`Run \`rolebox sync opencode\` to deploy`);
 }
+
+export default defineCommand({
+  meta: {
+    name: "install",
+    description: "Install a role from a registry",
+  },
+  args: {
+    role: {
+      type: "positional",
+      description: "Role specifier (e.g. software-architect, my-reg:role@2.0.0)",
+      required: true,
+    },
+  },
+  async run({ args }) {
+    await install(args.role);
+  },
+});

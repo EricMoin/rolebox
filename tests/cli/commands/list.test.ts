@@ -99,7 +99,7 @@ function captureLogs(fn: () => void): { logs: string[]; run: () => void } {
 describe("list", () => {
   it("shows 'No roles installed' when lock file does not exist", async () => {
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list([]));
+    const { logs, run } = captureLogs(() => list(false));
     run();
     expect(logs.some((c) => c.includes("No roles installed"))).toBe(true);
   });
@@ -108,7 +108,7 @@ describe("list", () => {
     await createLockFile([]);
 
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list([]));
+    const { logs, run } = captureLogs(() => list(false));
     run();
     expect(logs.some((c) => c.includes("No roles installed"))).toBe(true);
   });
@@ -125,7 +125,7 @@ describe("list", () => {
     ]);
 
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list([]));
+    const { logs, run } = captureLogs(() => list(false));
     run();
 
     expect(logs[0]).toBe("Installed roles:");
@@ -146,7 +146,7 @@ describe("list", () => {
     ]);
 
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list(["--json"]));
+    const { logs, run } = captureLogs(() => list(true));
     run();
 
     const parsed = JSON.parse(logs[0]);
@@ -163,7 +163,7 @@ describe("list", () => {
     await createLockFile([]);
 
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list(["--json"]));
+    const { logs, run } = captureLogs(() => list(true));
     run();
 
     const parsed = JSON.parse(logs[0]);
@@ -189,7 +189,7 @@ describe("list", () => {
     ]);
 
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list([]));
+    const { logs, run } = captureLogs(() => list(false));
     run();
 
     expect(logs[0]).toBe("Installed roles:");
@@ -213,7 +213,7 @@ describe("list", () => {
     ]);
 
     const { list } = await importList();
-    const { logs, run } = captureLogs(() => list(["--json"]));
+    const { logs, run } = captureLogs(() => list(true));
     run();
 
     expect(logs.some((c) => c.includes("Installed roles:"))).toBe(false);

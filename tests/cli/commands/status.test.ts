@@ -126,7 +126,7 @@ describe("status", () => {
   it("shows no roles message when lock is empty", async () => {
     createLockFile([]);
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status([]));
+    const { logs, run } = captureLogs(() => status(false, false));
     await run();
     expect(logs.some((l) => l.includes("No roles installed"))).toBe(true);
   });
@@ -144,7 +144,7 @@ describe("status", () => {
     createSyncSymlink("test-role", roleDir);
 
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status([]));
+    const { logs, run } = captureLogs(() => status(false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -164,7 +164,7 @@ describe("status", () => {
     }]);
 
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status([]));
+    const { logs, run } = captureLogs(() => status(false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -176,7 +176,7 @@ describe("status", () => {
     createOpencodeConfig(["rolebox@latest"]);
 
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status([]));
+    const { logs, run } = captureLogs(() => status(false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -188,7 +188,7 @@ describe("status", () => {
     createOpencodeConfig(["some-other-plugin"]);
 
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status([]));
+    const { logs, run } = captureLogs(() => status(false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -205,7 +205,7 @@ describe("status", () => {
     }]);
 
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status(["--json"]));
+    const { logs, run } = captureLogs(() => status(false, true));
     await run();
 
     const parsed = JSON.parse(logs[0]);
@@ -218,7 +218,7 @@ describe("status", () => {
 
   it("handles missing config dir gracefully", async () => {
     const { status } = await importStatus();
-    const { logs, run } = captureLogs(() => status([]));
+    const { logs, run } = captureLogs(() => status(false, false));
     await run();
 
     const allOutput = logs.join("\n");

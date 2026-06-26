@@ -517,7 +517,7 @@ describe("init CLI (--yes mode)", () => {
 
   it("creates a role with --yes and name argument", async () => {
     const { init } = await import("../../../src/cli/commands/init");
-    await init(["my-test-role", "--yes"]);
+    await init("my-test-role", true, undefined);
 
     const roleDir = join(tmpDir, "my-test-role");
     expect(existsSync(join(roleDir, "role.yaml"))).toBe(true);
@@ -531,7 +531,7 @@ describe("init CLI (--yes mode)", () => {
   it("prints success and sync hint messages", async () => {
     const { init } = await import("../../../src/cli/commands/init");
     const { logs, run } = captureLogs(async () => {
-      await init(["role-output", "--yes"]);
+      await init("role-output", true, undefined);
     });
     await run();
 
@@ -541,7 +541,7 @@ describe("init CLI (--yes mode)", () => {
 
   it("respects --template flag for minimal template", async () => {
     const { init } = await import("../../../src/cli/commands/init");
-    await init(["--yes", "--template", "minimal", "bare-role"]);
+    await init("bare-role", true, "minimal");
 
     const roleDir = join(tmpDir, "bare-role");
     const yaml = load(readFileSync(join(roleDir, "role.yaml"), "utf-8")) as Record<string, unknown>;
@@ -552,7 +552,7 @@ describe("init CLI (--yes mode)", () => {
 
   it("respects -t shorthand flag", async () => {
     const { init } = await import("../../../src/cli/commands/init");
-    await init(["-y", "-t", "collaboration", "team-role"]);
+    await init("team-role", true, "collaboration");
 
     const roleDir = join(tmpDir, "team-role");
     const yaml = load(readFileSync(join(roleDir, "role.yaml"), "utf-8")) as Record<string, unknown>;
@@ -563,7 +563,7 @@ describe("init CLI (--yes mode)", () => {
 
   it("throws error for invalid role name with --yes", async () => {
     const { init } = await import("../../../src/cli/commands/init");
-    await expect(init(["bad--name", "--yes"])).rejects.toThrow(/--/);
+    await expect(init("bad--name", true, undefined)).rejects.toThrow(/--/);
   });
 
   it("throws error when target directory already has role.yaml", async () => {
@@ -572,14 +572,14 @@ describe("init CLI (--yes mode)", () => {
     writeFileSync(join(existingDir, "role.yaml"), "name: existing", "utf-8");
 
     const { init } = await import("../../../src/cli/commands/init");
-    await expect(init(["existing-dir", "--yes"])).rejects.toThrow(
+    await expect(init("existing-dir", true, undefined)).rejects.toThrow(
       /already contains a role\.yaml/,
     );
   });
 
   it("--yes without name uses cwd basename as role ID", async () => {
     const { init } = await import("../../../src/cli/commands/init");
-    await init(["--yes"]);
+    await init(undefined, true, undefined);
 
     const roleDir = tmpDir;
     expect(existsSync(join(roleDir, "role.yaml"))).toBe(true);
@@ -589,15 +589,8 @@ describe("init CLI (--yes mode)", () => {
   it("throws error for invalid template type", async () => {
     const { init } = await import("../../../src/cli/commands/init");
     await expect(
-      init(["--yes", "--template", "nonexistent", "my-role"]),
+      init("my-role", true, "nonexistent"),
     ).rejects.toThrow(/Unknown template/);
-  });
-
-  it("throws error for unknown flag", async () => {
-    const { init } = await import("../../../src/cli/commands/init");
-    await expect(
-      init(["--unknown-flag", "my-role", "--yes"]),
-    ).rejects.toThrow(/Unknown flag/);
   });
 });
 
@@ -658,7 +651,7 @@ describe("init CLI (mocked interactive mode)", () => {
 
   it("scaffolds a role through mocked interactive flow", async () => {
     const { init } = await import("../../../src/cli/commands/init");
-    await init(["mock-role"]);
+    await init("mock-role", false, undefined);
 
     const roleDir = join(tmpDir, "mock-role");
     expect(existsSync(join(roleDir, "role.yaml"))).toBe(true);
