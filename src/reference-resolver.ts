@@ -119,7 +119,7 @@ export async function resolveExplicitReferences(
     try {
       const file = Bun.file(filePath);
       if (!(await file.exists())) {
-        log.warn(`Skipping reference "${key}": file not found at "${entry.path}"`);
+        log.info(`Skipping reference "${key}": file not found at "${entry.path}"`);
         continue;
       }
     } catch (err) {

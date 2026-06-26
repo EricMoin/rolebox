@@ -32,7 +32,7 @@ export function resolveEnvVars(value: string): string {
   return value.replace(ENV_VAR_PATTERN, (match, varName: string) => {
     const envValue = process.env[varName];
     if (envValue === undefined) {
-      log.warn(`Environment variable "${varName}" is not set; keeping placeholder "${match}". Set it with: export ${varName}=value`);
+      log.info(`Environment variable "${varName}" is not set; keeping placeholder "${match}". Set it with: export ${varName}=value`);
       return match;
     }
     return envValue;

@@ -44,7 +44,7 @@ export function parseCollaboration(
 ): ResolvedGraph | null {
   // ── Guard: must be a non-null, plain object ──
   if (raw === null || raw === undefined || typeof raw !== "object") {
-    log.warn("collaboration config is not an object");
+    log.info("collaboration config is not an object");
     return null;
   }
 
@@ -61,7 +61,7 @@ export function parseCollaboration(
 
   // ── Template requires at least one agent ──
   if (topology !== undefined && agents.length === 0) {
-    log.warn(
+    log.info(
       "topology requires at least one agent in 'agents' field",
     );
     return null;
@@ -82,7 +82,7 @@ export function parseCollaboration(
     try {
       templateEdges = expandTemplate(topology, agents);
     } catch (err) {
-      log.warn(
+      log.info(
         `expandTemplate failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
@@ -95,7 +95,7 @@ export function parseCollaboration(
   const edges = mergeEdges(templateEdges, flowEdges);
 
   if (edges.length === 0) {
-    log.warn(
+    log.info(
       "no edges defined — provide topology+agents or flow",
     );
     return null;
@@ -141,7 +141,7 @@ export function parseCollaboration(
 
   if (!valid) {
     // validateGraph already logs its own warnings; surface here too
-    log.warn(
+    log.info(
       `validation failed: ${warnings.join("; ")}`,
     );
     return null;
@@ -149,7 +149,7 @@ export function parseCollaboration(
 
   // Forward non-fatal warnings from the validator
   for (const warning of warnings) {
-    log.warn(warning);
+    log.info(warning);
   }
 
   return resolvedGraph;
@@ -168,7 +168,7 @@ function validateTopology(
   if (raw === undefined || raw === null) return undefined;
 
   if (typeof raw !== "string" || raw.trim() === "") {
-    log.warn(
+    log.info(
       `invalid topology — expected a string, got ${typeof raw}`,
     );
     return null;
@@ -176,7 +176,7 @@ function validateTopology(
 
   const trimmed = raw.trim();
   if (!GRAPH_TEMPLATE_VALUES.has(trimmed)) {
-    log.warn(`unknown topology: "${trimmed}"`);
+    log.info(`unknown topology: "${trimmed}"`);
     return null;
   }
 
@@ -209,7 +209,7 @@ function parseFlow(raw: unknown): FlowEdge[] {
       if (parsed) {
         edges.push(parsed);
       } else {
-        log.warn(
+        log.info(
           `invalid flow edge string: "${item}"`,
         );
       }
@@ -218,10 +218,10 @@ function parseFlow(raw: unknown): FlowEdge[] {
       if (parsed) {
         edges.push(parsed);
       } else {
-        log.warn("invalid flow edge object");
+        log.info("invalid flow edge object");
       }
     } else {
-      log.warn(
+      log.info(
         `unsupported flow entry type: ${typeof item}`,
       );
     }

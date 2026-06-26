@@ -82,7 +82,7 @@ export async function resolveSkills(
 
     if (!found) {
       const candidatePaths = candidates.map((c) => c.pattern);
-      log.warn(`Skill "${name}" not found. Searched:`, { candidates: candidatePaths });
+      log.info(`Skill "${name}" not found. Searched:`, { candidates: candidatePaths });
     }
   }
 

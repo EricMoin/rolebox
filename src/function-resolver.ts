@@ -72,7 +72,7 @@ export async function resolveFunctions(
 
     if (!matched) {
       const roleFuncDir = join(roleDir, "functions");
-      log.warn(
+      log.info(
         `Function "${name}" not found. Searched:\n` +
           `  1. ${functionPath(roleFuncDir, name)}\n` +
           `  2. ${functionPath(globalFunctionsDir, name)}\n` +
