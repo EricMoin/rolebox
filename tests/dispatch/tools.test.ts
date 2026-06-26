@@ -41,6 +41,10 @@ const mockToolContext = {
 // ── createDispatchTool ───────────────────────────────────────────────────
 
 describe("createDispatchTool", () => {
+  it("has arity 2 (manager + resolvedSubagents, no graphAdvancer)", () => {
+    expect(createDispatchTool.length).toBe(2);
+  });
+
   it("rejects invalid subagent", async () => {
     const resolved = new Map<string, string>();
     const manager = {} as unknown as DispatchManager;
