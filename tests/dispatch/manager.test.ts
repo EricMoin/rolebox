@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMockClient, parentContext } from "./helpers";
+import { metrics } from "../../src/dispatch/metrics";
 
 const fastConfig = {
   staleTimeoutMs: 500,
@@ -891,6 +892,181 @@ describe("DispatchManager", () => {
       await manager.handleSessionIdle("idle-session-2");
       expect(t.status).toBe("completed");
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+    });
+  });
+
+  // ── 12. pool-rejected cleanup ──────────────────────────────────
+
+  describe("pool-rejected cleanup", () => {
+    it("rejected task is scheduled for cleanup and notified", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1 });
+      const mgr = manager as any;
+
+      // Fill the single slot
+      await mgr.concurrency.acquire("default");
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(task.status).toBe("error");
+      expect(task.error).toContain("Pool is full");
+      expect(task.completedAt).toBeInstanceOf(Date);
+
+      // Verify cleanup was scheduled
+      expect(mgr.cleanupTimers.has(task.id)).toBe(true);
+
+      const timer = mgr.cleanupTimers.get(task.id);
+      expect(timer).toBeDefined();
+
+      // Clean up
+      mgr.concurrency.release("default");
+      clearTimeout(timer);
+    });
+
+    it("pool-rejected does not consume a concurrency slot", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1 });
+      const mgr = manager as any;
+
+      // Fill the single slot
+      await mgr.concurrency.acquire("default");
+      expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(task.status).toBe("error");
+      // Still exactly 1 — rejected task never acquired
+      expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+
+      mgr.concurrency.release("default");
+    });
+  });
+
+  // ── 13. gauge leak prevention (requires ROLEBOX_METRICS=1) ────
+
+  describe("gauge leak prevention", () => {
+    it("gauge returns to baseline after handleTaskCompleted", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(g.peek()).toBe(baseline + 1);
+      mgr.handleTaskCompleted(task.id);
+      expect(g.peek()).toBe(baseline);
+    });
+
+    it("gauge returns to baseline after handleTaskError", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(g.peek()).toBe(baseline + 1);
+      mgr.handleTaskError(task.id, "something broke");
+      expect(g.peek()).toBe(baseline);
+    });
+
+    it("gauge returns to baseline after handleTaskTimeout", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(g.peek()).toBe(baseline + 1);
+      mgr.handleTaskTimeout(task.id, "timed out");
+      expect(g.peek()).toBe(baseline);
+    });
+
+    it("gauge returns to baseline after cancelTask", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(g.peek()).toBe(baseline + 1);
+      await manager.cancelTask(task.id);
+      expect(g.peek()).toBe(baseline);
+    });
+
+    it("gauge returns to baseline after launch catch (promptAsync failure)", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+      const client = createMockClient({
+        sessionPromptAsync: () => Promise.reject(new Error("promptAsync failed")),
+      });
+      const manager = new DispatchManager(client, fastConfig);
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(task.status).toBe("error");
+      expect(g.peek()).toBe(baseline);
+    });
+
+    it("pool-rejected does not affect inflight gauge", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1 });
+      const mgr = manager as any;
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      const t1 = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(g.peek()).toBe(baseline + 1);
+
+      const t2 = await manager.launch(
+        { subagent: "h", prompt: "p2", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(t2.status).toBe("error");
+      expect(t2.error).toContain("Pool is full");
+      expect(g.peek()).toBe(baseline + 1);
+
+      mgr.handleTaskCompleted(t1.id);
+      expect(g.peek()).toBe(baseline);
     });
   });
 });
