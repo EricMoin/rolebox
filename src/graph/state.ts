@@ -28,6 +28,10 @@ export class GraphSessionState {
     if (!state || !graph) return;
     if (state.status !== "active") return;
 
+    if (state.completedSteps.length > 0 && state.completedSteps[state.completedSteps.length - 1] === completedAgent) {
+      return;
+    }
+
     // Collect all outgoing edges from completedAgent
     const outgoingEdges = graph.edges.filter((e) => e.from === completedAgent);
 
