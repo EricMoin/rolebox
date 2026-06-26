@@ -14,6 +14,8 @@ import { createSubLogger } from "./logger.ts";
 
 const log = createSubLogger("plugin-hooks");
 
+let hooksRegistered = false;
+
 export async function createPluginHooks(
   resolvedRoles: ResolvedRole[],
   client: PluginInput["client"],
@@ -38,6 +40,13 @@ export async function createPluginHooks(
     dispatchManager.setStoreDirectory(directory);
   }
   await dispatchManager.recover();
+
+  if (!hooksRegistered) {
+    hooksRegistered = true;
+    process.on("exit", () => dispatchManager.flushPersistSync());
+    process.on("SIGINT", () => { dispatchManager.flushPersistSync(); process.exit(130); });
+    process.on("SIGTERM", () => { dispatchManager.flushPersistSync(); process.exit(143); });
+  }
 
   return {
     tool: {

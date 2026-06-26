@@ -32,6 +32,7 @@ export class DispatchManager {
   private store: TaskStateStore;
   private _recovered = false;
   private inflightByParent = new Map<string, number>();
+  private _cancelQueue: Map<string, () => void> = new Map();
   private subagentModelKey: Map<string, string>;
   private _dirty = false;
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -85,56 +86,71 @@ export class DispatchManager {
     };
 
     this.tasks.set(taskId, task);
+    this.incInflight(task.parentSessionId);
 
     debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
-    // Try to acquire via background queue. If queue is full, reject with backpressure info.
-    const { promise: acqPromise } = this.concurrency.acquireBackground(concurrencyKey);
-    try {
-      await acqPromise;
-    } catch (err) {
-      if (err instanceof QueueFullError) {
+    const acqResult = this.concurrency.acquireBackground(concurrencyKey);
+
+    switch (acqResult.outcome) {
+      case "full": {
         metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
         task.status = "error";
         task.error = JSON.stringify({
           error: "Queue is full",
-          retry_after: err.retryAfter,
-          queue_depth: err.depth,
-          limit: err.limit,
+          retry_after: acqResult.error.retryAfter,
+          queue_depth: acqResult.error.depth,
+          limit: acqResult.error.limit,
         });
         task.completedAt = new Date();
-        debugLog("launch", taskId, `REJECTED: queue-full depth=${err.depth}/${err.limit}`);
+        debugLog("launch", taskId, `REJECTED: queue-full depth=${acqResult.error.depth}/${acqResult.error.limit}`);
+        this.decInflight(task.parentSessionId);
         this.scheduleCleanup(taskId);
         void this.notifyCompletion(task);
         return task;
       }
-      throw err;
+
+      case "acquired": {
+        task.concurrencyKey = concurrencyKey;
+        await this.startBackgroundTask(taskId, input, parentContext);
+        return task;
+      }
+
+      case "queued": {
+        task.concurrencyKey = concurrencyKey;
+        this._cancelQueue.set(taskId, acqResult.cancel);
+        debugLog("launch", taskId, `QUEUED — returning pending task immediately`);
+        void acqResult.promise.then(() => this._promoteQueued(taskId, input, parentContext));
+        return task;
+      }
     }
-    task.concurrencyKey = concurrencyKey;
+  }
+
+  private async startBackgroundTask(
+    taskId: string,
+    input: DispatchInput,
+    parentContext: { sessionID: string; agent: string; directory: string },
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
 
     let didMarkRunning = false;
 
     try {
       const createResult = await this.client.session.create({
-        body: {
-          parentID: parentContext.sessionID,
-        },
-        query: {
-          directory: parentContext.directory,
-        },
+        body: { parentID: parentContext.sessionID },
+        query: { directory: parentContext.directory },
       });
 
       const session = createResult.data;
-      if (!session) {
-        throw new Error("Failed to create session: empty response");
-      }
+      if (!session) throw new Error("Failed to create session: empty response");
+
       task.sessionId = session.id;
       task.status = "running";
       didMarkRunning = true;
       infoLog("launch", taskId, `running agent=${input.subagent}`);
       metrics.counter("dispatch_total", { agent: input.subagent, mode: "background" }).inc();
       metrics.gauge("inflight_tasks").inc();
-      this.incInflight(task.parentSessionId);
       task.progress.lastUpdate = new Date();
       this.persistState();
 
@@ -159,12 +175,27 @@ export class DispatchManager {
       if (didMarkRunning) {
         this.leaveRunning(taskId);
       } else {
-        this.concurrency.release(concurrencyKey);
+        this.concurrency.release(task.concurrencyKey!);
+        this.decInflight(task.parentSessionId);
         this.scheduleCleanup(taskId);
       }
     }
+  }
 
-    return task;
+  private async _promoteQueued(
+    taskId: string,
+    input: DispatchInput,
+    parentContext: { sessionID: string; agent: string; directory: string },
+  ): Promise<void> {
+    this._cancelQueue.delete(taskId);
+
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "pending") {
+      this.concurrency.release(task?.concurrencyKey ?? this.deriveKey(input.subagent));
+      return;
+    }
+
+    await this.startBackgroundTask(taskId, input, parentContext);
   }
 
   /**
@@ -274,6 +305,28 @@ export class DispatchManager {
     if (!task) throw new Error(`Task '${taskId}' not found`);
     if (task.agent !== input.subagent) throw new Error(`Task '${taskId}' agent mismatch: expected ${task.agent}, got ${input.subagent}`);
 
+    const concurrencyKey = this.deriveKey(input.subagent);
+    const acqResult = this.concurrency.acquireBackground(concurrencyKey);
+
+    if (acqResult.outcome === "full" || acqResult.outcome === "queued") {
+      if (acqResult.outcome === "queued") {
+        acqResult.cancel();
+      }
+      metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
+      task.status = "error";
+      task.error = JSON.stringify({
+        error: "Queue is full",
+        retry_after: acqResult.outcome === "full" ? acqResult.error.retryAfter : 30_000,
+        queue_depth: 0,
+        limit: 1,
+      });
+      task.completedAt = new Date();
+      debugLog("reopen", taskId, `REJECTED: no slot available`);
+      this.scheduleCleanup(taskId);
+      void this.notifyCompletion(task);
+      return task;
+    }
+
     const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
     const messageCountAtStart = (msgResult.data ?? []).length;
 
@@ -284,29 +337,6 @@ export class DispatchManager {
     task.messageCountAtStart = messageCountAtStart;
     if (input.timeout_ms !== undefined) {
       task.timeoutMs = input.timeout_ms;
-    }
-
-    const concurrencyKey = this.deriveKey(input.subagent);
-    const { promise: acqPromise } = this.concurrency.acquireBackground(concurrencyKey);
-    try {
-      await acqPromise;
-    } catch (err) {
-      if (err instanceof QueueFullError) {
-        metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
-        task.status = "error";
-        task.error = JSON.stringify({
-          error: "Queue is full",
-          retry_after: err.retryAfter,
-          queue_depth: err.depth,
-          limit: err.limit,
-        });
-        task.completedAt = new Date();
-        debugLog("reopen", taskId, `REJECTED: queue-full`);
-        this.scheduleCleanup(taskId);
-        void this.notifyCompletion(task);
-        return task;
-      }
-      throw err;
     }
     task.concurrencyKey = concurrencyKey;
 
@@ -368,6 +398,24 @@ export class DispatchManager {
       return false;
     }
 
+    // Handle pending (queued) task — no session created yet
+    if (task.status === "pending") {
+      const cancelHandle = this._cancelQueue.get(taskId);
+      if (cancelHandle) {
+        cancelHandle();
+        this._cancelQueue.delete(taskId);
+      }
+      if (!this.transition(taskId, ["pending"], "cancelled")) return false;
+      const t = this.tasks.get(taskId)!;
+      infoLog("lifecycle", taskId, `✕ cancelled (queued) agent=${t.agent}`);
+      metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
+      this.decInflight(t.parentSessionId);
+      void this.notifyCompletion(t);
+      this.scheduleCleanup(taskId);
+      return true;
+    }
+
+    // Running task — abort the session
     try {
       await this.client.session.abort({
         path: { id: task.sessionId },
@@ -479,6 +527,27 @@ export class DispatchManager {
     if (this._dirty) {
       this._dirty = false;
       await this.store.save(this.tasks);
+    }
+  }
+
+  /**
+   * Synchronous version of flushPersist() for process-exit crash safety.
+   * Clears debounce timer, flushes dirty state using store.saveSync().
+   * Never throws — wrapped in try/catch logging a warning.
+   * On exit, this is last-writer-wins vs any in-flight async save.
+   */
+  flushPersistSync(): void {
+    if (this._persistTimer) {
+      clearTimeout(this._persistTimer);
+      this._persistTimer = undefined;
+    }
+    if (this._dirty) {
+      this._dirty = false;
+      try {
+        this.store.saveSync(this.tasks);
+      } catch (err) {
+        debugLog("persist", "*", `sync flush failed: ${err}`);
+      }
     }
   }
 
@@ -824,6 +893,7 @@ export class DispatchManager {
     this.decInflight(t.parentSessionId);
     metrics.gauge("inflight_tasks").dec();
     this.persistState();
+    this.flushPersistSync();
     this.scheduleCleanup(taskId);
   }
 

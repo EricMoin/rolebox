@@ -23,6 +23,11 @@ interface ConcurrencySlot {
   queue: Waiter[];
 }
 
+type AcquireBackgroundResult =
+  | { outcome: "acquired"; cancel: () => void }
+  | { outcome: "queued"; promise: Promise<void>; cancel: () => void }
+  | { outcome: "full"; error: QueueFullError; cancel: () => void };
+
 /** Error thrown when the concurrency queue is at capacity. */
 export class QueueFullError extends Error {
   depth: number;
@@ -58,20 +63,6 @@ export class ConcurrencyManager {
       metrics.gauge("concurrency_limit", { key }).set(this.defaultLimit);
     }
     return slot;
-  }
-
-  /**
-   * Acquire a slot for the given key. Resolves immediately if under the limit,
-   * otherwise queues the caller until a slot is freed.
-   */
-  acquire(key: string): Promise<void> {
-    const slot = this.getOrCreateSlot(key);
-    if (slot.active < slot.limit) {
-      slot.active++;
-      metrics.gauge("concurrency_active", { key }).set(slot.active);
-      return Promise.resolve();
-    }
-    return this.acquireCancelable(key).promise;
   }
 
   /**
@@ -120,21 +111,23 @@ export class ConcurrencyManager {
 
   /**
    * Acquire a background slot. Background tasks can only use limit - reserved slots.
-   * If all background slots are occupied, falls back to the bounded cancelable queue.
+   * Returns a discriminated outcome: "acquired" (slot taken), "queued" (waiting in queue),
+   * or "full" (queue at capacity).
    */
-  acquireBackground(key: string): { promise: Promise<void>; cancel: () => void } {
+  acquireBackground(key: string): AcquireBackgroundResult {
     const slot = this.getOrCreateSlot(key);
     const bgLimit = Math.max(0, slot.limit - slot.reserved);
     if (slot.active < bgLimit) {
       slot.active++;
       metrics.gauge("concurrency_active", { key }).set(slot.active);
-      return { promise: Promise.resolve(), cancel: () => {} };
+      return { outcome: "acquired", cancel: () => {} };
     }
 
     const liveCount = slot.queue.filter(w => !w.cancelled).length;
     if (liveCount >= slot.maxQueueDepth) {
       return {
-        promise: Promise.reject(new QueueFullError(liveCount, slot.maxQueueDepth)),
+        outcome: "full",
+        error: new QueueFullError(liveCount, slot.maxQueueDepth),
         cancel: () => {},
       };
     }
@@ -150,6 +143,7 @@ export class ConcurrencyManager {
     metrics.gauge("concurrency_queued", { key }).set(liveCount + 1);
 
     return {
+      outcome: "queued",
       promise,
       cancel: () => {
         if (waiter.cancelled) return;
@@ -237,14 +231,4 @@ export class ConcurrencyManager {
     return this.slots.get(key)?.limit ?? this.defaultLimit;
   }
 
-  /**
-   * Bypass the acquire queue and directly occupy concurrency slots.
-   * Clamps to the slot's limit. Returns the actual number of slots occupied.
-   */
-  forceOccupy(key: string, count: number = 1): number {
-    const slot = this.getOrCreateSlot(key);
-    const added = Math.min(count, Math.max(0, slot.limit - slot.active));
-    slot.active += added;
-    return added;
-  }
 }

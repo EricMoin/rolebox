@@ -3,74 +3,60 @@ import { ConcurrencyManager } from "../../src/dispatch/concurrency.ts";
 
 describe("ConcurrencyManager", () => {
   it("acquire within limit resolves immediately", async () => {
-    const cm = new ConcurrencyManager(5);
-    const acqs = Array.from({ length: 5 }, () => cm.acquire("test"));
-    await expect(Promise.all(acqs)).resolves.toEqual([
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    ]);
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      const r = cm.acquireBackground("test");
+      expect(r.outcome).toBe("acquired");
+    }
+    expect(cm.getActiveCount("test")).toBe(5);
   });
 
   it("acquire at limit blocks", async () => {
-    const cm = new ConcurrencyManager(5);
-
-    // Fill all 5 slots
-    await Promise.all(Array.from({ length: 5 }, () => cm.acquire("test")));
-
-    // 6th acquire on same key must block
-    const blocked = cm.acquire("test");
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("test");
+    }
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("queued");
+    if (r.outcome !== "queued") throw new Error("expected queued");
     const timeout = new Promise<void>((_, reject) =>
       setTimeout(() => reject(new Error("timed out")), 100),
     );
-
-    await expect(Promise.race([blocked, timeout])).rejects.toThrow(
+    await expect(Promise.race([r.promise, timeout])).rejects.toThrow(
       "timed out",
     );
   });
 
   it("release unblocks waiting acquire", async () => {
-    const cm = new ConcurrencyManager(5);
-
-    // Fill all 5 slots
-    await Promise.all(Array.from({ length: 5 }, () => cm.acquire("test")));
-
-    // 6th acquire blocks
-    const acquirePromise = cm.acquire("test");
-
-    // Release one slot — the queued acquire should resolve
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("test");
+    }
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("queued");
+    if (r.outcome !== "queued") throw new Error("expected queued");
     cm.release("test");
-
-    await expect(acquirePromise).resolves.toBeUndefined();
+    await expect(r.promise).resolves.toBeUndefined();
   });
 
   it("different keys are independent", async () => {
-    const cm = new ConcurrencyManager(5);
-
-    // Fill key "a" to its limit
-    await Promise.all(Array.from({ length: 5 }, () => cm.acquire("a")));
-
-    // Key "b" should be unaffected
-    await expect(cm.acquire("b")).resolves.toBeUndefined();
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("a");
+    }
+    const r = cm.acquireBackground("b");
+    expect(r.outcome).toBe("acquired");
   });
 
   it("getActiveCount returns correct value", async () => {
-    const cm = new ConcurrencyManager(5);
-
+    const cm = new ConcurrencyManager(5, 10, 0);
     expect(cm.getActiveCount("test")).toBe(0);
-
-    await cm.acquire("test");
+    cm.acquireBackground("test");
     expect(cm.getActiveCount("test")).toBe(1);
-
-    await cm.acquire("test");
+    cm.acquireBackground("test");
     expect(cm.getActiveCount("test")).toBe(2);
-
-    await cm.acquire("test");
+    cm.acquireBackground("test");
     expect(cm.getActiveCount("test")).toBe(3);
-
-    // Release one, count should drop
     cm.release("test");
     expect(cm.getActiveCount("test")).toBe(2);
   });
@@ -87,77 +73,58 @@ describe("ConcurrencyManager", () => {
     expect(cm.getActiveCount("also-fresh")).toBe(0);
   });
 
-  // T3: release() with active=0 and no waiters → getActiveCount === 0, no throw
   it("release with active=0 and no waiters returns to 0", async () => {
-    const cm = new ConcurrencyManager(5);
-    await cm.acquire("test");
+    const cm = new ConcurrencyManager(5, 10, 0);
+    cm.acquireBackground("test");
     cm.release("test");
-    // Double-release: active is already 0
     cm.release("test");
     expect(cm.getActiveCount("test")).toBe(0);
   });
 
-  // T4: release promotes exactly one waiter per release, prevents double-release amplification
   it("double-release amplification prevented — cancelled waiter handling", async () => {
-    const cm = new ConcurrencyManager(5);
-    // Fill to limit
-    await Promise.all(Array.from({ length: 5 }, () => cm.acquire("test")));
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("test");
+    }
     expect(cm.getActiveCount("test")).toBe(5);
-
-    // Enqueue 2 acquireCancelable calls (both block)
     const h1 = cm.acquireCancelable("test");
     const h2 = cm.acquireCancelable("test");
-
-    // Release once → exactly 1 waiter resolves, active stays at limit
     cm.release("test");
     await h1.promise;
     expect(cm.getActiveCount("test")).toBe(5);
-
-    // Release again → second waiter resolves, active stays at limit
     cm.release("test");
     await h2.promise;
     expect(cm.getActiveCount("test")).toBe(5);
   });
 
-  // T5: forceOccupy clamps to limit and returns actual count
-  it("forceOccupy clamps to limit and returns actual count", () => {
-    const cm = new ConcurrencyManager(5);
-    expect(cm.forceOccupy("k", 10)).toBe(5);
+  it("forceOccupyBackground clamps to limit and returns actual count", () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+    expect(cm.forceOccupyBackground("k", 10)).toBe(5);
     expect(cm.getActiveCount("k")).toBe(5);
     expect(cm.getLimit("k")).toBe(5);
-    expect(cm.forceOccupy("k", 3)).toBe(0);
+    expect(cm.forceOccupyBackground("k", 3)).toBe(0);
     expect(cm.getActiveCount("k")).toBe(5);
   });
 
-  // T12: cancelAcquire prevents cancelled waiter from being served
   it("cancelAcquire prevents cancelled waiter from being served", async () => {
-    const cm = new ConcurrencyManager(5);
-    // Fill to limit
-    await Promise.all(Array.from({ length: 5 }, () => cm.acquire("test")));
-
-    // acquireCancelable a 6th (queued), get handle, call cancel()
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("test");
+    }
     const { cancel } = cm.acquireCancelable("test");
     cancel();
-
-    // Release → cancelled waiter does NOT resolve
     cm.release("test");
     expect(cm.getActiveCount("test")).toBe(4);
   });
 
-  // T13: idempotent cancel
   it("idempotent cancel", async () => {
-    const cm = new ConcurrencyManager(5);
-    // Fill to limit
-    await Promise.all(Array.from({ length: 5 }, () => cm.acquire("test")));
-
-    // acquireCancelable → queued
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("test");
+    }
     const { cancel } = cm.acquireCancelable("test");
-
-    // Double cancel: no throw
     expect(() => cancel()).not.toThrow();
     expect(() => cancel()).not.toThrow();
-
-    // Cancel after resolution: acquireCancelable, resolve via release, then cancel
     const h2 = cm.acquireCancelable("test");
     cm.release("test");
     await h2.promise;
@@ -167,35 +134,35 @@ describe("ConcurrencyManager", () => {
   // ── T8: reserved sync lane ────────────────────────────────────
 
   it("acquireBackground within background limit resolves immediately", async () => {
-    const cm = new ConcurrencyManager(5, 10, 1); // limit=5, reserved=1
-    // bgLimit = 5-1 = 4, so 4 acquires within bg should succeed
-    const acqs = Array.from({ length: 4 }, () => cm.acquireBackground("test"));
-    const results = await Promise.all(acqs.map((a) => a.promise));
-    expect(results).toEqual([undefined, undefined, undefined, undefined]);
+    const cm = new ConcurrencyManager(5, 10, 1);
+    for (let i = 0; i < 4; i++) {
+      const r = cm.acquireBackground("test");
+      expect(r.outcome).toBe("acquired");
+    }
     expect(cm.getActiveCount("test")).toBe(4);
   });
 
   it("acquireBackground at background limit blocks", async () => {
-    const cm = new ConcurrencyManager(5, 10, 1); // bgLimit=4
-    // Fill all 4 background slots
-    await Promise.all(Array.from({ length: 4 }, () => cm.acquireBackground("test").promise));
+    const cm = new ConcurrencyManager(5, 10, 1);
+    for (let i = 0; i < 4; i++) {
+      cm.acquireBackground("test");
+    }
     expect(cm.getActiveCount("test")).toBe(4);
-
-    // 5th background acquire must block
-    const { promise: blocked } = cm.acquireBackground("test");
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("queued");
+    if (r.outcome !== "queued") throw new Error("expected queued");
     const timeout = new Promise<void>((_, reject) =>
       setTimeout(() => reject(new Error("timed out")), 100),
     );
-    await expect(Promise.race([blocked, timeout])).rejects.toThrow("timed out");
+    await expect(Promise.race([r.promise, timeout])).rejects.toThrow("timed out");
   });
 
   it("acquireSync can use reserved slot when background is full", async () => {
-    const cm = new ConcurrencyManager(5, 10, 1); // bgLimit=4
-    // Fill all 4 background slots
-    await Promise.all(Array.from({ length: 4 }, () => cm.acquireBackground("test").promise));
+    const cm = new ConcurrencyManager(5, 10, 1);
+    for (let i = 0; i < 4; i++) {
+      cm.acquireBackground("test");
+    }
     expect(cm.getActiveCount("test")).toBe(4);
-
-    // Sync acquire should succeed immediately — uses reserved 5th slot
     const { promise: syncP } = cm.acquireSync("test");
     await expect(syncP).resolves.toBeUndefined();
     expect(cm.getActiveCount("test")).toBe(5);
@@ -230,36 +197,83 @@ describe("ConcurrencyManager", () => {
   });
 
   it("release promotes background waiters after sync acquire", async () => {
-    const cm = new ConcurrencyManager(3, 10, 1); // limit=3, bgLimit=2
-    // Fill 2 background slots
-    await Promise.all(Array.from({ length: 2 }, () => cm.acquireBackground("test").promise));
-    // Sync acquires the reserved 3rd slot
+    const cm = new ConcurrencyManager(3, 10, 1);
+    for (let i = 0; i < 2; i++) {
+      cm.acquireBackground("test");
+    }
     const { promise: syncP } = cm.acquireSync("test");
     await syncP;
     expect(cm.getActiveCount("test")).toBe(3);
-
-    // Background acquire blocks
-    const { promise: bgP } = cm.acquireBackground("test");
-
-    // Release sync → bg waiter promoted
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("queued");
+    if (r.outcome !== "queued") throw new Error("expected queued");
     cm.release("test");
-    await bgP;
+    await r.promise;
     expect(cm.getActiveCount("test")).toBe(3);
   });
 
   it("acquireBackground bounded queue works like acquireCancelable", async () => {
-    const cm = new ConcurrencyManager(2, 1, 1); // limit=2, bgLimit=1, maxQueueDepth=1
-    // Fill the 1 background slot
-    await cm.acquireBackground("test").promise;
-    // Enqueue one background waiter
-    const { promise: queued } = cm.acquireBackground("test");
-    // Second background waiter should be rejected (queue at capacity)
-    const { promise: rejected } = cm.acquireBackground("test");
-    await expect(rejected).rejects.toThrow("Queue is full");
-
-    // Release → queued waiter resolves
+    const cm = new ConcurrencyManager(2, 1, 1);
+    const r1 = cm.acquireBackground("test");
+    expect(r1.outcome).toBe("acquired");
+    const r2 = cm.acquireBackground("test");
+    expect(r2.outcome).toBe("queued");
+    if (r2.outcome !== "queued") throw new Error("expected queued");
+    const r3 = cm.acquireBackground("test");
+    expect(r3.outcome).toBe("full");
+    if (r3.outcome !== "full") throw new Error("expected full");
+    expect(r3.error).toBeInstanceOf(Error);
+    expect(r3.error.message).toContain("Queue is full");
     cm.release("test");
-    await queued;
+    await r2.promise;
     expect(cm.getActiveCount("test")).toBe(1);
+  });
+
+  // ── Discriminated outcome contract tests ────────────────────
+
+  it("acquireBackground returns acquired when bg slot is free", async () => {
+    const cm = new ConcurrencyManager(5, 10, 1);
+    const result = cm.acquireBackground("test");
+    expect(result.outcome).toBe("acquired");
+    expect(cm.getActiveCount("test")).toBe(1);
+  });
+
+  it("acquireBackground returns queued with cancel when bg full", async () => {
+    const cm = new ConcurrencyManager(5, 10, 1); // bgLimit=4
+    // Fill 4 bg slots
+    for (let i = 0; i < 4; i++) {
+      const r = cm.acquireBackground("test");
+      expect(r.outcome).toBe("acquired");
+    }
+    const result = cm.acquireBackground("test");
+    expect(result.outcome).toBe("queued");
+    if (result.outcome !== "queued") throw new Error("expected queued");
+    expect(result.promise).toBeInstanceOf(Promise);
+    expect(typeof result.cancel).toBe("function");
+    // Cancel it
+    result.cancel();
+    // Release one slot — should not promote the cancelled waiter
+    cm.release("test");
+    expect(cm.getActiveCount("test")).toBe(3); // released one, cancelled waiter didn't activate
+  });
+
+  it("acquireBackground returns full outcome when queue saturated", () => {
+    const cm = new ConcurrencyManager(2, 1, 0); // limit=2, bgLimit=2, maxQueueDepth=1
+    // Fill 2 bg slots
+    cm.acquireBackground("test"); // acquired
+    cm.acquireBackground("test"); // acquired
+    // Enqueue 1 waiter (hits maxQueueDepth)
+    const q = cm.acquireBackground("test");
+    expect(q.outcome).toBe("queued");
+    // Next should be "full"
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("full");
+    if (r.outcome !== "full") throw new Error("expected full");
+    expect(r.error).toBeInstanceOf(Error);
+    expect(r.error.depth).toBeGreaterThanOrEqual(0);
+    expect(r.error.limit).toBeGreaterThanOrEqual(0);
+    expect(r.error.retryAfter).toBeGreaterThan(0);
+    // Clean up — cancel the queued one
+    q.cancel!();
   });
 });

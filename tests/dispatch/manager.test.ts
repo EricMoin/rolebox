@@ -133,7 +133,7 @@ describe("DispatchManager", () => {
     const mgr = manager as any;
 
     // Fill all slots with non-releasing acquires
-    await Promise.all(Array.from({ length: 5 }, () => mgr.concurrency.acquire("default")));
+    Array.from({ length: 5 }, () => mgr.concurrency.acquireCancelable("default"));
     expect(mgr.concurrency.getActiveCount("default")).toBe(5);
 
     // executeSync will block since pool is full
@@ -176,7 +176,7 @@ describe("DispatchManager", () => {
     const mgr = manager as any;
 
     // Fill pool to limit
-    await Promise.all(Array.from({ length: 5 }, () => mgr.concurrency.acquire("default")));
+    Array.from({ length: 5 }, () => mgr.concurrency.acquireCancelable("default"));
     expect(mgr.concurrency.getActiveCount("default")).toBe(5);
 
     // executeSync will time out waiting for a slot
@@ -201,7 +201,7 @@ describe("DispatchManager", () => {
     const mgr = manager as any;
 
     // Fill 4 background + 1 sync = 5 total (at limit)
-    await Promise.all(Array.from({ length: 4 }, () => mgr.concurrency.acquire("default")));
+    Array.from({ length: 4 }, () => mgr.concurrency.acquireCancelable("default"));
 
     // sync acquires 5th slot
     const syncPromise = manager.executeSync(
@@ -1168,7 +1168,7 @@ describe("DispatchManager", () => {
       const mgr = manager as any;
 
       // Fill the single slot
-      await mgr.concurrency.acquire("default");
+      mgr.concurrency.acquireCancelable("default");
 
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
@@ -1200,7 +1200,7 @@ describe("DispatchManager", () => {
       const mgr = manager as any;
 
       // Fill the single slot
-      await mgr.concurrency.acquire("default");
+      mgr.concurrency.acquireCancelable("default");
       expect(mgr.concurrency.getActiveCount("default")).toBe(1);
 
       const task = await manager.launch(
@@ -1211,6 +1211,130 @@ describe("DispatchManager", () => {
       expect(task.status).toBe("error");
       // Still exactly 1 — rejected task never acquired
       expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+
+      mgr.concurrency.release("default");
+    });
+  });
+
+  // ── 12b. non-blocking background dispatch (T4) ────────────────
+
+  describe("non-blocking background dispatch", () => {
+    it("T4-1: queued background dispatch returns immediately as pending", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
+      const mgr = manager as any;
+
+      const fill = mgr.concurrency.acquireBackground("default");
+      expect(fill.outcome).toBe("acquired");
+
+      const start = Date.now();
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(50);
+      expect(task.status).toBe("pending");
+      expect(task.id).toMatch(/^bg_/);
+      expect(task.sessionId).toBe("");
+      expect(client.session.create).not.toHaveBeenCalled();
+
+      mgr.concurrency.release("default");
+      await new Promise(r => setTimeout(r, 10));
+    });
+
+    it("T4-2: queued task promotes to running when slot frees", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
+      const mgr = manager as any;
+
+      const fill = mgr.concurrency.acquireBackground("default");
+      expect(fill.outcome).toBe("acquired");
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("pending");
+
+      mgr.concurrency.release("default");
+      await new Promise(r => setTimeout(r, 10));
+
+      const updated = mgr.tasks.get(task.id);
+      expect(updated.status).toBe("running");
+      expect(updated.sessionId).not.toBe("");
+      expect(client.session.create).toHaveBeenCalled();
+    });
+
+    it("T4-3: cancel queued task cleans up without session abort or slot leak", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
+      const mgr = manager as any;
+
+      const fill = mgr.concurrency.acquireBackground("default");
+      expect(fill.outcome).toBe("acquired");
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("pending");
+
+      const cancelled = await manager.cancelTask(task.id);
+      expect(cancelled).toBe(true);
+      const updated = mgr.tasks.get(task.id);
+      expect(updated.status).toBe("cancelled");
+      expect(client.session.abort).not.toHaveBeenCalled();
+
+      mgr.concurrency.release("default");
+      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+    });
+
+    it("T4-4: queue-full rejects immediately with structured error", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0 });
+      const mgr = manager as any;
+
+      const fill = mgr.concurrency.acquireBackground("default");
+      expect(fill.outcome).toBe("acquired");
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(task.status).toBe("error");
+      const parsed = JSON.parse(task.error!);
+      expect(parsed.error).toBe("Queue is full");
+      expect(task.completedAt).toBeInstanceOf(Date);
+
+      mgr.concurrency.release("default");
+    });
+
+    it("T4-5: reopenForContinuation rejects immediately when no slot (no queue path)", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
+      const mgr = manager as any;
+
+      const t1 = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      expect(t1.status).toBe("running");
+      mgr.handleTaskCompleted(t1.id);
+
+      const fill = mgr.concurrency.acquireBackground("default");
+      expect(fill.outcome).toBe("acquired");
+
+      const t2 = await manager.reopenForContinuation(
+        t1.id,
+        { subagent: "h", prompt: "retry", run_in_background: true },
+        parentContext(),
+      );
+
+      expect(t2.status).toBe("error");
+      expect(mgr.tasks.get(t1.id).completedAt).toBeDefined();
 
       mgr.concurrency.release("default");
     });
@@ -1532,7 +1656,7 @@ describe("reopenForContinuation", () => {
     mgr.handleTaskCompleted(t1.id);
 
     // Fill the slot
-    await mgr.concurrency.acquire("default");
+    mgr.concurrency.acquireCancelable("default");
 
     const t2 = await manager.reopenForContinuation(
       t1.id,
@@ -2263,11 +2387,11 @@ describe("per-model concurrency key", () => {
     const mgr = manager as any;
 
     // Fill the specific key's pool
-    await mgr.concurrency.acquire("anthropic/claude-3");
-    await mgr.concurrency.acquire("anthropic/claude-3");
-    await mgr.concurrency.acquire("anthropic/claude-3");
-    await mgr.concurrency.acquire("anthropic/claude-3");
-    await mgr.concurrency.acquire("anthropic/claude-3");
+    mgr.concurrency.acquireCancelable("anthropic/claude-3");
+    mgr.concurrency.acquireCancelable("anthropic/claude-3");
+    mgr.concurrency.acquireCancelable("anthropic/claude-3");
+    mgr.concurrency.acquireCancelable("anthropic/claude-3");
+    mgr.concurrency.acquireCancelable("anthropic/claude-3");
     expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(5);
 
     // executeSync for reviewer — uses same key, will block (pool full)
@@ -2330,6 +2454,7 @@ describe("bounded background queue", () => {
 
     // Complete task 1 → task 2 acquires the freed slot
     mgr.handleTaskCompleted(t1.id);
+    await Promise.resolve();
 
     const t2 = await launch2Promise;
     expect(t2.status).toBe("running");
@@ -2382,6 +2507,7 @@ describe("bounded background queue", () => {
 
     // Clean up t1 and t2
     mgr.handleTaskCompleted(t1.id);
+    await Promise.resolve();
     const t2 = await launch2Promise;
     expect(t2.status).toBe("running");
     mgr.handleTaskCompleted(t2.id);
@@ -2421,6 +2547,7 @@ describe("bounded background queue", () => {
 
     // Complete task 1 → task 2 acquires
     mgr.handleTaskCompleted(t1.id);
+    await Promise.resolve();
     const t2 = await launch2Promise;
     expect(t2.status).toBe("running");
     mgr.handleTaskCompleted(t2.id);
@@ -2443,7 +2570,10 @@ describe("reserved sync lane", () => {
     const mgr = manager as any;
 
     // Fill all 4 background slots via acquireBackground
-    await Promise.all(Array.from({ length: 4 }, () => mgr.concurrency.acquireBackground("default").promise));
+    for (let i = 0; i < 4; i++) {
+      const r = mgr.concurrency.acquireBackground("default");
+      expect(r.outcome).toBe("acquired");
+    }
     expect(mgr.concurrency.getActiveCount("default")).toBe(4);
 
     // Background launch should block (bg slots full)
@@ -2480,7 +2610,10 @@ describe("reserved sync lane", () => {
     const mgr = manager as any;
 
     // Fill all 2 background slots
-    await Promise.all(Array.from({ length: 2 }, () => mgr.concurrency.acquireBackground("default").promise));
+    for (let i = 0; i < 2; i++) {
+      const r = mgr.concurrency.acquireBackground("default");
+      expect(r.outcome).toBe("acquired");
+    }
     expect(mgr.concurrency.getActiveCount("default")).toBe(2);
 
     // Background launch should reject (bg limit=2, queue depth=0)
@@ -2634,5 +2767,74 @@ describe("debounced persistence", () => {
 
     // Only 1 save — flush already consumed it
     expect(saveSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── 19. flushPersistSync (T5) ────────────────────────────────────
+
+describe("flushPersistSync", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T5-1: flushPersistSync writes current state and clears _dirty", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    // Make a state change that schedules a persist
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+    expect(mgr._dirty).toBe(true);
+
+    // Flush synchronously
+    manager.flushPersistSync();
+
+    expect(mgr._dirty).toBe(false);
+    expect(mgr._persistTimer).toBeUndefined();
+
+    // Cleanup
+    mgr.concurrency.release("default");
+  });
+
+  it("T5-2: terminal state is durable immediately via leaveRunning flush", async () => {
+    const client = createMockClient();
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-flush-test-"));
+    const manager = new DispatchManager(client, { ...fastConfig, taskTtlMs: 5000 });
+    manager.setStoreDirectory(dir);
+    const mgr = manager as any;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    // Complete the task (goes through leaveRunning)
+    mgr.handleTaskCompleted(task.id);
+
+    // Immediately create a new store and load — state should be durable
+    const { TaskStateStore } = await import("../../src/dispatch/task-store");
+    const freshStore = new TaskStateStore(dir);
+    const loaded = freshStore.load();
+    expect(loaded).not.toBeNull();
+    const loadedTask = loaded!.get(task.id);
+    expect(loadedTask).toBeDefined();
+    expect(loadedTask!.status).toBe("completed");
+
+    // Cleanup
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("T5-3: flushPersistSync is idempotent", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    // Call before any state — no crash
+    expect(() => manager.flushPersistSync()).not.toThrow();
+    expect(() => manager.flushPersistSync()).not.toThrow();
   });
 });
