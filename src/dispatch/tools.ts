@@ -30,6 +30,7 @@ function parentContextFromTool(context: {
 export function createDispatchTool(
   manager: DispatchManager,
   resolvedSubagents: Map<string, string>,
+  _subagentModelKey?: Map<string, string>,
 ) {
   return tool({
     description:

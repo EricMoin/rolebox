@@ -1387,3 +1387,171 @@ describe("recover()", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 });
+
+// ── 14. Per-model concurrency key isolation ───────────────────
+
+describe("per-model concurrency key", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("two different model subagents each occupy independent slots", async () => {
+    const modelKeys = new Map([
+      ["agent-openai", "openai/gpt-4"],
+      ["agent-anthropic", "anthropic/claude-3"],
+    ]);
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 1 },
+      modelKeys,
+    );
+
+    // First subagent with openai key acquires the single slot
+    const t1 = await manager.launch(
+      { subagent: "agent-openai", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+    expect(t1.concurrencyKey).toBe("openai/gpt-4");
+
+    const mgr = manager as any;
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(0);
+
+    // Second subagent with anthropic key — different pool, should succeed
+    const t2 = await manager.launch(
+      { subagent: "agent-anthropic", prompt: "p2", run_in_background: true },
+      parentContext(),
+    );
+    expect(t2.status).toBe("running");
+    expect(t2.concurrencyKey).toBe("anthropic/claude-3");
+
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(1);
+  });
+
+  it("same model key subagents share slots and get rejected at limit", async () => {
+    const modelKeys = new Map([
+      ["agent-a", "openai/gpt-4"],
+      ["agent-b", "openai/gpt-4"],
+    ]);
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 1 },
+      modelKeys,
+    );
+
+    // First subagent acquires the single slot
+    const t1 = await manager.launch(
+      { subagent: "agent-a", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+    expect(t1.concurrencyKey).toBe("openai/gpt-4");
+
+    const mgr = manager as any;
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+
+    // Second subagent with same key — pool full, rejected
+    const t2 = await manager.launch(
+      { subagent: "agent-b", prompt: "p2", run_in_background: true },
+      parentContext(),
+    );
+    expect(t2.status).toBe("error");
+    expect(t2.error).toContain("Pool is full");
+    expect(t2.concurrencyKey).toBeUndefined();
+
+    // Slot count unchanged — rejected task never acquired
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+  });
+
+  it("unknown subagent falls back to default key", async () => {
+    const modelKeys = new Map([
+      ["known-agent", "openai/gpt-4"],
+    ]);
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 1 },
+      modelKeys,
+    );
+
+    const t1 = await manager.launch(
+      { subagent: "unknown-agent", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+    expect(t1.concurrencyKey).toBe("default");
+
+    const mgr = manager as any;
+    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(0);
+  });
+
+  it("release after completion uses correct per-model key", async () => {
+    const modelKeys = new Map([
+      ["helper", "openai/gpt-4"],
+    ]);
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 2 },
+      modelKeys,
+    );
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.concurrencyKey).toBe("openai/gpt-4");
+
+    const mgr = manager as any;
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
+    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+
+    // Complete the task via handler — leaveRunning releases on correct key
+    mgr.handleTaskCompleted(task.id);
+    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(0);
+    // "default" pool should be unaffected
+    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+  });
+
+  it("executeSync uses correct per-model key", async () => {
+    const modelKeys = new Map([
+      ["reviewer", "anthropic/claude-3"],
+    ]);
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, syncTimeoutMs: 5000 },
+      modelKeys,
+    );
+    const mgr = manager as any;
+
+    // Fill the specific key's pool
+    await mgr.concurrency.acquire("anthropic/claude-3");
+    await mgr.concurrency.acquire("anthropic/claude-3");
+    await mgr.concurrency.acquire("anthropic/claude-3");
+    await mgr.concurrency.acquire("anthropic/claude-3");
+    await mgr.concurrency.acquire("anthropic/claude-3");
+    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(5);
+
+    // executeSync for reviewer — uses same key, will block (pool full)
+    const syncPromise = manager.executeSync(
+      { subagent: "reviewer", prompt: "hello", run_in_background: false },
+      parentContext(),
+    );
+
+    // Release one slot— the sync should acquire it
+    mgr.concurrency.release("anthropic/claude-3");
+
+    const result = await syncPromise;
+    expect(result).toBe("Hello from subagent");
+    // After sync completes and releases: 5 bg - 1 released + 1 sync - 1 sync release = 4
+    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(4);
+    // "default" pool is untouched
+    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+  });
+});

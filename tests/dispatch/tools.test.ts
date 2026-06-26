@@ -41,8 +41,8 @@ const mockToolContext = {
 // ── createDispatchTool ───────────────────────────────────────────────────
 
 describe("createDispatchTool", () => {
-  it("has arity 2 (manager + resolvedSubagents, no graphAdvancer)", () => {
-    expect(createDispatchTool.length).toBe(2);
+  it("has arity 3 (manager + resolvedSubagents + optional subagentModelKey)", () => {
+    expect(createDispatchTool.length).toBe(3);
   });
 
   it("rejects invalid subagent", async () => {
