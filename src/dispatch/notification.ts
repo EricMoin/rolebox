@@ -12,7 +12,9 @@ function enqueueNotify(
   fn: () => Promise<void>,
 ): void {
   const prev = parentQueues.get(parentSessionId) ?? Promise.resolve();
-  const next = prev.then(fn, fn); // chain even if previous failed
+  const next = prev.then(fn, fn).catch((err) => {
+    log.warn("notify chain error", err instanceof Error ? err.message : String(err));
+  });
   next.finally(() => {
     if (parentQueues.get(parentSessionId) === next) {
       parentQueues.delete(parentSessionId);
