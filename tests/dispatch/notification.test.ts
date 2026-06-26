@@ -190,4 +190,48 @@ describe("notifyParent", () => {
     // should not have thrown — error is caught internally
     expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
   });
+
+  it("serial queue continues after rejection — next notify to same parent still runs", async () => {
+    const client = createClient();
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+
+    // First call rejects (simulates promptAsync failure)
+    promptAsyncMock.mockImplementationOnce(() => Promise.reject(new Error("network error")));
+
+    const task1 = createTask({ id: "first" });
+    const task2 = createTask({ id: "second" });
+
+    await notifyParent(client, task1, 2);
+    await notifyParent(client, task2, 0);
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Both notifies should have been attempted; second one not blocked by first rejection
+    expect(promptAsyncMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("notifications to the same parent execute in FIFO order", async () => {
+    const client = createClient();
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+
+    const taskA = createTask({ id: "task-A", description: "first" });
+    const taskB = createTask({ id: "task-B", description: "second" });
+    const taskC = createTask({ id: "task-C", description: "third" });
+
+    // Fire all three in quick succession (same tick) — same parent session
+    notifyParent(client, taskA, 2);
+    notifyParent(client, taskB, 1);
+    notifyParent(client, taskC, 0);
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(3);
+
+    // Verify FIFO order: calls[0]/calls[1] use intermediate format (task ID in **ID:**)
+    // calls[2] uses final format (description in `- description (duration)`)
+    const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
+    expect(calls[0][0].body.parts[0].text).toContain("task-A");
+    expect(calls[1][0].body.parts[0].text).toContain("task-B");
+    expect(calls[2][0].body.parts[0].text).toContain("third");
+  });
 });
