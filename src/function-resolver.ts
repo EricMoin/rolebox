@@ -4,6 +4,9 @@ import { FunctionSource } from "./constants.ts";
 import { parseFrontmatter } from "./skill-resolver.ts";
 import { functionPath } from "./paths.ts";
 import type { FunctionCall } from "./function-parser.ts";
+import { createSubLogger } from "./logger.ts";
+
+const log = createSubLogger("function-resolver");
 
 /**
  * Resolve function names to their file locations using Bun.file().exists().
@@ -68,9 +71,7 @@ export async function resolveFunctions(
     }
 
     if (!matched) {
-      console.warn(
-        `Function "${name}" not found in any of the searched locations.`,
-      );
+      log.warn(`Function "${name}" not found in any of the searched locations.`);
     }
   }
 

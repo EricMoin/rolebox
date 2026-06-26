@@ -5,6 +5,9 @@ import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "./types.ts
 import { SkillScope, ReferenceScope } from "./constants.ts";
 import { resolveAllReferences } from "./reference-resolver.ts";
 import { skillDirPath, skillFilePath } from "./paths.ts";
+import { createSubLogger, formatError } from "./logger.ts";
+
+const log = createSubLogger("skill-resolver");
 
 interface Candidate {
   scope: ResolvedSkill["scope"];
@@ -47,6 +50,8 @@ export async function resolveSkills(
   for (const name of skillNames) {
     const candidates = buildCandidates(name, roleDir, globalSkillsDir);
 
+    let found = false;
+
     for (const candidate of candidates) {
       const matches = await fg(candidate.pattern, { onlyFiles: true });
       if (matches.length > 0) {
@@ -65,12 +70,19 @@ export async function resolveSkills(
             ReferenceScope.Skill,
             metadata.references as SkillMetadata["references"],
           );
-        } catch {
+        } catch (err) {
           // If the file can't be read, use empty description
+          log.debug("Failed to read skill file", { filePath, error: formatError(err) });
         }
         resolved.push({ name, description, scope: candidate.scope, filePath, references });
+        found = true;
         break;
       }
+    }
+
+    if (!found) {
+      const candidatePaths = candidates.map((c) => c.pattern);
+      log.warn(`Skill "${name}" not found. Searched:`, { candidates: candidatePaths });
     }
   }
 

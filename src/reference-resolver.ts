@@ -3,6 +3,9 @@ import fg from "fast-glob";
 import yaml from "js-yaml";
 import type { ReferenceEntry, ResolvedReference } from "./types.ts";
 import type { ReferenceScope } from "./constants.ts";
+import { createSubLogger, formatError } from "./logger.ts";
+
+const log = createSubLogger("reference-resolver");
 
 /**
  * Derive a human-readable name from a reference file path.
@@ -51,8 +54,9 @@ async function extractFrontmatterDescription(
         return meta.description;
       }
     }
-  } catch {
+  } catch (err) {
     // File unreadable or invalid frontmatter — skip
+    log.debug("Failed to read file", { path: filePath, error: formatError(err) });
   }
   return undefined;
 }
@@ -115,12 +119,11 @@ export async function resolveExplicitReferences(
     try {
       const file = Bun.file(filePath);
       if (!(await file.exists())) {
-        console.warn(
-          `[reference-resolver] Skipping reference "${key}": file not found at "${entry.path}"`,
-        );
+        log.warn(`Skipping reference "${key}": file not found at "${entry.path}"`);
         continue;
       }
-    } catch {
+    } catch (err) {
+      log.debug("Failed to check file existence", { path: filePath, error: formatError(err) });
       continue;
     }
 
