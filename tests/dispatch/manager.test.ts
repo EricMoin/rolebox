@@ -611,6 +611,85 @@ describe("DispatchManager", () => {
       expect(t.completedAt).toBe(origCompletedAt);
     });
   });
+
+  // ── 11. handleSessionIdle race-guard ──────────────────────────
+
+  describe("handleSessionIdle race-guard", () => {
+    it("poller wins during session.idle async gap — idle no-ops, single release", async () => {
+      const client = createMockClient();
+      // Deferred promise that idle will await
+      let resolveMessages!: (v: any) => void;
+      const deferred = new Promise<any>((r) => { resolveMessages = r; });
+
+      const sessionMessagesMock = mock(() => deferred);
+      client.session.messages = sessionMessagesMock;
+
+      const manager = new DispatchManager(client, fastConfig);
+
+      // Launch a task
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      const mgr = manager as any;
+      const t = mgr.tasks.get(task.id);
+      t.sessionId = "idle-session";
+      t.startedAt = new Date(Date.now() - 10000);
+
+      // Call handleSessionIdle — it will suspend at messages await
+      const idlePromise = manager.handleSessionIdle("idle-session");
+
+      // While suspended, poller completes via handleTaskCompleted
+      mgr.handleTaskCompleted(task.id);
+      expect(t.status).toBe("completed");
+      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+
+      // Now resolve the deferred — idle resumes
+      resolveMessages({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+        ],
+        error: undefined,
+      });
+      await idlePromise;
+
+      // After idle resumes: status still completed, concurrency still 0 (no double-release)
+      expect(t.status).toBe("completed");
+      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+    });
+
+    it("second handleSessionIdle for same task is a no-op", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      const mgr = manager as any;
+      const t = mgr.tasks.get(task.id);
+      t.sessionId = "idle-session-2";
+      t.startedAt = new Date(Date.now() - 10000);
+
+      // Set mock messages to return valid output
+      client.session.messages = mock(() => Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+        ],
+        error: undefined,
+      }));
+
+      // First idle — should complete the task
+      await manager.handleSessionIdle("idle-session-2");
+      expect(t.status).toBe("completed");
+      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+
+      // Second idle — should no-op (no throw, no state change)
+      await manager.handleSessionIdle("idle-session-2");
+      expect(t.status).toBe("completed");
+      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+    });
+  });
 });
 
 // ── 11. recover() ─────────────────────────────────────────────
@@ -764,6 +843,80 @@ describe("recover()", () => {
 
     // Pending task is silently removed (no error, just absent)
     expect(manager.getTask("bg_pending")).toBeUndefined();
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover with running tasks within limit registers all with poller", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    for (let i = 0; i < 3; i++) {
+      const t: DispatchTask = {
+        id: `bg_rec_${i}`,
+        sessionId: `ses_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    expect(mgr.concurrency.getActiveCount("default")).toBe(3);
+    expect(mgr.poller.getTaskCount()).toBe(3);
+    for (let i = 0; i < 3; i++) {
+      expect(manager.getTask(`bg_rec_${i}`)?.status).toBe("running");
+    }
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover with more running tasks than limit errors excess tasks", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    for (let i = 0; i < 6; i++) {
+      const t: DispatchTask = {
+        id: `bg_over_${i}`,
+        sessionId: `ses_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    expect(mgr.poller.getTaskCount()).toBe(5);
+    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
+
+    let errorCount = 0;
+    for (let i = 0; i < 6; i++) {
+      const t = manager.getTask(`bg_over_${i}`);
+      if (t?.status === "error" && t.error?.includes("Exceeded concurrency limit")) {
+        errorCount++;
+      }
+    }
+    expect(errorCount).toBe(1);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
