@@ -258,45 +258,49 @@ export class DispatchManager {
       return;
     }
 
-    debugLog("event", targetTaskId, "session.idle received — validating output");
+    try {
+      debugLog("event", targetTaskId, "session.idle received — validating output");
 
-    const msgResult = await this.client.session.messages({
-      path: { id: sessionId },
-    });
+      const msgResult = await this.client.session.messages({
+        path: { id: sessionId },
+      });
 
-    const messages = (msgResult.data ?? []) as Array<{
-      info: { role: string; finish?: string; error?: unknown };
-      parts: Array<{ type: string; state?: string; text?: string }>;
-    }>;
+      const messages = (msgResult.data ?? []) as Array<{
+        info: { role: string; finish?: string; error?: unknown };
+        parts: Array<{ type: string; state?: string; text?: string }>;
+      }>;
 
-    let hasAssistantOutput = false;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.info.role === "assistant") {
-        const hasText = m.parts.some(p => p.type === "text" && p.text && p.text.length > 0);
-        const hasToolResult = m.parts.some(p => p.type === "tool");
-        const hasPendingTools = m.parts.some(p => p.type === "tool" && (p.state === "pending" || p.state === "running"));
+      let hasAssistantOutput = false;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.info.role === "assistant") {
+          const hasText = m.parts.some(p => p.type === "text" && p.text && p.text.length > 0);
+          const hasToolResult = m.parts.some(p => p.type === "tool");
+          const hasPendingTools = m.parts.some(p => p.type === "tool" && (p.state === "pending" || p.state === "running"));
 
-        if (hasPendingTools) {
-          debugLog("event", targetTaskId, "session.idle but tools still pending — skipping");
-          return;
+          if (hasPendingTools) {
+            debugLog("event", targetTaskId, "session.idle but tools still pending — skipping");
+            return;
+          }
+
+          if (hasText || hasToolResult) {
+            hasAssistantOutput = true;
+          }
+          break;
         }
-
-        if (hasText || hasToolResult) {
-          hasAssistantOutput = true;
-        }
-        break;
       }
-    }
 
-    if (!hasAssistantOutput) {
-      debugLog("event", targetTaskId, "session.idle but no assistant output yet — skipping");
-      return;
-    }
+      if (!hasAssistantOutput) {
+        debugLog("event", targetTaskId, "session.idle but no assistant output yet — skipping");
+        return;
+      }
 
-    debugLog("event", targetTaskId, "session.idle validated — completing task");
-    this.poller.unregisterTask(targetTaskId);
-    this.handleTaskCompleted(targetTaskId);
+      debugLog("event", targetTaskId, "session.idle validated — completing task");
+      this.poller.unregisterTask(targetTaskId);
+      this.handleTaskCompleted(targetTaskId);
+    } catch (err) {
+      debugLog("event", targetTaskId, "handleSessionIdle error: " + (err instanceof Error ? err.message : String(err)));
+    }
   }
 
   private handleTaskCompleted(taskId: string): void {
