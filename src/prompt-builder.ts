@@ -1,152 +1,153 @@
-import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph, GraphNodeRole } from "./types.js";
-import { buildCollaborationBlock } from "./graph/index.js";
+import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "./types.ts";
+import { buildCollaborationBlock } from "./graph/index.ts";
+
+type XmlChild = XmlNode | string;
+
+export type XmlNode = { tag: string; children: XmlChild[] };
+type CdataNode = { cdata: string };
+
+export function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export function xml(tag: string, children: (XmlChild | CdataNode)[]): XmlNode {
+  return { tag, children: children as XmlChild[] };
+}
+
+function cdata(content: string): CdataNode {
+  return { cdata: content };
+}
+
+function isCdata(child: unknown): child is CdataNode {
+  return typeof child === "object" && child !== null && "cdata" in child;
+}
+
+export function renderXml(node: XmlNode, indent = 0): string {
+  const pad = "  ".repeat(indent);
+  const children = node.children as (XmlChild | CdataNode)[];
+
+  if (children.length === 1 && typeof children[0] === "string") {
+    return `${pad}<${node.tag}>${escapeXml(children[0])}</${node.tag}>`;
+  }
+
+  const childPad = "  ".repeat(indent + 1);
+  const inner = children
+    .map((child) => {
+      if (typeof child === "string") return `${childPad}${escapeXml(child)}`;
+      if (isCdata(child)) return `${childPad}<![CDATA[\n${child.cdata}\n${childPad}]]>`;
+      return renderXml(child, indent + 1);
+    })
+    .join("\n");
+  return `${pad}<${node.tag}>\n${inner}\n${pad}</${node.tag}>`;
+}
+
+function renderSection(tag: string, instruction: string, items: XmlNode[]): string {
+  if (items.length === 0) return "";
+  const body = items.map((item) => renderXml(item, 1)).join("\n");
+  return `<${tag}>\n${instruction}\n${body}\n</${tag}>`;
+}
 
 export interface PromptSource {
   prompt: string;
 }
 
+export interface AgentPromptOptions {
+  subagents?: Array<{ id: string; name: string; description: string }>;
+  references?: ResolvedReference[];
+  graph?: ResolvedGraph;
+}
+
 export function buildAgentPrompt(
   role: PromptSource,
   skills: ResolvedSkill[],
-  subagents?: Array<{ id: string; name: string; description: string }>,
-  references?: ResolvedReference[],
-  graph?: ResolvedGraph,
-  graphNodeRoles?: Map<string, GraphNodeRole>,
+  options: AgentPromptOptions = {},
 ): string {
-  const hasSkills = skills.length > 0;
-  const hasSubagents = subagents && subagents.length > 0;
-  const hasReferences = references && references.length > 0;
+  const { subagents, references, graph } = options;
 
-  if (!hasSkills && !hasSubagents && !hasReferences) {
-    return role.prompt;
+  const parts: string[] = [role.prompt];
+
+  if (references && references.length > 0) {
+    parts.push(buildReferenceBlock(references));
   }
 
-  let result = role.prompt;
-
-  if (hasReferences) {
-    result = `${result}\n\n${buildReferenceBlock(references)}`;
-  }
-
-  if (hasSkills) {
-    const skillBlocks = skills
-      .map(
-        (s) =>
-          `  <skill>
-    <name>${s.name}</name>
-    <description>${s.description}</description>
-    <scope>${s.scope}</scope>
-  </skill>`,
-      )
-      .join("\n");
-
-    result = `${result}
-
-<available_skills>
-Skills provide specialized instructions. Use the skill tool to load when task matches.
-${skillBlocks}
-</available_skills>`;
+  if (skills.length > 0) {
+    parts.push(buildSkillBlock(skills));
   }
 
   const subagentBlock = buildSubagentBlock(subagents ?? []);
   if (subagentBlock) {
-    result = `${result}\n\n${subagentBlock}`;
+    parts.push(subagentBlock);
   }
 
   if (graph) {
-    const collaboratonBlock = buildCollaborationBlock(graph, subagents ?? []);
-    if (collaboratonBlock) {
-      result = `${result}\n\n${collaboratonBlock}`;
+    const collaborationBlock = buildCollaborationBlock(graph, subagents ?? []);
+    if (collaborationBlock) {
+      parts.push(collaborationBlock);
     }
   }
 
-  return result;
+  return parts.join("\n\n");
 }
 
-/**
- * Build an XML block listing active functions for system prompt injection.
- *
- * Each function's content is wrapped in CDATA to prevent XML parsing issues.
- * Returns empty string when the functions array is empty.
- */
 export function buildFunctionBlock(functions: ResolvedFunction[]): string {
-  if (functions.length === 0) {
-    return "";
-  }
+  return renderSection(
+    "active_functions",
+    "These functions are currently active for this session. Follow their instructions.",
+    functions.map((fn) => xml("function", [
+      xml("name", [fn.name]),
+      xml("description", [fn.description]),
+      xml("instructions", [cdata(fn.content)]),
+    ])),
+  );
+}
 
-  const blocks = functions
-    .map(
-      (fn) =>
-        `  <function>
-    <name>${fn.name}</name>
-    <description>${fn.description}</description>
-    <instructions><![CDATA[
-${fn.content}
-    ]]></instructions>
-  </function>`,
-    )
-    .join("\n");
-
-  return `<active_functions>
-These functions are currently active for this session. Follow their instructions.
-${blocks}
- </active_functions>`;
+export function buildSkillBlock(skills: ResolvedSkill[]): string {
+  return renderSection(
+    "available_skills",
+    "Skills provide specialized instructions. Use the skill tool to load when task matches.",
+    skills.map((s) => xml("skill", [
+      xml("name", [s.name]),
+      xml("description", [s.description]),
+      xml("scope", [s.scope]),
+    ])),
+  );
 }
 
 export function buildReferenceBlock(references: ResolvedReference[]): string {
-  if (references.length === 0) {
-    return "";
-  }
-
-  const blocks = references
-    .map(
-      (r) =>
-        `  <reference>
-    <name>${r.name}</name>
-    <path>${r.filePath}</path>
-    <description>${r.description}</description>
-  </reference>`,
-    )
-    .join("\n");
-
-  return `<available_references>
-Reference documents provide deep knowledge. Use the Read tool to load full content when needed.
-${blocks}
-</available_references>`;
+  return renderSection(
+    "available_references",
+    "Reference documents provide deep knowledge. Use the Read tool to load full content when needed.",
+    references.map((r) => xml("reference", [
+      xml("name", [r.name]),
+      xml("path", [r.filePath]),
+      xml("description", [r.description]),
+    ])),
+  );
 }
 
-/**
- * Build an XML block listing available subagents for system prompt injection.
- *
- * Each subagent is listed with its id, name, and description.
- * Returns empty string when the subagents array is empty.
- */
-export function buildSubagentBlock(
-  subagents: Array<{ id: string; name: string; description: string }>,
-): string {
-  if (subagents.length === 0) {
-    return "";
-  }
-
-  const blocks = subagents
-    .map(
-      (a) =>
-        `  <subagent>
-    <id>${a.id}</id>
-    <name>${a.name}</name>
-    <description>${a.description}</description>
-  </subagent>`,
-    )
-    .join("\n");
-
-  return `<available_subagents>
-You can delegate tasks to these sub-agents via the dispatch() tool.
+const SUBAGENT_INSTRUCTIONS = `You can delegate tasks to these sub-agents via the dispatch() tool.
 Use dispatch(subagent="agent-id", prompt="...", run_in_background=false) for synchronous execution.
 Use dispatch(subagent="agent-id", prompt="...", run_in_background=true) for background execution.
 IMPORTANT: When run_in_background=true, you will receive a <system-reminder> notification when the task completes.
 Do NOT call dispatch_output to poll for results. Wait for the <system-reminder> notification first.
 Use dispatch_output(task_id="bg_xxx") ONLY after receiving the completion notification.
-Use dispatch_cancel(task_id="bg_xxx") to cancel a running background task.
+Use dispatch_cancel(task_id="bg_xxx") to cancel a running background task.`;
 
-${blocks}
-</available_subagents>`;
+export function buildSubagentBlock(
+  subagents: Array<{ id: string; name: string; description: string }>,
+): string {
+  return renderSection(
+    "available_subagents",
+    SUBAGENT_INSTRUCTIONS,
+    subagents.map((a) => xml("subagent", [
+      xml("id", [a.id]),
+      xml("name", [a.name]),
+      xml("description", [a.description]),
+    ])),
+  );
 }

@@ -116,43 +116,13 @@ function captureLogs(fn: () => Promise<void>): { logs: string[]; run: () => Prom
 describe("info", () => {
   it("shows error when no role specified", async () => {
     const { info } = await importInfo();
-    const origExit = process.exit;
-    let exitCode: number | undefined;
-    process.exit = ((code?: number) => { exitCode = code; }) as any;
-
-    const origErr = console.error;
-    let errMsg = "";
-    console.error = (...args: any[]) => { errMsg = args.join(" "); };
-
-    try {
-      await info([]);
-    } catch { /* exit mock */ }
-
-    process.exit = origExit;
-    console.error = origErr;
-    expect(errMsg).toContain("Usage:");
-    expect(exitCode).toBe(1);
+    await expect(info("", false, false)).rejects.toThrow(/not installed/);
   });
 
   it("shows error when role not installed", async () => {
     createLockFile([]);
     const { info } = await importInfo();
-    const origExit = process.exit;
-    let exitCode: number | undefined;
-    process.exit = ((code?: number) => { exitCode = code; }) as any;
-
-    const origErr = console.error;
-    let errMsg = "";
-    console.error = (...args: any[]) => { errMsg = args.join(" "); };
-
-    try {
-      await info(["nonexistent"]);
-    } catch { /* exit mock */ }
-
-    process.exit = origExit;
-    console.error = origErr;
-    expect(errMsg).toContain("not installed");
-    expect(exitCode).toBe(1);
+    await expect(info("nonexistent", false, false)).rejects.toThrow(/not installed/);
   });
 
   it("displays role details from role.yaml", async () => {
@@ -176,7 +146,7 @@ describe("info", () => {
     createSyncSymlink("software-architect", roleDir);
 
     const { info } = await importInfo();
-    const { logs, run } = captureLogs(() => info(["software-architect"]));
+    const { logs, run } = captureLogs(() => info("software-architect", false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -208,7 +178,7 @@ describe("info", () => {
     }]);
 
     const { info } = await importInfo();
-    const { logs, run } = captureLogs(() => info(["test-role", "--json"]));
+    const { logs, run } = captureLogs(() => info("test-role", true, false));
     await run();
 
     const parsed = JSON.parse(logs[0]);
@@ -237,7 +207,7 @@ describe("info", () => {
     }]);
 
     const { info } = await importInfo();
-    const { logs, run } = captureLogs(() => info(["team-lead"]));
+    const { logs, run } = captureLogs(() => info("team-lead", false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -266,7 +236,7 @@ describe("info", () => {
     }]);
 
     const { info } = await importInfo();
-    const { logs, run } = captureLogs(() => info(["review-team"]));
+    const { logs, run } = captureLogs(() => info("review-team", false, false));
     await run();
 
     const allOutput = logs.join("\n");
@@ -286,7 +256,7 @@ describe("info", () => {
     }]);
 
     const { info } = await importInfo();
-    const { logs, run } = captureLogs(() => info(["unsynced"]));
+    const { logs, run } = captureLogs(() => info("unsynced", false, false));
     await run();
 
     const allOutput = logs.join("\n");
