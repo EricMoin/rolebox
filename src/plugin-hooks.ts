@@ -1,11 +1,11 @@
-import type { AgentConfig } from "@opencode-ai/sdk";
+import type { AgentConfig, Event } from "@opencode-ai/sdk";
 import type { PluginInput, Config } from "@opencode-ai/plugin";
 import { applyParams } from "./function-resolver.ts";
 import { parseFunctionActivation } from "./function-parser.ts";
 import { functionSessionState } from "./session-state.ts";
 import { graphSessionState, buildGraphStateBlock } from "./graph/index.ts";
 import { buildFunctionBlock } from "./prompt-builder.ts";
-import { buildAgentConfig } from "./prompt/agent-config.ts";
+import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts";
 import { DispatchManager } from "./dispatch/manager.ts";
 import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.ts";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
@@ -32,6 +32,14 @@ export function createPluginHooks(
       dispatch_output: createDispatchOutputTool(dispatchManager),
       dispatch_cancel: createDispatchCancelTool(dispatchManager),
     },
+    event: async (input: { event: Event }) => {
+      if (input.event.type === "session.idle") {
+        const sessionId = (input.event.properties as { sessionID?: string })?.sessionID;
+        if (sessionId) {
+          await dispatchManager.handleSessionIdle(sessionId);
+        }
+      }
+    },
     config: async (config: Config) => {
       for (const resolved of resolvedRoles) {
         const agentConfig = buildAgentConfig(resolved);
@@ -51,7 +59,7 @@ export function createPluginHooks(
           if (sub.config.temperature !== undefined) subAgentCfg.temperature = sub.config.temperature;
           if (sub.config.top_p !== undefined) subAgentCfg.top_p = sub.config.top_p;
           if (sub.config.tools) subAgentCfg.tools = sub.config.tools;
-          if (sub.config.permission) subAgentCfg.permission = sub.config.permission;
+          if (sub.config.permission) subAgentCfg.permission = transformPermission(sub.config.permission);
 
           config.agent[sub.id] = subAgentCfg as AgentConfig;
         }
