@@ -1,5 +1,5 @@
 import type { AgentConfig } from "@opencode-ai/sdk";
-import type { ResolvedRole } from "../types.ts";
+import type { ResolvedRole, PermissionConfig } from "../types.ts";
 import { RoleMode } from "../constants.ts";
 
 function assignDefined<T extends Record<string, unknown>>(
@@ -15,11 +15,41 @@ function assignDefined<T extends Record<string, unknown>>(
 }
 
 /**
- * Build an SDK-compatible AgentConfig from a ResolvedRole.
+ * Transform rolebox's `{ allow?: string[], deny?: string[] }` permission format
+ * into opencode's per-tool PermissionConfig: `{ read: "allow", bash: "deny", ... }`.
  *
- * Only defined fields are included so that defaults in opencode itself
- * are not accidentally overwritten with empty strings or zero values.
+ * Also passes through configs that are already in the new format (object with
+ * string values like `{ read: "allow" }`) for forward-compatibility.
  */
+export function transformPermission(
+  perm: PermissionConfig | undefined,
+): AgentConfig["permission"] | undefined {
+  if (!perm) return undefined;
+
+  const hasAllow = Array.isArray(perm.allow);
+  const hasDeny = Array.isArray(perm.deny);
+
+  if (!hasAllow && !hasDeny) {
+    return perm as AgentConfig["permission"];
+  }
+
+  const result: Record<string, string> = {};
+
+  if (hasAllow) {
+    for (const tool of perm.allow!) {
+      result[tool.toLowerCase()] = "allow";
+    }
+  }
+
+  if (hasDeny) {
+    for (const tool of perm.deny!) {
+      result[tool.toLowerCase()] = "deny";
+    }
+  }
+
+  return result as AgentConfig["permission"];
+}
+
 export function buildAgentConfig(resolved: ResolvedRole): AgentConfig {
   const { config } = resolved;
 
@@ -36,7 +66,7 @@ export function buildAgentConfig(resolved: ResolvedRole): AgentConfig {
       temperature: config.temperature,
       top_p: config.top_p,
       tools: config.tools,
-      permission: config.permission as AgentConfig["permission"],
+      permission: transformPermission(config.permission),
     },
   );
 }
