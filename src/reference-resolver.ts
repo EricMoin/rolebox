@@ -1,8 +1,8 @@
 import { resolve as pathResolve, relative, dirname, basename, extname } from "node:path";
 import fg from "fast-glob";
 import yaml from "js-yaml";
-import type { ReferenceEntry, ResolvedReference } from "./types.js";
-import type { ReferenceScope } from "./constants.js";
+import type { ReferenceEntry, ResolvedReference } from "./types.ts";
+import type { ReferenceScope } from "./constants.ts";
 
 /**
  * Derive a human-readable name from a reference file path.

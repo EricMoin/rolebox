@@ -1,9 +1,9 @@
-export { DispatchManager } from "./manager.js";
-export { ConcurrencyManager } from "./concurrency.js";
-export { GlobalPoller } from "./global-poller.js";
-export { GlobalPoller as SessionPoller } from "./global-poller.js"; // deprecated alias
-export { SessionMonitor } from "./session-monitor.js";
-export { detectCompletion } from "./completion-detector.js";
-export { buildNotificationText, notifyParent } from "./notification.js";
-export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./tools.js";
-export type * from "./types.js";
+export { DispatchManager } from "./manager.ts";
+export { ConcurrencyManager } from "./concurrency.ts";
+export { GlobalPoller } from "./global-poller.ts";
+export { GlobalPoller as SessionPoller } from "./global-poller.ts"; // deprecated alias
+export { SessionMonitor } from "./session-monitor.ts";
+export { detectCompletion } from "./completion-detector.ts";
+export { buildNotificationText, notifyParent } from "./notification.ts";
+export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./tools.ts";
+export type * from "./types.ts";

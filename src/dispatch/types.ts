@@ -87,7 +87,7 @@ export interface DispatchResult {
  * Configurable limits and intervals for the dispatch manager.
  * Re-exported from config.ts for backward compatibility.
  */
-export type { DispatchManagerConfig } from "./config.js";
+export type { DispatchManagerConfig } from "./config.ts";
 
 /**
  * Payload for task lifecycle notifications emitted to the parent agent.

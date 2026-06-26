@@ -3,13 +3,13 @@ import type {
   DispatchInput,
   DispatchTask,
   DispatchManagerConfig,
-} from "./types.js";
-import { DEFAULT_CONFIG } from "./config.js";
-import { ConcurrencyManager } from "./concurrency.js";
-import { GlobalPoller } from "./global-poller.js";
-import { SessionMonitor } from "./session-monitor.js";
-import { detectCompletion } from "./completion-detector.js";
-import { notifyParent } from "./notification.js";
+} from "./types.ts";
+import { DEFAULT_CONFIG } from "./config.ts";
+import { ConcurrencyManager } from "./concurrency.ts";
+import { GlobalPoller } from "./global-poller.ts";
+import { SessionMonitor } from "./session-monitor.ts";
+import { detectCompletion } from "./completion-detector.ts";
+import { notifyParent } from "./notification.ts";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
 

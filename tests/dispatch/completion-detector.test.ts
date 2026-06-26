@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { detectCompletion, extractAssistantError } from "../../src/dispatch/completion-detector.js";
-import type { SessionMessageSnapshot, TaskPollState } from "../../src/dispatch/types.js";
+import { detectCompletion, extractAssistantError } from "../../src/dispatch/completion-detector.ts";
+import type { SessionMessageSnapshot, TaskPollState } from "../../src/dispatch/types.ts";
 
 // ── Test Helpers ──────────────────────────────────────────────────────
 

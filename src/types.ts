@@ -4,7 +4,7 @@ import type {
   FunctionSource,
   ReferenceScope,
   GraphTemplate,
-} from "./constants.js";
+} from "./constants.ts";
 
 /**
  * Permission configuration, mirroring opencode's PermissionConfig structure.
@@ -72,7 +72,7 @@ export interface FlowEdge {
   exit?: boolean;
 }
 
-export type { GraphTemplate } from "./constants.js";
+export type { GraphTemplate } from "./constants.ts";
 
 /**
  * Raw collaboration graph configuration as parsed from role.yaml.

@@ -1,9 +1,10 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import fg from "fast-glob";
 import yaml from "js-yaml";
-import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "./types.js";
-import { SkillScope, ReferenceScope } from "./constants.js";
-import { resolveAllReferences } from "./reference-resolver.js";
+import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "./types.ts";
+import { SkillScope, ReferenceScope } from "./constants.ts";
+import { resolveAllReferences } from "./reference-resolver.ts";
+import { skillDirPath, skillFilePath } from "./paths.ts";
 
 interface Candidate {
   scope: ResolvedSkill["scope"];
@@ -20,11 +21,12 @@ function buildCandidates(
   roleDir: string,
   globalSkillsDir: string,
 ): Candidate[] {
+  const roleSkillsDir = join(roleDir, "skills");
   return [
-    { scope: SkillScope.Rolebox, pattern: `${roleDir}/skills/${name}/SKILL.md` },
-    { scope: SkillScope.Rolebox, pattern: `${roleDir}/skills/${name}.md` },
-    { scope: SkillScope.Opencode, pattern: `${globalSkillsDir}/${name}/SKILL.md` },
-    { scope: SkillScope.Opencode, pattern: `${globalSkillsDir}/${name}.md` },
+    { scope: SkillScope.Rolebox, pattern: skillDirPath(roleSkillsDir, name) },
+    { scope: SkillScope.Rolebox, pattern: skillFilePath(roleSkillsDir, name) },
+    { scope: SkillScope.Opencode, pattern: skillDirPath(globalSkillsDir, name) },
+    { scope: SkillScope.Opencode, pattern: skillFilePath(globalSkillsDir, name) },
   ];
 }
 

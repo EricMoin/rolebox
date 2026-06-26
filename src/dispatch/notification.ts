@@ -1,5 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import type { DispatchTask, NotificationPayload } from "./types.js";
+import type { DispatchTask, NotificationPayload } from "./types.ts";
 
 /** Per-parent-session queue for serializing notification sends. */
 const parentQueues = new Map<string, Promise<void>>();

@@ -1,12 +1,12 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import type { DispatchManagerConfig } from "./config.js";
-import type { CompletionSignal, SessionMessageSnapshot, TaskPollState } from "./types.js";
-import { detectCompletion } from "./completion-detector.js";
-import { SessionMonitor } from "./session-monitor.js";
+import type { DispatchManagerConfig } from "./config.ts";
+import type { CompletionSignal, SessionMessageSnapshot, TaskPollState } from "./types.ts";
+import { detectCompletion } from "./completion-detector.ts";
+import { SessionMonitor } from "./session-monitor.ts";
 import {
   MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS, DEFAULT_MAX_CONCURRENT,
   MIN_STABILITY_POLLS, MESSAGE_STALENESS_TIMEOUT_MS, SESSION_GONE_TIMEOUT_MS,
-} from "./config.js";
+} from "./config.ts";
 
 export interface GlobalPollerDeps {
   completionDetector: typeof detectCompletion;

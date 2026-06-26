@@ -13,9 +13,9 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
-import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.js";
-import type { RoleConfig, SubAgentConfig } from "./types.js";
-import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR } from "./constants.js";
+import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.ts";
+import type { RoleConfig, SubAgentConfig } from "./types.ts";
+import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR } from "./constants.ts";
 
 /**
  * Validate a role ID string.

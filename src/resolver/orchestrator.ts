@@ -1,12 +1,13 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { resolveSkills } from "../skill-resolver.js";
-import { resolveAllReferences } from "../reference-resolver.js";
-import { resolveFunctions } from "../function-resolver.js";
-import { buildSubagentRoleBlock, parseCollaboration } from "../graph/index.js";
-import { buildAgentPrompt } from "../prompt-builder.js";
-import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedGraph, GraphNodeRole } from "../types.js";
-import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.js";
+import { resolveSkills } from "../skill-resolver.ts";
+import { resolveAllReferences } from "../reference-resolver.ts";
+import { resolveFunctions } from "../function-resolver.ts";
+import { buildSubagentRoleBlock, parseCollaboration } from "../graph/index.ts";
+import { buildAgentPrompt } from "../prompt-builder.ts";
+import { subagentDir, globalFunctionsPath } from "../paths.ts";
+import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedGraph, GraphNodeRole } from "../types.ts";
+import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.ts";
 
 export function computeNodeRole(
   graph: ResolvedGraph,
@@ -75,7 +76,7 @@ export async function resolveAllRoles(
       const skillReferences = skills.flatMap((s) => s.references);
       const allReferences = [...roleReferences, ...skillReferences];
 
-      const globalFunctionsDir = path.join(ctx.configDir, "functions");
+      const globalFunctionsDir = globalFunctionsPath(ctx.configDir);
 
       const functionNames = config.functions ?? [...DEFAULT_FUNCTIONS];
       const enabledFunctions = functionNames.filter(
@@ -93,8 +94,8 @@ export async function resolveAllRoles(
           const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
           const childId = `${roleId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
 
-          const slugDir = path.join(roleDir, "subagents", childSlug);
-          const nameDir = path.join(roleDir, "subagents", saConfig.name);
+          const slugDir = subagentDir(roleDir, childSlug);
+          const nameDir = subagentDir(roleDir, saConfig.name);
           const saRoleDir = existsSync(slugDir)
             ? slugDir
             : existsSync(nameDir)
@@ -127,7 +128,7 @@ export async function resolveAllRoles(
           const saSkillRefs = saSkills.flatMap((s) => s.references);
           const saReferences = [...roleReferences, ...saOwnRefs, ...saSkillRefs];
 
-          const saPrompt = buildAgentPrompt(saConfig, saSkills, undefined, saReferences);
+          const saPrompt = buildAgentPrompt(saConfig, saSkills, { references: saReferences });
 
           ctx.roleFunctionsMap.set(childId, saFunctions);
 
@@ -185,7 +186,7 @@ export async function resolveAllRoles(
         name: sa.config.name,
         description: sa.config.description,
       }));
-      const prompt = buildAgentPrompt(config, skills, subagentMetadata, allReferences, graph);
+      const prompt = buildAgentPrompt(config, skills, { subagents: subagentMetadata, references: allReferences, graph });
 
       resolved.push({ id: roleId, config, prompt, skills, functions, references: allReferences, subagents: resolvedSubagents, graph });
       ctx.roleFunctionsMap.set(roleId, functions);

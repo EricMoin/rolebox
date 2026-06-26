@@ -4,9 +4,9 @@ import {
   createDispatchTool,
   createDispatchOutputTool,
   createDispatchCancelTool,
-} from "../../src/dispatch/tools.js";
-import type { DispatchManager } from "../../src/dispatch/manager.js";
-import type { DispatchTask } from "../../src/dispatch/types.js";
+} from "../../src/dispatch/tools.ts";
+import type { DispatchManager } from "../../src/dispatch/manager.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 // ── helpers ──────────────────────────────────────────────────────────────
 

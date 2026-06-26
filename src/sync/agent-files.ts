@@ -1,8 +1,8 @@
 import path from "node:path";
-import os from "node:os";
 import { writeFileSync, readFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
-import type { ResolvedRole } from "../types.js";
-import { RoleMode, ROLEBOX_AGENT_MARKER } from "../constants.js";
+import type { ResolvedRole } from "../types.ts";
+import { RoleMode, ROLEBOX_AGENT_MARKER } from "../constants.ts";
+import { agentsDir, agentFilePath } from "../paths.ts";
 
 interface AgentEntry {
   id: string;
@@ -22,12 +22,12 @@ interface AgentEntry {
  * marker comment so they can be cleaned up if the role is removed.
  */
 export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
-  const agentsDir = path.join(os.homedir(), ".claude", "agents");
+  const agentsDirPath = agentsDir();
 
   try {
-    mkdirSync(agentsDir, { recursive: true });
+    mkdirSync(agentsDirPath, { recursive: true });
   } catch {
-    return; // Can't write — skip silently
+    return;
   }
 
   const allAgents: AgentEntry[] = [];
@@ -53,10 +53,10 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
   }
 
   try {
-    const existing = readdirSync(agentsDir);
+    const existing = readdirSync(agentsDirPath);
     for (const file of existing) {
       if (!file.endsWith(".md")) continue;
-      const filePath = path.join(agentsDir, file);
+      const filePath = path.join(agentsDirPath, file);
       try {
         const text = readFileSync(filePath, "utf-8");
         if (text.includes(ROLEBOX_AGENT_MARKER)) {
@@ -69,9 +69,7 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
         continue;
       }
     }
-  } catch {
-    // Directory not readable — skip cleanup
-  }
+  } catch {}
 
   for (const agent of allAgents) {
     const lines = [
@@ -84,11 +82,9 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
     if (agent.model) lines.push(`model: ${agent.model}`);
     lines.push("---", "", agent.prompt);
 
-    const filePath = path.join(agentsDir, `${agent.id}.md`);
+    const filePath = agentFilePath(agent.id);
     try {
       writeFileSync(filePath, lines.join("\n"), "utf-8");
-    } catch {
-      // Skip if write fails
-    }
+    } catch {}
   }
 }
