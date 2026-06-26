@@ -183,6 +183,63 @@ describe("validateGraph", () => {
     expect(result.warnings.filter((w) => w.includes("Cycle"))).toEqual([]);
   });
 
+  // ─── Disconnected subgraph (Bug #15) ────────────────────────────
+
+  it("warns about disconnected nodes but still returns valid", () => {
+    const edges: FlowEdge[] = [
+      { from: "parent", to: "agent-a" },
+      { from: "agent-a", to: "parent", exit: true },
+    ];
+    const graph = makeGraph({
+      edges,
+      nodes: ["agent-a", "disconnected-b"],
+    });
+    const result = validateGraph(graph, ["agent-a", "disconnected-b"]);
+    expect(result.valid).toBe(true);
+    expect(
+      result.warnings.some(
+        (w) => w.includes("disconnected") && w.includes("disconnected-b"),
+      ),
+    ).toBe(true);
+  });
+
+  it("warns about multiple disconnected nodes", () => {
+    const edges: FlowEdge[] = [
+      { from: "parent", to: "agent-a" },
+      { from: "agent-a", to: "parent", exit: true },
+    ];
+    const graph = makeGraph({
+      edges,
+      nodes: ["agent-a", "disconnected-1", "disconnected-2"],
+    });
+    const result = validateGraph(graph, [
+      "agent-a",
+      "disconnected-1",
+      "disconnected-2",
+    ]);
+    expect(result.valid).toBe(true);
+    expect(
+      result.warnings.filter((w) => w.includes("Disconnected node")).length,
+    ).toBe(2);
+  });
+
+  it("does not warn about disconnected nodes when all nodes are reachable", () => {
+    const edges: FlowEdge[] = [
+      { from: "parent", to: "agent-a" },
+      { from: "agent-a", to: "agent-b" },
+      { from: "agent-b", to: "parent", exit: true },
+    ];
+    const graph = makeGraph({
+      edges,
+      nodes: ["agent-a", "agent-b"],
+    });
+    const result = validateGraph(graph, ["agent-a", "agent-b"]);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.filter((w) => w.includes("Disconnected node"))).toEqual(
+      [],
+    );
+  });
+
   // ─── Combined scenarios ────────────────────────────────────────
 
   it("reports multiple validation failures", () => {

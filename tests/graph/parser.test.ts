@@ -568,6 +568,61 @@ describe("parseCollaboration", () => {
       expect(result).toBeNull();
     });
 
+    it("parses Unicode agent names (Bug #13)", () => {
+      const result = parseCollaboration(
+        {
+          flow: [
+            "parent -> 研究者",
+            "研究者 -> 撰写者: 传递结果",
+            "撰写者 -> parent",
+          ],
+        },
+        ["研究者", "撰写者"],
+      );
+      expect(result).not.toBeNull();
+      expect(result!.edges).toContainEqual(
+        expect.objectContaining({
+          from: "研究者",
+          to: "撰写者",
+          label: "传递结果",
+        }),
+      );
+    });
+
+    it("ASCII regression: hyphens still work (Bug #13)", () => {
+      const result = parseCollaboration(
+        {
+          flow: [
+            "parent -> agent-a",
+            "agent-a -> agent-b: some label",
+            "agent-b -> parent",
+          ],
+        },
+        ["agent-a", "agent-b"],
+      );
+      expect(result).not.toBeNull();
+      expect(result!.nodes.sort()).toEqual(["agent-a", "agent-b"]);
+    });
+
+    it("ASCII regression: underscores still work (Bug #13)", () => {
+      const result = parseCollaboration(
+        {
+          flow: [
+            "parent -> my_agent",
+            "my_agent -> other_agent: with label",
+            "other_agent -> parent",
+          ],
+        },
+        ["my_agent", "other_agent"],
+      );
+      expect(result).not.toBeNull();
+      const edge = result!.edges.find(
+        (e) => e.from === "my_agent" && e.to === "other_agent",
+      );
+      expect(edge).toBeDefined();
+      expect(edge!.label).toBe("with label");
+    });
+
     it("rejects object edge missing to field", () => {
       const result = parseCollaboration(
         {
@@ -635,7 +690,23 @@ describe("parseCollaboration", () => {
         },
         ["a"],
       );
-      expect(result!.maxIterations).toBe(-1);
+      expect(result!.maxIterations).toBe(0);
+    });
+
+    it("clamps negative max_iterations to 0", () => {
+      const result = parseCollaboration(
+        { topology: "pipeline", agents: ["a", "b"], max_iterations: -5 },
+        ["a", "b"],
+      );
+      expect(result!.maxIterations).toBe(0);
+    });
+
+    it("does not affect positive max_iterations", () => {
+      const result = parseCollaboration(
+        { topology: "pipeline", agents: ["a"], max_iterations: 5 },
+        ["a"],
+      );
+      expect(result!.maxIterations).toBe(5);
     });
   });
 
