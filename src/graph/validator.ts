@@ -9,7 +9,8 @@ import { PARENT_NODE } from "../constants.ts";
  * 2. At least one exit edge exists (edge to `"parent"` or `exit: true`)
  * 3. An entry point exists (at least one edge from `"parent"`)
  * 4. No orphan agents — agents in `availableAgents` not referenced in any edge (warning)
- * 5. Cycles without `maxIterations` — warning and default to 3
+ * 5. No disconnected nodes — all graph nodes reachable from `parent` via BFS (warning)
+ * 6. Cycles without `maxIterations` — warning and default to 3
  *
  * @param graph - The resolved collaboration graph to validate
  * @param availableAgents - List of all available agent IDs in the system
@@ -31,6 +32,7 @@ export function validateGraph(
   if (warnings.length > 0) return { valid: false, warnings };
 
   validateOrphanAgents(graph.edges, availableAgents, warnings);
+  validateConnectivity(graph, warnings);
   validateCycles(graph, warnings);
 
   return { valid: true, warnings };
@@ -126,7 +128,37 @@ function validateOrphanAgents(
 }
 
 /**
- * Check 5: Detect cycles in agent-to-agent edges.
+ * Check 5: Verify all nodes are reachable from the parent entry point via BFS.
+ * Warnings only, not fatal — disconnected agents are never dispatched to.
+ */
+function validateConnectivity(
+  graph: ResolvedGraph,
+  warnings: string[],
+): void {
+  const reachable = new Set<string>();
+  const queue = [PARENT_NODE];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (reachable.has(current)) continue;
+    reachable.add(current);
+    for (const edge of graph.edges) {
+      if (edge.from === current && !reachable.has(edge.to)) {
+        queue.push(edge.to);
+      }
+    }
+  }
+
+  for (const node of graph.nodes) {
+    if (!reachable.has(node)) {
+      const msg = `Disconnected node "${node}" is not reachable from parent entry point`;
+      warnings.push(msg);
+      console.warn(`[graph-validator] ${msg}`);
+    }
+  }
+}
+
+/**
+ * Check 6: Detect cycles in agent-to-agent edges.
  * If a cycle exists and maxIterations is not set, warn and default to 3.
  */
 function validateCycles(
