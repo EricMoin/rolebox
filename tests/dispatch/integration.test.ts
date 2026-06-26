@@ -291,6 +291,8 @@ describe("BUG-5: layered timeouts", () => {
   it("BUG-5b: stale task → 'Task stalled' timeout", async () => {
     m.statusFn.mockImplementation(() => sdkResult({ s1: { type: "idle" } }));
     m.completionDetector.mockImplementation(() => ({ type: "not_ready" }));
+    // Return no new messages so lastProgressUpdate is NOT refreshed
+    m.messagesFn.mockImplementation(() => sdkResult([]));
 
     const poller = makePoller(m);
     poller.registerTask("t1", "s1");

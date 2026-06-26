@@ -393,7 +393,7 @@ describe("GlobalPoller", () => {
   });
 
   describe("messages fetch failure (Bug #6)", () => {
-    it("17. updates lastProgressUpdate on messages fetch error to prevent false timeout", async () => {
+    it("17. failed message fetch does NOT refresh lastProgressUpdate", async () => {
       const p = makePoller(m);
       m.statusFn.mockImplementation(() => sdkResult({
         [SESSION_A]: { type: "idle" },
@@ -411,16 +411,14 @@ describe("GlobalPoller", () => {
 
       const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState }> }).tasks;
       const task = taskMap.get(TASK_A)!;
-      const staleTimeoutMs = 2700000;
-      task.pollState.lastProgressUpdate = Date.now() - staleTimeoutMs + 1000; // 1s from stale
+      const oldProgressTime = Date.now() - 10000;
+      task.pollState.lastProgressUpdate = oldProgressTime;
       task.pollState.hasProducedOutput = true;
 
       await runCycle(p);
 
-      // Should NOT have timed out — lastProgressUpdate was refreshed
-      expect(m.onTimeout).toHaveBeenCalledTimes(0);
-      // lastProgressUpdate should be updated close to now
-      expect(task.pollState.lastProgressUpdate).toBeGreaterThan(Date.now() - 1000);
+      // Failed fetch does NOT count as progress — lastProgressUpdate unchanged
+      expect(task.pollState.lastProgressUpdate).toBe(oldProgressTime);
     });
   });
 
@@ -510,6 +508,8 @@ describe("GlobalPoller", () => {
         [SESSION_A]: { type: "idle" },
       }));
       m.completionDetector.mockImplementation(() => ({ type: "not_ready" as const }));
+      // Return no new messages — task is stalled with no output arriving
+      m.messagesFn.mockReturnValue(Promise.resolve({ data: [], error: undefined }));
       p.registerTask(TASK_A, SESSION_A, undefined, 500); // 500ms per-task timeout
 
       const taskMap = (p as unknown as { tasks: Map<string, { registeredAt: number; pollState: TaskPollState; timeoutMs?: number }> }).tasks;
@@ -540,6 +540,135 @@ describe("GlobalPoller", () => {
 
       expect(m.onTimeout).toHaveBeenCalledTimes(0);
       expect(p.getTaskCount()).toBe(1);
+    });
+  });
+
+  describe("stall-timeout detection", () => {
+    it("23. lastProgressUpdate NOT refreshed on idle cycle (needsFetch, no new output)", async () => {
+      const poller = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 5000, minRuntimeMs: 0,
+        maxConcurrent: 5, taskTtlMs: 10000,
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      const oldTime = Date.now() - 3000;
+      poller.registerTask("task-idle", "session-idle");
+      poller.setTaskTiming("task-idle", { lastProgressUpdate: oldTime });
+      m.statusFn.mockReturnValue(Promise.resolve({ data: { "session-idle": { type: "idle" } }, error: undefined }));
+      m.messagesFn.mockReturnValue(Promise.resolve({ data: [], error: undefined }));
+      m.completionDetector.mockReturnValue({ type: "not_ready" });
+
+      await poller.pollCycle();
+
+      const state = poller.getTaskPollState("task-idle");
+      expect(state).toBeDefined();
+      expect(state!.lastProgressUpdate).toBe(oldTime);
+    });
+
+    it("24. lastProgressUpdate NOT refreshed on steady-state idle (no fetch needed)", async () => {
+      const poller = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 5000, minRuntimeMs: 0,
+        maxConcurrent: 5, taskTtlMs: 10000,
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      // Warmup cycle: establish prevKey and lastMessageCount
+      m.statusFn.mockReturnValue(Promise.resolve({ data: { "session-idle": { type: "idle" } }, error: undefined }));
+      m.messagesFn.mockReturnValue(Promise.resolve({ data: [idleMsg()], error: undefined }));
+      m.completionDetector.mockReturnValue({ type: "not_ready" });
+      poller.registerTask("task-idle", "session-idle");
+      await poller.pollCycle();
+
+      // Set a known old lastProgressUpdate
+      const oldTime = Date.now() - 3000;
+      poller.setTaskTiming("task-idle", { lastProgressUpdate: oldTime });
+
+      // Second cycle: same status → needsFetch=false → no update
+      await poller.pollCycle();
+
+      const state = poller.getTaskPollState("task-idle");
+      expect(state).toBeDefined();
+      expect(state!.lastProgressUpdate).toBe(oldTime);
+    });
+
+    it("25. lastProgressUpdate IS refreshed on busy/retry status", async () => {
+      const poller = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 5000, minRuntimeMs: 0,
+        maxConcurrent: 5, taskTtlMs: 10000,
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      const oldTime = Date.now() - 10000;
+      poller.registerTask("task-busy", "session-busy");
+      poller.setTaskTiming("task-busy", { lastProgressUpdate: oldTime });
+      m.statusFn.mockReturnValue(Promise.resolve({ data: { "session-busy": { type: "busy" } }, error: undefined }));
+
+      await poller.pollCycle();
+
+      const state = poller.getTaskPollState("task-busy");
+      expect(state).toBeDefined();
+      expect(state!.lastProgressUpdate).toBeGreaterThan(oldTime);
+    });
+
+    it("26. failed message fetch does NOT refresh lastProgressUpdate", async () => {
+      const poller = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 5000, minRuntimeMs: 0,
+        maxConcurrent: 5, taskTtlMs: 10000,
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      const oldTime = Date.now() - 5000;
+      poller.registerTask("task-failfetch", "session-failfetch");
+      poller.setTaskTiming("task-failfetch", { lastProgressUpdate: oldTime });
+      m.statusFn.mockReturnValue(Promise.resolve({ data: { "session-failfetch": { type: "idle" } }, error: undefined }));
+      m.messagesFn.mockReturnValue(Promise.resolve({ data: undefined, error: { status: 500, message: "fail" } }));
+
+      await poller.pollCycle();
+
+      const state = poller.getTaskPollState("task-failfetch");
+      expect(state).toBeDefined();
+      expect(state!.lastProgressUpdate).toBe(oldTime);
+    });
+
+    it("27. lastProgressUpdate IS refreshed when new messages arrive", async () => {
+      const poller = new GlobalPoller(m.client, {
+        pollIntervalMs: 3000, staleTimeoutMs: 5000, minRuntimeMs: 0,
+        maxConcurrent: 5, taskTtlMs: 10000,
+      }, {
+        completionDetector: m.completionDetector as unknown as typeof import("../../src/dispatch/completion-detector").detectCompletion,
+        sessionMonitor: m.sessionMonitor,
+        onTaskCompleted: m.onCompleted,
+        onTaskError: m.onError,
+        onTaskTimeout: m.onTimeout,
+      });
+      const oldTime = Date.now() - 10000;
+      poller.registerTask("task-newmsg", "session-newmsg");
+      poller.setTaskTiming("task-newmsg", { lastProgressUpdate: oldTime });
+      m.statusFn.mockReturnValue(Promise.resolve({ data: { "session-newmsg": { type: "idle" } }, error: undefined }));
+      m.messagesFn.mockReturnValue(Promise.resolve({ data: [idleMsg()], error: undefined }));
+      m.completionDetector.mockReturnValue({ type: "not_ready" });
+
+      await poller.pollCycle();
+
+      const state = poller.getTaskPollState("task-newmsg");
+      expect(state).toBeDefined();
+      expect(state!.lastProgressUpdate).toBeGreaterThan(oldTime);
     });
   });
 });

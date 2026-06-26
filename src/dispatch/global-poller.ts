@@ -179,11 +179,14 @@ export class GlobalPoller {
       const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
       if (msgResult.error !== undefined || msgResult.data == null) {
         debugLog("task", taskId, `messages fetch failed: ${JSON.stringify(msgResult.error)}`);
-        task.pollState.lastProgressUpdate = now;
         return;
       }
       const messages = msgResult.data as SessionMessageSnapshot[];
+      const prevCount = task.pollState.lastMessageCount;
       task.pollState.lastMessageCount = messages.length;
+      if (messages.length > prevCount) {
+        task.pollState.lastProgressUpdate = now;
+      }
       debugLog("task", taskId, `got ${messages.length} message(s)`);
 
       if (DEBUG) {
@@ -221,7 +224,6 @@ export class GlobalPoller {
     } else {
       debugLog("task", taskId, `no fetch needed (idle polls=${task.pollState.stableIdlePolls})`);
     }
-    task.pollState.lastProgressUpdate = now;
   }
 
   private async _handleSignal(

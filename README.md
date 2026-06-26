@@ -321,6 +321,36 @@ The parent dispatches work to a subagent using `task()` in its prompt:
 task(subagent_type="team-lead--implementer", prompt="Implement the auth module", run_in_background=true)
 ```
 
+Rolebox exposes three dispatch tools to the parent agent:
+
+| Tool | Purpose |
+|---|---|
+| `dispatch` | Launch a task (sync or background) |
+| `dispatch_output` | Retrieve results from a completed background task |
+| `dispatch_cancel` | Cancel a running background task |
+
+A fourth tool, `dispatch_metrics`, provides runtime counters, gauges, and histograms for the dispatch subsystem when `ROLEBOX_METRICS` is set.
+
+**Background tasks** run asynchronously. The parent gets a task ID back immediately and receives a `<system-reminder>` notification when the task finishes. Call `dispatch_output` after the notification to collect results.
+
+**Sync tasks** block until the subagent finishes (10 min timeout). Use these for short work where the parent needs the result right away.
+
+#### Session continuation
+
+Pass `session_id` (the task ID from a previous dispatch) to re-prompt a subagent in the same opencode session. This preserves the conversation history, so the subagent picks up where it left off.
+
+```
+task(subagent_type="team-lead--implementer", session_id="<previous-task-id>", prompt="Now add tests", run_in_background=true)
+```
+
+#### Per-task timeout
+
+Background tasks accept an optional `timeout_ms` to override the default 15 min stale timeout. Without it, long-running tasks get reaped.
+
+#### Concurrency
+
+Background tasks are gated by a per-model semaphore (default: 5 concurrent tasks per model). When all slots are full, new tasks queue up in a bounded FIFO (default depth: 10). If the queue is also full, the dispatch fails immediately with an error. One slot per model is reserved for sync dispatch so that synchronous calls don't starve behind a full background queue.
+
 ### Subagent skills and functions
 
 Subagents can have their own `skills/` and `functions/` directories (file-based declaration only). Skills from subagents are symlinked into opencode as `rolebox--{parentId}--{childId}--{skillName}`.

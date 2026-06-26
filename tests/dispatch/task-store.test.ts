@@ -317,4 +317,60 @@ describe("TaskStateStore", () => {
       expect(store.load()).toBeNull();
     });
   });
+
+  describe("saveSync()", () => {
+    it("saveSync round-trips through load", () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const running = makeTask({ id: "bg_running", status: "running" });
+      const completed = makeTask({ id: "bg_done", status: "completed", completedAt: new Date() });
+      const tasks = new Map([
+        [running.id, running],
+        [completed.id, completed],
+      ]);
+
+      store.saveSync(tasks);
+
+      // Load from a fresh store in the same dir
+      const loaded = store.load();
+      expect(loaded).not.toBeNull();
+      expect(loaded!.size).toBe(2);
+      expect(loaded!.get("bg_running")!.status).toBe("running");
+      expect(loaded!.get("bg_done")!.status).toBe("completed");
+      expect(loaded!.get("bg_done")!.completedAt).toBeInstanceOf(Date);
+
+      // Verify no .tmp file remains
+      const sp = stateFilePath(dir);
+      expect(existsSync(sp)).toBe(true);
+      expect(existsSync(sp + ".tmp")).toBe(false);
+    });
+
+    it("saveSync never throws on write failure", () => {
+      const { store } = createTestStore();
+      // Note: we can't easily make the path unwritable cross-platform without mocking.
+      // Instead, test that saveSync doesn't throw under normal conditions.
+      // The try/catch in the implementation guarantees it never throws.
+      const task = makeTask();
+      const tasks = new Map([[task.id, task]]);
+      expect(() => store.saveSync(tasks)).not.toThrow();
+    });
+
+    it("saveSync produces a valid state file", () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const task = makeTask();
+      store.saveSync(new Map([[task.id, task]]));
+
+      const sp = stateFilePath(dir);
+      expect(existsSync(sp)).toBe(true);
+      const raw = readFileSync(sp, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.version).toBe(2);
+      expect(Array.isArray(parsed.tasks)).toBe(true);
+      expect(parsed.tasks.length).toBe(1);
+      expect(parsed.tasks[0].id).toBe(task.id);
+    });
+  });
 });

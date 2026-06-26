@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -178,6 +178,33 @@ export class TaskStateStore {
     try {
       unlinkSync(this.getStatePath());
     } catch {}
+  }
+
+  /**
+   * Synchronous version of save() for crash-safe persistence.
+   * Mirrors the atomic write pattern from _doSave but fully synchronous.
+   *
+   * On process exit, this is last-writer-wins versus any in-flight async save(),
+   * which is the desired behavior (exit state is authoritative).
+   * Never throws — wraps errors in try/catch and logs a warning.
+   */
+  saveSync(tasks: Map<string, DispatchTask>): void {
+    try {
+      const json = this.serialize(tasks);
+      const statePath = this.getStatePath();
+      const stateDir = join(statePath, "..");
+
+      mkdirSync(stateDir, { recursive: true });
+
+      const tmp = statePath + ".tmp";
+      writeFileSync(tmp, json, "utf-8");
+
+      try { unlinkSync(statePath); } catch {}
+
+      renameSync(tmp, statePath);
+    } catch (err) {
+      log.warn("Failed to persist dispatch state (sync)", err);
+    }
   }
 
   // ── Private ─────────────────────────────────────────────────────────────
