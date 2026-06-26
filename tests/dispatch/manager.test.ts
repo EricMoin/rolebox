@@ -214,6 +214,127 @@ describe("DispatchManager", () => {
     expect(mgr.concurrency.getActiveCount("default")).toBe(4);
   });
 
+  // ── 2c. executeSync metrics ──────────────────────────────────
+
+  describe("executeSync metrics", () => {
+    it("T16: executeSync inflight gauge rises during, falls after", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+
+      let resolvePrompt!: (v: any) => void;
+      const deferred = new Promise<any>((r) => { resolvePrompt = r; });
+
+      const client = createMockClient({
+        sessionPrompt: () => deferred,
+      });
+      const manager = new DispatchManager(client, fastConfig);
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      // Start executeSync — it blocks at the prompt await
+      const syncPromise = manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      );
+
+      // Allow microtask flush so the gauge.inc() takes effect
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Gauge should be +1 during execution
+      expect(g.peek()).toBe(baseline + 1);
+
+      // Resolve the prompt
+      resolvePrompt({
+        data: { parts: [{ type: "text", text: "done" }] },
+        error: undefined,
+      });
+
+      await syncPromise;
+
+      // Gauge should be back to baseline after completion
+      expect(g.peek()).toBe(baseline);
+    });
+
+    it("T16: executeSync does NOT add to this.tasks", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const taskCountBefore = mgr.tasks.size;
+
+      await manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      );
+
+      // Sync task was NOT added to this.tasks
+      expect(mgr.tasks.size).toBe(taskCountBefore);
+    });
+
+    it("T16: executeSync records dispatch_completed_total and task_duration_ms on success", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+
+      const completedBefore = metrics.counter("dispatch_completed_total", { mode: "sync" }).peek();
+      const histBefore = metrics.histogram("task_duration_ms", { mode: "sync" }).peek();
+
+      await manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      );
+
+      const completedAfter = metrics.counter("dispatch_completed_total", { mode: "sync" }).peek();
+      const histAfter = metrics.histogram("task_duration_ms", { mode: "sync" }).peek();
+
+      expect(completedAfter).toBe(completedBefore + 1);
+      expect(histAfter.count).toBe(histBefore.count + 1);
+      expect(histAfter.sum).toBeGreaterThan(0);
+    });
+
+    it("T16: executeSync records dispatch_error_total on error", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+
+      const client = createMockClient({
+        sessionPrompt: () => Promise.reject(new Error("prompt failed")),
+      });
+      const manager = new DispatchManager(client, fastConfig);
+
+      const errorBefore = metrics.counter("dispatch_error_total", { mode: "sync" }).peek();
+
+      await expect(
+        manager.executeSync(
+          { subagent: "sync-test", prompt: "hello", run_in_background: false },
+          parentContext(),
+        ),
+      ).rejects.toThrow("prompt failed");
+
+      const errorAfter = metrics.counter("dispatch_error_total", { mode: "sync" }).peek();
+      expect(errorAfter).toBe(errorBefore + 1);
+    });
+
+    it("T16: executeSync inflight gauge balanced on error", async () => {
+      if (!process.env.ROLEBOX_METRICS) return;
+
+      const client = createMockClient({
+        sessionPrompt: () => Promise.reject(new Error("prompt failed")),
+      });
+      const manager = new DispatchManager(client, fastConfig);
+      const g = metrics.gauge("inflight_tasks");
+      const baseline = g.peek();
+
+      await expect(
+        manager.executeSync(
+          { subagent: "sync-test", prompt: "hello", run_in_background: false },
+          parentContext(),
+        ),
+      ).rejects.toThrow("prompt failed");
+
+      // Gauge should be back to baseline even on error
+      expect(g.peek()).toBe(baseline);
+    });
+  });
+
   // ── 3. cancelTask() ──────────────────────────────────────────
 
   it("cancelTask() aborts session and updates status to cancelled", async () => {
@@ -1191,7 +1312,7 @@ describe("DispatchManager", () => {
     it("queue-full does not affect inflight gauge", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0 });
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();

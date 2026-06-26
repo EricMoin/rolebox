@@ -1,4 +1,6 @@
 /// <reference types="bun-types" />
+import fs from "node:fs";
+import path from "node:path";
 import { describe, it, expect, mock } from "bun:test";
 import {
   createDispatchTool,
@@ -395,5 +397,93 @@ describe("createDispatchMetricsTool", () => {
 
     expect(result).toContain("no metrics recorded");
     expect(result).toContain("ROLEBOX_METRICS may be disabled");
+  });
+
+  it("with export_path writes JSON snapshot file atomically", async () => {
+    const tmpDir = fs.mkdtempSync("rb-metrics-test-");
+    const exportPath = path.join(tmpDir, "snapshot.json");
+
+    const tool = createDispatchMetricsTool();
+    await tool.execute({ export_path: exportPath }, mockToolContext);
+
+    expect(fs.existsSync(exportPath)).toBe(true);
+
+    const content = fs.readFileSync(exportPath, "utf-8");
+    const parsed = JSON.parse(content);
+    expect(parsed).toHaveProperty("counters");
+    expect(parsed).toHaveProperty("gauges");
+    expect(parsed).toHaveProperty("histograms");
+
+    expect(fs.existsSync(exportPath + ".tmp")).toBe(false);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("with export_path in json format also writes file", async () => {
+    const tmpDir = fs.mkdtempSync("rb-metrics-test-");
+    const exportPath = path.join(tmpDir, "snapshot.json");
+
+    const tool = createDispatchMetricsTool();
+    const result = await tool.execute(
+      { export_path: exportPath, format: "json" },
+      mockToolContext,
+    );
+
+    expect(fs.existsSync(exportPath)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(exportPath, "utf-8"));
+    expect(parsed).toHaveProperty("counters");
+
+    expect(() => JSON.parse(result)).not.toThrow();
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("without export_path does not write any file", async () => {
+    const tmpDir = fs.mkdtempSync("rb-metrics-test-");
+    const nonExistentPath = path.join(tmpDir, "should-not-exist.json");
+
+    const tool = createDispatchMetricsTool();
+    await tool.execute({}, mockToolContext);
+
+    expect(fs.existsSync(nonExistentPath)).toBe(false);
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reads ROLEBOX_METRICS_EXPORT env var when export_path not provided", async () => {
+    const tmpDir = fs.mkdtempSync("rb-metrics-test-");
+    const exportPath = path.join(tmpDir, "env-var-snapshot.json");
+
+    process.env.ROLEBOX_METRICS_EXPORT = exportPath;
+    try {
+      const tool = createDispatchMetricsTool();
+      await tool.execute({}, mockToolContext);
+
+      expect(fs.existsSync(exportPath)).toBe(true);
+      const parsed = JSON.parse(fs.readFileSync(exportPath, "utf-8"));
+      expect(parsed).toHaveProperty("counters");
+    } finally {
+      delete process.env.ROLEBOX_METRICS_EXPORT;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("explicit export_path overrides ROLEBOX_METRICS_EXPORT env var", async () => {
+    const tmpDir = fs.mkdtempSync("rb-metrics-test-");
+    const envPath = path.join(tmpDir, "env.json");
+    const explicitPath = path.join(tmpDir, "explicit.json");
+
+    process.env.ROLEBOX_METRICS_EXPORT = envPath;
+    try {
+      const tool = createDispatchMetricsTool();
+      await tool.execute({ export_path: explicitPath }, mockToolContext);
+
+      expect(fs.existsSync(explicitPath)).toBe(true);
+
+      expect(fs.existsSync(envPath)).toBe(false);
+    } finally {
+      delete process.env.ROLEBOX_METRICS_EXPORT;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
