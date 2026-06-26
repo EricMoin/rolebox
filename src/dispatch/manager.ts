@@ -252,6 +252,67 @@ export class DispatchManager {
     }
   }
 
+  async reopenForContinuation(
+    taskId: string,
+    input: DispatchInput,
+    parentContext: { sessionID: string; agent: string; directory: string },
+  ): Promise<DispatchTask> {
+    if (this.cleanedUpTasks.has(taskId)) throw new Error(`Task '${taskId}' was cleaned up`);
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task '${taskId}' not found`);
+    if (task.agent !== input.subagent) throw new Error(`Task '${taskId}' agent mismatch: expected ${task.agent}, got ${input.subagent}`);
+
+    const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
+    const messageCountAtStart = (msgResult.data ?? []).length;
+
+    this.transition(taskId, ["completed", "error", "timeout", "running"], "running", { completedAt: undefined });
+    task.startedAt = new Date();
+    task.progress = { lastUpdate: new Date(), toolCalls: 0 };
+    task.error = undefined;
+    task.messageCountAtStart = messageCountAtStart;
+
+    const concurrencyKey = this.deriveKey(input.subagent);
+    const { promise: acqPromise } = this.concurrency.acquireBackground(concurrencyKey);
+    try {
+      await acqPromise;
+    } catch (err) {
+      if (err instanceof QueueFullError) {
+        metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
+        task.status = "error";
+        task.error = JSON.stringify({
+          error: "Queue is full",
+          retry_after: err.retryAfter,
+          queue_depth: err.depth,
+          limit: err.limit,
+        });
+        task.completedAt = new Date();
+        debugLog("reopen", taskId, `REJECTED: queue-full`);
+        this.scheduleCleanup(taskId);
+        void this.notifyCompletion(task);
+        return task;
+      }
+      throw err;
+    }
+    task.concurrencyKey = concurrencyKey;
+
+    debugLog("reopen", taskId, `continuing ${task.agent} on session ${task.sessionId} (msgCount=${messageCountAtStart})`);
+
+    await this.client.session.promptAsync({
+      path: { id: task.sessionId },
+      body: {
+        agent: input.subagent,
+        parts: [{ type: "text", text: input.prompt }],
+      },
+    });
+
+    this.poller.registerTask(taskId, task.sessionId, { messageCountAtStart });
+    metrics.gauge("inflight_tasks").inc();
+    this.incInflight(task.parentSessionId);
+    this.persistState();
+
+    return task;
+  }
+
   getTask(taskId: string): DispatchTask | undefined {
     return this.tasks.get(taskId);
   }
@@ -311,13 +372,23 @@ export class DispatchManager {
     return true;
   }
 
-  async getResult(taskId: string): Promise<string> {
+  async getResult(
+    taskId: string,
+  ): Promise<{
+    kind: "ok" | "expired" | "not_found" | "fetch_error";
+    text?: string;
+    error?: string;
+  }> {
     const task = this.tasks.get(taskId);
     if (!task) {
       if (this.cleanedUpTasks.has(taskId)) {
-        return ""; // Task was cleaned up after completion — result no longer available
+        return {
+          kind: "expired",
+          text: "",
+          error: "Task result no longer available (was cleaned up)",
+        };
       }
-      return ""; // Task never existed
+      return { kind: "not_found", text: "", error: "Task never existed" };
     }
 
     const messagesResult = await this.client.session.messages({
@@ -325,13 +396,19 @@ export class DispatchManager {
     });
 
     if (messagesResult.error !== undefined) {
-      return `[Error retrieving task output: ${JSON.stringify(messagesResult.error)}]`;
+      return {
+        kind: "fetch_error",
+        text: "",
+        error: `Error retrieving task output: ${JSON.stringify(messagesResult.error)}`,
+      };
     }
 
     const messages = messagesResult.data ?? [];
+    const boundary = task.messageCountAtStart ?? 0;
 
     const textParts: string[] = [];
-    for (const msg of messages) {
+    for (let i = boundary; i < messages.length; i++) {
+      const msg = messages[i];
       if (msg.info.role !== "assistant") continue;
       for (const part of msg.parts) {
         if (part.type === "text") {
@@ -342,7 +419,7 @@ export class DispatchManager {
       }
     }
 
-    return textParts.join("");
+    return { kind: "ok", text: textParts.join("") };
   }
 
   cleanupTask(taskId: string): void {
@@ -495,9 +572,6 @@ export class DispatchManager {
     if (!targetTask || !targetTaskId) return;
 
     const elapsed = Date.now() - targetTask.startedAt.getTime();
-    // Different from the hasAssistantOutput check below: this debounces idle events
-    // for tasks that are too young to have produced any output. The output check
-    // determines whether the model has actually responded.
     if (elapsed < this.config.minRuntimeMs) {
       debugLog("event", targetTaskId, `session.idle too early (${elapsed}ms), deferring`);
       return;
@@ -510,10 +584,13 @@ export class DispatchManager {
         path: { id: sessionId },
       });
 
-      const messages = (msgResult.data ?? []) as Array<{
+      const allMessages = (msgResult.data ?? []) as Array<{
         info: { role: string; finish?: string; error?: unknown };
         parts: Array<{ type: string; state?: string; text?: string }>;
       }>;
+
+      const startIndex = targetTask.messageCountAtStart ?? 0;
+      const messages = allMessages.slice(startIndex);
 
       let hasAssistantOutput = false;
       for (let i = messages.length - 1; i >= 0; i--) {
@@ -536,17 +613,15 @@ export class DispatchManager {
       }
 
       if (!hasAssistantOutput) {
-        debugLog("event", targetTaskId, "session.idle but no assistant output yet — skipping");
+        debugLog("event", targetTaskId, "session.idle but no assistant output in continuation scope — skipping");
         return;
       }
 
       debugLog("event", targetTaskId, "session.idle validated — completing task");
-      // Gate through transition: only the winner proceeds
       if (!this.transition(targetTaskId, ["running"], "completed")) {
         debugLog("event", targetTaskId, "session.idle race lost — poller already completed this task");
         return;
       }
-      // Winner: unregister (idle handler's responsibility) + finalize
       this.poller.unregisterTask(targetTaskId);
       this.finalizeCompletion(targetTaskId);
     } catch (err) {
@@ -583,7 +658,8 @@ export class DispatchManager {
     if (!t) return false;
     if (!from.includes(t.status)) return false;
     t.status = to;
-    t.completedAt = fields?.completedAt ?? new Date();
+    // Use 'in' check to allow explicit completedAt: undefined (for reopen)
+    t.completedAt = fields && "completedAt" in fields ? fields.completedAt : new Date();
     if (fields?.error !== undefined) t.error = fields.error;
     return true;
   }

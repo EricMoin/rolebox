@@ -26,10 +26,12 @@ interface RegisteredTask {
   sessionId: string; pollState: TaskPollState; registeredAt: number;
 }
 
-function createPollState(): TaskPollState {
+function createPollState(overrides?: Partial<TaskPollState>): TaskPollState {
   return {
     consecutiveMissedPolls: 0, stableIdlePolls: 0, lastMessageCount: 0,
     lastProgressUpdate: Date.now(), hasProducedOutput: false,
+    messageCountAtStart: 0,
+    ...overrides,
   };
 }
 
@@ -52,9 +54,13 @@ export class GlobalPoller {
     client: OpencodeClient, config: DispatchManagerConfig, deps: GlobalPollerDeps,
   ) { this.client = client; this.config = config; this.deps = deps; }
 
-  registerTask(taskId: string, sessionId: string): void {
+  registerTask(taskId: string, sessionId: string, initialPollState?: Partial<TaskPollState>): void {
     if (this.tasks.has(taskId)) return;
-    this.tasks.set(taskId, { sessionId, pollState: createPollState(), registeredAt: Date.now() });
+    this.tasks.set(taskId, {
+      sessionId,
+      pollState: createPollState(initialPollState),
+      registeredAt: Date.now(),
+    });
     if (!this.isRunningFlag) this.start();
   }
 
@@ -194,8 +200,11 @@ export class GlobalPoller {
         }
       }
 
+      const startIndex = task.pollState.messageCountAtStart;
+      const scopedMessages = startIndex > 0 ? messages.slice(startIndex) : messages;
+
       const effectiveStatus = r.status ?? (notInStatusMap ? { type: "idle" } : undefined);
-      const sig = this.deps.completionDetector(messages, effectiveStatus, task.pollState);
+      const sig = this.deps.completionDetector(scopedMessages, effectiveStatus, task.pollState);
       debugLog("task", taskId, `signal=${sig.type}${"message" in sig ? ` msg=${(sig as { message: string }).message}` : ""}`);
       await this._handleSignal(taskId, task, sig, now, r.type);
     } else if (task.pollState.stableIdlePolls > 0 &&

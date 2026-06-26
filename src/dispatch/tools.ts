@@ -65,11 +65,13 @@ export function createDispatchTool(
         prompt: input.prompt,
         run_in_background: input.run_in_background,
         description: input.description,
-        session_id: input.session_id, // session_id: reserved for future re-prompt functionality
+        session_id: input.session_id,
       };
 
       if (input.run_in_background) {
-        const task = await manager.launch(dispatchInput, parentCtx);
+        const task = input.session_id
+          ? await manager.reopenForContinuation(input.session_id, dispatchInput, parentCtx)
+          : await manager.launch(dispatchInput, parentCtx);
 
         if (task.status === "error" && task.error) {
           return [
@@ -121,12 +123,26 @@ export function createDispatchOutputTool(manager: DispatchManager) {
     },
     async execute(input) {
       const task = manager.getTask(input.task_id);
+
       if (!task) {
-        return `Task '${input.task_id}' not found.`;
+        const result = await manager.getResult(input.task_id);
+        if (result.kind === "expired") {
+          return [
+            "Task Expired",
+            "",
+            `Task ID: ${input.task_id}`,
+            "This task was cleaned up before its result could be retrieved.",
+          ].join("\n");
+        }
+        return [
+          "Task Not Found",
+          "",
+          `No task found with ID: ${input.task_id}`,
+        ].join("\n");
       }
 
       if (task.status === "completed") {
-        const content = await manager.getResult(input.task_id);
+        const result = await manager.getResult(input.task_id);
         return [
           "Task Result\n",
           `Task ID: ${task.id}`,
@@ -135,7 +151,7 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           `Session ID: ${task.sessionId}`,
           "",
           "---\n",
-          content,
+          result.text ?? "",
         ].join("\n");
       }
 
@@ -144,8 +160,13 @@ export function createDispatchOutputTool(manager: DispatchManager) {
         task.status === "cancelled" ||
         task.status === "timeout"
       ) {
+        const statusLabel = {
+          error: "Task Error",
+          cancelled: "Task Cancelled",
+          timeout: "Task Timeout",
+        }[task.status];
         return [
-          `Task ${task.status.toUpperCase()}`,
+          statusLabel,
           "",
           `Task ID: ${task.id}`,
           `Description: ${task.description || "N/A"}`,
@@ -173,11 +194,24 @@ export function createDispatchOutputTool(manager: DispatchManager) {
       while (Date.now() < deadline) {
         const current = manager.getTask(input.task_id);
         if (!current) {
-          return `Task '${input.task_id}' was cleaned up before completion.`;
+          const result = await manager.getResult(input.task_id);
+          if (result.kind === "expired") {
+            return [
+              "Task Expired",
+              "",
+              `Task ID: ${input.task_id}`,
+              "This task was cleaned up before its result could be retrieved.",
+            ].join("\n");
+          }
+          return [
+            "Task Not Found",
+            "",
+            `No task found with ID: ${input.task_id}`,
+          ].join("\n");
         }
 
         if (current.status === "completed") {
-          const content = await manager.getResult(input.task_id);
+          const result = await manager.getResult(input.task_id);
           return [
             "Task Result\n",
             `Task ID: ${current.id}`,
@@ -186,7 +220,7 @@ export function createDispatchOutputTool(manager: DispatchManager) {
             `Session ID: ${current.sessionId}`,
             "",
             "---\n",
-            content,
+            result.text ?? "",
           ].join("\n");
         }
 
@@ -195,8 +229,13 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           current.status === "cancelled" ||
           current.status === "timeout"
         ) {
+          const statusLabel = {
+            error: "Task Error",
+            cancelled: "Task Cancelled",
+            timeout: "Task Timeout",
+          }[current.status];
           return [
-            `Task ${current.status.toUpperCase()}`,
+            statusLabel,
             "",
             `Task ID: ${current.id}`,
             `Description: ${current.description || "N/A"}`,
@@ -212,7 +251,14 @@ export function createDispatchOutputTool(manager: DispatchManager) {
 
       const final = manager.getTask(input.task_id);
       const finalStatus = final?.status ?? "unknown";
-      return `Timeout waiting for task '${input.task_id}'. Task is still ${finalStatus}.`;
+      return [
+        "Task Timeout",
+        "",
+        `Task ID: ${input.task_id}`,
+        `Description: ${final?.description || "N/A"}`,
+        `Status: ${finalStatus}`,
+        `Error: Blocking wait exceeded ${input.timeout}ms`,
+      ].join("\n");
     },
   });
 }

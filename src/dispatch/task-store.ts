@@ -33,6 +33,8 @@ export interface SerializedDispatchTask {
   completedAt?: string;
   error?: string;
   progress: SerializedTaskProgress;
+  continuationOf?: string;
+  messageCountAtStart?: number;
 }
 
 /**
@@ -140,6 +142,8 @@ export class TaskStateStore {
           lastUpdate: new Date(st.progress.lastUpdate),
           toolCalls: st.progress.toolCalls,
         },
+        continuationOf: st.continuationOf,
+        messageCountAtStart: st.messageCountAtStart,
       });
     }
 
@@ -183,6 +187,8 @@ export class TaskStateStore {
           lastUpdate: task.progress.lastUpdate.toISOString(),
           toolCalls: task.progress.toolCalls,
         },
+        continuationOf: task.continuationOf,
+        messageCountAtStart: task.messageCountAtStart,
       });
     }
 
