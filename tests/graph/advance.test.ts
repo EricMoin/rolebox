@@ -289,4 +289,19 @@ describe("advanceGraphForDispatch", () => {
     expect(state!.completedSteps).toEqual([]);
     expect(state!.status).toBe("active");
   });
+
+  it("deduplicates consecutive advance for same agent (double-trigger)", () => {
+    graphSessionState.initGraph(SESSION_ID, makeTestGraph());
+
+    advanceGraphForDispatch(SESSION_ID, "task", {
+      subagent_type: "coder",
+    });
+    advanceGraphForDispatch(SESSION_ID, "task", {
+      subagent_type: "coder",
+    });
+
+    const state = graphSessionState.getState(SESSION_ID);
+    expect(state!.completedSteps.filter((s) => s === "coder").length).toBe(1);
+    expect(state!.iterationCount).toBe(0);
+  });
 });
