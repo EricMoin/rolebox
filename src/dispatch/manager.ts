@@ -185,8 +185,8 @@ export class DispatchManager {
       await this.client.session.abort({
         path: { id: task.sessionId },
       });
-    } catch {
-      // Session may already be gone
+    } catch (err) {
+      debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
     }
 
     task.status = "cancelled";

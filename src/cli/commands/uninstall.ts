@@ -30,10 +30,12 @@ export async function uninstall(roleId: string): Promise<void> {
             unlinkSync(fullPath);
           }
         } catch {
+          console.warn("Warning: Failed to clean up symlink:", fullPath);
         }
       }
     }
   } catch {
+    // Best-effort — symlink cleanup should not crash uninstall
   }
 
   removeFromLock(roleId, registry);

@@ -80,6 +80,7 @@ export function checkSymlink(linkPath: string, name: string): SymlinkStatus {
     const stat = lstatSync(linkPath);
     result.isSymlink = stat.isSymbolicLink();
   } catch {
+    // Best-effort — UI formatting should never crash
     return result;
   }
 
@@ -90,9 +91,11 @@ export function checkSymlink(linkPath: string, name: string): SymlinkStatus {
         statSync(linkPath);
         result.targetExists = true;
       } catch {
+        // Best-effort — UI formatting should never crash
         result.targetExists = false;
       }
     } catch {
+      // Best-effort — UI formatting should never crash
       result.target = null;
     }
   } else {
@@ -114,7 +117,7 @@ export function listSymlinks(dir: string, prefix?: string): SymlinkStatus[] {
       results.push(checkSymlink(fullPath, entry));
     }
   } catch {
-    // non-fatal: directory unreadable
+    // Best-effort — UI formatting should never crash
   }
   return results;
 }

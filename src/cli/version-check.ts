@@ -46,7 +46,7 @@ function writeCache(cache: VersionCache): void {
     mkdirSync(join(file, ".."), { recursive: true });
     writeFileSync(file, JSON.stringify(cache), "utf-8");
   } catch {
-    // Non-fatal
+    // Best-effort cache write — failure is acceptable
   }
 }
 

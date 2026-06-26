@@ -227,6 +227,7 @@ function checkPluginRegistered(configPath: string): boolean {
     if (!Array.isArray(parsed.plugin)) return false;
     return parsed.plugin.some((p) => p === PLUGIN_ID || p.startsWith(`${PLUGIN_ID}@`));
   } catch {
+    // JSON parse failed — return false, no crash
     return false;
   }
 }

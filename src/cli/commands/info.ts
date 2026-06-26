@@ -81,6 +81,7 @@ export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: 
     try {
       roleConfig = yaml.load(readFileSync(roleYamlPath, "utf-8")) as RoleYaml || {};
     } catch {
+      console.warn("Warning: Failed to load role YAML:", roleYamlPath);
       roleConfig = {};
     }
   }
@@ -243,12 +244,13 @@ function discoverFileSubagents(rolePath: string): Array<{ name: string; descript
           const config = yaml.load(readFileSync(subRoleYaml, "utf-8")) as { name?: string; description?: string } || {};
           results.push({ name: config.name || entry.name, description: config.description });
         } catch {
+          console.warn("Warning: Failed to load subagent YAML:", subRoleYaml);
           results.push({ name: entry.name });
         }
       }
     }
   } catch {
-    // non-fatal
+    // Best-effort — subagent discovery should not crash info
   }
   return results;
 }
