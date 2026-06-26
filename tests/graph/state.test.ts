@@ -282,6 +282,63 @@ describe("GraphSessionState", () => {
     });
   });
 
+  describe("state cleanup on completion/exhaustion", () => {
+    it("clears state on next tick after pipeline completion", async () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "agent-a" },
+        { from: "agent-a", to: "parent", exit: true },
+      ];
+      const graph = makeGraph({ edges, nodes: ["agent-a"] });
+      gs.initGraph("s1", graph);
+
+      gs.advanceStep("s1", "agent-a");
+      expect(gs.getState("s1")!.status).toBe("complete");
+      expect(gs.getState("s1")).toBeDefined();
+      expect(gs.getGraph("s1")).toBeDefined();
+
+      await new Promise(r => setTimeout(r, 0));
+      expect(gs.getState("s1")).toBeUndefined();
+      expect(gs.getGraph("s1")).toBeUndefined();
+    });
+
+    it("clears state on next tick after loop exhaustion", async () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "agent-a" },
+        { from: "agent-a", to: "agent-b" },
+        { from: "agent-b", to: "agent-a" },
+      ];
+      const graph = makeGraph({ edges, nodes: ["agent-a", "agent-b"], maxIterations: 0 });
+      gs.initGraph("s1", graph);
+
+      gs.advanceStep("s1", "agent-a");
+      gs.advanceStep("s1", "agent-b");
+
+      expect(gs.getState("s1")!.status).toBe("exhausted");
+      expect(gs.getState("s1")).toBeDefined();
+      expect(gs.getGraph("s1")).toBeDefined();
+
+      await new Promise(r => setTimeout(r, 0));
+      expect(gs.getState("s1")).toBeUndefined();
+      expect(gs.getGraph("s1")).toBeUndefined();
+    });
+
+    it("does not clear active state after advanceStep", () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "agent-a" },
+        { from: "agent-a", to: "agent-b" },
+      ];
+      const graph = makeGraph({ edges, nodes: ["agent-a", "agent-b"] });
+      gs.initGraph("s1", graph);
+
+      gs.advanceStep("s1", "agent-a");
+      expect(gs.getState("s1")).toBeDefined();
+      expect(gs.getState("s1")!.status).toBe("active");
+    });
+  });
+
   describe("getNextAction", () => {
     it("returns the edge at currentStep when active", () => {
       const gs = fresh();
@@ -380,6 +437,103 @@ describe("GraphSessionState", () => {
       gs.advanceStep("s1", "agent-a");
       expect(gs.getState("s1")!.iterationCount).toBe(6);
       expect(gs.getState("s1")!.status).toBe("exhausted");
+    });
+  });
+
+  describe("advanceStep — review-loop exit edge selection (Bug #5)", () => {
+    it("picks exit edge when iterationCount >= maxIterations", () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "writer" },
+        { from: "writer", to: "reviewer" },
+        { from: "reviewer", to: "writer", label: "loop" },
+        { from: "reviewer", to: "parent", label: "exit", exit: true },
+      ];
+      const graph = makeGraph({ edges, nodes: ["writer", "reviewer"], maxIterations: 2 });
+      gs.initGraph("s1", graph);
+
+      // writer → reviewer
+      gs.advanceStep("s1", "writer");
+      expect(gs.getState("s1")!.status).toBe("active");
+      expect(gs.getState("s1")!.completedSteps).toEqual(["writer"]);
+
+      // reviewer → writer (loop, itc=1)
+      gs.advanceStep("s1", "reviewer");
+      expect(gs.getState("s1")!.status).toBe("active");
+      expect(gs.getState("s1")!.iterationCount).toBe(1);
+      expect(gs.getState("s1")!.completedSteps).toEqual(["writer", "reviewer"]);
+
+      // writer → reviewer (reviewer already visited, itc=2)
+      gs.advanceStep("s1", "writer");
+      expect(gs.getState("s1")!.status).toBe("active");
+      expect(gs.getState("s1")!.iterationCount).toBe(2);
+
+      // reviewer completes at limit → exit edge preferred, workflow completes
+      gs.advanceStep("s1", "reviewer");
+      expect(gs.getState("s1")!.status).toBe("complete");
+      expect(gs.getState("s1")!.iterationCount).toBe(2);
+    });
+
+    it("picks loop edge when iterationCount < maxIterations", () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "writer" },
+        { from: "writer", to: "reviewer" },
+        { from: "reviewer", to: "writer", label: "loop" },
+        { from: "reviewer", to: "parent", label: "exit", exit: true },
+      ];
+      const graph = makeGraph({ edges, nodes: ["writer", "reviewer"], maxIterations: 3 });
+      gs.initGraph("s1", graph);
+
+      gs.advanceStep("s1", "writer");
+      gs.advanceStep("s1", "reviewer");
+
+      expect(gs.getState("s1")!.status).toBe("active");
+      expect(gs.getState("s1")!.iterationCount).toBe(1);
+      expect(gs.getState("s1")!.completedSteps).toEqual(["writer", "reviewer"]);
+    });
+
+    it("unknown agent name is a no-op (status and completedSteps unchanged)", () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "agent-a" },
+        { from: "agent-a", to: "parent", exit: true },
+      ];
+      const graph = makeGraph({ edges, nodes: ["agent-a"] });
+      gs.initGraph("s1", graph);
+
+      const before = { ...gs.getState("s1")! };
+      gs.advanceStep("s1", "unknown-agent");
+      const after = gs.getState("s1")!;
+
+      expect(after.status).toBe(before.status);
+      expect(after.completedSteps).toEqual(before.completedSteps);
+      expect(after.iterationCount).toBe(before.iterationCount);
+      expect(after.currentStep).toBe(before.currentStep);
+    });
+
+    it("pipeline with single outgoing edge per agent still works", () => {
+      const gs = fresh();
+      const edges: FlowEdge[] = [
+        { from: "parent", to: "researcher" },
+        { from: "researcher", to: "writer" },
+        { from: "writer", to: "editor" },
+        { from: "editor", to: "parent", exit: true },
+      ];
+      const graph = makeGraph({ edges, nodes: ["researcher", "writer", "editor"] });
+      gs.initGraph("s1", graph);
+
+      gs.advanceStep("s1", "researcher");
+      expect(gs.getState("s1")!.status).toBe("active");
+      expect(gs.getState("s1")!.completedSteps).toEqual(["researcher"]);
+
+      gs.advanceStep("s1", "writer");
+      expect(gs.getState("s1")!.status).toBe("active");
+      expect(gs.getState("s1")!.completedSteps).toEqual(["researcher", "writer"]);
+
+      gs.advanceStep("s1", "editor");
+      expect(gs.getState("s1")!.status).toBe("complete");
+      expect(gs.getState("s1")!.completedSteps).toEqual(["researcher", "writer", "editor"]);
     });
   });
 });

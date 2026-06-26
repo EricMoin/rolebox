@@ -28,41 +28,68 @@ export class GraphSessionState {
     if (!state || !graph) return;
     if (state.status !== "active") return;
 
+    // Collect all outgoing edges from completedAgent
+    const outgoingEdges = graph.edges.filter((e) => e.from === completedAgent);
+
+    if (outgoingEdges.length === 0) {
+      // Valid sink node: mark complete
+      if (graph.nodes.includes(completedAgent)) {
+        state.completedSteps.push(completedAgent);
+        state.status = "complete";
+        setTimeout(() => this.clear(sessionID), 0);
+      }
+      // Unknown agent: no-op, don't modify state
+      return;
+    }
+
     state.completedSteps.push(completedAgent);
 
-    let nextIdx = -1;
-    for (let i = 0; i < graph.edges.length; i++) {
-      if (graph.edges[i].from === completedAgent) {
-        nextIdx = i;
-        break;
-      }
+    // Separate into exit edges and non-exit (loop) edges
+    const exitEdges = outgoingEdges.filter(
+      (e) => e.exit || e.to === PARENT_NODE,
+    );
+    const loopEdges = outgoingEdges.filter(
+      (e) => !(e.exit || e.to === PARENT_NODE),
+    );
+
+    // Decide which edge to follow based on iteration state
+    let chosenEdge: FlowEdge;
+    if (
+      state.iterationCount >= graph.maxIterations &&
+      graph.maxIterations > 0
+    ) {
+      // Prefer exit when iteration limit reached
+      chosenEdge = exitEdges[0] ?? loopEdges[0];
+    } else {
+      // Otherwise prefer looping back
+      chosenEdge = loopEdges[0] ?? exitEdges[0];
     }
 
-    if (nextIdx === -1) {
+    const chosenIdx = graph.edges.indexOf(chosenEdge);
+
+    // Handle exit edge
+    if (chosenEdge.exit || chosenEdge.to === PARENT_NODE) {
+      state.currentStep = chosenIdx;
       state.status = "complete";
+      setTimeout(() => this.clear(sessionID), 0);
       return;
     }
 
-    const nextEdge = graph.edges[nextIdx];
-
-    if (nextEdge.exit || nextEdge.to === PARENT_NODE) {
-      state.currentStep = nextIdx;
-      state.status = "complete";
-      return;
-    }
-
-    if (state.completedSteps.includes(nextEdge.to)) {
+    // Handle loop-back (target agent already visited)
+    if (state.completedSteps.includes(chosenEdge.to)) {
       state.iterationCount++;
       if (state.iterationCount > graph.maxIterations) {
         state.status = "exhausted";
-        state.currentStep = nextIdx;
+        state.currentStep = chosenIdx;
+        setTimeout(() => this.clear(sessionID), 0);
         return;
       }
-      state.currentStep = nextIdx;
+      state.currentStep = chosenIdx;
       return;
     }
 
-    state.currentStep = nextIdx;
+    // Normal advance
+    state.currentStep = chosenIdx;
   }
 
   getNextAction(state: GraphExecutionState, graph: ResolvedGraph): FlowEdge | undefined {
