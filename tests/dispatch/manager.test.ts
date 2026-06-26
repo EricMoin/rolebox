@@ -208,6 +208,95 @@ describe("DispatchManager", () => {
     expect(result).toBe("");
   });
 
+  // ── 2b. executeSync() hardened ───────────────────────────────
+
+  it("T7: executeSync acquires slot from shared concurrency pool", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 5000 });
+    const mgr = manager as any;
+
+    // Fill all slots with non-releasing acquires
+    await Promise.all(Array.from({ length: 5 }, () => mgr.concurrency.acquire("default")));
+    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
+
+    // executeSync will block since pool is full
+    const syncPromise = manager.executeSync(
+      { subagent: "sync-test", prompt: "hello", run_in_background: false },
+      parentContext(),
+    );
+
+    // Release one slot — sync should acquire it
+    mgr.concurrency.release("default");
+
+    const result = await syncPromise;
+    expect(result).toBe("Hello from subagent");
+    // After completion, sync released its slot: 4 bg + 0 sync = 4
+    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
+  });
+
+  it("T8: executeSync prompt timeout releases slot and aborts session", async () => {
+    const client = createMockClient({
+      sessionPrompt: () => new Promise<never>(() => {}), // never resolves
+      sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+    });
+    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 20 });
+    const mgr = manager as any;
+
+    await expect(
+      manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      ),
+    ).rejects.toThrow(/timed out/);
+
+    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+    expect(client.session.abort).toHaveBeenCalled();
+  });
+
+  it("T9: executeSync acquire timeout cancels orphaned waiter", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 20 });
+    const mgr = manager as any;
+
+    // Fill pool to limit
+    await Promise.all(Array.from({ length: 5 }, () => mgr.concurrency.acquire("default")));
+    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
+
+    // executeSync will time out waiting for a slot
+    await expect(
+      manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      ),
+    ).rejects.toThrow(/concurrency slot/);
+
+    // Pool should still have 5 active (no slot leaked)
+    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
+
+    // Release one — should not hand it to the cancelled sync waiter
+    mgr.concurrency.release("default");
+    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
+  });
+
+  it("T10: executeSync shares concurrency pool with background tasks", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 50 });
+    const mgr = manager as any;
+
+    // Fill 4 background + 1 sync = 5 total (at limit)
+    await Promise.all(Array.from({ length: 4 }, () => mgr.concurrency.acquire("default")));
+
+    // sync acquires 5th slot
+    const syncPromise = manager.executeSync(
+      { subagent: "sync-test", prompt: "hello", run_in_background: false },
+      parentContext(),
+    );
+    const result = await syncPromise;
+    expect(result).toBe("Hello from subagent");
+    // Sync released its slot
+    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
+  });
+
   // ── 3. cancelTask() ──────────────────────────────────────────
 
   it("cancelTask() aborts session and updates status to cancelled", async () => {

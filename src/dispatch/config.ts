@@ -26,6 +26,9 @@ export const SESSION_GONE_TIMEOUT_MS = 60_000;
 /** Message staleness timeout (60 min): time without any assistant output before declaring dead. */
 export const MESSAGE_STALENESS_TIMEOUT_MS = 3_600_000;
 
+/** Sync timeout (10 min): max wall-clock time for synchronous executeSync prompts. */
+export const SYNC_TIMEOUT_MS = 600_000;
+
 /** Minimum consecutive idle polls before marking a task as stable / complete. */
 export const MIN_STABILITY_POLLS = 2;
 
@@ -66,6 +69,8 @@ export interface DispatchManagerConfig {
   sessionGoneTimeoutMs?: number;
   /** Staleness timeout (ms) for sessions that never produced output — default: 3600000 (60 min) */
   messageStalenessTimeoutMs?: number;
+  /** Timeout (ms) for synchronous executeSync prompts — default: 600000 (10 min) */
+  syncTimeoutMs?: number;
   /** Consecutive idle polls before marking task stable — default: 3 */
   minStabilityPolls?: number;
   /** Consecutive polls with no status before existence check — default: 3 */
@@ -86,6 +91,7 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   taskTtlMs: TASK_TTL_MS,
   sessionGoneTimeoutMs: SESSION_GONE_TIMEOUT_MS,
   messageStalenessTimeoutMs: MESSAGE_STALENESS_TIMEOUT_MS,
+  syncTimeoutMs: SYNC_TIMEOUT_MS,
   minStabilityPolls: MIN_STABILITY_POLLS,
   minSessionGonePolls: MIN_SESSION_GONE_POLLS,
   minPollIntervalMs: MIN_POLL_INTERVAL_MS,
