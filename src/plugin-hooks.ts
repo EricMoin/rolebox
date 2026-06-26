@@ -10,6 +10,9 @@ import { DispatchManager } from "./dispatch/manager.ts";
 import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.ts";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
+import { createSubLogger } from "./logger.ts";
+
+const log = createSubLogger("plugin-hooks");
 
 export function createPluginHooks(
   resolvedRoles: ResolvedRole[],
@@ -152,6 +155,8 @@ export function createPluginHooks(
             output.system.push(stateBlock);
           }
         }
+        const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
+        log.debug("System prompt augmented", { totalChars, addedFunctions: 0, hasGraphBlock: !!graphState });
         return;
       }
 
@@ -183,6 +188,8 @@ export function createPluginHooks(
             output.system.push(stateBlock);
           }
         }
+        const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
+        log.debug("System prompt augmented", { totalChars, addedFunctions: 0, hasGraphBlock: !!graphState });
         return;
       }
 
@@ -197,6 +204,9 @@ export function createPluginHooks(
           output.system.push(stateBlock);
         }
       }
+
+      const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
+      log.debug("System prompt augmented", { totalChars, addedFunctions: activeFunctions.length, hasGraphBlock: !!graphState });
     },
   };
 }
