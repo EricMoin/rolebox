@@ -74,7 +74,10 @@ export class DispatchManager {
       metrics.counter("dispatch_rejected_total", { reason: "pool-full" }).inc();
       task.status = "error";
       task.error = "Pool is full — all concurrent slots occupied";
+      task.completedAt = new Date();
       debugLog("launch", taskId, `REJECTED: pool-full (${this.concurrency.getActiveCount(DEFAULT_CONCURRENCY_KEY)}/${this.concurrency.getLimit(DEFAULT_CONCURRENCY_KEY)})`);
+      this.scheduleCleanup(taskId);
+      void this.notifyCompletion(task);
       return task;
     }
 
@@ -126,10 +129,11 @@ export class DispatchManager {
       task.error = err instanceof Error ? err.message : String(err);
       debugLog("launch", taskId, `ERROR: ${task.error}`);
       if (didMarkRunning) {
-        this.decInflight(task.parentSessionId);
+        this.leaveRunning(taskId);
+      } else {
+        this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
+        this.scheduleCleanup(taskId);
       }
-      this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
-      this.scheduleCleanup(taskId);
     }
 
     return task;
@@ -274,13 +278,10 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✕ cancelled agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
-    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
-    this.decInflight(t.parentSessionId);
-    this.persistState();
     this.poller.unregisterTask(taskId);
     this.sessionMonitor.clearTask(taskId);
     void this.notifyCompletion(t);
-    this.scheduleCleanup(taskId);
+    this.leaveRunning(taskId);
     return true;
   }
 
@@ -570,11 +571,8 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
     metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
-    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
-    this.decInflight(t.parentSessionId);
-    this.persistState();
-    this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
+    this.leaveRunning(taskId);
   }
 
   private handleTaskTimeout(taskId: string, reason: string): void {
@@ -582,26 +580,44 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
     metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
-    this.decInflight(t.parentSessionId);
-    this.persistState();
-    this.scheduleCleanup(taskId);
     void this.notifyCompletion(t);
+    this.leaveRunning(taskId);
   }
 
   /** Shared winner-branch side effects after a successful transition. */
   private finalizeCompletion(taskId: string): void {
     const t = this.tasks.get(taskId)!;
-    this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     const duration = Date.now() - t.startedAt.getTime();
     infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
     metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
     metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
-    metrics.gauge("inflight_tasks").dec();
+    void this.notifyCompletion(t);
+    this.leaveRunning(taskId);
+  }
+
+  /**
+   * Centralized teardown for all terminal paths. Handles:
+   * - concurrency slot release (guarded: only if concurrencyKey set)
+   * - parent inflight counter decrement
+   * - inflight_tasks gauge decrement
+   * - state persistence
+   * - delayed cleanup scheduling
+   *
+   * Must only be called after acquire/gauge.inc() have been performed.
+   * Pool-rejected and failed-before-running paths must NOT call this.
+   */
+  private leaveRunning(taskId: string): void {
+    const t = this.tasks.get(taskId);
+    if (!t) return;
+    if (t.concurrencyKey) {
+      this.concurrency.release(t.concurrencyKey);
+    } else {
+      debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
+    }
     this.decInflight(t.parentSessionId);
+    metrics.gauge("inflight_tasks").dec();
     this.persistState();
     this.scheduleCleanup(taskId);
-    void this.notifyCompletion(t);
   }
 
   private scheduleCleanup(taskId: string): void {
