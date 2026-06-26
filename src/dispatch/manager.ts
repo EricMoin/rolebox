@@ -491,14 +491,24 @@ export class DispatchManager {
 
     this.restoreState();
 
+    // Rebuild inflightByParent from scratch — only re-attached tasks count.
+    // Stale counts from pre-crash dispatches whose terminal state didn't
+    // persist would otherwise leak into the post-recovery world.
+    this.inflightByParent.clear();
+
     const runningTasks: DispatchTask[] = [];
     const toRemove: string[] = [];
+    const lostPendingByParent = new Map<string, DispatchTask[]>();
 
     for (const [taskId, task] of this.tasks) {
       switch (task.status) {
-        case "pending":
+        case "pending": {
           toRemove.push(taskId);
+          const siblings = lostPendingByParent.get(task.parentSessionId) ?? [];
+          siblings.push(task);
+          lostPendingByParent.set(task.parentSessionId, siblings);
           break;
+        }
         case "running":
           runningTasks.push(task);
           break;
@@ -511,9 +521,14 @@ export class DispatchManager {
       }
     }
 
-    // Remove silent pending tasks
+    // Remove pending tasks
     for (const id of toRemove) {
       this.tasks.delete(id);
+    }
+
+    // Notify each parent about lost pending tasks (fire-and-forget)
+    for (const [parentSessionId, lostTasks] of lostPendingByParent) {
+      void this.notifyLostPendingTasks(parentSessionId, lostTasks);
     }
 
     // Verify each running task's session
@@ -540,21 +555,68 @@ export class DispatchManager {
           }
         } else {
           task.status = "error";
-          task.error = "Session lost after process restart";
+          task.error = "Session lost after process restart — You can re-dispatch with dispatch(...)";
           task.completedAt = new Date();
           this.scheduleCleanup(task.id);
           debugLog("recover", task.id, "session gone after restart");
         }
       } catch {
         task.status = "error";
-        task.error = "Session verification failed after restart";
+        task.error = "Session verification failed after restart — You can re-dispatch with dispatch(...)";
         task.completedAt = new Date();
         this.scheduleCleanup(task.id);
       }
     }
 
+    // Verify inflightByParent matches actual re-attached running tasks
+    const actualByParent = new Map<string, number>();
+    for (const [, task] of this.tasks) {
+      if (task.status === "running") {
+        actualByParent.set(task.parentSessionId, (actualByParent.get(task.parentSessionId) ?? 0) + 1);
+      }
+    }
+    for (const [pid, inflight] of this.inflightByParent) {
+      const actual = actualByParent.get(pid) ?? 0;
+      if (inflight !== actual) {
+        debugLog("recover", "*", `inflightByParent mismatch for ${pid}: inflight=${inflight} actual_running=${actual}`);
+      }
+    }
+
     if (toRemove.length > 0 || runningTasks.length > 0) {
       this.persistState();
+    }
+  }
+
+  private async notifyLostPendingTasks(
+    parentSessionId: string,
+    lostTasks: DispatchTask[],
+  ): Promise<void> {
+    const taskList = lostTasks
+      .map((t) => `- ${t.description || t.id}`)
+      .join("\n");
+    const text = [
+      "<system-reminder>",
+      "[RECOVERY: PENDING TASKS DROPPED]",
+      `**${lostTasks.length} pending task(s) were lost during process restart:**`,
+      taskList,
+      "",
+      "You can re-dispatch these tasks with dispatch(...).",
+      "</system-reminder>",
+    ].join("\n");
+
+    try {
+      await this.client.session.promptAsync({
+        path: { id: parentSessionId },
+        body: {
+          parts: [{ type: "text", text }],
+          noReply: true,
+        },
+      });
+      metrics.counter("notify_sent_total").inc();
+    } catch (err) {
+      metrics.counter("notify_failed_total").inc();
+      debugLog("recover", "notify",
+        `Failed to notify parent ${parentSessionId} about lost pending tasks`);
     }
   }
 

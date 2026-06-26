@@ -1512,6 +1512,7 @@ describe("recover()", () => {
     expect(loaded).toBeDefined();
     expect(loaded!.status).toBe("error");
     expect(loaded!.error).toContain("Session lost");
+    expect(loaded!.error).toContain("re-dispatch with dispatch");
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -1548,11 +1549,12 @@ describe("recover()", () => {
     expect(loaded).toBeDefined();
     expect(loaded!.status).toBe("error");
     expect(loaded!.error).toContain("verification failed");
+    expect(loaded!.error).toContain("re-dispatch with dispatch");
 
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("recover() silently removes pending tasks", async () => {
+  it("recover() removes pending tasks and notifies parent with lost task list", async () => {
     const tempDir = createTempDir();
     const client = createMockClient();
 
@@ -1565,6 +1567,7 @@ describe("recover()", () => {
       status: "pending",
       agent: "helper",
       prompt: "work",
+      description: "my pending work",
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
     };
@@ -1576,8 +1579,91 @@ describe("recover()", () => {
 
     await manager.recover();
 
-    // Pending task is silently removed (no error, just absent)
+    // Pending task is removed
     expect(manager.getTask("bg_pending")).toBeUndefined();
+
+    // Parent was notified about the lost pending task
+    expect(client.session.promptAsync).toHaveBeenCalled();
+    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const lostPendingCall = notifyCalls.find(
+      (c: any) => c[0]?.body?.parts?.[0]?.text?.includes("PENDING TASKS DROPPED"),
+    );
+    expect(lostPendingCall).toBeDefined();
+    const notifyText: string = lostPendingCall[0].body.parts[0].text;
+    expect(notifyText).toContain("my pending work");
+    expect(notifyText).toContain("re-dispatch");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover() groups multiple pending tasks by parent and sends one notification per parent", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    for (let i = 0; i < 3; i++) {
+      const pt: DispatchTask = {
+        id: `bg_pen_${i}`,
+        sessionId: `ses_p${i}`,
+        parentSessionId: "ses_parent",
+        status: "pending",
+        agent: "helper",
+        prompt: "work",
+        description: `pending task ${i}`,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(pt.id, pt);
+    }
+    // Another parent with one pending task
+    const otherParentTask: DispatchTask = {
+      id: "bg_other",
+      sessionId: "ses_other",
+      parentSessionId: "ses_other_parent",
+      status: "pending",
+      agent: "helper",
+      prompt: "work",
+      description: "other parent pending",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(otherParentTask.id, otherParentTask);
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+
+    await manager.recover();
+
+    // All pending tasks removed
+    expect(manager.getTask("bg_pen_0")).toBeUndefined();
+    expect(manager.getTask("bg_other")).toBeUndefined();
+
+    // Two notification calls: one for ses_parent, one for ses_other_parent
+    const notifyCalls = (client.session.promptAsync as any).mock.calls.filter(
+      (c: any) => c[0]?.body?.parts?.[0]?.text?.includes("PENDING TASKS DROPPED"),
+    );
+    expect(notifyCalls.length).toBe(2);
+
+    // First parent: should list all 3 tasks
+    const parentCall = notifyCalls.find(
+      (c: any) => c[0].path.id === "ses_parent",
+    );
+    expect(parentCall).toBeDefined();
+    const parentText: string = parentCall[0].body.parts[0].text;
+    expect(parentText).toContain("3 pending task(s)");
+    expect(parentText).toContain("pending task 0");
+    expect(parentText).toContain("pending task 2");
+
+    // Other parent: should list 1 task
+    const otherCall = notifyCalls.find(
+      (c: any) => c[0].path.id === "ses_other_parent",
+    );
+    expect(otherCall).toBeDefined();
+    const otherText: string = otherCall[0].body.parts[0].text;
+    expect(otherText).toContain("1 pending task(s)");
+    expect(otherText).toContain("other parent pending");
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -1815,6 +1901,101 @@ describe("recover()", () => {
     const errored = [t1, t2].filter(t => t?.status === "error" && t?.error?.includes("Exceeded concurrency limit")).length;
     expect(running).toBe(1);
     expect(errored).toBe(1);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("inflight counter only counts re-attached tasks — dead sessions excluded", async () => {
+    const tempDir = createTempDir();
+
+    // 5 running tasks, 3 sessions dead, 2 alive
+    const sessionData = new Set(["ses_1", "ses_2"]);
+    const client = createMockClient({
+      sessionGet: (args: any) => {
+        const sid = args.path.id;
+        if (sessionData.has(sid)) {
+          return Promise.resolve({ data: { id: sid }, error: undefined });
+        }
+        return Promise.resolve({ data: undefined, error: undefined });
+      },
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    for (let i = 1; i <= 5; i++) {
+      const t: DispatchTask = {
+        id: `bg_rec_${i}`,
+        sessionId: `ses_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    // Only ses_1 and ses_2 re-attached — inflightByParent must be 2, not 5
+    expect(mgr.inflightByParent.get("ses_parent")).toBe(2);
+
+    // Dead ones are errored
+    for (let i = 3; i <= 5; i++) {
+      const t = manager.getTask(`bg_rec_${i}`);
+      expect(t?.status).toBe("error");
+    }
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("after recovery, completing a task decrements inflight and notifies with correct remaining count", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    for (let i = 0; i < 2; i++) {
+      const t: DispatchTask = {
+        id: `bg_notify_${i}`,
+        sessionId: `ses_notify_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+
+    // Both re-attached — inflight should be 2
+    expect(mgr.inflightByParent.get("ses_parent")).toBe(2);
+
+    // Complete task 0
+    const task0 = manager.getTask("bg_notify_0");
+    expect(task0?.status).toBe("running");
+    mgr.handleTaskCompleted("bg_notify_0");
+
+    // After leaveRunning, inflight decremented to 1
+    expect(mgr.inflightByParent.get("ses_parent")).toBe(1);
+    expect(manager.getTask("bg_notify_0")!.status).toBe("completed");
+
+    // Complete task 1 — should reach 0 and clean up entry
+    mgr.handleTaskCompleted("bg_notify_1");
+    expect(mgr.inflightByParent.get("ses_parent")).toBeUndefined();
+    expect(manager.getTask("bg_notify_1")!.status).toBe("completed");
 
     rmSync(tempDir, { recursive: true, force: true });
   });
