@@ -213,13 +213,8 @@ export class DispatchManager {
       path: { id: task.sessionId },
     });
 
-    if (messagesResult.error) {
-      const errMsg =
-        typeof messagesResult.error === "object" &&
-        messagesResult.error !== null
-          ? JSON.stringify(messagesResult.error)
-          : String(messagesResult.error);
-      return `[Error retrieving task output: ${errMsg}]`;
+    if (messagesResult.error !== undefined) {
+      return `[Error retrieving task output: ${JSON.stringify(messagesResult.error)}]`;
     }
 
     const messages = messagesResult.data ?? [];
