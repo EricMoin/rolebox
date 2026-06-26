@@ -1,95 +1,10 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import { DispatchManager } from "../../src/dispatch/manager";
 import { TaskStateStore } from "../../src/dispatch/task-store.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-
-// ── helpers ──────────────────────────────────────────────────────
-
-function createMockClient(overrides?: {
-  sessionCreate?: () => unknown;
-  sessionPrompt?: () => unknown;
-  sessionPromptAsync?: () => unknown;
-  sessionMessages?: () => unknown;
-  sessionStatus?: () => unknown;
-  sessionAbort?: () => unknown;
-  sessionGet?: () => unknown;
-}) {
-  return {
-    session: {
-      create: mock(
-        overrides?.sessionCreate ??
-          (() =>
-            Promise.resolve({
-              data: { id: "test-session-1" },
-              error: undefined,
-            })),
-      ),
-      prompt: mock(
-        overrides?.sessionPrompt ??
-          (() =>
-            Promise.resolve({
-              data: {
-                parts: [
-                  { type: "text" as const, text: "Hello from subagent" },
-                ],
-              },
-              error: undefined,
-            })),
-      ),
-      promptAsync: mock(
-        overrides?.sessionPromptAsync ??
-          (() =>
-            Promise.resolve({
-              data: undefined,
-              error: undefined,
-            })),
-      ),
-      messages: mock(
-        overrides?.sessionMessages ??
-          (() =>
-            Promise.resolve({
-              data: [],
-              error: undefined,
-            })),
-      ),
-      status: mock(
-        overrides?.sessionStatus ??
-          (() =>
-            Promise.resolve({
-              data: {},
-              error: undefined,
-            })),
-      ),
-      abort: mock(
-        overrides?.sessionAbort ??
-          (() =>
-            Promise.resolve({
-              data: undefined,
-              error: undefined,
-            })),
-      ),
-      get: mock(
-        overrides?.sessionGet ??
-          (() =>
-            Promise.resolve({
-              data: { id: "test-session-1" },
-              error: undefined,
-            })),
-      ),
-    },
-  } as unknown as OpencodeClient;
-}
-
-function parentContext() {
-  return {
-    sessionID: "parent-session-1",
-    agent: "parent-agent",
-    directory: "/tmp/test",
-  };
-}
+import { createMockClient, parentContext } from "./helpers";
 
 const fastConfig = {
   staleTimeoutMs: 500,
