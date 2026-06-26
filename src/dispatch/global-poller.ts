@@ -5,7 +5,8 @@ import { detectCompletion } from "./completion-detector.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 import {
   MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS, DEFAULT_MAX_CONCURRENT,
-  MIN_STABILITY_POLLS, MESSAGE_STALENESS_TIMEOUT_MS, SESSION_GONE_TIMEOUT_MS,
+  MIN_STABILITY_POLLS, SESSION_GONE_TIMEOUT_MS,
+  BACKGROUND_STALE_TIMEOUT_MS,
 } from "./config.ts";
 
 import { debugLog } from "./debug-log.ts";
@@ -24,6 +25,7 @@ export interface GlobalPollerDeps {
 
 interface RegisteredTask {
   sessionId: string; pollState: TaskPollState; registeredAt: number;
+  timeoutMs?: number;
 }
 
 function createPollState(overrides?: Partial<TaskPollState>): TaskPollState {
@@ -54,12 +56,13 @@ export class GlobalPoller {
     client: OpencodeClient, config: DispatchManagerConfig, deps: GlobalPollerDeps,
   ) { this.client = client; this.config = config; this.deps = deps; }
 
-  registerTask(taskId: string, sessionId: string, initialPollState?: Partial<TaskPollState>): void {
+  registerTask(taskId: string, sessionId: string, initialPollState?: Partial<TaskPollState>, timeoutMs?: number): void {
     if (this.tasks.has(taskId)) return;
     this.tasks.set(taskId, {
       sessionId,
       pollState: createPollState(initialPollState),
       registeredAt: Date.now(),
+      timeoutMs,
     });
     if (!this.isRunningFlag) this.start();
   }
@@ -239,18 +242,25 @@ export class GlobalPoller {
     }
   }
 
+  private _effectiveStaleTimeoutMs(task: RegisteredTask): number {
+    if (task.timeoutMs !== undefined) return task.timeoutMs;
+    return this.config.backgroundStaleTimeoutMs
+      ?? this.config.staleTimeoutMs
+      ?? BACKGROUND_STALE_TIMEOUT_MS;
+  }
+
   private _checkTimeouts(
     taskId: string, task: RegisteredTask, now: number, monitorType: string,
   ): void {
     const elapsed = now - task.registeredAt;
-    if (!task.pollState.hasProducedOutput && elapsed > MESSAGE_STALENESS_TIMEOUT_MS) {
-      debugLog("timeout", taskId, `never produced output after ${Math.round(elapsed / 1000)}s`);
+    const staleMs = this._effectiveStaleTimeoutMs(task);
+    if (!task.pollState.hasProducedOutput && elapsed > staleMs) {
+      debugLog("timeout", taskId, `never produced output after ${Math.round(elapsed / 1000)}s (limit=${Math.round(staleMs / 1000)}s)`);
       this.deps.onTaskTimeout(taskId, "Never produced output"); this.unregisterTask(taskId); return;
     }
     if (task.pollState.hasProducedOutput &&
-        now - task.pollState.lastProgressUpdate >
-          (this.config.staleTimeoutMs ?? MESSAGE_STALENESS_TIMEOUT_MS)) {
-      debugLog("timeout", taskId, `stalled — no progress for ${Math.round((now - task.pollState.lastProgressUpdate) / 1000)}s`);
+        now - task.pollState.lastProgressUpdate > staleMs) {
+      debugLog("timeout", taskId, `stalled — no progress for ${Math.round((now - task.pollState.lastProgressUpdate) / 1000)}s (limit=${Math.round(staleMs / 1000)}s)`);
       this.deps.onTaskTimeout(taskId, "Task stalled"); this.unregisterTask(taskId); return;
     }
     if (monitorType === "uncertain" && elapsed > SESSION_GONE_TIMEOUT_MS) {

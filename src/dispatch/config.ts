@@ -35,6 +35,11 @@ export const MESSAGE_STALENESS_TIMEOUT_MS = 3_600_000;
 /** Sync timeout (10 min): max wall-clock time for synchronous executeSync prompts. */
 export const SYNC_TIMEOUT_MS = 600_000;
 
+/** Background default stale timeout (15 min): per-task default when no explicit timeout_ms is set.
+ *  More aggressive than the global staleTimeoutMs (45 min) to prevent background tasks from
+ *  holding resources too long. */
+export const BACKGROUND_STALE_TIMEOUT_MS = 900_000;
+
 /** Minimum consecutive idle polls before marking a task as stable / complete. */
 export const MIN_STABILITY_POLLS = 2;
 
@@ -89,6 +94,8 @@ export interface DispatchManagerConfig {
   maxPollIntervalMs?: number;
   /** Number of concurrency slots reserved for synchronous dispatch per key — default: 1 */
   syncReservedSlots?: number;
+  /** Per-task default stale timeout (ms) for background tasks — default: 900000 (15 min) */
+  backgroundStaleTimeoutMs?: number;
 }
 
 // ── Default configuration ───────────────────────────────────────────
@@ -108,4 +115,5 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   minPollIntervalMs: MIN_POLL_INTERVAL_MS,
   maxPollIntervalMs: MAX_POLL_INTERVAL_MS,
   syncReservedSlots: DEFAULT_SYNC_RESERVED_SLOTS,
+  backgroundStaleTimeoutMs: BACKGROUND_STALE_TIMEOUT_MS,
 };

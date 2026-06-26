@@ -210,6 +210,33 @@ describe("notifyParent", () => {
     expect(promptAsyncMock).toHaveBeenCalledTimes(2);
   });
 
+  it("resolves remainingCount at send time — enqueue with inflight=2, send with inflight=0 → ALL COMPLETE", async () => {
+    const client = createClient();
+    const task = createTask({ status: "completed" });
+
+    let inflight = 2;
+
+    // Enqueue notification with callback that reads inflight at send time.
+    // At enqueue time inflight=2, but by the time doNotify fires inflight=0.
+    notifyParent(client, task, () => inflight);
+
+    // Synchronously drop inflight before any microtask fires.
+    inflight = 0;
+
+    // Enqueue a second notification to ensure serial queue flushes both.
+    const task2 = createTask({ id: "task-2" });
+    notifyParent(client, task2, () => inflight);
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    const calls = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls;
+    expect(calls).toHaveLength(2);
+
+    // Both notifications were resolved at send time (inflight=0).
+    expect(calls[0][0].body.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(calls[1][0].body.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+  });
+
   it("notifications to the same parent execute in FIFO order", async () => {
     const client = createClient();
     const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;

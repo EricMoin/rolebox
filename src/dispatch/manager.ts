@@ -81,6 +81,7 @@ export class DispatchManager {
       description: input.description,
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
+      timeoutMs: input.timeout_ms,
     };
 
     this.tasks.set(taskId, task);
@@ -149,7 +150,7 @@ export class DispatchManager {
         });
 
         debugLog("launch", taskId, "promptAsync sent — registering with poller");
-        this.poller.registerTask(taskId, session.id);
+        this.poller.registerTask(taskId, session.id, undefined, task.timeoutMs);
       }
     } catch (err) {
       task.status = "error";
@@ -281,6 +282,9 @@ export class DispatchManager {
     task.progress = { lastUpdate: new Date(), toolCalls: 0 };
     task.error = undefined;
     task.messageCountAtStart = messageCountAtStart;
+    if (input.timeout_ms !== undefined) {
+      task.timeoutMs = input.timeout_ms;
+    }
 
     const concurrencyKey = this.deriveKey(input.subagent);
     const { promise: acqPromise } = this.concurrency.acquireBackground(concurrencyKey);
@@ -316,7 +320,7 @@ export class DispatchManager {
       },
     });
 
-    this.poller.registerTask(taskId, task.sessionId, { messageCountAtStart });
+    this.poller.registerTask(taskId, task.sessionId, { messageCountAtStart }, task.timeoutMs);
     metrics.gauge("inflight_tasks").inc();
     this.incInflight(task.parentSessionId);
     this.persistState();
@@ -551,7 +555,7 @@ export class DispatchManager {
           const occupied = this.concurrency.forceOccupyBackground(key);
           if (occupied === 1) {
             task.concurrencyKey = key;
-            this.poller.registerTask(task.id, task.sessionId);
+            this.poller.registerTask(task.id, task.sessionId, undefined, task.timeoutMs);
             this.incInflight(task.parentSessionId);
             debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
           } else {
@@ -647,11 +651,9 @@ export class DispatchManager {
   }
 
   async notifyCompletion(task: DispatchTask): Promise<void> {
-    const remainingCount = this.getInflight(task.parentSessionId);
-
     this.pendingNotifications.add(task.id);
     try {
-      await notifyParent(this.client, task, remainingCount);
+      await notifyParent(this.client, task, () => this.getInflight(task.parentSessionId));
     } finally {
       this.pendingNotifications.delete(task.id);
     }
