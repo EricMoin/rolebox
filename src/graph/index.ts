@@ -4,3 +4,4 @@ export { expandTemplate } from "./templates.ts";
 export { GraphSessionState, graphSessionState, buildGraphStateBlock } from "./state.ts";
 export type { GraphExecutionState } from "./state.ts";
 export { buildCollaborationBlock, buildSubagentRoleBlock } from "./prompt-builder.ts";
+export { extractDispatchTarget, advanceGraphForDispatch } from "./advance.ts";
