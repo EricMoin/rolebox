@@ -359,4 +359,26 @@ describe("DispatchManager", () => {
     manager.cleanupTask(task.id);
     expect(manager.getTask(task.id)).toBeUndefined();
   });
+
+  // ── 8. handleSessionIdle() ────────────────────────────────────
+
+  it("handleSessionIdle swallows messages API error", async () => {
+    const client = createMockClient({
+      sessionMessages: () => Promise.reject(new Error("network failure")),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: false },
+      parentContext(),
+    );
+
+    const taskRef = (manager as any).tasks.get(task.id);
+    taskRef.sessionId = "some-session-id";
+    taskRef.status = "running";
+    taskRef.startedAt = new Date(Date.now() - 10000);
+
+    await expect(manager.handleSessionIdle("some-session-id")).resolves.toBeUndefined();
+    expect(taskRef.status).toBe("running");
+  });
 });
