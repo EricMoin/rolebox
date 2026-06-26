@@ -3,7 +3,7 @@ import type { PluginInput, Config } from "@opencode-ai/plugin";
 import { applyParams } from "./function-resolver.ts";
 import { parseFunctionActivation } from "./function-parser.ts";
 import { functionSessionState } from "./session-state.ts";
-import { graphSessionState, buildGraphStateBlock } from "./graph/index.ts";
+import { graphSessionState, buildGraphStateBlock, advanceGraphForDispatch } from "./graph/index.ts";
 import { buildFunctionBlock } from "./prompt-builder.ts";
 import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts";
 import { DispatchManager } from "./dispatch/manager.ts";
@@ -115,21 +115,7 @@ export async function createPluginHooks(
       if (!input.sessionID) return;
       if (input.tool !== "task" && input.tool !== "dispatch") return;
 
-      const state = graphSessionState.getState(input.sessionID);
-      if (!state || state.status !== "active") return;
-
-      const args = typeof input.args === "string" ? input.args : JSON.stringify(input.args ?? {});
-      let agentMatch: RegExpMatchArray | null = null;
-      if (input.tool === "task") {
-        agentMatch = args.match(/subagent_type\s*=\s*["']([^"']+)["']/)
-                   ?? args.match(/subagent_type\s*=\s*([^\s,}\])]+)/);
-      } else {
-        agentMatch = args.match(/subagent\s*=\s*["']([^"']+)["']/)
-                   ?? args.match(/subagent\s*=\s*([^\s,}\])]+)/);
-      }
-      if (!agentMatch) return;
-
-      graphSessionState.advanceStep(input.sessionID, agentMatch[1]);
+      advanceGraphForDispatch(input.sessionID, input.tool, input.args);
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },

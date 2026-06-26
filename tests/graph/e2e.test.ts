@@ -14,6 +14,7 @@ import type { Config } from "@opencode-ai/sdk";
 import { discoverRoles } from "../../src/role-loader";
 import { parseCollaboration } from "../../src/graph/parser";
 import { graphSessionState } from "../../src/graph/state";
+import { advanceGraphForDispatch } from "../../src/graph/advance";
 import { buildSubagentRoleBlock } from "../../src/graph/prompt-builder";
 import type { ResolvedGraph, GraphNodeRole } from "../../src/types";
 import RoleboxModule from "../../src/index";
@@ -778,6 +779,111 @@ describe("Collaboration Graph E2E", () => {
       const match = 'subagent_type=explore)'.match(taskUnquoted);
       expect(match).not.toBeNull();
       expect(match![1]).toBe("explore");
+    });
+  });
+
+  // ── H. advanceGraphForDispatch Integration ────────────────────
+
+  describe("advanceGraphForDispatch Integration", () => {
+    function testGraph(): ResolvedGraph {
+      return {
+        edges: [
+          { from: "parent", to: "coder" },
+          { from: "coder", to: "reviewer" },
+          { from: "reviewer", to: "parent", exit: true },
+        ],
+        nodes: ["coder", "reviewer"],
+        maxIterations: 3,
+        exitEdges: [{ from: "reviewer", to: "parent", exit: true }],
+        template: "pipeline",
+      };
+    }
+
+    it("advances state with structured args (task tool)", () => {
+      const graph = testGraph();
+      graphSessionState.initGraph("adv-structured-1", graph);
+
+      advanceGraphForDispatch("adv-structured-1", "task", {
+        subagent_type: "coder",
+        prompt: "do it",
+        run_in_background: true,
+      });
+
+      const state = graphSessionState.getState("adv-structured-1")!;
+      expect(state.currentStep).toBe(1);
+      expect(state.completedSteps).toEqual(["coder"]);
+    });
+
+    it("advances state with structured args (dispatch tool)", () => {
+      const graph = testGraph();
+      graphSessionState.initGraph("adv-structured-2", graph);
+
+      advanceGraphForDispatch("adv-structured-2", "dispatch", {
+        subagent: "coder",
+        prompt: "do it",
+        run_in_background: true,
+      });
+
+      const state = graphSessionState.getState("adv-structured-2")!;
+      expect(state.currentStep).toBe(1);
+      expect(state.completedSteps).toEqual(["coder"]);
+    });
+
+    it("string fallback args still advance state (task tool)", () => {
+      const graph = testGraph();
+      graphSessionState.initGraph("adv-string-1", graph);
+
+      advanceGraphForDispatch(
+        "adv-string-1",
+        "task",
+        'task(subagent_type="coder", prompt="do it", run_in_background=true)',
+      );
+
+      const state = graphSessionState.getState("adv-string-1")!;
+      expect(state.currentStep).toBe(1);
+      expect(state.completedSteps).toEqual(["coder"]);
+    });
+
+    it("string fallback args still advance state (dispatch tool)", () => {
+      const graph = testGraph();
+      graphSessionState.initGraph("adv-string-2", graph);
+
+      advanceGraphForDispatch(
+        "adv-string-2",
+        "dispatch",
+        'dispatch(subagent="coder", prompt="do it")',
+      );
+
+      const state = graphSessionState.getState("adv-string-2")!;
+      expect(state.currentStep).toBe(1);
+      expect(state.completedSteps).toEqual(["coder"]);
+    });
+
+    it("does not advance for unknown session", () => {
+      advanceGraphForDispatch("nonexistent-session", "task", {
+        subagent_type: "coder",
+      });
+
+      const state = graphSessionState.getState("nonexistent-session");
+      expect(state).toBeUndefined();
+    });
+
+    it("does not advance when state is not active", () => {
+      const graph = testGraph();
+      graphSessionState.initGraph("adv-complete", graph);
+
+      // Advance to completion
+      advanceGraphForDispatch("adv-complete", "task", { subagent_type: "coder" });
+      advanceGraphForDispatch("adv-complete", "task", { subagent_type: "reviewer" });
+
+      const state = graphSessionState.getState("adv-complete")!;
+      expect(state.status).toBe("complete");
+
+      // Try advancing again — should be a no-op
+      advanceGraphForDispatch("adv-complete", "task", { subagent_type: "coder" });
+      const state2 = graphSessionState.getState("adv-complete")!;
+      expect(state2.currentStep).toBe(2);
+      expect(state2.completedSteps).toEqual(["coder", "reviewer"]);
     });
   });
 });
