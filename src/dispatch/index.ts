@@ -5,5 +5,5 @@ export { GlobalPoller as SessionPoller } from "./global-poller.ts"; // deprecate
 export { SessionMonitor } from "./session-monitor.ts";
 export { detectCompletion } from "./completion-detector.ts";
 export { buildNotificationText, notifyParent } from "./notification.ts";
-export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./tools.ts";
+export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchMetricsTool } from "./tools.ts";
 export type * from "./types.ts";

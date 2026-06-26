@@ -236,6 +236,11 @@ export class DispatchManager {
     return result;
   }
 
+  /** Return a snapshot of current dispatch metrics. */
+  getMetricsSnapshot(): import("./metrics.ts").MetricsSnapshot {
+    return metrics.snapshot();
+  }
+
   async cancelTask(taskId: string): Promise<boolean> {
     const task = this.tasks.get(taskId);
     if (!task) return false;

@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { DispatchManager } from "./manager.ts";
 import type { DispatchInput, DispatchTask } from "./types.ts";
+import { metrics } from "./metrics.ts";
 
 function formatDuration(task: DispatchTask): string {
   const end = task.completedAt ?? new Date();
@@ -228,6 +229,75 @@ export function createDispatchCancelTool(manager: DispatchManager) {
         return `Task '${input.task_id}' not found.`;
       }
       return `Task '${input.task_id}' cancelled.`;
+    },
+  });
+}
+
+export function createDispatchMetricsTool() {
+  return tool({
+    description:
+      "Retrieve runtime metrics snapshot for the dispatch subsystem — counters, gauges, and histograms. Returns a human-readable summary or JSON.",
+    args: {
+      format: z
+        .enum(["summary", "json"])
+        .optional()
+        .default("summary")
+        .describe("Output format: 'summary' for human-readable, 'json' for machine parsing"),
+    },
+    async execute(input) {
+      const snap = metrics.snapshot();
+
+      if (input.format === "json") {
+        return JSON.stringify(snap, null, 2);
+      }
+
+      // Build human-readable summary
+      const lines: string[] = ["## Dispatch Metrics", ""];
+
+      // Counters
+      const counterKeys = Object.keys(snap.counters);
+      if (counterKeys.length > 0) {
+        lines.push("### Counters");
+        for (const key of counterKeys) {
+          lines.push(`  ${key}: ${snap.counters[key].value}`);
+        }
+        lines.push("");
+      }
+
+      // Gauges
+      const gaugeKeys = Object.keys(snap.gauges);
+      if (gaugeKeys.length > 0) {
+        lines.push("### Gauges");
+        for (const key of gaugeKeys) {
+          lines.push(`  ${key}: ${snap.gauges[key].value}`);
+        }
+        lines.push("");
+      }
+
+      // Histograms
+      const histKeys = Object.keys(snap.histograms);
+      if (histKeys.length > 0) {
+        lines.push("### Histograms");
+        for (const key of histKeys) {
+          const h = snap.histograms[key];
+          lines.push(`  ${key}: count=${h.count} sum=${h.sum}`);
+          const bucketEntries = Object.entries(h.buckets).filter(([, v]) => v > 0);
+          if (bucketEntries.length > 0) {
+            for (const [b, v] of bucketEntries) {
+              lines.push(`    ≤${b}ms: ${v}`);
+            }
+          }
+        }
+        lines.push("");
+      }
+
+      if (counterKeys.length === 0 && gaugeKeys.length === 0 && histKeys.length === 0) {
+        lines.push("  (no metrics recorded — ROLEBOX_METRICS may be disabled)");
+        lines.push("");
+      }
+
+      lines.push("Labels follow low-cardinality conventions (agent id, status, concurrency key).");
+      return lines.join("\n");
     },
   });
 }

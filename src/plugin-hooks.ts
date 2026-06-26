@@ -7,7 +7,7 @@ import { graphSessionState, buildGraphStateBlock, advanceGraphForDispatch } from
 import { buildFunctionBlock } from "./prompt-builder.ts";
 import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts";
 import { DispatchManager } from "./dispatch/manager.ts";
-import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./dispatch/tools.ts";
+import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchMetricsTool } from "./dispatch/tools.ts";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
 import { createSubLogger } from "./logger.ts";
@@ -39,6 +39,7 @@ export async function createPluginHooks(
       dispatch: createDispatchTool(dispatchManager, resolvedSubagents),
       dispatch_output: createDispatchOutputTool(dispatchManager),
       dispatch_cancel: createDispatchCancelTool(dispatchManager),
+      dispatch_metrics: createDispatchMetricsTool(),
     },
     event: async (input: { event: Event }) => {
       if (input.event.type === "session.idle") {

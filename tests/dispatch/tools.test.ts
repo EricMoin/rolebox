@@ -4,6 +4,7 @@ import {
   createDispatchTool,
   createDispatchOutputTool,
   createDispatchCancelTool,
+  createDispatchMetricsTool,
 } from "../../src/dispatch/tools.ts";
 import type { DispatchManager } from "../../src/dispatch/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
@@ -211,5 +212,44 @@ describe("createDispatchCancelTool", () => {
     );
 
     expect(result).toContain("not found");
+  });
+});
+
+// ── createDispatchMetricsTool ──────────────────────────────────────────────
+
+describe("createDispatchMetricsTool", () => {
+  it("returns summary format by default with section header", async () => {
+    const tool = createDispatchMetricsTool();
+    const result = await tool.execute({}, mockToolContext);
+
+    expect(result).toContain("## Dispatch Metrics");
+
+    // No metrics recorded (ROLEBOX_METRICS is disabled in test env)
+    if (result.includes("no metrics recorded")) {
+      expect(result).toContain("ROLEBOX_METRICS may be disabled");
+    }
+  });
+
+  it("returns valid JSON when format=json", async () => {
+    const tool = createDispatchMetricsTool();
+    const result = await tool.execute({ format: "json" }, mockToolContext);
+
+    const parsed = JSON.parse(result);
+    expect(typeof parsed).toBe("object");
+    expect(parsed).toHaveProperty("counters");
+    expect(parsed).toHaveProperty("gauges");
+    expect(parsed).toHaveProperty("histograms");
+
+    expect(typeof parsed.counters).toBe("object");
+    expect(typeof parsed.gauges).toBe("object");
+    expect(typeof parsed.histograms).toBe("object");
+  });
+
+  it("shows empty message when no metrics recorded", async () => {
+    const tool = createDispatchMetricsTool();
+    const result = await tool.execute({ format: "summary" }, mockToolContext);
+
+    expect(result).toContain("no metrics recorded");
+    expect(result).toContain("ROLEBOX_METRICS may be disabled");
   });
 });
