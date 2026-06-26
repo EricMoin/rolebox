@@ -8,6 +8,10 @@ import {
   MIN_STABILITY_POLLS, MESSAGE_STALENESS_TIMEOUT_MS, SESSION_GONE_TIMEOUT_MS,
 } from "./config.ts";
 
+import { debugLog } from "./debug-log.ts";
+
+const DEBUG = !!process.env.ROLEBOX_DEBUG;
+
 export interface GlobalPollerDeps {
   completionDetector: typeof detectCompletion;
   sessionMonitor: SessionMonitor;
@@ -104,12 +108,18 @@ export class GlobalPoller {
     this.isPolling = true;
     try {
       if (this.tasks.size === 0) { this.stop(); return; }
+      debugLog("poll", "*", `cycle start — ${this.tasks.size} task(s) tracked`);
       const statusResult = await this.client.session.status();
-      if (statusResult.error !== undefined) { this._scheduleNext(); return; }
+      if (statusResult.error !== undefined) {
+        debugLog("poll", "*", `status API error: ${JSON.stringify(statusResult.error)}`);
+        this._scheduleNext(); return;
+      }
       const statusMap: Record<string, { type: string }> =
         (statusResult.data as Record<string, { type: string }>) ?? {};
       for (const [taskId, task] of this.tasks) {
-        try { await this._processTask(taskId, task, statusMap); } catch { /* isolate */ }
+        try { await this._processTask(taskId, task, statusMap); } catch (e) {
+          debugLog("poll", taskId, `process error: ${e instanceof Error ? e.message : e}`);
+        }
       }
       this._adjustInterval();
       if (this.isRunningFlag) this._scheduleNext();
@@ -126,16 +136,22 @@ export class GlobalPoller {
     const now = Date.now();
     const r = this.deps.sessionMonitor.checkSession(taskId, task.sessionId, statusMap);
 
+    debugLog("task", taskId, `monitor=${r.type} status=${r.status?.type ?? "none"} session=${task.sessionId}`);
+
     if (r.type === "gone") {
+      debugLog("task", taskId, "session gone — verifying existence...");
       const ex = await this.deps.sessionMonitor.verifyExistence(this.client, task.sessionId);
+      debugLog("task", taskId, `existence check: ${ex}`);
       if (ex === "missing") {
         this.deps.onTaskError(taskId, "Session disappeared");
         this.unregisterTask(taskId);
+        return;
       }
-      return;
+      debugLog("task", taskId, "session exists but not in status map — treating as idle, fetching messages");
     }
 
     if (r.type === "active" && (r.status?.type === "busy" || r.status?.type === "retry")) {
+      debugLog("task", taskId, `active (${r.status?.type}) — model is working`);
       task.pollState.lastProgressUpdate = now;
       task.pollState.stableIdlePolls = 0;
       task.pollState.hasProducedOutput = true;
@@ -145,21 +161,51 @@ export class GlobalPoller {
     const curKey = statusKey(r.type, r.status?.type);
     const prevKey = this._prevStatusKey.get(taskId);
     this._prevStatusKey.set(taskId, curKey);
-    const needsFetch = task.pollState.lastMessageCount === 0 || prevKey !== curKey;
+    const notInStatusMap = r.type === "gone" || r.type === "uncertain";
+    const needsFetch = task.pollState.lastMessageCount === 0 || prevKey !== curKey || notInStatusMap;
 
     if (needsFetch) {
+      debugLog("task", taskId, `fetching messages (prev=${prevKey} cur=${curKey} count=${task.pollState.lastMessageCount})`);
       const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
-      if (msgResult.error !== undefined || msgResult.data == null) return;
+      if (msgResult.error !== undefined || msgResult.data == null) {
+        debugLog("task", taskId, `messages fetch failed: ${JSON.stringify(msgResult.error)}`);
+        return;
+      }
       const messages = msgResult.data as SessionMessageSnapshot[];
       task.pollState.lastMessageCount = messages.length;
-      const sig = this.deps.completionDetector(messages, r.status, task.pollState);
+      debugLog("task", taskId, `got ${messages.length} message(s)`);
+
+      if (DEBUG) {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m.info.role === "assistant") {
+            const textParts = m.parts.filter(p => p.type === "text" && p.text);
+            const toolParts = m.parts.filter(p => p.type === "tool");
+            const snippet = textParts.map(p => p.text ?? "").join("").slice(0, 200);
+            const pendingTools = toolParts.filter(p => p.state === "pending" || p.state === "running").length;
+            debugLog("task", taskId, `last assistant: finish=${m.info.finish ?? "none"} tools_pending=${pendingTools}`);
+            if (snippet) {
+              debugLog("output", taskId, snippet.replace(/\n/g, "\\n") + (snippet.length >= 200 ? "..." : ""));
+            }
+            break;
+          }
+        }
+      }
+
+      const effectiveStatus = r.status ?? (notInStatusMap ? { type: "idle" } : undefined);
+      const sig = this.deps.completionDetector(messages, effectiveStatus, task.pollState);
+      debugLog("task", taskId, `signal=${sig.type}${"message" in sig ? ` msg=${(sig as { message: string }).message}` : ""}`);
       await this._handleSignal(taskId, task, sig, now, r.type);
     } else if (task.pollState.stableIdlePolls > 0 &&
                task.pollState.stableIdlePolls < MIN_STABILITY_POLLS) {
       task.pollState.stableIdlePolls++;
+      debugLog("task", taskId, `stabilizing ${task.pollState.stableIdlePolls}/${MIN_STABILITY_POLLS}`);
       if (task.pollState.stableIdlePolls >= MIN_STABILITY_POLLS) {
+        debugLog("task", taskId, "stable — marking completed");
         this.deps.onTaskCompleted(taskId); this.unregisterTask(taskId);
       }
+    } else {
+      debugLog("task", taskId, `no fetch needed (idle polls=${task.pollState.stableIdlePolls})`);
     }
     task.pollState.lastProgressUpdate = now;
   }
@@ -171,7 +217,13 @@ export class GlobalPoller {
     switch (sig.type) {
       case "completed": this.deps.onTaskCompleted(taskId); this.unregisterTask(taskId); break;
       case "error": this.deps.onTaskError(taskId, sig.message); this.unregisterTask(taskId); break;
-      case "stabilizing": task.pollState.stableIdlePolls++; break;
+      case "stabilizing":
+        task.pollState.stableIdlePolls++;
+        if (task.pollState.stableIdlePolls >= MIN_STABILITY_POLLS) {
+          debugLog("task", taskId, "stable — marking completed");
+          this.deps.onTaskCompleted(taskId); this.unregisterTask(taskId);
+        }
+        break;
       case "not_ready": this._checkTimeouts(taskId, task, now, monitorType); break;
     }
   }
@@ -181,14 +233,17 @@ export class GlobalPoller {
   ): void {
     const elapsed = now - task.registeredAt;
     if (!task.pollState.hasProducedOutput && elapsed > MESSAGE_STALENESS_TIMEOUT_MS) {
+      debugLog("timeout", taskId, `never produced output after ${Math.round(elapsed / 1000)}s`);
       this.deps.onTaskTimeout(taskId, "Never produced output"); this.unregisterTask(taskId); return;
     }
     if (task.pollState.hasProducedOutput &&
         now - task.pollState.lastProgressUpdate >
           (this.config.staleTimeoutMs ?? MESSAGE_STALENESS_TIMEOUT_MS)) {
+      debugLog("timeout", taskId, `stalled — no progress for ${Math.round((now - task.pollState.lastProgressUpdate) / 1000)}s`);
       this.deps.onTaskTimeout(taskId, "Task stalled"); this.unregisterTask(taskId); return;
     }
     if (monitorType === "uncertain" && elapsed > SESSION_GONE_TIMEOUT_MS) {
+      debugLog("timeout", taskId, `session unresponsive after ${Math.round(elapsed / 1000)}s`);
       this.deps.onTaskTimeout(taskId, "Session unresponsive"); this.unregisterTask(taskId); return;
     }
   }
