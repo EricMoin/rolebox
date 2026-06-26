@@ -163,4 +163,103 @@ describe("ConcurrencyManager", () => {
     await h2.promise;
     expect(() => h2.cancel()).not.toThrow();
   });
+
+  // ── T8: reserved sync lane ────────────────────────────────────
+
+  it("acquireBackground within background limit resolves immediately", async () => {
+    const cm = new ConcurrencyManager(5, 10, 1); // limit=5, reserved=1
+    // bgLimit = 5-1 = 4, so 4 acquires within bg should succeed
+    const acqs = Array.from({ length: 4 }, () => cm.acquireBackground("test"));
+    const results = await Promise.all(acqs.map((a) => a.promise));
+    expect(results).toEqual([undefined, undefined, undefined, undefined]);
+    expect(cm.getActiveCount("test")).toBe(4);
+  });
+
+  it("acquireBackground at background limit blocks", async () => {
+    const cm = new ConcurrencyManager(5, 10, 1); // bgLimit=4
+    // Fill all 4 background slots
+    await Promise.all(Array.from({ length: 4 }, () => cm.acquireBackground("test").promise));
+    expect(cm.getActiveCount("test")).toBe(4);
+
+    // 5th background acquire must block
+    const { promise: blocked } = cm.acquireBackground("test");
+    const timeout = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error("timed out")), 100),
+    );
+    await expect(Promise.race([blocked, timeout])).rejects.toThrow("timed out");
+  });
+
+  it("acquireSync can use reserved slot when background is full", async () => {
+    const cm = new ConcurrencyManager(5, 10, 1); // bgLimit=4
+    // Fill all 4 background slots
+    await Promise.all(Array.from({ length: 4 }, () => cm.acquireBackground("test").promise));
+    expect(cm.getActiveCount("test")).toBe(4);
+
+    // Sync acquire should succeed immediately — uses reserved 5th slot
+    const { promise: syncP } = cm.acquireSync("test");
+    await expect(syncP).resolves.toBeUndefined();
+    expect(cm.getActiveCount("test")).toBe(5);
+  });
+
+  it("forceOccupyBackground clamps to limit-reserved", () => {
+    const cm = new ConcurrencyManager(5, 10, 2); // limit=5, reserved=2, bgLimit=3
+    expect(cm.forceOccupyBackground("k", 10)).toBe(3);
+    expect(cm.getActiveCount("k")).toBe(3);
+    expect(cm.forceOccupyBackground("k", 3)).toBe(0);
+    expect(cm.getActiveCount("k")).toBe(3);
+    // Reserved slots are still free: sync should be able to acquire
+    const { promise: syncP } = cm.acquireSync("k");
+    expect(cm.getActiveCount("k")).toBe(4); // sync used one reserved slot
+  });
+
+  it("getReserved returns default for unset slots", () => {
+    const cm = new ConcurrencyManager(5, 10, 3);
+    expect(cm.getReserved("never-used")).toBe(3);
+  });
+
+  it("setReserved updates per-slot reservation", () => {
+    const cm = new ConcurrencyManager(5, 10, 1);
+    cm.setReserved("test", 2);
+    expect(cm.getReserved("test")).toBe(2);
+  });
+
+  it("setSlotReserved is alias for setReserved", () => {
+    const cm = new ConcurrencyManager(5, 10, 1);
+    cm.setSlotReserved("test", 3);
+    expect(cm.getReserved("test")).toBe(3);
+  });
+
+  it("release promotes background waiters after sync acquire", async () => {
+    const cm = new ConcurrencyManager(3, 10, 1); // limit=3, bgLimit=2
+    // Fill 2 background slots
+    await Promise.all(Array.from({ length: 2 }, () => cm.acquireBackground("test").promise));
+    // Sync acquires the reserved 3rd slot
+    const { promise: syncP } = cm.acquireSync("test");
+    await syncP;
+    expect(cm.getActiveCount("test")).toBe(3);
+
+    // Background acquire blocks
+    const { promise: bgP } = cm.acquireBackground("test");
+
+    // Release sync → bg waiter promoted
+    cm.release("test");
+    await bgP;
+    expect(cm.getActiveCount("test")).toBe(3);
+  });
+
+  it("acquireBackground bounded queue works like acquireCancelable", async () => {
+    const cm = new ConcurrencyManager(2, 1, 1); // limit=2, bgLimit=1, maxQueueDepth=1
+    // Fill the 1 background slot
+    await cm.acquireBackground("test").promise;
+    // Enqueue one background waiter
+    const { promise: queued } = cm.acquireBackground("test");
+    // Second background waiter should be rejected (queue at capacity)
+    const { promise: rejected } = cm.acquireBackground("test");
+    await expect(rejected).rejects.toThrow("Queue is full");
+
+    // Release → queued waiter resolves
+    cm.release("test");
+    await queued;
+    expect(cm.getActiveCount("test")).toBe(1);
+  });
 });

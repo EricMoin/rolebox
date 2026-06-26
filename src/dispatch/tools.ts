@@ -71,6 +71,16 @@ export function createDispatchTool(
       if (input.run_in_background) {
         const task = await manager.launch(dispatchInput, parentCtx);
 
+        if (task.status === "error" && task.error) {
+          return [
+            "Background task could not be launched.\n",
+            `Task ID: ${task.id}`,
+            `Description: ${input.description || "N/A"}`,
+            "",
+            `${task.error}`,
+          ].join("\n");
+        }
+
         return [
           "Background task launched.\n",
           `Task ID: ${task.id}`,

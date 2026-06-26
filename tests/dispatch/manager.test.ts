@@ -952,12 +952,12 @@ describe("DispatchManager", () => {
     });
   });
 
-  // ── 12. pool-rejected cleanup ──────────────────────────────────
+  // ── 12. queue-full rejection ──────────────────────────────────
 
-  describe("pool-rejected cleanup", () => {
-    it("rejected task is scheduled for cleanup and notified", async () => {
+  describe("queue-full rejection", () => {
+    it("rejected task is scheduled for cleanup and notified with structured error", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0 });
       const mgr = manager as any;
 
       // Fill the single slot
@@ -969,7 +969,11 @@ describe("DispatchManager", () => {
       );
 
       expect(task.status).toBe("error");
-      expect(task.error).toContain("Pool is full");
+      const parsed = JSON.parse(task.error!);
+      expect(parsed.error).toBe("Queue is full");
+      expect(parsed.queue_depth).toBe(0);
+      expect(parsed.limit).toBe(0);
+      expect(parsed.retry_after).toBeGreaterThan(0);
       expect(task.completedAt).toBeInstanceOf(Date);
 
       // Verify cleanup was scheduled
@@ -983,9 +987,9 @@ describe("DispatchManager", () => {
       clearTimeout(timer);
     });
 
-    it("pool-rejected does not consume a concurrency slot", async () => {
+    it("queue-full does not consume a concurrency slot", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0 });
       const mgr = manager as any;
 
       // Fill the single slot
@@ -1098,10 +1102,10 @@ describe("DispatchManager", () => {
       expect(g.peek()).toBe(baseline);
     });
 
-    it("pool-rejected does not affect inflight gauge", async () => {
+    it("queue-full does not affect inflight gauge", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0 });
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
@@ -1119,7 +1123,7 @@ describe("DispatchManager", () => {
       );
 
       expect(t2.status).toBe("error");
-      expect(t2.error).toContain("Pool is full");
+      expect(t2.error).toContain("Queue is full");
       expect(g.peek()).toBe(baseline + 1);
 
       mgr.handleTaskCompleted(t1.id);
@@ -1337,7 +1341,7 @@ describe("recover()", () => {
     }
     store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 0 });
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -1403,11 +1407,9 @@ describe("per-model concurrency key", () => {
     const client = createMockClient();
     const manager = new DispatchManager(
       client,
-      { ...fastConfig, maxConcurrent: 1 },
+      { ...fastConfig, maxConcurrent: 1, syncReservedSlots: 0 },
       modelKeys,
     );
-
-    // First subagent with openai key acquires the single slot
     const t1 = await manager.launch(
       { subagent: "agent-openai", prompt: "p1", run_in_background: true },
       parentContext(),
@@ -1431,7 +1433,7 @@ describe("per-model concurrency key", () => {
     expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(1);
   });
 
-  it("same model key subagents share slots and get rejected at limit", async () => {
+  it("same model key subagents share slots and get rejected at queue limit", async () => {
     const modelKeys = new Map([
       ["agent-a", "openai/gpt-4"],
       ["agent-b", "openai/gpt-4"],
@@ -1439,7 +1441,7 @@ describe("per-model concurrency key", () => {
     const client = createMockClient();
     const manager = new DispatchManager(
       client,
-      { ...fastConfig, maxConcurrent: 1 },
+      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0 },
       modelKeys,
     );
 
@@ -1454,13 +1456,14 @@ describe("per-model concurrency key", () => {
     const mgr = manager as any;
     expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
 
-    // Second subagent with same key — pool full, rejected
+    // Second subagent with same key — queue full, rejected
     const t2 = await manager.launch(
       { subagent: "agent-b", prompt: "p2", run_in_background: true },
       parentContext(),
     );
     expect(t2.status).toBe("error");
-    expect(t2.error).toContain("Pool is full");
+    const parsed = JSON.parse(t2.error!);
+    expect(parsed.error).toBe("Queue is full");
     expect(t2.concurrencyKey).toBeUndefined();
 
     // Slot count unchanged — rejected task never acquired
@@ -1474,10 +1477,9 @@ describe("per-model concurrency key", () => {
     const client = createMockClient();
     const manager = new DispatchManager(
       client,
-      { ...fastConfig, maxConcurrent: 1 },
+      { ...fastConfig, maxConcurrent: 1, syncReservedSlots: 0 },
       modelKeys,
     );
-
     const t1 = await manager.launch(
       { subagent: "unknown-agent", prompt: "p1", run_in_background: true },
       parentContext(),
@@ -1553,5 +1555,262 @@ describe("per-model concurrency key", () => {
     expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(4);
     // "default" pool is untouched
     expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+  });
+});
+
+// ── 15. bounded background queue ──────────────────────────────
+
+describe("bounded background queue", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("queue not full → task queues then acquires when slot freed", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 2, syncReservedSlots: 0 },
+    );
+    const mgr = manager as any;
+
+    // First task acquires the only slot
+    const t1 = await manager.launch(
+      { subagent: "h", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+    expect(t1.concurrencyKey).toBe("default");
+
+    // Second task — queue is not full (depth 0 < limit 2), should enqueue
+    const launch2Promise = manager.launch(
+      { subagent: "h", prompt: "p2", run_in_background: true },
+      parentContext(),
+    );
+
+    // Give a tick for the waiter to enqueue
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Task 2 should be pending (enqueued, not yet running)
+    const tasksForParent = manager.getTasksByParent("parent-session-1");
+    const pendingTasks = tasksForParent.filter(t => t.status === "pending");
+    expect(pendingTasks.length).toBeGreaterThanOrEqual(1);
+
+    // The active count should still be 1
+    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+
+    // Complete task 1 → task 2 acquires the freed slot
+    mgr.handleTaskCompleted(t1.id);
+
+    const t2 = await launch2Promise;
+    expect(t2.status).toBe("running");
+    expect(t2.concurrencyKey).toBe("default");
+
+    // Clean up t2
+    mgr.handleTaskCompleted(t2.id);
+  });
+
+  it("queue full → structured error with retry_after, depth, limit", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 1, syncReservedSlots: 0 },
+    );
+    const mgr = manager as any;
+
+    // Task 1 acquires the only slot
+    const t1 = await manager.launch(
+      { subagent: "h", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+
+    // Task 2 enqueues (queue depth 1 = limit 1)
+    const launch2Promise = manager.launch(
+      { subagent: "h", prompt: "p2", run_in_background: true },
+      parentContext(),
+    );
+
+    // Give a tick for waiter to enqueue
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Task 3 — queue is now full, should reject
+    const t3 = await manager.launch(
+      { subagent: "h", prompt: "p3", run_in_background: true },
+      parentContext(),
+    );
+
+    expect(t3.status).toBe("error");
+    const parsed = JSON.parse(t3.error!);
+    expect(parsed.error).toBe("Queue is full");
+    expect(parsed.queue_depth).toBe(1);
+    expect(parsed.limit).toBe(1);
+    expect(parsed.retry_after).toBeGreaterThan(0);
+    expect(t3.completedAt).toBeInstanceOf(Date);
+
+    // Task 3 should NOT consume a concurrency slot
+    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+
+    // Clean up t1 and t2
+    mgr.handleTaskCompleted(t1.id);
+    const t2 = await launch2Promise;
+    expect(t2.status).toBe("running");
+    mgr.handleTaskCompleted(t2.id);
+  });
+
+  it("queue depth recovers after cancelled waiter frees a queue slot", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 1, syncReservedSlots: 0 },
+    );
+    const mgr = manager as any;
+
+    // Task 1 acquires the only slot
+    const t1 = await manager.launch(
+      { subagent: "h", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+
+    // Enqueue a waiter manually, then cancel it
+    const { cancel } = mgr.concurrency.acquireCancelable("default");
+    cancel();
+
+    // Queue should now be effectively empty (cancelled waiter was removed)
+    // Next launch should enqueue, not reject
+    const launch2Promise = manager.launch(
+      { subagent: "h", prompt: "p2", run_in_background: true },
+      parentContext(),
+    );
+
+    // Give a tick for waiter to enqueue
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Task 2 should be pending (enqueued)
+    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
+
+    // Complete task 1 → task 2 acquires
+    mgr.handleTaskCompleted(t1.id);
+    const t2 = await launch2Promise;
+    expect(t2.status).toBe("running");
+    mgr.handleTaskCompleted(t2.id);
+  });
+});
+
+// ── 16. reserved sync lane integration ─────────────────────────
+
+describe("reserved sync lane", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("sync acquires immediately via reserved lane when background is full", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 1, syncTimeoutMs: 5000 },
+    );
+    const mgr = manager as any;
+
+    // Fill all 4 background slots via acquireBackground
+    await Promise.all(Array.from({ length: 4 }, () => mgr.concurrency.acquireBackground("default").promise));
+    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
+
+    // Background launch should block (bg slots full)
+    const launchPromise = manager.launch(
+      { subagent: "bg-blocked", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    // Give a tick for bg waiter to enqueue
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Background task should be pending (enqueued)
+    const pending = manager.getTasksByParent("parent-session-1")
+      .filter(t => t.status === "pending");
+    expect(pending.length).toBeGreaterThanOrEqual(1);
+
+    // Sync execute should acquire immediately via reserved 5th slot
+    const syncResult = await manager.executeSync(
+      { subagent: "sync-test", prompt: "hello", run_in_background: false },
+      parentContext(),
+    );
+    expect(syncResult).toBe("Hello from subagent");
+
+    // After sync releases: bg waiter gets promoted, active stays at 5 (4 original bg + 1 promoted)
+    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
+  });
+
+  it("background launch rejects when bg slots full and queue at capacity", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(
+      client,
+      { ...fastConfig, maxConcurrent: 3, maxQueueDepth: 0, syncReservedSlots: 1 },
+    );
+    const mgr = manager as any;
+
+    // Fill all 2 background slots
+    await Promise.all(Array.from({ length: 2 }, () => mgr.concurrency.acquireBackground("default").promise));
+    expect(mgr.concurrency.getActiveCount("default")).toBe(2);
+
+    // Background launch should reject (bg limit=2, queue depth=0)
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("error");
+    const parsed = JSON.parse(task.error!);
+    expect(parsed.error).toBe("Queue is full");
+    // reserved sync slot should still be available
+    expect(mgr.concurrency.getActiveCount("default")).toBe(2);
+  });
+
+  it("recover uses forceOccupyBackground — clamps to limit-reserved", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "manager-t8-recover-"));
+    const client = createMockClient();
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+
+    // Create 5 running tasks — limit=5, reserved=1 → bgLimit=4
+    for (let i = 0; i < 5; i++) {
+      const t: DispatchTask = {
+        id: `bg_t8_${i}`,
+        sessionId: `ses_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 1 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    // forceOccupyBackground clamps to 4 (limit - reserved)
+    expect(mgr.poller.getTaskCount()).toBe(4);
+    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
+
+    // 1 task should be errored (exceeded concurrency limit on recovery)
+    let errorCount = 0;
+    for (let i = 0; i < 5; i++) {
+      const t = manager.getTask(`bg_t8_${i}`);
+      if (t?.status === "error" && t.error?.includes("Exceeded concurrency limit")) {
+        errorCount++;
+      }
+    }
+    expect(errorCount).toBe(1);
+
+    // The reserved sync slot should still be available
+    const { promise: syncP } = mgr.concurrency.acquireSync("default");
+    await syncP;
+    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
+
+    rmSync(tempDir, { recursive: true, force: true });
   });
 });
