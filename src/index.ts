@@ -10,6 +10,7 @@ import { syncSkillSymlinks } from "./sync/skill-symlinks.ts";
 import { createPluginHooks } from "./plugin-hooks.ts";
 import type { ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { PLUGIN_ID } from "./constants.ts";
+import { createSubLogger, getLogFilePath } from "./logger.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +34,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     ? ctxRoleboxDir
     : path.join(configDir, "rolebox");
   const globalSkillsDir = path.join(configDir, "skills");
+  const log = createSubLogger("init");
 
   const roles = await discoverRoles(roleboxDir);
 
@@ -47,6 +49,17 @@ const RoleboxPlugin: Plugin = async (ctx) => {
 
   syncAgentFiles(resolvedRoles);
   syncSkillSymlinks(resolvedRoles, globalSkillsDir);
+
+  const discovered = roles.size;
+  const resolved = resolvedRoles.length;
+  const skipped = discovered - resolved;
+  log.info("Plugin initialized", { discovered, resolved, skipped, logFile: getLogFilePath() });
+  if (resolved === 0 && discovered > 0) {
+    log.warn("All discovered roles failed to resolve — check role.yaml files");
+  }
+  if (discovered === 0) {
+    log.info("No roles found in rolebox directory");
+  }
 
   return createPluginHooks(resolvedRoles, ctx.client, roleFunctionsMap, roleGraphMap);
 };
