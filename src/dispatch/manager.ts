@@ -13,7 +13,8 @@ import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent } from "./notification.ts";
 
 import { TaskStateStore } from "./task-store.ts";
-import { debugLog } from "./debug-log.ts";
+import { debugLog, infoLog } from "./debug-log.ts";
+import { metrics } from "./metrics.ts";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
 
@@ -68,6 +69,15 @@ export class DispatchManager {
 
     debugLog("launch", taskId, `agent=${input.subagent} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
+    // Pool-full fast-fail: reject immediately if all slots are occupied
+    if (this.concurrency.getActiveCount(DEFAULT_CONCURRENCY_KEY) >= this.concurrency.getLimit(DEFAULT_CONCURRENCY_KEY)) {
+      metrics.counter("dispatch_rejected_total", { reason: "pool-full" }).inc();
+      task.status = "error";
+      task.error = "Pool is full — all concurrent slots occupied";
+      debugLog("launch", taskId, `REJECTED: pool-full (${this.concurrency.getActiveCount(DEFAULT_CONCURRENCY_KEY)}/${this.concurrency.getLimit(DEFAULT_CONCURRENCY_KEY)})`);
+      return task;
+    }
+
     await this.concurrency.acquire(DEFAULT_CONCURRENCY_KEY);
     task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
 
@@ -90,6 +100,9 @@ export class DispatchManager {
       task.sessionId = session.id;
       task.status = "running";
       didMarkRunning = true;
+      infoLog("launch", taskId, `running agent=${input.subagent}`);
+      metrics.counter("dispatch_total", { agent: input.subagent, mode: "background" }).inc();
+      metrics.gauge("inflight_tasks").inc();
       this.incInflight(task.parentSessionId);
       task.progress.lastUpdate = new Date();
       this.persistState();
@@ -154,6 +167,7 @@ export class DispatchManager {
       throw new Error(`executeSync timed out waiting for a concurrency slot after ${timeoutMs}ms`);
     }
     didAcquire = true;
+    metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
 
     try {
       // Step 2: Session create
@@ -253,6 +267,8 @@ export class DispatchManager {
 
     if (!this.transition(taskId, ["pending", "running"], "cancelled")) return false;
     const t = this.tasks.get(taskId)!;
+    infoLog("lifecycle", taskId, `✕ cancelled agent=${t.agent}`);
+    metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     this.decInflight(t.parentSessionId);
     this.persistState();
@@ -539,14 +555,16 @@ export class DispatchManager {
 
   private handleTaskCompleted(taskId: string): void {
     if (!this.transition(taskId, ["pending", "running"], "completed")) return;
-    debugLog("lifecycle", taskId, "✓ COMPLETED");
+    const t = this.tasks.get(taskId)!;
+    infoLog("lifecycle", taskId, `✓ completed agent=${t.agent}`);
     this.finalizeCompletion(taskId);
   }
 
   private handleTaskError(taskId: string, error: string): void {
     if (!this.transition(taskId, ["pending", "running"], "error", { error })) return;
     const t = this.tasks.get(taskId)!;
-    debugLog("lifecycle", taskId, `✗ ERROR: ${error}`);
+    infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
+    metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     this.decInflight(t.parentSessionId);
     this.persistState();
@@ -557,7 +575,8 @@ export class DispatchManager {
   private handleTaskTimeout(taskId: string, reason: string): void {
     if (!this.transition(taskId, ["pending", "running"], "timeout", { error: reason })) return;
     const t = this.tasks.get(taskId)!;
-    debugLog("lifecycle", taskId, `⏱ TIMEOUT: ${reason}`);
+    infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
+    metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
     this.decInflight(t.parentSessionId);
     this.persistState();
@@ -569,6 +588,11 @@ export class DispatchManager {
   private finalizeCompletion(taskId: string): void {
     const t = this.tasks.get(taskId)!;
     this.concurrency.release(t.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY);
+    const duration = Date.now() - t.startedAt.getTime();
+    infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
+    metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
+    metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
+    metrics.gauge("inflight_tasks").dec();
     this.decInflight(t.parentSessionId);
     this.persistState();
     this.scheduleCleanup(taskId);

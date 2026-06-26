@@ -12,3 +12,8 @@ const log = createSubLogger("dispatch", DEBUG ? 2 /* debug */ : undefined);
 export function debugLog(tag: string, taskId: string, msg: string): void {
   log.debug(msg, { tag, taskId });
 }
+
+/** Info-level lifecycle log — always visible at default ROLEBOX_LOG_LEVEL=info. */
+export function infoLog(tag: string, taskId: string, msg: string): void {
+  log.info(msg, { tag, taskId });
+}
