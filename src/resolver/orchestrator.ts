@@ -6,8 +6,11 @@ import { resolveFunctions } from "../function-resolver.ts";
 import { buildSubagentRoleBlock, parseCollaboration } from "../graph/index.ts";
 import { buildAgentPrompt } from "../prompt-builder.ts";
 import { subagentDir, globalFunctionsPath } from "../paths.ts";
+import { createSubLogger, formatError } from "../logger.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedGraph, GraphNodeRole } from "../types.ts";
 import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.ts";
+
+const log = createSubLogger("orchestrator");
 
 export function computeNodeRole(
   graph: ResolvedGraph,
@@ -166,7 +169,7 @@ export async function resolveAllRoles(
           graph = resolvedGraph;
           ctx.roleGraphMap.set(roleId, resolvedGraph);
         } else {
-          console.warn(`[role-loader] Failed to parse collaboration graph for role "${roleId}" — role will load without graph`);
+          log.warn("Failed to parse collaboration graph", { roleId });
         }
       }
 
@@ -190,8 +193,8 @@ export async function resolveAllRoles(
 
       resolved.push({ id: roleId, config, prompt, skills, functions, references: allReferences, subagents: resolvedSubagents, graph });
       ctx.roleFunctionsMap.set(roleId, functions);
-    } catch {
-      // Silently skip roles that fail during resolution.
+    } catch (err) {
+      log.error("Failed to process role, skipping", { roleId, error: formatError(err) });
     }
   }
 
