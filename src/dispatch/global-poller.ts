@@ -169,6 +169,7 @@ export class GlobalPoller {
       const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
       if (msgResult.error !== undefined || msgResult.data == null) {
         debugLog("task", taskId, `messages fetch failed: ${JSON.stringify(msgResult.error)}`);
+        task.pollState.lastProgressUpdate = now;
         return;
       }
       const messages = msgResult.data as SessionMessageSnapshot[];
