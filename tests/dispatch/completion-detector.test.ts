@@ -255,7 +255,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 2 }),
+      pollState({ stableIdlePolls: 1 }),
     );
     expect(result).toEqual({ type: "stabilizing" });
   });
@@ -264,7 +264,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      pollState({ stableIdlePolls: 2 }),
     );
     expect(result).toEqual({ type: "completed" });
   });

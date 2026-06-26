@@ -27,7 +27,7 @@ export const SESSION_GONE_TIMEOUT_MS = 60_000;
 export const MESSAGE_STALENESS_TIMEOUT_MS = 3_600_000;
 
 /** Minimum consecutive idle polls before marking a task as stable / complete. */
-export const MIN_STABILITY_POLLS = 3;
+export const MIN_STABILITY_POLLS = 2;
 
 /** Minimum consecutive polls with no status before triggering an existence check. */
 export const MIN_SESSION_GONE_POLLS = 3;

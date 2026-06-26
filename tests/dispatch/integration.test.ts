@@ -210,7 +210,7 @@ describe("BUG-3: stability gating", () => {
     expect(m.onCompleted).toHaveBeenCalledTimes(0);
   });
 
-  it("BUG-3: 2 stabilizing cycles → still NOT completed", async () => {
+  it("BUG-3: 1 stabilizing cycle → still NOT completed", async () => {
     m.statusFn.mockImplementation(() => sdkResult({ s1: { type: "idle" } }));
     m.completionDetector.mockImplementation(() => ({ type: "stabilizing" }));
 
@@ -218,11 +218,10 @@ describe("BUG-3: stability gating", () => {
     poller.registerTask("t1", "s1");
 
     await runCycle(poller);
-    await runCycle(poller);
     expect(m.onCompleted).toHaveBeenCalledTimes(0);
   });
 
-  it("BUG-3: 3 stabilizing cycles → completed (MIN_STABILITY_POLLS=3)", async () => {
+  it("BUG-3: 2 stabilizing cycles → completed (MIN_STABILITY_POLLS=2)", async () => {
     m.statusFn.mockImplementation(() => sdkResult({ s1: { type: "idle" } }));
     m.completionDetector.mockImplementation(() => ({ type: "stabilizing" }));
 
@@ -231,9 +230,7 @@ describe("BUG-3: stability gating", () => {
 
     // Cycle 1: needsFetch=true → detector returns "stabilizing" → stableIdlePolls=1
     await runCycle(poller);
-    // Cycle 2: needsFetch=false → stableIdlePolls > 0 && < 3 → stableIdlePolls=2
-    await runCycle(poller);
-    // Cycle 3: stableIdlePolls ≥ 3 → completed
+    // Cycle 2: needsFetch=false → stableIdlePolls > 0 && < 2 → stableIdlePolls=2 → completed
     await runCycle(poller);
 
     expect(m.onCompleted).toHaveBeenCalledWith("t1");
@@ -413,11 +410,7 @@ describe("integration: busy → idle → complete", () => {
     await runCycle(poller);
     expect(m.onCompleted).toHaveBeenCalledTimes(0);
 
-    // Cycle 3: idle, still stabilizing
-    await runCycle(poller);
-    expect(m.onCompleted).toHaveBeenCalledTimes(0);
-
-    // Cycle 4: idle, stability reached
+    // Cycle 3: idle, stability reached (MIN_STABILITY_POLLS=2)
     m.completionDetector.mockImplementation(() => ({ type: "completed" }));
     await runCycle(poller);
 
