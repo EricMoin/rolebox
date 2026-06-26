@@ -254,7 +254,7 @@ describe("End-to-end", () => {
         { id: "team-lead--researcher", name: "Researcher", description: "Finds and synthesizes information" },
       ];
 
-      const prompt = buildAgentPrompt(tl, [], subagentMetadata);
+      const prompt = buildAgentPrompt(tl, [], { subagents: subagentMetadata });
 
       expect(prompt).toContain("You are a team lead");
 
