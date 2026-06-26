@@ -11,6 +11,8 @@ import { SessionMonitor } from "./session-monitor.ts";
 import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent } from "./notification.ts";
 
+import { debugLog } from "./debug-log.ts";
+
 const DEFAULT_CONCURRENCY_KEY = "default";
 
 export class DispatchManager {
@@ -58,6 +60,8 @@ export class DispatchManager {
 
     this.tasks.set(taskId, task);
 
+    debugLog("launch", taskId, `agent=${input.subagent} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
+
     await this.concurrency.acquire(DEFAULT_CONCURRENCY_KEY);
 
     try {
@@ -78,6 +82,8 @@ export class DispatchManager {
       task.status = "running";
       task.progress.lastUpdate = new Date();
 
+      debugLog("launch", taskId, `session created: ${session.id}`);
+
       if (input.run_in_background) {
         await this.client.session.promptAsync({
           path: { id: session.id },
@@ -87,11 +93,13 @@ export class DispatchManager {
           },
         });
 
+        debugLog("launch", taskId, "promptAsync sent — registering with poller");
         this.poller.registerTask(taskId, session.id);
       }
     } catch (err) {
       task.status = "error";
       task.error = err instanceof Error ? err.message : String(err);
+      debugLog("launch", taskId, `ERROR: ${task.error}`);
       this.concurrency.release(DEFAULT_CONCURRENCY_KEY);
       this.scheduleCleanup(taskId);
     }
@@ -243,6 +251,7 @@ export class DispatchManager {
   private handleTaskError(taskId: string, error: string): void {
     const t = this.tasks.get(taskId);
     if (!t) return;
+    debugLog("lifecycle", taskId, `✗ ERROR: ${error}`);
     t.status = "error";
     t.error = error;
     t.completedAt = new Date();
@@ -254,6 +263,7 @@ export class DispatchManager {
   private handleTaskTimeout(taskId: string, reason: string): void {
     const t = this.tasks.get(taskId);
     if (!t) return;
+    debugLog("lifecycle", taskId, `⏱ TIMEOUT: ${reason}`);
     t.status = "timeout";
     t.completedAt = new Date();
     t.error = reason;

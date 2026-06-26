@@ -6,4 +6,5 @@ export { SessionMonitor } from "./session-monitor.ts";
 export { detectCompletion } from "./completion-detector.ts";
 export { buildNotificationText, notifyParent } from "./notification.ts";
 export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool } from "./tools.ts";
+export { getDebugLogPath } from "./debug-log.ts";
 export type * from "./types.ts";
