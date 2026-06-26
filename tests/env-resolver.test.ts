@@ -1,5 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { resolveEnvVars, resolveEnvVarsDeep } from "../src/env-resolver";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/env-resolver";
+import { createSubLogger } from "../src/logger";
+
+const capturedWarnings: unknown[][] = [];
+
+beforeAll(() => {
+  __setLoggerForTest({
+    warn: (...args: unknown[]) => { capturedWarnings.push(args); },
+    debug: () => {},
+    error: () => {},
+    info: () => {},
+  });
+});
+
+afterAll(() => {
+  __setLoggerForTest(createSubLogger("env-resolver") as unknown as Parameters<typeof __setLoggerForTest>[0]);
+});
 
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_PATH = process.env.PATH;
@@ -10,6 +26,7 @@ beforeEach(() => {
   delete process.env.TEST_VAR;
   delete process.env.ANOTHER_VAR;
   delete process.env.SPECIAL_1;
+  capturedWarnings.length = 0;
 });
 
 afterEach(() => {
@@ -33,14 +50,11 @@ describe("resolveEnvVars", () => {
   });
 
   it("leaves missing env var placeholder as-is and warns", () => {
-    const warn = mock();
-    console.warn = warn;
-
     const result = resolveEnvVars("path/{env:NONEXISTENT_VAR_12345}");
 
     expect(result).toBe("path/{env:NONEXISTENT_VAR_12345}");
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain("NONEXISTENT_VAR_12345");
+    expect(capturedWarnings.length).toBe(1);
+    expect(JSON.stringify(capturedWarnings[0])).toContain("NONEXISTENT_VAR_12345");
   });
 
   it("resolves var at start of string", () => {
@@ -146,12 +160,10 @@ describe("resolveEnvVarsDeep", () => {
   });
 
   it("keeps missing env var placeholder in deep resolve", () => {
-    const warn = mock();
-    console.warn = warn;
-
     const obj = { x: "{env:MISSING_VAR_DEEP}" };
     const result = resolveEnvVarsDeep(obj) as Record<string, string>;
     expect(result.x).toBe("{env:MISSING_VAR_DEEP}");
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(capturedWarnings.length).toBe(1);
+    expect(JSON.stringify(capturedWarnings[0])).toContain("MISSING_VAR_DEEP");
   });
 });
