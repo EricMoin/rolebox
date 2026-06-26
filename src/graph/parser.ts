@@ -8,9 +8,11 @@ import { expandTemplate } from "./templates.ts";
 import { validateGraph } from "./validator.ts";
 
 // Regex for string edge syntax: "agent-a -> agent-b" or "agent-a -> agent-b: label text"
-// Agent names must match \w+(?:-\w+)*  (words separated by hyphens, no trailing hyphens)
+// Agent names match any characters except whitespace, '>' and ':' —
+// this allows hyphens (my-agent), underscores (my_agent), and Unicode (研究者)
+// The arrow '->' is matched literally between the capture groups.
 const STRING_EDGE_RE =
-  /^\s*(\w+(?:-\w+)*)\s*->\s*(\w+(?:-\w+)*)(?:\s*:\s*(.*?))?\s*$/;
+  /^\s*([^\s>:]+)\s*->\s*([^\s>:]+)(?:\s*:\s*(.*?))?\s*$/;
 
 /**
  * Parse a collaboration graph from a raw YAML-parsed configuration object.
