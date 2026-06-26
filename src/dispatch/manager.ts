@@ -5,8 +5,9 @@ import type {
   DispatchTaskStatus,
   DispatchManagerConfig,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS } from "./config.ts";
 import { ConcurrencyManager } from "./concurrency.ts";
+import { QueueFullError } from "./concurrency.ts";
 import { GlobalPoller } from "./global-poller.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 import { detectCompletion } from "./completion-detector.ts";
@@ -40,7 +41,11 @@ export class DispatchManager {
   ) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.concurrency = new ConcurrencyManager(this.config.maxConcurrent);
+    this.concurrency = new ConcurrencyManager(
+      this.config.maxConcurrent,
+      this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
+      this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+    );
     this.sessionMonitor = new SessionMonitor();
     this.store = new TaskStateStore(process.cwd());
     this.subagentModelKey = subagentModelKey ?? new Map();
@@ -80,19 +85,28 @@ export class DispatchManager {
 
     debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
-    // Pool-full fast-fail: reject immediately if all slots are occupied
-    if (this.concurrency.getActiveCount(concurrencyKey) >= this.concurrency.getLimit(concurrencyKey)) {
-      metrics.counter("dispatch_rejected_total", { reason: "pool-full" }).inc();
-      task.status = "error";
-      task.error = "Pool is full — all concurrent slots occupied";
-      task.completedAt = new Date();
-      debugLog("launch", taskId, `REJECTED: pool-full (${this.concurrency.getActiveCount(concurrencyKey)}/${this.concurrency.getLimit(concurrencyKey)})`);
-      this.scheduleCleanup(taskId);
-      void this.notifyCompletion(task);
-      return task;
+    // Try to acquire via background queue. If queue is full, reject with backpressure info.
+    const { promise: acqPromise } = this.concurrency.acquireBackground(concurrencyKey);
+    try {
+      await acqPromise;
+    } catch (err) {
+      if (err instanceof QueueFullError) {
+        metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
+        task.status = "error";
+        task.error = JSON.stringify({
+          error: "Queue is full",
+          retry_after: err.retryAfter,
+          queue_depth: err.depth,
+          limit: err.limit,
+        });
+        task.completedAt = new Date();
+        debugLog("launch", taskId, `REJECTED: queue-full depth=${err.depth}/${err.limit}`);
+        this.scheduleCleanup(taskId);
+        void this.notifyCompletion(task);
+        return task;
+      }
+      throw err;
     }
-
-    await this.concurrency.acquire(concurrencyKey);
     task.concurrencyKey = concurrencyKey;
 
     let didMarkRunning = false;
@@ -153,7 +167,7 @@ export class DispatchManager {
   /**
    * Execute a synchronous (blocking) dispatch. NOT tracked in this.tasks,
    * NOT persisted, NOT registered with the poller. Protected by:
-   * - Cancelable concurrency acquire (shared "default" pool with background tasks)
+   * - Sync concurrency acquire (can use reserved slots)
    * - syncTimeoutMs config for both acquire-wait and prompt phases
    * - AbortController + session.abort() for prompt timeout
    * - Leak-free: cancelAcq on acquire timeout, didAcquire guard on release
@@ -170,7 +184,7 @@ export class DispatchManager {
     let didAcquire = false;
 
     // Step 1: Cancelable acquire covering the wait phase
-    const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireCancelable(concurrencyKey);
+    const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireSync(concurrencyKey);
     let acqTimer: ReturnType<typeof setTimeout> | undefined;
     const acqTimeout = new Promise<"timeout">((r) => {
       acqTimer = setTimeout(() => r("timeout"), timeoutMs);
@@ -404,7 +418,7 @@ export class DispatchManager {
           path: { id: task.sessionId },
         });
         if (result.data) {
-          const occupied = this.concurrency.forceOccupy(DEFAULT_CONCURRENCY_KEY);
+          const occupied = this.concurrency.forceOccupyBackground(DEFAULT_CONCURRENCY_KEY);
           if (occupied === 1) {
             task.concurrencyKey = DEFAULT_CONCURRENCY_KEY;
             this.poller.registerTask(task.id, task.sessionId);

@@ -20,6 +20,12 @@ export const MIN_RUNTIME_MS = 5_000;
 /** Default max concurrent background tasks. */
 export const DEFAULT_MAX_CONCURRENT = 5;
 
+/** Default max queued tasks per concurrency slot (2× maxConcurrent). */
+export const DEFAULT_MAX_QUEUE_DEPTH = 10;
+
+/** Default number of reserved slots for synchronous dispatch per concurrency key. */
+export const DEFAULT_SYNC_RESERVED_SLOTS = 1;
+
 /** Session-gone timeout (1 min): time without any status before we declare a session missing. */
 export const SESSION_GONE_TIMEOUT_MS = 60_000;
 
@@ -62,6 +68,8 @@ export interface DispatchManagerConfig {
   minRuntimeMs: number;
   /** Maximum number of concurrent background tasks — default: 5 */
   maxConcurrent: number;
+  /** Maximum queued tasks waiting per concurrency slot — default: 10 */
+  maxQueueDepth?: number;
   /** Time-to-live (ms) for completed task records before cleanup — default: 30 minutes */
   taskTtlMs: number;
   // ── New optional fields ───────────────────────────────────────────
@@ -79,6 +87,8 @@ export interface DispatchManagerConfig {
   minPollIntervalMs?: number;
   /** Maximum allowed poll interval (ms) — default: 5000 */
   maxPollIntervalMs?: number;
+  /** Number of concurrency slots reserved for synchronous dispatch per key — default: 1 */
+  syncReservedSlots?: number;
 }
 
 // ── Default configuration ───────────────────────────────────────────
@@ -88,6 +98,7 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   staleTimeoutMs: DEFAULT_STALE_TIMEOUT_MS,
   minRuntimeMs: MIN_RUNTIME_MS,
   maxConcurrent: DEFAULT_MAX_CONCURRENT,
+  maxQueueDepth: DEFAULT_MAX_QUEUE_DEPTH,
   taskTtlMs: TASK_TTL_MS,
   sessionGoneTimeoutMs: SESSION_GONE_TIMEOUT_MS,
   messageStalenessTimeoutMs: MESSAGE_STALENESS_TIMEOUT_MS,
@@ -96,4 +107,5 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   minSessionGonePolls: MIN_SESSION_GONE_POLLS,
   minPollIntervalMs: MIN_POLL_INTERVAL_MS,
   maxPollIntervalMs: MAX_POLL_INTERVAL_MS,
+  syncReservedSlots: DEFAULT_SYNC_RESERVED_SLOTS,
 };
