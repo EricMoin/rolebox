@@ -200,6 +200,8 @@ export class DispatchManager {
     }
     didAcquire = true;
     metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
+    metrics.gauge("inflight_tasks").inc();
+    const startTime = Date.now();
 
     try {
       // Step 2: Session create
@@ -238,16 +240,23 @@ export class DispatchManager {
         clearTimeout(promptTimer);
 
         const response = promptResult.data;
-        if (!response) return "";
-        const text = response.parts
-          .filter((p) => p.type === "text")
-          .map((p) => (p as { type: "text"; text: string }).text)
-          .join("");
+        const text = response
+          ? response.parts
+              .filter((p) => p.type === "text")
+              .map((p) => (p as { type: "text"; text: string }).text)
+              .join("")
+          : "";
+        metrics.counter("dispatch_completed_total", { mode: "sync" }).inc();
+        metrics.histogram("task_duration_ms", { mode: "sync" }).observe(Date.now() - startTime);
         return text;
       } finally {
         clearTimeout(promptTimer);
       }
+    } catch (err) {
+      metrics.counter("dispatch_error_total", { mode: "sync" }).inc();
+      throw err;
     } finally {
+      metrics.gauge("inflight_tasks").dec();
       if (didAcquire) {
         this.concurrency.release(concurrencyKey);
       }

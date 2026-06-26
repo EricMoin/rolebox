@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { DispatchManager } from "./manager.ts";
@@ -284,19 +285,32 @@ export function createDispatchCancelTool(manager: DispatchManager) {
 export function createDispatchMetricsTool() {
   return tool({
     description:
-      "Retrieve runtime metrics snapshot for the dispatch subsystem — counters, gauges, and histograms. Returns a human-readable summary or JSON.",
+      "Retrieve runtime metrics snapshot for the dispatch subsystem — counters, gauges, and histograms. Returns a human-readable summary or JSON. Optionally exports the snapshot JSON to a file.",
     args: {
       format: z
         .enum(["summary", "json"])
         .optional()
         .default("summary")
         .describe("Output format: 'summary' for human-readable, 'json' for machine parsing"),
+      export_path: z
+        .string()
+        .optional()
+        .describe("Optional file path to write the snapshot JSON atomically. Falls back to ROLEBOX_METRICS_EXPORT env var."),
     },
     async execute(input) {
       const snap = metrics.snapshot();
+      const jsonStr = JSON.stringify(snap, null, 2);
+
+      // Export to file if requested (arg takes precedence over env var)
+      const exportPath = input.export_path || process.env.ROLEBOX_METRICS_EXPORT;
+      if (exportPath) {
+        const tmpPath = exportPath + ".tmp";
+        fs.writeFileSync(tmpPath, jsonStr, "utf-8");
+        fs.renameSync(tmpPath, exportPath);
+      }
 
       if (input.format === "json") {
-        return JSON.stringify(snap, null, 2);
+        return jsonStr;
       }
 
       // Build human-readable summary
