@@ -254,17 +254,23 @@ export function buildCollaborationBlock(
 
   let routingXml: string;
   switch (template) {
-    case GT.Pipeline:
-      routingXml = buildPipelineXml(
-        traceLinearPath(graph),
-        meta,
-        graph.maxIterations,
-      );
+    case GT.Pipeline: {
+      const path = traceLinearPath(graph);
+      if (path.length < graph.nodes.length) {
+        routingXml = buildCustomXml(graph, meta);
+      } else {
+        routingXml = buildPipelineXml(path, meta, graph.maxIterations);
+      }
       break;
+    }
     case GT.ReviewLoop: {
       const path = traceLinearPath(graph);
       const loopEdges = findLoopEdges(graph, path);
-      routingXml = buildReviewLoopXml(path, loopEdges, meta, graph.maxIterations);
+      if (path.length < graph.nodes.length) {
+        routingXml = buildCustomXml(graph, meta);
+      } else {
+        routingXml = buildReviewLoopXml(path, loopEdges, meta, graph.maxIterations);
+      }
       break;
     }
     case GT.Star:
