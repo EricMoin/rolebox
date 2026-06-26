@@ -14,7 +14,7 @@ __setLoggerForTest({
   warn: (...args: unknown[]) => { capturedLogs.push(args); },
   debug: () => {},
   error: (...args: unknown[]) => { capturedLogs.push(args); },
-  info: () => {},
+  info: (...args: unknown[]) => { capturedLogs.push(args); },
   silly: () => {},
   trace: () => {},
   fatal: () => {},

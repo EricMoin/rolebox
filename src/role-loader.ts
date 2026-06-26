@@ -68,9 +68,9 @@ export async function discoverRoles(
     const roleId = basename(dirname(yamlPath));
 
     if (!validateRoleId(roleId)) {
-      log.warn(
-        `Skipping "${roleId}": role ID must not contain "--". Rename the directory to avoid the "--" separator.`,
-      );
+      log.info(
+              `Skipping "${roleId}": role ID must not contain "--". Rename the directory to avoid the "--" separator.`,
+            );
       continue;
     }
 
@@ -81,7 +81,7 @@ export async function discoverRoles(
       }
     } catch (err) {
       // Unexpected errors during loadOneRole; skip and continue
-      log.warn(
+      log.error(
         `Skipping "${roleId}": unexpected error during load`,
         formatError(err),
       );
@@ -192,7 +192,7 @@ async function loadOneRole(
     const content = await readFile(yamlPath, "utf-8");
     raw = yaml.load(content);
   } catch (err) {
-    log.warn(
+    log.info(
       `Skipping "${roleId}": invalid YAML`,
       formatError(err),
     );
@@ -200,7 +200,7 @@ async function loadOneRole(
   }
 
   if (raw === null || raw === undefined || typeof raw !== "object") {
-    log.warn(
+    log.info(
       `Skipping "${roleId}": YAML does not contain an object`,
     );
     return null;
@@ -209,7 +209,7 @@ async function loadOneRole(
   const obj = raw as Record<string, unknown>;
 
   if (!obj.name || typeof obj.name !== "string" || obj.name.trim() === "") {
-    log.warn(
+    log.info(
       `Skipping "${roleId}": missing or invalid "name" field. Add a "name:" field to ${yamlPath}`,
     );
     return null;
@@ -221,7 +221,7 @@ async function loadOneRole(
     try {
       prompt = await readFile(promptFilePath, "utf-8");
       } catch {
-        log.warn(
+        log.info(
           `Skipping "${roleId}": prompt_file "${obj.prompt_file}" not found`,
         );
         return null;
@@ -229,7 +229,7 @@ async function loadOneRole(
   } else if (typeof obj.prompt === "string" && obj.prompt.trim() !== "") {
     prompt = obj.prompt;
   } else {
-    log.warn(
+    log.info(
       `Skipping "${roleId}": must provide "prompt" or "prompt_file". Add either "prompt:" or "prompt_file:" to ${yamlPath}`,
     );
     return null;
@@ -251,21 +251,21 @@ async function loadOneRole(
         typeof entry.name !== "string" ||
         entry.name.trim() === ""
       ) {
-        log.warn(
+        log.info(
           `Skipping subagent in "${roleId}": missing or invalid "name"`,
         );
         continue;
       }
 
       if (!validateRoleId(entry.name as string)) {
-        log.warn(
+        log.info(
           `Skipping subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
         );
         continue;
       }
 
       if ("subagents" in entry) {
-        log.warn(
+        log.info(
           `Stripping nested "subagents" from subagent "${entry.name}" in "${roleId}"`,
         );
       }
@@ -283,7 +283,7 @@ async function loadOneRole(
           subPrompt = await readFile(promptFilePath, "utf-8");
           subPrompt = resolveEnvVars(subPrompt);
         } catch {
-          log.warn(
+          log.info(
             `Skipping subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
           );
           continue;
@@ -294,7 +294,7 @@ async function loadOneRole(
       ) {
         subPrompt = entry.prompt;
       } else {
-        log.warn(
+        log.info(
           `Skipping subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
         );
         continue;
@@ -353,7 +353,7 @@ async function loadOneRole(
       };
 
       if (seenSubagentNames.has(subagent.name)) {
-        log.warn(
+        log.info(
           `Duplicate subagent name "${subagent.name}" in "${roleId}": later definition wins`,
         );
         validSubagents = validSubagents.filter((s) => s.name !== subagent.name);
@@ -474,7 +474,7 @@ async function discoverFileBasedSubagents(
       const content = await readFile(yamlPath, "utf-8");
       raw = yaml.load(content);
     } catch (err) {
-      log.warn(
+      log.info(
         `Skipping file-based subagent "${childId}" in "${roleId}": invalid YAML`,
         formatError(err),
       );
@@ -482,7 +482,7 @@ async function discoverFileBasedSubagents(
     }
 
     if (raw === null || raw === undefined || typeof raw !== "object") {
-      log.warn(
+      log.info(
         `Skipping file-based subagent "${childId}" in "${roleId}": YAML does not contain an object`,
       );
       continue;
@@ -496,7 +496,7 @@ async function discoverFileBasedSubagents(
       typeof entry.name !== "string" ||
       entry.name.trim() === ""
     ) {
-      log.warn(
+      log.info(
         `Skipping file-based subagent "${childId}" in "${roleId}": missing or invalid "name"`,
       );
       continue;
@@ -504,7 +504,7 @@ async function discoverFileBasedSubagents(
 
     // Validate name does not contain --
     if (!validateRoleId(entry.name as string)) {
-      log.warn(
+      log.info(
         `Skipping file-based subagent "${entry.name}" in "${roleId}": name must not contain "--"`,
       );
       continue;
@@ -512,7 +512,7 @@ async function discoverFileBasedSubagents(
 
     // Reject nested subagents
     if ("subagents" in entry) {
-      log.warn(
+      log.info(
         `Stripping nested "subagents" from file-based subagent "${entry.name}" in "${roleId}"`,
       );
     }
@@ -530,7 +530,7 @@ async function discoverFileBasedSubagents(
         subPrompt = await readFile(promptFilePath, "utf-8");
         subPrompt = resolveEnvVars(subPrompt);
       } catch {
-        log.warn(
+        log.info(
           `Skipping file-based subagent "${entry.name}" in "${roleId}": prompt_file "${entry.prompt_file}" not found`,
         );
         continue;
@@ -542,7 +542,7 @@ async function discoverFileBasedSubagents(
       subPrompt = entry.prompt;
       subPrompt = resolveEnvVars(subPrompt);
     } else {
-      log.warn(
+      log.info(
         `Skipping file-based subagent "${entry.name}" in "${roleId}": must provide "prompt" or "prompt_file"`,
       );
       continue;

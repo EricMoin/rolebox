@@ -9,7 +9,7 @@ beforeAll(() => {
     warn: (...args: unknown[]) => { capturedWarnings.push(args); },
     debug: () => {},
     error: () => {},
-    info: () => {},
+    info: (...args: unknown[]) => { capturedWarnings.push(args); },
   });
 });
 

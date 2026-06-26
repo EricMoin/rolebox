@@ -169,7 +169,7 @@ export async function resolveAllRoles(
           graph = resolvedGraph;
           ctx.roleGraphMap.set(roleId, resolvedGraph);
         } else {
-          log.warn("Failed to parse collaboration graph", { roleId });
+          log.info("Failed to parse collaboration graph", { roleId });
         }
       }
 
