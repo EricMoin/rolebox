@@ -2,6 +2,9 @@ import path from "node:path";
 import { mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync } from "node:fs";
 import type { ResolvedRole } from "../types.ts";
 import { SkillScope, ROLEBOX_SKILL_PREFIX } from "../constants.ts";
+import { createSubLogger, formatError } from "../logger.ts";
+
+const log = createSubLogger("sync");
 
 function createSkillEntry(entryPath: string, filePath: string): void {
   const isDirectorySkill = path.basename(filePath).toLowerCase() === "skill.md";
@@ -12,7 +15,9 @@ function createSkillEntry(entryPath: string, filePath: string): void {
       mkdirSync(entryPath, { recursive: true });
       symlinkSync(filePath, path.join(entryPath, "SKILL.md"));
     }
-  } catch {}
+  } catch (err) {
+    log.warn("Failed to create skill symlink", { entryPath, filePath, error: formatError(err) });
+  }
 }
 
 /**
@@ -26,7 +31,8 @@ function createSkillEntry(entryPath: string, filePath: string): void {
 export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: string): void {
   try {
     mkdirSync(globalSkillsDir, { recursive: true });
-  } catch {
+  } catch (err) {
+    log.debug("Failed to create directory", { dir: globalSkillsDir, error: formatError(err) });
     return;
   }
 
@@ -41,14 +47,17 @@ export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir
           unlinkSync(entryPath);
         } else if (stat.isDirectory()) {
           const inner = path.join(entryPath, "SKILL.md");
-          try { unlinkSync(inner); } catch {}
-          try { rmdirSync(entryPath); } catch {}
+          try { unlinkSync(inner); } catch (err) { log.debug("Cleanup failed", { path: inner, error: formatError(err) }); }
+          try { rmdirSync(entryPath); } catch (err) { log.debug("Cleanup failed", { path: entryPath, error: formatError(err) }); }
         }
-      } catch {
+      } catch (err) {
+        log.debug("Failed to check entry", { path: entryPath, error: formatError(err) });
         continue;
       }
     }
-  } catch {}
+  } catch (err) {
+    log.warn("Failed to read skills directory", { dir: globalSkillsDir, error: formatError(err) });
+  }
 
   for (const role of resolvedRoles) {
     for (const skill of role.skills) {
