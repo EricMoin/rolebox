@@ -1,18 +1,32 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { discoverRoles, applyInheritance } from "../src/role-loader";
+import { discoverRoles, applyInheritance, __setLoggerForTest } from "../src/role-loader";
 import type { RoleConfig, SubAgentConfig } from "../src/types.ts";
 
+const capturedLogs: unknown[][] = [];
+
+// Inject a mock logger — tslog "hidden" mode doesn't use console.warn,
+// so we replace the module-level logger via the test hook.
+__setLoggerForTest({
+  warn: (...args: unknown[]) => { capturedLogs.push(args); },
+  debug: () => {},
+  error: (...args: unknown[]) => { capturedLogs.push(args); },
+  info: () => {},
+  silly: () => {},
+  trace: () => {},
+  fatal: () => {},
+  getSubLogger: () => ({}),
+  attachTransport: () => {},
+} as any);
+
 let tmpDir: string;
-let warnMock: ReturnType<typeof mock>;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-"));
-  warnMock = mock();
-  console.warn = warnMock;
+  capturedLogs.length = 0;
 });
 
 afterEach(() => {
@@ -57,7 +71,7 @@ describe("discoverRoles", () => {
     expect(config.name).toBe("Software Engineer");
     expect(config.description).toBe("Writes code");
     expect(config.prompt).toBe("You are a software engineer.");
-    expect(warnMock).toHaveBeenCalledTimes(0);
+    expect(capturedLogs.length).toBe(0);
   });
 
   it("loads multiple valid roles from different subdirectories", async () => {
@@ -100,7 +114,7 @@ describe("discoverRoles", () => {
     expect(roles.size).toBe(1);
     expect(roles.has("good")).toBe(true);
     expect(roles.has("bad")).toBe(false);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][];
     expect(warnings.some((c) => c[0].includes("bad") && c[0].includes("invalid YAML"))).toBe(true);
   });
 
@@ -116,7 +130,7 @@ describe("discoverRoles", () => {
     const roles = await discoverRoles(tmpDir);
 
     expect(roles.size).toBe(0);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(warnings.some((c) => c[0].includes("broken") && c[0].includes("prompt_file"))).toBe(true);
   });
 
@@ -129,7 +143,7 @@ describe("discoverRoles", () => {
     const roles = await discoverRoles(tmpDir);
 
     expect(roles.size).toBe(0);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(warnings.some((c) => c[0].includes("anon") && c[0].includes("name"))).toBe(true);
   });
 
@@ -142,7 +156,7 @@ describe("discoverRoles", () => {
     const roles = await discoverRoles(tmpDir);
 
     expect(roles.size).toBe(0);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(warnings.some((c) => c[0].includes("empty-name") && c[0].includes("name"))).toBe(true);
   });
 
@@ -150,13 +164,13 @@ describe("discoverRoles", () => {
     const nonexistent = join(tmpdir(), "definitely-does-not-exist-xyz");
     const roles = await discoverRoles(nonexistent);
     expect(roles.size).toBe(0);
-    expect(warnMock).toHaveBeenCalledTimes(0);
+    expect(capturedLogs.length).toBe(0);
   });
 
   it("returns empty Map when rolebox directory exists but is empty", async () => {
     const roles = await discoverRoles(tmpDir);
     expect(roles.size).toBe(0);
-    expect(warnMock).toHaveBeenCalledTimes(0);
+    expect(capturedLogs.length).toBe(0);
   });
 
   it("loads prompt from prompt_file and resolves its content", async () => {
@@ -222,7 +236,7 @@ describe("discoverRoles", () => {
     const roles = await discoverRoles(tmpDir);
 
     expect(roles.size).toBe(0);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(warnings.some((c) => c[0].includes("silent") && c[0].includes("prompt"))).toBe(true);
   });
 
@@ -287,7 +301,7 @@ describe("discoverRoles", () => {
     const roles = await discoverRoles(tmpDir);
 
     expect(roles.size).toBe(0);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(warnings.some((c) => c[0].includes("my--role") && c[0].includes("--"))).toBe(true);
   });
 
@@ -393,7 +407,7 @@ describe("discoverRoles", () => {
     expect(roles.size).toBe(1);
     const config = roles.get("parent")!;
     expect(config.subagents).toBeUndefined();
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(
       warnings.some(
         (c) =>
@@ -420,7 +434,7 @@ describe("discoverRoles", () => {
     expect(roles.size).toBe(1);
     const config = roles.get("parent")!;
     expect(config.subagents).toBeUndefined();
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(
       warnings.some(
         (c) =>
@@ -454,7 +468,7 @@ describe("discoverRoles", () => {
     expect(config.subagents!.length).toBe(1);
     expect(config.subagents![0].name).toBe("Nested");
     expect('subagents' in (config.subagents![0] as object)).toBe(false);
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(
       warnings.some(
         (c) =>
@@ -482,7 +496,7 @@ describe("discoverRoles", () => {
     expect(roles.size).toBe(1);
     const config = roles.get("parent")!;
     expect(config.subagents).toBeUndefined();
-    const warnings = warnMock.mock.calls as string[][];
+    const warnings = capturedLogs as string[][]
     expect(
       warnings.some(
         (c) =>
@@ -653,7 +667,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("parent")!;
       expect(config.subagents).toBeUndefined();
-      expect(warnMock).toHaveBeenCalledTimes(0);
+      expect(capturedLogs.length).toBe(0);
     });
 
     it("non-existent subagents/ directory causes no error and no subagents", async () => {
@@ -667,7 +681,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("parent")!;
       expect(config.subagents).toBeUndefined();
-      expect(warnMock).toHaveBeenCalledTimes(0);
+      expect(capturedLogs.length).toBe(0);
     });
 
     it("skips file-based subagent with invalid YAML and logs warning", async () => {
@@ -686,7 +700,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("parent")!;
       expect(config.subagents).toBeUndefined();
-      const warnings = warnMock.mock.calls as string[][];
+      const warnings = capturedLogs as string[][]
       expect(
         warnings.some((c) => c[0].includes("bad") && c[0].includes("invalid YAML")),
       ).toBe(true);
@@ -708,7 +722,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("parent")!;
       expect(config.subagents).toBeUndefined();
-      const warnings = warnMock.mock.calls as string[][];
+      const warnings = capturedLogs as string[][]
       expect(
         warnings.some((c) => c[0].includes("anon") && c[0].includes("name")),
       ).toBe(true);
@@ -730,7 +744,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("parent")!;
       expect(config.subagents).toBeUndefined();
-      const warnings = warnMock.mock.calls as string[][];
+      const warnings = capturedLogs as string[][]
       expect(
         warnings.some((c) => c[0].includes("bad--name") && c[0].includes("--")),
       ).toBe(true);
@@ -975,12 +989,10 @@ describe("applyInheritance", () => {
 
 describe("discoverRoles with inheritance", () => {
   let tmpDir: string;
-  let warnMock: ReturnType<typeof mock>;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-"));
-    warnMock = mock();
-    console.warn = warnMock;
+    capturedLogs.length = 0;
   });
 
   afterEach(() => {
