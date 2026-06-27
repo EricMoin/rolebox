@@ -2018,6 +2018,10 @@ describe("reopenForContinuation", () => {
     mgr.handleTaskCompleted(t1.id);
     expect(t1.status).toBe("completed");
 
+    // Drain microtasks so fire-and-forget materializeAndNotify → notifyParent
+    // completes before reopenForContinuation inspects promptAsyncCalls.
+    await new Promise((r) => setTimeout(r, 0));
+
     // leaveRunning → flushPersistSync disposes the watchdog.
     // Re-enable it for reopenForContinuation to re-register.
     (mgr.watchdog as any).disposed = false;
