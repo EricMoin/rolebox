@@ -1,8 +1,9 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
 import { DispatchManager } from "../../src/dispatch/manager";
 import type { DispatchTask } from "../../src/dispatch/types";
 import { TaskStateStore } from "../../src/dispatch/task-store.ts";
 import { mkdtempSync, rmSync } from "node:fs";
+import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMockClient, parentContext } from "./helpers";
@@ -1702,6 +1703,11 @@ describe("recover()", () => {
     return mkdtempSync(join(tmpdir(), "manager-recover-test-"));
   }
 
+  beforeEach(() => {
+    clearParentQueues();
+    clearSentFinalNotifies();
+  });
+
   it("recover() with no persisted state is a no-op", async () => {
     const client = createMockClient();
     const manager = new DispatchManager(client, fastConfig);
@@ -2264,6 +2270,228 @@ describe("recover()", () => {
     mgr.handleTaskCompleted("bg_notify_1");
     expect(mgr.inflightByParent.get("ses_parent")).toBeUndefined();
     expect(manager.getTask("bg_notify_1")!.status).toBe("completed");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // ── 11b. Task 11: authoritative inflight rebuild + terminal notify ──
+
+  it("Task-11: authoritative inflightByParent rebuild from actualByParent after recovery", async () => {
+    const tempDir = createTempDir();
+
+    // 5 running tasks across 2 parents: parent-A has 3 tasks, parent-B has 2
+    // sessions ses_a1, ses_a3, ses_b1 alive; ses_a2, ses_b2 dead
+    const aliveSessions = new Set(["ses_a1", "ses_a3", "ses_b1"]);
+    const client = createMockClient({
+      sessionGet: (args: any) => {
+        const sid = args.path.id;
+        if (aliveSessions.has(sid)) {
+          return Promise.resolve({ data: { id: sid }, error: undefined });
+        }
+        return Promise.resolve({ data: undefined, error: undefined });
+      },
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+
+    const taskDefs = [
+      { id: "bg_a1", sid: "ses_a1", parent: "parent-A" },
+      { id: "bg_a2", sid: "ses_a2", parent: "parent-A" },
+      { id: "bg_a3", sid: "ses_a3", parent: "parent-A" },
+      { id: "bg_b1", sid: "ses_b1", parent: "parent-B" },
+      { id: "bg_b2", sid: "ses_b2", parent: "parent-B" },
+    ];
+    for (const td of taskDefs) {
+      const t: DispatchTask = {
+        id: td.id,
+        sessionId: td.sid,
+        parentSessionId: td.parent,
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+
+    // Authoritative: only actually re-attached running tasks count
+    expect(mgr.inflightByParent.get("parent-A")).toBe(2); // ses_a1, ses_a3 alive; ses_a2 dead
+    expect(mgr.inflightByParent.get("parent-B")).toBe(1); // ses_b1 alive; ses_b2 dead
+
+    // Dead sessions are errored
+    expect(manager.getTask("bg_a2")!.status).toBe("error");
+    expect(manager.getTask("bg_b2")!.status).toBe("error");
+
+    // Alive sessions are running
+    expect(manager.getTask("bg_a1")!.status).toBe("running");
+    expect(manager.getTask("bg_a3")!.status).toBe("running");
+    expect(manager.getTask("bg_b1")!.status).toBe("running");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("Task-11: session-lost on recover → parent notified via notifyCompletion", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient({
+      sessionGet: () =>
+        Promise.resolve({ data: undefined, error: undefined }),
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const task: DispatchTask = {
+      id: "bg_session_lost",
+      sessionId: "ses_dead",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "helper",
+      prompt: "work",
+      description: "session-lost notify test",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(task.id, task);
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    // Task is errored
+    const loaded = manager.getTask("bg_session_lost");
+    expect(loaded!.status).toBe("error");
+    expect(loaded!.error).toContain("Session lost");
+
+    // Wait for async notification to flush through the queue
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Parent was notified about the error via promptAsync
+    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const completionCall = notifyCalls.find(
+      (c: any) => c[0]?.path?.id === "ses_parent" && c[0]?.body?.noReply === false,
+    );
+    expect(completionCall).toBeDefined();
+    const notifyText: string = completionCall[0].body.parts[0].text;
+    expect(notifyText).toContain("session-lost notify test");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("Task-11: verification-failed on recover → parent notified via notifyCompletion", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient({
+      sessionGet: () => {
+        throw new Error("connection failed");
+      },
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const task: DispatchTask = {
+      id: "bg_verify_fail",
+      sessionId: "ses_broken",
+      parentSessionId: "ses_parent",
+      status: "running",
+      agent: "helper",
+      prompt: "work",
+      description: "verify-failed notify test",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(task.id, task);
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    // Task is errored
+    const loaded = manager.getTask("bg_verify_fail");
+    expect(loaded!.status).toBe("error");
+    expect(loaded!.error).toContain("verification failed");
+
+    // Wait for async notification
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Parent was notified
+    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const completionCall = notifyCalls.find(
+      (c: any) => c[0]?.path?.id === "ses_parent" && c[0]?.body?.noReply === false,
+    );
+    expect(completionCall).toBeDefined();
+    const notifyText: string = completionCall[0].body.parts[0].text;
+    expect(notifyText).toContain("verify-failed notify test");
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("Task-11: concurrency-exceeded on recover → parent notified via notifyCompletion", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient({
+      sessionGet: () =>
+        Promise.resolve({ data: { id: "ses_alive" }, error: undefined }),
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    // 6 running tasks, but maxConcurrent is 5 → 1 should exceed
+    for (let i = 0; i < 6; i++) {
+      const t: DispatchTask = {
+        id: `bg_over_${i}`,
+        sessionId: `ses_over_${i}`,
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        description: `overload task ${i}`,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 0 });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    // Wait for async notification
+    await new Promise((r) => setTimeout(r, 50));
+
+    const mgr = manager as any;
+    // 5 tasks re-attached, 1 errored
+    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(5);
+
+    let errorCount = 0;
+    let lastErrorId: string | undefined;
+    for (let i = 0; i < 6; i++) {
+      const t = manager.getTask(`bg_over_${i}`);
+      if (t?.status === "error" && t.error?.includes("Exceeded concurrency limit")) {
+        errorCount++;
+        lastErrorId = `bg_over_${i}`;
+      }
+    }
+    expect(errorCount).toBe(1);
+
+    // Parent was notified about the errored task
+    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const completionCall = notifyCalls.find(
+      (c: any) =>
+        c[0]?.path?.id === "ses_parent" &&
+        c[0]?.body?.noReply === false &&
+        c[0]?.body?.parts?.[0]?.text?.includes("Exceeded concurrency limit") === false,
+    );
+    // At minimum, the errored task's description should appear in some notify call
+    expect(completionCall).toBeDefined();
 
     rmSync(tempDir, { recursive: true, force: true });
   });

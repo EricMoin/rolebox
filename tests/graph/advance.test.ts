@@ -176,12 +176,17 @@ describe("advanceGraphForDispatch", () => {
     graphSessionState.clear(SESSION_ID);
   });
 
+  // ── In-route dispatches (normal flow, no correction) ───────────
+
   it("advances state when called with valid structured task args", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
-    advanceGraphForDispatch(SESSION_ID, "task", {
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "coder",
       prompt: "x",
     });
+
+    expect(outcome.result.kind).toBe("advanced");
+    expect(outcome.correction).toBeUndefined();
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state).toBeDefined();
@@ -191,9 +196,12 @@ describe("advanceGraphForDispatch", () => {
 
   it("advances state when called with valid dispatch args", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
-    advanceGraphForDispatch(SESSION_ID, "dispatch", {
+    const outcome = advanceGraphForDispatch(SESSION_ID, "dispatch", {
       subagent: "coder",
     });
+
+    expect(outcome.result.kind).toBe("advanced");
+    expect(outcome.correction).toBeUndefined();
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state).toBeDefined();
@@ -202,103 +210,174 @@ describe("advanceGraphForDispatch", () => {
 
   it("advances state from string fallback args", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
-    advanceGraphForDispatch(
+    const outcome = advanceGraphForDispatch(
       SESSION_ID,
       "task",
       'task(subagent_type="coder", prompt="x")',
     );
+
+    expect(outcome.result.kind).toBe("advanced");
+    expect(outcome.correction).toBeUndefined();
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state).toBeDefined();
     expect(state!.completed).toContain("coder");
   });
 
-  it("does nothing when session has no state", () => {
-    advanceGraphForDispatch("nonexistent", "task", {
+  // ── Ignored cases (no graph state, inactive, untargetable) ─────
+
+  it("returns ignored when session has no graph state", () => {
+    const outcome = advanceGraphForDispatch("nonexistent", "task", {
       subagent_type: "coder",
     });
+
+    expect(outcome.result.kind).toBe("ignored");
+    expect(outcome.correction).toBeUndefined();
+
     const state = graphSessionState.getState("nonexistent");
     expect(state).toBeUndefined();
   });
 
-  it("does nothing when state status is complete", () => {
+  it("returns ignored when state status is complete", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
     graphSessionState.getState(SESSION_ID)!.status = "complete";
 
-    advanceGraphForDispatch(SESSION_ID, "task", {
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "coder",
     });
+
+    expect(outcome.result.kind).toBe("ignored");
+    expect(outcome.correction).toBeUndefined();
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toEqual([]);
   });
 
-  it("does nothing when state status is exhausted", () => {
+  it("returns ignored when state status is exhausted", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
     graphSessionState.getState(SESSION_ID)!.status = "exhausted";
 
-    advanceGraphForDispatch(SESSION_ID, "task", {
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "coder",
     });
 
+    expect(outcome.result.kind).toBe("ignored");
+    expect(outcome.correction).toBeUndefined();
+
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toEqual([]);
   });
 
-  it("does nothing when target cannot be extracted", () => {
+  it("returns ignored when target cannot be extracted", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
-    advanceGraphForDispatch(SESSION_ID, "task", {});
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", {});
+
+    expect(outcome.result.kind).toBe("ignored");
+    expect(outcome.correction).toBeUndefined();
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toEqual([]);
   });
 
-  it("does nothing when args is null", () => {
+  it("returns ignored when args is null", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
-    advanceGraphForDispatch(SESSION_ID, "task", null);
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", null);
+
+    expect(outcome.result.kind).toBe("ignored");
+    expect(outcome.correction).toBeUndefined();
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toEqual([]);
   });
+
+  // ── Multi-step flow (completed graph walk) ─────────────────────
 
   it("advances through multiple steps correctly", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
 
-    advanceGraphForDispatch(SESSION_ID, "task", {
+    const outcome1 = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "coder",
     });
+    expect(outcome1.result.kind).toBe("advanced");
+    expect(outcome1.correction).toBeUndefined();
+
     let state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toContain("coder");
     expect(state!.status).toBe("active");
 
-    advanceGraphForDispatch(SESSION_ID, "dispatch", {
+    const outcome2 = advanceGraphForDispatch(SESSION_ID, "dispatch", {
       subagent: "reviewer",
     });
+    expect(outcome2.result.kind).toBe("completed");
+    expect(outcome2.correction).toBeUndefined();
+
     state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toContain("reviewer");
     expect(state!.status).toBe("complete");
   });
 
-  it("does nothing with unknown agent target", () => {
+  // ── Off-route dispatch (target not in frontier) ────────────────
+
+  it("returns correction for off-route dispatch (target not in frontier)", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
-    advanceGraphForDispatch(SESSION_ID, "task", {
+
+    // Advance past "coder" so frontier is ["reviewer"]
+    advanceGraphForDispatch(SESSION_ID, "task", { subagent_type: "coder" });
+
+    // Dispatch "coder" again — not in frontier, should be off_route
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", {
+      subagent_type: "coder",
+    });
+
+    expect(outcome.result.kind).toBe("off_route");
+    expect(outcome.correction).toBeDefined();
+    expect(outcome.correction!).toContain("coder");
+    expect(outcome.correction!).toContain("reviewer");
+    expect(outcome.correction!).toContain("off");
+
+    // State unchanged
+    const state = graphSessionState.getState(SESSION_ID);
+    expect(state!.frontier).toEqual(["reviewer"]);
+    expect(state!.completed.filter((s) => s === "coder").length).toBe(1);
+  });
+
+  // ── Unknown agent target ───────────────────────────────────────
+
+  it("returns correction for unknown agent target", () => {
+    graphSessionState.initGraph(SESSION_ID, makeTestGraph());
+
+    const outcome = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "unknown-agent",
     });
 
+    expect(outcome.result.kind).toBe("unknown");
+    expect(outcome.correction).toBeDefined();
+    expect(outcome.correction!).toContain("unknown-agent");
+    expect(outcome.correction!).toContain("not part of the collaboration graph");
+
+    // State unchanged
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed).toEqual([]);
     expect(state!.status).toBe("active");
   });
 
+  // ── Deduplication (second dispatch of same agent = off_route) ──
+
   it("deduplicates consecutive advance for same agent (double-trigger)", () => {
     graphSessionState.initGraph(SESSION_ID, makeTestGraph());
 
-    advanceGraphForDispatch(SESSION_ID, "task", {
+    const outcome1 = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "coder",
     });
-    advanceGraphForDispatch(SESSION_ID, "task", {
+    expect(outcome1.result.kind).toBe("advanced");
+    expect(outcome1.correction).toBeUndefined();
+
+    const outcome2 = advanceGraphForDispatch(SESSION_ID, "task", {
       subagent_type: "coder",
     });
+    expect(outcome2.result.kind).toBe("off_route");
+    expect(outcome2.correction).toBeDefined();
+    expect(outcome2.correction!).toContain("coder");
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed.filter((s) => s === "coder").length).toBe(1);

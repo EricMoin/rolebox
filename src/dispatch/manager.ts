@@ -679,6 +679,7 @@ export class DispatchManager {
             this.transition(task.id, ["running"], "error", {
               error: "Exceeded concurrency limit on recovery",
             });
+            void this.notifyCompletion(task);
             this.scheduleCleanup(task.id);
             debugLog("recover", task.id, "dropped — concurrency limit exceeded on recovery");
           }
@@ -686,6 +687,7 @@ export class DispatchManager {
           task.status = "error";
           task.error = "Session lost after process restart — You can re-dispatch with dispatch(...)";
           task.completedAt = new Date();
+          void this.notifyCompletion(task);
           this.scheduleCleanup(task.id);
           debugLog("recover", task.id, "session gone after restart");
         }
@@ -693,23 +695,21 @@ export class DispatchManager {
         task.status = "error";
         task.error = "Session verification failed after restart — You can re-dispatch with dispatch(...)";
         task.completedAt = new Date();
+        void this.notifyCompletion(task);
         this.scheduleCleanup(task.id);
       }
     }
 
-    // Verify inflightByParent matches actual re-attached running tasks
+    // Rebuild inflightByParent authoritatively from actual running tasks.
+    // IncInflight during the loop above is best-effort; this assignment
+    // guarantees the map reflects only truly re-attached running tasks.
     const actualByParent = new Map<string, number>();
     for (const [, task] of this.tasks) {
       if (task.status === "running") {
         actualByParent.set(task.parentSessionId, (actualByParent.get(task.parentSessionId) ?? 0) + 1);
       }
     }
-    for (const [pid, inflight] of this.inflightByParent) {
-      const actual = actualByParent.get(pid) ?? 0;
-      if (inflight !== actual) {
-        debugLog("recover", "*", `inflightByParent mismatch for ${pid}: inflight=${inflight} actual_running=${actual}`);
-      }
-    }
+    this.inflightByParent = actualByParent;
 
     if (toRemove.length > 0 || runningTasks.length > 0) {
       this.persistState();
@@ -1086,6 +1086,34 @@ export class DispatchManager {
     void this.notifyCompletion(t);
     this.leaveRunning(taskId);
   }
+
+  // ── Terminal-path notification coverage ──────────────────────────────
+  // Every code path that transitions a task to a terminal state (completed,
+  // error, cancelled, timeout) MUST call notifyCompletion so the parent
+  // session receives a <system-reminder>.  Task 5 hardened notifyParent with
+  // idempotency (sentFinalNotifies Set) + bounded retry as a safety net;
+  // double-notify is harmless but should not be relied upon.
+  //
+  // Terminal Path                                   | notifyCompletion    | Verified
+  // ------------------------------------------------|---------------------|---------
+  // launch() queue-full                               L118                 yes
+  // cancelTask() pending (queued)                     L448                 yes
+  // cancelTask() running                              L468                 yes
+  // handleTaskCompleted() -> finalizeCompletion        L1086                yes
+  // handleTaskError()                                  L1066                yes
+  // handleTaskTimeout()                                L1075                yes
+  // evaluateAndComplete() not_ready timeout            L855, L867           yes
+  // evaluateAndComplete() error-event -> finalize      L789-L795            yes
+  // evaluateAndComplete() deleted-event -> finalize    L797-L804            yes
+  // evaluateAndComplete() completed -> finalize        L828-L834            yes
+  // evaluateAndComplete() error -> finalize            L836-L842            yes
+  // evaluateAndComplete() stabilizing -> finalize      L875-L883            yes
+  // reopenForContinuation() queue-full                 L344                 yes
+  // recover() session-lost                             (Task 11)            yes
+  // recover() verification-failed                      (Task 11)            yes
+  // recover() concurrency-exceeded                     (Task 11)            yes
+  //
+  // Safety net: Task 5 notifyParent handles idempotency + retry.
 
   /**
    * Centralized teardown for all terminal paths. Handles:

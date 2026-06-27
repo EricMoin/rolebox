@@ -191,7 +191,17 @@ export async function resolveAllRoles(
       }));
       const prompt = buildAgentPrompt(config, skills, { subagents: subagentMetadata, references: allReferences, graph });
 
-      resolved.push({ id: roleId, config, prompt, skills, functions, references: allReferences, subagents: resolvedSubagents, graph });
+      resolved.push({
+        id: roleId,
+        config,
+        prompt,
+        skills,
+        functions,
+        references: allReferences,
+        subagents: resolvedSubagents,
+        graph,
+        ...(config.dispatch ? { dispatchConfig: config.dispatch as ResolvedRole["dispatchConfig"] } : {}),
+      });
       ctx.roleFunctionsMap.set(roleId, functions);
     } catch (err) {
       log.error("Failed to process role, skipping", { roleId, error: formatError(err) });
