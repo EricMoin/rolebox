@@ -608,6 +608,145 @@ describe("DispatchManager", () => {
     expect(result.text).toBe("Analysis:Complete.");
   });
 
+  it("getResult() returns totalChars equal to full text length", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "prompt" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [
+                { type: "text" as const, text: "Hello" },
+                { type: "text" as const, text: "World" },
+              ],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.totalChars).toBe(10); // "HelloWorld".length
+    expect(result.text).toBe("HelloWorld");
+  });
+
+  it("getResult() returns resultText from fenced block when ```result fence is present", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "prompt" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [
+                { type: "text" as const, text: "Some preamble.\n```result\nclean output\n```\nSome postamble." },
+              ],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.hadFence).toBe(true);
+    expect(result.resultText).toBe("clean output");
+    // raw text still has the fence markers
+    expect(result.text).toContain("```result");
+  });
+
+  it("getResult() returns resultText equal to raw text when no fence is present", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "prompt" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [
+                { type: "text" as const, text: "Plain output without fences." },
+              ],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.hadFence).toBe(false);
+    expect(result.resultText).toBe(result.text);
+    expect(result.resultText).toBe("Plain output without fences.");
+  });
+
+  it("getResult() non-ok kinds (not_found/expired/fetch_error) have zero totalChars and empty resultText", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+
+    const notFound = await manager.getResult("nonexistent");
+    expect(notFound.kind).toBe("not_found");
+    expect(notFound.totalChars).toBe(0);
+    expect(notFound.hadFence).toBe(false);
+    expect(notFound.resultText).toBe("");
+
+    // expired: clean up a task then ask for its result
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: false },
+      parentContext(),
+    );
+    manager.cleanupTask(task.id);
+    const expired = await manager.getResult(task.id);
+    expect(expired.kind).toBe("expired");
+    expect(expired.totalChars).toBe(0);
+    expect(expired.hadFence).toBe(false);
+    expect(expired.resultText).toBe("");
+
+    // fetch_error
+    const clientErr = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: undefined,
+          error: { message: "session expired" },
+        }),
+    });
+    const mgr2 = new DispatchManager(clientErr);
+    const t2 = await mgr2.launch(
+      { subagent: "helper", prompt: "fail", run_in_background: false },
+      parentContext(),
+    );
+    const fetchErr = await mgr2.getResult(t2.id);
+    expect(fetchErr.kind).toBe("fetch_error");
+    expect(fetchErr.totalChars).toBe(0);
+    expect(fetchErr.hadFence).toBe(false);
+    expect(fetchErr.resultText).toBe("");
+  });
+
   // ── 5. getTask() ─────────────────────────────────────────────
 
   it("getTask() returns undefined for unknown task", () => {

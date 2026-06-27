@@ -15,6 +15,7 @@ import { notifyParent } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 
 import { TaskStateStore } from "./task-store.ts";
+import { extractResultBlock } from "./result-extractor.ts";
 import { debugLog, infoLog } from "./debug-log.ts";
 import { metrics } from "./metrics.ts";
 
@@ -558,7 +559,10 @@ export class DispatchManager {
     taskId: string,
   ): Promise<{
     kind: "ok" | "expired" | "not_found" | "fetch_error";
-    text?: string;
+    text: string;
+    resultText: string;
+    hadFence: boolean;
+    totalChars: number;
     error?: string;
   }> {
     const task = this.tasks.get(taskId);
@@ -567,10 +571,20 @@ export class DispatchManager {
         return {
           kind: "expired",
           text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
           error: "Task result no longer available (was cleaned up)",
         };
       }
-      return { kind: "not_found", text: "", error: "Task never existed" };
+      return {
+        kind: "not_found",
+        text: "",
+        resultText: "",
+        hadFence: false,
+        totalChars: 0,
+        error: "Task never existed",
+      };
     }
 
     const messagesResult = await this.client.session.messages({
@@ -581,13 +595,31 @@ export class DispatchManager {
       return {
         kind: "fetch_error",
         text: "",
+        resultText: "",
+        hadFence: false,
+        totalChars: 0,
         error: `Error retrieving task output: ${JSON.stringify(messagesResult.error)}`,
       };
     }
 
-    const messages = messagesResult.data ?? [];
+    const messages = (messagesResult.data ?? []) as SessionMessageSnapshot[];
     const boundary = task.messageCountAtStart ?? 0;
+    const fullText = this.buildAssistantText(messages, boundary);
+    const extracted = extractResultBlock(fullText);
 
+    return {
+      kind: "ok",
+      text: fullText,
+      resultText: extracted.result,
+      hadFence: extracted.hadFence,
+      totalChars: fullText.length,
+    };
+  }
+
+  private buildAssistantText(
+    messages: readonly SessionMessageSnapshot[],
+    boundary: number,
+  ): string {
     const textParts: string[] = [];
     for (let i = boundary; i < messages.length; i++) {
       const msg = messages[i];
@@ -600,8 +632,7 @@ export class DispatchManager {
         }
       }
     }
-
-    return { kind: "ok", text: textParts.join("") };
+    return textParts.join("");
   }
 
   cleanupTask(taskId: string): void {
