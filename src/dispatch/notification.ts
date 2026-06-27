@@ -5,8 +5,31 @@ import { metrics } from "./metrics.ts";
 
 const log = createSubLogger("dispatch:notify");
 
+// ── Retry / idempotency constants ───────────────────────────────────
+
+export const NOTIFY_MAX_RETRIES = 3;
+export const NOTIFY_BASE_DELAY_MS = 500;
+export const NOTIFY_MAX_DELAY_MS = 5000;
+
+export interface NotifyOpts {
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+}
+
 /** Per-parent-session queue for serializing notification sends. */
 const parentQueues = new Map<string, Promise<void>>();
+
+/** Tracks taskIds for which a final notification has already been sent. */
+const sentFinalNotifies = new Set<string>();
+
+export function clearSentFinalNotifies(): void {
+  sentFinalNotifies.clear();
+}
+
+export function clearParentQueues(): void {
+  parentQueues.clear();
+}
 
 function enqueueNotify(
   parentSessionId: string,
@@ -67,11 +90,15 @@ export async function notifyParent(
   client: OpencodeClient,
   task: DispatchTask,
   remainingProvider: (() => number) | number,
+  opts?: NotifyOpts,
 ): Promise<void> {
+  const maxRetries = opts?.maxRetries ?? NOTIFY_MAX_RETRIES;
+  const baseDelayMs = opts?.baseDelayMs ?? NOTIFY_BASE_DELAY_MS;
+  const maxDelayMs = opts?.maxDelayMs ?? NOTIFY_MAX_DELAY_MS;
+
   const isTaskFailure = task.status === "error" || task.status === "cancelled" || task.status === "timeout";
 
   const doNotify = async (): Promise<void> => {
-    // Resolve remaining count at send time (not enqueue time).
     const remainingCount = typeof remainingProvider === "function"
       ? remainingProvider()
       : remainingProvider;
@@ -88,21 +115,59 @@ export async function notifyParent(
     const text = buildNotificationText(payload);
     const shouldReply = remainingCount === 0 || isTaskFailure;
 
-    try {
-      await client.session.promptAsync({
-        path: { id: task.parentSessionId },
-        body: {
-          parts: [{ type: "text", text }],
-          noReply: !shouldReply,
-        },
-      });
-      metrics.counter("notify_sent_total").inc();
-    } catch (err) {
+    if (shouldReply) {
+      if (sentFinalNotifies.has(task.id)) {
+        return;
+      }
+
+      let lastError: unknown;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          await client.session.promptAsync({
+            path: { id: task.parentSessionId },
+            body: {
+              parts: [{ type: "text", text }],
+              noReply: false,
+            },
+          });
+          metrics.counter("notify_sent_total").inc();
+          sentFinalNotifies.add(task.id);
+          return;
+        } catch (err) {
+          lastError = err;
+          if (attempt < maxRetries) {
+            metrics.counter("notify_retry_total").inc();
+            const delay = Math.min(
+              baseDelayMs * Math.pow(2, attempt),
+              maxDelayMs,
+            );
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      }
+
       metrics.counter("notify_failed_total").inc();
       log.warn(
         `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
-        err,
+        lastError,
       );
+    } else {
+      try {
+        await client.session.promptAsync({
+          path: { id: task.parentSessionId },
+          body: {
+            parts: [{ type: "text", text }],
+            noReply: true,
+          },
+        });
+        metrics.counter("notify_sent_total").inc();
+      } catch (err) {
+        metrics.counter("notify_failed_total").inc();
+        log.warn(
+          `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
+          err,
+        );
+      }
     }
   };
 

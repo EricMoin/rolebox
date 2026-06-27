@@ -276,4 +276,149 @@ describe("ConcurrencyManager", () => {
     // Clean up — cancel the queued one
     q.cancel!();
   });
+
+  it("maxActivePerParent=2 limits a single parent even when global slots free", async () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+    const r1 = cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 2 });
+    expect(r1.outcome).toBe("acquired");
+    const r2 = cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 2 });
+    expect(r2.outcome).toBe("acquired");
+    expect(cm.getActiveCount("test")).toBe(2);
+
+    const r3 = cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 2 });
+    expect(r3.outcome).toBe("queued");
+    if (r3.outcome !== "queued") throw new Error("expected queued");
+
+    const r4 = cm.acquireBackground("test", { parentId: "parent-b", maxActivePerParent: 2 });
+    expect(r4.outcome).toBe("acquired");
+    expect(cm.getActiveCount("test")).toBe(3);
+  });
+
+  it("release promotes parent-B waiter when parent-A waiter is at cap", async () => {
+    const cm = new ConcurrencyManager(10, 10, 0);
+
+    cm.forceOccupyBackground("test", 2, "parent-a");
+
+    const aQueued = cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 1 });
+    expect(aQueued.outcome).toBe("queued");
+    if (aQueued.outcome !== "queued") throw new Error("expected queued");
+
+    cm.forceOccupyBackground("test", 8, "filler");
+    const bQueued = cm.acquireBackground("test", { parentId: "parent-b", maxActivePerParent: 5 });
+    expect(bQueued.outcome).toBe("queued");
+    if (bQueued.outcome !== "queued") throw new Error("expected queued");
+
+    const aQueued2 = cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 1 });
+    expect(aQueued2.outcome).toBe("queued");
+    if (aQueued2.outcome !== "queued") throw new Error("expected queued");
+
+    cm.release("test", "parent-a");
+
+    await bQueued.promise;
+
+    const timeout = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error("timed out")), 100),
+    );
+    await expect(Promise.race([aQueued.promise, timeout])).rejects.toThrow("timed out");
+  });
+
+  it("release(key, parentId) decrements activeByParent and deletes at 0", async () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+
+    cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 2 });
+    cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 2 });
+
+    expect(cm.canAcquireForParent("test", "parent-a", 2)).toBe(false);
+
+    cm.release("test", "parent-a");
+    expect(cm.canAcquireForParent("test", "parent-a", 2)).toBe(true);
+
+    cm.release("test", "parent-a");
+    expect(cm.canAcquireForParent("test", "parent-a", 2)).toBe(true);
+
+    const fresh = cm.acquireBackground("test", { parentId: "parent-a", maxActivePerParent: 2 });
+    expect(fresh.outcome).toBe("acquired");
+  });
+
+  it("configurable retryAfterMs surfaces in full outcome error", () => {
+    const cm = new ConcurrencyManager(2, 1, 0, 15_000);
+    cm.acquireBackground("test");
+    cm.acquireBackground("test");
+    cm.acquireBackground("test");
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("full");
+    if (r.outcome !== "full") throw new Error("expected full");
+    expect(r.error.retryAfter).toBe(15_000);
+    expect(r.error.message).toContain("Queue is full");
+  });
+
+  it("default retryAfterMs is 30000", () => {
+    const cm = new ConcurrencyManager(2, 1, 0);
+    cm.acquireBackground("test");
+    cm.acquireBackground("test");
+    cm.acquireBackground("test");
+    const r = cm.acquireBackground("test");
+    expect(r.outcome).toBe("full");
+    if (r.outcome !== "full") throw new Error("expected full");
+    expect(r.error.retryAfter).toBe(30_000);
+  });
+
+  it("existing acquireBackground(key) without opts unchanged (regression)", async () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+    for (let i = 0; i < 5; i++) {
+      const r = cm.acquireBackground("test");
+      expect(r.outcome).toBe("acquired");
+    }
+    expect(cm.getActiveCount("test")).toBe(5);
+
+    const q = cm.acquireBackground("test");
+    expect(q.outcome).toBe("queued");
+    if (q.outcome !== "queued") throw new Error("expected queued");
+
+    cm.release("test");
+    await q.promise;
+    expect(cm.getActiveCount("test")).toBe(5);
+  });
+
+  it("canAcquireForParent returns false when parent at cap", () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+    cm.acquireBackground("test", { parentId: "p1", maxActivePerParent: 2 });
+    cm.acquireBackground("test", { parentId: "p1", maxActivePerParent: 2 });
+
+    expect(cm.canAcquireForParent("test", "p1", 2)).toBe(false);
+    expect(cm.canAcquireForParent("test", "p2", 2)).toBe(true);
+    expect(cm.canAcquireForParent("nonexistent", "p1", 1)).toBe(true);
+  });
+
+  it("forceOccupyBackground with parentId registers parent mapping", () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+    cm.forceOccupyBackground("test", 3, "parent-a");
+
+    expect(cm.canAcquireForParent("test", "parent-a", 2)).toBe(false);
+    expect(cm.canAcquireForParent("test", "parent-a", 3)).toBe(false);
+    expect(cm.canAcquireForParent("test", "parent-a", 4)).toBe(true);
+  });
+
+  it("forceOccupyBackground without parentId does not affect activeByParent", () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+    cm.forceOccupyBackground("test", 3);
+    expect(cm.canAcquireForParent("test", "any-parent", 1)).toBe(true);
+  });
+
+  it("queued waiter stores parentId for promotion re-check", async () => {
+    const cm = new ConcurrencyManager(5, 10, 0);
+
+    for (let i = 0; i < 5; i++) {
+      cm.acquireBackground("test");
+    }
+
+    const q = cm.acquireBackground("test", { parentId: "p1", maxActivePerParent: 2 });
+    expect(q.outcome).toBe("queued");
+    if (q.outcome !== "queued") throw new Error("expected queued");
+
+    cm.release("test");
+    await q.promise;
+    expect(cm.getActiveCount("test")).toBe(5);
+    expect(cm.canAcquireForParent("test", "p1", 1)).toBe(false);
+  });
 });

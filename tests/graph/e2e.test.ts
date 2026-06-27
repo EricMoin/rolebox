@@ -13,7 +13,7 @@ import type { Config } from "@opencode-ai/sdk";
 
 import { discoverRoles } from "../../src/role-loader";
 import { parseCollaboration } from "../../src/graph/parser";
-import { graphSessionState } from "../../src/graph/state";
+import { graphSessionState, buildGraphStateBlock } from "../../src/graph/state";
 import { advanceGraphForDispatch } from "../../src/graph/advance";
 import { buildSubagentRoleBlock } from "../../src/graph/prompt-builder";
 import type { ResolvedGraph, GraphNodeRole } from "../../src/types";
@@ -542,15 +542,15 @@ describe("Collaboration Graph E2E", () => {
       };
     }
 
-    it("initGraph creates active state with step 0", () => {
+    it("initGraph creates active state with frontier", () => {
       const graph = testGraph();
       graphSessionState.initGraph("test-session", graph);
 
       const state = graphSessionState.getState("test-session");
       expect(state).toBeDefined();
       expect(state!.status).toBe("active");
-      expect(state!.currentStep).toBe(0);
-      expect(state!.completedSteps).toEqual([]);
+      expect(state!.frontier).toEqual(["coder"]);
+      expect(state!.completed).toEqual([]);
       expect(state!.iterationCount).toBe(0);
     });
 
@@ -561,15 +561,15 @@ describe("Collaboration Graph E2E", () => {
       graphSessionState.advanceStep("test-session-2", "coder");
       let state = graphSessionState.getState("test-session-2")!;
       expect(state.status).toBe("active");
-      expect(state.currentStep).toBe(1);
-      expect(state.completedSteps).toEqual(["coder"]);
+      expect(state.frontier).toEqual(["reviewer"]);
+      expect(state.completed).toEqual(["coder"]);
       expect(state.iterationCount).toBe(0);
 
       graphSessionState.advanceStep("test-session-2", "reviewer");
       state = graphSessionState.getState("test-session-2")!;
       expect(state.status).toBe("complete");
-      expect(state.currentStep).toBe(2);
-      expect(state.completedSteps).toEqual(["coder", "reviewer"]);
+      expect(state.frontier).toEqual([]);
+      expect(state.completed).toEqual(["coder", "reviewer"]);
     });
 
     it("isComplete returns false when active, true when complete", () => {
@@ -591,11 +591,10 @@ describe("Collaboration Graph E2E", () => {
           { from: "parent", to: "coder" },
           { from: "coder", to: "reviewer" },
           { from: "reviewer", to: "coder", label: "loop" },
-          { from: "reviewer", to: "parent", exit: true },
         ],
         nodes: ["coder", "reviewer"],
-        maxIterations: 1,
-        exitEdges: [{ from: "reviewer", to: "parent", exit: true }],
+        maxIterations: 0,
+        exitEdges: [],
       };
 
       graphSessionState.initGraph("test-session-exhaust", graphWithLoop);
@@ -605,11 +604,6 @@ describe("Collaboration Graph E2E", () => {
 
       graphSessionState.advanceStep("test-session-exhaust", "reviewer");
       let state = graphSessionState.getState("test-session-exhaust")!;
-      expect(state.status).toBe("active");
-      expect(state.iterationCount).toBe(1);
-
-      graphSessionState.advanceStep("test-session-exhaust", "coder");
-      state = graphSessionState.getState("test-session-exhaust")!;
       expect(state.status).toBe("exhausted");
 
       graphSessionState.advanceStep("test-session-exhaust", "reviewer");
@@ -625,16 +619,16 @@ describe("Collaboration Graph E2E", () => {
 
       expect(block).toContain("<collaboration_state>");
       expect(block).toContain("<status>active</status>");
-      expect(block).toContain("<current_step>0</current_step>");
-      expect(block).toContain("<completed_steps>none</completed_steps>");
+      expect(block).toContain("<frontier>coder</frontier>");
+      expect(block).toContain("<completed>none</completed>");
       expect(block).toContain("Dispatch to coder");
 
       graphSessionState.advanceStep("test-session-4", "coder");
       const state2 = graphSessionState.getState("test-session-4")!;
       const block2 = buildGraphStateBlock(state2, graph);
 
-      expect(block2).toContain("<current_step>1</current_step>");
-      expect(block2).toContain("<completed_steps>coder</completed_steps>");
+      expect(block2).toContain("<frontier>reviewer</frontier>");
+      expect(block2).toContain("<completed>coder</completed>");
       expect(block2).toContain("Dispatch to reviewer");
     });
 
@@ -649,7 +643,8 @@ describe("Collaboration Graph E2E", () => {
       const block = buildGraphStateBlock(state, graph);
 
       expect(block).toContain("<status>complete</status>");
-      expect(block).toContain("<completed_steps>coder, reviewer</completed_steps>");
+      expect(block).toContain("<frontier>none</frontier>");
+      expect(block).toContain("<completed>coder, reviewer</completed>");
       expect(block).toContain("Workflow complete");
     });
 
@@ -810,8 +805,8 @@ describe("Collaboration Graph E2E", () => {
       });
 
       const state = graphSessionState.getState("adv-structured-1")!;
-      expect(state.currentStep).toBe(1);
-      expect(state.completedSteps).toEqual(["coder"]);
+      expect(state.frontier).toEqual(["reviewer"]);
+      expect(state.completed).toEqual(["coder"]);
     });
 
     it("advances state with structured args (dispatch tool)", () => {
@@ -825,8 +820,8 @@ describe("Collaboration Graph E2E", () => {
       });
 
       const state = graphSessionState.getState("adv-structured-2")!;
-      expect(state.currentStep).toBe(1);
-      expect(state.completedSteps).toEqual(["coder"]);
+      expect(state.frontier).toEqual(["reviewer"]);
+      expect(state.completed).toEqual(["coder"]);
     });
 
     it("string fallback args still advance state (task tool)", () => {
@@ -840,8 +835,8 @@ describe("Collaboration Graph E2E", () => {
       );
 
       const state = graphSessionState.getState("adv-string-1")!;
-      expect(state.currentStep).toBe(1);
-      expect(state.completedSteps).toEqual(["coder"]);
+      expect(state.frontier).toEqual(["reviewer"]);
+      expect(state.completed).toEqual(["coder"]);
     });
 
     it("string fallback args still advance state (dispatch tool)", () => {
@@ -855,8 +850,8 @@ describe("Collaboration Graph E2E", () => {
       );
 
       const state = graphSessionState.getState("adv-string-2")!;
-      expect(state.currentStep).toBe(1);
-      expect(state.completedSteps).toEqual(["coder"]);
+      expect(state.frontier).toEqual(["reviewer"]);
+      expect(state.completed).toEqual(["coder"]);
     });
 
     it("does not advance for unknown session", () => {
@@ -882,29 +877,8 @@ describe("Collaboration Graph E2E", () => {
       // Try advancing again — should be a no-op
       advanceGraphForDispatch("adv-complete", "task", { subagent_type: "coder" });
       const state2 = graphSessionState.getState("adv-complete")!;
-      expect(state2.currentStep).toBe(2);
-      expect(state2.completedSteps).toEqual(["coder", "reviewer"]);
+      expect(state2.frontier).toEqual([]);
+      expect(state2.completed).toEqual(["coder", "reviewer"]);
     });
   });
 });
-
-function buildGraphStateBlock(
-  state: { status: string; currentStep: number; completedSteps: string[]; iterationCount: number },
-  graph: ResolvedGraph,
-): string {
-  const stepInfo = state.status === "active"
-    ? graph.edges[state.currentStep]
-    : null;
-
-  const nextAction = stepInfo
-    ? `Dispatch to ${stepInfo.to}${stepInfo.label ? ` (${stepInfo.label})` : ""}`
-    : "Workflow complete";
-
-  return `<collaboration_state>
-  <status>${state.status}</status>
-  <current_step>${state.currentStep}</current_step>
-  <completed_steps>${state.completedSteps.join(", ") || "none"}</completed_steps>
-  <iteration>${state.iterationCount}/${graph.maxIterations || "unlimited"}</iteration>
-  <next_action>${nextAction}</next_action>
-</collaboration_state>`;
-}

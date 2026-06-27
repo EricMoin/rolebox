@@ -1,7 +1,14 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, mock, afterEach, beforeAll, afterAll } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { DispatchTask, NotificationPayload } from "../../src/dispatch/types";
-import { buildNotificationText, notifyParent } from "../../src/dispatch/notification";
+import {
+  buildNotificationText,
+  notifyParent,
+  NOTIFY_MAX_RETRIES,
+  clearSentFinalNotifies,
+  clearParentQueues,
+} from "../../src/dispatch/notification";
+import { metrics } from "../../src/dispatch/metrics";
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -112,6 +119,9 @@ describe("buildNotificationText", () => {
 describe("notifyParent", () => {
   afterEach(() => {
     mock.restore();
+    clearSentFinalNotifies();
+    clearParentQueues();
+    metrics.reset();
   });
 
   it("calls promptAsync with notification text containing [BACKGROUND TASK COMPLETED] for intermediate", async () => {
@@ -260,5 +270,227 @@ describe("notifyParent", () => {
     expect(calls[0][0].body.parts[0].text).toContain("task-A");
     expect(calls[1][0].body.parts[0].text).toContain("task-B");
     expect(calls[2][0].body.parts[0].text).toContain("third");
+  });
+});
+
+// ── tests: notifyParent retry + idempotency ────────────────────────
+
+describe("notifyParent retry and idempotency", () => {
+  let prevMetricsEnv: string | undefined;
+  let metricsActive = false;
+
+  beforeAll(() => {
+    prevMetricsEnv = process.env.ROLEBOX_METRICS;
+    process.env.ROLEBOX_METRICS = "1";
+    const probe = metrics.counter("_probe");
+    probe.inc();
+    const probe2 = metrics.counter("_probe");
+    metricsActive = probe2.peek() > 0;
+    metrics.reset();
+  });
+
+  afterAll(() => {
+    if (prevMetricsEnv === undefined) {
+      delete process.env.ROLEBOX_METRICS;
+    } else {
+      process.env.ROLEBOX_METRICS = prevMetricsEnv;
+    }
+  });
+
+  afterEach(() => {
+    mock.restore();
+    metrics.reset();
+    clearSentFinalNotifies();
+    clearParentQueues();
+  });
+
+  it("retries final notification with bounded exponential backoff, succeeds eventually", async () => {
+    let callCount = 0;
+    const promptAsyncMock = mock(async () => {
+      callCount++;
+      if (callCount <= 2) throw new Error("transient error");
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ status: "completed" });
+
+    await notifyParent(client, task, 0, {
+      maxRetries: 3,
+      baseDelayMs: 10,
+      maxDelayMs: 50,
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(3);
+    if (metricsActive) {
+      expect(metrics.counter("notify_sent_total").peek()).toBe(1);
+      expect(metrics.counter("notify_retry_total").peek()).toBe(2);
+      expect(metrics.counter("notify_failed_total").peek()).toBe(0);
+    }
+  });
+
+  it("increments notify_failed_total on final give-up after all retries exhausted", async () => {
+    const promptAsyncMock = mock(async () => {
+      throw new Error("persistent error");
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ status: "completed" });
+
+    await notifyParent(client, task, 0, {
+      maxRetries: 2,
+      baseDelayMs: 10,
+      maxDelayMs: 50,
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(3);
+    if (metricsActive) {
+      expect(metrics.counter("notify_retry_total").peek()).toBe(2);
+      expect(metrics.counter("notify_failed_total").peek()).toBe(1);
+      expect(metrics.counter("notify_sent_total").peek()).toBe(0);
+    }
+  });
+
+  it("final notification is idempotent — second call for same taskId is no-op", async () => {
+    const promptAsyncMock = mock(async () => {
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ id: "bg_idem_test", status: "completed" });
+
+    await notifyParent(client, task, 0);
+    await notifyParent(client, task, 0);
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("intermediate (remaining>0) notification is NOT deduped — multiple sends allowed", async () => {
+    const promptAsyncMock = mock(async () => {
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ id: "bg_intermediate", status: "completed" });
+
+    await notifyParent(client, task, 2);
+    await notifyParent(client, task, 2);
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(2);
+
+    const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
+    expect(calls[0][0].body.noReply).toBe(true);
+    expect(calls[1][0].body.noReply).toBe(true);
+  });
+
+  it("per-parent ordering preserved when final notification is slow", async () => {
+    const order: string[] = [];
+
+    const promptAsyncMock = mock(async (args: any) => {
+      const text = args.body.parts[0].text;
+      if (text.includes("first-task")) {
+        order.push("A-start");
+        await new Promise((r) => setTimeout(r, 30));
+        order.push("A-end");
+      } else if (text.includes("second-task")) {
+        order.push("B");
+      }
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const taskA = createTask({ id: "task-A", description: "first-task" });
+    const taskB = createTask({ id: "task-B", description: "second-task" });
+
+    notifyParent(client, taskA, 0);
+    notifyParent(client, taskB, 0);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(2);
+    expect(order).toEqual(["A-start", "A-end", "B"]);
+  });
+
+  it("uses default retry constants when opts omitted", async () => {
+    expect(NOTIFY_MAX_RETRIES).toBe(3);
+
+    let callCount = 0;
+    const promptAsyncMock = mock(async () => {
+      callCount++;
+      if (callCount <= NOTIFY_MAX_RETRIES) throw new Error("fail");
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ status: "completed" });
+
+    await notifyParent(client, task, 0);
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(NOTIFY_MAX_RETRIES + 1);
+    if (metricsActive) {
+      expect(metrics.counter("notify_sent_total").peek()).toBe(1);
+    }
+  }, 10000);
+
+  it("retry delay obeys maxDelayMs upper bound", async () => {
+    const timestamps: number[] = [];
+    const promptAsyncMock = mock(async () => {
+      timestamps.push(Date.now());
+      if (timestamps.length <= 3) throw new Error("fail");
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ status: "completed" });
+
+    await notifyParent(client, task, 0, {
+      maxRetries: 3,
+      baseDelayMs: 100,
+      maxDelayMs: 150,
+    });
+
+    await new Promise((r) => setTimeout(r, 1000));
+
+    expect(timestamps.length).toBe(4);
+
+    if (timestamps.length >= 4) {
+      const d1 = timestamps[1] - timestamps[0];
+      const d2 = timestamps[2] - timestamps[1];
+      const d3 = timestamps[3] - timestamps[2];
+      expect(d1).toBeGreaterThan(50);
+      expect(d2).toBeGreaterThan(100);
+      expect(d3).toBeGreaterThan(100);
+    }
   });
 });

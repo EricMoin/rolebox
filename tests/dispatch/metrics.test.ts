@@ -141,10 +141,10 @@ describe("Histogram", () => {
 
   it("value above the largest bucket falls into no bucket", () => {
     const h = new Histogram();
-    h.observe(999999);
+    h.observe(3_000_000);
     const snap = h.peek();
     expect(snap.count).toBe(1);
-    expect(snap.sum).toBe(999999);
+    expect(snap.sum).toBe(3_000_000);
     for (const v of Object.values(snap.buckets)) {
       expect(v).toBe(0);
     }
@@ -290,5 +290,135 @@ describe("MetricsRegistry (disabled)", () => {
     const a = reg.counter("tasks");
     const b = reg.counter("tasks");
     expect(a).not.toBe(b); // not cached in disabled mode
+  });
+});
+
+// ── MetricsRegistry (disabled — core allowlist) ──────────────────────
+
+describe("MetricsRegistry (disabled — core allowlist)", () => {
+  it("core counter returns same persisted instance when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    const a = reg.counter("dispatch_rejected_total");
+    const b = reg.counter("dispatch_rejected_total");
+    expect(a).toBe(b); // core metrics are cached even when disabled
+    a.inc(5);
+    expect(a.peek()).toBe(5);
+    expect(b.peek()).toBe(5);
+  });
+
+  it("core counter appears in snapshot() when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    reg.counter("dispatch_rejected_total").inc(3);
+    const snap = reg.snapshot();
+    expect(snap.counters["dispatch_rejected_total"]).toEqual({ value: 3 });
+  });
+
+  it("non-core counter stays NO-OP and absent from snapshot when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    reg.counter("some_random_counter").inc(42);
+    const snap = reg.snapshot();
+    expect(snap.counters["some_random_counter"]).toBeUndefined();
+  });
+
+  it("core gauge returns same persisted instance when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    const a = reg.gauge("inflight_tasks");
+    const b = reg.gauge("inflight_tasks");
+    expect(a).toBe(b);
+    a.set(2);
+    expect(a.peek()).toBe(2);
+    expect(b.peek()).toBe(2);
+  });
+
+  it("core gauge appears in snapshot() when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    reg.gauge("inflight_tasks").set(2);
+    const snap = reg.snapshot();
+    expect(snap.gauges["inflight_tasks"]).toEqual({ value: 2 });
+  });
+
+  it("multiple core gauges all appear in snapshot() when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    reg.gauge("inflight_tasks").set(2);
+    reg.gauge("concurrency_queued").set(5);
+    const snap = reg.snapshot();
+    expect(snap.gauges["inflight_tasks"]).toEqual({ value: 2 });
+    expect(snap.gauges["concurrency_queued"]).toEqual({ value: 5 });
+  });
+
+  it("non-core gauge stays absent from snapshot when disabled", () => {
+    const reg = new MetricsRegistry(false);
+    reg.gauge("some_random_gauge").set(99);
+    const snap = reg.snapshot();
+    expect(snap.gauges["some_random_gauge"]).toBeUndefined();
+  });
+
+  it("histogram() remains NO-OP when disabled (not in core allowlist)", () => {
+    const reg = new MetricsRegistry(false);
+    const h = reg.histogram("duration");
+    h.observe(100);
+    expect(h.peek().count).toBe(1); // local operations work
+    expect(reg.snapshot().histograms).toEqual({}); // not in snapshot
+  });
+
+  it("snapshot() when disabled returns core counters and gauges, empty histograms", () => {
+    const reg = new MetricsRegistry(false);
+    reg.counter("dispatch_rejected_total").inc(7);
+    reg.gauge("inflight_tasks").set(3);
+    reg.gauge("concurrency_queued").set(1);
+    // non-core metrics
+    reg.counter("other").inc(99);
+    reg.gauge("other").set(99);
+    reg.histogram("dur").observe(50);
+
+    const snap = reg.snapshot();
+    expect(snap.counters).toEqual({
+      "dispatch_rejected_total": { value: 7 },
+    });
+    expect(snap.gauges).toEqual({
+      "inflight_tasks": { value: 3 },
+      "concurrency_queued": { value: 1 },
+    });
+    expect(snap.histograms).toEqual({});
+  });
+});
+
+// ── Extended histogram buckets ───────────────────────────────────────
+
+describe("Histogram extended buckets", () => {
+  it("includes 900000, 1800000, 2700000 buckets", () => {
+    const h = new Histogram();
+    const snap = h.peek();
+    expect(snap.buckets).toHaveProperty("900000");
+    expect(snap.buckets).toHaveProperty("1800000");
+    expect(snap.buckets).toHaveProperty("2700000");
+  });
+
+  it("observe(1_000_000) lands in 1800000 bucket", () => {
+    const h = new Histogram();
+    h.observe(1_000_000);
+    const snap = h.peek();
+    // 1000000 > 900000, <= 1800000 → lands in 1800000+ buckets
+    expect(snap.buckets["900000"]).toBe(0);
+    expect(snap.buckets["1800000"]).toBe(1);
+    expect(snap.buckets["2700000"]).toBe(1);
+  });
+
+  it("observe(500_000) lands in 900000 bucket but not below", () => {
+    const h = new Histogram();
+    h.observe(500_000);
+    const snap = h.peek();
+    expect(snap.buckets["300000"]).toBe(0);
+    expect(snap.buckets["900000"]).toBe(1);
+    expect(snap.buckets["1800000"]).toBe(1);
+    expect(snap.buckets["2700000"]).toBe(1);
+  });
+
+  it("observe(2_000_000) lands in 2700000 bucket", () => {
+    const h = new Histogram();
+    h.observe(2_000_000);
+    const snap = h.peek();
+    expect(snap.buckets["1800000"]).toBe(0);
+    expect(snap.buckets["2700000"]).toBe(1);
   });
 });

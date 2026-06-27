@@ -37,6 +37,8 @@ export interface SerializedDispatchTask {
   concurrencyKey?: string;
   continuationOf?: string;
   messageCountAtStart?: number;
+  timeoutMs?: number;
+  mode?: string;
 }
 
 /**
@@ -44,7 +46,7 @@ export interface SerializedDispatchTask {
  * Version field enables future schema migrations.
  */
 interface DispatchStateFile {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   tasks: SerializedDispatchTask[];
 }
 
@@ -132,12 +134,12 @@ export class TaskStateStore {
     if (!parsed) return null;
 
     const { version, tasks } = parsed;
-    if (version !== 1 && version !== 2) {
+    if (version !== 1 && version !== 2 && version !== 3) {
       log.warn(`Unsupported dispatch state schema version ${version}, starting fresh`);
       return null;
     }
 
-    // Build the task map, applying v1→v2 defaults when migrating
+    // Build the task map, applying v1→v2/v2→v3 defaults when migrating
     const map = new Map<string, DispatchTask>();
     for (const st of tasks) {
       map.set(st.id, {
@@ -158,12 +160,14 @@ export class TaskStateStore {
         concurrencyKey: version === 1 ? "default" : st.concurrencyKey,
         continuationOf: version === 1 ? undefined : st.continuationOf,
         messageCountAtStart: version === 1 ? 0 : st.messageCountAtStart,
+        timeoutMs: version === 1 || version === 2 ? undefined : st.timeoutMs,
+        mode: version === 1 || version === 2 ? "background" : (st.mode as "background" | "sync" | undefined),
       });
     }
 
-    // Re-save as v2 after single-shot migration (fire-and-forget —
+    // Re-save as v3 after single-shot migration (fire-and-forget —
     // will be picked up on next persist cycle even if this write fails)
-    if (version === 1) {
+    if (version === 1 || version === 2) {
       void this.save(map);
     }
 
@@ -237,11 +241,13 @@ export class TaskStateStore {
         concurrencyKey: task.concurrencyKey,
         continuationOf: task.continuationOf,
         messageCountAtStart: task.messageCountAtStart,
+        timeoutMs: task.timeoutMs,
+        mode: task.mode,
       });
     }
 
     const file: DispatchStateFile = {
-      version: 2,
+      version: 3,
       tasks: serialized,
     };
 
@@ -270,7 +276,7 @@ export class TaskStateStore {
 function isDispatchStateFile(value: unknown): value is DispatchStateFile {
   if (typeof value !== "object" || value === null) return false;
   const obj = value as Record<string, unknown>;
-  if (obj.version !== 1 && obj.version !== 2) return false;
+  if (obj.version !== 1 && obj.version !== 2 && obj.version !== 3) return false;
   if (!Array.isArray(obj.tasks)) return false;
   return true;
 }

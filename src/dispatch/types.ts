@@ -57,6 +57,8 @@ export interface DispatchTask {
   messageCountAtStart?: number;
   /** Per-task timeout in ms. Overrides background default. Set from DispatchInput.timeout_ms. */
   timeoutMs?: number;
+  /** Execution mode: "background" (async, default) or "sync" (blocks caller). */
+  mode?: "background" | "sync";
 }
 
 /**
