@@ -4,6 +4,7 @@ import type { DispatchTask, NotificationPayload } from "../../src/dispatch/types
 import {
   buildNotificationText,
   notifyParent,
+  hasFinalNotifyBeenSent,
   NOTIFY_MAX_RETRIES,
   clearSentFinalNotifies,
   clearParentQueues,
@@ -193,7 +194,7 @@ describe("notifyParent", () => {
 
     const task = createTask();
 
-    await notifyParent(client, task, 0);
+    notifyParent(client, task, 0);
 
     await new Promise((r) => setTimeout(r, 10));
 
@@ -450,7 +451,7 @@ describe("notifyParent retry and idempotency", () => {
 
     const task = createTask({ status: "completed" });
 
-    await notifyParent(client, task, 0);
+    notifyParent(client, task, 0);
 
     await new Promise((r) => setTimeout(r, 5000));
 
@@ -492,5 +493,63 @@ describe("notifyParent retry and idempotency", () => {
       expect(d2).toBeGreaterThan(100);
       expect(d3).toBeGreaterThan(100);
     }
+  });
+
+  it("returns false when all retries are exhausted and does NOT add to sentFinalNotifies", async () => {
+    const promptAsyncMock = mock(async () => {
+      throw new Error("persistent failure");
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ id: "bg_fail_test", status: "completed" });
+
+    const result = await notifyParent(client, task, 0, {
+      maxRetries: 2,
+      baseDelayMs: 10,
+      maxDelayMs: 50,
+    });
+
+    expect(result).toBe(false);
+    expect(hasFinalNotifyBeenSent(task.id)).toBe(false);
+  });
+
+  it("returns true on successful final send and hasFinalNotifyBeenSent returns true", async () => {
+    const promptAsyncMock = mock(async () => {
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ id: "bg_success_test", status: "completed" });
+
+    const result = await notifyParent(client, task, 0);
+
+    expect(result).toBe(true);
+    expect(hasFinalNotifyBeenSent(task.id)).toBe(true);
+  });
+
+  it("second notifyParent call returns true immediately without calling promptAsync again", async () => {
+    const promptAsyncMock = mock(async () => {
+      return { data: undefined, error: undefined };
+    });
+
+    const client = {
+      session: { promptAsync: promptAsyncMock },
+    } as unknown as OpencodeClient;
+
+    const task = createTask({ id: "bg_idem2", status: "completed" });
+
+    const result1 = await notifyParent(client, task, 0);
+    const result2 = await notifyParent(client, task, 0);
+
+    expect(result1).toBe(true);
+    expect(result2).toBe(true);
+    expect(hasFinalNotifyBeenSent(task.id)).toBe(true);
+    expect(promptAsyncMock).toHaveBeenCalledTimes(1);
   });
 });

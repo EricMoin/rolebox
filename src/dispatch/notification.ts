@@ -18,7 +18,7 @@ export interface NotifyOpts {
 }
 
 /** Per-parent-session queue for serializing notification sends. */
-const parentQueues = new Map<string, Promise<void>>();
+const parentQueues = new Map<string, Promise<boolean>>();
 
 /** Tracks taskIds for which a final notification has already been sent. */
 const sentFinalNotifies = new Set<string>();
@@ -31,14 +31,19 @@ export function clearParentQueues(): void {
   parentQueues.clear();
 }
 
+export function hasFinalNotifyBeenSent(taskId: string): boolean {
+  return sentFinalNotifies.has(taskId);
+}
+
 function enqueueNotify(
   parentSessionId: string,
-  fn: () => Promise<void>,
-): void {
-  const prev = parentQueues.get(parentSessionId) ?? Promise.resolve();
-  const next = prev.then(fn, fn).catch((err) => {
+  fn: () => Promise<boolean>,
+): Promise<boolean> {
+  const prev = parentQueues.get(parentSessionId) ?? Promise.resolve(true);
+  const next = prev.then(() => fn(), () => fn()).catch((err) => {
     metrics.counter("notify_failed_total").inc();
     log.warn("notify chain error", err instanceof Error ? err.message : String(err));
+    return false;
   });
   next.finally(() => {
     if (parentQueues.get(parentSessionId) === next) {
@@ -46,6 +51,7 @@ function enqueueNotify(
     }
   });
   parentQueues.set(parentSessionId, next);
+  return next;
 }
 
 /**
@@ -91,14 +97,14 @@ export async function notifyParent(
   task: DispatchTask,
   remainingProvider: (() => number) | number,
   opts?: NotifyOpts,
-): Promise<void> {
+): Promise<boolean> {
   const maxRetries = opts?.maxRetries ?? NOTIFY_MAX_RETRIES;
   const baseDelayMs = opts?.baseDelayMs ?? NOTIFY_BASE_DELAY_MS;
   const maxDelayMs = opts?.maxDelayMs ?? NOTIFY_MAX_DELAY_MS;
 
   const isTaskFailure = task.status === "error" || task.status === "cancelled" || task.status === "timeout";
 
-  const doNotify = async (): Promise<void> => {
+  const doNotify = async (): Promise<boolean> => {
     const remainingCount = typeof remainingProvider === "function"
       ? remainingProvider()
       : remainingProvider;
@@ -117,7 +123,7 @@ export async function notifyParent(
 
     if (shouldReply) {
       if (sentFinalNotifies.has(task.id)) {
-        return;
+        return true;
       }
 
       let lastError: unknown;
@@ -132,7 +138,7 @@ export async function notifyParent(
           });
           metrics.counter("notify_sent_total").inc();
           sentFinalNotifies.add(task.id);
-          return;
+          return true;
         } catch (err) {
           lastError = err;
           if (attempt < maxRetries) {
@@ -151,6 +157,7 @@ export async function notifyParent(
         `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
         lastError,
       );
+      return false;
     } else {
       try {
         await client.session.promptAsync({
@@ -161,17 +168,19 @@ export async function notifyParent(
           },
         });
         metrics.counter("notify_sent_total").inc();
+        return false;
       } catch (err) {
         metrics.counter("notify_failed_total").inc();
         log.warn(
           `Failed to notify parent session ${task.parentSessionId} about task ${task.id}`,
           err,
         );
+        return false;
       }
     }
   };
 
-  enqueueNotify(task.parentSessionId, doNotify);
+  return enqueueNotify(task.parentSessionId, doNotify);
 }
 
 function computeDuration(start: Date, end?: Date): string {
