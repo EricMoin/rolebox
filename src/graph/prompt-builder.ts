@@ -1,5 +1,6 @@
 import type { ResolvedGraph, GraphNodeRole } from "../types.ts";
 import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
+import { RESULT_FENCE } from "../dispatch/result-extractor.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -232,6 +233,28 @@ The graph completes when: an exit-point agent returns their output, OR max ${gra
 <routing_rules>
 ${GUARD_RULES}
 </routing_rules>`;
+}
+
+// ── Result contract ────────────────────────────────────────────────────
+
+/**
+ * Guidance block telling subagents to wrap their final deliverable
+ * inside a fenced ```result block so the orchestrator can extract it cleanly.
+ *
+ * This is guidance, not a hard requirement — extraction falls back to
+ * full text when no fence is present.
+ */
+export const SUBAGENT_RESULT_CONTRACT = `<result_contract>
+When you finish, put your final deliverable inside a fenced \`\`\`${RESULT_FENCE} block so the orchestrator can extract it cleanly. Everything outside the block is treated as working notes.
+</result_contract>`;
+
+/**
+ * Build the `<result_contract>` guidance block for subagents.
+ *
+ * Injects a concise reminder to use the result fence.
+ */
+export function buildResultContract(): string {
+  return SUBAGENT_RESULT_CONTRACT;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────

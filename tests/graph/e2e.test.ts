@@ -180,6 +180,7 @@ describe("Collaboration Graph E2E", () => {
         expect(coder).toBeDefined();
         expect(coder.mode).toBe("subagent");
         expect(coder.prompt).toContain("<collaboration_role>");
+        expect(coder.prompt).toContain("<result_contract>");
         expect(coder.prompt).toContain("You receive work from the orchestrator");
         expect(coder.prompt).toContain("Your output will be passed to: reviewer");
         expect((coder as Record<string, unknown>).hidden).toBe(true);
@@ -214,6 +215,7 @@ describe("Collaboration Graph E2E", () => {
         expect(reviewer).toBeDefined();
         expect(reviewer.mode).toBe("subagent");
         expect(reviewer.prompt).toContain("<collaboration_role>");
+        expect(reviewer.prompt).toContain("<result_contract>");
         expect(reviewer.prompt).toContain("You receive work from: coder");
         expect(reviewer.prompt).toContain("Your output completes the workflow");
         expect((reviewer as Record<string, unknown>).hidden).toBe(true);
@@ -365,6 +367,7 @@ describe("Collaboration Graph E2E", () => {
 
         expect(researcher.mode).toBe("subagent");
         expect(researcher.prompt).toContain("<collaboration_role>");
+        expect(researcher.prompt).toContain("<result_contract>");
         expect(researcher.prompt).toContain("You receive work from the orchestrator");
         expect(researcher.prompt).toContain("writer");
       } finally {

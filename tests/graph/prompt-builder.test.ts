@@ -2,6 +2,8 @@ import { describe, it, expect } from "bun:test";
 import {
   buildCollaborationBlock,
   buildSubagentRoleBlock,
+  buildResultContract,
+  SUBAGENT_RESULT_CONTRACT,
 } from "../../src/graph/prompt-builder";
 import type { ResolvedGraph, GraphNodeRole } from "../../src/types";
 
@@ -528,5 +530,36 @@ describe("buildSubagentRoleBlock", () => {
 
     expect(result).toMatch(/^<collaboration_role>/);
     expect(result).toMatch(/<\/collaboration_role>$/);
+  });
+});
+
+describe("buildResultContract", () => {
+  it("returns SUBAGENT_RESULT_CONTRACT constant", () => {
+    expect(buildResultContract()).toBe(SUBAGENT_RESULT_CONTRACT);
+  });
+
+  it("contains <result_contract> XML wrapper", () => {
+    const result = buildResultContract();
+    expect(result).toContain("<result_contract>");
+    expect(result).toContain("</result_contract>");
+  });
+
+  it("mentions the result fence", () => {
+    const result = buildResultContract();
+    expect(result).toContain("result");
+    expect(result).toContain("```");
+  });
+
+  it("is concise (≤4 lines)", () => {
+    const result = buildResultContract();
+    const lines = result.split("\n");
+    // XML tag lines + 1 content line = ≤4 lines
+    expect(lines.length).toBeLessThanOrEqual(4);
+  });
+
+  it("references RESULT_FENCE value in the fence syntax", () => {
+    const result = buildResultContract();
+    // Should say ```result not ```json or ```other
+    expect(result).toContain("```result");
   });
 });
