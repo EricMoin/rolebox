@@ -530,7 +530,11 @@ export class DispatchManager {
       return task;
     }
 
-    const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
+    const msgResult = await withTimeout(
+      this.client.session.messages({ path: { id: task.sessionId } }),
+      this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
+      "reopen:session.messages",
+    );
     const messageCountAtStart = (msgResult.data ?? []).length;
 
     this.transition(taskId, ["completed", "error", "timeout", "running"], "running", { completedAt: undefined });
@@ -1370,7 +1374,11 @@ export class DispatchManager {
     this.watchdog.resetWatchdog(taskId);
 
     try {
-      const msgResult = await this.client.session.messages({ path: { id: sessionId } });
+      const msgResult = await withTimeout(
+        this.client.session.messages({ path: { id: sessionId } }),
+        this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
+        "handleSessionIdle:session.messages",
+      );
       if (msgResult.error !== undefined) {
         debugLog("event", taskId, `session.idle messages fetch error: ${JSON.stringify(msgResult.error)}`);
         return;
@@ -1568,7 +1576,10 @@ export class DispatchManager {
     this.scheduleSidecarGC(taskId);
     this.persistState();
 
+    // Add to outbox before notify — sweeper re-sends if this fails
+    this.addToOutbox(taskId);
     await this.notifyCompletion(t);
+    // Outbox entry is pruned by sweeper on next tick if notify succeeded
   }
 
   // ── Terminal-path notification coverage ──────────────────────────────
