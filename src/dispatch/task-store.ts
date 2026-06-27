@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 
 import { createSubLogger } from "../logger.ts";
 import { getDataDir } from "../cli/paths.ts";
+import { acquireStateLock } from "./state-lock.ts";
 import type { DispatchTask, DispatchTaskStatus } from "./types.ts";
 
 // ─── Serialization Interfaces ──────────────────────────────────────────────
@@ -67,12 +68,36 @@ const log = createSubLogger("dispatch:store");
 export class TaskStateStore {
   private dirHash: string;
   private _saveLock: Promise<void> = Promise.resolve();
+  private _lockState?: ReturnType<typeof acquireStateLock>;
+  private _readOnly = false;
 
   constructor(directory: string) {
     this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
+
+  /** Lock State File for multi-instance isolation. */
+  tryLock(): boolean {
+    const lock = acquireStateLock(this.getStatePath());
+    if (lock.ok) {
+      this._lockState = lock;
+      return true;
+    }
+    this._readOnly = true;
+    return false;
+  }
+
+  /** Release lock if held. */
+  unlock(): void {
+    this._lockState?.release();
+    this._lockState = undefined;
+  }
+
+  /** Is this store in read-only degraded mode? */
+  get readOnly(): boolean {
+    return this._readOnly;
+  }
 
   /**
    * Persist the current task map to disk asynchronously.
@@ -83,6 +108,7 @@ export class TaskStateStore {
    * concurrent callers queue up behind the previous save.
    */
   async save(tasks: Map<string, DispatchTask>): Promise<void> {
+    if (this._readOnly) return;
     // Chain onto the previous save to serialize writes
     this._saveLock = this._saveLock.then(() => this._doSave(tasks), () => this._doSave(tasks));
     return this._saveLock;
@@ -193,6 +219,7 @@ export class TaskStateStore {
    * Never throws — wraps errors in try/catch and logs a warning.
    */
   saveSync(tasks: Map<string, DispatchTask>): void {
+    if (this._readOnly) return;
     try {
       const json = this.serialize(tasks);
       const statePath = this.getStatePath();
