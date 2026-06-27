@@ -22,9 +22,33 @@ export interface TaskProgress {
 }
 
 /**
+ * Reference to materialized (persisted) task output.
+ * Carries path + metadata so readers can decide whether to fetch the
+ * sidecar without loading the full text into memory.
+ *
+ * The persisted schema (state file) will also carry an `outbox: string[]`
+ * field alongside this ref — see T5.
+ */
+export interface MaterializedResultRef {
+  /** Absolute path to state/results/{taskId}.txt sidecar file */
+  sidecarPath: string;
+  /** Total character count of the materialized full text */
+  totalChars: number;
+  /** Whether the output contained a ```result fence */
+  hadFence: boolean;
+  /** Set when materialization failed (timeout/SDK error); sidecar may be empty */
+  fetchError?: string;
+  /** ISO timestamp of when materialization completed */
+  materializedAt: string;
+}
+
+/**
  * Full state record for a dispatched task.
  * Created when a parent agent calls task() and updated throughout the
  * task lifecycle by the dispatch manager's polling loop.
+ *
+ * NOTE: The persisted schema will later gain a top-level `outbox: string[]`
+ * field (not per-task) — see T5.
  */
 export interface DispatchTask {
   /** Unique identifier for this task instance */
@@ -59,6 +83,10 @@ export interface DispatchTask {
   timeoutMs?: number;
   /** Execution mode: "background" (async, default) or "sync" (blocks caller). */
   mode?: "background" | "sync";
+  /** Reference to materialized output once the task completes.
+   *  Populated by the completion/harvest pipeline after `result` signal
+   *  is emitted.  Absent until then. */
+  result?: MaterializedResultRef;
 }
 
 /**
