@@ -202,42 +202,57 @@ describe("createDispatchOutputTool", () => {
     expect(result).toContain("still running");
   });
 
-  it("blocks when task running and block=true, returns result on completion", async () => {
+  it("block=true returns immediately with guidance (no poll loop)", async () => {
     const running = makeTask({
       status: "running",
       completedAt: undefined,
     });
-    const completed = makeTask({ status: "completed" });
 
     let callCount = 0;
     const manager = {
       getTask: mock((_taskId: string) => {
         callCount++;
-        // Return running for the first few calls, then completed
-        if (callCount <= 2) return running;
-        return completed;
+        return running;
       }),
-      getResult: mock(() =>
-        Promise.resolve({
-          kind: "ok",
-          text: "blocked result",
-          resultText: "blocked result",
-          hadFence: false,
-          totalChars: 14,
-        }),
-      ),
     } as unknown as DispatchManager;
 
     const tool = createDispatchOutputTool(manager);
 
+    const start = Date.now();
     const result = await tool.execute(
       { task_id: "bg_test123", block: true, timeout: 5000 },
       mockToolContext,
     );
+    const elapsed = Date.now() - start;
 
-    expect(result).toContain("Task Result");
-    expect(result).toContain("blocked result");
-    expect(result).toContain("[result 14/14 chars]");
+    // Must return immediately (< 500ms — no poll loop)
+    expect(elapsed).toBeLessThan(500);
+    // Should show status, not result
+    expect(result).toContain("Task Status");
+    expect(result).toContain("still running");
+    // Should include deprecation note
+    expect(result).toContain("block/timeout parameters are deprecated");
+    // getTask called exactly once (no polling)
+    expect(callCount).toBe(1);
+  });
+
+  it("running task with block=false returns guidance, no deprecation note", async () => {
+    const running = makeTask({ status: "running", completedAt: undefined });
+    const manager = {
+      getTask: mock(() => running),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_test123", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Task Status");
+    expect(result).toContain("still running");
+    expect(result).toContain("<system-reminder>");
+    // No deprecation note when block=false (default)
+    expect(result).not.toContain("deprecated");
   });
 
   it("T11: 6 distinct task states produce 6 distinguishable outputs", async () => {
