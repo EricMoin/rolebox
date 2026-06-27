@@ -884,4 +884,213 @@ describe("Collaboration Graph E2E", () => {
       expect(state2.completed).toEqual(["coder", "reviewer"]);
     });
   });
+
+  // ── I. Star Topology ──────────────────────────────────────────
+
+  describe("Star Topology", () => {
+    function starGraph(): ResolvedGraph {
+      return {
+        edges: [
+          { from: "parent", to: "a" },
+          { from: "parent", to: "b" },
+          { from: "parent", to: "c" },
+          { from: "a", to: "parent", exit: true },
+          { from: "b", to: "parent", exit: true },
+          { from: "c", to: "parent", exit: true },
+        ],
+        nodes: ["a", "b", "c"],
+        maxIterations: 0,
+        exitEdges: [
+          { from: "a", to: "parent", exit: true },
+          { from: "b", to: "parent", exit: true },
+          { from: "c", to: "parent", exit: true },
+        ],
+        template: "star",
+      };
+    }
+
+    it("initGraph populates frontier with all star workers [a,b,c]", () => {
+      const graph = starGraph();
+      graphSessionState.initGraph("star-1", graph);
+
+      const state = graphSessionState.getState("star-1")!;
+      expect(state.status).toBe("active");
+      expect(state.frontier).toEqual(["a", "b", "c"]);
+      expect(state.completed).toEqual([]);
+    });
+
+    it("advanceStep completes only after all three workers finish", () => {
+      const graph = starGraph();
+      graphSessionState.initGraph("star-2", graph);
+
+      graphSessionState.advanceStep("star-2", "a");
+      let state = graphSessionState.getState("star-2")!;
+      expect(state.status).toBe("active");
+      expect(state.frontier).toEqual(["b", "c"]);
+
+      graphSessionState.advanceStep("star-2", "b");
+      state = graphSessionState.getState("star-2")!;
+      expect(state.status).toBe("active");
+      expect(state.frontier).toEqual(["c"]);
+
+      graphSessionState.advanceStep("star-2", "c");
+      state = graphSessionState.getState("star-2")!;
+      expect(state.status).toBe("complete");
+      expect(state.frontier).toEqual([]);
+      expect(state.completed).toEqual(["a", "b", "c"]);
+    });
+
+    it("getNextAction returns all frontier targets for star", () => {
+      const graph = starGraph();
+      graphSessionState.initGraph("star-3", graph);
+
+      const state = graphSessionState.getState("star-3")!;
+      const actions = graphSessionState.getNextAction(state, graph);
+      expect(actions.length).toBe(3);
+      expect(actions.map((e) => e.to).sort()).toEqual(["a", "b", "c"]);
+    });
+
+    it("buildGraphStateBlock shows all frontier targets", () => {
+      const graph = starGraph();
+      graphSessionState.initGraph("star-4", graph);
+
+      const state = graphSessionState.getState("star-4")!;
+      const block = buildGraphStateBlock(state, graph);
+
+      expect(block).toContain("<status>active</status>");
+      expect(block).toContain("Dispatch to a");
+      expect(block).toContain("Dispatch to b");
+      expect(block).toContain("Dispatch to c");
+    });
+  });
+
+  // ── J. Off-Route Correction ───────────────────────────────────
+
+  describe("Off-Route Correction", () => {
+    function pipelineGraph(): ResolvedGraph {
+      return {
+        edges: [
+          { from: "parent", to: "coder" },
+          { from: "coder", to: "reviewer" },
+          { from: "reviewer", to: "parent", exit: true },
+        ],
+        nodes: ["coder", "reviewer"],
+        maxIterations: 3,
+        exitEdges: [{ from: "reviewer", to: "parent", exit: true }],
+        template: "pipeline",
+      };
+    }
+
+    it("dispatch to off-route node returns correction", () => {
+      const graph = pipelineGraph();
+      graphSessionState.initGraph("off-1", graph);
+
+      // coder is in frontier; reviewer is not yet
+      const result = advanceGraphForDispatch("off-1", "task", {
+        subagent_type: "reviewer",
+      });
+
+      expect(result.result.kind).toBe("off_route");
+      expect(result.correction).toBeDefined();
+      expect(result.correction!).toContain("off the collaboration graph route");
+      expect(result.correction!).toContain("reviewer");
+      expect(result.correction!).toContain("coder");
+    });
+
+    it("dispatch unknown node returns correction", () => {
+      const graph = pipelineGraph();
+      graphSessionState.initGraph("off-2", graph);
+
+      const result = advanceGraphForDispatch("off-2", "dispatch", {
+        subagent: "ghost",
+      });
+
+      expect(result.result.kind).toBe("unknown");
+      expect(result.correction).toBeDefined();
+      expect(result.correction!).toContain("not part of the collaboration graph");
+      expect(result.correction!).toContain("ghost");
+    });
+
+    it("off-route dispatch does not change state", () => {
+      const graph = pipelineGraph();
+      graphSessionState.initGraph("off-3", graph);
+
+      const before = graphSessionState.getState("off-3")!;
+      expect(before.frontier).toEqual(["coder"]);
+
+      advanceGraphForDispatch("off-3", "task", {
+        subagent_type: "reviewer",
+      });
+
+      const after = graphSessionState.getState("off-3")!;
+      expect(after.frontier).toEqual(["coder"]);
+    });
+  });
+
+  // ── K. Persisted Progress Recovery ────────────────────────────
+
+  describe("Persisted Progress Recovery", () => {
+    it("recovers state after persist + fresh GraphSessionState", async () => {
+      const { mkdtempSync, rmSync, mkdirSync } = await import("node:fs");
+      const path = await import("node:path");
+      const os = await import("node:os");
+
+      const dir = mkdtempSync(path.join(os.tmpdir(), "rolebox-graph-persist-"));
+      const stateDir = path.join(dir, "state");
+      mkdirSync(stateDir, { recursive: true });
+
+      try {
+        // Set up a fresh GraphSessionState with store directory
+        graphSessionState.setStoreDirectory(dir);
+
+        const graph: ResolvedGraph = {
+          edges: [
+            { from: "parent", to: "a" },
+            { from: "parent", to: "b" },
+            { from: "a", to: "parent", exit: true },
+            { from: "b", to: "parent", exit: true },
+          ],
+          nodes: ["a", "b"],
+          maxIterations: 0,
+          exitEdges: [
+            { from: "a", to: "parent", exit: true },
+            { from: "b", to: "parent", exit: true },
+          ],
+          template: "star",
+        };
+
+        graphSessionState.initGraph("persist-test", graph, "test-agent");
+        graphSessionState.advanceStep("persist-test", "a");
+
+        // Flush async persist
+        graphSessionState.flushSync();
+
+        // Clear in-memory state
+        (graphSessionState as any).states.clear();
+        (graphSessionState as any).graphs.clear();
+        (graphSessionState as any).agentIds.clear();
+
+        // Recover — needs reattach callback
+        graphSessionState.recover((sid, agentId) => {
+          if (agentId === "test-agent") return graph;
+          return undefined;
+        });
+
+        const recovered = graphSessionState.getState("persist-test");
+        expect(recovered).toBeDefined();
+        expect(recovered!.status).toBe("active");
+        expect(recovered!.frontier).toEqual(["b"]);
+        expect(recovered!.completed).toEqual(["a"]);
+      } finally {
+        // Cleanup
+        graphSessionState.clear("persist-test");
+        (graphSessionState as any).states.clear();
+        (graphSessionState as any).graphs.clear();
+        (graphSessionState as any).agentIds.clear();
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {}
+      }
+    });
+  });
 });
