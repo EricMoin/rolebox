@@ -185,8 +185,8 @@ describe("advanceGraphForDispatch", () => {
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state).toBeDefined();
-    expect(state!.completedSteps).toContain("coder");
-    expect(state!.currentStep).toBe(1);
+    expect(state!.completed).toContain("coder");
+    expect(state!.frontier).toEqual(["reviewer"]);
   });
 
   it("advances state when called with valid dispatch args", () => {
@@ -197,7 +197,7 @@ describe("advanceGraphForDispatch", () => {
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state).toBeDefined();
-    expect(state!.completedSteps).toContain("coder");
+    expect(state!.completed).toContain("coder");
   });
 
   it("advances state from string fallback args", () => {
@@ -210,7 +210,7 @@ describe("advanceGraphForDispatch", () => {
 
     const state = graphSessionState.getState(SESSION_ID);
     expect(state).toBeDefined();
-    expect(state!.completedSteps).toContain("coder");
+    expect(state!.completed).toContain("coder");
   });
 
   it("does nothing when session has no state", () => {
@@ -230,7 +230,7 @@ describe("advanceGraphForDispatch", () => {
     });
 
     const state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toEqual([]);
+    expect(state!.completed).toEqual([]);
   });
 
   it("does nothing when state status is exhausted", () => {
@@ -242,7 +242,7 @@ describe("advanceGraphForDispatch", () => {
     });
 
     const state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toEqual([]);
+    expect(state!.completed).toEqual([]);
   });
 
   it("does nothing when target cannot be extracted", () => {
@@ -250,7 +250,7 @@ describe("advanceGraphForDispatch", () => {
     advanceGraphForDispatch(SESSION_ID, "task", {});
 
     const state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toEqual([]);
+    expect(state!.completed).toEqual([]);
   });
 
   it("does nothing when args is null", () => {
@@ -258,7 +258,7 @@ describe("advanceGraphForDispatch", () => {
     advanceGraphForDispatch(SESSION_ID, "task", null);
 
     const state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toEqual([]);
+    expect(state!.completed).toEqual([]);
   });
 
   it("advances through multiple steps correctly", () => {
@@ -268,14 +268,14 @@ describe("advanceGraphForDispatch", () => {
       subagent_type: "coder",
     });
     let state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toContain("coder");
+    expect(state!.completed).toContain("coder");
     expect(state!.status).toBe("active");
 
     advanceGraphForDispatch(SESSION_ID, "dispatch", {
       subagent: "reviewer",
     });
     state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toContain("reviewer");
+    expect(state!.completed).toContain("reviewer");
     expect(state!.status).toBe("complete");
   });
 
@@ -286,7 +286,7 @@ describe("advanceGraphForDispatch", () => {
     });
 
     const state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps).toEqual([]);
+    expect(state!.completed).toEqual([]);
     expect(state!.status).toBe("active");
   });
 
@@ -301,7 +301,7 @@ describe("advanceGraphForDispatch", () => {
     });
 
     const state = graphSessionState.getState(SESSION_ID);
-    expect(state!.completedSteps.filter((s) => s === "coder").length).toBe(1);
+    expect(state!.completed.filter((s) => s === "coder").length).toBe(1);
     expect(state!.iterationCount).toBe(0);
   });
 });

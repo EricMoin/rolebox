@@ -2,11 +2,19 @@ import type { FlowEdge, ResolvedGraph } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
 
 export interface GraphExecutionState {
-  currentStep: number;
-  completedSteps: string[];
+  frontier: string[];
+  completed: string[];
   iterationCount: number;
   status: "active" | "complete" | "exhausted";
 }
+
+export type AdvanceResult =
+  | { kind: "advanced"; frontier: string[] }
+  | { kind: "completed" }
+  | { kind: "exhausted" }
+  | { kind: "off_route"; expected: string[]; got: string }
+  | { kind: "unknown"; got: string }
+  | { kind: "ignored" };
 
 export class GraphSessionState {
   private graphs: Map<string, ResolvedGraph> = new Map();
@@ -14,91 +22,89 @@ export class GraphSessionState {
 
   initGraph(sessionID: string, graph: ResolvedGraph): void {
     this.graphs.set(sessionID, graph);
+    const frontier: string[] = [];
+    for (const e of graph.edges) {
+      if (
+        e.from === PARENT_NODE &&
+        e.to !== PARENT_NODE &&
+        !frontier.includes(e.to)
+      ) {
+        frontier.push(e.to);
+      }
+    }
     this.states.set(sessionID, {
-      currentStep: 0,
-      completedSteps: [],
+      frontier,
+      completed: [],
       iterationCount: 0,
       status: "active",
     });
   }
 
-  advanceStep(sessionID: string, completedAgent: string): void {
+  advanceStep(sessionID: string, completedAgent: string): AdvanceResult {
     const state = this.states.get(sessionID);
     const graph = this.graphs.get(sessionID);
-    if (!state || !graph) return;
-    if (state.status !== "active") return;
+    if (!state || !graph) return { kind: "ignored" };
+    if (state.status !== "active") return { kind: "ignored" };
 
-    if (state.completedSteps.length > 0 && state.completedSteps[state.completedSteps.length - 1] === completedAgent) {
-      return;
+    if (!graph.nodes.includes(completedAgent)) {
+      return { kind: "unknown", got: completedAgent };
     }
 
-    // Collect all outgoing edges from completedAgent
-    const outgoingEdges = graph.edges.filter((e) => e.from === completedAgent);
+    if (!state.frontier.includes(completedAgent)) {
+      return {
+        kind: "off_route",
+        expected: [...state.frontier],
+        got: completedAgent,
+      };
+    }
 
-    if (outgoingEdges.length === 0) {
-      // Valid sink node: mark complete
-      if (graph.nodes.includes(completedAgent)) {
-        state.completedSteps.push(completedAgent);
-        state.status = "complete";
-        setTimeout(() => this.clear(sessionID), 0);
+    state.frontier = state.frontier.filter((a) => a !== completedAgent);
+
+    const lastCompleted = state.completed[state.completed.length - 1];
+    if (lastCompleted !== completedAgent) {
+      state.completed.push(completedAgent);
+    }
+
+    const outgoing = graph.edges.filter((e) => e.from === completedAgent);
+    const exitEdges = outgoing.filter((e) => e.exit || e.to === PARENT_NODE);
+    const forward = outgoing.filter((e) => !e.exit && e.to !== PARENT_NODE);
+
+    let skippedLoopDueToCap = false;
+    for (const e of forward) {
+      if (state.completed.includes(e.to)) {
+        state.iterationCount++;
+        if (state.iterationCount > graph.maxIterations) {
+          skippedLoopDueToCap = true;
+          continue;
+        }
       }
-      // Unknown agent: no-op, don't modify state
-      return;
+      if (!state.frontier.includes(e.to)) {
+        state.frontier.push(e.to);
+      }
     }
 
-    state.completedSteps.push(completedAgent);
-
-    // Separate into exit edges and non-exit (loop) edges
-    const exitEdges = outgoingEdges.filter(
-      (e) => e.exit || e.to === PARENT_NODE,
-    );
-    const loopEdges = outgoingEdges.filter(
-      (e) => !(e.exit || e.to === PARENT_NODE),
-    );
-
-    // Decide which edge to follow based on iteration state
-    let chosenEdge: FlowEdge;
-    if (
-      state.iterationCount >= graph.maxIterations &&
-      graph.maxIterations > 0
-    ) {
-      // Prefer exit when iteration limit reached
-      chosenEdge = exitEdges[0] ?? loopEdges[0];
-    } else {
-      // Otherwise prefer looping back
-      chosenEdge = loopEdges[0] ?? exitEdges[0];
-    }
-
-    const chosenIdx = graph.edges.indexOf(chosenEdge);
-
-    // Handle exit edge
-    if (chosenEdge.exit || chosenEdge.to === PARENT_NODE) {
-      state.currentStep = chosenIdx;
-      state.status = "complete";
-      setTimeout(() => this.clear(sessionID), 0);
-      return;
-    }
-
-    // Handle loop-back (target agent already visited)
-    if (state.completedSteps.includes(chosenEdge.to)) {
-      state.iterationCount++;
-      if (state.iterationCount > graph.maxIterations) {
+    if (state.frontier.length === 0) {
+      if (
+        forward.length > 0 &&
+        skippedLoopDueToCap &&
+        exitEdges.length === 0
+      ) {
         state.status = "exhausted";
-        state.currentStep = chosenIdx;
-        setTimeout(() => this.clear(sessionID), 0);
-        return;
+        return { kind: "exhausted" };
       }
-      state.currentStep = chosenIdx;
-      return;
+      state.status = "complete";
+      return { kind: "completed" };
     }
 
-    // Normal advance
-    state.currentStep = chosenIdx;
+    return { kind: "advanced", frontier: [...state.frontier] };
   }
 
-  getNextAction(state: GraphExecutionState, graph: ResolvedGraph): FlowEdge | undefined {
-    if (state.status !== "active") return undefined;
-    return graph.edges[state.currentStep];
+  getNextAction(
+    state: GraphExecutionState,
+    graph: ResolvedGraph,
+  ): FlowEdge[] {
+    if (state.status !== "active") return [];
+    return graph.edges.filter((e) => state.frontier.includes(e.to));
   }
 
   getState(sessionID: string): GraphExecutionState | undefined {
@@ -127,19 +133,29 @@ export function buildGraphStateBlock(
   state: GraphExecutionState,
   graph: ResolvedGraph,
 ): string {
-  const stepInfo = state.status === "active"
-    ? graph.edges[state.currentStep]
-    : null;
+  const frontierStr = state.frontier.join(", ") || "none";
+  const completedStr = state.completed.join(", ") || "none";
+  const iterStr = `${state.iterationCount}/${graph.maxIterations || "unlimited"}`;
 
-  const nextAction = stepInfo
-    ? `Dispatch to ${stepInfo.to}${stepInfo.label ? ` (${stepInfo.label})` : ""}`
-    : "Workflow complete";
+  let nextAction: string;
+  if (state.status === "active") {
+    nextAction = state.frontier
+      .map((target) => {
+        const edge = graph.edges.find((e) => e.to === target);
+        return `Dispatch to ${target}${edge?.label ? ` (${edge.label})` : ""}`;
+      })
+      .join("\n  ");
+  } else if (state.status === "exhausted") {
+    nextAction = "Workflow exhausted";
+  } else {
+    nextAction = "Workflow complete";
+  }
 
   return `<collaboration_state>
   <status>${state.status}</status>
-  <current_step>${state.currentStep}</current_step>
-  <completed_steps>${state.completedSteps.join(", ") || "none"}</completed_steps>
-  <iteration>${state.iterationCount}/${graph.maxIterations || "unlimited"}</iteration>
+  <frontier>${frontierStr}</frontier>
+  <completed>${completedStr}</completed>
+  <iteration>${iterStr}</iteration>
   <next_action>${nextAction}</next_action>
 </collaboration_state>`;
 }

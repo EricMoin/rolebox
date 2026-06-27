@@ -1,4 +1,5 @@
 import { graphSessionState } from "./state.ts";
+import type { AdvanceResult } from "./state.ts";
 
 // Regex patterns for string fallback extraction, matching the existing
 // patterns from the plugin-hooks tool.execute.after handler.
@@ -64,13 +65,13 @@ export function advanceGraphForDispatch(
   sessionID: string,
   tool: string,
   args: unknown,
-): void {
+): AdvanceResult {
   const state = graphSessionState.getState(sessionID);
-  if (!state) return;
-  if (state.status !== "active") return;
+  if (!state) return { kind: "ignored" };
+  if (state.status !== "active") return { kind: "ignored" };
 
   const target = extractDispatchTarget(tool, args);
-  if (!target) return;
+  if (!target) return { kind: "ignored" };
 
-  graphSessionState.advanceStep(sessionID, target);
+  return graphSessionState.advanceStep(sessionID, target);
 }

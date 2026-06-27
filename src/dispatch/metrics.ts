@@ -11,7 +11,12 @@
 
 // ── Histogram bucket boundaries (milliseconds) ───────────────────────
 
-const HISTOGRAM_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000] as const;
+const HISTOGRAM_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000, 900000, 1800000, 2700000] as const;
+
+const CORE_METRIC_NAMES = {
+  counters: ["dispatch_rejected_total"],
+  gauges: ["inflight_tasks", "concurrency_queued"],
+} as const;
 
 // ── Public interfaces ────────────────────────────────────────────────
 
@@ -144,12 +149,25 @@ export class MetricsRegistry {
   private gauges = new Map<string, Gauge>();
   private histograms = new Map<string, Histogram>();
 
+  private coreCounters = new Map<string, Counter>();
+  private coreGauges = new Map<string, Gauge>();
+
   constructor(enabled?: boolean) {
     this.enabled = enabled ?? !!process.env.ROLEBOX_METRICS;
   }
 
   counter(name: string, labels?: Record<string, string>): Counter {
-    if (!this.enabled) return new Counter();
+    if (!this.enabled) {
+      if (!CORE_METRIC_NAMES.counters.includes(name as typeof CORE_METRIC_NAMES.counters[number])) {
+        return new Counter();
+      }
+      const key = makeKey(name, labels);
+      const existing = this.coreCounters.get(key);
+      if (existing) return existing;
+      const c = new Counter();
+      this.coreCounters.set(key, c);
+      return c;
+    }
     const key = makeKey(name, labels);
     const existing = this.counters.get(key);
     if (existing) return existing;
@@ -159,7 +177,17 @@ export class MetricsRegistry {
   }
 
   gauge(name: string, labels?: Record<string, string>): Gauge {
-    if (!this.enabled) return new Gauge();
+    if (!this.enabled) {
+      if (!CORE_METRIC_NAMES.gauges.includes(name as typeof CORE_METRIC_NAMES.gauges[number])) {
+        return new Gauge();
+      }
+      const key = makeKey(name, labels);
+      const existing = this.coreGauges.get(key);
+      if (existing) return existing;
+      const g = new Gauge();
+      this.coreGauges.set(key, g);
+      return g;
+    }
     const key = makeKey(name, labels);
     const existing = this.gauges.get(key);
     if (existing) return existing;
@@ -180,7 +208,15 @@ export class MetricsRegistry {
 
   snapshot(): MetricsSnapshot {
     if (!this.enabled) {
-      return { counters: {}, gauges: {}, histograms: {} };
+      const counters: Record<string, CounterSnapshot> = {};
+      for (const [key, c] of this.coreCounters) {
+        counters[key] = { value: c.peek() };
+      }
+      const gauges: Record<string, GaugeSnapshot> = {};
+      for (const [key, g] of this.coreGauges) {
+        gauges[key] = { value: g.peek() };
+      }
+      return { counters, gauges, histograms: {} };
     }
 
     const counters: Record<string, CounterSnapshot> = {};
