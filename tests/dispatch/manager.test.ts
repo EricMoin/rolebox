@@ -215,6 +215,29 @@ describe("DispatchManager", () => {
     expect(mgr.concurrency.getActiveCount("default")).toBe(4);
   });
 
+  it("executeSync session create hang does not block forever", async () => {
+    const client = createMockClient({
+      sessionCreate: () => new Promise<never>(() => {}), // never resolves
+    });
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      materializeTimeoutMs: 20,
+      syncAcquireTimeoutMs: 5000,
+      syncPromptTimeoutMs: 5000,
+    });
+    const mgr = manager as any;
+
+    await expect(
+      manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      ),
+    ).rejects.toThrow(/timed out/);
+
+    // Slot must be released after timeout
+    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+  });
+
   // ── 2c. executeSync metrics ──────────────────────────────────
 
   describe("executeSync metrics", () => {
@@ -3447,7 +3470,7 @@ describe("flushPersistSync", () => {
     const freshStore2 = new TaskStateStore(dir);
     const loaded2 = freshStore2.load();
     expect(loaded2).not.toBeNull();
-    const loadedTask = loaded2!.get(task.id);
+    const loadedTask = loaded2!.tasks.get(task.id);
     expect(loadedTask).toBeDefined();
     expect(loadedTask!.status).toBe("completed");
 
@@ -4109,5 +4132,145 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // Cleanup
     mgr.handleTaskCompleted(task.id);
+  });
+
+  // ── materializeResult() ──────────────────────────────────────
+
+  it("materializeResult() fetches messages, extracts result, and writes sidecar", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" as const },
+              parts: [
+                { type: "text" as const, text: "Some preamble.\n```result\nclean output\n```\nSome postamble." },
+              ],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "do work", run_in_background: false },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    const ref = await mgr.materializeResult(task.id);
+
+    expect(ref.sidecarPath).toContain(`state/results/${task.id}.txt`);
+    expect(ref.totalChars).toBeGreaterThan(0);
+    expect(ref.hadFence).toBe(true);
+    expect(ref.fetchError).toBeUndefined();
+    expect(ref.materializedAt).toBeString();
+    expect(new Date(ref.materializedAt).getTime()).toBeGreaterThan(0);
+  });
+
+  it("materializeResult() returns fetchError ref when task is not found", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+    const mgr = manager as any;
+
+    const ref = await mgr.materializeResult("nonexistent");
+
+    expect(ref.sidecarPath).toBe("");
+    expect(ref.totalChars).toBe(0);
+    expect(ref.hadFence).toBe(false);
+    expect(ref.fetchError).toBe("task not found");
+    expect(ref.materializedAt).toBeString();
+  });
+
+  it("materializeResult() returns fetchError ref when messages API returns error", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: undefined,
+          error: { message: "session expired" },
+        }),
+    });
+    const manager = new DispatchManager(client);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "fail", run_in_background: false },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    const ref = await mgr.materializeResult(task.id);
+
+    expect(ref.sidecarPath).toBe("");
+    expect(ref.totalChars).toBe(0);
+    expect(ref.hadFence).toBe(false);
+    expect(ref.fetchError).toContain("Error retrieving task output");
+    expect(ref.fetchError).toContain("session expired");
+    expect(ref.materializedAt).toBeString();
+  });
+
+  it("materializeResult() handles hanging messages call without hanging test", async () => {
+    const client = createMockClient({
+      sessionMessages: () => new Promise(() => {
+        // never resolves — simulates a hanging SDK call
+      }),
+    });
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      materializeTimeoutMs: 100,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "hang", run_in_background: false },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    const start = Date.now();
+    const ref = await mgr.materializeResult(task.id);
+    const elapsed = Date.now() - start;
+
+    expect(ref.sidecarPath).toBe("");
+    expect(ref.totalChars).toBe(0);
+    expect(ref.hadFence).toBe(false);
+    expect(ref.fetchError).toBe("timeout");
+    expect(ref.materializedAt).toBeString();
+    expect(elapsed).toBeLessThan(2000); // should resolve quickly due to 100ms timeout
+  });
+
+  it("materializeResult() respects messageCountAtStart boundary", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "old output" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "new output" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "do work", run_in_background: false },
+      parentContext(),
+    );
+
+    // Manually set messageCountAtStart to skip first message
+    const tasks = (manager as any).tasks as Map<string, any>;
+    const taskRef = tasks.get(task.id);
+    taskRef.messageCountAtStart = 1;
+
+    const mgr = manager as any;
+    const ref = await mgr.materializeResult(task.id);
+
+    expect(ref.totalChars).toBe("new output".length);
+    expect(ref.fetchError).toBeUndefined();
   });
 });
