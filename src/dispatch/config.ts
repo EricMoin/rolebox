@@ -75,6 +75,21 @@ export const DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS = 120_000;
  *  LIVE — consumed by manager.ts (Task 12) */
 export const DEFAULT_SYNC_PROMPT_TIMEOUT_MS = 600_000;
 
+/** Timeout (ms) for materializing a sub-agent result fetch — default: 10 s */
+export const MATERIALIZE_TIMEOUT_MS = 10_000;
+
+/** Result retention (ms): how long sidecar result files are kept after task cleanup — default: 1 h */
+export const RESULT_RETENTION_MS = 3_600_000;
+
+/** Outbox sweeper initial retry delay (ms) — default: 3 s */
+export const OUTBOX_FIRST_RETRY_MS = 3_000;
+
+/** Outbox sweeper max retry delay (ms) — default: 60 s */
+export const OUTBOX_MAX_RETRY_MS = 60_000;
+
+/** Outbox sweeper polling interval (ms) — default: 5 s */
+export const OUTBOX_SWEEP_INTERVAL_MS = 5_000;
+
 // ── Configuration interface ─────────────────────────────────────────
 
 /**
@@ -119,6 +134,17 @@ export interface DispatchManagerConfig {
   backpressureMaxRetries?: number;
   /** Max cumulative delay (ms) under backpressure before giving up — default: 60000 */
   backpressureMaxDelayMs?: number;
+
+  /** Timeout (ms) for materializing a sub-agent result fetch — default: 10000 */
+  materializeTimeoutMs?: number;
+  /** How long (ms) sidecar result files are kept after task cleanup — default: 3600000 */
+  resultRetentionMs?: number;
+  /** Outbox sweeper initial retry delay (ms) — default: 3000 */
+  outboxFirstRetryMs?: number;
+  /** Outbox sweeper max retry delay (ms) — default: 60000 */
+  outboxMaxRetryMs?: number;
+  /** Outbox sweeper polling interval (ms) — default: 5000 */
+  outboxSweepIntervalMs?: number;
 }
 
 // ── Default configuration ───────────────────────────────────────────
@@ -140,6 +166,12 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   retryAfterMs: DEFAULT_RETRY_AFTER_MS,
   backpressureMaxRetries: DEFAULT_BACKPRESSURE_MAX_RETRIES,
   backpressureMaxDelayMs: DEFAULT_BACKPRESSURE_MAX_DELAY_MS,
+
+  materializeTimeoutMs: MATERIALIZE_TIMEOUT_MS,
+  resultRetentionMs: RESULT_RETENTION_MS,
+  outboxFirstRetryMs: OUTBOX_FIRST_RETRY_MS,
+  outboxMaxRetryMs: OUTBOX_MAX_RETRY_MS,
+  outboxSweepIntervalMs: OUTBOX_SWEEP_INTERVAL_MS,
 };
 
 // ── Environment variable resolution ─────────────────────────────────
@@ -177,6 +209,12 @@ export function resolveEnvConfig(): Partial<DispatchManagerConfig> {
 
   const bs = intEnv("ROLEBOX_DISPATCH_BG_STALE_MS");
   if (bs !== undefined) result.backgroundStaleTimeoutMs = bs;
+
+  const mt = intEnv("ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS");
+  if (mt !== undefined) result.materializeTimeoutMs = mt;
+
+  const rr = intEnv("ROLEBOX_DISPATCH_RESULT_RETENTION_MS");
+  if (rr !== undefined) result.resultRetentionMs = rr;
 
   return result;
 }
