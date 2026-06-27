@@ -19,6 +19,11 @@ import {
   GLOBAL_SWEEP_INTERVAL_MS,
   IDLE_DEBOUNCE_MS,
   SYNC_TIMEOUT_MS,
+  MATERIALIZE_TIMEOUT_MS,
+  RESULT_RETENTION_MS,
+  OUTBOX_FIRST_RETRY_MS,
+  OUTBOX_MAX_RETRY_MS,
+  OUTBOX_SWEEP_INTERVAL_MS,
 } from "../../src/dispatch/config";
 
 const savedEnv: Record<string, string | undefined> = {};
@@ -31,6 +36,8 @@ function resetEnvVars() {
     "ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT",
     "ROLEBOX_DISPATCH_RETRY_AFTER_MS",
     "ROLEBOX_DISPATCH_BG_STALE_MS",
+    "ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS",
+    "ROLEBOX_DISPATCH_RESULT_RETENTION_MS",
   ]) {
     if (key in process.env) {
       savedEnv[key] = process.env[key];
@@ -64,6 +71,21 @@ describe("DEFAULT_CONFIG", () => {
 
     expect(DEFAULT_CONFIG.syncPromptTimeoutMs).toBe(DEFAULT_SYNC_PROMPT_TIMEOUT_MS);
     expect(DEFAULT_CONFIG.syncPromptTimeoutMs).toBe(600000);
+
+    expect(DEFAULT_CONFIG.materializeTimeoutMs).toBe(MATERIALIZE_TIMEOUT_MS);
+    expect(DEFAULT_CONFIG.materializeTimeoutMs).toBe(10000);
+
+    expect(DEFAULT_CONFIG.resultRetentionMs).toBe(RESULT_RETENTION_MS);
+    expect(DEFAULT_CONFIG.resultRetentionMs).toBe(3600000);
+
+    expect(DEFAULT_CONFIG.outboxFirstRetryMs).toBe(OUTBOX_FIRST_RETRY_MS);
+    expect(DEFAULT_CONFIG.outboxFirstRetryMs).toBe(3000);
+
+    expect(DEFAULT_CONFIG.outboxMaxRetryMs).toBe(OUTBOX_MAX_RETRY_MS);
+    expect(DEFAULT_CONFIG.outboxMaxRetryMs).toBe(60000);
+
+    expect(DEFAULT_CONFIG.outboxSweepIntervalMs).toBe(OUTBOX_SWEEP_INTERVAL_MS);
+    expect(DEFAULT_CONFIG.outboxSweepIntervalMs).toBe(5000);
   });
 
   it("retains all live legacy fields", () => {
@@ -155,6 +177,8 @@ describe("resolveEnvConfig", () => {
     process.env.ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT = "7";
     process.env.ROLEBOX_DISPATCH_RETRY_AFTER_MS = "15000";
     process.env.ROLEBOX_DISPATCH_BG_STALE_MS = "600000";
+    process.env.ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS = "20000";
+    process.env.ROLEBOX_DISPATCH_RESULT_RETENTION_MS = "7200000";
 
     const result = resolveEnvConfig();
     expect(result.maxConcurrent).toBe(10);
@@ -163,7 +187,9 @@ describe("resolveEnvConfig", () => {
     expect(result.maxActivePerParent).toBe(7);
     expect(result.retryAfterMs).toBe(15000);
     expect(result.backgroundStaleTimeoutMs).toBe(600000);
-    expect(Object.keys(result).length).toBe(6);
+    expect(result.materializeTimeoutMs).toBe(20000);
+    expect(result.resultRetentionMs).toBe(7200000);
+    expect(Object.keys(result).length).toBe(8);
   });
 });
 
