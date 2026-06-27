@@ -20,6 +20,18 @@ interface SerializedTaskProgress {
 }
 
 /**
+ * JSON-serializable mirror of MaterializedResultRef.
+ * Only JSON-safe primitives — no Date objects.
+ */
+interface SerializedMaterializedResultRef {
+  sidecarPath: string;
+  totalChars: number;
+  hadFence: boolean;
+  fetchError?: string;
+  materializedAt: string;
+}
+
+/**
  * JSON-serializable mirror of DispatchTask.
  * Date fields are stored as ISO strings and deserialized back on load.
  */
@@ -40,6 +52,7 @@ export interface SerializedDispatchTask {
   messageCountAtStart?: number;
   timeoutMs?: number;
   mode?: string;
+  result?: SerializedMaterializedResultRef;
 }
 
 /**
@@ -47,8 +60,9 @@ export interface SerializedDispatchTask {
  * Version field enables future schema migrations.
  */
 interface DispatchStateFile {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   tasks: SerializedDispatchTask[];
+  outbox?: string[];
 }
 
 // ─── TaskStateStore ─────────────────────────────────────────────────────────
@@ -107,16 +121,16 @@ export class TaskStateStore {
    * Serialization lock ensures only one write is in-flight at a time;
    * concurrent callers queue up behind the previous save.
    */
-  async save(tasks: Map<string, DispatchTask>): Promise<void> {
+  async save(tasks: Map<string, DispatchTask>, outbox?: Set<string>): Promise<void> {
     if (this._readOnly) return;
     // Chain onto the previous save to serialize writes
-    this._saveLock = this._saveLock.then(() => this._doSave(tasks), () => this._doSave(tasks));
+    this._saveLock = this._saveLock.then(() => this._doSave(tasks, outbox), () => this._doSave(tasks, outbox));
     return this._saveLock;
   }
 
-  private async _doSave(tasks: Map<string, DispatchTask>): Promise<void> {
+  private async _doSave(tasks: Map<string, DispatchTask>, outbox?: Set<string>): Promise<void> {
     try {
-      const json = this.serialize(tasks);
+      const json = this.serialize(tasks, outbox);
       const statePath = this.getStatePath();
       const stateDir = join(statePath, "..");
 
@@ -141,10 +155,10 @@ export class TaskStateStore {
    * - File is corrupt JSON — logged as warning
    * - File has unexpected schema version — logged as warning
    *
-   * On success, returns a Map<string, DispatchTask> with ISO strings
-   * deserialized back to Date objects.
+   * On success, returns tasks map with ISO strings deserialized to Dates,
+   * plus the outbox string array (empty for v1-v3 or when absent).
    */
-  load(): Map<string, DispatchTask> | null {
+  load(): { tasks: Map<string, DispatchTask>; outbox: string[] } | null {
     let raw: string;
     try {
       raw = readFileSync(this.getStatePath(), "utf-8");
@@ -160,10 +174,15 @@ export class TaskStateStore {
     if (!parsed) return null;
 
     const { version, tasks } = parsed;
-    if (version !== 1 && version !== 2 && version !== 3) {
+    if (version !== 1 && version !== 2 && version !== 3 && version !== 4) {
       log.warn(`Unsupported dispatch state schema version ${version}, starting fresh`);
       return null;
     }
+
+    // Collect outbox (v4+) — defaults to empty for v1-v3
+    const outbox: string[] = (version === 4 && Array.isArray(parsed.outbox))
+      ? parsed.outbox.filter((x): x is string => typeof x === "string")
+      : [];
 
     // Build the task map, applying v1→v2/v2→v3 defaults when migrating
     const map = new Map<string, DispatchTask>();
@@ -188,16 +207,25 @@ export class TaskStateStore {
         messageCountAtStart: version === 1 ? 0 : st.messageCountAtStart,
         timeoutMs: version === 1 || version === 2 ? undefined : st.timeoutMs,
         mode: version === 1 || version === 2 ? "background" : (st.mode as "background" | "sync" | undefined),
+        result: version === 4 && st.result
+          ? {
+              sidecarPath: st.result.sidecarPath,
+              totalChars: st.result.totalChars,
+              hadFence: st.result.hadFence,
+              fetchError: st.result.fetchError,
+              materializedAt: st.result.materializedAt,
+            }
+          : undefined,
       });
     }
 
-    // Re-save as v3 after single-shot migration (fire-and-forget —
+    // Re-save as v4 after single-shot migration (fire-and-forget —
     // will be picked up on next persist cycle even if this write fails)
-    if (version === 1 || version === 2) {
+    if (version === 1 || version === 2 || version === 3) {
       void this.save(map);
     }
 
-    return map;
+    return { tasks: map, outbox };
   }
 
   /**
@@ -218,10 +246,10 @@ export class TaskStateStore {
    * which is the desired behavior (exit state is authoritative).
    * Never throws — wraps errors in try/catch and logs a warning.
    */
-  saveSync(tasks: Map<string, DispatchTask>): void {
+  saveSync(tasks: Map<string, DispatchTask>, outbox?: Set<string>): void {
     if (this._readOnly) return;
     try {
-      const json = this.serialize(tasks);
+      const json = this.serialize(tasks, outbox);
       const statePath = this.getStatePath();
       const stateDir = join(statePath, "..");
 
@@ -246,11 +274,11 @@ export class TaskStateStore {
   }
 
   /** Convert a live task map to a JSON string. */
-  private serialize(tasks: Map<string, DispatchTask>): string {
+  private serialize(tasks: Map<string, DispatchTask>, outbox?: Set<string>): string {
     const serialized: SerializedDispatchTask[] = [];
 
     for (const task of tasks.values()) {
-      serialized.push({
+      const s: SerializedDispatchTask = {
         id: task.id,
         sessionId: task.sessionId,
         parentSessionId: task.parentSessionId,
@@ -270,13 +298,29 @@ export class TaskStateStore {
         messageCountAtStart: task.messageCountAtStart,
         timeoutMs: task.timeoutMs,
         mode: task.mode,
-      });
+      };
+
+      if (task.result) {
+        s.result = {
+          sidecarPath: task.result.sidecarPath,
+          totalChars: task.result.totalChars,
+          hadFence: task.result.hadFence,
+          fetchError: task.result.fetchError,
+          materializedAt: task.result.materializedAt,
+        };
+      }
+
+      serialized.push(s);
     }
 
     const file: DispatchStateFile = {
-      version: 3,
+      version: 4,
       tasks: serialized,
     };
+
+    if (outbox && outbox.size > 0) {
+      file.outbox = [...outbox];
+    }
 
     return JSON.stringify(file, null, 2);
   }
@@ -303,7 +347,7 @@ export class TaskStateStore {
 function isDispatchStateFile(value: unknown): value is DispatchStateFile {
   if (typeof value !== "object" || value === null) return false;
   const obj = value as Record<string, unknown>;
-  if (obj.version !== 1 && obj.version !== 2 && obj.version !== 3) return false;
+  if (obj.version !== 1 && obj.version !== 2 && obj.version !== 3 && obj.version !== 4) return false;
   if (!Array.isArray(obj.tasks)) return false;
   return true;
 }
