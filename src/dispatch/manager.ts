@@ -25,7 +25,7 @@ export class DispatchManager {
   private tasks: Map<string, DispatchTask> = new Map();
   private cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private pendingNotifications: Set<string> = new Set();
-  private cleanedUpTasks = new Set<string>();
+  private cleanedUpTasks = new Map<string, number>();
   private concurrency: ConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: OpencodeClient;
@@ -710,10 +710,17 @@ export class DispatchManager {
     this.eventState.delete(taskId);
     this.tasks.delete(taskId);
     this.persistState();
-    this.cleanedUpTasks.add(taskId);
+    this.cleanedUpTasks.set(taskId, Date.now());
     if (this.cleanedUpTasks.size > 500) {
-      const oldest = this.cleanedUpTasks.values().next().value;
-      if (oldest !== undefined) this.cleanedUpTasks.delete(oldest);
+      let oldestKey = "";
+      let oldestTime = Infinity;
+      for (const [key, ts] of this.cleanedUpTasks) {
+        if (ts < oldestTime) {
+          oldestTime = ts;
+          oldestKey = key;
+        }
+      }
+      if (oldestKey) this.cleanedUpTasks.delete(oldestKey);
     }
     const timer = this.cleanupTimers.get(taskId);
     if (timer) {
@@ -793,6 +800,10 @@ export class DispatchManager {
   async recover(): Promise<void> {
     if (this._recovered) return;
     this._recovered = true;
+
+    if (!this.store.tryLock()) {
+      debugLog("recover", "*", "Could not acquire state lock, operating in read-only recover mode");
+    }
 
     this.restoreState();
 
@@ -1371,7 +1382,6 @@ export class DispatchManager {
     this.decInflight(t.parentSessionId);
     metrics.gauge("inflight_tasks").dec();
     this.persistState();
-    this.flushPersistSync();
     this.scheduleCleanup(taskId);
   }
 

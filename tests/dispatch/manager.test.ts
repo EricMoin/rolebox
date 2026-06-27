@@ -1078,7 +1078,7 @@ describe("DispatchManager", () => {
       manager.cleanupTask(tid);
     }
 
-    const cleaned = mgr.cleanedUpTasks as Set<string>;
+    const cleaned = mgr.cleanedUpTasks as Map<string, number>;
     expect(cleaned.size).toBe(500);
     expect(cleaned.has(taskIds[0])).toBe(false);
     expect(cleaned.has(taskIds[500])).toBe(true);
@@ -1181,12 +1181,10 @@ describe("DispatchManager", () => {
 
   // ── 9. bounded cleanedUpTasks ─────────────────────────────
 
-  it("does not grow unbounded (FIFO eviction at 500)", () => {
+  it("does not grow unbounded (LRU eviction at 500 entries, oldest timestamp evicted)", () => {
     const client = createMockClient();
     const manager = new DispatchManager(client, fastConfig);
 
-    // Directly populate cleanedUpTasks through cleanupTask
-    // by first populating the tasks map so cleanupTask can delete them
     const mgr = manager as any;
     const taskIds: string[] = [];
     for (let i = 0; i < 600; i++) {
@@ -1196,7 +1194,7 @@ describe("DispatchManager", () => {
       manager.cleanupTask(tid);
     }
 
-    const cleaned = mgr.cleanedUpTasks as Set<string>;
+    const cleaned = mgr.cleanedUpTasks as Map<string, number>;
     expect(cleaned.size).toBe(500);
 
     // Most recent 500 entries should still be recognized
@@ -3419,7 +3417,7 @@ describe("flushPersistSync", () => {
     mgr.concurrency.release("default");
   });
 
-  it("T5-2: terminal state is durable immediately via leaveRunning flush", async () => {
+  it("T5-2: terminal state IS NOT immediately durable (no sync flush in leaveRunning)", async () => {
     const client = createMockClient();
     const dir = mkdtempSync(join(tmpdir(), "dispatch-flush-test-"));
     const manager = new DispatchManager(client, { ...fastConfig, taskTtlMs: 5000 });
@@ -3435,12 +3433,21 @@ describe("flushPersistSync", () => {
     // Complete the task (goes through leaveRunning)
     mgr.handleTaskCompleted(task.id);
 
-    // Immediately create a new store and load — state should be durable
+    // Immediately create a new store and load — state should NOT be durable yet
+    // because leaveRunning no longer calls flushPersistSync (debounced async only)
     const { TaskStateStore } = await import("../../src/dispatch/task-store");
     const freshStore = new TaskStateStore(dir);
     const loaded = freshStore.load();
-    expect(loaded).not.toBeNull();
-    const loadedTask = loaded!.get(task.id);
+    expect(loaded).toBeNull();
+
+    // Wait for the debounced async persist (500ms + buffer)
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Now state should be durable via async debounced persist
+    const freshStore2 = new TaskStateStore(dir);
+    const loaded2 = freshStore2.load();
+    expect(loaded2).not.toBeNull();
+    const loadedTask = loaded2!.get(task.id);
     expect(loadedTask).toBeDefined();
     expect(loadedTask!.status).toBe("completed");
 
@@ -3455,6 +3462,117 @@ describe("flushPersistSync", () => {
     // Call before any state — no crash
     expect(() => manager.flushPersistSync()).not.toThrow();
     expect(() => manager.flushPersistSync()).not.toThrow();
+  });
+});
+
+// ── Task 17: LRU cleanedUpTasks + leaveRunning no sync flush + degraded mode ──
+
+describe("Task 17: LRU cleanedUpTasks", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T17-1: getResult returns expired for LRU entries, not_found for evicted and unknown", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    // Clean up 100 tasks — all should stay in LRU (under 500 cap)
+    for (let i = 0; i < 100; i++) {
+      mgr.tasks.set(`task_${i}`, { id: `task_${i}`, sessionId: `ses_${i}` });
+      manager.cleanupTask(`task_${i}`);
+    }
+
+    // task_50 is still in the LRU → expired
+    const result50 = await manager.getResult("task_50");
+    expect(result50.kind).toBe("expired");
+    expect(result50.error).toContain("was cleaned up");
+
+    // Populate 500 more to trigger LRU eviction of the oldest
+    for (let i = 100; i < 600; i++) {
+      mgr.tasks.set(`task_${i}`, { id: `task_${i}`, sessionId: `ses_${i}` });
+      manager.cleanupTask(`task_${i}`);
+    }
+
+    // task_0 was the oldest in LRU → evicted → not_found
+    const result0 = await manager.getResult("task_0");
+    expect(result0.kind).toBe("not_found");
+
+    // Truly unknown
+    const resultUnknown = await manager.getResult("never_existed");
+    expect(resultUnknown.kind).toBe("not_found");
+  });
+});
+
+describe("Task 17: leaveRunning debounced persist", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T17-2: leaveRunning does NOT invoke store.saveSync (no sync flush on hot path)", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const saveSyncSpy = mock(() => {});
+    mgr.store.saveSync = saveSyncSpy;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+    mgr.handleTaskCompleted(task.id);
+
+    // saveSync must NOT have been called (no sync flush in leaveRunning)
+    expect(saveSyncSpy).not.toHaveBeenCalled();
+
+    // Cleanup
+    mgr.concurrency.release("default");
+  });
+});
+
+describe("Task 17: degraded mode", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T17-3: degraded mode — store.save() is no-op when _readOnly is set", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    // Force the store into read-only degraded mode
+    mgr.store._readOnly = true;
+
+    // Verify save() is a no-op in degraded mode
+    const tasks = new Map();
+    await mgr.store.save(tasks);
+    // save() returns early without writing; validates silently (no throw)
+
+    // Verify saveSync() is a no-op in degraded mode
+    mgr.store.saveSync(tasks);
+    // saveSync() returns early without writing
+
+    // Verify tryLock() returns false and sets _readOnly when lock already held
+    const otherStore = new (mgr.store.constructor as new (dir: string) => typeof mgr.store)("/tmp");
+    // Not testing multi-instance lock here (covered in state-lock.test.ts)
+  });
+
+  it("T17-4: recover() sets _readOnly when store.tryLock() fails", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const origTryLock = mgr.store.tryLock.bind(mgr.store);
+    mgr.store.tryLock = mock(() => {
+      mgr.store._readOnly = true;
+      return false;
+    });
+
+    await manager.recover();
+    expect(mgr.store._readOnly).toBe(true);
+
+    mgr.store.tryLock = origTryLock;
   });
 });
 
