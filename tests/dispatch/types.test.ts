@@ -18,4 +18,20 @@ describe("dispatch types", () => {
     // are correct.
     expect(typeof types).toBe("object");
   });
+
+  it("MaterializedResultRef shape", () => {
+    // Construct a concrete literal to verify the type compiles
+    // and all fields resolve at runtime.
+    const ref: types.MaterializedResultRef = {
+      sidecarPath: "/tmp/results/task-123.txt",
+      totalChars: 42,
+      hadFence: true,
+      fetchError: undefined,
+      materializedAt: new Date().toISOString(),
+    };
+    expect(ref.sidecarPath).toBeDefined();
+    expect(ref.totalChars).toBe(42);
+    expect(ref.hadFence).toBe(true);
+    expect(ref.materializedAt).toEqual(expect.any(String));
+  });
 });
