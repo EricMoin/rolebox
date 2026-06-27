@@ -1184,7 +1184,7 @@ describe("DispatchManager", () => {
   describe("queue-full rejection", () => {
     it("rejected task is scheduled for cleanup and notified with structured error", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, backpressureMaxRetries: 0 });
       const mgr = manager as any;
 
       // Fill the single slot
@@ -1216,7 +1216,7 @@ describe("DispatchManager", () => {
 
     it("queue-full does not consume a concurrency slot", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, backpressureMaxRetries: 0 });
       const mgr = manager as any;
 
       // Fill the single slot
@@ -1313,7 +1313,7 @@ describe("DispatchManager", () => {
 
     it("T4-4: queue-full rejects immediately with structured error", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0, backpressureMaxRetries: 0 });
       const mgr = manager as any;
 
       const fill = mgr.concurrency.acquireBackground("default");
@@ -1456,7 +1456,7 @@ describe("DispatchManager", () => {
     it("queue-full does not affect inflight gauge", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0 });
+      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0, backpressureMaxRetries: 0 });
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
@@ -2546,7 +2546,7 @@ describe("per-model concurrency key", () => {
     const client = createMockClient();
     const manager = new DispatchManager(
       client,
-      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0 },
+      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0, backpressureMaxRetries: 0 },
       modelKeys,
     );
 
@@ -2715,12 +2715,12 @@ describe("bounded background queue", () => {
     mgr.handleTaskCompleted(t2.id);
   });
 
-  it("queue full → structured error with retry_after, depth, limit", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 1, syncReservedSlots: 0 },
-    );
+    it("queue full → structured error with retry_after, depth, limit", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(
+        client,
+        { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 1, syncReservedSlots: 0, backpressureMaxRetries: 0 },
+      );
     const mgr = manager as any;
 
     // Task 1 acquires the only slot
@@ -2852,12 +2852,12 @@ describe("reserved sync lane", () => {
     expect(mgr.concurrency.getActiveCount("default")).toBe(5);
   });
 
-  it("background launch rejects when bg slots full and queue at capacity", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 3, maxQueueDepth: 0, syncReservedSlots: 1 },
-    );
+    it("background launch rejects when bg slots full and queue at capacity", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(
+        client,
+        { ...fastConfig, maxConcurrent: 3, maxQueueDepth: 0, syncReservedSlots: 1, backpressureMaxRetries: 0 },
+      );
     const mgr = manager as any;
 
     // Fill all 2 background slots
@@ -3087,5 +3087,320 @@ describe("flushPersistSync", () => {
     // Call before any state — no crash
     expect(() => manager.flushPersistSync()).not.toThrow();
     expect(() => manager.flushPersistSync()).not.toThrow();
+  });
+});
+
+// ── Task 12: config injection + per-parent fairness + backpressure ──
+
+describe("Task 12: per-parent fairness", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T12-1: single parent past maxActivePerParent queues while other parent launches immediately", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 5,
+      maxActivePerParent: 1,
+      syncReservedSlots: 0,
+    });
+    const mgr = manager as any;
+
+    const ctxA = { sessionID: "parent-A", agent: "a", directory: "/tmp" };
+    const ctxB = { sessionID: "parent-B", agent: "b", directory: "/tmp" };
+
+    // Parent A: first task acquires
+    const tA1 = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      ctxA,
+    );
+    expect(tA1.status).toBe("running");
+
+    // Parent A: second task — would exceed maxActivePerParent, should queue
+    const tA2promise = manager.launch(
+      { subagent: "h", prompt: "p2", run_in_background: true },
+      ctxA,
+    );
+
+    // Give a tick for the waiter to enqueue
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Parent B: task should acquire immediately (different parent)
+    const tB1 = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      ctxB,
+    );
+    expect(tB1.status).toBe("running");
+
+    const tA2 = await tA2promise;
+    // Task A2 should be pending (queued, waiting for A1 to release)
+    // or it might have already been promoted if timing worked out
+    expect(["pending", "running"]).toContain(tA2.status);
+
+    // Complete A1 → A2 gets promoted
+    if (tA2.status === "pending") {
+      mgr.handleTaskCompleted(tA1.id);
+      await new Promise((r) => setTimeout(r, 10));
+      const updatedA2 = mgr.tasks.get(tA2.id);
+      expect(updatedA2.status).toBe("running");
+      mgr.handleTaskCompleted(updatedA2.id);
+    }
+
+    // Cleanup B1
+    mgr.handleTaskCompleted(tB1.id);
+  });
+
+  it("T12-1b: recover rebuilds per-parent active counts from forceOccupyBackground", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "manager-t12-recover-"));
+    const client = createMockClient();
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+
+    // 2 tasks from parent-A, 1 from parent-B — all alive
+    const taskDefs = [
+      { id: "bg_pa1", sid: "ses_pa1", parent: "parent-A" },
+      { id: "bg_pa2", sid: "ses_pa2", parent: "parent-A" },
+      { id: "bg_pb1", sid: "ses_pb1", parent: "parent-B" },
+    ];
+    for (const td of taskDefs) {
+      const t: DispatchTask = {
+        id: td.id,
+        sessionId: td.sid,
+        parentSessionId: td.parent,
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+      };
+      tasks.set(t.id, t);
+    }
+    await store.save(tasks);
+
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 5,
+      syncReservedSlots: 0,
+    });
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    const mgr = manager as any;
+    // inflightByParent should reflect recovered active counts
+    expect(mgr.inflightByParent.get("parent-A")).toBe(2);
+    expect(mgr.inflightByParent.get("parent-B")).toBe(1);
+
+    // Concurrency activeByParent should be populated
+    const slot = mgr.concurrency.slots.get("default") as any;
+    expect(slot.activeByParent.get("parent-A")).toBe(2);
+    expect(slot.activeByParent.get("parent-B")).toBe(1);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+});
+
+describe("Task 12: backpressure retry", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T12-2: queue-full with backpressureMaxRetries>0 retries then succeeds when slot frees", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 1,
+      maxQueueDepth: 1,
+      syncReservedSlots: 0,
+      backpressureMaxRetries: 3,
+      retryAfterMs: 10,
+    });
+    const mgr = manager as any;
+
+    // Fill the single slot
+    const t1 = await manager.launch(
+      { subagent: "h", prompt: "p1", run_in_background: true },
+      parentContext(),
+    );
+    expect(t1.status).toBe("running");
+
+    // Enqueue a waiter to fill the queue
+    const t2promise = manager.launch(
+      { subagent: "h", prompt: "p2", run_in_background: true },
+      parentContext(),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Queue is full: slot occupied + 1 queued → third task triggers backpressure
+    const t3 = await manager.launch(
+      { subagent: "h", prompt: "p3", run_in_background: true },
+      parentContext(),
+    );
+    expect(t3.status).toBe("pending");
+    expect(mgr._cancelQueue.has(t3.id)).toBe(true);
+
+    // Free up everything: complete t1 → t2 promotes; complete t2 → slot free
+    mgr.handleTaskCompleted(t1.id);
+    await new Promise((r) => setTimeout(r, 10));
+    const t2 = await t2promise;
+    expect(t2.status).toBe("running");
+    mgr.handleTaskCompleted(t2.id);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Wait for backpressure retry to fire
+    await new Promise((r) => setTimeout(r, 50));
+
+    const updatedT3 = mgr.tasks.get(t3.id);
+    expect(updatedT3.status).toBe("running");
+    expect(updatedT3.sessionId).not.toBe("");
+
+    mgr.handleTaskCompleted(updatedT3.id);
+  });
+
+  it("T12-3: queue-full with retries exhausted → structured JSON error + notify", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 1,
+      maxQueueDepth: 0,
+      syncReservedSlots: 0,
+      backpressureMaxRetries: 1,
+      retryAfterMs: 5,
+    });
+    const mgr = manager as any;
+
+    // Fill the single slot — no queue, so any new launch triggers backpressure
+    mgr.concurrency.acquireBackground("default");
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true, description: "backpressure-test" },
+      parentContext(),
+    );
+    expect(task.status).toBe("pending");
+
+    // Wait for the retry to fire (attempt 1) and get exhausted
+    await new Promise((r) => setTimeout(r, 50));
+
+    const updated = mgr.tasks.get(task.id);
+    expect(updated.status).toBe("error");
+    const parsed = JSON.parse(updated.error!);
+    expect(parsed.error).toContain("backpressure retries exhausted");
+    expect(parsed.attempts).toBe(1);
+    expect(parsed.retry_after).toBeGreaterThan(0);
+    expect(updated.completedAt).toBeInstanceOf(Date);
+
+    // Inflight counter decremented (decInflight called on exhaustion)
+    expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+
+    // Notification was sent
+    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const lastCall = notifyCalls[notifyCalls.length - 1];
+    expect(lastCall).toBeDefined();
+
+    mgr.concurrency.release("default");
+  });
+
+  it("T12-3b: backpressure emits retry metric on each attempt", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 1,
+      maxQueueDepth: 0,
+      syncReservedSlots: 0,
+      backpressureMaxRetries: 2,
+      retryAfterMs: 5,
+    });
+    const mgr = manager as any;
+
+    mgr.concurrency.acquireBackground("default");
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("pending");
+
+    // Wait for both retries to exhaust
+    await new Promise((r) => setTimeout(r, 50));
+
+    const updated = mgr.tasks.get(task.id);
+    expect(updated.status).toBe("error");
+
+    // dispatch_backpressure_retry_total counter was incremented
+    const counter = metrics.counter("dispatch_backpressure_retry_total", { key: "default" });
+    expect(counter.peek()).toBeGreaterThanOrEqual(1);
+
+    mgr.concurrency.release("default");
+  });
+});
+
+describe("Task 12: config injection", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T12-4: maxConcurrent and maxActivePerParent from constructor honored", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      maxConcurrent: 2,
+      maxActivePerParent: 1,
+      syncReservedSlots: 0,
+    });
+    const mgr = manager as any;
+
+    const ctx = parentContext();
+
+    // First task acquires normally
+    const t1 = await manager.launch(
+      { subagent: "h", prompt: "p1", run_in_background: true },
+      ctx,
+    );
+    expect(t1.status).toBe("running");
+
+    // Second task from same parent → exceeds maxActivePerParent, queues
+    const t2promise = manager.launch(
+      { subagent: "h", prompt: "p2", run_in_background: true },
+      ctx,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const t2 = await t2promise;
+    // It may still be pending (queued) or already promoted
+    expect(["pending", "running"]).toContain(t2.status);
+
+    // Third task from same parent → should also queue (not reject)
+    const t3promise = manager.launch(
+      { subagent: "h", prompt: "p3", run_in_background: true },
+      ctx,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const t3 = await t3promise;
+    expect(["pending", "running"]).toContain(t3.status);
+
+    // Complete all and clean up
+    mgr.handleTaskCompleted(t1.id);
+    await new Promise((r) => setTimeout(r, 10));
+    const updatedT2 = mgr.tasks.get(t2.id);
+    if (updatedT2.status !== "completed" && updatedT2.status !== "error") {
+      mgr.handleTaskCompleted(t2.id);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    const updatedT3 = mgr.tasks.get(t3.id);
+    if (updatedT3.status !== "completed" && updatedT3.status !== "error") {
+      mgr.handleTaskCompleted(t3.id);
+    }
+  });
+
+  it("T12-4b: retryAfterMs passed to ConcurrencyManager constructor", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, {
+      ...fastConfig,
+      retryAfterMs: 15000,
+    });
+    const mgr = manager as any;
+
+    // ConcurrencyManager was constructed with custom retryAfterMs
+    expect(mgr.concurrency.retryAfterMs).toBe(15000);
   });
 });

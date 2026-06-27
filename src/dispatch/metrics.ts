@@ -14,7 +14,7 @@
 const HISTOGRAM_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 300000, 900000, 1800000, 2700000] as const;
 
 const CORE_METRIC_NAMES = {
-  counters: ["dispatch_rejected_total"],
+  counters: ["dispatch_rejected_total", "dispatch_backpressure_retry_total"],
   gauges: ["inflight_tasks", "concurrency_queued"],
 } as const;
 
