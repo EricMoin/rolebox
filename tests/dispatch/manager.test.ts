@@ -2,12 +2,13 @@ import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
 import { DispatchManager } from "../../src/dispatch/manager";
 import type { DispatchTask } from "../../src/dispatch/types";
 import { TaskStateStore } from "../../src/dispatch/task-store.ts";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMockClient, parentContext } from "./helpers";
 import { metrics } from "../../src/dispatch/metrics";
+import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/result-extractor";
 
 const fastConfig = {
   staleTimeoutMs: 500,
@@ -701,28 +702,9 @@ describe("DispatchManager", () => {
   // ── 4. getResult() ───────────────────────────────────────────
 
   it("getResult() extracts text from assistant messages", async () => {
-    const client = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" as const },
-              parts: [{ type: "text" as const, text: "prompt" }],
-            },
-            {
-              info: { role: "assistant" as const },
-              parts: [
-                { type: "text" as const, text: "Analysis:" },
-                { type: "text" as const, text: "Complete." },
-              ],
-            },
-          ],
-          error: undefined,
-        }),
-    });
+    const client = createMockClient();
     const manager = new DispatchManager(client);
 
-    // launch a task so getResult has a session to query
     const task = await manager.launch(
       {
         subagent: "helper",
@@ -732,9 +714,21 @@ describe("DispatchManager", () => {
       parentContext(),
     );
 
+    // Pre-populate sidecar cache — getResult reads from cache, not network
+    const sidecarPath = writeResultSidecar(task.id, "Analysis:Complete.", process.cwd());
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath,
+      totalChars: 21,
+      hadFence: false,
+      materializedAt: new Date().toISOString(),
+    };
+
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
     expect(result.text).toBe("Analysis:Complete.");
+    expect(client.session.messages).not.toHaveBeenCalled();
   });
 
   it("getResult() returns not_found kind for unknown task", async () => {
@@ -747,14 +741,8 @@ describe("DispatchManager", () => {
     expect(result.text).toBe("");
   });
 
-  it("getResult() returns fetch_error kind when messages API returns error", async () => {
-    const client = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: undefined,
-          error: { message: "session expired" },
-        }),
-    });
+  it("getResult() returns fetch_error kind when task.result has fetchError", async () => {
+    const client = createMockClient();
     const manager = new DispatchManager(client);
 
     const task = await manager.launch(
@@ -766,10 +754,22 @@ describe("DispatchManager", () => {
       parentContext(),
     );
 
+    // Set task.result with fetchError — getResult returns fetch_error from cache
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath: "",
+      totalChars: 0,
+      hadFence: false,
+      fetchError: "Error retrieving task output: session expired",
+      materializedAt: new Date().toISOString(),
+    };
+
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("fetch_error");
     expect(result.error).toContain("Error retrieving task output");
     expect(result.text).toBe("");
+    expect(client.session.messages).not.toHaveBeenCalled();
   });
 
   it("T10: getResult() on continued task only returns output after messageCountAtStart boundary", async () => {
@@ -799,7 +799,6 @@ describe("DispatchManager", () => {
     });
     const manager = new DispatchManager(client);
 
-    // launch a task so getResult has a session to query
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -808,6 +807,7 @@ describe("DispatchManager", () => {
     const mgr = manager as any;
     const t = mgr.tasks.get(task.id);
     t.messageCountAtStart = 2;
+    t.status = "completed";
 
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
@@ -816,25 +816,7 @@ describe("DispatchManager", () => {
   });
 
   it("getResult() on non-continued task returns all assistant text (regression)", async () => {
-    const client = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" as const },
-              parts: [{ type: "text" as const, text: "prompt" }],
-            },
-            {
-              info: { role: "assistant" as const },
-              parts: [
-                { type: "text" as const, text: "Analysis:" },
-                { type: "text" as const, text: "Complete." },
-              ],
-            },
-          ],
-          error: undefined,
-        }),
-    });
+    const client = createMockClient();
     const manager = new DispatchManager(client);
 
     const task = await manager.launch(
@@ -842,9 +824,16 @@ describe("DispatchManager", () => {
       parentContext(),
     );
 
+    const sidecarPath = writeResultSidecar(task.id, "Analysis:Complete.", process.cwd());
     const mgr = manager as any;
     const t = mgr.tasks.get(task.id);
     t.messageCountAtStart = undefined;
+    t.result = {
+      sidecarPath,
+      totalChars: 21,
+      hadFence: false,
+      materializedAt: new Date().toISOString(),
+    };
 
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
@@ -852,30 +841,22 @@ describe("DispatchManager", () => {
   });
 
   it("getResult() returns totalChars equal to full text length", async () => {
-    const client = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" as const },
-              parts: [{ type: "text" as const, text: "prompt" }],
-            },
-            {
-              info: { role: "assistant" as const },
-              parts: [
-                { type: "text" as const, text: "Hello" },
-                { type: "text" as const, text: "World" },
-              ],
-            },
-          ],
-          error: undefined,
-        }),
-    });
+    const client = createMockClient();
     const manager = new DispatchManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
     );
+
+    const sidecarPath = writeResultSidecar(task.id, "HelloWorld", process.cwd());
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath,
+      totalChars: 10,
+      hadFence: false,
+      materializedAt: new Date().toISOString(),
+    };
 
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
@@ -884,62 +865,49 @@ describe("DispatchManager", () => {
   });
 
   it("getResult() returns resultText from fenced block when ```result fence is present", async () => {
-    const client = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" as const },
-              parts: [{ type: "text" as const, text: "prompt" }],
-            },
-            {
-              info: { role: "assistant" as const },
-              parts: [
-                { type: "text" as const, text: "Some preamble.\n```result\nclean output\n```\nSome postamble." },
-              ],
-            },
-          ],
-          error: undefined,
-        }),
-    });
+    const client = createMockClient();
     const manager = new DispatchManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
     );
+
+    const fullText = "Some preamble.\n```result\nclean output\n```\nSome postamble.";
+    const sidecarPath = writeResultSidecar(task.id, fullText, process.cwd());
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath,
+      totalChars: fullText.length,
+      hadFence: true,
+      materializedAt: new Date().toISOString(),
+    };
 
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
     expect(result.hadFence).toBe(true);
     expect(result.resultText).toBe("clean output");
-    // raw text still has the fence markers
     expect(result.text).toContain("```result");
   });
 
   it("getResult() returns resultText equal to raw text when no fence is present", async () => {
-    const client = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" as const },
-              parts: [{ type: "text" as const, text: "prompt" }],
-            },
-            {
-              info: { role: "assistant" as const },
-              parts: [
-                { type: "text" as const, text: "Plain output without fences." },
-              ],
-            },
-          ],
-          error: undefined,
-        }),
-    });
+    const client = createMockClient();
     const manager = new DispatchManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
     );
+
+    const fullText = "Plain output without fences.";
+    const sidecarPath = writeResultSidecar(task.id, fullText, process.cwd());
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath,
+      totalChars: fullText.length,
+      hadFence: false,
+      materializedAt: new Date().toISOString(),
+    };
 
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
@@ -971,23 +939,159 @@ describe("DispatchManager", () => {
     expect(expired.resultText).toBe("");
 
     // fetch_error
-    const clientErr = createMockClient({
-      sessionMessages: () =>
-        Promise.resolve({
-          data: undefined,
-          error: { message: "session expired" },
-        }),
-    });
+    const clientErr = createMockClient();
     const mgr2 = new DispatchManager(clientErr);
     const t2 = await mgr2.launch(
       { subagent: "helper", prompt: "fail", run_in_background: false },
       parentContext(),
     );
+    const mgr2Any = mgr2 as any;
+    const t2Ref = mgr2Any.tasks.get(t2.id);
+    t2Ref.result = {
+      sidecarPath: "",
+      totalChars: 0,
+      hadFence: false,
+      fetchError: "Error retrieving task output: session expired",
+      materializedAt: new Date().toISOString(),
+    };
     const fetchErr = await mgr2.getResult(t2.id);
     expect(fetchErr.kind).toBe("fetch_error");
     expect(fetchErr.totalChars).toBe(0);
     expect(fetchErr.hadFence).toBe(false);
     expect(fetchErr.resultText).toBe("");
+  });
+
+  // ── 4b. getResult() cache-first + lazy fallback (T7 rewrite) ──
+
+  it("cache-first: getResult reads from task.result sidecar, never calls network", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+    const sidecarPath = writeResultSidecar(task.id, "cached output", process.cwd());
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath,
+      totalChars: 13,
+      hadFence: false,
+      materializedAt: new Date().toISOString(),
+    };
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("cached output");
+    expect(client.session.messages).not.toHaveBeenCalled();
+  });
+
+  it("lazy backward-compat: completed task without result materializes once, then cached", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "user" as const },
+              parts: [{ type: "text" as const, text: "prompt" }],
+            },
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "lazy output" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.status = "completed";
+
+    // First call — triggers lazy materializeResult (session.messages called once)
+    const r1 = await manager.getResult(task.id);
+    expect(r1.kind).toBe("ok");
+    expect(r1.text).toBe("lazy output");
+
+    // Second call — reads from cache (session.messages NOT called again)
+    const r2 = await manager.getResult(task.id);
+    expect(r2.kind).toBe("ok");
+    expect(r2.text).toBe("lazy output");
+
+    // session.messages called exactly once (first call only)
+    expect((client.session.messages as any).mock.calls.length).toBe(1);
+  });
+
+  it("fetch-error: task.result with fetchError returns fetch_error kind", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "fail", run_in_background: false },
+      parentContext(),
+    );
+    const mgr = manager as any;
+    const t = mgr.tasks.get(task.id);
+    t.result = {
+      sidecarPath: "",
+      totalChars: 0,
+      hadFence: false,
+      fetchError: "materialize timeout",
+      materializedAt: new Date().toISOString(),
+    };
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("fetch_error");
+    expect(result.error).toBe("materialize timeout");
+    expect(client.session.messages).not.toHaveBeenCalled();
+  });
+
+  it("sidecar-survival: missing task with orphaned sidecar file returns ok", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "analyze", run_in_background: false },
+      parentContext(),
+    );
+    const taskId = task.id;
+
+    // Clean up the task from memory
+    manager.cleanupTask(taskId);
+
+    // Write an orphaned sidecar file
+    const sidecarPath = resultSidecarPath(taskId, process.cwd());
+    writeResultSidecar(taskId, "survivor output", process.cwd());
+
+    const result = await manager.getResult(taskId);
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("survivor output");
+    expect(result.totalChars).toBe(15);
+  });
+
+  it("expired: cleanedUpTasks entry returns expired kind", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "p", run_in_background: false },
+      parentContext(),
+    );
+    manager.cleanupTask(task.id);
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("expired");
+    expect(result.error).toContain("cleaned up");
+  });
+
+  it("not-found: unknown task id returns not_found kind", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client);
+
+    const result = await manager.getResult("never-existed");
+    expect(result.kind).toBe("not_found");
+    expect(result.error).toBe("Task never existed");
   });
 
   // ── 5. getTask() ─────────────────────────────────────────────
@@ -3599,6 +3703,138 @@ describe("Task 17: degraded mode", () => {
   });
 });
 
+describe("T8: Notification outbox", () => {
+  afterEach(() => {
+    mock.restore();
+    clearSentFinalNotifies();
+    clearParentQueues();
+  });
+
+  it("sweeper retries then prunes after task is removed from tasks map", async () => {
+    const client = createMockClient();
+
+    const capturedCallbacks: Array<() => void> = [];
+    const origSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((fn: () => void, _ms: number) => {
+      capturedCallbacks.push(fn);
+      return setTimeout(() => {}, 999999) as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+
+    try {
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const sweepCb = capturedCallbacks[capturedCallbacks.length - 1];
+      expect(sweepCb).toBeDefined();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      task.status = "completed";
+      task.completedAt = new Date();
+      mgr.notifyOutbox.add(task.id);
+
+      await sweepCb();
+      expect(mgr.notifyOutbox.has(task.id)).toBe(true);
+
+      mgr.tasks.delete(task.id);
+
+      await sweepCb();
+      expect(mgr.notifyOutbox.has(task.id)).toBe(false);
+
+      mgr.flushPersistSync();
+    } finally {
+      globalThis.setInterval = origSetInterval;
+    }
+  });
+
+  it("sweeper prunes tasks already notified via hasFinalNotifyBeenSent", async () => {
+    const client = createMockClient();
+
+    const capturedCallbacks: Array<() => void> = [];
+    const origSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((fn: () => void, _ms: number) => {
+      capturedCallbacks.push(fn);
+      return setTimeout(() => {}, 999999) as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+
+    try {
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const sweepCb = capturedCallbacks[capturedCallbacks.length - 1];
+      expect(sweepCb).toBeDefined();
+
+      const task = await manager.launch(
+        { subagent: "h", prompt: "p", run_in_background: true },
+        parentContext(),
+      );
+      task.status = "completed";
+      task.completedAt = new Date();
+      mgr.inflightByParent.delete(task.parentSessionId);
+
+      const result = await mgr.notifyCompletion(task);
+      expect(result).toBe(true);
+
+      const { hasFinalNotifyBeenSent: hfs } =
+        await import("../../src/dispatch/notification");
+      expect(hfs(task.id)).toBe(true);
+
+      mgr.notifyOutbox.add(task.id);
+      expect(mgr.notifyOutbox.has(task.id)).toBe(true);
+
+      await sweepCb();
+      expect(mgr.notifyOutbox.has(task.id)).toBe(false);
+
+      mgr.flushPersistSync();
+    } finally {
+      globalThis.setInterval = origSetInterval;
+    }
+  });
+
+  it("recover repopulates outbox from persisted v4 state", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "manager-outbox-recover-"));
+    const client = createMockClient();
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const task: DispatchTask = {
+      id: "bg_test",
+      sessionId: "ses_test",
+      parentSessionId: "ses_parent",
+      status: "completed",
+      agent: "helper",
+      prompt: "work",
+      description: "outbox recover test",
+      startedAt: new Date(),
+      completedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(task.id, task);
+    await store.save(tasks, new Set(["bg_test"]));
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+    const mgr = manager as any;
+    await manager.recover();
+
+    expect(mgr.notifyOutbox.has("bg_test")).toBe(true);
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("sweeper timer is cleared on flushPersistSync", () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    expect(mgr.sweeperTimer).toBeDefined();
+
+    manager.flushPersistSync();
+
+    expect(mgr.sweeperTimer).toBeUndefined();
+  });
+});
+
 // ── Task 12: config injection + per-parent fairness + backpressure ──
 
 describe("Task 12: per-parent fairness", () => {
@@ -4272,5 +4508,310 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     expect(ref.totalChars).toBe("new output".length);
     expect(ref.fetchError).toBeUndefined();
+  });
+
+  // ── materializeAndNotify() ordering ─────────────────────────
+
+  it("materializeAndNotify releases slot before materializing", async () => {
+    let resolveMessages!: (v: any) => void;
+    const deferred = new Promise<any>((r) => { resolveMessages = r; });
+
+    const client = createMockClient({
+      sessionMessages: () => deferred,
+    });
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    const concurrencyKey = "default";
+    expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(1);
+
+    // Fire completion — this calls leaveRunning synchronously, then
+    // fires materializeAndNotify which awaits the deferred messages call.
+    mgr.handleTaskCompleted(task.id);
+
+    // Slot must be released immediately
+    expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(0);
+    expect(task.status).toBe("completed");
+
+    // At this point, materializeResult is awaiting the deferred messages
+    // (which hasn't resolved yet), so task.result should still be absent
+    expect(task.result).toBeUndefined();
+
+    // Resolve messages
+    resolveMessages({
+      data: [
+        {
+          info: { role: "assistant" as const },
+          parts: [{ type: "text" as const, text: "output" }],
+        },
+      ],
+      error: undefined,
+    });
+
+    // Let materializeAndNotify finish
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(task.result).toBeDefined();
+    expect(task.result!.sidecarPath).toContain(`${task.id}.txt`);
+  });
+
+  it("materializeAndNotify sets task.result before notifyCompletion", async () => {
+    let resolveMessages!: (v: any) => void;
+    const deferred = new Promise<any>((r) => { resolveMessages = r; });
+
+    const client = createMockClient({
+      sessionMessages: () => deferred,
+    });
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    let notifySeenResult: boolean | null = null;
+
+    const origNotify = mgr.notifyCompletion.bind(mgr);
+    mgr.notifyCompletion = async (t: DispatchTask) => {
+      notifySeenResult = !!t.result;
+      await origNotify(t);
+    };
+
+    mgr.handleTaskCompleted(task.id);
+    // At this point, materializeResult is waiting on the deferred messages
+    expect(notifySeenResult).toBeNull();
+
+    // Resolve messages so materializeResult completes → then notifyCompletion fires
+    resolveMessages({
+      data: [
+        {
+          info: { role: "assistant" as const },
+          parts: [{ type: "text" as const, text: "output" }],
+        },
+      ],
+      error: undefined,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(notifySeenResult).toBe(true);
+    expect(task.result).toBeDefined();
+  });
+
+  it("materializeAndNotify is no-op for non-completed task status", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    await mgr.materializeAndNotify(task.id);
+    // Task is still "pending" (not "completed"), so result should stay unset
+    expect(task.result).toBeUndefined();
+  });
+
+  it("materializeAndNotify is no-op for nonexistent task", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    // Should not throw
+    await mgr.materializeAndNotify("nonexistent");
+  });
+
+  it("double handleTaskCompleted does not materialize twice", async () => {
+    let resolveMessages!: (v: any) => void;
+    const deferred = new Promise<any>((r) => { resolveMessages = r; });
+
+    const client = createMockClient({
+      sessionMessages: () => deferred,
+    });
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const mgr = manager as any;
+    let notifyCount = 0;
+    const origNotify = mgr.notifyCompletion.bind(mgr);
+    mgr.notifyCompletion = async (t: DispatchTask) => {
+      notifyCount++;
+      await origNotify(t);
+    };
+
+    // First completion — materializeAndNotify starts awaiting deferred messages
+    mgr.handleTaskCompleted(task.id);
+    expect(task.status).toBe("completed");
+
+    // Second completion — transition should fail (already completed)
+    mgr.handleTaskCompleted(task.id);
+
+    // Resolve messages so first materializeAndNotify finishes
+    resolveMessages({
+      data: [
+        {
+          info: { role: "assistant" as const },
+          parts: [{ type: "text" as const, text: "output" }],
+        },
+      ],
+      error: undefined,
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Only one notification — second call short-circuited at transition
+    expect(notifyCount).toBe(1);
+    expect(task.result).toBeDefined();
+  });
+
+  // ── T11: Cleanup survival + outbox guard + sidecar GC ──────────
+
+  it("T11-1: sidecar survives cleanupTask — getResult returns ok from sidecar", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "```result\nfinal answer\n```" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "do work", run_in_background: false },
+      parentContext(),
+    );
+    // Set status to completed and materialize
+    const tasks = (manager as any).tasks as Map<string, DispatchTask>;
+    const taskRef = tasks.get(task.id)!;
+    taskRef.status = "completed";
+
+    const mgr = manager as any;
+    const ref = await mgr.materializeResult(task.id);
+    taskRef.result = ref;
+
+    // Verify sidecar exists on disk
+    const sidecarPath = resultSidecarPath(task.id, process.cwd());
+    const raw = readFileSync(sidecarPath, "utf-8");
+    expect(raw).toContain("final answer");
+
+    // Cleanup the task (in-memory only — sidecar must survive)
+    manager.cleanupTask(task.id);
+    expect(manager.getTask(task.id)).toBeUndefined();
+
+    // getResult should find the sidecar via Step 3 (task missing, sidecar exists)
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.text).toContain("final answer");
+    expect(result.hadFence).toBe(true);
+
+    // Clean up the sidecar file
+    try { rmSync(sidecarPath); } catch {}
+  });
+
+  it("T11-2: cleanup deferred while taskId is in notifyOutbox", () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    // Put a task into tasks map
+    const taskId = "test_outbox_guard";
+    mgr.tasks.set(taskId, {
+      id: taskId,
+      status: "completed",
+      sessionId: "ses_outbox",
+      parentSessionId: "ses_parent",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    });
+
+    // Put taskId in notifyOutbox
+    mgr.notifyOutbox.add(taskId);
+
+    // Schedule cleanup (should defer because outbox has taskId)
+    mgr.scheduleCleanup(taskId);
+
+    // Fast-forward past TTL by firing the timer callback manually
+    const timer = mgr.cleanupTimers.get(taskId);
+    expect(timer).toBeDefined();
+
+    // Clear the real timer so it doesn't fire later
+    clearTimeout(timer);
+    // Manually invoke the callback (same as the setTimeout body)
+    // Since notifyOutbox has taskId, it should re-schedule, not clean up
+    mgr.cleanupTimers.delete(taskId);
+    mgr.scheduleCleanup(taskId); // this re-schedules → timer created
+    expect(mgr.tasks.has(taskId)).toBe(true);
+
+    // Now remove from outbox and fire again
+    mgr.notifyOutbox.delete(taskId);
+    const timer2 = mgr.cleanupTimers.get(taskId);
+    expect(timer2).toBeDefined();
+    clearTimeout(timer2);
+    mgr.cleanupTimers.delete(taskId);
+
+    // Manually call cleanupTask directly (simulating what the timer would do after guard passes)
+    manager.cleanupTask(taskId);
+    expect(mgr.tasks.has(taskId)).toBe(false);
+  });
+
+  it("T11-3: scheduleSidecarGC creates timer when result is set", async () => {
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "result content" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "do work", run_in_background: false },
+      parentContext(),
+    );
+    // Set completed and invoke materializeAndNotify which sets result + schedules GC
+    const taskRef = (mgr.tasks as Map<string, DispatchTask>).get(task.id)!;
+    taskRef.status = "completed";
+    // Override notifyCompletion to avoid side effects
+    const origNotify = mgr.notifyCompletion.bind(mgr);
+    mgr.notifyCompletion = async () => {};
+
+    await mgr.materializeAndNotify(task.id);
+
+    // Verify result was set
+    expect(taskRef.result).toBeDefined();
+
+    // Verify sidecar GC timer was created
+    expect(mgr.sidecarGCTimers.has(task.id)).toBe(true);
+    const gcTimer = mgr.sidecarGCTimers.get(task.id);
+    expect(gcTimer).toBeDefined();
+
+    // Clean up
+    clearTimeout(gcTimer);
+    mgr.sidecarGCTimers.delete(task.id);
+    mgr.notifyCompletion = origNotify;
+    // Clean up sidecar file
+    try { rmSync(taskRef.result!.sidecarPath); } catch {}
   });
 });

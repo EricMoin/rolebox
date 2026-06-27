@@ -8,15 +8,16 @@ import type {
   SessionMessageSnapshot,
   MaterializedResultRef,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS, OUTBOX_SWEEP_INTERVAL_MS, RESULT_RETENTION_MS } from "./config.ts";
+import { unlinkSync } from "node:fs";
 import { ConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
-import { notifyParent } from "./notification.ts";
+import { notifyParent, hasFinalNotifyBeenSent } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 
 import { TaskStateStore } from "./task-store.ts";
-import { extractResultBlock, writeResultSidecar } from "./result-extractor.ts";
+import { extractResultBlock, readResultSidecar, resultSidecarPath, writeResultSidecar } from "./result-extractor.ts";
 import { debugLog, infoLog } from "./debug-log.ts";
 import { metrics } from "./metrics.ts";
 import { withTimeout, TimeoutError } from "./with-timeout.ts";
@@ -26,6 +27,7 @@ const DEFAULT_CONCURRENCY_KEY = "default";
 export class DispatchManager {
   private tasks: Map<string, DispatchTask> = new Map();
   private cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private sidecarGCTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingNotifications: Set<string> = new Set();
   private cleanedUpTasks = new Map<string, number>();
   private concurrency: ConcurrencyManager;
@@ -43,6 +45,8 @@ export class DispatchManager {
   private _dirty = false;
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
   private sessionMonitor: SessionMonitor;
+  private notifyOutbox = new Set<string>();
+  private sweeperTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     client: OpencodeClient,
@@ -76,6 +80,29 @@ export class DispatchManager {
         idleDebounceMs: this.config.idleDebounceMs ?? IDLE_DEBOUNCE_MS,
       },
     );
+    this.startSweeper();
+  }
+
+  private startSweeper(): void {
+    const interval = this.config.outboxSweepIntervalMs ?? OUTBOX_SWEEP_INTERVAL_MS;
+    this.sweeperTimer = setInterval(async () => {
+      for (const taskId of this.notifyOutbox) {
+        const task = this.tasks.get(taskId);
+        if (!task || hasFinalNotifyBeenSent(taskId)) {
+          this.notifyOutbox.delete(taskId);
+          continue;
+        }
+        const sent = await this.notifyCompletion(task);
+        if (sent) {
+          this.notifyOutbox.delete(taskId);
+        }
+      }
+    }, interval);
+  }
+
+  private addToOutbox(taskId: string): void {
+    this.notifyOutbox.add(taskId);
+    this.persistState();
   }
 
   getConfig(): Readonly<DispatchManagerConfig> {
@@ -659,53 +686,106 @@ export class DispatchManager {
     error?: string;
   }> {
     const task = this.tasks.get(taskId);
-    if (!task) {
-      if (this.cleanedUpTasks.has(taskId)) {
+
+    // Step 1: Check task.result (cache hit — pure local read)
+    if (task?.result) {
+      if (task.result.fetchError) {
         return {
-          kind: "expired",
+          kind: "fetch_error",
           text: "",
           resultText: "",
           hadFence: false,
           totalChars: 0,
-          error: "Task result no longer available (was cleaned up)",
+          error: task.result.fetchError,
         };
       }
+      const sidecarText = readResultSidecar(task.result.sidecarPath);
+      if (sidecarText !== null) {
+        const extracted = extractResultBlock(sidecarText);
+        return {
+          kind: "ok",
+          text: sidecarText,
+          resultText: extracted.result,
+          hadFence: extracted.hadFence,
+          totalChars: task.result.totalChars,
+        };
+      }
+      // Sidecar file missing (was cleaned up by GC) — fall through to lazy
+    }
+
+    // Step 2: Task completed but no result (lazy backward-compat fetch)
+    if (task && task.status === "completed" && !task.result) {
+      const ref = await this.materializeResult(taskId);
+      task.result = ref;
+      this.persistState();
+
+      if (ref.fetchError) {
+        return {
+          kind: "fetch_error",
+          text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
+          error: ref.fetchError,
+        };
+      }
+      const sidecarText = readResultSidecar(ref.sidecarPath);
+      if (sidecarText !== null) {
+        const extracted = extractResultBlock(sidecarText);
+        return {
+          kind: "ok",
+          text: sidecarText,
+          resultText: extracted.result,
+          hadFence: extracted.hadFence,
+          totalChars: ref.totalChars,
+        };
+      }
+    }
+
+    // Step 3: Task missing but sidecar exists (survives cleanup)
+    if (!task) {
+      const sidecarPath = resultSidecarPath(taskId, process.cwd());
+      const sidecarText = readResultSidecar(sidecarPath);
+      if (sidecarText !== null) {
+        const extracted = extractResultBlock(sidecarText);
+        return {
+          kind: "ok",
+          text: sidecarText,
+          resultText: extracted.result,
+          hadFence: extracted.hadFence,
+          totalChars: sidecarText.length,
+        };
+      }
+    }
+
+    // Step 4: Expired / Not found
+    if (task) {
       return {
-        kind: "not_found",
+        kind: "expired",
         text: "",
         resultText: "",
         hadFence: false,
         totalChars: 0,
-        error: "Task never existed",
+        error: "Task status neither completed nor has materialized result",
       };
     }
-
-    const messagesResult = await this.client.session.messages({
-      path: { id: task.sessionId },
-    });
-
-    if (messagesResult.error !== undefined) {
+    if (this.cleanedUpTasks.has(taskId)) {
       return {
-        kind: "fetch_error",
+        kind: "expired",
         text: "",
         resultText: "",
         hadFence: false,
         totalChars: 0,
-        error: `Error retrieving task output: ${JSON.stringify(messagesResult.error)}`,
+        error: "Task result no longer available (was cleaned up)",
       };
     }
-
-    const messages = (messagesResult.data ?? []) as SessionMessageSnapshot[];
-    const boundary = task.messageCountAtStart ?? 0;
-    const fullText = this.buildAssistantText(messages, boundary);
-    const extracted = extractResultBlock(fullText);
-
     return {
-      kind: "ok",
-      text: fullText,
-      resultText: extracted.result,
-      hadFence: extracted.hadFence,
-      totalChars: fullText.length,
+      kind: "not_found",
+      text: "",
+      resultText: "",
+      hadFence: false,
+      totalChars: 0,
+      error: "Task never existed",
     };
   }
 
@@ -823,7 +903,7 @@ export class DispatchManager {
       if (!this._dirty) return;
       this._dirty = false;
       try {
-        await this.store.save(this.tasks);
+        await this.store.save(this.tasks, this.notifyOutbox);
       } catch (err) {
         debugLog("persist", "*", `async save failed: ${err}`);
       }
@@ -841,7 +921,7 @@ export class DispatchManager {
     }
     if (this._dirty) {
       this._dirty = false;
-      await this.store.save(this.tasks);
+      await this.store.save(this.tasks, this.notifyOutbox);
     }
   }
 
@@ -859,19 +939,35 @@ export class DispatchManager {
     if (this._dirty) {
       this._dirty = false;
       try {
-        this.store.saveSync(this.tasks);
+        this.store.saveSync(this.tasks, this.notifyOutbox);
       } catch (err) {
         debugLog("persist", "*", `sync flush failed: ${err}`);
       }
     }
+    if (this.sweeperTimer) {
+      clearInterval(this.sweeperTimer);
+      this.sweeperTimer = undefined;
+    }
+    for (const timer of this.sidecarGCTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.sidecarGCTimers.clear();
+    for (const timer of this.cleanupTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.cleanupTimers.clear();
     this.watchdog.dispose(); // decision 8 — prevent timer leak on process exit
   }
 
   private restoreState(): void {
     const loaded = this.store.load();
     if (!loaded) return;
-    for (const [taskId, task] of loaded.tasks) {
+    const { tasks: loadedTasks, outbox } = loaded;
+    for (const [taskId, task] of loadedTasks) {
       this.tasks.set(taskId, task);
+    }
+    for (const id of outbox) {
+      this.notifyOutbox.add(id);
     }
   }
 
@@ -1056,10 +1152,10 @@ export class DispatchManager {
     this.cleanupTimers.set(taskId, timer);
   }
 
-  async notifyCompletion(task: DispatchTask): Promise<void> {
+  async notifyCompletion(task: DispatchTask): Promise<boolean> {
     this.pendingNotifications.add(task.id);
     try {
-      await notifyParent(this.client, task, () => this.getInflight(task.parentSessionId));
+      return await notifyParent(this.client, task, () => this.getInflight(task.parentSessionId));
     } finally {
       this.pendingNotifications.delete(task.id);
     }
@@ -1160,7 +1256,13 @@ export class DispatchManager {
           if (this.transition(taskId, ["running"], "completed")) {
             this.watchdog.unregisterTask(taskId);
             this.watchdog.cancelDebounce(taskId);
-            this.finalizeCompletion(taskId);
+            const t = this.tasks.get(taskId)!;
+            const duration = Date.now() - t.startedAt.getTime();
+            infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
+            metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
+            metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
+            this.leaveRunning(taskId);
+            void this.materializeAndNotify(taskId);
           }
           break;
         }
@@ -1228,7 +1330,13 @@ export class DispatchManager {
           if (this.transition(taskId, ["running"], "completed")) {
             this.watchdog.unregisterTask(taskId);
             this.watchdog.cancelDebounce(taskId);
-            this.finalizeCompletion(taskId);
+            const t = this.tasks.get(taskId)!;
+            const duration = Date.now() - t.startedAt.getTime();
+            infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
+            metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
+            metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
+            this.leaveRunning(taskId);
+            void this.materializeAndNotify(taskId);
           }
           break;
         }
@@ -1405,8 +1513,12 @@ export class DispatchManager {
   private handleTaskCompleted(taskId: string): void {
     if (!this.transition(taskId, ["pending", "running"], "completed")) return;
     const t = this.tasks.get(taskId)!;
-    infoLog("lifecycle", taskId, `✓ completed agent=${t.agent}`);
-    this.finalizeCompletion(taskId);
+    const duration = Date.now() - t.startedAt.getTime();
+    infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
+    metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
+    metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
+    this.leaveRunning(taskId);
+    void this.materializeAndNotify(taskId);
   }
 
   private handleTaskError(taskId: string, error: string): void {
@@ -1427,7 +1539,7 @@ export class DispatchManager {
     this.leaveRunning(taskId);
   }
 
-  /** Shared winner-branch side effects after a successful transition. */
+  /** Side effects after a non-completed terminal transition (error/timeout). */
   private finalizeCompletion(taskId: string): void {
     const t = this.tasks.get(taskId)!;
     const duration = Date.now() - t.startedAt.getTime();
@@ -1436,6 +1548,20 @@ export class DispatchManager {
     metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
     void this.notifyCompletion(t);
     this.leaveRunning(taskId);
+  }
+
+  /** Materialize result then notify parent for completed transitions.
+   *  Concurrency slot must be released BEFORE calling this (via leaveRunning). */
+  private async materializeAndNotify(taskId: string): Promise<void> {
+    const t = this.tasks.get(taskId);
+    if (!t || t.status !== "completed") return;
+
+    const ref = await this.materializeResult(taskId);
+    t.result = ref;
+    this.scheduleSidecarGC(taskId);
+    this.persistState();
+
+    await this.notifyCompletion(t);
   }
 
   // ── Terminal-path notification coverage ──────────────────────────────
@@ -1450,15 +1576,15 @@ export class DispatchManager {
   // launch() queue-full                               L118                 yes
   // cancelTask() pending (queued)                     L448                 yes
   // cancelTask() running                              L468                 yes
-  // handleTaskCompleted() -> finalizeCompletion        L1086                yes
-  // handleTaskError()                                  L1066                yes
-  // handleTaskTimeout()                                L1075                yes
-  // evaluateAndComplete() not_ready timeout            L855, L867           yes
-  // evaluateAndComplete() error-event -> finalize      L789-L795            yes
-  // evaluateAndComplete() deleted-event -> finalize    L797-L804            yes
-  // evaluateAndComplete() completed -> finalize        L828-L834            yes
-  // evaluateAndComplete() error -> finalize            L836-L842            yes
-  // evaluateAndComplete() stabilizing -> finalize      L875-L883            yes
+  // handleTaskCompleted() -> materializeAndNotify       L1466                yes
+  // handleTaskError()                                  L1478                yes
+  // handleTaskTimeout()                                L1487                yes
+  // evaluateAndComplete() not_ready timeout            L1248, L1260        yes
+  // evaluateAndComplete() error-event -> finalize      L1133-L1139          yes
+  // evaluateAndComplete() deleted-event -> finalize    L1142-L1148          yes
+  // evaluateAndComplete() completed -> materialize     L1215-L1228          yes
+  // evaluateAndComplete() error -> finalize            L1228-L1234          yes
+  // evaluateAndComplete() stabilizing -> materialize   L1287-L1299          yes
   // reopenForContinuation() queue-full                 L344                 yes
   // recover() session-lost                             (Task 11)            yes
   // recover() verification-failed                      (Task 11)            yes
@@ -1496,7 +1622,7 @@ export class DispatchManager {
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
-      if (this.pendingNotifications.has(taskId)) {
+      if (this.pendingNotifications.has(taskId) || this.notifyOutbox.has(taskId)) {
         this.scheduleCleanup(taskId);
         return;
       }
@@ -1504,5 +1630,18 @@ export class DispatchManager {
     }, this.config.taskTtlMs);
 
     this.cleanupTimers.set(taskId, timer);
+  }
+
+  private scheduleSidecarGC(taskId: string): void {
+    const t = this.tasks.get(taskId);
+    if (!t?.result) return;
+
+    const retention = this.config.resultRetentionMs ?? RESULT_RETENTION_MS;
+    const timer = setTimeout(() => {
+      const path = resultSidecarPath(taskId, process.cwd());
+      try { unlinkSync(path); } catch {}
+      this.sidecarGCTimers.delete(taskId);
+    }, retention);
+    this.sidecarGCTimers.set(taskId, timer);
   }
 }
