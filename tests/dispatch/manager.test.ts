@@ -2988,6 +2988,98 @@ describe("recover()", () => {
 
     rmSync(tempDir, { recursive: true, force: true });
   });
+
+  it("recover() does NOT eagerly fetch for completed tasks without result (v3 backward compat)", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient({
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" as const },
+              parts: [{ type: "text" as const, text: "recovered lazy output" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const completedTask: DispatchTask = {
+      id: "bg_v3_completed",
+      sessionId: "ses_v3",
+      parentSessionId: "ses_parent",
+      status: "completed",
+      agent: "helper",
+      prompt: "work",
+      description: "v3 completed task without result",
+      startedAt: new Date(Date.now() - 60000),
+      completedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(completedTask.id, completedTask);
+    await store.save(tasks);
+
+    (client.session.messages as any).mock.calls.length = 0;
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+    await manager.recover();
+
+    expect((client.session.messages as any).mock.calls.length).toBe(0);
+
+    const sidecarPath = resultSidecarPath("bg_v3_completed", process.cwd());
+    let sidecarExists = false;
+    try {
+      readFileSync(sidecarPath);
+      sidecarExists = true;
+    } catch {}
+
+    const result = await manager.getResult("bg_v3_completed");
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("recovered lazy output");
+
+    expect((client.session.messages as any).mock.calls.length).toBe(1);
+
+    const loaded = manager.getTask("bg_v3_completed");
+    expect(loaded?.result).toBeDefined();
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("recover() restores outbox and sweeper is running", async () => {
+    const tempDir = createTempDir();
+    const client = createMockClient();
+
+    const store = new TaskStateStore(tempDir);
+    const tasks = new Map<string, DispatchTask>();
+    const task: DispatchTask = {
+      id: "bg_outbox",
+      sessionId: "ses_out",
+      parentSessionId: "ses_parent",
+      status: "completed",
+      agent: "helper",
+      prompt: "work",
+      description: "outbox sweeper test",
+      startedAt: new Date(),
+      completedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    };
+    tasks.set(task.id, task);
+    await store.save(tasks, new Set(["bg_outbox"]));
+
+    const manager = new DispatchManager(client, fastConfig);
+    manager.setStoreDirectory(tempDir);
+    const mgr = manager as any;
+    await manager.recover();
+
+    expect(mgr.notifyOutbox.has("bg_outbox")).toBe(true);
+
+    expect(mgr.sweeperTimer).toBeDefined();
+
+    rmSync(tempDir, { recursive: true, force: true });
+  });
 });
 
 // ── 14. Per-model concurrency key isolation ───────────────────
@@ -3701,6 +3793,8 @@ describe("Task 17: degraded mode", () => {
 
     mgr.store.tryLock = origTryLock;
   });
+
+
 });
 
 describe("T8: Notification outbox", () => {
