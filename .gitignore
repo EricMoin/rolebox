@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .rolebox/
 .npmrc
+
+# Persisted dispatch task state (auto-generated during tests)
+state/

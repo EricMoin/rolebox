@@ -14,8 +14,7 @@
  *     use different finish reasons ("end_turn" for Claude, "stop" for OpenAI, etc.)
  */
 
-import type { CompletionSignal, SessionMessageSnapshot, TaskPollState } from "./types.ts";
-import { MIN_STABILITY_POLLS } from "./config.ts";
+import type { CompletionSignal, SessionMessageSnapshot, TaskEventState } from "./types.ts";
 
 // ── Public Types ───────────────────────────────────────────────────────
 
@@ -61,7 +60,8 @@ const TERMINAL_SESSION_STATUSES: ReadonlySet<string> = new Set([
 export function detectCompletion(
   messages: SessionMessageSnapshot[],
   sessionStatus: { type: string } | undefined,
-  pollState: TaskPollState,
+  pollState: TaskEventState,
+  skipStabilityGating?: boolean,
 ): CompletionSignal {
   // 1. Session gone → let the session monitor handle it
   if (!sessionStatus) {
@@ -116,7 +116,8 @@ export function detectCompletion(
 
   // 10. Session is idle, has assistant output, no pending tools.
   //     Apply stability gating to avoid premature completion detection.
-  if (pollState.stableIdlePolls < MIN_STABILITY_POLLS) {
+  //     When skipStabilityGating=true (event-driven evaluation), bypass stability.
+  if (!skipStabilityGating) {
     return { type: "stabilizing" };
   }
 

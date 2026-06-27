@@ -52,6 +52,15 @@ export const MIN_POLL_INTERVAL_MS = 500;
 /** Absolute maximum poll interval (5 s) to prevent polling too infrequently. */
 export const MAX_POLL_INTERVAL_MS = 5_000;
 
+/** Per-task reconcile watchdog interval (15 s): max event silence before a one-shot reconcile. */
+export const WATCHDOG_INTERVAL_MS = 15_000;
+
+/** Global sweep interval (30 s): safety-net pass over all running tasks for missed events / crash recovery. */
+export const GLOBAL_SWEEP_INTERVAL_MS = 30_000;
+
+/** Idle debounce (1.5 s): wait after a validated session.idle before confirming completion, to absorb between-step idles. */
+export const IDLE_DEBOUNCE_MS = 1_500;
+
 /** Terminal task TTL (30 min): how long a terminal-state task record lives before eviction. */
 export const TERMINAL_TASK_TTL_MS = 1_800_000;
 
@@ -96,6 +105,12 @@ export interface DispatchManagerConfig {
   syncReservedSlots?: number;
   /** Per-task default stale timeout (ms) for background tasks — default: 900000 (15 min) */
   backgroundStaleTimeoutMs?: number;
+  /** Watchdog reconcile interval (ms) — default: 15000 (15 s) */
+  watchdogIntervalMs?: number;
+  /** Global sweep interval (ms) — default: 30000 (30 s) */
+  globalSweepIntervalMs?: number;
+  /** Idle debounce delay (ms) — default: 1500 (1.5 s) */
+  idleDebounceMs?: number;
 }
 
 // ── Default configuration ───────────────────────────────────────────
@@ -116,4 +131,7 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   maxPollIntervalMs: MAX_POLL_INTERVAL_MS,
   syncReservedSlots: DEFAULT_SYNC_RESERVED_SLOTS,
   backgroundStaleTimeoutMs: BACKGROUND_STALE_TIMEOUT_MS,
+  watchdogIntervalMs: WATCHDOG_INTERVAL_MS,
+  globalSweepIntervalMs: GLOBAL_SWEEP_INTERVAL_MS,
+  idleDebounceMs: IDLE_DEBOUNCE_MS,
 };

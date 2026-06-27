@@ -737,10 +737,12 @@ describe("DispatchManager", () => {
       parentContext(),
     );
 
-    const taskRef = (manager as any).tasks.get(task.id);
+    const mgr = manager as any;
+    const taskRef = mgr.tasks.get(task.id);
     taskRef.sessionId = "some-session-id";
     taskRef.status = "running";
     taskRef.startedAt = new Date(Date.now() - 10000);
+    mgr.sessionToTask.set("some-session-id", task.id);
 
     await expect(manager.handleSessionIdle("some-session-id")).resolves.toBeUndefined();
     expect(taskRef.status).toBe("running");
@@ -755,24 +757,22 @@ describe("DispatchManager", () => {
       parentContext(),
     );
 
-    const taskRef = (manager as any).tasks.get(task.id);
+    const mgr = manager as any;
+    const taskRef = mgr.tasks.get(task.id);
     taskRef.sessionId = "early-session";
     taskRef.status = "running";
-    // Very recent start — elapsed will be < minRuntimeMs (5000)
     taskRef.startedAt = new Date(Date.now());
+    mgr.sessionToTask.set("early-session", task.id);
 
-    // Spy on messages before calling idle
     const messagesSpy = client.session.messages;
 
     await manager.handleSessionIdle("early-session");
 
-    // Should not have fetched messages (too early)
     expect(messagesSpy).not.toHaveBeenCalled();
-    // Task should still be running
     expect(taskRef.status).toBe("running");
   });
 
-  it("handleSessionIdle completes task when elapsed >= minRuntimeMs and assistant output exists", async () => {
+  it("handleSessionIdle starts debounce then completes on trigger when elapsed >= minRuntimeMs and assistant output exists", async () => {
     const client = createMockClient();
     const manager = new DispatchManager(client, fastConfig);
 
@@ -781,13 +781,15 @@ describe("DispatchManager", () => {
       parentContext(),
     );
 
-    const taskRef = (manager as any).tasks.get(task.id);
+    const mgr = manager as any;
+    const taskRef = mgr.tasks.get(task.id);
+    const watchdog = mgr.watchdog;
     taskRef.sessionId = "mature-session";
     taskRef.status = "running";
-    // Old enough to be past minRuntimeMs (5000)
     taskRef.startedAt = new Date(Date.now() - 6000);
+    mgr.sessionToTask.set("mature-session", task.id);
+    watchdog.registerTask(task.id);
 
-    // Mock messages to return assistant output
     client.session.messages = mock(() =>
       Promise.resolve({
         data: [
@@ -796,10 +798,19 @@ describe("DispatchManager", () => {
         error: undefined,
       }),
     );
+    client.session.status = mock(() =>
+      Promise.resolve({
+        data: { "mature-session": { type: "idle" } },
+        error: undefined,
+      }),
+    );
 
     await manager.handleSessionIdle("mature-session");
 
-    // Task should have been completed
+    expect(watchdog.isDebouncing(task.id)).toBe(true);
+    expect(taskRef.status).toBe("running");
+
+    await watchdog.triggerDebounce(task.id);
     expect(taskRef.status).toBe("completed");
   });
 
@@ -1083,9 +1094,8 @@ describe("DispatchManager", () => {
   // ── 11. handleSessionIdle race-guard ──────────────────────────
 
   describe("handleSessionIdle race-guard", () => {
-    it("poller wins during session.idle async gap — idle no-ops, single release", async () => {
+    it("direct completion wins during idle debounce — idle debounce no-ops, single release", async () => {
       const client = createMockClient();
-      // Deferred promise that idle will await
       let resolveMessages!: (v: any) => void;
       const deferred = new Promise<any>((r) => { resolveMessages = r; });
 
@@ -1094,7 +1104,6 @@ describe("DispatchManager", () => {
 
       const manager = new DispatchManager(client, fastConfig);
 
-      // Launch a task
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
         parentContext(),
@@ -1103,16 +1112,17 @@ describe("DispatchManager", () => {
       const t = mgr.tasks.get(task.id);
       t.sessionId = "idle-session";
       t.startedAt = new Date(Date.now() - 10000);
+      mgr.sessionToTask.set("idle-session", task.id);
 
       // Call handleSessionIdle — it will suspend at messages await
       const idlePromise = manager.handleSessionIdle("idle-session");
 
-      // While suspended, poller completes via handleTaskCompleted
+      // While suspended, direct complete via handleTaskCompleted
       mgr.handleTaskCompleted(task.id);
       expect(t.status).toBe("completed");
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
 
-      // Now resolve the deferred — idle resumes
+      // Now resolve the deferred — idle resumes, starts debounce
       resolveMessages({
         data: [
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
@@ -1126,7 +1136,7 @@ describe("DispatchManager", () => {
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
     });
 
-    it("second handleSessionIdle for same task is a no-op", async () => {
+    it("second handleSessionIdle for same task is a no-op while already debouncing", async () => {
       const client = createMockClient();
       const manager = new DispatchManager(client, fastConfig);
 
@@ -1135,25 +1145,34 @@ describe("DispatchManager", () => {
         parentContext(),
       );
       const mgr = manager as any;
+      const watchdog = mgr.watchdog;
       const t = mgr.tasks.get(task.id);
       t.sessionId = "idle-session-2";
       t.startedAt = new Date(Date.now() - 10000);
+      mgr.sessionToTask.set("idle-session-2", task.id);
+      watchdog.registerTask(task.id);
 
-      // Set mock messages to return valid output
       client.session.messages = mock(() => Promise.resolve({
         data: [
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
         ],
         error: undefined,
       }));
+      client.session.status = mock(() => Promise.resolve({
+        data: { "idle-session-2": { type: "idle" } },
+        error: undefined,
+      }));
 
-      // First idle — should complete the task
       await manager.handleSessionIdle("idle-session-2");
-      expect(t.status).toBe("completed");
-      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
+      expect(watchdog.isDebouncing(task.id)).toBe(true);
+      expect(t.status).toBe("running");
 
-      // Second idle — should no-op (no throw, no state change)
+      // Second idle — should no-op (already debouncing)
       await manager.handleSessionIdle("idle-session-2");
+      expect(watchdog.isDebouncing(task.id)).toBe(true);
+
+      // Trigger the debounce to complete
+      await watchdog.triggerDebounce(task.id);
       expect(t.status).toBe("completed");
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
     });
@@ -1505,6 +1524,11 @@ describe("reopenForContinuation", () => {
     mgr.handleTaskCompleted(t1.id);
     expect(t1.status).toBe("completed");
 
+    // leaveRunning → flushPersistSync disposes the watchdog.
+    // Re-enable it for reopenForContinuation to re-register.
+    (mgr.watchdog as any).disposed = false;
+    (mgr.watchdog as any).registeredTasks.clear();
+
     const createCountBefore = sessionCreate.length;
 
     const t2 = await manager.reopenForContinuation(
@@ -1527,8 +1551,7 @@ describe("reopenForContinuation", () => {
     // messageCountAtStart set (2 messages in msgResult)
     expect(t2.messageCountAtStart).toBe(2);
 
-    // Poller re-registered
-    expect(mgr.poller.getTaskCount()).toBe(1);
+    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(1);
 
     // Task state reset
     expect(t2.startedAt).toBeInstanceOf(Date);
@@ -1721,7 +1744,7 @@ describe("recover()", () => {
     expect(loaded!.status).toBe("running");
 
     // Poller should have the running task registered
-    expect((manager as any).poller.getTaskCount()).toBe(1);
+    expect((manager as any).watchdog.getRegisteredTaskIds().length).toBe(1);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -1939,7 +1962,7 @@ describe("recover()", () => {
 
     const mgr = manager as any;
     expect(mgr.concurrency.getActiveCount("default")).toBe(3);
-    expect(mgr.poller.getTaskCount()).toBe(3);
+    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(3);
     for (let i = 0; i < 3; i++) {
       expect(manager.getTask(`bg_rec_${i}`)?.status).toBe("running");
     }
@@ -1972,7 +1995,7 @@ describe("recover()", () => {
     await manager.recover();
 
     const mgr = manager as any;
-    expect(mgr.poller.getTaskCount()).toBe(5);
+    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(5);
     expect(mgr.concurrency.getActiveCount("default")).toBe(5);
 
     let errorCount = 0;
@@ -2063,7 +2086,7 @@ describe("recover()", () => {
     // Both tasks are running
     expect(manager.getTask("bg_openai")?.status).toBe("running");
     expect(manager.getTask("bg_claude")?.status).toBe("running");
-    expect(mgr.poller.getTaskCount()).toBe(2);
+    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(2);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -2656,7 +2679,7 @@ describe("reserved sync lane", () => {
 
     const mgr = manager as any;
     // forceOccupyBackground clamps to 4 (limit - reserved)
-    expect(mgr.poller.getTaskCount()).toBe(4);
+    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(4);
     expect(mgr.concurrency.getActiveCount("default")).toBe(4);
 
     // 1 task should be errored (exceeded concurrency limit on recovery)

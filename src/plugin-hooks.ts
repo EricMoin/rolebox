@@ -56,10 +56,43 @@ export async function createPluginHooks(
       dispatch_metrics: createDispatchMetricsTool(),
     },
     event: async (input: { event: Event }) => {
-      if (input.event.type === "session.idle") {
-        const sessionId = (input.event.properties as { sessionID?: string })?.sessionID;
-        if (sessionId) {
-          await dispatchManager.handleSessionIdle(sessionId);
+      const e = input.event;
+      const props = e.properties as Record<string, unknown> | undefined;
+
+      switch (e.type) {
+        case "session.idle": {
+          const sid = (props as { sessionID?: string } | undefined)?.sessionID;
+          if (sid) await dispatchManager.handleSessionIdle(sid);
+          break;
+        }
+        case "session.status": {
+          const sid = (props as { sessionID?: string } | undefined)?.sessionID;
+          if (sid) {
+            // NOTE: status field shape varies by SDK version. Using raw property access.
+            const statusVal = props?.status;
+            const statusType = typeof statusVal === "object" && statusVal !== null
+              ? ((statusVal as { type?: string }).type ?? String(statusVal))
+              : String(statusVal ?? "");
+            dispatchManager.handleSessionStatus(sid, statusType);
+          }
+          break;
+        }
+        case "session.error": {
+          const sid = (props as { sessionID?: string } | undefined)?.sessionID;
+          if (sid) await dispatchManager.handleSessionError(sid, props?.error);
+          break;
+        }
+        case "session.deleted": {
+          const info = props?.info as { id?: string } | undefined;
+          const did = info?.id;
+          if (did) await dispatchManager.handleSessionDeleted(did);
+          break;
+        }
+        case "message.updated": {
+          const info = props?.info as { sessionID?: string } | undefined;
+          const msid = info?.sessionID;
+          if (msid) dispatchManager.handleMessageUpdated(msid);
+          break;
         }
       }
     },
