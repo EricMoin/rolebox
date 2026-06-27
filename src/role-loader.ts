@@ -14,7 +14,7 @@ import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.ts";
-import type { RoleConfig, SubAgentConfig } from "./types.ts";
+import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "./types.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR } from "./constants.ts";
 import { createSubLogger, formatError } from "./logger.ts";
 import type { Logger } from "tslog";
@@ -178,6 +178,51 @@ export function applyInheritance(
 }
 
 /**
+ * Parse and validate the `dispatch:` block from a role.yaml.
+ *
+ * Coerces each known field with Number(), drops NaN and ≤0 values,
+ * and logs a warning for each invalid entry via the role-loader logger.
+ * Returns undefined if the dispatch block is absent, null, or contains
+ * no valid fields.
+ */
+function parseDispatchConfig(
+  raw: Record<string, unknown> | null | undefined,
+  roleId: string,
+): DispatchRoleConfig | undefined {
+  if (raw == null || typeof raw !== "object") return undefined;
+
+  const validFields: Record<string, number> = {};
+  const knownKeys = [
+    "maxConcurrent",
+    "maxQueueDepth",
+    "syncReservedSlots",
+    "maxActivePerParent",
+    "retryAfterMs",
+    "backpressureMaxRetries",
+    "backpressureMaxDelayMs",
+    "backgroundStaleTimeoutMs",
+    "syncAcquireTimeoutMs",
+    "syncPromptTimeoutMs",
+  ];
+
+  for (const key of knownKeys) {
+    const val = (raw as Record<string, unknown>)[key];
+    if (val === undefined || val === null) continue;
+
+    const num = Number(val);
+    if (Number.isNaN(num) || num <= 0) {
+      log.warn(`Skipping "${roleId}" dispatch.${key}: ${JSON.stringify(val)} — must be a positive number`);
+      continue;
+    }
+
+    validFields[key] = num;
+  }
+
+  if (Object.keys(validFields).length === 0) return undefined;
+  return validFields as unknown as DispatchRoleConfig;
+}
+
+/**
  * Parse and validate a single role.yaml file.
  *
  * @returns RoleConfig on success, null if the role should be skipped
@@ -237,6 +282,11 @@ async function loadOneRole(
 
   prompt = resolveEnvVars(prompt);
   const resolved = resolveEnvVarsDeep(obj) as Record<string, unknown>;
+
+  const dispatchConfig = parseDispatchConfig(
+    resolved.dispatch as Record<string, unknown> | null | undefined,
+    roleId,
+  );
 
   const rawSubagents = resolved.subagents;
   let validSubagents: SubAgentConfig[] = [];
@@ -425,6 +475,7 @@ async function loadOneRole(
     ...(resolved.collaboration != null && typeof resolved.collaboration === "object"
       ? { collaboration: resolved.collaboration as RoleConfig["collaboration"] }
       : {}),
+    ...(dispatchConfig ? { dispatch: dispatchConfig } : {}),
   };
 
   if (mergedSubagents) {

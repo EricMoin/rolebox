@@ -60,18 +60,42 @@ export function extractDispatchTarget(
 /**
  * Single-authority entry point for advancing the graph state after a dispatch.
  * Checks session state validity, extracts target, calls graphSessionState.advanceStep.
+ *
+ * Returns the AdvanceResult plus an optional correction string for off-route
+ * or unknown dispatches. The correction is a <system-reminder> block suitable
+ * for injection into the orchestrator's next system prompt (Task 18).
  */
 export function advanceGraphForDispatch(
   sessionID: string,
   tool: string,
   args: unknown,
-): AdvanceResult {
+): { result: AdvanceResult; correction?: string } {
   const state = graphSessionState.getState(sessionID);
-  if (!state) return { kind: "ignored" };
-  if (state.status !== "active") return { kind: "ignored" };
+  if (!state) return { result: { kind: "ignored" } };
+  if (state.status !== "active") return { result: { kind: "ignored" } };
 
   const target = extractDispatchTarget(tool, args);
-  if (!target) return { kind: "ignored" };
+  if (!target) return { result: { kind: "ignored" } };
 
-  return graphSessionState.advanceStep(sessionID, target);
+  const result = graphSessionState.advanceStep(sessionID, target);
+
+  if (result.kind === "off_route") {
+    const expected = result.expected.join(", ");
+    const correction = `<system-reminder>
+The dispatch to "${result.got}" went off the collaboration graph route.
+Expected next target(s): ${expected}.
+The graph state has not been advanced.
+</system-reminder>`;
+    return { result, correction };
+  }
+
+  if (result.kind === "unknown") {
+    const correction = `<system-reminder>
+"${result.got}" is not part of the collaboration graph.
+The graph state has not been advanced.
+</system-reminder>`;
+    return { result, correction };
+  }
+
+  return { result };
 }

@@ -783,6 +783,165 @@ describe("discoverRoles", () => {
       expect(names).toContain("Three");
     });
   });
+
+  describe("dispatch block parsing", () => {
+    it("parses a valid dispatch: block with all numeric fields", async () => {
+      await writeRoleYaml(
+        "dispatcher",
+        [
+          "name: Dispatcher",
+          "description: Has dispatch config",
+          "prompt: I dispatch tasks.",
+          "dispatch:",
+          "  maxConcurrent: 3",
+          "  maxQueueDepth: 20",
+          "  syncReservedSlots: 2",
+          "  maxActivePerParent: 5",
+          "  retryAfterMs: 15000",
+          "  backpressureMaxRetries: 10",
+          "  backpressureMaxDelayMs: 120000",
+          "  backgroundStaleTimeoutMs: 600000",
+          "  syncAcquireTimeoutMs: 180000",
+          "  syncPromptTimeoutMs: 300000",
+        ].join("\n"),
+      );
+
+      const roles = await discoverRoles(tmpDir);
+
+      expect(roles.size).toBe(1);
+      const config = roles.get("dispatcher")!;
+      expect(config.dispatch).toBeDefined();
+      expect(config.dispatch!.maxConcurrent).toBe(3);
+      expect(config.dispatch!.maxQueueDepth).toBe(20);
+      expect(config.dispatch!.syncReservedSlots).toBe(2);
+      expect(config.dispatch!.maxActivePerParent).toBe(5);
+      expect(config.dispatch!.retryAfterMs).toBe(15000);
+      expect(config.dispatch!.backpressureMaxRetries).toBe(10);
+      expect(config.dispatch!.backpressureMaxDelayMs).toBe(120000);
+      expect(config.dispatch!.backgroundStaleTimeoutMs).toBe(600000);
+      expect(config.dispatch!.syncAcquireTimeoutMs).toBe(180000);
+      expect(config.dispatch!.syncPromptTimeoutMs).toBe(300000);
+      expect(capturedLogs.length).toBe(0);
+    });
+
+    it("parses a partial dispatch: block with only some fields", async () => {
+      await writeRoleYaml(
+        "partial-dispatch",
+        [
+          "name: Partial",
+          "description: Some dispatch fields",
+          "prompt: I dispatch.",
+          "dispatch:",
+          "  maxConcurrent: 7",
+          "  retryAfterMs: 60000",
+        ].join("\n"),
+      );
+
+      const roles = await discoverRoles(tmpDir);
+
+      expect(roles.size).toBe(1);
+      const config = roles.get("partial-dispatch")!;
+      expect(config.dispatch).toBeDefined();
+      expect(config.dispatch!.maxConcurrent).toBe(7);
+      expect(config.dispatch!.retryAfterMs).toBe(60000);
+      expect(config.dispatch!.maxQueueDepth).toBeUndefined();
+      expect(config.dispatch!.backgroundStaleTimeoutMs).toBeUndefined();
+      expect(capturedLogs.length).toBe(0);
+    });
+
+    it("drops invalid dispatch values (NaN, ≤0, non-number) with warnings, role still loads", async () => {
+      await writeRoleYaml(
+        "bad-dispatch",
+        [
+          "name: BadDispatch",
+          "description: Has bad dispatch values",
+          "prompt: I dispatch badly.",
+          "dispatch:",
+          '  maxConcurrent: "not-a-number"',
+          "  maxQueueDepth: -5",
+          "  retryAfterMs: 30000",
+          "  backgroundStaleTimeoutMs: 0",
+        ].join("\n"),
+      );
+
+      const roles = await discoverRoles(tmpDir);
+
+      expect(roles.size).toBe(1);
+      const config = roles.get("bad-dispatch")!;
+      expect(config.dispatch).toBeDefined();
+      // Invalid values should be dropped
+      expect(config.dispatch!.maxConcurrent).toBeUndefined();
+      expect(config.dispatch!.maxQueueDepth).toBeUndefined();
+      expect(config.dispatch!.backgroundStaleTimeoutMs).toBeUndefined();
+      // Valid value should survive
+      expect(config.dispatch!.retryAfterMs).toBe(30000);
+
+      // Should have warnings about invalid entries
+      const warnings = capturedLogs as string[][];
+      const warningCount = warnings.filter((c) =>
+        c[0].includes("bad-dispatch") && c[0].includes("dispatch"),
+      ).length;
+      expect(warningCount).toBeGreaterThanOrEqual(3);
+    });
+
+    it("role without dispatch: block loads normally with dispatch undefined", async () => {
+      await writeRoleYaml(
+        "plain",
+        "name: Plain\ndescription: No dispatch\nprompt: I am plain.\n",
+      );
+
+      const roles = await discoverRoles(tmpDir);
+
+      expect(roles.size).toBe(1);
+      const config = roles.get("plain")!;
+      expect(config.dispatch).toBeUndefined();
+      expect(capturedLogs.length).toBe(0);
+    });
+
+    it("dispatch: block with empty object yields dispatch undefined (no valid fields)", async () => {
+      await writeRoleYaml(
+        "empty-dispatch",
+        [
+          "name: EmptyDispatch",
+          "description: Empty dispatch block",
+          "prompt: I have empty dispatch.",
+          "dispatch: {}",
+        ].join("\n"),
+      );
+
+      const roles = await discoverRoles(tmpDir);
+
+      expect(roles.size).toBe(1);
+      const config = roles.get("empty-dispatch")!;
+      expect(config.dispatch).toBeUndefined();
+      expect(capturedLogs.length).toBe(0);
+    });
+
+    it("resolves env vars in dispatch values", async () => {
+      process.env.ROLEBOX_TEST_DISPATCH_CONC = "12";
+      await writeRoleYaml(
+        "env-dispatch",
+        [
+          "name: EnvDispatch",
+          "description: Dispatch with env vars",
+          "prompt: I dispatch with env.",
+          "dispatch:",
+          "  maxConcurrent: \"{env:ROLEBOX_TEST_DISPATCH_CONC}\"",
+          "  retryAfterMs: 45000",
+        ].join("\n"),
+      );
+
+      const roles = await discoverRoles(tmpDir);
+
+      expect(roles.size).toBe(1);
+      const config = roles.get("env-dispatch")!;
+      expect(config.dispatch).toBeDefined();
+      expect(config.dispatch!.maxConcurrent).toBe(12);
+      expect(config.dispatch!.retryAfterMs).toBe(45000);
+
+      delete process.env.ROLEBOX_TEST_DISPATCH_CONC;
+    });
+  });
 });
 
 describe("applyInheritance", () => {

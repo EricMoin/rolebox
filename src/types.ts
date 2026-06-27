@@ -5,6 +5,7 @@ import type {
   ReferenceScope,
   GraphTemplate,
 } from "./constants.ts";
+import type { DispatchManagerConfig } from "./dispatch/config.ts";
 
 /**
  * Permission configuration, mirroring opencode's PermissionConfig structure.
@@ -90,6 +91,34 @@ export interface CollaborationConfig {
 }
 
 /**
+ * Raw dispatch configuration as parsed from role.yaml.
+ * Each field is an optional number that, when set, overrides the
+ * corresponding DispatchManagerConfig default for this role's sub-agent dispatch.
+ */
+export interface DispatchRoleConfig {
+  /** Maximum concurrent background tasks (dispatch default: 5) */
+  maxConcurrent?: number;
+  /** Maximum queued tasks per concurrency slot (dispatch default: 10) */
+  maxQueueDepth?: number;
+  /** Reserved concurrency slots for synchronous dispatch (dispatch default: 1) */
+  syncReservedSlots?: number;
+  /** Maximum active background tasks per parent session (dispatch default: 3) */
+  maxActivePerParent?: number;
+  /** Delay (ms) after a dispatch failure before retry (dispatch default: 30000) */
+  retryAfterMs?: number;
+  /** Maximum backpressure retry attempts (dispatch default: 5) */
+  backpressureMaxRetries?: number;
+  /** Maximum cumulative backpressure delay (ms) (dispatch default: 60000) */
+  backpressureMaxDelayMs?: number;
+  /** Per-task default stale timeout (ms) for background tasks (dispatch default: 900000) */
+  backgroundStaleTimeoutMs?: number;
+  /** Timeout (ms) to acquire a slot for synchronous dispatch (dispatch default: 120000) */
+  syncAcquireTimeoutMs?: number;
+  /** Timeout (ms) for sub-agent prompt in sync mode (dispatch default: 600000) */
+  syncPromptTimeoutMs?: number;
+}
+
+/**
  * Normalized internal representation of a collaboration graph.
  * Generated at build-time from CollaborationConfig by resolving
  * template expansions, deduplicating nodes, and categorizing edges.
@@ -168,6 +197,8 @@ export interface RoleConfig {
   references?: Record<string, string | ReferenceEntry>;
   /** Collaboration graph configuration for multi-agent workflows */
   collaboration?: CollaborationConfig;
+  /** Dispatch subsystem overrides for sub-agent queueing and concurrency */
+  dispatch?: DispatchRoleConfig;
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;
 }
@@ -271,6 +302,8 @@ export interface ResolvedRole {
   subagents: ResolvedSubAgent[];
   /** Resolved collaboration graph for multi-agent workflows (set when collaboration config is present) */
   graph?: ResolvedGraph;
+  /** Resolved dispatch configuration overrides from role.yaml dispatch: block */
+  dispatchConfig?: Partial<DispatchManagerConfig>;
 }
 
 /**
