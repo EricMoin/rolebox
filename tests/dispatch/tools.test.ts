@@ -140,7 +140,13 @@ describe("createDispatchOutputTool", () => {
     const manager = {
       getTask: mock(() => completed),
       getResult: mock(() =>
-        Promise.resolve({ kind: "ok", text: "test content" }),
+        Promise.resolve({
+          kind: "ok",
+          text: "test content",
+          resultText: "test content",
+          hadFence: false,
+          totalChars: 12,
+        }),
       ),
     } as unknown as DispatchManager;
     const tool = createDispatchOutputTool(manager);
@@ -152,6 +158,7 @@ describe("createDispatchOutputTool", () => {
 
     expect(result).toContain("Task Result");
     expect(result).toContain("test content");
+    expect(result).toContain("[result 12/12 chars]");
   });
 
   it("returns not_found for unknown task", async () => {
@@ -161,6 +168,9 @@ describe("createDispatchOutputTool", () => {
         Promise.resolve({
           kind: "not_found",
           text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
           error: "Task never existed",
         }),
       ),
@@ -208,7 +218,13 @@ describe("createDispatchOutputTool", () => {
         return completed;
       }),
       getResult: mock(() =>
-        Promise.resolve({ kind: "ok", text: "blocked result" }),
+        Promise.resolve({
+          kind: "ok",
+          text: "blocked result",
+          resultText: "blocked result",
+          hadFence: false,
+          totalChars: 14,
+        }),
       ),
     } as unknown as DispatchManager;
 
@@ -221,6 +237,7 @@ describe("createDispatchOutputTool", () => {
 
     expect(result).toContain("Task Result");
     expect(result).toContain("blocked result");
+    expect(result).toContain("[result 14/14 chars]");
   });
 
   it("T11: 6 distinct task states produce 6 distinguishable outputs", async () => {
@@ -229,7 +246,13 @@ describe("createDispatchOutputTool", () => {
     const manager1 = {
       getTask: mock(() => completedTask),
       getResult: mock(() =>
-        Promise.resolve({ kind: "ok", text: "result text" }),
+        Promise.resolve({
+          kind: "ok",
+          text: "result text",
+          resultText: "result text",
+          hadFence: false,
+          totalChars: 11,
+        }),
       ),
     } as unknown as DispatchManager;
     const r1 = await createDispatchOutputTool(manager1).execute(
@@ -293,6 +316,9 @@ describe("createDispatchOutputTool", () => {
         Promise.resolve({
           kind: "expired",
           text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
           error: "Task result no longer available (was cleaned up)",
         }),
       ),
@@ -311,6 +337,9 @@ describe("createDispatchOutputTool", () => {
         Promise.resolve({
           kind: "not_found",
           text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
           error: "Task never existed",
         }),
       ),
@@ -335,6 +364,9 @@ describe("createDispatchOutputTool", () => {
         Promise.resolve({
           kind: "fetch_error",
           text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
           error: "Error retrieving task output: some error",
         }),
       ),
@@ -349,6 +381,175 @@ describe("createDispatchOutputTool", () => {
     // The completed format should just have whatever text the result provides (empty)
     expect(result).not.toContain("fetch_error");
     expect(result).not.toContain("[Error");
+  });
+
+  // ── T15: Pagination, Tail, and Spill-to-File ──────────────────────────
+
+  it("T15.1: small result returned inline with envelope, no spill", async () => {
+    const completed = makeTask({ status: "completed" });
+    const shortText = "hello world";
+    const manager = {
+      getTask: mock(() => completed),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "ok",
+          text: shortText,
+          resultText: shortText,
+          hadFence: false,
+          totalChars: shortText.length,
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_test123", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Task Result");
+    expect(result).toContain("hello world");
+    expect(result).toContain(`[result ${shortText.length}/${shortText.length} chars]`);
+    expect(result).not.toContain("(truncated)");
+    expect(result).not.toContain("file=");
+    expect(result).not.toContain("next_offset=");
+    expect(result).not.toContain("use offset/limit");
+  });
+
+  it("T15.2: large result (> max_chars) is truncated, spills to file", async () => {
+    const completed = makeTask({ status: "completed", id: "bg_spill" });
+    // Create a result that exceeds a small max_chars window
+    const longResult = "A".repeat(500);
+    const maxChars = 100;
+
+    const manager = {
+      getTask: mock(() => completed),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "ok",
+          text: longResult,
+          resultText: longResult,
+          hadFence: false,
+          totalChars: longResult.length,
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_spill", block: false, timeout: 60000, max_chars: maxChars },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Task Result");
+    // Body should contain only a windowed portion
+    expect(result).toContain("A".repeat(maxChars));
+    // Should have truncated marker and spill info
+    expect(result).toContain("(truncated)");
+    expect(result).toContain("file=");
+    expect(result).toContain("next_offset=");
+    expect(result).toContain("use offset/limit or read the file");
+
+    // Verify spill file exists with full content
+    const spillPath = (result.match(/file=(\S+)/) ?? [])[1];
+    expect(spillPath).toBeTruthy();
+    expect(fs.existsSync(spillPath!)).toBe(true);
+    expect(fs.readFileSync(spillPath!, "utf-8")).toBe(longResult);
+
+    // Clean up
+    fs.rmSync(spillPath!, { force: true });
+  });
+
+  it("T15.3: offset/limit returns a window; tail:true returns final chars", async () => {
+    const completed = makeTask({ status: "completed" });
+    const resultText = "0123456789ABCDEFGHIJ"; // 20 chars
+
+    const manager = {
+      getTask: mock(() => completed),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "ok",
+          text: resultText,
+          resultText: resultText,
+          hadFence: false,
+          totalChars: resultText.length,
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    // offset 5, limit 5 → should return "56789"
+    const r1 = await tool.execute(
+      {
+        task_id: "bg_test123",
+        block: false,
+        timeout: 60000,
+        max_chars: 100,
+        offset: 5,
+        limit: 5,
+      },
+      mockToolContext,
+    );
+    expect(r1).toContain("56789");
+    expect(r1).toContain("[result 5/15 chars]");
+    expect(r1).toContain("next_offset=10");
+
+    // tail:true → last 5 chars
+    const r2 = await tool.execute(
+      {
+        task_id: "bg_test123",
+        block: false,
+        timeout: 60000,
+        max_chars: 5,
+        tail: true,
+      },
+      mockToolContext,
+    );
+    expect(r2).toContain("FGHIJ");
+    expect(r2).toContain("[result 5/20 chars]");
+    expect(r2).toContain("(truncated)");
+  });
+
+  it("T15.4: fenced result block shows clean extracted content inline", async () => {
+    const completed = makeTask({ status: "completed" });
+    const fullText = [
+      "Some preamble",
+      "```result",
+      "clean output here",
+      "more clean output",
+      "```",
+      "Some postamble",
+    ].join("\n");
+    const extractedText = "clean output here\nmore clean output";
+
+    const manager = {
+      getTask: mock(() => completed),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "ok",
+          text: fullText,
+          resultText: extractedText,
+          hadFence: true,
+          totalChars: fullText.length,
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_test123", block: false, timeout: 60000 },
+      mockToolContext,
+    );
+
+    // Inline body should be the extracted content, not the raw fenced text
+    expect(result).toContain("clean output here");
+    expect(result).toContain("more clean output");
+    // Should NOT contain the fence markers
+    expect(result).not.toContain("```result");
+    expect(result).not.toContain("```");
+    expect(result).not.toContain("Some preamble");
+    expect(result).not.toContain("Some postamble");
+    // But the spilled file (if any) would have full text — in this case it's small so no spill
   });
 });
 
