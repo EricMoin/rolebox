@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync, unlinkSync, renameSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
 export const RESULT_FENCE = "result";
@@ -129,4 +129,34 @@ export function formatResultEnvelope(opts: EnvelopeOpts): string {
   }
 
   return parts.join(" ");
+}
+
+/**
+ * Build the filesystem path for a result sidecar file.
+ */
+export function resultSidecarPath(taskId: string, dir: string): string {
+  return join(dir, "state", "results", `${taskId}.txt`);
+}
+
+/**
+ * Write result text to a sidecar file atomically.
+ * Reuses the atomic-write pattern (`.tmp` + `unlinkSync` + `renameSync`).
+ * Creates parent directories as needed.
+ * Returns the absolute path to the written file.
+ */
+export function writeResultSidecar(taskId: string, fullText: string, dir: string): string {
+  return spillToFile(taskId, fullText, dir);
+}
+
+/**
+ * Read result text from a sidecar file.
+ * Returns `null` when the file does not exist (ENOENT) — never throws for missing files.
+ */
+export function readResultSidecar(sidecarPath: string): string | null {
+  try {
+    return readFileSync(sidecarPath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
+  }
 }

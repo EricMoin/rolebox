@@ -4,6 +4,9 @@ import {
   applyWindow,
   spillToFile,
   formatResultEnvelope,
+  resultSidecarPath,
+  writeResultSidecar,
+  readResultSidecar,
   RESULT_FENCE,
   DEFAULT_MAX_RESULT_CHARS,
 } from "../../src/dispatch/result-extractor.ts";
@@ -280,6 +283,61 @@ describe("formatResultEnvelope", () => {
     expect(env).not.toContain("truncated");
     // Should still have length info
     expect(env).toContain("42");
+  });
+});
+
+// ── sidecar helpers ────────────────────────────────────────────────
+
+describe("sidecar helpers", () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = makeTempDir();
+  });
+
+  afterEach(() => {
+    cleanupDir(testDir);
+  });
+
+  it("resultSidecarPath builds correct path", () => {
+    const path = resultSidecarPath("task-sidecar", testDir);
+    expect(path).toBe(join(testDir, "state", "results", "task-sidecar.txt"));
+    // Does not touch the filesystem
+    expect(fs.existsSync(path)).toBe(false);
+  });
+
+  it("round-trip: write then read returns identical text", () => {
+    const content = "sidecar result data\nwith multiple\nlines";
+    const writtenPath = writeResultSidecar("roundtrip", content, testDir);
+    const readBack = readResultSidecar(writtenPath);
+    expect(readBack).toBe(content);
+  });
+
+  it("missing file returns null (no throw)", () => {
+    const path = join(testDir, "state", "results", "nonexistent.txt");
+    const result = readResultSidecar(path);
+    expect(result).toBeNull();
+  });
+
+  it("overwrite works (idempotent write)", () => {
+    const path1 = writeResultSidecar("idempotent", "first", testDir);
+    const path2 = writeResultSidecar("idempotent", "second", testDir);
+    expect(path1).toBe(path2);
+    const readBack = readResultSidecar(path2);
+    expect(readBack).toBe("second");
+  });
+
+  it("writeResultSidecar returns absolute path", () => {
+    const path = writeResultSidecar("abs-path", "data", testDir);
+    expect(path.startsWith("/")).toBe(true);
+    expect(fs.existsSync(path)).toBe(true);
+  });
+
+  it("readResultSidecar throws for non-ENOENT errors", () => {
+    // Passing a directory instead of a file produces an EISDIR error
+    const dirPath = join(testDir, "state", "results");
+    fs.mkdirSync(dirPath, { recursive: true });
+    expect(() => readResultSidecar(dirPath)).toThrow();
   });
 });
 
