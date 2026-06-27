@@ -6,8 +6,9 @@ import type {
   DispatchManagerConfig,
   TaskEventState,
   SessionMessageSnapshot,
+  MaterializedResultRef,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS } from "./config.ts";
 import { ConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
@@ -15,9 +16,10 @@ import { notifyParent } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 
 import { TaskStateStore } from "./task-store.ts";
-import { extractResultBlock } from "./result-extractor.ts";
+import { extractResultBlock, writeResultSidecar } from "./result-extractor.ts";
 import { debugLog, infoLog } from "./debug-log.ts";
 import { metrics } from "./metrics.ts";
+import { withTimeout, TimeoutError } from "./with-timeout.ts";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
 
@@ -371,10 +373,28 @@ export class DispatchManager {
       metrics.gauge("inflight_tasks").inc();
 
       // Step 2: Session create
-      const createResult = await this.client.session.create({
-        body: { parentID: parentContext.sessionID },
-        query: { directory: parentContext.directory },
-      });
+      const createTimeoutMs = this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
+      let createResult: Awaited<ReturnType<typeof this.client.session.create>>;
+      try {
+        createResult = await withTimeout(
+          this.client.session.create({
+            body: { parentID: parentContext.sessionID },
+            query: { directory: parentContext.directory },
+          }),
+          createTimeoutMs,
+          "session.create",
+        );
+      } catch (e) {
+        if (e instanceof TimeoutError) {
+          const err = JSON.stringify({
+            error: `Session create timed out after ${createTimeoutMs}ms`,
+            phase: "session",
+            timeout_ms: createTimeoutMs,
+          });
+          throw new Error(err);
+        }
+        throw e;
+      }
       const session = createResult.data;
       if (!session) {
         const err = JSON.stringify({
@@ -689,6 +709,68 @@ export class DispatchManager {
     };
   }
 
+  private async materializeResult(taskId: string): Promise<MaterializedResultRef> {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return {
+        sidecarPath: "",
+        totalChars: 0,
+        hadFence: false,
+        fetchError: "task not found",
+        materializedAt: new Date().toISOString(),
+      };
+    }
+
+    const boundary = task.messageCountAtStart ?? 0;
+
+    try {
+      const messagesResult = await withTimeout(
+        this.client.session.messages({ path: { id: task.sessionId } }),
+        this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
+        "materializeResult:session.messages",
+      );
+
+      if (messagesResult.error !== undefined) {
+        return {
+          sidecarPath: "",
+          totalChars: 0,
+          hadFence: false,
+          fetchError: `Error retrieving task output: ${JSON.stringify(messagesResult.error)}`,
+          materializedAt: new Date().toISOString(),
+        };
+      }
+
+      const allMessages = (messagesResult.data ?? []) as SessionMessageSnapshot[];
+      const fullText = this.buildAssistantText(allMessages, boundary);
+      const extracted = extractResultBlock(fullText);
+      const path = writeResultSidecar(taskId, fullText, process.cwd());
+
+      return {
+        sidecarPath: path,
+        totalChars: fullText.length,
+        hadFence: extracted.hadFence,
+        materializedAt: new Date().toISOString(),
+      };
+    } catch (err: unknown) {
+      if (err instanceof TimeoutError) {
+        return {
+          sidecarPath: "",
+          totalChars: 0,
+          hadFence: false,
+          fetchError: "timeout",
+          materializedAt: new Date().toISOString(),
+        };
+      }
+      return {
+        sidecarPath: "",
+        totalChars: 0,
+        hadFence: false,
+        fetchError: String(err),
+        materializedAt: new Date().toISOString(),
+      };
+    }
+  }
+
   private buildAssistantText(
     messages: readonly SessionMessageSnapshot[],
     boundary: number,
@@ -788,7 +870,7 @@ export class DispatchManager {
   private restoreState(): void {
     const loaded = this.store.load();
     if (!loaded) return;
-    for (const [taskId, task] of loaded) {
+    for (const [taskId, task] of loaded.tasks) {
       this.tasks.set(taskId, task);
     }
   }
@@ -1012,8 +1094,28 @@ export class DispatchManager {
     }
 
     try {
-      const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
-      const statusResult = await this.client.session.status();
+      const fetchTimeoutMs = this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
+
+      let msgResult;
+      let statusResult;
+      try {
+        msgResult = await withTimeout(
+          this.client.session.messages({ path: { id: task.sessionId } }),
+          fetchTimeoutMs,
+          "session.messages",
+        );
+        statusResult = await withTimeout(
+          this.client.session.status(),
+          fetchTimeoutMs,
+          "session.status",
+        );
+      } catch (e) {
+        if (e instanceof TimeoutError) {
+          debugLog("evaluate", taskId, `fetch timed out after ${fetchTimeoutMs}ms`);
+          return;
+        }
+        throw e;
+      }
 
       if (msgResult.error !== undefined) {
         debugLog("evaluate", taskId, `messages fetch error: ${JSON.stringify(msgResult.error)}`);
