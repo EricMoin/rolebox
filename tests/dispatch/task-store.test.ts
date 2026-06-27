@@ -65,9 +65,9 @@ describe("TaskStateStore", () => {
 
       const loaded = store.load();
       expect(loaded).not.toBeNull();
-      expect(loaded!.size).toBe(1);
+      expect(loaded!.tasks.size).toBe(1);
 
-      const t = loaded!.get(task.id);
+      const t = loaded!.tasks.get(task.id);
       expect(t).toBeDefined();
       expect(t!.id).toBe(task.id);
       expect(t!.status).toBe("running");
@@ -98,13 +98,13 @@ describe("TaskStateStore", () => {
 
       const loaded = store.load();
       expect(loaded).not.toBeNull();
-      expect(loaded!.size).toBe(3);
+      expect(loaded!.tasks.size).toBe(3);
 
-      expect(loaded!.get("bg_001")!.status).toBe("running");
-      expect(loaded!.get("bg_002")!.status).toBe("completed");
-      expect(loaded!.get("bg_002")!.completedAt).toBeInstanceOf(Date);
-      expect(loaded!.get("bg_003")!.status).toBe("error");
-      expect(loaded!.get("bg_003")!.error).toBe("something broke");
+      expect(loaded!.tasks.get("bg_001")!.status).toBe("running");
+      expect(loaded!.tasks.get("bg_002")!.status).toBe("completed");
+      expect(loaded!.tasks.get("bg_002")!.completedAt).toBeInstanceOf(Date);
+      expect(loaded!.tasks.get("bg_003")!.status).toBe("error");
+      expect(loaded!.tasks.get("bg_003")!.error).toBe("something broke");
     });
   });
 
@@ -134,7 +134,7 @@ describe("TaskStateStore", () => {
       await storeA.save(new Map([[taskA.id, taskA]]));
 
       currentDataDir = dirA;
-      expect(storeA.load()?.size).toBe(1);
+      expect(storeA.load()?.tasks.size).toBe(1);
 
       currentDataDir = dirB;
       expect(storeB.load()).toBeNull();
@@ -155,7 +155,7 @@ describe("TaskStateStore", () => {
       const raw = readFileSync(path, "utf-8");
       const parsed = JSON.parse(raw);
 
-      expect(parsed.version).toBe(3);
+      expect(parsed.version).toBe(4);
       expect(Array.isArray(parsed.tasks)).toBe(true);
       expect(parsed.tasks.length).toBe(1);
 
@@ -227,8 +227,8 @@ describe("TaskStateStore", () => {
       // Load — should auto-add defaults and re-save as v2
       const loaded = store.load();
       expect(loaded).not.toBeNull();
-      expect(loaded!.size).toBe(1);
-      const t = loaded!.get("bg_v1task")!;
+      expect(loaded!.tasks.size).toBe(1);
+      const t = loaded!.tasks.get("bg_v1task")!;
       expect(t.id).toBe("bg_v1task");
       expect(t.status).toBe("running");
       expect(t.progress.toolCalls).toBe(3);
@@ -240,10 +240,10 @@ describe("TaskStateStore", () => {
       // Wait for the fire-and-forget async v1→v2 migration save to complete
       await new Promise((r) => setTimeout(r, 50));
 
-      // Verify disk file is now v3
+      // Verify disk file is now v4
       const raw = readFileSync(path, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(3);
+      expect(parsed.version).toBe(4);
       expect(parsed.tasks[0].concurrencyKey).toBe("default");
       expect(parsed.tasks[0].messageCountAtStart).toBe(0);
     });
@@ -284,9 +284,9 @@ describe("TaskStateStore", () => {
       writeFileSync(path, JSON.stringify(v1File), "utf-8");
 
       const loaded = store.load();
-      expect(loaded!.size).toBe(2);
+      expect(loaded!.tasks.size).toBe(2);
 
-      for (const t of loaded!.values()) {
+      for (const t of loaded!.tasks.values()) {
         expect(t.concurrencyKey).toBe("default");
         expect(t.continuationOf).toBeUndefined();
         expect(t.messageCountAtStart).toBe(0);
@@ -308,7 +308,7 @@ describe("TaskStateStore", () => {
 
       const loaded = store.load();
       expect(loaded).not.toBeNull();
-      const t = loaded!.get("bg_sync_mode")!;
+      const t = loaded!.tasks.get("bg_sync_mode")!;
       expect(t.mode).toBe("sync");
       expect(t.timeoutMs).toBe(120000);
     });
@@ -345,13 +345,13 @@ describe("TaskStateStore", () => {
 
       const loaded = store.load();
       expect(loaded).not.toBeNull();
-      expect(loaded!.size).toBe(1);
-      const t = loaded!.get("bg_v2task")!;
+      expect(loaded!.tasks.size).toBe(1);
+      const t = loaded!.tasks.get("bg_v2task")!;
       expect(t.mode).toBe("background");
       expect(t.timeoutMs).toBeUndefined();
     });
 
-    it("loads version:3 successfully; version:4 returns null", () => {
+    it("loads version:3 and version:4 successfully; version:5 returns null", () => {
       const { store, dir } = createTestStore();
       dirs.push(dir);
 
@@ -366,10 +366,18 @@ describe("TaskStateStore", () => {
       );
       expect(store.load()).not.toBeNull();
 
-      // version:4 should return null
+      // version:4 should load
       writeFileSync(
         path,
         JSON.stringify({ version: 4, tasks: [] }),
+        "utf-8",
+      );
+      expect(store.load()).not.toBeNull();
+
+      // version:5 should return null
+      writeFileSync(
+        path,
+        JSON.stringify({ version: 5, tasks: [] }),
         "utf-8",
       );
       expect(store.load()).toBeNull();
@@ -417,10 +425,10 @@ describe("TaskStateStore", () => {
       // Load from a fresh store in the same dir
       const loaded = store.load();
       expect(loaded).not.toBeNull();
-      expect(loaded!.size).toBe(2);
-      expect(loaded!.get("bg_running")!.status).toBe("running");
-      expect(loaded!.get("bg_done")!.status).toBe("completed");
-      expect(loaded!.get("bg_done")!.completedAt).toBeInstanceOf(Date);
+      expect(loaded!.tasks.size).toBe(2);
+      expect(loaded!.tasks.get("bg_running")!.status).toBe("running");
+      expect(loaded!.tasks.get("bg_done")!.status).toBe("completed");
+      expect(loaded!.tasks.get("bg_done")!.completedAt).toBeInstanceOf(Date);
 
       // Verify no .tmp file remains
       const sp = stateFilePath(dir);
@@ -449,10 +457,207 @@ describe("TaskStateStore", () => {
       expect(existsSync(sp)).toBe(true);
       const raw = readFileSync(sp, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(3);
+      expect(parsed.version).toBe(4);
       expect(Array.isArray(parsed.tasks)).toBe(true);
       expect(parsed.tasks.length).toBe(1);
       expect(parsed.tasks[0].id).toBe(task.id);
+    });
+  });
+
+  describe("v4 schema (result + outbox)", () => {
+    it("round-trips a task with result ref and outbox", async () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const task = makeTask({
+        id: "bg_v4_result",
+        status: "completed",
+        result: {
+          sidecarPath: "/tmp/state/results/bg_v4_result.txt",
+          totalChars: 1420,
+          hadFence: true,
+          materializedAt: new Date().toISOString(),
+        },
+      });
+      const outbox = new Set(["bg_v4_result"]);
+      await store.save(new Map([[task.id, task]]), outbox);
+
+      const loaded = store.load();
+      expect(loaded).not.toBeNull();
+      expect(loaded!.tasks.size).toBe(1);
+      expect(loaded!.outbox).toEqual(["bg_v4_result"]);
+
+      const t = loaded!.tasks.get("bg_v4_result")!;
+      expect(t.result).toBeDefined();
+      expect(t.result!.sidecarPath).toBe("/tmp/state/results/bg_v4_result.txt");
+      expect(t.result!.totalChars).toBe(1420);
+      expect(t.result!.hadFence).toBe(true);
+      expect(t.result!.fetchError).toBeUndefined();
+      expect(typeof t.result!.materializedAt).toBe("string");
+
+      // Verify disk file is v4 with result + outbox
+      const sp = stateFilePath(dir);
+      const raw = readFileSync(sp, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.version).toBe(4);
+      expect(parsed.outbox).toEqual(["bg_v4_result"]);
+      expect(parsed.tasks[0].result).toBeDefined();
+      expect(parsed.tasks[0].result.totalChars).toBe(1420);
+    });
+
+    it("round-trips a task with result.fetchError", async () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const task = makeTask({
+        id: "bg_err_result",
+        status: "error",
+        result: {
+          sidecarPath: "/tmp/state/results/bg_err_result.txt",
+          totalChars: 0,
+          hadFence: false,
+          fetchError: "timeout after 30s",
+          materializedAt: new Date().toISOString(),
+        },
+      });
+      await store.save(new Map([[task.id, task]]));
+
+      const loaded = store.load();
+      const t = loaded!.tasks.get("bg_err_result")!;
+      expect(t.result).toBeDefined();
+      expect(t.result!.fetchError).toBe("timeout after 30s");
+      expect(t.result!.totalChars).toBe(0);
+    });
+
+    it("v3 file migrates to v4 without data loss", async () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      // Write a v3 state file manually
+      const v3File = {
+        version: 3,
+        tasks: [
+          {
+            id: "bg_v3mig",
+            sessionId: "ses_v3",
+            parentSessionId: "ses_parent",
+            status: "completed",
+            agent: "helper",
+            prompt: "work",
+            description: "v3 task",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            progress: {
+              lastUpdate: new Date().toISOString(),
+              toolCalls: 7,
+            },
+            concurrencyKey: "default",
+            messageCountAtStart: 5,
+            mode: "sync",
+            timeoutMs: 60000,
+          },
+        ],
+      };
+
+      const path = stateFilePath(dir);
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, JSON.stringify(v3File), "utf-8");
+
+      const loaded = store.load();
+      expect(loaded).not.toBeNull();
+      expect(loaded!.tasks.size).toBe(1);
+      expect(loaded!.outbox).toEqual([]);
+
+      const t = loaded!.tasks.get("bg_v3mig")!;
+      expect(t.id).toBe("bg_v3mig");
+      expect(t.mode).toBe("sync");
+      expect(t.timeoutMs).toBe(60000);
+      // v3 tasks don't have result
+      expect(t.result).toBeUndefined();
+
+      // Wait for the fire-and-forget async v3→v4 migration save
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Verify disk file is now v4
+      const raw = readFileSync(path, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.version).toBe(4);
+      expect(parsed.tasks[0].id).toBe("bg_v3mig");
+      expect(parsed.tasks[0].result).toBeUndefined();
+      expect(parsed.outbox).toBeUndefined();
+    });
+
+    it("outbox persists and reloads across multiple saves", async () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const task1 = makeTask({ id: "bg_outbox_1", status: "completed" });
+      const task2 = makeTask({ id: "bg_outbox_2", status: "completed" });
+
+      // Save with outbox containing both task IDs
+      await store.save(
+        new Map([
+          [task1.id, task1],
+          [task2.id, task2],
+        ]),
+        new Set(["bg_outbox_1", "bg_outbox_2"]),
+      );
+
+      let loaded = store.load();
+      expect(loaded!.outbox).toEqual(["bg_outbox_1", "bg_outbox_2"]);
+
+      // Save again with reduced outbox
+      await store.save(
+        new Map([
+          [task1.id, task1],
+          [task2.id, task2],
+        ]),
+        new Set(["bg_outbox_2"]),
+      );
+
+      loaded = store.load();
+      expect(loaded!.outbox).toEqual(["bg_outbox_2"]);
+
+      // Save without outbox (backward-compat)
+      await store.save(
+        new Map([
+          [task1.id, task1],
+          [task2.id, task2],
+        ]),
+      );
+
+      loaded = store.load();
+      // When outbox is omitted, the file doesn't have an outbox field
+      // and load defaults to []
+      expect(loaded!.outbox).toEqual([]);
+    });
+
+    it("saveSync round-trips with outbox", () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const task = makeTask({ id: "bg_sync_outbox", status: "completed" });
+      const outbox = new Set(["bg_sync_outbox"]);
+      store.saveSync(new Map([[task.id, task]]), outbox);
+
+      const loaded = store.load();
+      expect(loaded).not.toBeNull();
+      expect(loaded!.outbox).toEqual(["bg_sync_outbox"]);
+    });
+
+    it("empty outbox does not appear in serialized JSON", () => {
+      const { store, dir } = createTestStore();
+      dirs.push(dir);
+
+      const task = makeTask({ id: "bg_empty_outbox" });
+      store.saveSync(new Map([[task.id, task]]), new Set());
+
+      const sp = stateFilePath(dir);
+      const raw = readFileSync(sp, "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.version).toBe(4);
+      // empty outbox should not be serialized
+      expect(parsed.outbox).toBeUndefined();
     });
   });
 });
