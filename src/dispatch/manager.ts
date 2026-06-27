@@ -76,6 +76,10 @@ export class DispatchManager {
     );
   }
 
+  getConfig(): Readonly<DispatchManagerConfig> {
+    return this.config;
+  }
+
   private deriveKey(subagentId: string): string {
     return this.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
   }
