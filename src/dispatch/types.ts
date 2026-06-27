@@ -78,6 +78,8 @@ export interface DispatchInput {
   session_id?: string;
   /** Optional per-task timeout in milliseconds (overrides background default). Only applies to background tasks. */
   timeout_ms?: number;
+  /** Timeout for the prompt phase of sync dispatch. Overrides syncPromptTimeoutMs config. */
+  sync_timeout_ms?: number;
 }
 
 /**

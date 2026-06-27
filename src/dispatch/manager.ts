@@ -7,7 +7,7 @@ import type {
   TaskEventState,
   SessionMessageSnapshot,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS } from "./config.ts";
 import { ConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
@@ -36,6 +36,7 @@ export class DispatchManager {
   private _recovered = false;
   private inflightByParent = new Map<string, number>();
   private _cancelQueue: Map<string, () => void> = new Map();
+  private _syncControllers: Map<string, AbortController> = new Map();
   private subagentModelKey: Map<string, string>;
   private _dirty = false;
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -299,64 +300,109 @@ export class DispatchManager {
   }
 
   /**
-   * Execute a synchronous (blocking) dispatch. NOT tracked in this.tasks,
-   * NOT persisted, NOT registered with the poller. Protected by:
+   * Execute a synchronous (blocking) dispatch. Tracked in this.tasks with
+   * mode:"sync" for crash visibility / cancellability, but NOT counted in
+   * inflightByParent (caller is blocked, needs no async countdown).
+   *
+   * Protected by:
    * - Sync concurrency acquire (can use reserved slots)
-   * - syncTimeoutMs config for both acquire-wait and prompt phases
-   * - AbortController + session.abort() for prompt timeout
-   * - Leak-free: cancelAcq on acquire timeout, didAcquire guard on release
+   * - Split timeouts: syncAcquireTimeoutMs for acquire, syncPromptTimeoutMs for prompt
+   * - Dynamic override: input.sync_timeout_ms overrides prompt-phase timeout
+   * - AbortController + session.abort() for prompt timeout / cancellation
+   * - Leak-free: cancelAcq on acquire timeout, finally-block teardown
    *
    * Returns the joined text of all assistant text parts.
-   * Throws on timeout or network/session error.
+   * Throws structured JSON error: { error, phase, timeout_ms }.
    */
   async executeSync(
     input: DispatchInput,
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<string> {
-    const timeoutMs = this.config.syncTimeoutMs ?? SYNC_TIMEOUT_MS;
+    const acquireTimeoutMs = this.config.syncAcquireTimeoutMs ?? DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS;
+    const promptTimeoutMs = input.sync_timeout_ms
+      ?? this.config.syncPromptTimeoutMs
+      ?? this.config.syncTimeoutMs
+      ?? SYNC_TIMEOUT_MS;
     const concurrencyKey = this.deriveKey(input.subagent);
+
+    const taskId = `sync_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    const task: DispatchTask = {
+      id: taskId,
+      sessionId: "",
+      parentSessionId: parentContext.sessionID,
+      status: "pending",
+      agent: input.subagent,
+      prompt: input.prompt,
+      description: input.description,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      mode: "sync",
+    };
+    this.tasks.set(taskId, task);
+
     let didAcquire = false;
-
-    // Step 1: Cancelable acquire covering the wait phase
-    const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireSync(concurrencyKey);
-    let acqTimer: ReturnType<typeof setTimeout> | undefined;
-    const acqTimeout = new Promise<"timeout">((r) => {
-      acqTimer = setTimeout(() => r("timeout"), timeoutMs);
-    });
-    const acqResult = await Promise.race([acq.then(() => "acquired" as const), acqTimeout]);
-    clearTimeout(acqTimer);
-
-    if (acqResult === "timeout") {
-      cancelAcq();
-      throw new Error(`executeSync timed out waiting for a concurrency slot after ${timeoutMs}ms`);
-    }
-    didAcquire = true;
-    metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
-    metrics.gauge("inflight_tasks").inc();
     const startTime = Date.now();
 
     try {
+      // Step 1: Cancelable acquire with dedicated acquire timeout
+      const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireSync(concurrencyKey);
+      let acqTimer: ReturnType<typeof setTimeout> | undefined;
+      const acqTimeout = new Promise<"timeout">((r) => {
+        acqTimer = setTimeout(() => r("timeout"), acquireTimeoutMs);
+      });
+      const acqResult = await Promise.race([acq.then(() => "acquired" as const), acqTimeout]);
+      clearTimeout(acqTimer);
+
+      if (acqResult === "timeout") {
+        cancelAcq();
+        const err = JSON.stringify({
+          error: `Timed out waiting for a concurrency slot after ${acquireTimeoutMs}ms`,
+          phase: "acquire",
+          timeout_ms: acquireTimeoutMs,
+        });
+        throw new Error(err);
+      }
+      didAcquire = true;
+      metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
+      metrics.gauge("inflight_tasks").inc();
+
       // Step 2: Session create
       const createResult = await this.client.session.create({
         body: { parentID: parentContext.sessionID },
         query: { directory: parentContext.directory },
       });
       const session = createResult.data;
-      if (!session) throw new Error("Failed to create session: empty response");
+      if (!session) {
+        const err = JSON.stringify({
+          error: "Failed to create session: empty response",
+          phase: "session",
+          timeout_ms: promptTimeoutMs,
+        });
+        throw new Error(err);
+      }
 
-      // Step 3: Prompt with abort + timeout
+      task.sessionId = session.id;
+      this.sessionToTask.set(session.id, taskId);
+
+      // Step 3: Prompt with abort + split timeout
       const controller = new AbortController();
+      this._syncControllers.set(taskId, controller);
       let promptTimer: ReturnType<typeof setTimeout> | undefined;
       const promptTimeout = new Promise<never>((_, rej) => {
         promptTimer = setTimeout(() => {
           controller.abort();
           void this.client.session.abort({ path: { id: session.id } });
-          rej(new Error(`executeSync prompt timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
+          const err = JSON.stringify({
+            error: `Prompt timed out after ${promptTimeoutMs}ms`,
+            phase: "prompt",
+            timeout_ms: promptTimeoutMs,
+          });
+          rej(new Error(err));
+        }, promptTimeoutMs);
       });
 
       try {
-        const promptResult: { data?: { parts: Array<{ type: string; text?: string }> } } = 
+        const promptResult: { data?: { parts: Array<{ type: string; text?: string }> } } =
           await Promise.race([
             this.client.session.prompt({
               path: { id: session.id },
@@ -389,8 +435,11 @@ export class DispatchManager {
       throw err;
     } finally {
       metrics.gauge("inflight_tasks").dec();
+      this._syncControllers.delete(taskId);
+      this.sessionToTask.delete(task.sessionId);
+      this.tasks.delete(taskId);
       if (didAcquire) {
-        this.concurrency.release(concurrencyKey);
+        this.concurrency.release(concurrencyKey, parentContext.sessionID);
       }
     }
   }
@@ -532,6 +581,26 @@ export class DispatchManager {
       this.decInflight(t.parentSessionId);
       void this.notifyCompletion(t);
       this.scheduleCleanup(taskId);
+      return true;
+    }
+
+    // Sync task — abort controller (executeSync's finally block handles teardown)
+    if (task.mode === "sync") {
+      const controller = this._syncControllers.get(taskId);
+      if (controller) {
+        if (task.sessionId) {
+          try {
+            await this.client.session.abort({ path: { id: task.sessionId } });
+          } catch (err) {
+            debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        controller.abort();
+      }
+      if (!this.transition(taskId, ["pending"], "cancelled")) return false;
+      const t = this.tasks.get(taskId)!;
+      infoLog("lifecycle", taskId, `✕ cancelled (sync) agent=${t.agent}`);
+      metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
       return true;
     }
 
@@ -745,9 +814,18 @@ export class DispatchManager {
           lostPendingByParent.set(task.parentSessionId, siblings);
           break;
         }
-        case "running":
-          runningTasks.push(task);
+        case "running": {
+          if (task.mode === "sync") {
+            task.status = "error";
+            task.error = "Sync task interrupted by restart";
+            task.completedAt = new Date();
+            this.scheduleCleanupFromRecovery(taskId, task);
+            debugLog("recover", taskId, "sync task interrupted by restart — marked error, NOT notified");
+          } else {
+            runningTasks.push(task);
+          }
           break;
+        }
         case "completed":
         case "error":
         case "timeout":

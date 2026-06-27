@@ -4,6 +4,13 @@ import { z } from "zod";
 import type { DispatchManager } from "./manager.ts";
 import type { DispatchInput, DispatchTask } from "./types.ts";
 import { metrics } from "./metrics.ts";
+import {
+  applyWindow,
+  spillToFile,
+  formatResultEnvelope,
+  DEFAULT_MAX_RESULT_CHARS,
+} from "./result-extractor.ts";
+import { getDataDir } from "../cli/paths.ts";
 
 function formatDuration(task: DispatchTask): string {
   const end = task.completedAt ?? new Date();
@@ -112,6 +119,40 @@ export function createDispatchTool(
   });
 }
 
+function buildCompletedOutput(
+  task: DispatchTask,
+  result: { text: string; resultText: string; totalChars: number },
+  opts: { maxChars: number; offset?: number; limit?: number; tail?: boolean },
+  dir: string,
+): string {
+  const header = [
+    "Task Result\n",
+    `Task ID: ${task.id}`,
+    `Description: ${task.description || "N/A"}`,
+    `Duration: ${formatDuration(task)}`,
+    `Session ID: ${task.sessionId}`,
+    "",
+    "---\n",
+  ].join("\n");
+
+  const windowed = applyWindow(result.resultText, opts);
+
+  let spillPath: string | undefined;
+  if (result.totalChars > opts.maxChars) {
+    spillPath = spillToFile(task.id, result.text, dir);
+  }
+
+  const envelope = formatResultEnvelope({
+    truncated: windowed.truncated,
+    returnedChars: windowed.returnedChars,
+    totalChars: windowed.totalChars,
+    nextOffset: windowed.nextOffset,
+    spilledFile: spillPath,
+  });
+
+  return header + windowed.text + "\n" + envelope;
+}
+
 export function createDispatchOutputTool(manager: DispatchManager) {
   return tool({
     description:
@@ -130,8 +171,39 @@ export function createDispatchOutputTool(manager: DispatchManager) {
         .optional()
         .default(60000)
         .describe("Maximum wait time in milliseconds when blocking"),
+      max_chars: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .default(DEFAULT_MAX_RESULT_CHARS)
+        .describe(
+          "Maximum characters to return in the inline result body. Results larger than this are spilled to a file.",
+        ),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .default(0)
+        .describe("Start position in the result text (0-based)."),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe(
+          "Maximum characters to return from offset, capped at max_chars.",
+        ),
+      tail: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return the last max_chars characters of the result instead of a window from offset.",
+        ),
     },
-    async execute(input) {
+    async execute(input, context) {
+      const dir = context?.directory ?? getDataDir();
       const task = manager.getTask(input.task_id);
 
       if (!task) {
@@ -153,16 +225,17 @@ export function createDispatchOutputTool(manager: DispatchManager) {
 
       if (task.status === "completed") {
         const result = await manager.getResult(input.task_id);
-        return [
-          "Task Result\n",
-          `Task ID: ${task.id}`,
-          `Description: ${task.description || "N/A"}`,
-          `Duration: ${formatDuration(task)}`,
-          `Session ID: ${task.sessionId}`,
-          "",
-          "---\n",
-          result.text ?? "",
-        ].join("\n");
+        return buildCompletedOutput(
+          task,
+          result,
+          {
+            maxChars: input.max_chars ?? DEFAULT_MAX_RESULT_CHARS,
+            offset: input.offset ?? 0,
+            limit: input.limit,
+            tail: input.tail,
+          },
+          dir,
+        );
       }
 
       if (
@@ -222,16 +295,17 @@ export function createDispatchOutputTool(manager: DispatchManager) {
 
         if (current.status === "completed") {
           const result = await manager.getResult(input.task_id);
-          return [
-            "Task Result\n",
-            `Task ID: ${current.id}`,
-            `Description: ${current.description || "N/A"}`,
-            `Duration: ${formatDuration(current)}`,
-            `Session ID: ${current.sessionId}`,
-            "",
-            "---\n",
-            result.text ?? "",
-          ].join("\n");
+          return buildCompletedOutput(
+            current,
+            result,
+            {
+              maxChars: input.max_chars ?? DEFAULT_MAX_RESULT_CHARS,
+              offset: input.offset ?? 0,
+              limit: input.limit,
+              tail: input.tail,
+            },
+            dir,
+          );
         }
 
         if (

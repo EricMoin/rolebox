@@ -157,7 +157,7 @@ describe("DispatchManager", () => {
       sessionPrompt: () => new Promise<never>(() => {}), // never resolves
       sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
     });
-    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 20 });
+    const manager = new DispatchManager(client, { ...fastConfig, syncPromptTimeoutMs: 20, syncAcquireTimeoutMs: 5000 });
     const mgr = manager as any;
 
     await expect(
@@ -173,7 +173,7 @@ describe("DispatchManager", () => {
 
   it("T9: executeSync acquire timeout cancels orphaned waiter", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 20 });
+    const manager = new DispatchManager(client, { ...fastConfig, syncAcquireTimeoutMs: 20 });
     const mgr = manager as any;
 
     // Fill pool to limit
@@ -255,7 +255,7 @@ describe("DispatchManager", () => {
       expect(g.peek()).toBe(baseline);
     });
 
-    it("T16: executeSync does NOT add to this.tasks", async () => {
+    it("T16: executeSync cleans up task from this.tasks on completion", async () => {
       const client = createMockClient();
       const manager = new DispatchManager(client, fastConfig);
       const mgr = manager as any;
@@ -267,7 +267,7 @@ describe("DispatchManager", () => {
         parentContext(),
       );
 
-      // Sync task was NOT added to this.tasks
+      // Sync task was added during execution but cleaned up in finally block
       expect(mgr.tasks.size).toBe(taskCountBefore);
     });
 
@@ -333,6 +333,226 @@ describe("DispatchManager", () => {
 
       // Gauge should be back to baseline even on error
       expect(g.peek()).toBe(baseline);
+    });
+  });
+
+  // ── 2d. executeSync task tracking (Manager #5) ───────────────
+
+  describe("executeSync task tracking", () => {
+    it("getTask returns sync task during execution and is cancellable via cancelTask", async () => {
+      // Use a never-resolving prompt (mock doesn't respect AbortSignal,
+      // so we rely on a short prompt timeout to unblock after cancel).
+      const client = createMockClient({
+        sessionPrompt: () => new Promise<never>(() => {}),
+        sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+      });
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        syncPromptTimeoutMs: 200,
+        syncAcquireTimeoutMs: 5000,
+      });
+      const mgr = manager as any;
+
+      const syncPromise = manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      );
+
+      // Allow microtask flush so task is registered in this.tasks
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Find the sync task by scanning this.tasks
+      let syncTaskId: string | undefined;
+      for (const [id, t] of mgr.tasks) {
+        if (t.mode === "sync") {
+          syncTaskId = id;
+          break;
+        }
+      }
+      expect(syncTaskId).toBeDefined();
+      expect(syncTaskId).toMatch(/^sync_/);
+
+      // getTask returns the sync task
+      const task = manager.getTask(syncTaskId!);
+      expect(task).toBeDefined();
+      expect(task!.mode).toBe("sync");
+      expect(task!.agent).toBe("sync-test");
+
+      // Verify sessionToTask maps the session
+      expect(task!.sessionId).toBeTruthy();
+      expect(mgr.sessionToTask.get(task!.sessionId)).toBe(syncTaskId);
+
+      // Cancel it
+      const cancelled = await manager.cancelTask(syncTaskId!);
+      expect(cancelled).toBe(true);
+
+      // executeSync should reject (either from abort or timeout)
+      await expect(syncPromise).rejects.toThrow();
+
+      // Task cleaned up from tasks
+      expect(manager.getTask(syncTaskId!)).toBeUndefined();
+      expect(mgr._syncControllers.has(syncTaskId!)).toBe(false);
+    });
+
+    it("split timeouts: acquire uses syncAcquireTimeoutMs, prompt uses syncPromptTimeoutMs", async () => {
+      // Fill all slots so acquire times out quickly
+      const client = createMockClient();
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        syncAcquireTimeoutMs: 20,
+        syncPromptTimeoutMs: 600_000,
+      });
+      const mgr = manager as any;
+
+      Array.from({ length: 5 }, () => mgr.concurrency.acquireCancelable("default"));
+
+      const err = await manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      ).catch((e: Error) => e);
+
+      const parsed = JSON.parse(err.message);
+      expect(parsed.phase).toBe("acquire");
+      expect(parsed.error).toContain("concurrency slot");
+
+      // Release all slots
+      for (let i = 0; i < 5; i++) mgr.concurrency.release("default");
+    });
+
+    it("sync_timeout_ms in input overrides prompt-phase timeout", async () => {
+      const client = createMockClient({
+        sessionPrompt: () => new Promise<never>(() => {}),
+        sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+      });
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        syncPromptTimeoutMs: 600_000,
+        syncAcquireTimeoutMs: 5000,
+      });
+
+      const err = await manager.executeSync(
+        {
+          subagent: "sync-test",
+          prompt: "hello",
+          run_in_background: false,
+          sync_timeout_ms: 20,
+        },
+        parentContext(),
+      ).catch((e: Error) => e);
+
+      const parsed = JSON.parse(err.message);
+      expect(parsed.phase).toBe("prompt");
+      expect(parsed.timeout_ms).toBe(20);
+      expect(parsed.error).toContain("timed out");
+    });
+
+    it("sync throw produces JSON-structured error with phase field", async () => {
+      // Prompt timeout case
+      const client = createMockClient({
+        sessionPrompt: () => new Promise<never>(() => {}),
+        sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+      });
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        syncPromptTimeoutMs: 20,
+        syncAcquireTimeoutMs: 5000,
+      });
+
+      const err = await manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      ).catch((e: Error) => e);
+
+      let parsed: any;
+      expect(() => { parsed = JSON.parse(err.message); }).not.toThrow();
+      expect(parsed.error).toBeDefined();
+      expect(parsed.phase).toBe("prompt");
+      expect(parsed.timeout_ms).toBe(20);
+
+      // Acquire timeout case
+      const client2 = createMockClient();
+      const manager2 = new DispatchManager(client2, {
+        ...fastConfig,
+        syncAcquireTimeoutMs: 20,
+        syncPromptTimeoutMs: 600_000,
+      });
+      const mgr2 = manager2 as any;
+
+      Array.from({ length: 5 }, () => mgr2.concurrency.acquireCancelable("default"));
+
+      const err2 = await manager2.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      ).catch((e: Error) => e);
+
+      let parsed2: any;
+      expect(() => { parsed2 = JSON.parse(err2.message); }).not.toThrow();
+      expect(parsed2.error).toBeDefined();
+      expect(parsed2.phase).toBe("acquire");
+      expect(parsed2.timeout_ms).toBe(20);
+
+      for (let i = 0; i < 5; i++) mgr2.concurrency.release("default");
+    });
+
+    it("recover with persisted mode:sync running task marks error, no notify", async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "manager-sync-recover-"));
+      const client = createMockClient();
+
+      const store = new TaskStateStore(tempDir);
+      const tasks = new Map<string, DispatchTask>();
+      const syncTask: DispatchTask = {
+        id: "sync_recover_1",
+        sessionId: "ses_sync_rec",
+        parentSessionId: "ses_parent",
+        status: "running",
+        agent: "helper",
+        prompt: "work",
+        description: "sync recovery test",
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        mode: "sync",
+      };
+      tasks.set(syncTask.id, syncTask);
+      await store.save(tasks);
+
+      const manager = new DispatchManager(client, fastConfig);
+      manager.setStoreDirectory(tempDir);
+
+      await manager.recover();
+
+      const loaded = manager.getTask("sync_recover_1");
+      expect(loaded).toBeDefined();
+      expect(loaded!.status).toBe("error");
+      expect(loaded!.error).toBe("Sync task interrupted by restart");
+
+      // Should NOT have notified parent
+      const notifyCalls = (client.session.promptAsync as any).mock.calls.filter(
+        (c: any) => c[0]?.path?.id === "ses_parent",
+      );
+      // No notification for sync tasks (parent was blocked, not waiting for notify)
+      expect(notifyCalls.length).toBe(0);
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it("normal sync completion leaves no lingering entry in this.tasks or _syncControllers", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const tasksBefore = mgr.tasks.size;
+      const controllersBefore = mgr._syncControllers.size;
+      const sttBefore = mgr.sessionToTask.size;
+
+      await manager.executeSync(
+        { subagent: "sync-test", prompt: "hello", run_in_background: false },
+        parentContext(),
+      );
+
+      expect(mgr.tasks.size).toBe(tasksBefore);
+      expect(mgr._syncControllers.size).toBe(controllersBefore);
+      // sessionToTask should be unchanged (sync task's session mapping was cleaned up)
+      expect(mgr.sessionToTask.size).toBe(sttBefore);
     });
   });
 
