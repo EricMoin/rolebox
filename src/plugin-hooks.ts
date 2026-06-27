@@ -8,6 +8,7 @@ import { buildFunctionBlock } from "./prompt-builder.ts";
 import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts";
 import { DispatchManager } from "./dispatch/manager.ts";
 import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchMetricsTool } from "./dispatch/tools.ts";
+import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "./dispatch/config.ts";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
 import { createSubLogger } from "./logger.ts";
@@ -15,6 +16,10 @@ import { createSubLogger } from "./logger.ts";
 const log = createSubLogger("plugin-hooks");
 
 let hooksRegistered = false;
+
+export const managerMap = new Map<string, DispatchManager>();
+
+export const pendingCorrections = new Map<string, string>();
 
 export async function createPluginHooks(
   resolvedRoles: ResolvedRole[],
@@ -35,17 +40,43 @@ export async function createPluginHooks(
     }
   }
 
-  const dispatchManager = new DispatchManager(client, undefined, subagentModelKey);
-  if (directory) {
-    dispatchManager.setStoreDirectory(directory);
+  const dir = directory ?? process.cwd();
+
+  let dispatchManager = managerMap.get(dir);
+  if (!dispatchManager) {
+    const primaryRole = resolvedRoles.find((r) => r.config.mode === RoleMode.Primary);
+    const mergedConfig = mergeConfig(
+      DEFAULT_CONFIG,
+      primaryRole?.dispatchConfig,
+      resolveEnvConfig(),
+    );
+    dispatchManager = new DispatchManager(client, mergedConfig, subagentModelKey);
+    dispatchManager.setStoreDirectory(dir);
+    managerMap.set(dir, dispatchManager);
+    await dispatchManager.recover();
   }
-  await dispatchManager.recover();
+
+  if (directory) {
+    graphSessionState.setStoreDirectory(directory);
+  }
+  graphSessionState.recover((_sessionID, agentId) => roleGraphMap.get(agentId));
 
   if (!hooksRegistered) {
     hooksRegistered = true;
-    process.on("exit", () => dispatchManager.flushPersistSync());
-    process.on("SIGINT", () => { dispatchManager.flushPersistSync(); process.exit(130); });
-    process.on("SIGTERM", () => { dispatchManager.flushPersistSync(); process.exit(143); });
+    process.on("exit", () => {
+      dispatchManager.flushPersistSync();
+      if (directory) graphSessionState.flushSync();
+    });
+    process.on("SIGINT", () => {
+      dispatchManager.flushPersistSync();
+      if (directory) graphSessionState.flushSync();
+      process.exit(130);
+    });
+    process.on("SIGTERM", () => {
+      dispatchManager.flushPersistSync();
+      if (directory) graphSessionState.flushSync();
+      process.exit(143);
+    });
   }
 
   return {
@@ -163,13 +194,24 @@ export async function createPluginHooks(
       if (!input.sessionID) return;
       if (input.tool !== "task" && input.tool !== "dispatch") return;
 
-      advanceGraphForDispatch(input.sessionID, input.tool, input.args);
+      const { correction } = advanceGraphForDispatch(input.sessionID, input.tool, input.args);
+      if (correction) {
+        pendingCorrections.set(input.sessionID, correction);
+        log.debug("guardrail correction stashed", { sessionID: input.sessionID });
+      }
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },
       output: { system: string[] },
     ) => {
       if (!input.sessionID) return;
+
+      const correction = pendingCorrections.get(input.sessionID);
+      if (correction) {
+        output.system.push(correction);
+        pendingCorrections.delete(input.sessionID);
+        log.debug("guardrail correction injected", { sessionID: input.sessionID });
+      }
 
       // Lazy-init graph state if not yet initialized (system.transform fires before chat.message on first turn)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

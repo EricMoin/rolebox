@@ -183,12 +183,12 @@ export class GraphSessionState {
     }
   }
 
-  recover(reattach: (sessionID: string) => ResolvedGraph | undefined): void {
+  recover(reattach: (sessionID: string, agentId: string) => ResolvedGraph | undefined): void {
     if (!this.store) return;
     const loaded = this.store.load();
     if (!loaded) return;
     for (const [sessionID, entry] of loaded) {
-      const graph = reattach(sessionID);
+      const graph = reattach(sessionID, entry.agentId);
       if (graph) {
         this.graphs.set(sessionID, graph);
         this.states.set(sessionID, entry.state);
