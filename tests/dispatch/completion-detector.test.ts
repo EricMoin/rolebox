@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { detectCompletion, extractAssistantError } from "../../src/dispatch/completion-detector.ts";
-import type { SessionMessageSnapshot, TaskPollState } from "../../src/dispatch/types.ts";
+import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types.ts";
 
 // ── Test Helpers ──────────────────────────────────────────────────────
 
@@ -15,13 +15,13 @@ function msg(overrides: Partial<SessionMessageSnapshot["info"]> = {}, parts: Ses
   };
 }
 
-function pollState(overrides: Partial<TaskPollState> = {}): TaskPollState {
+function eventState(overrides: Partial<TaskEventState> = {}): TaskEventState {
   return {
-    consecutiveMissedPolls: 0,
-    stableIdlePolls: 3,
     lastMessageCount: 1,
     lastProgressUpdate: Date.now(),
     hasProducedOutput: true,
+    messageCountAtStart: 0,
+    lastEventAt: Date.now(),
     ...overrides,
   };
 }
@@ -35,29 +35,32 @@ function idle() {
 describe("detectCompletion", () => {
   // ── Terminal / Successful Completion ──────────────────────────────
 
-  it("returns completed when finish is end_turn, no pending tools, and stable polls are sufficient", () => {
+  it("returns completed when finish is end_turn, no pending tools, and skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns completed with stableIdlePolls exactly at threshold", () => {
+  it("returns completed with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns completed with stableIdlePolls above threshold", () => {
+  it("returns completed with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 5 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
@@ -68,7 +71,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       undefined,
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
@@ -77,7 +80,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       { type: "busy" },
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
@@ -86,16 +89,17 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       { type: "retry" },
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
 
-  it("returns completed for unexpected session status (treated as idle-like)", () => {
+  it("returns completed for unexpected session status (treated as idle-like) with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       { type: "unknown_status" },
-      pollState(),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
@@ -103,7 +107,7 @@ describe("detectCompletion", () => {
   // ── Missing / Incomplete Messages ─────────────────────────────────
 
   it("returns not_ready when messages array is empty", () => {
-    const result = detectCompletion([], idle(), pollState());
+    const result = detectCompletion([], idle(), eventState());
     expect(result).toEqual({ type: "not_ready" });
   });
 
@@ -111,7 +115,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [{ info: { role: "user", id: "u1" }, parts: [] }],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
@@ -122,7 +126,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ error: "model rate-limited" })],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "error", message: "model rate-limited" });
   });
@@ -131,7 +135,7 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ error: { message: "context length exceeded" } })],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({
       type: "error",
@@ -145,43 +149,47 @@ describe("detectCompletion", () => {
     const result = detectCompletion(
       [msg({ finish: "tool-calls" })],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
 
-  it("returns completed when finish is stop (OpenAI-style terminal)", () => {
+  it("returns completed when finish is stop (OpenAI-style terminal) with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "stop" })],
       idle(),
-      pollState(),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns completed when finish is length (session idle with output)", () => {
+  it("returns completed when finish is length (session idle with output) with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "length" })],
       idle(),
-      pollState(),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns completed when finish is unknown (session idle with output)", () => {
+  it("returns completed when finish is unknown (session idle with output) with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({ finish: "unknown" })],
       idle(),
-      pollState(),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("returns completed when finish is undefined (session idle with output)", () => {
+  it("returns completed when finish is undefined (session idle with output) with skipStabilityGating", () => {
     const result = detectCompletion(
       [msg({})], // no finish field
       idle(),
-      pollState(),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
@@ -196,7 +204,7 @@ describe("detectCompletion", () => {
         ]),
       ],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
@@ -209,12 +217,12 @@ describe("detectCompletion", () => {
         ]),
       ],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "not_ready" });
   });
 
-  it("ignores non-tool parts when checking tool state", () => {
+  it("ignores non-tool parts when checking tool state with skipStabilityGating", () => {
     const result = detectCompletion(
       [
         msg({ finish: "end_turn" }, [
@@ -222,12 +230,13 @@ describe("detectCompletion", () => {
         ]),
       ],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("allows completed tools (state complete) through", () => {
+  it("allows completed tools (state complete) through with skipStabilityGating", () => {
     const result = detectCompletion(
       [
         msg({ finish: "end_turn" }, [
@@ -235,50 +244,53 @@ describe("detectCompletion", () => {
         ]),
       ],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
   // ── Stability Gating ──────────────────────────────────────────────
 
-  it("returns stabilizing when stable idle polls are below threshold", () => {
+  it("returns stabilizing when stability gating is not skipped (default)", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 1 }),
+      eventState(),
     );
     expect(result).toEqual({ type: "stabilizing" });
   });
 
-  it("returns stabilizing at threshold minus one", () => {
+  it("returns stabilizing when skipStabilityGating is not passed", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 1 }),
+      eventState(),
     );
     expect(result).toEqual({ type: "stabilizing" });
   });
 
-  it("returns completed at exact threshold", () => {
+  it("returns completed when skipStabilityGating is explicitly true", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       idle(),
-      pollState({ stableIdlePolls: 2 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
 
   // ── Multi-message Scenarios ────────────────────────────────────────
 
-  it("uses the last assistant message when multiple exist", () => {
+  it("uses the last assistant message when multiple exist with skipStabilityGating", () => {
     const result = detectCompletion(
       [
         msg({ id: "first", finish: "tool-calls" }),
         msg({ id: "last", finish: "end_turn" }),
       ],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });
@@ -290,12 +302,12 @@ describe("detectCompletion", () => {
         msg({ id: "last", error: "final message errored" }),
       ],
       idle(),
-      pollState(),
+      eventState(),
     );
     expect(result).toEqual({ type: "error", message: "final message errored" });
   });
 
-  it("skips non-assistant messages when scanning for last assistant", () => {
+  it("skips non-assistant messages when scanning for last assistant with skipStabilityGating", () => {
     const result = detectCompletion(
       [
         { info: { role: "user", id: "u1" }, parts: [] },
@@ -303,7 +315,8 @@ describe("detectCompletion", () => {
         msg({ finish: "end_turn" }),
       ],
       idle(),
-      pollState({ stableIdlePolls: 3 }),
+      eventState(),
+      true,
     );
     expect(result).toEqual({ type: "completed" });
   });

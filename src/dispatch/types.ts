@@ -116,7 +116,7 @@ export interface NotificationPayload {
   remainingTasks: number;
 }
 
-// ─── Global Poller Internal Types ─────────────────────────────────────────
+// ─── Dispatch Event-Tracking Types ─────────────────────────────────────────
 
 /** Signal emitted by the completion detector */
 export type CompletionSignal =
@@ -131,13 +131,13 @@ export interface SessionMessageSnapshot {
   parts: Array<{ type: string; state?: string; text?: string }>;
 }
 
-/** Per-task polling metadata tracked by global poller */
-export interface TaskPollState {
-  consecutiveMissedPolls: number;
-  stableIdlePolls: number;
+/** Per-task event-tracking metadata (replaces poll-era TaskPollState). */
+export interface TaskEventState {
   lastMessageCount: number;
   lastProgressUpdate: number;
   hasProducedOutput: boolean;
   /** Lower bound for completion detection — only messages after this count are from the current run */
   messageCountAtStart: number;
+  /** Timestamp of the last routed event for this task (liveness). */
+  lastEventAt: number;
 }

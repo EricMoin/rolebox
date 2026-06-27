@@ -4,12 +4,12 @@ import type {
   DispatchTask,
   DispatchTaskStatus,
   DispatchManagerConfig,
+  TaskEventState,
+  SessionMessageSnapshot,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS } from "./config.ts";
 import { ConcurrencyManager } from "./concurrency.ts";
-import { QueueFullError } from "./concurrency.ts";
-import { GlobalPoller } from "./global-poller.ts";
-import { SessionMonitor } from "./session-monitor.ts";
+import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent } from "./notification.ts";
 
@@ -27,8 +27,9 @@ export class DispatchManager {
   private concurrency: ConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: OpencodeClient;
-  private poller: GlobalPoller;
-  private sessionMonitor: SessionMonitor;
+  private watchdog: TaskWatchdogManager;
+  private sessionToTask: Map<string, string> = new Map();
+  private eventState: Map<string, TaskEventState> = new Map();
   private store: TaskStateStore;
   private _recovered = false;
   private inflightByParent = new Map<string, number>();
@@ -49,16 +50,24 @@ export class DispatchManager {
       this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
       this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
     );
-    this.sessionMonitor = new SessionMonitor();
     this.store = new TaskStateStore(process.cwd());
     this.subagentModelKey = subagentModelKey ?? new Map();
-    this.poller = new GlobalPoller(client, this.config, {
-      completionDetector: detectCompletion,
-      sessionMonitor: this.sessionMonitor,
-      onTaskCompleted: (taskId) => this.handleTaskCompleted(taskId),
-      onTaskError: (taskId, error) => this.handleTaskError(taskId, error),
-      onTaskTimeout: (taskId, reason) => this.handleTaskTimeout(taskId, reason),
-    });
+    this.watchdog = new TaskWatchdogManager(
+      {
+        onReconcile: (taskId: string) => this.evaluateAndComplete(taskId, "watchdog-reconcile"),
+        onSweep: (taskId: string) => {
+          if (!this.watchdog.isDebouncing(taskId)) {
+            return this.evaluateAndComplete(taskId, "global-sweep");
+          }
+        },
+        onDebounceElapsed: (taskId: string) => this.evaluateAndComplete(taskId, "idle-debounce"),
+      },
+      {
+        watchdogIntervalMs: this.config.watchdogIntervalMs ?? WATCHDOG_INTERVAL_MS,
+        globalSweepIntervalMs: this.config.globalSweepIntervalMs ?? GLOBAL_SWEEP_INTERVAL_MS,
+        idleDebounceMs: this.config.idleDebounceMs ?? IDLE_DEBOUNCE_MS,
+      },
+    );
   }
 
   private deriveKey(subagentId: string): string {
@@ -146,6 +155,14 @@ export class DispatchManager {
       if (!session) throw new Error("Failed to create session: empty response");
 
       task.sessionId = session.id;
+      this.sessionToTask.set(session.id, taskId);
+      this.eventState.set(taskId, {
+        lastMessageCount: 0,
+        lastProgressUpdate: Date.now(),
+        hasProducedOutput: false,
+        messageCountAtStart: 0,
+        lastEventAt: Date.now(),
+      });
       task.status = "running";
       didMarkRunning = true;
       infoLog("launch", taskId, `running agent=${input.subagent}`);
@@ -165,14 +182,15 @@ export class DispatchManager {
           },
         });
 
-        debugLog("launch", taskId, "promptAsync sent — registering with poller");
-        this.poller.registerTask(taskId, session.id, undefined, task.timeoutMs);
+        debugLog("launch", taskId, "promptAsync sent — registering with watchdog");
+        this.watchdog.registerTask(taskId);
       }
     } catch (err) {
       task.status = "error";
       task.error = err instanceof Error ? err.message : String(err);
       debugLog("launch", taskId, `ERROR: ${task.error}`);
       if (didMarkRunning) {
+        this.sessionToTask.delete(task.sessionId); // edge-case #4
         this.leaveRunning(taskId);
       } else {
         this.concurrency.release(task.concurrencyKey!);
@@ -350,7 +368,24 @@ export class DispatchManager {
       },
     });
 
-    this.poller.registerTask(taskId, task.sessionId, { messageCountAtStart }, task.timeoutMs);
+    this.watchdog.cancelDebounce(taskId);
+    this.watchdog.unregisterTask(taskId);
+    this.watchdog.registerTask(taskId); // edge-case #5
+
+    const es = this.eventState.get(taskId) ?? {
+      lastMessageCount: 0,
+      lastProgressUpdate: Date.now(),
+      hasProducedOutput: false,
+      messageCountAtStart: 0,
+      lastEventAt: Date.now(),
+    };
+    es.messageCountAtStart = messageCountAtStart;
+    es.lastProgressUpdate = Date.now();
+    es.hasProducedOutput = false;
+    es.lastEventAt = Date.now();
+    this.eventState.set(taskId, es);
+
+    this.sessionToTask.set(task.sessionId, taskId); // edge-case #5
     metrics.gauge("inflight_tasks").inc();
     this.incInflight(task.parentSessionId);
     this.persistState();
@@ -428,8 +463,8 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✕ cancelled agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
-    this.poller.unregisterTask(taskId);
-    this.sessionMonitor.clearTask(taskId);
+    this.watchdog.unregisterTask(taskId);
+    this.watchdog.cancelDebounce(taskId);
     void this.notifyCompletion(t);
     this.leaveRunning(taskId);
     return true;
@@ -486,6 +521,9 @@ export class DispatchManager {
   }
 
   cleanupTask(taskId: string): void {
+    const t = this.tasks.get(taskId);
+    if (t?.sessionId) this.sessionToTask.delete(t.sessionId); // edge-case #4 index cleanup
+    this.eventState.delete(taskId);
     this.tasks.delete(taskId);
     this.persistState();
     this.cleanedUpTasks.add(taskId);
@@ -549,6 +587,7 @@ export class DispatchManager {
         debugLog("persist", "*", `sync flush failed: ${err}`);
       }
     }
+    this.watchdog.dispose(); // decision 8 — prevent timer leak on process exit
   }
 
   private restoreState(): void {
@@ -624,7 +663,15 @@ export class DispatchManager {
           const occupied = this.concurrency.forceOccupyBackground(key);
           if (occupied === 1) {
             task.concurrencyKey = key;
-            this.poller.registerTask(task.id, task.sessionId, undefined, task.timeoutMs);
+            this.watchdog.registerTask(task.id); // edge-case #6
+            this.sessionToTask.set(task.sessionId, task.id); // edge-case #6
+            this.eventState.set(task.id, {
+              lastMessageCount: 0,
+              lastProgressUpdate: Date.now(),
+              hasProducedOutput: false,
+              messageCountAtStart: task.messageCountAtStart ?? 0,
+              lastEventAt: Date.now(),
+            });
             this.incInflight(task.parentSessionId);
             debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
           } else {
@@ -728,54 +775,167 @@ export class DispatchManager {
     }
   }
 
-  async handleSessionIdle(sessionId: string): Promise<void> {
-    let targetTask: DispatchTask | undefined;
-    let targetTaskId: string | undefined;
-
-    for (const [taskId, task] of this.tasks) {
-      if (task.sessionId === sessionId && task.status === "running") {
-        targetTask = task;
-        targetTaskId = taskId;
-        break;
-      }
+  private async evaluateAndComplete(
+    taskId: string,
+    trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event",
+  ): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "running") {
+      debugLog("evaluate", taskId, `no-op: task ${!task ? "not found" : `status=${task.status}`}`);
+      return;
     }
 
-    if (!targetTask || !targetTaskId) return;
+    if (trigger === "error-event") {
+      if (this.transition(taskId, ["running"], "error", { error: "Task error event received" })) {
+        this.watchdog.unregisterTask(taskId);
+        this.watchdog.cancelDebounce(taskId);
+        this.finalizeCompletion(taskId);
+      }
+      return;
+    }
 
-    const elapsed = Date.now() - targetTask.startedAt.getTime();
-    if (elapsed < this.config.minRuntimeMs) {
-      debugLog("event", targetTaskId, `session.idle too early (${elapsed}ms), deferring`);
+    if (trigger === "deleted-event") {
+      if (this.transition(taskId, ["running"], "error", { error: "Session deleted" })) {
+        this.watchdog.unregisterTask(taskId);
+        this.watchdog.cancelDebounce(taskId);
+        this.finalizeCompletion(taskId);
+      }
       return;
     }
 
     try {
-      debugLog("event", targetTaskId, "session.idle received — validating output");
+      const msgResult = await this.client.session.messages({ path: { id: task.sessionId } });
+      const statusResult = await this.client.session.status();
 
-      const msgResult = await this.client.session.messages({
-        path: { id: sessionId },
-      });
+      if (msgResult.error !== undefined) {
+        debugLog("evaluate", taskId, `messages fetch error: ${JSON.stringify(msgResult.error)}`);
+        return;
+      }
+
+      const allMessages = (msgResult.data ?? []) as SessionMessageSnapshot[];
+      const statusMap = (statusResult.data ?? {}) as Record<string, { type: string }>;
+      const sessionStatus = statusMap[task.sessionId];
+
+      const eventState = this.eventState.get(taskId);
+      if (!eventState) return;
+
+      const startIndex = eventState.messageCountAtStart ?? 0;
+      const scopedMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
+
+      const sig = detectCompletion(scopedMessages, sessionStatus, eventState, true);
+
+      switch (sig.type) {
+        case "completed": {
+          if (this.transition(taskId, ["running"], "completed")) {
+            this.watchdog.unregisterTask(taskId);
+            this.watchdog.cancelDebounce(taskId);
+            this.finalizeCompletion(taskId);
+          }
+          break;
+        }
+        case "error": {
+          if (this.transition(taskId, ["running"], "error", { error: sig.message })) {
+            this.watchdog.unregisterTask(taskId);
+            this.watchdog.cancelDebounce(taskId);
+            this.finalizeCompletion(taskId);
+          }
+          break;
+        }
+        case "not_ready": {
+          const now = Date.now();
+          const elapsed = now - task.startedAt.getTime();
+          const staleMs = task.timeoutMs ?? this.config.backgroundStaleTimeoutMs ?? BACKGROUND_STALE_TIMEOUT_MS;
+          if (!eventState.hasProducedOutput && elapsed > staleMs) {
+            if (this.transition(taskId, ["running"], "timeout", { error: "Never produced output" })) {
+              this.watchdog.unregisterTask(taskId);
+              this.watchdog.cancelDebounce(taskId);
+              const t = this.tasks.get(taskId)!;
+              infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: Never produced output`);
+              metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
+              void this.notifyCompletion(t);
+              this.leaveRunning(taskId);
+            }
+            break;
+          }
+          if (eventState.hasProducedOutput && now - eventState.lastProgressUpdate > staleMs) {
+            if (this.transition(taskId, ["running"], "timeout", { error: "Task stalled" })) {
+              this.watchdog.unregisterTask(taskId);
+              this.watchdog.cancelDebounce(taskId);
+              const t = this.tasks.get(taskId)!;
+              infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: Task stalled`);
+              metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
+              void this.notifyCompletion(t);
+              this.leaveRunning(taskId);
+            }
+            break;
+          }
+          debugLog("evaluate", taskId, `not_ready — no stale timeout`);
+          break;
+        }
+        case "stabilizing": {
+          debugLog("evaluate", taskId, `stabilizing with skipStabilityGating=true — treating as completed`);
+          if (this.transition(taskId, ["running"], "completed")) {
+            this.watchdog.unregisterTask(taskId);
+            this.watchdog.cancelDebounce(taskId);
+            this.finalizeCompletion(taskId);
+          }
+          break;
+        }
+      }
+    } catch (err) {
+      debugLog("evaluate", taskId, `error fetching: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async handleSessionIdle(sessionId: string): Promise<void> {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return; // edge-case #2
+
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "running") return; // edge-case #1
+
+    const elapsed = Date.now() - task.startedAt.getTime();
+    if (elapsed < this.config.minRuntimeMs) {
+      debugLog("event", taskId, `session.idle too early (${elapsed}ms) — discarding, resetting watchdog`);
+      this.watchdog.resetWatchdog(taskId); // edge-case #3: still reset watchdog
+      return;
+    }
+
+    this.watchdog.resetWatchdog(taskId);
+
+    try {
+      const msgResult = await this.client.session.messages({ path: { id: sessionId } });
+      if (msgResult.error !== undefined) {
+        debugLog("event", taskId, `session.idle messages fetch error: ${JSON.stringify(msgResult.error)}`);
+        return;
+      }
 
       const allMessages = (msgResult.data ?? []) as Array<{
         info: { role: string; finish?: string; error?: unknown };
         parts: Array<{ type: string; state?: string; text?: string }>;
       }>;
 
-      const startIndex = targetTask.messageCountAtStart ?? 0;
+      const eventState = this.eventState.get(taskId);
+      const startIndex = eventState?.messageCountAtStart ?? 0;
       const messages = allMessages.slice(startIndex);
 
       let hasAssistantOutput = false;
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
         if (m.info.role === "assistant") {
-          const hasText = m.parts.some(p => p.type === "text" && p.text && p.text.length > 0);
-          const hasToolResult = m.parts.some(p => p.type === "tool");
-          const hasPendingTools = m.parts.some(p => p.type === "tool" && (p.state === "pending" || p.state === "running"));
-
+          const hasPendingTools = m.parts.some(
+            (p) => p.type === "tool" && (p.state === "pending" || p.state === "running"),
+          );
           if (hasPendingTools) {
-            debugLog("event", targetTaskId, "session.idle but tools still pending — skipping");
+            debugLog("event", taskId, "session.idle but tools still pending — skipping");
             return;
           }
-
+          if (m.info.finish === "tool-calls") {
+            debugLog("event", taskId, "session.idle but finish=tool-calls — skipping");
+            return;
+          }
+          const hasText = m.parts.some((p) => p.type === "text" && p.text && p.text.length > 0);
+          const hasToolResult = m.parts.some((p) => p.type === "tool");
           if (hasText || hasToolResult) {
             hasAssistantOutput = true;
           }
@@ -784,20 +944,76 @@ export class DispatchManager {
       }
 
       if (!hasAssistantOutput) {
-        debugLog("event", targetTaskId, "session.idle but no assistant output in continuation scope — skipping");
+        debugLog("event", taskId, "session.idle but no assistant output — skipping");
         return;
       }
 
-      debugLog("event", targetTaskId, "session.idle validated — completing task");
-      if (!this.transition(targetTaskId, ["running"], "completed")) {
-        debugLog("event", targetTaskId, "session.idle race lost — poller already completed this task");
-        return;
+      if (this.watchdog.isDebouncing(taskId)) {
+        debugLog("event", taskId, "already debouncing — ignoring duplicate idle");
+        return; // edge-case #10
       }
-      this.poller.unregisterTask(targetTaskId);
-      this.finalizeCompletion(targetTaskId);
+
+      debugLog("event", taskId, "session.idle validated — starting debounce");
+      this.watchdog.startDebounce(taskId);
     } catch (err) {
-      debugLog("event", targetTaskId, "handleSessionIdle error: " + (err instanceof Error ? err.message : String(err)));
+      debugLog("event", taskId, "handleSessionIdle error: " + (err instanceof Error ? err.message : String(err)));
     }
+  }
+
+  handleSessionStatus(sessionId: string, statusType: string): void {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return; // edge-case #2
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "running") return; // edge-case #1
+
+    const eventState = this.eventState.get(taskId);
+    if (!eventState) return;
+
+    eventState.lastProgressUpdate = Date.now();
+    eventState.hasProducedOutput = true;
+    eventState.lastEventAt = Date.now();
+
+    this.watchdog.resetWatchdog(taskId);
+
+    if (statusType === "busy" || statusType === "retry") {
+      this.watchdog.cancelDebounce(taskId);
+      debugLog("event", taskId, `session.status=${statusType} — progress heartbeat, cancelled debounce`);
+    } else {
+      debugLog("event", taskId, `session.status=${statusType} — progress heartbeat`);
+    }
+  }
+
+  handleMessageUpdated(sessionId: string): void {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return; // edge-case #2
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "running") return; // edge-case #1
+
+    const eventState = this.eventState.get(taskId);
+    if (!eventState) return;
+
+    eventState.lastProgressUpdate = Date.now();
+    eventState.hasProducedOutput = true;
+    eventState.lastEventAt = Date.now();
+    this.watchdog.resetWatchdog(taskId);
+    this.watchdog.cancelDebounce(taskId);
+
+    debugLog("event", taskId, "message.updated — progress heartbeat, cancelled debounce");
+  }
+
+  async handleSessionError(sessionId: string, error: unknown): Promise<void> {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return; // edge-case #2 + edge-case #11 (no sessionId)
+    const errorMsg = error instanceof Error ? error.message : error !== undefined ? String(error) : "Unknown session error";
+    debugLog("event", taskId, `session.error (${errorMsg}) — routing to evaluateAndComplete`);
+    await this.evaluateAndComplete(taskId, "error-event");
+  }
+
+  async handleSessionDeleted(sessionId: string): Promise<void> {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return; // edge-case #2
+    debugLog("event", taskId, `session.deleted — routing to evaluateAndComplete`);
+    await this.evaluateAndComplete(taskId, "deleted-event");
   }
 
   private incInflight(parentSessionId: string): void {

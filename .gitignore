@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .sisyphus/
 .npmrc
+
+# Persisted dispatch task state (auto-generated during tests)
+state/
