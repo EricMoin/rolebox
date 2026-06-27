@@ -49,6 +49,7 @@ export class DispatchManager {
       this.config.maxConcurrent,
       this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
       this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+      this.config.retryAfterMs,
     );
     this.store = new TaskStateStore(process.cwd());
     this.subagentModelKey = subagentModelKey ?? new Map();
@@ -99,10 +100,21 @@ export class DispatchManager {
 
     debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
-    const acqResult = this.concurrency.acquireBackground(concurrencyKey);
+    const acqResult = this.concurrency.acquireBackground(concurrencyKey, {
+      parentId: task.parentSessionId,
+      maxActivePerParent: this.config.maxActivePerParent,
+    });
 
     switch (acqResult.outcome) {
       case "full": {
+        const maxRetries = this.config.backpressureMaxRetries ?? 0;
+        if (maxRetries > 0) {
+          task.concurrencyKey = concurrencyKey;
+          debugLog("launch", taskId, `QUEUE-FULL — scheduling backpressure retry (0/${maxRetries})`);
+          this._scheduleBackpressureRetry(taskId, concurrencyKey, input, parentContext, 0, maxRetries);
+          return task;
+        }
+
         metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
         task.status = "error";
         task.error = JSON.stringify({
@@ -193,7 +205,7 @@ export class DispatchManager {
         this.sessionToTask.delete(task.sessionId); // edge-case #4
         this.leaveRunning(taskId);
       } else {
-        this.concurrency.release(task.concurrencyKey!);
+        this.concurrency.release(task.concurrencyKey!, task.parentSessionId);
         this.decInflight(task.parentSessionId);
         this.scheduleCleanup(taskId);
       }
@@ -209,11 +221,77 @@ export class DispatchManager {
 
     const task = this.tasks.get(taskId);
     if (!task || task.status !== "pending") {
-      this.concurrency.release(task?.concurrencyKey ?? this.deriveKey(input.subagent));
+      this.concurrency.release(task?.concurrencyKey ?? this.deriveKey(input.subagent), task?.parentSessionId);
       return;
     }
 
     await this.startBackgroundTask(taskId, input, parentContext);
+  }
+
+  private _scheduleBackpressureRetry(
+    taskId: string,
+    concurrencyKey: string,
+    input: DispatchInput,
+    parentContext: { sessionID: string; agent: string; directory: string },
+    attempt: number,
+    maxRetries: number,
+  ): void {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "pending") return;
+
+    const retryAfterMs = this.config.retryAfterMs;
+    const maxDelayMs = this.config.backpressureMaxDelayMs ?? 60000;
+    const delay = Math.min(retryAfterMs * Math.pow(2, attempt), maxDelayMs);
+    metrics.counter("dispatch_backpressure_retry_total", { key: concurrencyKey }).inc();
+
+    debugLog("launch", taskId, `backpressure retry attempt=${attempt + 1}/${maxRetries} delay=${delay}ms`);
+
+    const timer = setTimeout(() => {
+      this._cancelQueue.delete(taskId);
+      const currentTask = this.tasks.get(taskId);
+      if (!currentTask || currentTask.status !== "pending") return;
+
+      const acqResult = this.concurrency.acquireBackground(concurrencyKey, {
+        parentId: task.parentSessionId,
+        maxActivePerParent: this.config.maxActivePerParent,
+      });
+
+      if (acqResult.outcome === "acquired") {
+        debugLog("launch", taskId, `backpressure retry ${attempt + 1}: acquired`);
+        void this.startBackgroundTask(taskId, input, parentContext);
+        return;
+      }
+
+      if (acqResult.outcome === "queued") {
+        debugLog("launch", taskId, `backpressure retry ${attempt + 1}: queued`);
+        this._cancelQueue.set(taskId, acqResult.cancel);
+        void acqResult.promise.then(() => this._promoteQueued(taskId, input, parentContext));
+        return;
+      }
+
+      // Still full
+      if (attempt + 1 >= maxRetries) {
+        debugLog("launch", taskId, `backpressure exhausted after ${maxRetries} attempts`);
+        metrics.counter("dispatch_rejected_total", { reason: "backpressure-exhausted" }).inc();
+        task.status = "error";
+        task.error = JSON.stringify({
+          error: "Queue is full after backpressure retries exhausted",
+          attempts: attempt + 1,
+          retry_after: acqResult.error.retryAfter,
+          queue_depth: acqResult.error.depth,
+          limit: acqResult.error.limit,
+        });
+        task.completedAt = new Date();
+        this.decInflight(task.parentSessionId);
+        this.scheduleCleanup(taskId);
+        void this.notifyCompletion(task);
+        return;
+      }
+
+      this._scheduleBackpressureRetry(taskId, concurrencyKey, input, parentContext, attempt + 1, maxRetries);
+    }, delay);
+
+    this._cancelQueue.set(taskId, () => clearTimeout(timer));
   }
 
   /**
@@ -324,7 +402,10 @@ export class DispatchManager {
     if (task.agent !== input.subagent) throw new Error(`Task '${taskId}' agent mismatch: expected ${task.agent}, got ${input.subagent}`);
 
     const concurrencyKey = this.deriveKey(input.subagent);
-    const acqResult = this.concurrency.acquireBackground(concurrencyKey);
+    const acqResult = this.concurrency.acquireBackground(concurrencyKey, {
+      parentId: task.parentSessionId,
+      maxActivePerParent: this.config.maxActivePerParent,
+    });
 
     if (acqResult.outcome === "full" || acqResult.outcome === "queued") {
       if (acqResult.outcome === "queued") {
@@ -660,7 +741,7 @@ export class DispatchManager {
         });
         if (result.data) {
           const key = task.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY;
-          const occupied = this.concurrency.forceOccupyBackground(key);
+          const occupied = this.concurrency.forceOccupyBackground(key, 1, task.parentSessionId);
           if (occupied === 1) {
             task.concurrencyKey = key;
             this.watchdog.registerTask(task.id); // edge-case #6
@@ -1130,7 +1211,7 @@ export class DispatchManager {
     const t = this.tasks.get(taskId);
     if (!t) return;
     if (t.concurrencyKey) {
-      this.concurrency.release(t.concurrencyKey);
+      this.concurrency.release(t.concurrencyKey, t.parentSessionId);
     } else {
       debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
     }
