@@ -11,6 +11,7 @@ import {
   DEFAULT_MAX_RESULT_CHARS,
 } from "./result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
+import { debugLog } from "./debug-log.ts";
 
 function formatDuration(task: DispatchTask): string {
   const end = task.completedAt ?? new Date();
@@ -204,6 +205,13 @@ export function createDispatchOutputTool(manager: DispatchManager) {
     },
     async execute(input, context) {
       const dir = context?.directory ?? getDataDir();
+
+      // Deprecation: block/timeout are accepted but ignored.
+      // Use <system-reminder> notifications instead.
+      if (input.block === true) {
+        debugLog("dispatch_output", input.task_id, "block=true deprecated — ignored");
+      }
+
       const task = manager.getTask(input.task_id);
 
       if (!task) {
@@ -216,11 +224,25 @@ export function createDispatchOutputTool(manager: DispatchManager) {
             "This task was cleaned up before its result could be retrieved.",
           ].join("\n");
         }
-        return [
-          "Task Not Found",
-          "",
-          `No task found with ID: ${input.task_id}`,
-        ].join("\n");
+        if (result.kind === "not_found") {
+          return [
+            "Task Not Found",
+            "",
+            `No task found with ID: ${input.task_id}`,
+          ].join("\n");
+        }
+        // fetch_error or sidecar survival — treat as completed with whatever text we have
+        return buildCompletedOutput(
+          { id: input.task_id } as DispatchTask,
+          result,
+          {
+            maxChars: input.max_chars ?? DEFAULT_MAX_RESULT_CHARS,
+            offset: input.offset ?? 0,
+            limit: input.limit,
+            tail: input.tail,
+          },
+          dir,
+        );
       }
 
       if (task.status === "completed") {
@@ -260,89 +282,22 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           .join("\n");
       }
 
-      if (!input.block) {
-        return [
-          "Task Status\n",
-          `Task ID: ${task.id}`,
-          `Description: ${task.description || "N/A"}`,
-          `Status: ${task.status}`,
-          "",
-          "Task is still running. Do NOT poll dispatch_output repeatedly.",
-          "You will receive a <system-reminder> notification when this task completes.",
-          "Wait for the notification, then call dispatch_output to retrieve results.",
-        ].join("\n");
-      }
-
-      const deadline = Date.now() + input.timeout;
-      while (Date.now() < deadline) {
-        const current = manager.getTask(input.task_id);
-        if (!current) {
-          const result = await manager.getResult(input.task_id);
-          if (result.kind === "expired") {
-            return [
-              "Task Expired",
-              "",
-              `Task ID: ${input.task_id}`,
-              "This task was cleaned up before its result could be retrieved.",
-            ].join("\n");
-          }
-          return [
-            "Task Not Found",
-            "",
-            `No task found with ID: ${input.task_id}`,
-          ].join("\n");
-        }
-
-        if (current.status === "completed") {
-          const result = await manager.getResult(input.task_id);
-          return buildCompletedOutput(
-            current,
-            result,
-            {
-              maxChars: input.max_chars ?? DEFAULT_MAX_RESULT_CHARS,
-              offset: input.offset ?? 0,
-              limit: input.limit,
-              tail: input.tail,
-            },
-            dir,
-          );
-        }
-
-        if (
-          current.status === "error" ||
-          current.status === "cancelled" ||
-          current.status === "timeout"
-        ) {
-          const statusLabel = {
-            error: "Task Error",
-            cancelled: "Task Cancelled",
-            timeout: "Task Timeout",
-          }[current.status];
-          return [
-            statusLabel,
-            "",
-            `Task ID: ${current.id}`,
-            `Description: ${current.description || "N/A"}`,
-            `Status: ${current.status}`,
-            current.error ? `Error: ${current.error}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n");
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-
-      const final = manager.getTask(input.task_id);
-      const finalStatus = final?.status ?? "unknown";
-      return [
-        "Task Timeout",
+      const lines = [
+        "Task Status\n",
+        `Task ID: ${task.id}`,
+        `Description: ${task.description || "N/A"}`,
+        `Status: ${task.status}`,
         "",
-        `Task ID: ${input.task_id}`,
-        `Description: ${final?.description || "N/A"}`,
-        `Status: ${finalStatus}`,
-        `Error: Blocking wait exceeded ${input.timeout}ms`,
-      ].join("\n");
+        "Task is still running. Do NOT poll dispatch_output repeatedly.",
+        "You will receive a <system-reminder> notification when this task completes.",
+        "Wait for the notification, then call dispatch_output to retrieve results.",
+      ];
+
+      if (input.block === true) {
+        lines.push("", "Note: block/timeout parameters are deprecated and ignored. Use <system-reminder> instead.");
+      }
+
+      return lines.join("\n");
     },
   });
 }
