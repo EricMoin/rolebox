@@ -1020,6 +1020,13 @@ export class DispatchManager {
           break;
         }
         case "completed":
+          // Do NOT eagerly fetch for completed tasks without result (v3 backward compat)
+          // T9's getResult handles lazy materialization on first access
+          if (!task.result) {
+            debugLog("recover", taskId, "completed task without result — lazy fetch on first read");
+          }
+          this.scheduleCleanupFromRecovery(taskId, task);
+          break;
         case "error":
         case "timeout":
         case "cancelled":
