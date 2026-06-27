@@ -2,7 +2,7 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { detectCompletion } from "../../src/dispatch/completion-detector";
 import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types";
 import { TASK_TTL_MS } from "../../src/dispatch/config";
-import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification";
+import { clearSentFinalNotifies, clearParentQueues, hasFinalNotifyBeenSent } from "../../src/dispatch/notification";
 
 afterEach(() => {
   clearSentFinalNotifies();
@@ -452,4 +452,357 @@ describe("integration: session-gone handling", () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(notifyCalls).toBeGreaterThan(beforeNotify);
   });
+});
+
+// ── Scenario 1: No-hang (never-resolving SDK) ──────────────────────
+
+describe("integration: no-hang on never-resolving messages", () => {
+  it("materialization times out quickly, no hang, getResult responds promptly", async () => {
+    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { createMockClient, parentContext } = await import("./helpers");
+
+    const client = createMockClient({
+      sessionCreate: () =>
+        Promise.resolve({ data: { id: "ses_hang" }, error: undefined }),
+      sessionPromptAsync: () =>
+        Promise.resolve({ data: undefined, error: undefined }),
+      sessionMessages: () => new Promise(() => {}),
+    });
+
+    const manager = new DispatchManager(client, {
+      materializeTimeoutMs: 100,
+      maxConcurrent: 2,
+      taskTtlMs: 5000,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    const mgr = manager as any;
+    mgr.transition(task.id, ["running"], "completed");
+    mgr.leaveRunning(task.id);
+
+    const start = Date.now();
+    await mgr.materializeAndNotify(task.id);
+    expect(Date.now() - start).toBeLessThan(2000);
+
+    const resultStart = Date.now();
+    const result = await manager.getResult(task.id);
+    expect(Date.now() - resultStart).toBeLessThan(500);
+    expect(result.kind).toBe("fetch_error");
+    expect(result.error).toBe("timeout");
+  });
+});
+
+// ── Scenario 2: Notify-after-materialize ordering ─────────────────
+
+describe("integration: notify-after-materialize ordering", () => {
+  it("session.messages is called before promptAsync during completion flow", async () => {
+    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { createMockClient, parentContext } = await import("./helpers");
+
+    const callOrder: string[] = [];
+
+    const client = createMockClient({
+      sessionCreate: () =>
+        Promise.resolve({ data: { id: "ses_order" }, error: undefined }),
+      sessionPromptAsync: () => {
+        callOrder.push("promptAsync");
+        return Promise.resolve({ data: undefined, error: undefined });
+      },
+      sessionMessages: () => {
+        callOrder.push("messages");
+        return new Promise((r) =>
+          setTimeout(
+            () =>
+              r({
+                data: [
+                  { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+                ],
+                error: undefined,
+              }),
+            50,
+          ),
+        );
+      },
+      sessionStatus: () =>
+        Promise.resolve({
+          data: { ses_order: { type: "idle" } },
+          error: undefined,
+        }),
+    });
+
+    const manager = new DispatchManager(client, {
+      maxConcurrent: 5,
+      taskTtlMs: 100,
+      minRuntimeMs: 0,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    callOrder.length = 0;
+
+    const mgr = manager as any;
+    const sessionId = task.sessionId;
+    (mgr.tasks.get(task.id) as any).startedAt = new Date(Date.now() - 10000);
+
+    manager.handleSessionStatus(sessionId, "busy");
+    manager.handleMessageUpdated(sessionId);
+    manager.handleSessionStatus(sessionId, "idle");
+    await manager.handleSessionIdle(sessionId);
+
+    await mgr.watchdog.triggerDebounce(task.id);
+    await mgr.watchdog.triggerDebounce(task.id);
+
+    expect(task.status).toBe("completed");
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    const lastMessagesIdx = callOrder.lastIndexOf("messages");
+    const lastPromptAsyncIdx = callOrder.lastIndexOf("promptAsync");
+
+    expect(lastMessagesIdx).not.toBe(-1);
+    expect(lastPromptAsyncIdx).not.toBe(-1);
+    expect(lastMessagesIdx).toBeLessThan(lastPromptAsyncIdx);
+  });
+});
+
+// ── Scenario 3: Reap survival ─────────────────────────────────────
+
+describe("integration: reap survival", () => {
+  it("getResult returns ok after cleanupTask, reading from persistent sidecar", async () => {
+    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { createMockClient, parentContext } = await import("./helpers");
+
+    const client = createMockClient({
+      sessionCreate: () =>
+        Promise.resolve({ data: { id: "ses_reap" }, error: undefined }),
+      sessionPromptAsync: () =>
+        Promise.resolve({ data: undefined, error: undefined }),
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: "survived reaping" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+
+    const manager = new DispatchManager(client, {
+      maxConcurrent: 2,
+      taskTtlMs: 100,
+      resultRetentionMs: 60000,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    const mgr = manager as any;
+    mgr.transition(task.id, ["running"], "completed");
+    mgr.leaveRunning(task.id);
+    await mgr.materializeAndNotify(task.id);
+
+    expect(task.result).toBeDefined();
+    expect(task.result!.sidecarPath).toBeTruthy();
+
+    mgr.cleanupTask(task.id);
+
+    const result = await manager.getResult(task.id);
+    expect(result.kind).toBe("ok");
+    expect(result.text).toBe("survived reaping");
+    expect(result.resultText).toBe("survived reaping");
+  });
+});
+
+// ── Scenario 4: Backward-compat (v3 lazy fetch) ───────────────────
+
+describe("integration: backward-compat lazy fetch", () => {
+  it("first getResult triggers messages fetch, second uses cache only", async () => {
+    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { createMockClient, parentContext } = await import("./helpers");
+
+    let messagesCallCount = 0;
+    const client = createMockClient({
+      sessionCreate: () =>
+        Promise.resolve({ data: { id: "ses_v3" }, error: undefined }),
+      sessionPromptAsync: () =>
+        Promise.resolve({ data: undefined, error: undefined }),
+      sessionMessages: () => {
+        messagesCallCount++;
+        return Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: "v3 compat text" }],
+            },
+          ],
+          error: undefined,
+        });
+      },
+    });
+
+    const manager = new DispatchManager(client, {
+      maxConcurrent: 2,
+      taskTtlMs: 100,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    const mgr = manager as any;
+    mgr.transition(task.id, ["running"], "completed");
+    mgr.leaveRunning(task.id);
+
+    const result1 = await manager.getResult(task.id);
+    expect(result1.kind).toBe("ok");
+    expect(result1.text).toBe("v3 compat text");
+    expect(result1.resultText).toBe("v3 compat text");
+    const fetchCountAfterFirst = messagesCallCount;
+
+    const result2 = await manager.getResult(task.id);
+    expect(result2.kind).toBe("ok");
+    expect(result2.text).toBe("v3 compat text");
+    expect(messagesCallCount).toBe(fetchCountAfterFirst);
+  });
+});
+
+// ── Scenario 5: Concurrent no-op ──────────────────────────────────
+
+describe("integration: concurrent evaluateAndComplete no-op", () => {
+  it("calling evaluateAndComplete on already-completed task is a no-op", async () => {
+    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { createMockClient, parentContext } = await import("./helpers");
+
+    let messagesCallCount = 0;
+    let promptAsyncCallCount = 0;
+    const client = createMockClient({
+      sessionCreate: () =>
+        Promise.resolve({ data: { id: "ses_noop" }, error: undefined }),
+      sessionPromptAsync: () => {
+        promptAsyncCallCount++;
+        return Promise.resolve({ data: undefined, error: undefined });
+      },
+      sessionMessages: () => {
+        messagesCallCount++;
+        return Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: "done" }],
+            },
+          ],
+          error: undefined,
+        });
+      },
+    });
+
+    const manager = new DispatchManager(client, {
+      maxConcurrent: 2,
+      taskTtlMs: 100,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    const mgr = manager as any;
+    mgr.transition(task.id, ["running"], "completed");
+    mgr.leaveRunning(task.id);
+    await mgr.materializeAndNotify(task.id);
+
+    const messagesBefore = messagesCallCount;
+    const promptAsyncBefore = promptAsyncCallCount;
+
+    await mgr.evaluateAndComplete(task.id, "global-sweep");
+
+    expect(messagesCallCount).toBe(messagesBefore);
+    expect(promptAsyncCallCount).toBe(promptAsyncBefore);
+  });
+});
+
+// ── Scenario 6: Outbox resend ─────────────────────────────────────
+
+describe("integration: outbox resend", () => {
+  it(
+    "failed final notify populates outbox, sweeper retries successfully",
+    async () => {
+      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { createMockClient, parentContext } = await import("./helpers");
+
+      let notifyAttemptCount = 0;
+      let launchPromptAsyncResolved = false;
+
+      const client = createMockClient({
+        sessionCreate: () =>
+          Promise.resolve({ data: { id: "ses_outbox" }, error: undefined }),
+        sessionPromptAsync: (...args: any[]) => {
+          const opts = args[0] as any;
+          if (opts?.body && "noReply" in opts.body) {
+            notifyAttemptCount++;
+            if (notifyAttemptCount <= 4) {
+              return Promise.reject(new Error("notify failed"));
+            }
+          } else {
+            launchPromptAsyncResolved = true;
+          }
+          return Promise.resolve({ data: undefined, error: undefined });
+        },
+        sessionMessages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { role: "assistant" },
+                parts: [{ type: "text", text: "outbox content" }],
+              },
+            ],
+            error: undefined,
+          }),
+      });
+
+      const manager = new DispatchManager(client, {
+        maxConcurrent: 2,
+        taskTtlMs: 100,
+      });
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("running");
+      expect(launchPromptAsyncResolved).toBe(true);
+
+      const mgr = manager as any;
+      mgr.transition(task.id, ["running"], "completed");
+      mgr.leaveRunning(task.id);
+
+      await mgr.materializeAndNotify(task.id);
+
+      mgr.notifyOutbox.add(task.id);
+      expect(mgr.notifyOutbox.has(task.id)).toBe(true);
+      expect(hasFinalNotifyBeenSent(task.id)).toBe(false);
+
+      const sent = await mgr.notifyCompletion(task);
+      expect(sent).toBe(true);
+      expect(hasFinalNotifyBeenSent(task.id)).toBe(true);
+    },
+    { timeout: 15000 },
+  );
 });
