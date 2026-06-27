@@ -142,4 +142,8 @@ export interface TaskEventState {
   messageCountAtStart: number;
   /** Timestamp of the last routed event for this task (liveness). */
   lastEventAt: number;
+  /** One-shot re-confirmation guard: set when idle-debounce first signals completion.
+   *  Cleared on re-check if message count changed (model continued).
+   *  Capped at exactly one re-check — no livelock. */
+  pendingConfirm?: { messageCount: number; at: number };
 }

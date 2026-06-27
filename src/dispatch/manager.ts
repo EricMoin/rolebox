@@ -12,6 +12,7 @@ import { ConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent } from "./notification.ts";
+import { SessionMonitor } from "./session-monitor.ts";
 
 import { TaskStateStore } from "./task-store.ts";
 import { debugLog, infoLog } from "./debug-log.ts";
@@ -37,6 +38,7 @@ export class DispatchManager {
   private subagentModelKey: Map<string, string>;
   private _dirty = false;
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
+  private sessionMonitor: SessionMonitor;
 
   constructor(
     client: OpencodeClient,
@@ -53,6 +55,7 @@ export class DispatchManager {
     );
     this.store = new TaskStateStore(process.cwd());
     this.subagentModelKey = subagentModelKey ?? new Map();
+    this.sessionMonitor = new SessionMonitor();
     this.watchdog = new TaskWatchdogManager(
       {
         onReconcile: (taskId: string) => this.evaluateAndComplete(taskId, "watchdog-reconcile"),
@@ -907,6 +910,27 @@ export class DispatchManager {
 
       switch (sig.type) {
         case "completed": {
+          // ── One-shot re-confirmation for idle-debounce path ──────
+          // Prevents false-positive completion when a model pauses
+          // between steps. First debounce elapse records pendingConfirm
+          // and re-arms. Second elapse checks message count stability.
+          // Capped at exactly one re-check to avoid livelock.
+          if (trigger === "idle-debounce") {
+            const pc = eventState.pendingConfirm;
+            if (!pc) {
+              eventState.pendingConfirm = { messageCount: scopedMessages.length, at: Date.now() };
+              this.watchdog.startDebounce(taskId);
+              debugLog("evaluate", taskId, `idle-debounce pendingConfirm recorded (msgCount=${scopedMessages.length}) — re-armed`);
+              break;
+            }
+            if (scopedMessages.length !== pc.messageCount) {
+              delete eventState.pendingConfirm;
+              debugLog("evaluate", taskId, `pendingConfirm failed: msgCount ${pc.messageCount} → ${scopedMessages.length} — staying running`);
+              break;
+            }
+            delete eventState.pendingConfirm;
+            debugLog("evaluate", taskId, `pendingConfirm passed: msgCount stable at ${scopedMessages.length} — completing`);
+          }
           if (this.transition(taskId, ["running"], "completed")) {
             this.watchdog.unregisterTask(taskId);
             this.watchdog.cancelDebounce(taskId);
@@ -923,6 +947,26 @@ export class DispatchManager {
           break;
         }
         case "not_ready": {
+          // ── Session-gone verification ──────────────────────────
+          // When sessionStatus is undefined (status map lacks this
+          // session), use secondary verification to confirm if the
+          // session truly no longer exists.
+          if (sessionStatus === undefined) {
+            const existence = await this.sessionMonitor.verifyExistence(this.client, task.sessionId);
+            if (existence === "missing") {
+              if (this.transition(taskId, ["running"], "error", { error: "Session no longer exists" })) {
+                this.watchdog.unregisterTask(taskId);
+                this.watchdog.cancelDebounce(taskId);
+                const t = this.tasks.get(taskId)!;
+                debugLog("evaluate", taskId, `session gone (verifyExistence=missing) — erroring task`);
+                void this.notifyCompletion(t);
+                this.leaveRunning(taskId);
+              }
+              break;
+            }
+            debugLog("evaluate", taskId, `sessionStatus undefined but verifyExistence=${existence} — continuing as not_ready`);
+          }
+
           const now = Date.now();
           const elapsed = now - task.startedAt.getTime();
           const staleMs = task.timeoutMs ?? this.config.backgroundStaleTimeoutMs ?? BACKGROUND_STALE_TIMEOUT_MS;

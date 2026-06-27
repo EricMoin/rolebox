@@ -811,6 +811,11 @@ describe("DispatchManager", () => {
     expect(watchdog.isDebouncing(task.id)).toBe(true);
     expect(taskRef.status).toBe("running");
 
+    // First debounce → records pendingConfirm, re-arms (Task 13 re-confirmation)
+    await watchdog.triggerDebounce(task.id);
+    expect(taskRef.status).toBe("running");
+
+    // Second debounce → stable, completes
     await watchdog.triggerDebounce(task.id);
     expect(taskRef.status).toBe("completed");
   });
@@ -1172,7 +1177,11 @@ describe("DispatchManager", () => {
       await manager.handleSessionIdle("idle-session-2");
       expect(watchdog.isDebouncing(task.id)).toBe(true);
 
-      // Trigger the debounce to complete
+      // First debounce → records pendingConfirm, re-arms (Task 13 re-confirmation)
+      await watchdog.triggerDebounce(task.id);
+      expect(t.status).toBe("running");
+
+      // Second debounce → stable, completes
       await watchdog.triggerDebounce(task.id);
       expect(t.status).toBe("completed");
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
@@ -3402,5 +3411,226 @@ describe("Task 12: config injection", () => {
 
     // ConcurrencyManager was constructed with custom retryAfterMs
     expect(mgr.concurrency.retryAfterMs).toBe(15000);
+  });
+});
+
+// ── Task 13: completion stability + SessionMonitor ───────────────
+
+describe("Task 13: completion stability re-confirmation", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("T13-1: false-positive guard — message count grows between re-confirmations, task stays running", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+    const watchdog = mgr.watchdog;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = mgr.tasks.get(task.id);
+    taskRef.sessionId = "idle-session-1";
+    taskRef.status = "running";
+    taskRef.startedAt = new Date(Date.now() - 10000);
+    mgr.sessionToTask.set("idle-session-1", task.id);
+    watchdog.registerTask(task.id);
+
+    // First setup: idle session with 1 assistant message
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+        ],
+        error: undefined,
+      }),
+    );
+    client.session.status = mock(() =>
+      Promise.resolve({
+        data: { "idle-session-1": { type: "idle" } },
+        error: undefined,
+      }),
+    );
+
+    // First debounce elapse → records pendingConfirm, re-arms
+    watchdog.startDebounce(task.id);
+    await watchdog.triggerDebounce(task.id);
+    expect(taskRef.status).toBe("running");
+    expect(watchdog.isDebouncing(task.id)).toBe(true);
+
+    // Verify pendingConfirm was recorded
+    const es = mgr.eventState.get(task.id);
+    expect(es.pendingConfirm).toBeDefined();
+    expect(es.pendingConfirm.messageCount).toBe(1);
+
+    // Change mock: model produced more messages (count grew from 1 → 3)
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "more" }] },
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "extra" }] },
+        ],
+        error: undefined,
+      }),
+    );
+
+    // Second debounce elapse → pendingConfirm check fails (msgCount 1 → 3)
+    await watchdog.triggerDebounce(task.id);
+    expect(taskRef.status).toBe("running");
+
+    // pendingConfirm cleared
+    const es2 = mgr.eventState.get(task.id);
+    expect(es2.pendingConfirm).toBeUndefined();
+
+    // Cleanup
+    mgr.handleTaskCompleted(task.id);
+  });
+
+  it("T13-2: true completion — message count stable across both debounce elapses", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+    const watchdog = mgr.watchdog;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = mgr.tasks.get(task.id);
+    taskRef.sessionId = "idle-session-2";
+    taskRef.status = "running";
+    taskRef.startedAt = new Date(Date.now() - 10000);
+    mgr.sessionToTask.set("idle-session-2", task.id);
+    watchdog.registerTask(task.id);
+
+    // Stable: session idle, 1 assistant message
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+        ],
+        error: undefined,
+      }),
+    );
+    client.session.status = mock(() =>
+      Promise.resolve({
+        data: { "idle-session-2": { type: "idle" } },
+        error: undefined,
+      }),
+    );
+
+    // First debounce elapse → records pendingConfirm, re-arms
+    watchdog.startDebounce(task.id);
+    await watchdog.triggerDebounce(task.id);
+    expect(taskRef.status).toBe("running");
+    expect(watchdog.isDebouncing(task.id)).toBe(true);
+
+    const es1 = mgr.eventState.get(task.id);
+    expect(es1.pendingConfirm).toBeDefined();
+
+    // Second debounce elapse → same mocks, same msgCount → completed
+    await watchdog.triggerDebounce(task.id);
+    expect(taskRef.status).toBe("completed");
+
+    // pendingConfirm cleared after completion
+    const es2 = mgr.eventState.get(task.id);
+    expect(es2.pendingConfirm).toBeUndefined();
+  });
+
+  it("T13-3: session gone — verifyExistence returns missing, task errored + notified", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true, description: "gone-task" },
+      parentContext(),
+    );
+
+    const taskRef = mgr.tasks.get(task.id);
+    taskRef.sessionId = "gone-session";
+    taskRef.status = "running";
+    mgr.sessionToTask.set("gone-session", task.id);
+    mgr.watchdog.registerTask(task.id);
+
+    // status() returns data WITHOUT the task's session → sessionStatus undefined
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
+        ],
+        error: undefined,
+      }),
+    );
+    client.session.status = mock(() =>
+      Promise.resolve({
+        data: { "other-session": { type: "idle" } }, // gone-session NOT in map
+        error: undefined,
+      }),
+    );
+
+    // Mock verifyExistence → "missing"
+    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("missing" as const));
+
+    // Trigger via idle-debounce (only evaluateAndComplete examines sessionStatus for gone check)
+    mgr.watchdog.startDebounce(task.id);
+    await mgr.watchdog.triggerDebounce(task.id);
+
+    expect(taskRef.status).toBe("error");
+    expect(taskRef.error).toContain("no longer exists");
+
+    // Cleanup
+    mgr.watchdog.unregisterTask(task.id);
+    mgr.concurrency.release("default");
+  });
+
+  it("T13-4: session uncertain — verifyExistence returns exists, task stays running", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true },
+      parentContext(),
+    );
+
+    const taskRef = mgr.tasks.get(task.id);
+    taskRef.sessionId = "uncertain-session";
+    taskRef.status = "running";
+    mgr.sessionToTask.set("uncertain-session", task.id);
+    mgr.watchdog.registerTask(task.id);
+
+    // status() returns data WITHOUT the task's session
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [
+          { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
+        ],
+        error: undefined,
+      }),
+    );
+    client.session.status = mock(() =>
+      Promise.resolve({
+        data: { "other-session": { type: "idle" } },
+        error: undefined,
+      }),
+    );
+
+    // Mock verifyExistence → "exists"
+    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
+
+    // Trigger via idle-debounce
+    mgr.watchdog.startDebounce(task.id);
+    await mgr.watchdog.triggerDebounce(task.id);
+
+    expect(taskRef.status).toBe("running");
+
+    // Cleanup
+    mgr.handleTaskCompleted(task.id);
   });
 });
