@@ -1166,7 +1166,14 @@ export class DispatchManager {
   async notifyCompletion(task: DispatchTask): Promise<boolean> {
     this.pendingNotifications.add(task.id);
     try {
-      return await notifyParent(this.client, task, () => this.getInflight(task.parentSessionId));
+      return await notifyParent(this.client, task, () => {
+        const raw = this.getInflight(task.parentSessionId);
+        // If leaveRunning hasn't been called yet for this task, the inflight
+        // count still includes it. Subtract 1 so the notification reflects
+        // only *other* running tasks for this parent.
+        const taskStillCounted = raw > 0 && task.status !== "running" && task.status !== "pending";
+        return taskStillCounted ? raw - 1 : raw;
+      });
     } finally {
       this.pendingNotifications.delete(task.id);
     }

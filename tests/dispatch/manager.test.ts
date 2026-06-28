@@ -3809,7 +3809,13 @@ describe("T8: Notification outbox", () => {
   });
 
   it("sweeper retries then prunes after task is removed from tasks map", async () => {
-    const client = createMockClient();
+    let callCount = 0;
+    const client = createMockClient({
+      sessionPromptAsync: () => {
+        callCount++;
+        return Promise.reject(new Error("network error"));
+      },
+    });
 
     const capturedCallbacks: Array<() => void> = [];
     const origSetInterval = globalThis.setInterval;
