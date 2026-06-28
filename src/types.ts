@@ -237,6 +237,19 @@ export interface ResolvedFunction {
   source: FunctionSource;
   /** Parameter declarations from frontmatter (name → default value) */
   params?: Record<string, string>;
+  phase?: string;
+  priority?: number;
+  requires?: string[];
+  produces?: string;
+  consumes?: string;
+  gate?: Condition;
+  continue_until?: Condition;
+  requires_evidence?: string[];
+  observe?: ObserveSpec[];
+  transitions?: TransitionSpec[];
+  state_schema_version?: number;
+  continue_max?: number;
+  handlers?: string;
 }
 
 /**
@@ -327,6 +340,38 @@ export interface SkillMetadata {
   references?: Record<string, string | ReferenceEntry>;
 }
 
+/** A boolean predicate over the closed condition vocabulary. */
+export type Condition =
+  | string                          // named condition, e.g. "user_approval", "artifact_exists(plan)"
+  | { all: Condition[] }
+  | { any: Condition[] }
+  | { not: Condition };
+
+/** A reaction a function runs when a lifecycle event fires. */
+export interface ObserveSpec {
+  /** Which lifecycle event triggers this reaction. */
+  on: "tool_after" | "message" | "activate" | "idle";
+  /** For on:"tool_after", only fire when this tool was called. */
+  tool?: string;
+  /** Optional extra guard; reaction only runs when this condition is true. */
+  when?: Condition;
+  /** Content to inject into the next system prompt when fired. */
+  inject?: string;
+  /** Mark this evidence tag as observed. */
+  set_evidence?: string;
+  /** Extract the ```{name} fenced block from the assistant message into artifact {name}. */
+  capture_artifact?: string;
+  /** Mirror the latest todowrite state into function STATE under key "__todos". */
+  sync_todos?: boolean;
+}
+
+/** When `when` becomes true, activate/deactivate the listed functions. */
+export interface TransitionSpec {
+  when: Condition;
+  activate?: string[];
+  deactivate?: string[];
+}
+
 /**
  * YAML frontmatter metadata parsed from function files.
  * Fields follow a simpler subset of the skill frontmatter schema.
@@ -338,4 +383,17 @@ export interface FunctionMetadata {
   description?: string;
   /** Parameter declarations: name → default value or description */
   params?: Record<string, string>;
+  phase?: string;
+  priority?: number;
+  requires?: string[];
+  produces?: string;
+  consumes?: string;
+  gate?: Condition;
+  continue_until?: Condition;
+  requires_evidence?: string[];
+  observe?: ObserveSpec[];
+  transitions?: TransitionSpec[];
+  state_schema_version?: number;
+  continue_max?: number;
+  handlers?: string;
 }
