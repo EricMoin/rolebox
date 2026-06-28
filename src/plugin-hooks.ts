@@ -12,6 +12,7 @@ import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "./dispatch/config
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
 import { createSubLogger } from "./logger.ts";
+import { runToolObserve } from "./function/observe.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -199,6 +200,26 @@ export async function createPluginHooks(
         pendingCorrections.set(input.sessionID, correction);
         log.debug("guardrail correction stashed", { sessionID: input.sessionID });
       }
+
+      // --- function OBSERVE ---
+      try {
+        const allFns: ResolvedFunction[] = [];
+        for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
+        const activeNames = functionSessionState.getActive(input.sessionID);
+        const activeFns = allFns.filter((f) => activeNames.has(f.name));
+        if (activeFns.length > 0 && input.tool) {
+          const { ArtifactStore } = await import("./function/artifact-store.ts");
+          const artifacts = new ArtifactStore(process.cwd());
+          const injects = runToolObserve({
+            sessionID: input.sessionID, tool: input.tool,
+            activeFns, artifacts, lastAssistantText: null,
+          });
+          for (const inj of injects) {
+            const existing = pendingCorrections.get(input.sessionID);
+            pendingCorrections.set(input.sessionID, existing ? existing + "\n" + inj : inj);
+          }
+        }
+      } catch {}
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },
