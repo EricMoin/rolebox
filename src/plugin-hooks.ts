@@ -260,7 +260,20 @@ export async function createPluginHooks(
         }
       }
 
-      if (activeFunctions.length === 0) {
+      // Priority-ordered injection + requires dependency guard
+      const activeSet = functionSessionState.getActive(input.sessionID);
+      const guarded: ResolvedFunction[] = [];
+      for (const fn of activeFunctions) {
+        const missing = (fn.requires ?? []).filter((d) => !activeSet.has(d));
+        if (missing.length > 0) {
+          output.system.push(`<system-reminder>Function '${fn.name}' requires ${missing.map((m) => `'${m}'`).join(", ")} active first.</system-reminder>`);
+          continue;
+        }
+        guarded.push(fn);
+      }
+      guarded.sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
+
+      if (guarded.length === 0) {
         // Inject graph state block even when functions are active but empty
         if (graphState) {
           const graph = graphSessionState.getGraph(input.sessionID);
@@ -274,7 +287,7 @@ export async function createPluginHooks(
         return;
       }
 
-      const block = buildFunctionBlock(activeFunctions);
+      const block = buildFunctionBlock(guarded);
       output.system.push(block);
 
       // graphState already resolved above
@@ -287,7 +300,7 @@ export async function createPluginHooks(
       }
 
       const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
-      log.debug("System prompt augmented", { totalChars, addedFunctions: activeFunctions.length, hasGraphBlock: !!graphState });
+      log.debug("System prompt augmented", { totalChars, addedFunctions: guarded.length, hasGraphBlock: !!graphState });
     },
   };
 }
