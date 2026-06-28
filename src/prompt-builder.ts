@@ -1,4 +1,5 @@
 import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "./types.ts";
+import type { FnState } from "./function/runtime-state.ts";
 import { buildCollaborationBlock } from "./graph/index.ts";
 import { createSubLogger } from "./logger.ts";
 
@@ -161,4 +162,18 @@ export function buildSubagentBlock(
       xml("description", [a.description]),
     ])),
   );
+}
+
+export function buildFunctionStateBlock(fnName: string, s: FnState, todosRemaining: number): string {
+  return `<function_state name="${fnName}">
+  <phase>${s.phase}</phase>
+  <gate_satisfied>${s.gateSatisfied}</gate_satisfied>
+  <todos_remaining>${todosRemaining}</todos_remaining>
+  <evidence>${Object.entries(s.evidenceObserved).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}</evidence>
+  <continuation>${s.continuationCount}</continuation>
+</function_state>`;
+}
+
+export function buildActiveArtifactBlock(name: string, content: string): string {
+  return `<active_artifact name="${name}">\n${content}\n</active_artifact>`;
 }
