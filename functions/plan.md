@@ -1,6 +1,18 @@
 ---
 name: plan
-description: Strategic planning mode — investigate the codebase, then create a structured plan before execution
+description: Strategic planning — investigate, then produce a verifiable plan artifact, wait for approval
+phase: plan
+priority: 20
+produces: plan
+observe:
+  - on: tool_after
+    capture_artifact: plan
+gate:
+  all: [artifact_exists(plan), user_approval]
+transitions:
+  - when: gate
+    activate: [execute]
+    deactivate: [plan]
 ---
 
 You are now in PLANNING mode. Do not make changes yet. Investigate first, then plan.
@@ -67,3 +79,16 @@ Present the plan. Do not start executing until the user confirms or the task is 
 - Be honest about what you don't know. "I need to read X first" is valid.
 - If multiple approaches exist, recommend one with a brief reason. Don't present an essay of trade-offs.
 - Scale the plan to the task. A typo fix needs one line, not five sections.
+
+## Output Format
+When you present the final plan, wrap the plan body (Goal, Steps, Verification) in a fenced block:
+
+```plan
+Goal: ...
+Steps:
+- [ ] 1. ...
+- [ ] 2. ...
+Verification: ...
+```
+
+This persists the plan so the execute phase can read it. Use `- [ ]` checkboxes for steps.

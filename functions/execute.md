@@ -1,6 +1,16 @@
 ---
 name: execute
-description: Execution mode — implement step by step with tool-based verification after each change
+description: Execute the approved plan with per-step verification, continue until all steps done
+phase: execute
+priority: 20
+consumes: plan
+requires_evidence: [lsp_diagnostics, test]
+observe:
+  - on: tool_after
+    tool: todowrite
+    sync_todos: true
+continue_until:
+  all: [plan_todos_complete, evidence_met]
 ---
 
 You are now in EXECUTION mode. You have a plan (explicit or implied). Implement it systematically.
@@ -61,3 +71,6 @@ When done:
 - Stay in scope. Notice unrelated issues? Note them, don't fix them.
 - Minimal changes. Don't refactor while implementing. Don't "improve" adjacent code.
 - Be direct about failure. "X broke because Y" > hedging.
+
+## Tool Use
+Use the `todowrite` tool to track the plan's steps so progress is synced. After each file change, run `lsp_diagnostics` and the test command to satisfy evidence requirements.

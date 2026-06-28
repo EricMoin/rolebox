@@ -4,7 +4,7 @@ import { applyParams } from "./function-resolver.ts";
 import { parseFunctionActivation } from "./function-parser.ts";
 import { functionSessionState } from "./session-state.ts";
 import { graphSessionState, buildGraphStateBlock, advanceGraphForDispatch } from "./graph/index.ts";
-import { buildFunctionBlock } from "./prompt-builder.ts";
+import { buildFunctionBlock, buildActiveArtifactBlock } from "./prompt-builder.ts";
 import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts";
 import { DispatchManager } from "./dispatch/manager.ts";
 import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchMetricsTool } from "./dispatch/tools.ts";
@@ -407,6 +407,14 @@ export async function createPluginHooks(
 
       const block = buildFunctionBlock(guarded);
       output.system.push(block);
+
+      // --- function kernel: inject consumed artifacts ---
+      for (const fn of guarded) {
+        if (fn.consumes) {
+          const content = artifacts.read(input.sessionID, fn.consumes);
+          if (content) output.system.push(buildActiveArtifactBlock(fn.consumes, content));
+        }
+      }
 
       // graphState already resolved above
       if (graphState) {
