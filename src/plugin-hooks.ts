@@ -63,23 +63,28 @@ export async function createPluginHooks(
 
   if (directory) {
     graphSessionState.setStoreDirectory(directory);
+    functionRuntime.setStoreDirectory(directory);
   }
   graphSessionState.recover((_sessionID, agentId) => roleGraphMap.get(agentId));
+  functionRuntime.recover();
 
   if (!hooksRegistered) {
     hooksRegistered = true;
     process.on("exit", () => {
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
+      if (directory) functionRuntime.flushSync();
     });
     process.on("SIGINT", () => {
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
+      if (directory) functionRuntime.flushSync();
       process.exit(130);
     });
     process.on("SIGTERM", () => {
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
+      if (directory) functionRuntime.flushSync();
       process.exit(143);
     });
   }
