@@ -57,13 +57,27 @@ export async function resolveFunctions(
         continue;
       }
 
+      const m = metadata as FunctionMetadata;
       resolved.push({
-        name: metadata.name ?? name,
-        description: metadata.description ?? "",
+        name: m.name ?? name,
+        description: m.description ?? "",
         content: body,
         filePath: candidate.path,
         source: candidate.source,
-        params: (metadata as FunctionMetadata).params,
+        params: m.params,
+        phase: m.phase,
+        priority: m.priority,
+        requires: m.requires,
+        produces: m.produces,
+        consumes: m.consumes,
+        gate: m.gate,
+        continue_until: m.continue_until,
+        requires_evidence: m.requires_evidence,
+        observe: m.observe,
+        transitions: m.transitions,
+        state_schema_version: m.state_schema_version,
+        continue_max: m.continue_max,
+        handlers: m.handlers,
       });
 
       matched = true;
