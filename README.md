@@ -34,6 +34,26 @@ rolebox <command> [options]
 
 ### Commands
 
+#### `init [name]`
+
+Scaffold a new role interactively. Creates a ready-to-use directory structure with all necessary files.
+
+```bash
+rolebox init                          # Interactive wizard
+rolebox init my-role                  # Create role in ./my-role directory
+rolebox init my-role -y               # Skip prompts, use defaults
+rolebox init my-role -t subagents     # Use a specific template
+```
+
+**Templates:**
+
+| Template | Description |
+|---|---|
+| `minimal` | Just `role.yaml` and `PROMPT.md` |
+| `standard` | Role with skills, functions, and references directories |
+| `subagents` | Parent role with child sub-agent scaffolding |
+| `collaboration` | Multi-agent role with collaboration graph topology |
+
 #### `install <role>[@version]`
 
 Install a role from a registry. The role specifier can be in several formats:
@@ -81,6 +101,7 @@ Search available roles across all configured registries.
 ```bash
 rolebox search               # List all available roles
 rolebox search react         # Search for roles matching "react"
+rolebox search --no-cache    # Bypass registry cache
 ```
 
 Matches against role names, descriptions, and tags (case-insensitive).
@@ -90,8 +111,9 @@ Matches against role names, descriptions, and tags (case-insensitive).
 Update installed roles to the latest versions available in their registries.
 
 ```bash
-rolebox update                # Update all installed roles
-rolebox update software-architect  # Update a specific role
+rolebox update                         # Update all installed roles
+rolebox update software-architect      # Update a specific role
+rolebox update --no-cache              # Bypass registry cache
 ```
 
 #### `registry <subcommand>`
@@ -102,6 +124,26 @@ Manage registry sources.
 rolebox registry list                    # Show all configured registries
 rolebox registry add https://github.com/user/my-roles  # Add a registry
 rolebox registry remove my-roles         # Remove a registry (not the default)
+```
+
+#### `info <role>`
+
+Show detailed information about an installed role, including model config, skills, functions, subagents, collaboration graph, and sync status.
+
+```bash
+rolebox info software-architect
+rolebox info software-architect --json    # JSON output
+rolebox info software-architect --check   # Verify integrity hash
+```
+
+#### `status`
+
+Show overall health of the rolebox installation: version, registries, installed roles with sync status, opencode plugin registration, and skill symlink integrity.
+
+```bash
+rolebox status
+rolebox status --check-updates   # Also check for newer versions in registries
+rolebox status --json            # JSON output for scripting
 ```
 
 ### Configuration
@@ -245,9 +287,70 @@ When reviewing code, check:
 | Purpose | Reference knowledge | Behavior modification |
 | Injection | On-demand into context | Always in system prompt while active |
 
+## References
+
+References are deep-knowledge documents that agents can read on demand for contextual information. Unlike skills (which are instruction sets), references provide raw domain knowledge — theory, specifications, guides, etc.
+
+### Auto-discovery
+
+Place markdown files in a `references/` directory. They are discovered automatically:
+
+```
+my-role/
+├── role.yaml
+└── references/
+    ├── api-spec.md
+    └── theory/
+        └── core-principles.md
+```
+
+All `.md` files under `references/` are recursively discovered. Descriptions are extracted from YAML frontmatter (if present) or auto-generated from the filename.
+
+### Explicit declarations
+
+Declare references in `role.yaml` for files outside `references/` or to provide custom descriptions:
+
+```yaml
+references:
+  api-spec: references/api-spec.md
+  design-guide:
+    path: docs/design-guide.md
+    description: Internal design system documentation
+```
+
+### Skill-specific references
+
+Skills can also have their own references:
+
+```
+skills/
+└── my-skill/
+    ├── SKILL.md
+    └── references/
+        └── domain-theory.md
+```
+
+References declared in a skill's SKILL.md frontmatter work the same way:
+
+```markdown
+---
+name: my-skill
+description: Does something
+references:
+  theory: references/domain-theory.md
+---
+```
+
+### Resolution
+
+- Role-level references are discovered from `{roleDir}/references/`
+- Skill-level references are discovered from `{roleDir}/skills/{name}/references/`
+- Explicit declarations override auto-discovered descriptions for the same file
+- All references are surfaced to the agent in an `<available_references>` block
+
 ## Subagents
 
-Subagents are child agents that a parent role can delegate to via `task()`. They let you build roles that coordinate specialist sub-agents, each with its own prompt, skills, and configuration.
+Subagents are child agents that a parent role can delegate to via `dispatch`. They let you build roles that coordinate specialist sub-agents, each with its own prompt, skills, and configuration.
 
 ### When to use
 
@@ -315,10 +418,10 @@ The `--` separator is reserved. Don't use it in regular role IDs.
 
 ### Dispatch
 
-The parent dispatches work to a subagent using `task()` in its prompt:
+The parent dispatches work to a subagent using the `dispatch` tool:
 
 ```
-task(subagent_type="team-lead--implementer", prompt="Implement the auth module", run_in_background=true)
+dispatch(subagent="team-lead--implementer", prompt="Implement the auth module", run_in_background=true)
 ```
 
 Rolebox exposes three dispatch tools to the parent agent:
@@ -340,7 +443,7 @@ A fourth tool, `dispatch_metrics`, provides runtime counters, gauges, and histog
 Pass `session_id` (the task ID from a previous dispatch) to re-prompt a subagent in the same opencode session. This preserves the conversation history, so the subagent picks up where it left off.
 
 ```
-task(subagent_type="team-lead--implementer", session_id="<previous-task-id>", prompt="Now add tests", run_in_background=true)
+dispatch(subagent="team-lead--implementer", session_id="<previous-task-id>", prompt="Now add tests", run_in_background=true)
 ```
 
 #### Per-task timeout
@@ -470,14 +573,14 @@ You don't need to manage the workflow manually. Rolebox handles it:
 1. When a chat starts, the graph state initializes (step 0, status: active)
 2. The orchestrator's system prompt gets a `<collaboration_graph>` block describing the workflow and a `<collaboration_state>` block showing current progress
 3. Each subagent's prompt gets a `<collaboration_role>` block explaining its position (e.g., "You receive work from Coder. Your output goes to Editor.")
-4. Every time `task()` dispatches to a subagent, the state advances to the next step
+4. Every time `dispatch` dispatches to a subagent, the state advances to the next step
 5. When an exit edge is reached or max iterations are exceeded, the workflow completes
 
 The orchestrator LLM sees the state on every turn, so it knows which agent to call next without you hardcoding dispatch logic in the prompt.
 
 ### No graph? No problem
 
-The `collaboration:` field is optional. Roles with subagents but no graph continue to work exactly as before — the parent decides dispatch order freely via `task()`.
+The `collaboration:` field is optional. Roles with subagents but no graph continue to work exactly as before — the parent decides dispatch order freely via `dispatch`.
 
 ## Configuration reference
 
@@ -491,6 +594,7 @@ prompt: |                     # Or use prompt_file (mutually exclusive)
   Your system prompt here...
 
 # Optional
+version: string               # Semantic version (e.g. "1.0.0")
 model: string                 # e.g. "gpt-4", "claude-3-sonnet"
 mode: primary | subagent | all  # Default: "primary"
 color: string                 # UI color
@@ -513,6 +617,13 @@ functions:                    # Available functions (default: [plan, execute])
 disable_functions:            # Remove specific defaults
   - execute
 
+# References (explicit declarations — auto-discovery needs no config)
+references:
+  api-spec: references/api-spec.md
+  design-guide:
+    path: docs/design-guide.md
+    description: Custom description
+
 # Subagents
 subagents:                    # Inline child agents (see ## Subagents)
   - name: string
@@ -528,6 +639,19 @@ collaboration:
     - "from -> to: label"
     - { from: a, to: b, label: x, exit: true }
   max_iterations: number                   # Loop limit (default: 3 for cycles)
+
+# Dispatch configuration (override defaults for subagent dispatch)
+dispatch:
+  maxConcurrent: number             # Max concurrent background tasks (default: 5)
+  maxQueueDepth: number             # Max queued tasks (default: 10)
+  syncReservedSlots: number         # Slots reserved for sync dispatch (default: 1)
+  maxActivePerParent: number        # Max active tasks per parent session (default: 3)
+  backgroundStaleTimeoutMs: number  # Stale timeout for background tasks (default: 900000)
+  syncAcquireTimeoutMs: number      # Timeout to acquire sync slot (default: 120000)
+  syncPromptTimeoutMs: number       # Timeout for sync prompt (default: 600000)
+  retryAfterMs: number              # Delay before retry after failure (default: 30000)
+  backpressureMaxRetries: number    # Max backpressure retries (default: 5)
+  backpressureMaxDelayMs: number    # Max backpressure delay (default: 60000)
 
 # Permissions
 permission:
@@ -550,6 +674,22 @@ prompt: |
   You work for {env:COMPANY_NAME}...
 ```
 
+### Dispatch environment variables
+
+Override dispatch configuration globally via environment variables (takes precedence over role.yaml `dispatch:` block):
+
+| Variable | Description | Default |
+|---|---|---|
+| `ROLEBOX_DISPATCH_MAX_CONCURRENT` | Max concurrent background tasks | 5 |
+| `ROLEBOX_DISPATCH_MAX_QUEUE_DEPTH` | Max queued tasks | 10 |
+| `ROLEBOX_DISPATCH_SYNC_RESERVED` | Reserved sync slots | 1 |
+| `ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT` | Max active tasks per parent session | 3 |
+| `ROLEBOX_DISPATCH_RETRY_AFTER_MS` | Retry delay after failure (ms) | 30000 |
+| `ROLEBOX_DISPATCH_BG_STALE_MS` | Background stale timeout (ms) | 900000 |
+| `ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS` | Result fetch timeout (ms) | 10000 |
+| `ROLEBOX_DISPATCH_RESULT_RETENTION_MS` | Result file retention (ms) | 3600000 |
+| `ROLEBOX_METRICS` | Enable dispatch metrics (set to any truthy value) | unset |
+
 ## Directory structure
 
 ```
@@ -562,16 +702,22 @@ prompt: |
 │   │   ├── role.yaml
 │   │   ├── skills/
 │   │   │   └── review-checklist.md
-│   │   └── functions/
-│   │       └── plan.md          # Role-local override of built-in plan
+│   │   ├── functions/
+│   │   │   └── plan.md          # Role-local override of built-in plan
+│   │   └── references/          # Deep-knowledge documents
+│   │       └── style-guide.md
 │   ├── team-lead/
 │   │   ├── role.yaml            # Parent role (can have inline subagents)
+│   │   ├── references/
+│   │   │   └── architecture.md
 │   │   └── subagents/           # File-based subagents
 │   │       └── researcher/
 │   │           ├── role.yaml
 │   │           └── skills/
 │   │               └── research-checklist/
-│   │                   └── SKILL.md
+│   │                   ├── SKILL.md
+│   │                   └── references/
+│   │                       └── methodology.md
 │   └── ...
 ├── functions/                    # Global user-defined functions
 │   └── my-custom-fn.md
