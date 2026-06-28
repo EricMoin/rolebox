@@ -36,6 +36,10 @@ export class FunctionSessionState {
     return this.sessions.get(sessionID)?.has(functionName) ?? false;
   }
 
+  deactivate(sessionID: string, functionName: string): void {
+    this.sessions.get(sessionID)?.delete(functionName);
+  }
+
   clear(sessionID: string): void {
     this.sessions.delete(sessionID);
     this.callArgs.delete(sessionID);

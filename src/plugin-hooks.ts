@@ -13,6 +13,10 @@ import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
 import { createSubLogger } from "./logger.ts";
 import { runToolObserve } from "./function/observe.ts";
+import { functionRuntime } from "./function/runtime-state.ts";
+import { evaluateGateAndTransitions } from "./function/phase-machine.ts";
+import type { CondEnv } from "./function/conditions.ts";
+import { ArtifactStore } from "./function/artifact-store.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -187,6 +191,22 @@ export async function createPluginHooks(
           graphSessionState.initGraph(input.sessionID, graph);
         }
       }
+
+      // --- function kernel: init runtime state for newly activated functions ---
+      const roleFns = roleId ? roleFunctionsMap.get(roleId) : null;
+      const activeFnNames = functionSessionState.getActive(input.sessionID);
+      for (const fnName of activeFnNames) {
+        const resolvedFn = roleFns?.find((f) => f.name === fnName);
+        const sv = resolvedFn?.state_schema_version ?? 1;
+        const st = functionRuntime.init(input.sessionID, fnName, sv);
+        st.activatedAtTurn = st.currentTurn;
+      }
+      functionRuntime.markDirty();
+      // Reset continuation counters because a user message just arrived:
+      for (const [, st] of functionRuntime.all(input.sessionID)) {
+        st.continuationCount = 0;
+        st.cooldownUntilTurn = 0;
+      }
     },
     "tool.execute.after": async (
       input: { sessionID?: string; tool?: string; args?: unknown },
@@ -280,6 +300,45 @@ export async function createPluginHooks(
           seen.add(fn.name);
         }
       }
+
+      // --- function kernel: increment turns, evaluate gates + transitions ---
+      const runtimeStates = functionRuntime.all(input.sessionID);
+      let userMessagedThisTurn = true; // will be refined later
+      for (const [, st] of runtimeStates) {
+        st.currentTurn += 1;
+      }
+      const artifacts = new ArtifactStore(process.cwd());
+      for (const fn of activeFunctions) {
+        const st = functionRuntime.get(input.sessionID, fn.name);
+        if (!st) continue;
+        const env: CondEnv = {
+          sessionID: input.sessionID,
+          fnName: fn.name,
+          state: st,
+          artifacts,
+          requiredEvidence: fn.requires_evidence ?? [],
+          userMessagedThisTurn,
+        };
+        const tr = evaluateGateAndTransitions(fn, env);
+        // Collect transitions (applied atomically after loop)
+        for (const name of tr.activate) {
+          functionSessionState.activate(input.sessionID, [name]);
+          const resolved = allFunctions.find((f) => f.name === name);
+          const st2 = functionRuntime.init(
+            input.sessionID,
+            name,
+            resolved?.state_schema_version ?? 1,
+          );
+          st2.activatedAtTurn = st2.currentTurn;
+        }
+        for (const name of tr.deactivate) {
+          // Self-deactivation rule: a function can only deactivate itself
+          if (name === fn.name) {
+            functionSessionState.deactivate(input.sessionID, name);
+          }
+        }
+      }
+      functionRuntime.markDirty();
 
       // Priority-ordered injection + requires dependency guard
       const activeSet = functionSessionState.getActive(input.sessionID);
