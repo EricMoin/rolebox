@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 .rolebox/
+.sisyphus/
 .npmrc
 
 # Persisted dispatch task state (auto-generated during tests)
