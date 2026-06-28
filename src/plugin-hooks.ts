@@ -15,7 +15,8 @@ import { createSubLogger } from "./logger.ts";
 import { runToolObserve } from "./function/observe.ts";
 import { functionRuntime } from "./function/runtime-state.ts";
 import { evaluateGateAndTransitions } from "./function/phase-machine.ts";
-import type { CondEnv } from "./function/conditions.ts";
+import { evaluateCondition, type CondEnv } from "./function/conditions.ts";
+import { decideContinuation } from "./function/continuation.ts";
 import { ArtifactStore } from "./function/artifact-store.ts";
 
 const log = createSubLogger("plugin-hooks");
@@ -103,7 +104,39 @@ export async function createPluginHooks(
       switch (e.type) {
         case "session.idle": {
           const sid = (props as { sessionID?: string } | undefined)?.sessionID;
-          if (sid) await dispatchManager.handleSessionIdle(sid);
+          if (!sid) break;
+          await dispatchManager.handleSessionIdle(sid);
+          // --- function CONTINUE ---
+          const activeSet = functionSessionState.getActive(sid);
+          if (activeSet.size === 0) break;
+          const allFns: ResolvedFunction[] = [];
+          for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
+          const { ArtifactStore } = await import("./function/artifact-store.ts");
+          const artifacts = new ArtifactStore(process.cwd());
+          let burst = 0;
+          for (const st of functionRuntime.all(sid).values()) burst += st.continuationCount;
+          for (const name of activeSet) {
+            const fn = allFns.find((f) => f.name === name);
+            if (!fn?.continue_until) continue;
+            const st = functionRuntime.get(sid, name);
+            if (!st || st.phase === "complete") continue;
+            const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
+              requiredEvidence: fn.requires_evidence ?? [], userMessagedThisTurn: false };
+            if (evaluateCondition(fn.continue_until, env)) { st.phase = "complete"; functionRuntime.markDirty(); continue; }
+            const decision = decideContinuation({
+              fnName: name, st, reason: "completion condition not yet met",
+              cfg: { globalMaxTurns: 25, perFnMax: fn.continue_max ?? 5 },
+              totalContinuationsThisBurst: burst,
+            });
+            functionRuntime.markDirty();
+            if (decision.shouldContinue && decision.reminder) {
+              await client.session.promptAsync({
+                path: { id: sid },
+                body: { parts: [{ type: "text", text: decision.reminder }] },
+              }).catch(() => {});
+              break;   // ONE continuation per idle event
+            }
+          }
           break;
         }
         case "session.status": {
