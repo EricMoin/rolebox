@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { runToolObserve } from "../src/function/observe";
+import { runToolObserve, runTextCapture } from "../src/function/observe";
 import { functionRuntime } from "../src/function/runtime-state";
 import { ArtifactStore } from "../src/function/artifact-store";
 import type { ResolvedFunction } from "../src/types";
@@ -145,5 +145,62 @@ describe("runToolObserve", () => {
     const st = functionRuntime.get("sid-6", "plan");
     expect(st).toBeDefined();
     expect(st!.evidenceObserved).toEqual({});
+  });
+});
+
+describe("runTextCapture (idle-time artifact capture)", () => {
+  it("captures a fenced artifact from completed assistant text", () => {
+    const dir = mkdtempSync(join(tmpdir(), "txtcap-"));
+    const fn = makeFn({ observe: [{ on: "tool_after", capture_artifact: "plan" }] });
+
+    runTextCapture({
+      sessionID: "tc-1",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(dir),
+      assistantText: "Final plan below.\n```plan\nGoal: ship\n- [ ] 1. do it\n```\nWaiting for approval.",
+    });
+
+    const artifact = new ArtifactStore(dir).read("tc-1", "plan");
+    expect(artifact).toBe("Goal: ship\n- [ ] 1. do it");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not write an artifact when the fence is absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "txtcap-"));
+    const fn = makeFn({ observe: [{ on: "tool_after", capture_artifact: "plan" }] });
+
+    runTextCapture({
+      sessionID: "tc-2",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(dir),
+      assistantText: "Here are some thoughts, but no plan block yet.",
+    });
+
+    expect(new ArtifactStore(dir).read("tc-2", "plan")).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("ignores sync_todos and evidence specs (capture_artifact only)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "txtcap-"));
+    const fn = makeFn({
+      name: "execute",
+      observe: [
+        { on: "tool_after", tool: "todowrite", sync_todos: true },
+        { on: "tool_after", set_evidence: "test" },
+      ],
+    });
+    functionRuntime.init("tc-3", "execute", 1);
+
+    runTextCapture({
+      sessionID: "tc-3",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(dir),
+      assistantText: "- [ ] 1. pending todo",
+    });
+
+    const st = functionRuntime.get("tc-3", "execute");
+    expect(st!.kv.__todos).toBeUndefined();
+    expect(st!.evidenceObserved).toEqual({});
+    rmSync(dir, { recursive: true, force: true });
   });
 });

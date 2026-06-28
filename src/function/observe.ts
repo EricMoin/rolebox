@@ -54,3 +54,20 @@ function renderTodosFromArgs(args: unknown): string | null {
     })
     .join("\n");
 }
+
+// Idle-time capture: extracts capture_artifact from the final assistant text when
+// the turn ends without a trailing tool call (runToolObserve never fires then).
+export function runTextCapture(opts: {
+  sessionID: string;
+  activeFns: ResolvedFunction[];
+  artifacts: ArtifactStore;
+  assistantText: string;
+}): void {
+  for (const fn of opts.activeFns) {
+    for (const spec of fn.observe ?? []) {
+      if (spec.on !== "tool_after" || !spec.capture_artifact) continue;
+      const block = extractResultBlockNamed(opts.assistantText, spec.capture_artifact);
+      if (block !== null) opts.artifacts.write(opts.sessionID, spec.capture_artifact, block);
+    }
+  }
+}

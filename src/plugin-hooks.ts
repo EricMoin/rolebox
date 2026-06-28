@@ -12,7 +12,7 @@ import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "./dispatch/config
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
 import { createSubLogger } from "./logger.ts";
-import { runToolObserve } from "./function/observe.ts";
+import { runToolObserve, runTextCapture } from "./function/observe.ts";
 import { functionRuntime } from "./function/runtime-state.ts";
 import { evaluateGateAndTransitions } from "./function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "./function/conditions.ts";
@@ -26,6 +26,35 @@ let hooksRegistered = false;
 export const managerMap = new Map<string, DispatchManager>();
 
 export const pendingCorrections = new Map<string, string>();
+
+// Sessions that received a genuine user message this turn (drives the user_approval
+// gate). Auto-continuation prompts are excluded so they never count as approval.
+export const userMessagedSessions = new Set<string>();
+
+async function fetchLastAssistantText(
+  client: PluginInput["client"],
+  sessionID: string,
+): Promise<string | null> {
+  try {
+    const res = await client.session.messages({ path: { id: sessionID } });
+    if ((res as { error?: unknown }).error !== undefined) return null;
+    const msgs = ((res as { data?: unknown }).data ?? []) as Array<{
+      info: { role: string };
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].info.role !== "assistant") continue;
+      const text = msgs[i].parts
+        .filter((p) => p.type === "text" && typeof p.text === "string")
+        .map((p) => p.text as string)
+        .join("");
+      return text.length > 0 ? text : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export async function createPluginHooks(
   resolvedRoles: ResolvedRole[],
@@ -113,6 +142,16 @@ export async function createPluginHooks(
           for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
           const { ArtifactStore } = await import("./function/artifact-store.ts");
           const artifacts = new ArtifactStore(process.cwd());
+
+          const activeFns = allFns.filter((f) => activeSet.has(f.name));
+          const needsCapture = activeFns.some((f) =>
+            (f.observe ?? []).some((s) => s.on === "tool_after" && s.capture_artifact),
+          );
+          if (needsCapture) {
+            const text = await fetchLastAssistantText(client, sid);
+            if (text) runTextCapture({ sessionID: sid, activeFns, artifacts, assistantText: text });
+          }
+
           let burst = 0;
           for (const st of functionRuntime.all(sid).values()) burst += st.continuationCount;
           for (const name of activeSet) {
@@ -199,6 +238,13 @@ export async function createPluginHooks(
       input: { agent?: string; sessionID: string },
       output: { parts: Array<{ type: string; text?: string }> },
     ) => {
+      const firstText = output.parts.find(
+        (p: { type: string; text?: string }) => p.type === "text" && typeof p.text === "string",
+      ) as { text?: string } | undefined;
+      if (input.sessionID && !(firstText?.text ?? "").includes("[auto-continue")) {
+        userMessagedSessions.add(input.sessionID);
+      }
+
       const textPartIndex = output.parts.findIndex(
         (p: { type: string; text?: string }) => p.type === "text" && "text" in p,
       );
@@ -270,9 +316,17 @@ export async function createPluginHooks(
         if (activeFns.length === 0) return;
 
         const artifacts = new ArtifactStore(process.cwd());
+        const needsText = activeFns.some((f) =>
+          (f.observe ?? []).some(
+            (s) => s.on === "tool_after" && s.capture_artifact && (!s.tool || s.tool === input.tool),
+          ),
+        );
+        const lastAssistantText = needsText
+          ? await fetchLastAssistantText(client, input.sessionID)
+          : null;
         const injects = runToolObserve({
           sessionID: input.sessionID, tool: input.tool,
-          activeFns, artifacts, lastAssistantText: null,
+          activeFns, artifacts, lastAssistantText,
           toolArgs: input.args,
         });
         for (const inj of injects) {
@@ -343,7 +397,8 @@ export async function createPluginHooks(
 
       // --- function kernel: increment turns, evaluate gates + transitions ---
       const runtimeStates = functionRuntime.all(input.sessionID);
-      let userMessagedThisTurn = true; // will be refined later
+      const userMessagedThisTurn = userMessagedSessions.has(input.sessionID);
+      userMessagedSessions.delete(input.sessionID);
       for (const [, st] of runtimeStates) {
         st.currentTurn += 1;
       }
