@@ -1,11 +1,5 @@
 # Changelog
 
-## 0.9.1
-
-### Documentation
-
-- Update README with init, info, status commands, References system, dispatch config, and dispatch env vars
-
 ## 0.9.0
 
 ### Features
