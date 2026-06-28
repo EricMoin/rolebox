@@ -213,7 +213,15 @@ The plan is ready for your review.`;
       tool: "todowrite",
       activeFns: [executeFn],
       artifacts,
-      lastAssistantText: `- [x] 1. Create project scaffolding and install dependencies\n- [ ] 2. Implement the HTTP server with error handling\n- [ ] 3. Write unit tests for all endpoints\n- [ ] 4. Run lsp_diagnostics and the test suite`,
+      lastAssistantText: null,
+      toolArgs: {
+        todos: [
+          { content: "1. Create project scaffolding and install dependencies", status: "completed" },
+          { content: "2. Implement the HTTP server with error handling", status: "pending" },
+          { content: "3. Write unit tests for all endpoints", status: "pending" },
+          { content: "4. Run lsp_diagnostics and the test suite", status: "pending" },
+        ],
+      },
     });
     expect(execSt.kv["__todos"]).toBeDefined();
     expect(execSt.kv["__todos"]).toContain("[x] 1.");
@@ -235,7 +243,15 @@ The plan is ready for your review.`;
       tool: "todowrite",
       activeFns: [executeFn],
       artifacts,
-      lastAssistantText: `- [x] 1. Create project scaffolding and install dependencies\n- [x] 2. Implement the HTTP server with error handling\n- [x] 3. Write unit tests for all endpoints\n- [ ] 4. Run lsp_diagnostics and the test suite`,
+      lastAssistantText: null,
+      toolArgs: {
+        todos: [
+          { content: "1. Create project scaffolding and install dependencies", status: "completed" },
+          { content: "2. Implement the HTTP server with error handling", status: "completed" },
+          { content: "3. Write unit tests for all endpoints", status: "completed" },
+          { content: "4. Run lsp_diagnostics and the test suite", status: "pending" },
+        ],
+      },
     });
 
     // 8d. Run test after changes
@@ -282,7 +298,15 @@ The plan is ready for your review.`;
       tool: "todowrite",
       activeFns: [executeFn],
       artifacts,
-      lastAssistantText: `- [x] 1. Create project scaffolding and install dependencies\n- [x] 2. Implement the HTTP server with error handling\n- [x] 3. Write unit tests for all endpoints\n- [x] 4. Run lsp_diagnostics and the test suite`,
+      lastAssistantText: null,
+      toolArgs: {
+        todos: [
+          { content: "1. Create project scaffolding and install dependencies", status: "completed" },
+          { content: "2. Implement the HTTP server with error handling", status: "completed" },
+          { content: "3. Write unit tests for all endpoints", status: "completed" },
+          { content: "4. Run lsp_diagnostics and the test suite", status: "completed" },
+        ],
+      },
     });
     log("[10] ✓ last step checked off");
 

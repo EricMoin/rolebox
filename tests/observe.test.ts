@@ -61,7 +61,7 @@ describe("runToolObserve", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("syncs todos into kv.__todos on todowrite", () => {
+  it("syncs todos into kv.__todos on todowrite from toolArgs", () => {
     const fn = makeFn({
       observe: [{ on: "tool_after", sync_todos: true }],
     });
@@ -72,12 +72,21 @@ describe("runToolObserve", () => {
       tool: "todowrite",
       activeFns: [fn],
       artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
-      lastAssistantText: "some todo text",
+      lastAssistantText: null,
+      toolArgs: {
+        todos: [
+          { content: "Step 1", status: "completed" },
+          { content: "Step 2", status: "pending" },
+          { content: "Step 3", status: "in_progress" },
+        ],
+      },
     });
 
     const st = functionRuntime.get("sid-3", "plan");
     expect(st).toBeDefined();
-    expect(st!.kv.__todos).toBe("some todo text");
+    expect(st!.kv.__todos).toContain("- [x] Step 1");
+    expect(st!.kv.__todos).toContain("- [ ] Step 2");
+    expect(st!.kv.__todos).toContain("- [ ] Step 3");
   });
 
   it("auto-marks requires_evidence when tool matches", () => {

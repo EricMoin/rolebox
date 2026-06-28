@@ -250,32 +250,34 @@ export async function createPluginHooks(
       input: { sessionID?: string; tool?: string; args?: unknown },
       _output: unknown,
     ) => {
-      if (!input.sessionID) return;
-      if (input.tool !== "task" && input.tool !== "dispatch") return;
+      if (!input.sessionID || !input.tool) return;
 
-      const { correction } = advanceGraphForDispatch(input.sessionID, input.tool, input.args);
-      if (correction) {
-        pendingCorrections.set(input.sessionID, correction);
-        log.debug("guardrail correction stashed", { sessionID: input.sessionID });
+      if (input.tool === "task" || input.tool === "dispatch") {
+        const { correction } = advanceGraphForDispatch(input.sessionID, input.tool, input.args);
+        if (correction) {
+          pendingCorrections.set(input.sessionID, correction);
+          log.debug("guardrail correction stashed", { sessionID: input.sessionID });
+        }
       }
 
       // --- function OBSERVE ---
       try {
+        const activeNames = functionSessionState.getActive(input.sessionID);
+        if (activeNames.size === 0) return;
         const allFns: ResolvedFunction[] = [];
         for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
-        const activeNames = functionSessionState.getActive(input.sessionID);
         const activeFns = allFns.filter((f) => activeNames.has(f.name));
-        if (activeFns.length > 0 && input.tool) {
-          const { ArtifactStore } = await import("./function/artifact-store.ts");
-          const artifacts = new ArtifactStore(process.cwd());
-          const injects = runToolObserve({
-            sessionID: input.sessionID, tool: input.tool,
-            activeFns, artifacts, lastAssistantText: null,
-          });
-          for (const inj of injects) {
-            const existing = pendingCorrections.get(input.sessionID);
-            pendingCorrections.set(input.sessionID, existing ? existing + "\n" + inj : inj);
-          }
+        if (activeFns.length === 0) return;
+
+        const artifacts = new ArtifactStore(process.cwd());
+        const injects = runToolObserve({
+          sessionID: input.sessionID, tool: input.tool,
+          activeFns, artifacts, lastAssistantText: null,
+          toolArgs: input.args,
+        });
+        for (const inj of injects) {
+          const existing = pendingCorrections.get(input.sessionID);
+          pendingCorrections.set(input.sessionID, existing ? existing + "\n" + inj : inj);
         }
       } catch {}
     },
