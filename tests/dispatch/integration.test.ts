@@ -168,7 +168,7 @@ describe("integration: event-driven completion flow", () => {
 
     await manager.handleSessionError(task.sessionId, new Error("session crashed"));
     expect(task.status).toBe("error");
-    expect(task.error).toBe("Task error event received");
+    expect(task.error).toBe("session crashed");
   });
 
   it("session deleted event transitions task to error", async () => {
@@ -447,7 +447,7 @@ describe("integration: session-gone handling", () => {
     const beforeNotify = notifyCalls;
     await manager.handleSessionError(task.sessionId, new Error("boom"));
     expect(task.status).toBe("error");
-    expect(task.error).toBe("Task error event received");
+    expect(task.error).toBe("boom");
 
     await new Promise((r) => setTimeout(r, 200));
     expect(notifyCalls).toBeGreaterThan(beforeNotify);

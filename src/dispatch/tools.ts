@@ -11,7 +11,6 @@ import {
   DEFAULT_MAX_RESULT_CHARS,
 } from "./result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
-import { debugLog } from "./debug-log.ts";
 
 function formatDuration(task: DispatchTask): string {
   const end = task.completedAt ?? new Date();
@@ -38,7 +37,7 @@ function parentContextFromTool(context: {
 
 export function createDispatchTool(
   manager: DispatchManager,
-  resolvedSubagents: Map<string, string>,
+  resolvedSubagents: Map<string, { parentFullId: string }>,
   _subagentModelKey?: Map<string, string>,
 ) {
   return tool({
@@ -73,6 +72,14 @@ export function createDispatchTool(
       if (!resolvedSubagents.has(input.subagent)) {
         const available = [...resolvedSubagents.keys()].join(", ");
         return `Invalid subagent: '${input.subagent}'. Available subagents: ${available}`;
+      }
+
+      const entry = resolvedSubagents.get(input.subagent);
+      if (entry && entry.parentFullId !== context.agent) {
+        const availableChildren = [...resolvedSubagents.entries()]
+          .filter(([, v]) => v.parentFullId === context.agent)
+          .map(([k]) => k);
+        return `Subagent '${input.subagent}' is not a direct child of your agent '${context.agent}'. You can only dispatch to your direct children: ${availableChildren.join(", ") || "(none)"}`;
       }
 
       const parentCtx = parentContextFromTool(context);
@@ -157,21 +164,11 @@ function buildCompletedOutput(
 export function createDispatchOutputTool(manager: DispatchManager) {
   return tool({
     description:
-      "Retrieve output from a completed background task. Only call AFTER receiving a <system-reminder> notification for the task. Do NOT use this to poll for status.",
+      "Retrieve output from a completed background task. Call ONLY after receiving the task's <system-reminder> completion notification. There is no blocking mode — never poll this tool to wait for a task to finish.",
     args: {
       task_id: z
         .string()
         .describe("The task ID returned by the dispatch tool"),
-      block: z
-        .boolean()
-        .optional()
-        .default(false)
-        .describe("Wait for the task to complete before returning"),
-      timeout: z
-        .number()
-        .optional()
-        .default(60000)
-        .describe("Maximum wait time in milliseconds when blocking"),
       max_chars: z
         .number()
         .int()
@@ -205,12 +202,6 @@ export function createDispatchOutputTool(manager: DispatchManager) {
     },
     async execute(input, context) {
       const dir = context?.directory ?? getDataDir();
-
-      // Deprecation: block/timeout are accepted but ignored.
-      // Use <system-reminder> notifications instead.
-      if (input.block === true) {
-        debugLog("dispatch_output", input.task_id, "block=true deprecated — ignored");
-      }
 
       const task = manager.getTask(input.task_id);
 
@@ -292,10 +283,6 @@ export function createDispatchOutputTool(manager: DispatchManager) {
         "You will receive a <system-reminder> notification when this task completes.",
         "Wait for the notification, then call dispatch_output to retrieve results.",
       ];
-
-      if (input.block === true) {
-        lines.push("", "Note: block/timeout parameters are deprecated and ignored. Use <system-reminder> instead.");
-      }
 
       return lines.join("\n");
     },

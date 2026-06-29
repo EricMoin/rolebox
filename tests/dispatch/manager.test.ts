@@ -1489,12 +1489,11 @@ describe("DispatchManager", () => {
       expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
     });
 
-    it("getInflight returns 0 for unknown parent", () => {
+    it("getInflightCount returns 0 for unknown parent", () => {
       const client = createMockClient();
       const manager = new DispatchManager(client, fastConfig);
-      const mgr = manager as any;
 
-      expect(mgr.getInflight("nonexistent-parent")).toBe(0);
+      expect(manager.getInflightCount("nonexistent-parent")).toBe(0);
     });
   });
 

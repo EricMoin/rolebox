@@ -155,7 +155,7 @@ describe("TaskStateStore", () => {
       const raw = readFileSync(path, "utf-8");
       const parsed = JSON.parse(raw);
 
-      expect(parsed.version).toBe(4);
+      expect(parsed.version).toBe(5);
       expect(Array.isArray(parsed.tasks)).toBe(true);
       expect(parsed.tasks.length).toBe(1);
 
@@ -240,10 +240,10 @@ describe("TaskStateStore", () => {
       // Wait for the fire-and-forget async v1→v2 migration save to complete
       await new Promise((r) => setTimeout(r, 50));
 
-      // Verify disk file is now v4
+      // Verify disk file is now v5
       const raw = readFileSync(path, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(4);
+      expect(parsed.version).toBe(5);
       expect(parsed.tasks[0].concurrencyKey).toBe("default");
       expect(parsed.tasks[0].messageCountAtStart).toBe(0);
     });
@@ -374,13 +374,13 @@ describe("TaskStateStore", () => {
       );
       expect(store.load()).not.toBeNull();
 
-      // version:5 should return null
+      // version:5 should load
       writeFileSync(
         path,
         JSON.stringify({ version: 5, tasks: [] }),
         "utf-8",
       );
-      expect(store.load()).toBeNull();
+      expect(store.load()).not.toBeNull();
     });
   });
 
@@ -457,7 +457,7 @@ describe("TaskStateStore", () => {
       expect(existsSync(sp)).toBe(true);
       const raw = readFileSync(sp, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(4);
+      expect(parsed.version).toBe(5);
       expect(Array.isArray(parsed.tasks)).toBe(true);
       expect(parsed.tasks.length).toBe(1);
       expect(parsed.tasks[0].id).toBe(task.id);
@@ -499,7 +499,7 @@ describe("TaskStateStore", () => {
       const sp = stateFilePath(dir);
       const raw = readFileSync(sp, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(4);
+      expect(parsed.version).toBe(5);
       expect(parsed.outbox).toEqual(["bg_v4_result"]);
       expect(parsed.tasks[0].result).toBeDefined();
       expect(parsed.tasks[0].result.totalChars).toBe(1420);
@@ -529,7 +529,7 @@ describe("TaskStateStore", () => {
       expect(t.result!.totalChars).toBe(0);
     });
 
-    it("v3 file migrates to v4 without data loss", async () => {
+    it("v3 file migrates to v5 without data loss", async () => {
       const { store, dir } = createTestStore();
       dirs.push(dir);
 
@@ -578,10 +578,10 @@ describe("TaskStateStore", () => {
       // Wait for the fire-and-forget async v3→v4 migration save
       await new Promise((r) => setTimeout(r, 50));
 
-      // Verify disk file is now v4
+      // Verify disk file is now v5
       const raw = readFileSync(path, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(4);
+      expect(parsed.version).toBe(5);
       expect(parsed.tasks[0].id).toBe("bg_v3mig");
       expect(parsed.tasks[0].result).toBeUndefined();
       expect(parsed.outbox).toBeUndefined();
@@ -655,7 +655,7 @@ describe("TaskStateStore", () => {
       const sp = stateFilePath(dir);
       const raw = readFileSync(sp, "utf-8");
       const parsed = JSON.parse(raw);
-      expect(parsed.version).toBe(4);
+      expect(parsed.version).toBe(5);
       // empty outbox should not be serialized
       expect(parsed.outbox).toBeUndefined();
     });

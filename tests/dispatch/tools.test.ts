@@ -48,7 +48,7 @@ describe("createDispatchTool", () => {
   });
 
   it("rejects invalid subagent", async () => {
-    const resolved = new Map<string, string>();
+    const resolved = new Map<string, { parentFullId: string }>();
     const manager = {} as unknown as DispatchManager;
     const tool = createDispatchTool(manager, resolved);
 
@@ -67,7 +67,7 @@ describe("createDispatchTool", () => {
   });
 
   it("sync mode returns full response", async () => {
-    const resolved = new Map([["test-agent", "test-role"]]);
+    const resolved = new Map([["test-agent", { parentFullId: "role" }]]);
     const manager = {
       executeSync: mock(() => Promise.resolve("test response")),
     } as unknown as DispatchManager;
@@ -86,7 +86,7 @@ describe("createDispatchTool", () => {
   });
 
   it("async mode returns task_id format", async () => {
-    const resolved = new Map([["test-agent", "test-role"]]);
+    const resolved = new Map([["test-agent", { parentFullId: "role" }]]);
     const task = makeTask({ id: "bg_test123", status: "pending" });
     const manager = {
       launch: mock(() => Promise.resolve(task)),
@@ -108,7 +108,7 @@ describe("createDispatchTool", () => {
   });
 
   it("passes timeout_ms through to DispatchInput when provided", async () => {
-    const resolved = new Map([["test-agent", "test-role"]]);
+    const resolved = new Map([["test-agent", { parentFullId: "role" }]]);
     const task = makeTask({ id: "bg_test123", status: "pending" });
     const launchSpy = mock(() => Promise.resolve(task));
     const manager = {
@@ -129,6 +129,80 @@ describe("createDispatchTool", () => {
     expect(launchSpy).toHaveBeenCalledTimes(1);
     const callArgs = launchSpy.mock.calls[0] as [unknown, unknown];
     expect(callArgs[0]).toMatchObject({ timeout_ms: 5000 });
+  });
+
+  // ── lineage checks ──────────────────────────────────────────────────
+
+  it("allows dispatch from chancellor to direct child drafter", async () => {
+    const resolved = new Map([
+      ["emperor--chancellor--drafter", { parentFullId: "emperor--chancellor" }],
+      ["emperor--chancellor--reviewer", { parentFullId: "emperor--chancellor" }],
+    ]);
+    const manager = {
+      executeSync: mock(() => Promise.resolve("drafter response")),
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(manager, resolved);
+
+    const result = await tool.execute(
+      {
+        subagent: "emperor--chancellor--drafter",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      { ...mockToolContext, agent: "emperor--chancellor" },
+    );
+
+    expect(result).toBe("drafter response");
+  });
+
+  it("rejects dispatch from chancellor to jinyiwei (cross-tree)", async () => {
+    const resolved = new Map([
+      ["emperor--chancellor--drafter", { parentFullId: "emperor--chancellor" }],
+      ["emperor--jinyiwei", { parentFullId: "emperor" }],
+    ]);
+    const manager = {
+      executeSync: mock(() => Promise.resolve("should not reach")),
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(manager, resolved);
+
+    const result = await tool.execute(
+      {
+        subagent: "emperor--jinyiwei",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      { ...mockToolContext, agent: "emperor--chancellor" },
+    );
+
+    expect(result).toContain("is not a direct child");
+    const children = result.split("direct children:")[1].trim();
+    expect(children).toContain("emperor--chancellor--drafter");
+    expect(children).not.toContain("emperor--jinyiwei");
+  });
+
+  it("rejects dispatch from emperor to grandchild drafter (non-direct-child)", async () => {
+    const resolved = new Map([
+      ["emperor--chancellor", { parentFullId: "emperor" }],
+      ["emperor--chancellor--drafter", { parentFullId: "emperor--chancellor" }],
+    ]);
+    const manager = {
+      executeSync: mock(() => Promise.resolve("should not reach")),
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(manager, resolved);
+
+    const result = await tool.execute(
+      {
+        subagent: "emperor--chancellor--drafter",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      { ...mockToolContext, agent: "emperor" },
+    );
+
+    expect(result).toContain("is not a direct child");
+    const children2 = result.split("direct children:")[1].trim();
+    expect(children2).toContain("emperor--chancellor");
+    expect(children2).not.toContain("emperor--chancellor--drafter");
   });
 });
 
@@ -202,7 +276,7 @@ describe("createDispatchOutputTool", () => {
     expect(result).toContain("still running");
   });
 
-  it("block=true returns immediately with guidance (no poll loop)", async () => {
+  it("ignores a stale block param: returns immediately, no poll loop, no deprecation note", async () => {
     const running = makeTask({
       status: "running",
       completedAt: undefined,
@@ -220,19 +294,15 @@ describe("createDispatchOutputTool", () => {
 
     const start = Date.now();
     const result = await tool.execute(
-      { task_id: "bg_test123", block: true, timeout: 5000 },
+      { task_id: "bg_test123", block: true, timeout: 5000 } as never,
       mockToolContext,
     );
     const elapsed = Date.now() - start;
 
-    // Must return immediately (< 500ms — no poll loop)
     expect(elapsed).toBeLessThan(500);
-    // Should show status, not result
     expect(result).toContain("Task Status");
     expect(result).toContain("still running");
-    // Should include deprecation note
-    expect(result).toContain("block/timeout parameters are deprecated");
-    // getTask called exactly once (no polling)
+    expect(result).not.toContain("deprecated");
     expect(callCount).toBe(1);
   });
 

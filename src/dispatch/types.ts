@@ -57,6 +57,8 @@ export interface DispatchTask {
   sessionId: string;
   /** Session ID of the parent agent that dispatched this task */
   parentSessionId: string;
+  /** Nesting depth: 0 for direct dispatch, 1 for sub-sub-agent, etc. */
+  depth: number;
   /** Current lifecycle status */
   status: DispatchTaskStatus;
   /** Sub-agent name (matches the resolved sub-agent ID) */

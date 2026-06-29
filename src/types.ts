@@ -22,8 +22,8 @@ export interface PermissionConfig {
  * Configuration for a sub-agent within a role.
  * Sub-agents are child agents that the parent role can delegate tasks to.
  * Fields here override the parent's defaults for the sub-agent.
- * The `subagents` field is NOT permitted on SubAgentConfig itself
- * (enforced at parse-time, not at the type level).
+ * The `subagents` field allows recursive nesting of sub-agents within sub-agents.
+ * Nested subagent parsing is bounded by a max-depth guard (default: 3).
  */
 export interface SubAgentConfig {
   /** Sub-agent name (used for display and delegation routing) */
@@ -56,6 +56,12 @@ export interface SubAgentConfig {
   functions?: string[];
   /** Names of default functions to disable for this sub-agent */
   disable_functions?: string[];
+  /** Function names to auto-activate at session start. These functions become active without requiring |name| syntax. */
+  auto_activate?: string[];
+  /** When true, auto-activated functions cannot be deactivated by transition or user. Prevents accidental deactivation of critical functions. */
+  locked?: boolean;
+  /** Nested sub-agent definitions (recursive, max depth 3) */
+  subagents?: SubAgentConfig[];
 }
 
 /**
@@ -104,6 +110,8 @@ export interface DispatchRoleConfig {
   syncReservedSlots?: number;
   /** Maximum active background tasks per parent session (dispatch default: 3) */
   maxActivePerParent?: number;
+  /** Maximum cumulative sessions across all dispatches in a request (undefined = unlimited) */
+  maxTotalSessionsPerRequest?: number;
   /** Delay (ms) after a dispatch failure before retry (dispatch default: 30000) */
   retryAfterMs?: number;
   /** Maximum backpressure retry attempts (dispatch default: 5) */
@@ -199,6 +207,10 @@ export interface RoleConfig {
   collaboration?: CollaborationConfig;
   /** Dispatch subsystem overrides for sub-agent queueing and concurrency */
   dispatch?: DispatchRoleConfig;
+  /** Function names to auto-activate at session start. These functions become active without requiring |name| syntax. */
+  auto_activate?: string[];
+  /** When true, auto-activated functions cannot be deactivated by transition or user. Prevents accidental deactivation of critical functions. */
+  locked?: boolean;
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;
 }
@@ -290,6 +302,10 @@ export interface ResolvedSubAgent {
   subagents: ResolvedSubAgent[];
   parentId: string;
   inheritedFrom: Partial<Record<string, unknown>>;
+  /** Function names to auto-activate at session start (passthrough from config). */
+  auto_activate?: string[];
+  /** When true, auto-activated functions cannot be deactivated by transition or user (passthrough from config). */
+  locked?: boolean;
 }
 
 /**
@@ -317,6 +333,10 @@ export interface ResolvedRole {
   graph?: ResolvedGraph;
   /** Resolved dispatch configuration overrides from role.yaml dispatch: block */
   dispatchConfig?: Partial<DispatchManagerConfig>;
+  /** Function names to auto-activate at session start (passthrough from config). */
+  auto_activate?: string[];
+  /** When true, auto-activated functions cannot be deactivated by transition or user (passthrough from config). */
+  locked?: boolean;
 }
 
 /**

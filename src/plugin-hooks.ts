@@ -9,10 +9,10 @@ import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts"
 import { DispatchManager } from "./dispatch/manager.ts";
 import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchMetricsTool } from "./dispatch/tools.ts";
 import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "./dispatch/config.ts";
-import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
+import type { ResolvedRole, ResolvedSubAgent, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
 import { createSubLogger } from "./logger.ts";
-import { runToolObserve, runTextCapture } from "./function/observe.ts";
+import { runToolObserve, runTextCapture, runMessageObserve, runActivateObserve } from "./function/observe.ts";
 import { functionRuntime } from "./function/runtime-state.ts";
 import { evaluateGateAndTransitions } from "./function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "./function/conditions.ts";
@@ -30,6 +30,10 @@ export const pendingCorrections = new Map<string, string>();
 // Sessions that received a genuine user message this turn (drives the user_approval
 // gate). Auto-continuation prompts are excluded so they never count as approval.
 export const userMessagedSessions = new Set<string>();
+
+export const roleAutoActivateMap = new Map<string, string[]>();
+export const roleLockedMap = new Map<string, boolean>();
+export const autoActivatedSessions = new Set<string>();
 
 async function fetchLastAssistantText(
   client: PluginInput["client"],
@@ -63,15 +67,36 @@ export async function createPluginHooks(
   roleGraphMap: Map<string, ResolvedGraph>,
   directory?: string,
 ) {
-  const resolvedSubagents = new Map<string, string>();
+  const resolvedSubagents = new Map<string, { parentFullId: string }>();
   const subagentModelKey = new Map<string, string>();
-  for (const role of resolvedRoles) {
-    for (const sub of role.subagents) {
-      resolvedSubagents.set(sub.id, role.id);
-      const model = sub.config.model ?? role.config.model;
+
+  function registerSubagentLineage(
+    subagents: ResolvedSubAgent[],
+    parentFullId: string,
+    parentModel: string | undefined,
+  ): void {
+    for (const sub of subagents) {
+      resolvedSubagents.set(sub.id, { parentFullId });
+      const model = sub.config.model ?? parentModel;
       const key = model ? model : "default";
       subagentModelKey.set(sub.id, key);
-      log.debug("model key", { subagent: sub.id, key });
+      log.debug("model key", { subagent: sub.id, key, parentFullId });
+      if (sub.subagents.length > 0) {
+        registerSubagentLineage(sub.subagents, sub.id, model);
+      }
+    }
+  }
+
+  for (const role of resolvedRoles) {
+    registerSubagentLineage(role.subagents, role.id, role.config.model);
+  }
+
+  for (const resolved of resolvedRoles) {
+    if (resolved.config.auto_activate?.length) {
+      roleAutoActivateMap.set(resolved.id, resolved.config.auto_activate);
+    }
+    if (resolved.locked !== undefined) {
+      roleLockedMap.set(resolved.id, resolved.locked);
     }
   }
 
@@ -136,6 +161,23 @@ export async function createPluginHooks(
           if (!sid) break;
           await dispatchManager.handleSessionIdle(sid);
           // --- function CONTINUE ---
+          // Skip continuation for sync dispatch sessions: promptAsync would
+          // prevent session.prompt() from resolving, causing an infinite hang.
+          if (dispatchManager.isSyncSession(sid)) {
+            log.debug("skipping function continuation for sync session", { sessionID: sid });
+            break;
+          }
+          // Invariant: while awaiting in-flight dispatches, the completion
+          // <system-reminder> wakes the parent — auto-continue must NOT (it would
+          // spin-poll an unsatisfiable continue_until until results arrive).
+          const inflight = dispatchManager.getInflightCount(sid);
+          if (inflight > 0) {
+            log.debug("suppressing auto-continue: parent awaiting in-flight dispatch", {
+              sessionID: sid,
+              inflight,
+            });
+            break;
+          }
           const activeSet = functionSessionState.getActive(sid);
           if (activeSet.size === 0) break;
           const allFns: ResolvedFunction[] = [];
@@ -210,12 +252,8 @@ export async function createPluginHooks(
       }
     },
     config: async (config: Config) => {
-      for (const resolved of resolvedRoles) {
-        const agentConfig = buildAgentConfig(resolved);
-        config.agent ??= {};
-        config.agent[resolved.id] = agentConfig;
-
-        for (const sub of resolved.subagents) {
+      function registerSubAgentConfigs(subagents: ResolvedSubAgent[], cfg: Config): void {
+        for (const sub of subagents) {
           const subAgentCfg: Record<string, unknown> = {
             prompt: sub.prompt,
             mode: RoleMode.Subagent,
@@ -230,8 +268,20 @@ export async function createPluginHooks(
           if (sub.config.tools) subAgentCfg.tools = sub.config.tools;
           if (sub.config.permission) subAgentCfg.permission = transformPermission(sub.config.permission);
 
-          config.agent[sub.id] = subAgentCfg as AgentConfig;
+          cfg.agent ??= {};
+          cfg.agent[sub.id] = subAgentCfg as AgentConfig;
+          if (sub.subagents.length > 0) {
+            registerSubAgentConfigs(sub.subagents, cfg);
+          }
         }
+      }
+
+      for (const resolved of resolvedRoles) {
+        const agentConfig = buildAgentConfig(resolved);
+        config.agent ??= {};
+        config.agent[resolved.id] = agentConfig;
+
+        registerSubAgentConfigs(resolved.subagents, config);
       }
     },
     "chat.message": async (
@@ -251,32 +301,64 @@ export async function createPluginHooks(
       if (textPartIndex === -1) return;
 
       const part = output.parts[textPartIndex] as { type: string; text: string };
-      const { functions: parsedFunctions, calls, cleanedText } = parseFunctionActivation(part.text);
-      if (parsedFunctions.length === 0) return;
+      const agentId = input.agent as string | undefined;
 
-      part.text = cleanedText;
+      if (agentId && input.sessionID && !autoActivatedSessions.has(input.sessionID)) {
+        const autoFns = roleAutoActivateMap.get(agentId);
+        if (autoFns && autoFns.length > 0) {
+          const lockedNames = roleLockedMap.get(agentId) ? autoFns : undefined;
+          functionSessionState.activateDefaults(input.sessionID, autoFns, lockedNames);
+          autoActivatedSessions.add(input.sessionID);
 
-      const roleId = input.agent;
-      const roleFunctions = roleId ? roleFunctionsMap.get(roleId) : null;
+          const allFns: ResolvedFunction[] = [];
+          for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
+          const autoActiveFns = allFns.filter((f) => autoFns.includes(f.name));
 
-      if (roleFunctions) {
-        const validNames = new Set(roleFunctions.map((f) => f.name));
-        const validFunctions = parsedFunctions.filter((fn) => validNames.has(fn));
-        const validCalls = calls.filter((c) => validNames.has(c.name));
-        functionSessionState.activate(input.sessionID, validFunctions, validCalls);
-      } else {
-        functionSessionState.activate(input.sessionID, parsedFunctions, calls);
+          // Init runtime state for auto-activated functions before firing on:activate
+          for (const fn of autoActiveFns) {
+            functionRuntime.init(input.sessionID, fn.name, fn.state_schema_version ?? 1);
+          }
+
+          if (autoActiveFns.length > 0) {
+            const activateInjects = runActivateObserve({
+              sessionID: input.sessionID,
+              activeFns: autoActiveFns,
+            });
+            for (const inj of activateInjects) {
+              const existing = pendingCorrections.get(input.sessionID);
+              pendingCorrections.set(input.sessionID, existing ? existing + "\n" + inj : inj);
+            }
+          }
+        }
       }
 
-      const agentId = input.agent as string | undefined;
-      if (agentId && input.sessionID && !graphSessionState.getState(input.sessionID)) {
-        const graph = roleGraphMap.get(agentId);
-        if (graph) {
-          graphSessionState.initGraph(input.sessionID, graph);
+      const { functions: parsedFunctions, calls, cleanedText } = parseFunctionActivation(part.text);
+
+      if (parsedFunctions.length > 0) {
+        part.text = cleanedText;
+
+        const roleId = input.agent;
+        const roleFunctions = roleId ? roleFunctionsMap.get(roleId) : null;
+
+        if (roleFunctions) {
+          const validNames = new Set(roleFunctions.map((f) => f.name));
+          const validFunctions = parsedFunctions.filter((fn) => validNames.has(fn));
+          const validCalls = calls.filter((c) => validNames.has(c.name));
+          functionSessionState.activate(input.sessionID, validFunctions, validCalls);
+        } else {
+          functionSessionState.activate(input.sessionID, parsedFunctions, calls);
+        }
+
+        if (agentId && input.sessionID && !graphSessionState.getState(input.sessionID)) {
+          const graph = roleGraphMap.get(agentId);
+          if (graph) {
+            graphSessionState.initGraph(input.sessionID, graph);
+          }
         }
       }
 
       // --- function kernel: init runtime state for newly activated functions ---
+      const roleId = input.agent;
       const roleFns = roleId ? roleFunctionsMap.get(roleId) : null;
       const activeFnNames = functionSessionState.getActive(input.sessionID);
       for (const fnName of activeFnNames) {
@@ -290,6 +372,28 @@ export async function createPluginHooks(
       for (const [, st] of functionRuntime.all(input.sessionID)) {
         st.continuationCount = 0;
         st.cooldownUntilTurn = 0;
+      }
+
+      const isAutoContinue = (firstText?.text ?? "").includes("[auto-continue");
+      if (!isAutoContinue && agentId) {
+        try {
+          const activeNames = functionSessionState.getActive(input.sessionID);
+          if (activeNames.size > 0) {
+            const allFns2: ResolvedFunction[] = [];
+            for (const funcs of roleFunctionsMap.values()) allFns2.push(...funcs);
+            const activeFns = allFns2.filter((f) => activeNames.has(f.name));
+            if (activeFns.length > 0) {
+              const messageInjects = runMessageObserve({
+                sessionID: input.sessionID,
+                activeFns,
+              });
+              for (const inj of messageInjects) {
+                const existing = pendingCorrections.get(input.sessionID);
+                pendingCorrections.set(input.sessionID, existing ? existing + "\n" + inj : inj);
+              }
+            }
+          }
+        } catch {}
       }
     },
     "tool.execute.after": async (

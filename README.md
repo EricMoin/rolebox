@@ -460,7 +460,7 @@ Subagents can have their own `skills/` and `functions/` directories (file-based 
 
 ### Limitations
 
-Subagents don't nest. A subagent can't define its own subagents. There's no runtime creation of subagents, and subagents can't communicate directly with each other. All coordination goes through the parent.
+File-based subagents support recursive nesting up to `maxDepth=3` (configurable) via nested `subagents/` directories. There's no runtime creation of subagents, and subagents can't communicate directly with each other. All coordination goes through the parent. The `--` separator chains at each level (e.g. `grandparent--parent--child`).
 
 ## Collaboration Graph
 
@@ -646,6 +646,7 @@ dispatch:
   maxQueueDepth: number             # Max queued tasks (default: 10)
   syncReservedSlots: number         # Slots reserved for sync dispatch (default: 1)
   maxActivePerParent: number        # Max active tasks per parent session (default: 3)
+  maxTotalSessionsPerRequest: number # Max cumulative sessions per user request (default: unlimited / opt-in)
   backgroundStaleTimeoutMs: number  # Stale timeout for background tasks (default: 900000)
   syncAcquireTimeoutMs: number      # Timeout to acquire sync slot (default: 120000)
   syncPromptTimeoutMs: number       # Timeout for sync prompt (default: 600000)
@@ -684,6 +685,7 @@ Override dispatch configuration globally via environment variables (takes preced
 | `ROLEBOX_DISPATCH_MAX_QUEUE_DEPTH` | Max queued tasks | 10 |
 | `ROLEBOX_DISPATCH_SYNC_RESERVED` | Reserved sync slots | 1 |
 | `ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT` | Max active tasks per parent session | 3 |
+| `ROLEBOX_DISPATCH_MAX_TOTAL_SESSIONS_PER_REQUEST` | Max cumulative sessions per user request | unlimited / opt-in |
 | `ROLEBOX_DISPATCH_RETRY_AFTER_MS` | Retry delay after failure (ms) | 30000 |
 | `ROLEBOX_DISPATCH_BG_STALE_MS` | Background stale timeout (ms) | 900000 |
 | `ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS` | Result fetch timeout (ms) | 10000 |
@@ -786,7 +788,7 @@ Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skil
 - No runtime role switching
 - Functions persist for the entire session (no per-message deactivation yet)
 - No conditional functions based on project context
-- No recursive subagent nesting (subagents can't have their own subagents)
+- Recursive file-based subagent nesting is supported (max depth: 3). `--` is reserved as the parent/child separator.
 - `--` is reserved in role IDs (used as the parent/child separator)
 
 ## Creating a Registry

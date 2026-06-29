@@ -183,4 +183,38 @@ describe("decideContinuation", () => {
     expect(result.reminder!).toContain("my-fn");
     expect(result.reminder!).toContain("still working");
   });
+
+  it("appends a FINAL continuation warning on the last allowed turn", () => {
+    const st = mockState({ continuationCount: 4 });
+    const cfg = defaultConfig({ perFnMax: 5 });
+
+    const result = decideContinuation({
+      fnName: "synthesize",
+      st,
+      reason: "completion condition not yet met",
+      cfg,
+      totalContinuationsThisBurst: 4,
+    });
+
+    expect(result.shouldContinue).toBe(true);
+    expect(result.reminder!).toContain("5/5");
+    expect(result.reminder!).toContain("FINAL continuation");
+  });
+
+  it("does NOT append a FINAL warning before the last allowed turn", () => {
+    const st = mockState({ continuationCount: 0 });
+    const cfg = defaultConfig({ perFnMax: 5 });
+
+    const result = decideContinuation({
+      fnName: "synthesize",
+      st,
+      reason: "completion condition not yet met",
+      cfg,
+      totalContinuationsThisBurst: 0,
+    });
+
+    expect(result.shouldContinue).toBe(true);
+    expect(result.reminder!).toContain("1/5");
+    expect(result.reminder!).not.toContain("FINAL");
+  });
 });

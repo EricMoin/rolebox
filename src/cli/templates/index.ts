@@ -87,11 +87,33 @@ export const templates: Record<TemplateType, Template> = {
     files: [
       {
         relativePath: 'role.yaml',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) => {
+          const lines = [
+            `name: ${config.name}`,
+            `description: ${config.description}`,
+            `prompt_file: PROMPT.md`,
+          ];
+          if (config.model) lines.push(`model: ${config.model}`);
+          if (config.temperature !== undefined)
+            lines.push(`temperature: ${config.temperature}`);
+          return lines.join('\n') + '\n';
+        },
       },
       {
         relativePath: 'PROMPT.md',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) =>
+          [
+            `# ${config.name}`,
+            '',
+            config.description,
+            '',
+            '## Instructions',
+            '',
+            'TODO: Write your system prompt here. Define how',
+            `**${config.name}** should behave, what output format to use,`,
+            'and any constraints it must follow.',
+            '',
+          ].join('\n'),
       },
     ],
   },
@@ -106,11 +128,41 @@ export const templates: Record<TemplateType, Template> = {
     files: [
       {
         relativePath: 'role.yaml',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) => {
+          const lines = [
+            `name: ${config.name}`,
+            `description: ${config.description}`,
+            `prompt_file: PROMPT.md`,
+            `skills: []`,
+            `functions:`,
+            `  - plan`,
+            `  - execute`,
+          ];
+          if (config.model) lines.push(`model: ${config.model}`);
+          if (config.temperature !== undefined)
+            lines.push(`temperature: ${config.temperature}`);
+          return lines.join('\n') + '\n';
+        },
       },
       {
         relativePath: 'PROMPT.md',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) =>
+          [
+            `# ${config.name}`,
+            '',
+            `You are ${config.description}.`,
+            '',
+            '## Instructions',
+            '',
+            'TODO: Define your role behaviour, constraints, and output format.',
+            '',
+            '## Code of Conduct',
+            '',
+            '- Be precise and actionable.',
+            '- Verify assumptions before acting.',
+            '- Communicate clearly and concisely.',
+            '',
+          ].join('\n'),
       },
       {
         relativePath: 'skills/README.md',
@@ -230,11 +282,59 @@ See full docs: https://github.com/EricMoin/rolebox
     files: [
       {
         relativePath: 'role.yaml',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) => {
+          const names = config.subagentNames ?? [];
+          const lines = [
+            `name: ${config.name}`,
+            `description: ${config.description}`,
+            `prompt_file: PROMPT.md`,
+            `skills: []`,
+            `functions:`,
+            `  - plan`,
+            `  - execute`,
+            `subagents:`,
+          ];
+          for (const n of names) {
+            lines.push(`  - name: ${n}`);
+            lines.push(`    description: Sub-agent handling ${n} tasks`);
+            lines.push(`    prompt_file: PROMPT.md`);
+          }
+          if (config.model) lines.push(`model: ${config.model}`);
+          if (config.temperature !== undefined)
+            lines.push(`temperature: ${config.temperature}`);
+          return lines.join('\n') + '\n';
+        },
       },
       {
         relativePath: 'PROMPT.md',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) => {
+          const subagentList =
+            (config.subagentNames ?? []).length > 0
+              ? config.subagentNames!
+                  .map((s) => `  - ${s}`)
+                  .join('\n')
+              : '  - TODO: add sub-agent names';
+          return [
+            `# ${config.name}`,
+            '',
+            `You coordinate a team of sub-agents to accomplish complex tasks.`,
+            '',
+            `Your role: ${config.description}`,
+            '',
+            '## Team',
+            '',
+            subagentList,
+            '',
+            '## Coordination',
+            '',
+            'TODO: Define how you delegate work and integrate results.',
+            '',
+            '- Use `task()` to dispatch work to sub-agents.',
+            '- Collect and reconcile outputs before responding.',
+            '- Escalate only when the team is blocked.',
+            '',
+          ].join('\n');
+        },
       },
       {
         relativePath: 'skills/README.md',
@@ -375,13 +475,37 @@ See full docs: https://github.com/EricMoin/rolebox
       },
       {
         relativePath: 'subagents/{name}/role.yaml',
-        content: (config: InitConfig) =>
-          `# PLACEHOLDER — subagent role.yaml for "${config.name}"`,
+        content: (config: InitConfig) => {
+          const lines = [
+            `name: {name}`,
+            `description: Sub-agent of ${config.name}`,
+            `prompt_file: PROMPT.md`,
+          ];
+          if (config.model) lines.push(`model: ${config.model}`);
+          if (config.temperature !== undefined)
+            lines.push(`temperature: ${config.temperature}`);
+          return lines.join('\n') + '\n';
+        },
       },
       {
         relativePath: 'subagents/{name}/PROMPT.md',
         content: (config: InitConfig) =>
-          `# PLACEHOLDER — subagent prompt for "${config.name}"`,
+          [
+            `# {name}`,
+            '',
+            `You are a sub-agent of **${config.name}**.`,
+            '',
+            `Role: Sub-agent — {name}`,
+            '',
+            'TODO: Write your specialised system prompt here.',
+            '',
+            '## Behaviour',
+            '',
+            '- Focus on your assigned domain.',
+            '- Report results clearly to the orchestrator.',
+            '- Ask for clarification when the task is ambiguous.',
+            '',
+          ].join('\n'),
       },
     ],
   },
@@ -396,11 +520,61 @@ See full docs: https://github.com/EricMoin/rolebox
     files: [
       {
         relativePath: 'role.yaml',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) => {
+          const names = config.subagentNames ?? [];
+          const topology = config.topology ?? 'pipeline';
+          const agents = names.map((s) => s.toLowerCase().replace(/\s+/g, '-'));
+          const lines = [
+            `name: ${config.name}`,
+            `description: ${config.description}`,
+            `prompt_file: PROMPT.md`,
+            `skills: []`,
+            `functions:`,
+            `  - plan`,
+            `  - execute`,
+            `subagents:`,
+          ];
+          for (const n of names) {
+            lines.push(`  - name: ${n}`);
+            lines.push(`    description: Sub-agent handling ${n} tasks`);
+            lines.push(`    prompt_file: PROMPT.md`);
+          }
+          lines.push(`collaboration:`);
+          lines.push(`  topology: ${topology}`);
+          lines.push(`  agents: [${agents.join(', ')}]`);
+          lines.push(`  max_iterations: 3`);
+          if (config.model) lines.push(`model: ${config.model}`);
+          if (config.temperature !== undefined)
+            lines.push(`temperature: ${config.temperature}`);
+          return lines.join('\n') + '\n';
+        },
       },
       {
         relativePath: 'PROMPT.md',
-        content: 'PLACEHOLDER',
+        content: (config: InitConfig) => {
+          const topology = config.topology ?? 'pipeline';
+          return [
+            `# ${config.name}`,
+            '',
+            `You lead a collaborative workflow using a **${topology}** topology.`,
+            '',
+            `Your role: ${config.description}`,
+            '',
+            '## Workflow',
+            '',
+            'TODO: Describe the hand-off sequence between agents.',
+            '',
+            `The collaboration graph (topology: ${topology}) routes work`,
+            'automatically. Follow the graph state shown in each turn.',
+            '',
+            '## Guidelines',
+            '',
+            '- Dispatch work according to the collaboration graph.',
+            '- Respect `max_iterations` — don\'t loop indefinitely.',
+            '- Summarise final output when the workflow completes.',
+            '',
+          ].join('\n');
+        },
       },
       {
         relativePath: 'skills/README.md',
@@ -541,13 +715,37 @@ See full docs: https://github.com/EricMoin/rolebox
       },
       {
         relativePath: 'subagents/{name}/role.yaml',
-        content: (config: InitConfig) =>
-          `# PLACEHOLDER — subagent role.yaml for "${config.name}"`,
+        content: (config: InitConfig) => {
+          const lines = [
+            `name: {name}`,
+            `description: Sub-agent of ${config.name}`,
+            `prompt_file: PROMPT.md`,
+          ];
+          if (config.model) lines.push(`model: ${config.model}`);
+          if (config.temperature !== undefined)
+            lines.push(`temperature: ${config.temperature}`);
+          return lines.join('\n') + '\n';
+        },
       },
       {
         relativePath: 'subagents/{name}/PROMPT.md',
         content: (config: InitConfig) =>
-          `# PLACEHOLDER — subagent prompt for "${config.name}"`,
+          [
+            `# {name}`,
+            '',
+            `You are a sub-agent of **${config.name}**.`,
+            '',
+            `Role: Sub-agent — {name}`,
+            '',
+            'TODO: Write your specialised system prompt here.',
+            '',
+            '## Behaviour',
+            '',
+            '- Focus on your assigned domain.',
+            '- Report results clearly to the orchestrator.',
+            '- Ask for clarification when the task is ambiguous.',
+            '',
+          ].join('\n'),
       },
     ],
   },

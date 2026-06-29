@@ -7,7 +7,7 @@ import { buildSubagentRoleBlock, buildResultContract, parseCollaboration } from 
 import { buildAgentPrompt } from "../prompt-builder.ts";
 import { subagentDir, globalFunctionsPath } from "../paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
-import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedGraph, GraphNodeRole } from "../types.ts";
+import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole, SubAgentConfig } from "../types.ts";
 import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.ts";
 
 const log = createSubLogger("orchestrator");
@@ -51,6 +51,111 @@ export interface ResolveContext {
   roleGraphMap: Map<string, ResolvedGraph>;
 }
 
+async function resolveSubagents(
+  parentFullId: string,
+  configs: SubAgentConfig[],
+  depth: number,
+  roleId: string,
+  roleDir: string,
+  ctx: ResolveContext,
+  roleReferences: ResolvedReference[],
+  inheritedParent: RoleConfig,
+): Promise<ResolvedSubAgent[]> {
+  const globalFunctionsDir = globalFunctionsPath(ctx.configDir);
+  const resolved: ResolvedSubAgent[] = [];
+
+  for (const saConfig of configs) {
+    const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
+    const childId = `${parentFullId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
+
+    const slugDir = subagentDir(roleDir, childSlug);
+    const nameDir = subagentDir(roleDir, saConfig.name);
+    const saRoleDir = existsSync(slugDir)
+      ? slugDir
+      : existsSync(nameDir)
+        ? nameDir
+        : roleDir;
+
+    const saLocalSkills = saConfig.skills ?? [];
+    const saGlobalSkills = saConfig.opencode_skills ?? [];
+    const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
+    let saSkills: ResolvedSkill[] = [];
+    if (saAllSkillNames.length > 0) {
+      saSkills = await resolveSkills(saAllSkillNames, saRoleDir, ctx.globalSkillsDir);
+    }
+
+    const saFunctionNames = saConfig.functions ?? [...DEFAULT_FUNCTIONS];
+    const saEnabledFunctions = saFunctionNames.filter(
+      (fn) => !(saConfig.disable_functions ?? []).includes(fn),
+    );
+    let saFunctions: ResolvedFunction[] = [];
+    if (saEnabledFunctions.length > 0) {
+      saFunctions = await resolveFunctions(
+        saEnabledFunctions,
+        saRoleDir,
+        globalFunctionsDir,
+        ctx.builtinDir,
+      );
+    }
+
+    const saOwnRefs = await resolveAllReferences(saRoleDir, ReferenceScope.Role);
+    const saSkillRefs = saSkills.flatMap((s) => s.references);
+    const saReferences = [...roleReferences, ...saOwnRefs, ...saSkillRefs];
+
+    // Resolve nested subagents first so we can include their metadata
+    // in this subagent's prompt <available_subagents> block.
+    const resolvedChildren = saConfig.subagents?.length
+      ? await resolveSubagents(
+          childId,
+          saConfig.subagents,
+          depth + 1,
+          roleId,
+          saRoleDir,
+          ctx,
+          saReferences,
+          saConfig as unknown as RoleConfig,
+        )
+      : [];
+
+    const childMetadata = resolvedChildren.map(child => ({
+      id: child.id,
+      name: child.config.name,
+      description: child.config.description,
+    }));
+
+    const saPrompt = buildAgentPrompt(saConfig, saSkills, {
+      references: saReferences,
+      ...(childMetadata.length > 0 ? { subagents: childMetadata } : {}),
+    });
+
+    ctx.roleFunctionsMap.set(childId, saFunctions);
+
+    const inheritedFrom: Record<string, unknown> = {};
+    const parentObj = inheritedParent as unknown as Record<string, unknown>;
+    const childObj = saConfig as unknown as Record<string, unknown>;
+    const inheritableKeys = ["model", "color", "variant", "temperature", "top_p", "permission", "tools"] as const;
+    for (const key of inheritableKeys) {
+      if (parentObj[key] !== undefined && childObj[key] === parentObj[key]) {
+        inheritedFrom[key] = parentObj[key];
+      }
+    }
+
+    resolved.push({
+      id: childId,
+      config: saConfig,
+      prompt: saPrompt,
+      skills: saSkills,
+      functions: saFunctions,
+      references: saReferences,
+      parentId: parentFullId,
+      inheritedFrom,
+      subagents: resolvedChildren,
+    });
+  }
+
+  return resolved;
+}
+
 export async function resolveAllRoles(
   roles: Map<string, RoleConfig>,
   ctx: ResolveContext,
@@ -91,73 +196,9 @@ export async function resolveAllRoles(
         functions = await resolveFunctions(enabledFunctions, roleDir, globalFunctionsDir, ctx.builtinDir);
       }
 
-      const resolvedSubagents: ResolvedSubAgent[] = [];
-      if (config.subagents && config.subagents.length > 0) {
-        for (const saConfig of config.subagents) {
-          const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
-          const childId = `${roleId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
-
-          const slugDir = subagentDir(roleDir, childSlug);
-          const nameDir = subagentDir(roleDir, saConfig.name);
-          const saRoleDir = existsSync(slugDir)
-            ? slugDir
-            : existsSync(nameDir)
-              ? nameDir
-              : roleDir;
-
-          const saLocalSkills = saConfig.skills ?? [];
-          const saGlobalSkills = saConfig.opencode_skills ?? [];
-          const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
-          let saSkills: ResolvedSkill[] = [];
-          if (saAllSkillNames.length > 0) {
-            saSkills = await resolveSkills(saAllSkillNames, saRoleDir, ctx.globalSkillsDir);
-          }
-
-          const saFunctionNames = saConfig.functions ?? [...DEFAULT_FUNCTIONS];
-          const saEnabledFunctions = saFunctionNames.filter(
-            (fn) => !(saConfig.disable_functions ?? []).includes(fn),
-          );
-          let saFunctions: ResolvedFunction[] = [];
-          if (saEnabledFunctions.length > 0) {
-            saFunctions = await resolveFunctions(
-              saEnabledFunctions,
-              saRoleDir,
-              globalFunctionsDir,
-              ctx.builtinDir,
-            );
-          }
-
-          const saOwnRefs = await resolveAllReferences(saRoleDir, ReferenceScope.Role);
-          const saSkillRefs = saSkills.flatMap((s) => s.references);
-          const saReferences = [...roleReferences, ...saOwnRefs, ...saSkillRefs];
-
-          const saPrompt = buildAgentPrompt(saConfig, saSkills, { references: saReferences });
-
-          ctx.roleFunctionsMap.set(childId, saFunctions);
-
-          const inheritedFrom: Record<string, unknown> = {};
-          const parentObj = config as unknown as Record<string, unknown>;
-          const childObj = saConfig as unknown as Record<string, unknown>;
-          const inheritableKeys = ["model", "color", "variant", "temperature", "top_p", "permission", "tools"] as const;
-          for (const key of inheritableKeys) {
-            if (parentObj[key] !== undefined && childObj[key] === parentObj[key]) {
-              inheritedFrom[key] = parentObj[key];
-            }
-          }
-
-          resolvedSubagents.push({
-            id: childId,
-            config: saConfig,
-            prompt: saPrompt,
-            skills: saSkills,
-            functions: saFunctions,
-            references: saReferences,
-            parentId: roleId,
-            inheritedFrom,
-            subagents: [],
-          });
-        }
-      }
+      const resolvedSubagents = config.subagents?.length
+        ? await resolveSubagents(roleId, config.subagents, 0, roleId, roleDir, ctx, roleReferences, config)
+        : [];
 
       let graph: ResolvedGraph | undefined;
       if (config.collaboration) {
@@ -202,6 +243,12 @@ export async function resolveAllRoles(
         subagents: resolvedSubagents,
         graph,
         ...(config.dispatch ? { dispatchConfig: config.dispatch as ResolvedRole["dispatchConfig"] } : {}),
+        ...(Array.isArray(config.auto_activate)
+          ? { auto_activate: config.auto_activate as string[] }
+          : {}),
+        ...(typeof config.locked === "boolean"
+          ? { locked: config.locked as boolean }
+          : {}),
       });
       ctx.roleFunctionsMap.set(roleId, functions);
     } catch (err) {

@@ -1,6 +1,6 @@
 import path from "node:path";
 import { writeFileSync, readFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
-import type { ResolvedRole } from "../types.ts";
+import type { ResolvedRole, ResolvedSubAgent } from "../types.ts";
 import { RoleMode, ROLEBOX_AGENT_MARKER } from "../constants.ts";
 import { agentsDir, agentFilePath } from "../paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
@@ -34,6 +34,24 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
     return;
   }
 
+  function collectAllAgents(subagents: ResolvedSubAgent[]): AgentEntry[] {
+    const result: AgentEntry[] = [];
+    for (const sub of subagents) {
+      result.push({
+        id: sub.id,
+        name: sub.config.name,
+        description: sub.config.description,
+        prompt: sub.prompt,
+        mode: RoleMode.Subagent,
+        model: sub.config.model,
+      });
+      if (sub.subagents.length > 0) {
+        result.push(...collectAllAgents(sub.subagents));
+      }
+    }
+    return result;
+  }
+
   const allAgents: AgentEntry[] = [];
   for (const role of resolvedRoles) {
     allAgents.push({
@@ -44,16 +62,7 @@ export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
       mode: role.config.mode ?? RoleMode.Primary,
       model: role.config.model,
     });
-    for (const sub of role.subagents) {
-      allAgents.push({
-        id: sub.id,
-        name: sub.config.name,
-        description: sub.config.description,
-        prompt: sub.prompt,
-        mode: RoleMode.Subagent,
-        model: sub.config.model,
-      });
-    }
+    allAgents.push(...collectAllAgents(role.subagents));
   }
 
   try {

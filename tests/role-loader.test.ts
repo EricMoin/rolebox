@@ -272,6 +272,9 @@ describe("discoverRoles", () => {
     expect(config.opencode_skills).toEqual(["global-skill"]);
   });
 
+  // NOTE: This tests top-level role discovery (discoverRoles glob, deep:2).
+  // It is distinct from subagent nesting, which uses recursive discoverFileBasedSubagents
+  // with a max-depth guard of 3. Nesting within subagents/ is handled by a separate path.
   it("does not scan nested subdirectories beyond one level", async () => {
     const deepRoleDir = join(tmpDir, "outer", "inner");
     mkdirSync(deepRoleDir, { recursive: true });
@@ -443,7 +446,7 @@ describe("discoverRoles", () => {
     ).toBe(true);
   });
 
-  it("strips nested subagents from subagent with warning", async () => {
+  it("preserves nested subagents from subagent with warning", async () => {
     await writeRoleYaml(
       "parent",
       [
@@ -467,12 +470,15 @@ describe("discoverRoles", () => {
     expect(config.subagents).toBeDefined();
     expect(config.subagents!.length).toBe(1);
     expect(config.subagents![0].name).toBe("Nested");
-    expect('subagents' in (config.subagents![0] as object)).toBe(false);
+    // Nested subagents are now preserved
+    expect("subagents" in (config.subagents![0] as object)).toBe(true);
+    expect(config.subagents![0].subagents!.length).toBe(1);
+    expect(config.subagents![0].subagents![0].name).toBe("Grandchild");
     const warnings = capturedLogs as string[][]
     expect(
       warnings.some(
         (c) =>
-          c[0].includes("Nested") && c[0].includes('"subagents"'),
+          c[0].includes("Nested") && c[0].includes("Preserving"),
       ),
     ).toBe(true);
   });

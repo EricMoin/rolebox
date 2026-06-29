@@ -3,6 +3,7 @@ import type { FunctionCall } from "./function-parser.ts";
 export class FunctionSessionState {
   private sessions: Map<string, Set<string>> = new Map();
   private callArgs: Map<string, Map<string, FunctionCall>> = new Map();
+  private locked: Map<string, Set<string>> = new Map();
 
   activate(sessionID: string, functionNames: string[], calls?: FunctionCall[]): void {
     if (!this.sessions.has(sessionID)) {
@@ -24,6 +25,21 @@ export class FunctionSessionState {
     }
   }
 
+  activateDefaults(sessionID: string, functionNames: string[], lockedNames?: string[]): void {
+    this.activate(sessionID, functionNames);
+    if (lockedNames && lockedNames.length > 0) {
+      if (!this.locked.has(sessionID)) {
+        this.locked.set(sessionID, new Set());
+      }
+      const lockedSet = this.locked.get(sessionID)!;
+      for (const name of lockedNames) {
+        if (functionNames.includes(name)) {
+          lockedSet.add(name);
+        }
+      }
+    }
+  }
+
   getActive(sessionID: string): Set<string> {
     return this.sessions.get(sessionID) ?? new Set();
   }
@@ -37,12 +53,15 @@ export class FunctionSessionState {
   }
 
   deactivate(sessionID: string, functionName: string): void {
+    const lockedSet = this.locked.get(sessionID);
+    if (lockedSet?.has(functionName)) return;
     this.sessions.get(sessionID)?.delete(functionName);
   }
 
   clear(sessionID: string): void {
     this.sessions.delete(sessionID);
     this.callArgs.delete(sessionID);
+    this.locked.delete(sessionID);
   }
 }
 

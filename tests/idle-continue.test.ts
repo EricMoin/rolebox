@@ -235,4 +235,63 @@ describe("session.idle CONTINUE", () => {
 
     expect(promptAsyncMock).toHaveBeenCalledTimes(0);
   });
+
+  it("suppresses auto-continue while the parent has in-flight dispatch tasks", async () => {
+    const client = createMockClient();
+    const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
+    roleFunctionsMap.set("test-primary", [fn]);
+
+    const hooks = await createPluginHooks(
+      [makePrimaryRole()],
+      client,
+      roleFunctionsMap,
+      new Map(),
+      tmpDir,
+    );
+
+    const sessionID = "test-session";
+    functionSessionState.activate(sessionID, ["plan"]);
+    const st = functionRuntime.init(sessionID, "plan", 1);
+    st.kv["__todos"] = "- [ ] pending task";
+
+    const mgr = managerMap.get(tmpDir)!;
+    const inflightSpy = mock(() => 1);
+    (mgr as unknown as { getInflightCount: () => number }).getInflightCount = inflightSpy;
+
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+    expect(inflightSpy).toHaveBeenCalled();
+    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("resumes auto-continue once in-flight dispatches drain to zero", async () => {
+    const client = createMockClient();
+    const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
+    roleFunctionsMap.set("test-primary", [fn]);
+
+    const hooks = await createPluginHooks(
+      [makePrimaryRole()],
+      client,
+      roleFunctionsMap,
+      new Map(),
+      tmpDir,
+    );
+
+    const sessionID = "test-session";
+    functionSessionState.activate(sessionID, ["plan"]);
+    const st = functionRuntime.init(sessionID, "plan", 1);
+    st.kv["__todos"] = "- [ ] pending task";
+
+    const mgr = managerMap.get(tmpDir)!;
+    (mgr as unknown as { getInflightCount: () => number }).getInflightCount = mock(() => 0);
+
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(1);
+    expect((promptAsyncMock as any).mock.calls[0][0].body.parts[0].text).toContain("auto-continue");
+  });
 });

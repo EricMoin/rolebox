@@ -155,6 +155,9 @@ export function applyInheritance(
     ...(child.disable_functions !== undefined
       ? { disable_functions: child.disable_functions }
       : {}),
+    ...(child.subagents !== undefined
+      ? { subagents: child.subagents }
+      : {}),
   };
 
   for (const { key, childVal, parentVal } of inheritableFields) {
@@ -197,6 +200,7 @@ function parseDispatchConfig(
     "maxQueueDepth",
     "syncReservedSlots",
     "maxActivePerParent",
+    "maxTotalSessionsPerRequest",
     "retryAfterMs",
     "backpressureMaxRetries",
     "backpressureMaxDelayMs",
@@ -220,6 +224,134 @@ function parseDispatchConfig(
 
   if (Object.keys(validFields).length === 0) return undefined;
   return validFields as unknown as DispatchRoleConfig;
+}
+
+/**
+ * Build a SubAgentConfig from a parsed YAML entry and a resolved prompt string.
+ * Handles all optional fields common to both inline and file-based subagent parsing.
+ */
+function buildSubAgentFields(
+  entry: Record<string, unknown>,
+  resolvedPrompt: string,
+): Omit<SubAgentConfig, "subagents"> {
+  return {
+    name: entry.name as string,
+    description: (entry.description as string) ?? "",
+    prompt: resolvedPrompt,
+    ...(typeof entry.prompt_file === "string"
+      ? { prompt_file: entry.prompt_file }
+      : {}),
+    ...(typeof entry.model === "string" ? { model: entry.model } : {}),
+    ...(typeof entry.color === "string" ? { color: entry.color } : {}),
+    ...(typeof entry.variant === "string"
+      ? { variant: entry.variant }
+      : {}),
+    ...(typeof entry.temperature === "number"
+      ? { temperature: entry.temperature }
+      : {}),
+    ...(typeof entry.top_p === "number" ? { top_p: entry.top_p } : {}),
+    ...(entry.permission != null &&
+    typeof entry.permission === "object"
+      ? { permission: entry.permission as SubAgentConfig["permission"] }
+      : {}),
+    ...(entry.tools != null && typeof entry.tools === "object"
+      ? { tools: entry.tools as Record<string, boolean> }
+      : {}),
+    ...(Array.isArray(entry.skills)
+      ? { skills: entry.skills as string[] }
+      : {}),
+    ...(Array.isArray(entry.opencode_skills)
+      ? { opencode_skills: entry.opencode_skills as string[] }
+      : {}),
+    ...(Array.isArray(entry.functions)
+      ? { functions: entry.functions as string[] }
+      : {}),
+    ...(Array.isArray(entry.disable_functions)
+      ? { disable_functions: entry.disable_functions as string[] }
+      : {}),
+  };
+}
+
+/**
+ * Recursively parse an array of raw subagent entries into SubAgentConfig[].
+ * Handles prompt_file resolution relative to parentDir and recurses into
+ * nested subagents fields.
+ */
+async function parseNestedSubagents(
+  rawArray: unknown[],
+  parentDir: string,
+): Promise<SubAgentConfig[]> {
+  const subagents: SubAgentConfig[] = [];
+
+  for (const raw of rawArray) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const entry = raw as Record<string, unknown>;
+
+    if (
+      !entry.name ||
+      typeof entry.name !== "string" ||
+      entry.name.trim() === ""
+    ) {
+      log.info(`Skipping nested subagent: missing or invalid "name"`);
+      continue;
+    }
+
+    if (!validateRoleId(entry.name as string)) {
+      log.info(
+        `Skipping nested subagent "${entry.name}": name must not contain "--"`,
+      );
+      continue;
+    }
+
+    let subPrompt: string;
+    if (
+      typeof entry.prompt_file === "string" &&
+      entry.prompt_file.trim() !== ""
+    ) {
+      const promptFilePath = pathResolve(parentDir, entry.prompt_file);
+      try {
+        subPrompt = await readFile(promptFilePath, "utf-8");
+        subPrompt = resolveEnvVars(subPrompt);
+      } catch {
+        log.info(
+          `Skipping nested subagent "${entry.name}": prompt_file "${entry.prompt_file}" not found`,
+        );
+        continue;
+      }
+    } else if (
+      typeof entry.prompt === "string" &&
+      entry.prompt.trim() !== ""
+    ) {
+      subPrompt = resolveEnvVars(entry.prompt);
+    } else {
+      log.info(
+        `Skipping nested subagent "${entry.name}": must provide "prompt" or "prompt_file"`,
+      );
+      continue;
+    }
+
+    const config: SubAgentConfig = {
+      ...buildSubAgentFields(entry, subPrompt),
+    };
+
+    if (Array.isArray(entry.subagents)) {
+      const nestedDir =
+        typeof entry.prompt_file === "string"
+          ? dirname(pathResolve(parentDir, entry.prompt_file as string))
+          : parentDir;
+      log.info(
+        `Preserving nested "subagents" from subagent "${entry.name}"`,
+      );
+      config.subagents = await parseNestedSubagents(
+        entry.subagents as unknown[],
+        nestedDir,
+      );
+    }
+
+    subagents.push(config);
+  }
+
+  return subagents;
 }
 
 /**
@@ -314,12 +446,6 @@ async function loadOneRole(
         continue;
       }
 
-      if ("subagents" in entry) {
-        log.info(
-          `Stripping nested "subagents" from subagent "${entry.name}" in "${roleId}"`,
-        );
-      }
-
       let subPrompt: string;
       if (
         typeof entry.prompt_file === "string" &&
@@ -351,56 +477,18 @@ async function loadOneRole(
       }
 
       const subagent: SubAgentConfig = {
-        name: entry.name as string,
-        description: (entry.description as string) ?? "",
-        prompt: subPrompt,
-        ...(typeof entry.prompt_file === "string"
-          ? { prompt_file: entry.prompt_file }
-          : {}),
-        ...(typeof entry.model === "string"
-          ? { model: entry.model }
-          : {}),
-        ...(typeof entry.color === "string"
-          ? { color: entry.color }
-          : {}),
-        ...(typeof entry.variant === "string"
-          ? { variant: entry.variant }
-          : {}),
-        ...(typeof entry.temperature === "number"
-          ? { temperature: entry.temperature }
-          : {}),
-        ...(typeof entry.top_p === "number"
-          ? { top_p: entry.top_p }
-          : {}),
-        ...(entry.permission != null &&
-        typeof entry.permission === "object"
-          ? {
-              permission:
-                entry.permission as SubAgentConfig["permission"],
-            }
-          : {}),
-        ...(entry.tools != null && typeof entry.tools === "object"
-          ? { tools: entry.tools as Record<string, boolean> }
-          : {}),
-        ...(Array.isArray(entry.skills)
-          ? { skills: entry.skills as string[] }
-          : {}),
-        ...(Array.isArray(entry.opencode_skills)
-          ? {
-              opencode_skills:
-                entry.opencode_skills as string[],
-            }
-          : {}),
-        ...(Array.isArray(entry.functions)
-          ? { functions: entry.functions as string[] }
-          : {}),
-        ...(Array.isArray(entry.disable_functions)
-          ? {
-              disable_functions:
-                entry.disable_functions as string[],
-            }
-          : {}),
+        ...buildSubAgentFields(entry, subPrompt),
       };
+
+      if (Array.isArray(entry.subagents)) {
+        log.info(
+          `Preserving nested "subagents" from subagent "${entry.name}" in "${roleId}"`,
+        );
+        subagent.subagents = await parseNestedSubagents(
+          entry.subagents as unknown[],
+          dirname(yamlPath),
+        );
+      }
 
       if (seenSubagentNames.has(subagent.name)) {
         log.info(
@@ -476,6 +564,12 @@ async function loadOneRole(
       ? { collaboration: resolved.collaboration as RoleConfig["collaboration"] }
       : {}),
     ...(dispatchConfig ? { dispatch: dispatchConfig } : {}),
+    ...(Array.isArray(resolved.auto_activate)
+      ? { auto_activate: resolved.auto_activate as string[] }
+      : {}),
+    ...(typeof resolved.locked === "boolean"
+      ? { locked: resolved.locked as boolean }
+      : {}),
   };
 
   if (mergedSubagents) {
@@ -492,17 +586,27 @@ async function loadOneRole(
  * name becomes the sub-agent ID (used for logging / validation context), and
  * the role.yaml is parsed with the same rules as inline sub-agents.
  *
+ * Recursively discovers nested subagents up to `maxDepth` levels deep
+ * (default: 3). Inline-nested subagents (from role.yaml `subagents:`)
+ * take precedence over file-based nested subagents with the same name.
+ *
  * Non-existent or empty `subagents/` directories return an empty array
  * silently (not an error).
  *
  * @param roleDir - Absolute path to the role's directory (contains role.yaml).
  * @param roleId - Parent role ID (used for log messages only).
+ * @param maxDepth - Maximum nesting depth for recursive discovery (default 3).
+ * @param currentDepth - Current recursion depth (0 = top-level call).
  * @returns Array of valid file-based sub-agent configs.
  */
 async function discoverFileBasedSubagents(
   roleDir: string,
   roleId: string,
+  maxDepth: number = 3,
+  currentDepth: number = 0,
 ): Promise<SubAgentConfig[]> {
+  if (currentDepth >= maxDepth) return [];
+
   let matches: string[];
   try {
     matches = await fglob("subagents/*/role.yaml", {
@@ -561,13 +665,6 @@ async function discoverFileBasedSubagents(
       continue;
     }
 
-    // Reject nested subagents
-    if ("subagents" in entry) {
-      log.info(
-        `Stripping nested "subagents" from file-based subagent "${entry.name}" in "${roleId}"`,
-      );
-    }
-
     // Validate prompt (resolve prompt_file relative to subagent directory)
     const subagentDir = dirname(yamlPath);
     let subPrompt: string;
@@ -600,56 +697,40 @@ async function discoverFileBasedSubagents(
     }
 
     const subagent: SubAgentConfig = {
-      name: entry.name as string,
-      description: (entry.description as string) ?? "",
-      prompt: subPrompt,
-      ...(typeof entry.prompt_file === "string"
-        ? { prompt_file: entry.prompt_file }
-        : {}),
-      ...(typeof entry.model === "string"
-        ? { model: entry.model }
-        : {}),
-      ...(typeof entry.color === "string"
-        ? { color: entry.color }
-        : {}),
-      ...(typeof entry.variant === "string"
-        ? { variant: entry.variant }
-        : {}),
-      ...(typeof entry.temperature === "number"
-        ? { temperature: entry.temperature }
-        : {}),
-      ...(typeof entry.top_p === "number"
-        ? { top_p: entry.top_p }
-        : {}),
-      ...(entry.permission != null &&
-      typeof entry.permission === "object"
-        ? {
-            permission:
-              entry.permission as SubAgentConfig["permission"],
-          }
-        : {}),
-      ...(entry.tools != null && typeof entry.tools === "object"
-        ? { tools: entry.tools as Record<string, boolean> }
-        : {}),
-      ...(Array.isArray(entry.skills)
-        ? { skills: entry.skills as string[] }
-        : {}),
-      ...(Array.isArray(entry.opencode_skills)
-        ? {
-            opencode_skills:
-              entry.opencode_skills as string[],
-          }
-        : {}),
-      ...(Array.isArray(entry.functions)
-        ? { functions: entry.functions as string[] }
-        : {}),
-      ...(Array.isArray(entry.disable_functions)
-        ? {
-            disable_functions:
-              entry.disable_functions as string[],
-          }
-        : {}),
+      ...buildSubAgentFields(entry, subPrompt),
     };
+
+    if (Array.isArray(entry.subagents)) {
+      log.info(
+        `Preserving nested "subagents" from file-based subagent "${entry.name}" in "${roleId}"`,
+      );
+      subagent.subagents = await parseNestedSubagents(
+        entry.subagents as unknown[],
+        subagentDir,
+      );
+    }
+
+    // Discover file-based nested subagents in subagentDir/subagents/
+    const fileBasedNested = await discoverFileBasedSubagents(
+      subagentDir,
+      roleId,
+      maxDepth,
+      currentDepth + 1,
+    );
+
+    // Merge: inline nested subagents win over file-based with same name
+    if (fileBasedNested.length > 0) {
+      const nestedMap = new Map<string, SubAgentConfig>();
+      for (const sa of fileBasedNested) {
+        nestedMap.set(sa.name, sa);
+      }
+      if (subagent.subagents) {
+        for (const sa of subagent.subagents) {
+          nestedMap.set(sa.name, sa);
+        }
+      }
+      subagent.subagents = Array.from(nestedMap.values());
+    }
 
     subagents.push(subagent);
   }

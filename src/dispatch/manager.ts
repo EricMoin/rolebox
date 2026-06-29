@@ -24,6 +24,30 @@ import { withTimeout, TimeoutError } from "./with-timeout.ts";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
 
+// Opencode session.error payloads vary (Error | string | { name, data: { message } }).
+// String(obj) would yield "[object Object]" and hide the real cause, so dig out a message.
+export function extractSessionErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name || "Error";
+  if (typeof error === "string") return error.trim() || "Unknown session error";
+  if (error && typeof error === "object") {
+    const o = error as Record<string, unknown>;
+    const data = (o.data && typeof o.data === "object" ? o.data : {}) as Record<string, unknown>;
+    const msg = data.message ?? o.message;
+    const name = typeof o.name === "string" ? o.name : undefined;
+    if (typeof msg === "string" && msg.trim()) {
+      return name && name !== msg ? `${name}: ${msg}` : msg;
+    }
+    if (name && name.trim()) return name;
+    try {
+      const json = JSON.stringify(error);
+      if (json && json !== "{}") return json;
+    } catch {
+      return String(error);
+    }
+  }
+  return error !== undefined ? String(error) : "Unknown session error";
+}
+
 export class DispatchManager {
   private tasks: Map<string, DispatchTask> = new Map();
   private cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -39,6 +63,7 @@ export class DispatchManager {
   private store: TaskStateStore;
   private _recovered = false;
   private inflightByParent = new Map<string, number>();
+  private sessionsByRequest = new Map<string, number>();
   private _cancelQueue: Map<string, () => void> = new Map();
   private _syncControllers: Map<string, AbortController> = new Map();
   private subagentModelKey: Map<string, string>;
@@ -109,6 +134,19 @@ export class DispatchManager {
     return this.config;
   }
 
+  /**
+   * Returns true if the given session is currently owned by a synchronous
+   * dispatch task. Used by plugin-hooks to suppress function continuation
+   * for sync sessions (continuation would prevent session.prompt() from
+   * ever resolving).
+   */
+  isSyncSession(sessionId: string): boolean {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return false;
+    const task = this.tasks.get(taskId);
+    return task?.mode === "sync";
+  }
+
   private deriveKey(subagentId: string): string {
     return this.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
   }
@@ -120,10 +158,41 @@ export class DispatchManager {
     const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
     const concurrencyKey = this.deriveKey(input.subagent);
 
+    // Budget gate
+    const budget = this.config.maxTotalSessionsPerRequest;
+    const root = parentContext.sessionID;
+    if (budget !== undefined && this.getRequestSessions(root) >= budget) {
+      metrics.counter("dispatch_rejected_total", { reason: "budget-exhausted" }).inc();
+      const task: DispatchTask = {
+        id: taskId,
+        sessionId: "",
+        parentSessionId: parentContext.sessionID,
+        depth: this.computeDepth(parentContext.sessionID),
+        status: "error",
+        agent: input.subagent,
+        prompt: input.prompt,
+        description: input.description,
+        startedAt: new Date(),
+        completedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        timeoutMs: input.timeout_ms,
+        error: JSON.stringify({
+          error: "Session budget exhausted",
+          limit: budget,
+          spawned: this.getRequestSessions(root),
+        }),
+      };
+      this.tasks.set(taskId, task);
+      this.scheduleCleanup(taskId);
+      void this.notifyCompletion(task);
+      return task;
+    }
+
     const task: DispatchTask = {
       id: taskId,
       sessionId: "",
       parentSessionId: parentContext.sessionID,
+      depth: this.computeDepth(parentContext.sessionID),
       status: "pending",
       agent: input.subagent,
       prompt: input.prompt,
@@ -135,6 +204,7 @@ export class DispatchManager {
 
     this.tasks.set(taskId, task);
     this.incInflight(task.parentSessionId);
+    this.incRequestSessions(root);
 
     debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 
@@ -358,11 +428,32 @@ export class DispatchManager {
       ?? SYNC_TIMEOUT_MS;
     const concurrencyKey = this.deriveKey(input.subagent);
 
+    const callerDepth = this.computeDepth(parentContext.sessionID);
+    if (callerDepth > 0) {
+      throw new Error(JSON.stringify({
+        error: "Synchronous dispatch forbidden at depth>0",
+        depth: callerDepth,
+      }));
+    }
+
+    const budget = this.config.maxTotalSessionsPerRequest;
+    const root = parentContext.sessionID;
+    const isNewSession = !input.session_id;
+    if (isNewSession && budget !== undefined && this.getRequestSessions(root) >= budget) {
+      metrics.counter("dispatch_rejected_total", { reason: "budget-exhausted" }).inc();
+      throw new Error(JSON.stringify({
+        error: "Session budget exhausted",
+        limit: budget,
+        spawned: this.getRequestSessions(root),
+      }));
+    }
+
     const taskId = `sync_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
     const task: DispatchTask = {
       id: taskId,
       sessionId: "",
       parentSessionId: parentContext.sessionID,
+      depth: this.computeDepth(parentContext.sessionID),
       status: "pending",
       agent: input.subagent,
       prompt: input.prompt,
@@ -434,6 +525,7 @@ export class DispatchManager {
 
       task.sessionId = session.id;
       this.sessionToTask.set(session.id, taskId);
+      if (isNewSession) this.incRequestSessions(root);
 
       // Step 3: Prompt with abort + split timeout
       const controller = new AbortController();
@@ -1167,7 +1259,7 @@ export class DispatchManager {
     this.pendingNotifications.add(task.id);
     try {
       return await notifyParent(this.client, task, () => {
-        const raw = this.getInflight(task.parentSessionId);
+        const raw = this.getInflightCount(task.parentSessionId);
         // If leaveRunning hasn't been called yet for this task, the inflight
         // count still includes it. Subtract 1 so the notification reflects
         // only *other* running tasks for this parent.
@@ -1182,6 +1274,7 @@ export class DispatchManager {
   private async evaluateAndComplete(
     taskId: string,
     trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event",
+    errorDetail?: string,
   ): Promise<void> {
     const task = this.tasks.get(taskId);
     if (!task || task.status !== "running") {
@@ -1190,7 +1283,7 @@ export class DispatchManager {
     }
 
     if (trigger === "error-event") {
-      if (this.transition(taskId, ["running"], "error", { error: "Task error event received" })) {
+      if (this.transition(taskId, ["running"], "error", { error: errorDetail ?? "Task error event received" })) {
         this.watchdog.unregisterTask(taskId);
         this.watchdog.cancelDebounce(taskId);
         this.finalizeCompletion(taskId);
@@ -1485,16 +1578,25 @@ export class DispatchManager {
   async handleSessionError(sessionId: string, error: unknown): Promise<void> {
     const taskId = this.sessionToTask.get(sessionId);
     if (!taskId) return; // edge-case #2 + edge-case #11 (no sessionId)
-    const errorMsg = error instanceof Error ? error.message : error !== undefined ? String(error) : "Unknown session error";
+    const errorMsg = extractSessionErrorMessage(error);
     debugLog("event", taskId, `session.error (${errorMsg}) — routing to evaluateAndComplete`);
-    await this.evaluateAndComplete(taskId, "error-event");
+    await this.evaluateAndComplete(taskId, "error-event", errorMsg);
   }
 
   async handleSessionDeleted(sessionId: string): Promise<void> {
+    this.resetRequestSessions(sessionId);
     const taskId = this.sessionToTask.get(sessionId);
     if (!taskId) return; // edge-case #2
     debugLog("event", taskId, `session.deleted — routing to evaluateAndComplete`);
     await this.evaluateAndComplete(taskId, "deleted-event");
+  }
+
+  private computeDepth(parentSessionId: string): number {
+    const parentTaskId = this.sessionToTask.get(parentSessionId);
+    if (!parentTaskId) return 0;
+    const parentTask = this.tasks.get(parentTaskId);
+    if (!parentTask) return 0;
+    return (parentTask.depth ?? 0) + 1;
   }
 
   private incInflight(parentSessionId: string): void {
@@ -1511,8 +1613,20 @@ export class DispatchManager {
     }
   }
 
-  private getInflight(parentSessionId: string): number {
+  getInflightCount(parentSessionId: string): number {
     return this.inflightByParent.get(parentSessionId) ?? 0;
+  }
+
+  private getRequestSessions(rootSession: string): number {
+    return this.sessionsByRequest.get(rootSession) ?? 0;
+  }
+
+  private incRequestSessions(rootSession: string): void {
+    this.sessionsByRequest.set(rootSession, (this.sessionsByRequest.get(rootSession) ?? 0) + 1);
+  }
+
+  private resetRequestSessions(rootSession: string): void {
+    this.sessionsByRequest.delete(rootSession);
   }
 
   /** Atomic compare-and-swap status transition. Returns true iff THIS call won the race. */

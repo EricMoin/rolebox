@@ -46,7 +46,11 @@ export function decideContinuation(opts: {
     st.cooldownUntilTurn = st.currentTurn + 3;
   }
 
-  const reminder = `<system-reminder>[auto-continue ${st.continuationCount}/${cfg.perFnMax} for ${opts.fnName}: ${opts.reason}] Continue until this function's completion condition is met. Do not stop yet.</system-reminder>`;
+  const finalWarning =
+    st.continuationCount >= cfg.perFnMax
+      ? " This is your FINAL continuation — produce your output NOW, even if incomplete."
+      : "";
+  const reminder = `<system-reminder>[auto-continue ${st.continuationCount}/${cfg.perFnMax} for ${opts.fnName}: ${opts.reason}] Continue until this function's completion condition is met. Do not stop yet.${finalWarning}</system-reminder>`;
 
   return { shouldContinue: true, reminder, reason: opts.reason };
 }

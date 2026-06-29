@@ -52,6 +52,7 @@ export interface SerializedDispatchTask {
   messageCountAtStart?: number;
   timeoutMs?: number;
   mode?: string;
+  depth?: number;
   result?: SerializedMaterializedResultRef;
 }
 
@@ -60,7 +61,7 @@ export interface SerializedDispatchTask {
  * Version field enables future schema migrations.
  */
 interface DispatchStateFile {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5;
   tasks: SerializedDispatchTask[];
   outbox?: string[];
 }
@@ -174,13 +175,13 @@ export class TaskStateStore {
     if (!parsed) return null;
 
     const { version, tasks } = parsed;
-    if (version !== 1 && version !== 2 && version !== 3 && version !== 4) {
+    if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
       log.warn(`Unsupported dispatch state schema version ${version}, starting fresh`);
       return null;
     }
 
     // Collect outbox (v4+) — defaults to empty for v1-v3
-    const outbox: string[] = (version === 4 && Array.isArray(parsed.outbox))
+    const outbox: string[] = ((version === 4 || version === 5) && Array.isArray(parsed.outbox))
       ? parsed.outbox.filter((x): x is string => typeof x === "string")
       : [];
 
@@ -207,7 +208,8 @@ export class TaskStateStore {
         messageCountAtStart: version === 1 ? 0 : st.messageCountAtStart,
         timeoutMs: version === 1 || version === 2 ? undefined : st.timeoutMs,
         mode: version === 1 || version === 2 ? "background" : (st.mode as "background" | "sync" | undefined),
-        result: version === 4 && st.result
+        depth: st.depth ?? 0,
+        result: (version === 4 || version === 5) && st.result
           ? {
               sidecarPath: st.result.sidecarPath,
               totalChars: st.result.totalChars,
@@ -221,7 +223,7 @@ export class TaskStateStore {
 
     // Re-save as v4 after single-shot migration (fire-and-forget —
     // will be picked up on next persist cycle even if this write fails)
-    if (version === 1 || version === 2 || version === 3) {
+    if (version === 1 || version === 2 || version === 3 || version === 4) {
       void this.save(map);
     }
 
@@ -298,6 +300,7 @@ export class TaskStateStore {
         messageCountAtStart: task.messageCountAtStart,
         timeoutMs: task.timeoutMs,
         mode: task.mode,
+        depth: task.depth,
       };
 
       if (task.result) {
@@ -314,7 +317,7 @@ export class TaskStateStore {
     }
 
     const file: DispatchStateFile = {
-      version: 4,
+      version: 5,
       tasks: serialized,
     };
 
@@ -347,7 +350,7 @@ export class TaskStateStore {
 function isDispatchStateFile(value: unknown): value is DispatchStateFile {
   if (typeof value !== "object" || value === null) return false;
   const obj = value as Record<string, unknown>;
-  if (obj.version !== 1 && obj.version !== 2 && obj.version !== 3 && obj.version !== 4) return false;
+  if (obj.version !== 1 && obj.version !== 2 && obj.version !== 3 && obj.version !== 4 && obj.version !== 5) return false;
   if (!Array.isArray(obj.tasks)) return false;
   return true;
 }

@@ -2,6 +2,7 @@ import type { ResolvedFunction } from "../types.ts";
 import { functionRuntime } from "./runtime-state.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import { extractResultBlockNamed } from "./fence.ts";
+import { evaluateCondition } from "./conditions.ts";
 
 export function runToolObserve(opts: {
   sessionID: string;
@@ -70,4 +71,52 @@ export function runTextCapture(opts: {
       if (block !== null) opts.artifacts.write(opts.sessionID, spec.capture_artifact, block);
     }
   }
+}
+
+export function runMessageObserve(opts: {
+  sessionID: string;
+  activeFns: ResolvedFunction[];
+  artifacts?: ArtifactStore;
+  userMessagedThisTurn?: boolean;
+}): string[] {
+  const injects: string[] = [];
+  for (const fn of opts.activeFns) {
+    const st = functionRuntime.get(opts.sessionID, fn.name);
+    if (!st) continue;
+    for (const spec of fn.observe ?? []) {
+      if (spec.on !== "message") continue;
+      if (spec.when) {
+        const condResult = evaluateCondition(spec.when, {
+          sessionID: opts.sessionID,
+          fnName: fn.name,
+          state: st,
+          artifacts: opts.artifacts ?? ({} as ArtifactStore),
+          requiredEvidence: fn.requires_evidence ?? [],
+          userMessagedThisTurn: opts.userMessagedThisTurn ?? false,
+        });
+        if (!condResult) continue;
+      }
+      if (spec.set_evidence) st.evidenceObserved[spec.set_evidence] = true;
+      if (spec.inject) injects.push(spec.inject);
+    }
+  }
+  functionRuntime.markDirty();
+  return injects;
+}
+
+export function runActivateObserve(opts: {
+  sessionID: string;
+  activeFns: ResolvedFunction[];
+}): string[] {
+  const injects: string[] = [];
+  for (const fn of opts.activeFns) {
+    const st = functionRuntime.get(opts.sessionID, fn.name);
+    if (!st) continue;
+    for (const spec of fn.observe ?? []) {
+      if (spec.on !== "activate") continue;
+      if (spec.inject) injects.push(spec.inject);
+    }
+  }
+  functionRuntime.markDirty();
+  return injects;
 }

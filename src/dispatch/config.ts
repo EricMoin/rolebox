@@ -105,6 +105,8 @@ export interface DispatchManagerConfig {
   maxQueueDepth?: number;
   /** Maximum active background tasks per parent session — default: 3 */
   maxActivePerParent?: number;
+  /** Cumulative session budget per request — undefined means unlimited (opt-in) */
+  maxTotalSessionsPerRequest?: number;
   /** Time-to-live (ms) for completed task records before cleanup — default: 30 minutes */
   taskTtlMs: number;
   /** Minimum wall-clock time (ms) before a task can be reaped — default: 5000 */
@@ -203,6 +205,9 @@ export function resolveEnvConfig(): Partial<DispatchManagerConfig> {
 
   const map = intEnv("ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT");
   if (map !== undefined) result.maxActivePerParent = map;
+
+  const mts = intEnv("ROLEBOX_DISPATCH_MAX_TOTAL_SESSIONS_PER_REQUEST");
+  if (mts !== undefined) result.maxTotalSessionsPerRequest = mts;
 
   const ra = intEnv("ROLEBOX_DISPATCH_RETRY_AFTER_MS");
   if (ra !== undefined) result.retryAfterMs = ra;
