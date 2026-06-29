@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.0
+
+### Features
+
+- Add `configureLogDirectory` to logger for project-local `.rolebox` logging
+
+### Bug Fixes
+
+- Add gone-gate for non-existent sessions in dispatch evaluate loop
+- Treat absent session status as idle-equivalent in completion detector
+
+### Refactors
+
+- Migrate state storage from `XDG_DATA_HOME` to project-local `.rolebox`
+
 ## 0.11.0
 
 ### Features
