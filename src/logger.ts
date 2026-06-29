@@ -61,7 +61,14 @@ export function resolveLogFilePath(): string | null {
     if (result) return result;
   }
 
-  // 2. Config dir
+  // 2. Project-local .rolebox dir (set via configureLogDirectory)
+  if (_baseDirectory) {
+    const localPath = join(_baseDirectory, ".rolebox", "logs", "rolebox.log");
+    const result = ensureLogDir(localPath);
+    if (result) return result;
+  }
+
+  // 3. Config dir (fallback for CLI / pre-init calls)
   try {
     const configLogPath = join(getConfigDir(), "logs", "rolebox.log");
     const result = ensureLogDir(configLogPath);
@@ -70,7 +77,7 @@ export function resolveLogFilePath(): string | null {
     // getConfigDir itself shouldn't throw, but guard anyway
   }
 
-  // 3. OS-native temp directory fallback (cross-platform)
+  // 4. OS-native temp directory fallback (cross-platform)
   const tmpPath = join(tmpdir(), "rolebox.log");
   const tmpResult = ensureLogDir(tmpPath);
   if (tmpResult) return tmpResult;
@@ -168,6 +175,7 @@ let _rootLogger: Logger<ILogObj> | null = null;
 let _logFilePath: string | null | undefined;
 let _parsedLevel: number | undefined;
 let _transport: LogTransport | null = null;
+let _baseDirectory: string | undefined;
 
 function ensureInitialized(): void {
   if (_rootLogger) return;
@@ -257,6 +265,34 @@ export function formatError(err: unknown): { message: string; stack?: string; na
 export function getLogFilePath(): string | null {
   ensureInitialized();
   return _logFilePath ?? null;
+}
+
+export function configureLogDirectory(directory: string): void {
+  _baseDirectory = directory;
+  const newPath = resolveLogFilePath();
+  if (newPath === _logFilePath) return;
+
+  if (_transport) {
+    _transport.close();
+    _transport = null;
+  }
+
+  _logFilePath = newPath;
+
+  if (_logFilePath && _rootLogger) {
+    const maxBytes = process.env.ROLEBOX_LOG_MAX_BYTES
+      ? parseInt(process.env.ROLEBOX_LOG_MAX_BYTES, 10) || DEFAULT_MAX_FILE_BYTES
+      : DEFAULT_MAX_FILE_BYTES;
+
+    _transport = new LogTransport(_logFilePath, maxBytes);
+
+    _rootLogger.attachTransport((logObj) => {
+      try {
+        const entry = JSON.stringify({ ...logObj, pid: process.pid }) + "\n";
+        _transport!.write(entry);
+      } catch {}
+    });
+  }
 }
 
 /**
