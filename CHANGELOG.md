@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0
+
+### Features
+
+- Add `monitor` command — runtime dispatch dashboard with human-readable and JSON output, active/pending/error task filtering (`--all`), error detail display, live-refresh watch mode (`--watch`, `--interval`), and active function tracking with agent resolution
+- Add `monitor-reader` module: reads dispatch, fnstate, and graph state files into a unified `MonitorSnapshot`, resolves agent IDs from graph and dispatch session mappings
+- Add `state-hash` utility: deterministic directory-to-hash for state file naming
+
 ## 0.10.0
 
 ### Features
