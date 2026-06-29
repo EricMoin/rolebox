@@ -27,6 +27,7 @@ const main = defineCommand({
     registry: () => import("./cli/commands/registry.ts").then((m) => m.default),
     status: () => import("./cli/commands/status.ts").then((m) => m.default),
     info: () => import("./cli/commands/info.ts").then((m) => m.default),
+    monitor: () => import("./cli/commands/monitor.ts").then((m) => m.default),
   },
   cleanup() {
     return checkForUpdate(version);

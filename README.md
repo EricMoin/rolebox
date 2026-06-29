@@ -136,6 +136,21 @@ rolebox info software-architect --json    # JSON output
 rolebox info software-architect --check   # Verify integrity hash
 ```
 
+#### `monitor`
+
+Show runtime dispatch activity and activated roles for the current project. Reads persisted state files from `~/.local/share/rolebox/state/`.
+
+```bash
+rolebox monitor                              # Snapshot of active tasks and functions
+rolebox monitor --all                        # Include completed/cancelled tasks
+rolebox monitor --json                       # JSON output
+rolebox monitor --watch                      # Live-refresh dashboard (2s interval)
+rolebox monitor --watch --interval 5000      # Custom refresh rate
+rolebox monitor --watch --json               # NDJSON output (one JSON line per interval)
+```
+
+Supports four visibility categories for tasks: `pending`, `running`, `error` tasks are shown by default; use `--all` to also show `completed`, `cancelled`, and `timeout` tasks.
+
 #### `status`
 
 Show overall health of the rolebox installation: version, registries, installed roles with sync status, opencode plugin registration, and skill symlink integrity.
