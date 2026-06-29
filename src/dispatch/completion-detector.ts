@@ -63,23 +63,21 @@ export function detectCompletion(
   pollState: TaskEventState,
   skipStabilityGating?: boolean,
 ): CompletionSignal {
-  // 1. Session gone → let the session monitor handle it
-  if (!sessionStatus) {
-    return { type: "not_ready" };
+  // Status-based gating applies ONLY when a status is present. An absent
+  // status (undefined) means the session is missing from the directory-scoped
+  // `session.status()` map — NOT that it is gone — so it is treated as
+  // idle-equivalent and falls through to the message checks below. The caller
+  // distinguishes truly-gone sessions via SessionMonitor.verifyExistence().
+  if (sessionStatus) {
+    if (ACTIVE_SESSION_STATUSES.has(sessionStatus.type)) {
+      return { type: "not_ready" };
+    }
+    if (TERMINAL_SESSION_STATUSES.has(sessionStatus.type)) {
+      return { type: "completed" };
+    }
   }
 
-  // 2. Session is actively processing
-  if (ACTIVE_SESSION_STATUSES.has(sessionStatus.type)) {
-    return { type: "not_ready" };
-  }
-
-  // 3. Terminal session status (e.g., "interrupted") → task is done
-  if (TERMINAL_SESSION_STATUSES.has(sessionStatus.type)) {
-    return { type: "completed" };
-  }
-
-  // 4. For idle sessions: verify we have assistant output
-  //    (non-idle, non-active, non-terminal statuses are treated as idle-like)
+  // For idle (or absent-status) sessions: verify we have assistant output
 
   // 5. Find the LAST assistant message (reverse scan)
   let lastAssistant: SessionMessageSnapshot | undefined;

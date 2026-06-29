@@ -67,11 +67,31 @@ describe("detectCompletion", () => {
 
   // ── Session Status Gates ──────────────────────────────────────────
 
-  it("returns not_ready when sessionStatus is undefined", () => {
+  it("treats absent session status as idle-equivalent: completed with output + skipStabilityGating (regression: task hung, parent never notified)", () => {
     const result = detectCompletion(
       [msg({ finish: "end_turn" })],
       undefined,
       eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "completed" });
+  });
+
+  it("treats absent session status as idle-equivalent: stabilizing without skipStabilityGating", () => {
+    const result = detectCompletion(
+      [msg({ finish: "end_turn" })],
+      undefined,
+      eventState(),
+    );
+    expect(result).toEqual({ type: "stabilizing" });
+  });
+
+  it("returns not_ready when session status absent and no assistant output (startup guard)", () => {
+    const result = detectCompletion(
+      [],
+      undefined,
+      eventState({ hasProducedOutput: false }),
+      true,
     );
     expect(result).toEqual({ type: "not_ready" });
   });
