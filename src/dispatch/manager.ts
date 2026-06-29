@@ -1342,6 +1342,27 @@ export class DispatchManager {
       const startIndex = eventState.messageCountAtStart ?? 0;
       const scopedMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
 
+      // Gone-gate: a session absent from the (directory-scoped) status map is
+      // treated as idle by detectCompletion, so confirm it still exists first.
+      // A genuinely-gone session is errored here; an existing one falls through
+      // and its output drives completion — finished background tasks no longer
+      // hang waiting for an idle status the server never reports.
+      if (sessionStatus === undefined) {
+        const existence = await this.sessionMonitor.verifyExistence(this.client, task.sessionId);
+        if (existence === "missing") {
+          if (this.transition(taskId, ["running"], "error", { error: "Session no longer exists" })) {
+            this.watchdog.unregisterTask(taskId);
+            this.watchdog.cancelDebounce(taskId);
+            const t = this.tasks.get(taskId)!;
+            debugLog("evaluate", taskId, `session gone (verifyExistence=missing) — erroring task`);
+            void this.notifyCompletion(t);
+            this.leaveRunning(taskId);
+          }
+          return;
+        }
+        debugLog("evaluate", taskId, `sessionStatus undefined but verifyExistence=${existence} — treating as idle`);
+      }
+
       const sig = detectCompletion(scopedMessages, sessionStatus, eventState, true);
 
       switch (sig.type) {
@@ -1389,26 +1410,9 @@ export class DispatchManager {
           break;
         }
         case "not_ready": {
-          // ── Session-gone verification ──────────────────────────
-          // When sessionStatus is undefined (status map lacks this
-          // session), use secondary verification to confirm if the
-          // session truly no longer exists.
-          if (sessionStatus === undefined) {
-            const existence = await this.sessionMonitor.verifyExistence(this.client, task.sessionId);
-            if (existence === "missing") {
-              if (this.transition(taskId, ["running"], "error", { error: "Session no longer exists" })) {
-                this.watchdog.unregisterTask(taskId);
-                this.watchdog.cancelDebounce(taskId);
-                const t = this.tasks.get(taskId)!;
-                debugLog("evaluate", taskId, `session gone (verifyExistence=missing) — erroring task`);
-                void this.notifyCompletion(t);
-                this.leaveRunning(taskId);
-              }
-              break;
-            }
-            debugLog("evaluate", taskId, `sessionStatus undefined but verifyExistence=${existence} — continuing as not_ready`);
-          }
-
+          // Existence is already confirmed by the gone-gate above, so not_ready
+          // here means "alive but no completion signal yet" — fall through to
+          // the stale-timeout safety-net.
           const now = Date.now();
           const elapsed = now - task.startedAt.getTime();
           const staleMs = task.timeoutMs ?? this.config.backgroundStaleTimeoutMs ?? BACKGROUND_STALE_TIMEOUT_MS;
@@ -1546,17 +1550,18 @@ export class DispatchManager {
     const eventState = this.eventState.get(taskId);
     if (!eventState) return;
 
-    eventState.lastProgressUpdate = Date.now();
-    eventState.hasProducedOutput = true;
     eventState.lastEventAt = Date.now();
-
     this.watchdog.resetWatchdog(taskId);
 
     if (statusType === "busy" || statusType === "retry") {
+      eventState.lastProgressUpdate = Date.now();
+      eventState.hasProducedOutput = true;
       this.watchdog.cancelDebounce(taskId);
       debugLog("event", taskId, `session.status=${statusType} — progress heartbeat, cancelled debounce`);
     } else {
-      debugLog("event", taskId, `session.status=${statusType} — progress heartbeat`);
+      // Idle/other status is NOT progress: leave lastProgressUpdate untouched so the
+      // stale-timeout safety-net can still fire if completion detection fails.
+      debugLog("event", taskId, `session.status=${statusType} — idle heartbeat (stale clock preserved)`);
     }
   }
 

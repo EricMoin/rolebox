@@ -4473,6 +4473,48 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.handleTaskCompleted(task.id);
   });
 
+  it("T13-5: absent status + session exists + output → completes and notifies parent (regression: bg task hung in running)", async () => {
+    clearSentFinalNotifies();
+    clearParentQueues();
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+    const mgr = manager as any;
+
+    const task = await manager.launch(
+      { subagent: "h", prompt: "p", run_in_background: true, description: "idle-not-in-status-map" },
+      parentContext(),
+    );
+
+    const taskRef = mgr.tasks.get(task.id);
+    taskRef.sessionId = "idle-session";
+    taskRef.status = "running";
+    mgr.sessionToTask.set("idle-session", task.id);
+    mgr.watchdog.registerTask(task.id);
+
+    client.session.messages = mock(() =>
+      Promise.resolve({
+        data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }],
+        error: undefined,
+      }),
+    );
+    // Finished child is absent from the status map (server omits idle sessions).
+    client.session.status = mock(() =>
+      Promise.resolve({ data: { "other-session": { type: "idle" } }, error: undefined }),
+    );
+    mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
+
+    await mgr.watchdog.triggerWatchdog(task.id);
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(taskRef.status).toBe("completed");
+    const notifyCalls = (client.session.promptAsync as any).mock.calls.filter(
+      (c: any) => c[0]?.path?.id === "parent-session-1",
+    );
+    expect(notifyCalls.length).toBeGreaterThan(0);
+
+    mgr.watchdog.unregisterTask(task.id);
+  });
+
   // ── materializeResult() ──────────────────────────────────────
 
   it("materializeResult() fetches messages, extracts result, and writes sidecar", async () => {
