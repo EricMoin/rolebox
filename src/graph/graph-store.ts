@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { createSubLogger } from "../logger.ts";
-import { getDataDir } from "../cli/paths.ts";
 import type { GraphExecutionState } from "./state.ts";
 
 export interface SerializedGraphSession {
@@ -21,10 +20,12 @@ interface GraphStateFile {
 const log = createSubLogger("graph:store");
 
 export class GraphStore {
+  private directory: string;
   private dirHash: string;
   private _saveLock: Promise<void> = Promise.resolve();
 
   constructor(directory: string) {
+    this.directory = directory;
     this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
   }
 
@@ -120,7 +121,7 @@ export class GraphStore {
   }
 
   private getStatePath(): string {
-    return join(getDataDir(), "state", `graph-${this.dirHash}.json`);
+    return join(this.directory, ".rolebox", "state", `graph-${this.dirHash}.json`);
   }
 
   private serialize(

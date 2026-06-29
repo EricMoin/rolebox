@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stateFileHash } from "../state-hash.ts";
-import { getDataDir } from "../paths.ts";
 
 export interface TaskSnapshot {
   id: string;
@@ -106,7 +105,7 @@ function computeDurationMs(startedAt: string | undefined, completedAt?: string):
 
 export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
   const hash = stateFileHash(projectDir);
-  const stateDir = join(getDataDir(), "state");
+  const stateDir = join(projectDir, ".rolebox", "state");
 
   const tasks: TaskSnapshot[] = [];
   const sessionAgentMap = new Map<string, string>();

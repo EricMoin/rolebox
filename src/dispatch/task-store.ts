@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { createSubLogger } from "../logger.ts";
-import { getDataDir } from "../cli/paths.ts";
 import { acquireStateLock } from "./state-lock.ts";
 import type { DispatchTask, DispatchTaskStatus } from "./types.ts";
 
@@ -81,20 +80,23 @@ const log = createSubLogger("dispatch:store");
  * keyed by a 12-character sha256 hash of the directory path.
  */
 export class TaskStateStore {
+  private directory: string;
   private dirHash: string;
   private _saveLock: Promise<void> = Promise.resolve();
   private _lockState?: ReturnType<typeof acquireStateLock>;
   private _readOnly = false;
 
   constructor(directory: string) {
+    this.directory = directory;
     this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
 
-  /** Lock State File for multi-instance isolation. */
   tryLock(): boolean {
-    const lock = acquireStateLock(this.getStatePath());
+    const statePath = this.getStatePath();
+    mkdirSync(join(statePath, ".."), { recursive: true });
+    const lock = acquireStateLock(statePath);
     if (lock.ok) {
       this._lockState = lock;
       return true;
@@ -270,9 +272,8 @@ export class TaskStateStore {
 
   // ── Private ─────────────────────────────────────────────────────────────
 
-  /** Compute the state file path: {dataDir}/state/dispatch-{hash12}.json */
   private getStatePath(): string {
-    return join(getDataDir(), "state", `dispatch-${this.dirHash}.json`);
+    return join(this.directory, ".rolebox", "state", `dispatch-${this.dirHash}.json`);
   }
 
   /** Convert a live task map to a JSON string. */

@@ -95,7 +95,7 @@ export function applyWindow(text: string, opts: WindowOpts): WindowResult {
 }
 
 export function spillToFile(taskId: string, fullText: string, dir: string): string {
-  const resultsDir = join(dir, "state", "results");
+  const resultsDir = join(dir, ".rolebox", "state", "results");
   mkdirSync(resultsDir, { recursive: true });
 
   const target = join(resultsDir, `${taskId}.txt`);
@@ -135,7 +135,7 @@ export function formatResultEnvelope(opts: EnvelopeOpts): string {
  * Build the filesystem path for a result sidecar file.
  */
 export function resultSidecarPath(taskId: string, dir: string): string {
-  return join(dir, "state", "results", `${taskId}.txt`);
+  return join(dir, ".rolebox", "state", "results", `${taskId}.txt`);
 }
 
 /**

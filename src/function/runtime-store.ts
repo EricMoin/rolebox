@@ -2,7 +2,6 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { getDataDir } from "../cli/paths.ts";
 import type { FnState } from "./runtime-state.ts";
 
 interface FileShape {
@@ -11,15 +10,17 @@ interface FileShape {
 }
 
 export class FunctionRuntimeStore {
+  private directory: string;
   private dirHash: string;
   private _lock: Promise<void> = Promise.resolve();
 
   constructor(directory: string) {
+    this.directory = directory;
     this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
   }
 
   private statePath(): string {
-    return join(getDataDir(), "state", `fnstate-${this.dirHash}.json`);
+    return join(this.directory, ".rolebox", "state", `fnstate-${this.dirHash}.json`);
   }
 
   private toFile(states: Map<string, Map<string, FnState>>): string {

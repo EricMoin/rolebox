@@ -43,7 +43,7 @@ function makeSessions(): Map<string, { agentId: string; state: GraphExecutionSta
 
 function stateFilePath(dir: string): string {
   const hash = createHash("sha256").update(dir).digest("hex").slice(0, 12);
-  return join(currentDataDir, "state", `graph-${hash}.json`);
+  return join(dir, ".rolebox", "state", `graph-${hash}.json`);
 }
 
 const dirs: string[] = [];

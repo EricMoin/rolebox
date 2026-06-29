@@ -50,7 +50,7 @@ afterEach(() => {
 
 function stateFilePath(dir: string): string {
   const hash = createHash("sha256").update(dir).digest("hex").slice(0, 12);
-  return join(currentDataDir || dir, "state", `dispatch-${hash}.json`);
+  return join(dir, ".rolebox", "state", `dispatch-${hash}.json`);
 }
 
 describe("TaskStateStore", () => {

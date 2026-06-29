@@ -200,7 +200,7 @@ describe("spillToFile", () => {
   it("writes content atomically to {dir}/state/results/{taskId}.txt", () => {
     const content = "result payload content";
     const path = spillToFile("task-abc", content, testDir);
-    expect(path).toContain(join("state", "results", "task-abc.txt"));
+    expect(path).toContain(join(".rolebox", "state", "results", "task-abc.txt"));
     expect(fs.existsSync(path)).toBe(true);
     const readBack = fs.readFileSync(path, "utf-8");
     expect(readBack).toBe(content);
@@ -210,14 +210,14 @@ describe("spillToFile", () => {
     const path = spillToFile("task-xyz", "hello", testDir);
     expect(fs.existsSync(path)).toBe(true);
     // The state/results dir should exist
-    const resultsDir = join(testDir, "state", "results");
+    const resultsDir = join(testDir, ".rolebox", "state", "results");
     expect(fs.existsSync(resultsDir)).toBe(true);
   });
 
   it("returns the absolute path", () => {
     const path = spillToFile("task-123", "data", testDir);
     expect(path.startsWith("/")).toBe(true);
-    expect(path).toBe(join(testDir, "state", "results", "task-123.txt"));
+    expect(path).toBe(join(testDir, ".rolebox", "state", "results", "task-123.txt"));
   });
 
   it("overwrites existing file (idempotent)", () => {
@@ -301,7 +301,7 @@ describe("sidecar helpers", () => {
 
   it("resultSidecarPath builds correct path", () => {
     const path = resultSidecarPath("task-sidecar", testDir);
-    expect(path).toBe(join(testDir, "state", "results", "task-sidecar.txt"));
+    expect(path).toBe(join(testDir, ".rolebox", "state", "results", "task-sidecar.txt"));
     // Does not touch the filesystem
     expect(fs.existsSync(path)).toBe(false);
   });
@@ -314,7 +314,7 @@ describe("sidecar helpers", () => {
   });
 
   it("missing file returns null (no throw)", () => {
-    const path = join(testDir, "state", "results", "nonexistent.txt");
+    const path = join(testDir, ".rolebox", "state", "results", "nonexistent.txt");
     const result = readResultSidecar(path);
     expect(result).toBeNull();
   });
@@ -335,7 +335,7 @@ describe("sidecar helpers", () => {
 
   it("readResultSidecar throws for non-ENOENT errors", () => {
     // Passing a directory instead of a file produces an EISDIR error
-    const dirPath = join(testDir, "state", "results");
+    const dirPath = join(testDir, ".rolebox", "state", "results");
     fs.mkdirSync(dirPath, { recursive: true });
     expect(() => readResultSidecar(dirPath)).toThrow();
   });

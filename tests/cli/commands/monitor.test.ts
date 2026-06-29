@@ -13,19 +13,17 @@ let tmpDir: string;
 let origCwd: string;
 
 function stateDir(): string {
-  return join(tmpDir, "rolebox", "state");
+  return join(tmpDir, ".rolebox", "state");
 }
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "monitor-cmd-test-"));
-  process.env.XDG_DATA_HOME = tmpDir;
   origCwd = process.cwd();
   process.chdir(tmpDir);
 });
 
 afterEach(() => {
   process.chdir(origCwd);
-  delete process.env.XDG_DATA_HOME;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

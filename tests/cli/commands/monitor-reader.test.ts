@@ -13,21 +13,14 @@ let tmpDir: string;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "monitor-reader-test-"));
-  process.env.XDG_DATA_HOME = tmpDir;
 });
 
 afterEach(() => {
-  delete process.env.XDG_DATA_HOME;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-afterAll(() => {
-  // Ensure no leaked env state
-  delete process.env.XDG_DATA_HOME;
-});
-
 function stateDir(): string {
-  return join(tmpDir, "rolebox", "state");
+  return join(tmpDir, ".rolebox", "state");
 }
 
 async function importReader() {
@@ -37,9 +30,9 @@ async function importReader() {
 describe("readMonitorSnapshot", () => {
   it("returns empty state when no files exist", async () => {
     const { readMonitorSnapshot } = await importReader();
-    const snapshot = readMonitorSnapshot("/some/project");
+    const snapshot = readMonitorSnapshot(tmpDir);
 
-    expect(snapshot.projectDir).toBe("/some/project");
+    expect(snapshot.projectDir).toBe(tmpDir);
     expect(snapshot.tasks).toEqual([]);
     expect(snapshot.activeFunctions).toEqual([]);
     expect(() => new Date(snapshot.timestamp)).not.toThrow();
@@ -101,7 +94,7 @@ describe("readMonitorSnapshot", () => {
     );
 
     const { readMonitorSnapshot } = await importReader();
-    const snapshot = readMonitorSnapshot("/some/project");
+    const snapshot = readMonitorSnapshot(tmpDir);
 
     expect(snapshot.tasks.length).toBe(3);
 
@@ -192,7 +185,7 @@ describe("readMonitorSnapshot", () => {
     );
 
     const { readMonitorSnapshot } = await importReader();
-    const snapshot = readMonitorSnapshot("/some/project");
+    const snapshot = readMonitorSnapshot(tmpDir);
 
     expect(snapshot.activeFunctions.length).toBe(2);
 
@@ -261,7 +254,7 @@ describe("readMonitorSnapshot", () => {
     // No graph file at all
 
     const { readMonitorSnapshot } = await importReader();
-    const snapshot = readMonitorSnapshot("/some/project");
+    const snapshot = readMonitorSnapshot(tmpDir);
 
     expect(snapshot.activeFunctions.length).toBe(2);
 
@@ -281,7 +274,7 @@ describe("readMonitorSnapshot", () => {
     );
 
     const { readMonitorSnapshot } = await importReader();
-    const snapshot = readMonitorSnapshot("/some/project");
+    const snapshot = readMonitorSnapshot(tmpDir);
 
     expect(snapshot.tasks).toEqual([]);
     expect(snapshot.activeFunctions).toEqual([]);
@@ -331,7 +324,7 @@ describe("readMonitorSnapshot", () => {
     );
 
     const { readMonitorSnapshot } = await importReader();
-    const snapshot = readMonitorSnapshot("/some/project");
+    const snapshot = readMonitorSnapshot(tmpDir);
 
     expect(snapshot.tasks.length).toBe(1);
     expect(snapshot.tasks[0].id).toBe("t1");

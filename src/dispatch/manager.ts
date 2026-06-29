@@ -72,6 +72,7 @@ export class DispatchManager {
   private sessionMonitor: SessionMonitor;
   private notifyOutbox = new Set<string>();
   private sweeperTimer: ReturnType<typeof setInterval> | undefined;
+  private _directory: string;
 
   constructor(
     client: OpencodeClient,
@@ -86,7 +87,8 @@ export class DispatchManager {
       this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
       this.config.retryAfterMs,
     );
-    this.store = new TaskStateStore(process.cwd());
+    this._directory = process.cwd();
+    this.store = new TaskStateStore(this._directory);
     this.subagentModelKey = subagentModelKey ?? new Map();
     this.sessionMonitor = new SessionMonitor();
     this.watchdog = new TaskWatchdogManager(
@@ -840,7 +842,7 @@ export class DispatchManager {
 
     // Step 3: Task missing but sidecar exists (survives cleanup)
     if (!task) {
-      const sidecarPath = resultSidecarPath(taskId, process.cwd());
+      const sidecarPath = resultSidecarPath(taskId, this._directory);
       const sidecarText = readResultSidecar(sidecarPath);
       if (sidecarText !== null) {
         const extracted = extractResultBlock(sidecarText);
@@ -919,7 +921,7 @@ export class DispatchManager {
       const allMessages = (messagesResult.data ?? []) as SessionMessageSnapshot[];
       const fullText = this.buildAssistantText(allMessages, boundary);
       const extracted = extractResultBlock(fullText);
-      const path = writeResultSidecar(taskId, fullText, process.cwd());
+      const path = writeResultSidecar(taskId, fullText, this._directory);
 
       return {
         sidecarPath: path,
@@ -1072,6 +1074,7 @@ export class DispatchManager {
    * Must be called before recover() if the default process.cwd() is wrong.
    */
   setStoreDirectory(directory: string): void {
+    this._directory = directory;
     this.store = new TaskStateStore(directory);
   }
 
@@ -1777,7 +1780,7 @@ export class DispatchManager {
 
     const retention = this.config.resultRetentionMs ?? RESULT_RETENTION_MS;
     const timer = setTimeout(() => {
-      const path = resultSidecarPath(taskId, process.cwd());
+      const path = resultSidecarPath(taskId, this._directory);
       try { unlinkSync(path); } catch {}
       this.sidecarGCTimers.delete(taskId);
     }, retention);
