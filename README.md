@@ -138,7 +138,7 @@ rolebox info software-architect --check   # Verify integrity hash
 
 #### `monitor`
 
-Show runtime dispatch activity and activated roles for the current project. Reads persisted state files from `~/.local/share/rolebox/state/`.
+Show runtime dispatch activity and activated roles for the current project. Reads persisted state files from the project-local `.rolebox/state/` directory (resolved from the nearest ancestor of the current directory).
 
 ```bash
 rolebox monitor                              # Snapshot of active tasks and functions
