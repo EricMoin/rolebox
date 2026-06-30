@@ -2,7 +2,7 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
+import { shortHash } from "../../src/state-paths";
 import type { DispatchTask } from "../../src/dispatch/types";
 
 let currentDataDir = "";
@@ -49,7 +49,7 @@ afterEach(() => {
 });
 
 function stateFilePath(dir: string): string {
-  const hash = createHash("sha256").update(dir).digest("hex").slice(0, 12);
+  const hash = shortHash(dir);
   return join(dir, ".rolebox", "state", `dispatch-${hash}.json`);
 }
 

@@ -2,7 +2,7 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
+import { shortHash } from "../../src/state-paths";
 import type { GraphExecutionState } from "../../src/graph/state";
 
 let currentDataDir = "";
@@ -42,7 +42,7 @@ function makeSessions(): Map<string, { agentId: string; state: GraphExecutionSta
 }
 
 function stateFilePath(dir: string): string {
-  const hash = createHash("sha256").update(dir).digest("hex").slice(0, 12);
+  const hash = shortHash(dir);
   return join(dir, ".rolebox", "state", `graph-${hash}.json`);
 }
 

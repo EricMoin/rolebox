@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWriteSync, hashId } from "./fs-util.ts";
+import { atomicWriteSync } from "./fs-util.ts";
+import { shortHash } from "../state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("function:artifacts");
@@ -13,7 +14,7 @@ export class ArtifactStore {
   constructor(private workspaceDir: string) {}
 
   private dir(sessionID: string): string {
-    return join(this.workspaceDir, ".rolebox", "artifacts", hashId(sessionID));
+    return join(this.workspaceDir, ".rolebox", "artifacts", shortHash(sessionID));
   }
 
   private path(sessionID: string, name: string): string {

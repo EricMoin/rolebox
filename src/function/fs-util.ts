@@ -1,12 +1,6 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { createHash } from "node:crypto";
-
-/** Stable 12-hex-char id derived from an arbitrary seed (sha256 prefix). */
-export function hashId(seed: string): string {
-  return createHash("sha256").update(seed).digest("hex").slice(0, 12);
-}
 
 /**
  * Atomically replace `target` with `content`: write a sibling `.tmp` file,

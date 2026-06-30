@@ -1,9 +1,9 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 
 import { createSubLogger } from "../logger.ts";
+import { shortHash } from "../state-paths.ts";
 import type { GraphExecutionState } from "./state.ts";
 
 export interface SerializedGraphSession {
@@ -26,7 +26,7 @@ export class GraphStore {
 
   constructor(directory: string) {
     this.directory = directory;
-    this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
+    this.dirHash = shortHash(directory);
   }
 
   async save(

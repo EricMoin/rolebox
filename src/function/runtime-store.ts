@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWrite, atomicWriteSync, hashId } from "./fs-util.ts";
+import { atomicWrite, atomicWriteSync } from "./fs-util.ts";
+import { shortHash } from "../state-paths.ts";
 import type { FnState } from "./runtime-state.ts";
 
 interface FileShape {
@@ -15,7 +16,7 @@ export class FunctionRuntimeStore {
 
   constructor(directory: string) {
     this.directory = directory;
-    this.dirHash = hashId(directory);
+    this.dirHash = shortHash(directory);
   }
 
   private statePath(): string {
