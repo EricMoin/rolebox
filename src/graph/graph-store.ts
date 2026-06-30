@@ -206,7 +206,7 @@ function migrateV1toV2(oldState: GraphStateFile): GraphStateFile {
         ...session.state,
         loopCounters: {},
         lastResults: {},
-        loopStartTimeMs: null,
+        loopStartTimeMs: undefined,
         terminationReason: null,
         correctionCount: 0,
       },

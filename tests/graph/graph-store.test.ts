@@ -144,7 +144,7 @@ describe("GraphStore", () => {
       expect(state.status).toBe("active");
       expect(state.loopCounters).toEqual({});
       expect(state.lastResults).toEqual({});
-      expect(state.loopStartTimeMs).toBeNull();
+      expect(state.loopStartTimeMs).toBeUndefined();
       expect(state.terminationReason).toBeNull();
       expect(state.correctionCount).toBe(0);
     });

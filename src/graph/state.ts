@@ -3,6 +3,7 @@ import { PARENT_NODE } from "../constants.ts";
 import { isExitEdge } from "./graph-utils.ts";
 import { GraphStore } from "./graph-store.ts";
 import { createSubLogger } from "../logger.ts";
+import { evaluateSync } from "./termination.ts";
 
 const log = createSubLogger("graph:state");
 
@@ -13,7 +14,7 @@ export interface GraphExecutionState {
   status: "active" | "complete" | "exhausted";
   loopCounters?: Record<string, number>;
   lastResults?: Record<string, { hash: string; text: string }>;
-  loopStartTimeMs?: number | null;
+  loopStartTimeMs?: number;
   terminationReason?: TerminationReason | null;
   correctionCount?: number;
   convergenceSignal?: string;
@@ -62,6 +63,10 @@ export class GraphSessionState {
         completed: [],
         iterationCount: 0,
         status: "active",
+        loopCounters: {},
+        lastResults: {},
+        terminationReason: null,
+        correctionCount: 0,
       },
     });
     this._persist();
@@ -96,9 +101,28 @@ export class GraphSessionState {
     const exitEdges = outgoing.filter(isExitEdge);
     const forward = outgoing.filter((e) => !isExitEdge(e));
 
+    // Per-loop-group counter tracking via resolved loop groups
+    const loopGroups = graph.termination?.loopGroups ?? [];
+    if (!state.loopCounters) state.loopCounters = {};
+
     let skippedLoopDueToCap = false;
     for (const e of forward) {
       if (state.completed.includes(e.to)) {
+        // Set loop start time on first back-edge iteration
+        if (!state.loopStartTimeMs) state.loopStartTimeMs = Date.now();
+
+        // Increment per-loop-group counters for matching back-edges
+        for (const group of loopGroups) {
+          const isBackEdge = group.backEdges.some(
+            (be) => be.from === e.from && be.to === e.to,
+          );
+          if (isBackEdge) {
+            state.loopCounters![group.id] =
+              (state.loopCounters![group.id] ?? 0) + 1;
+          }
+        }
+
+        // Legacy global iteration counter (backward compat)
         state.iterationCount++;
         if (state.iterationCount > graph.maxIterations) {
           skippedLoopDueToCap = true;
@@ -110,7 +134,26 @@ export class GraphSessionState {
       }
     }
 
+    // Evaluate sync termination conditions after frontier update
+    const reason = evaluateSync(state, graph, Date.now());
+    if (reason) {
+      state.terminationReason = reason;
+      if (reason === "converged" || reason === "result_match") {
+        state.status = "complete";
+      } else {
+        state.status = "exhausted";
+      }
+    }
+
     this._persist();
+
+    // If termination set status to non-active, return immediately
+    if (state.status !== "active") {
+      if (state.status === "exhausted") {
+        return { kind: "exhausted" };
+      }
+      return { kind: "completed" };
+    }
 
     if (state.frontier.length === 0) {
       if (
@@ -139,7 +182,7 @@ export class GraphSessionState {
   isComplete(sessionID: string): boolean {
     const state = this.sessions.get(sessionID)?.state;
     if (!state) return false;
-    return state.status === "complete" || state.status === "exhausted";
+    return state.status === "complete" || state.status === "exhausted" || state.terminationReason != null;
   }
 
   clear(sessionID: string): void {
