@@ -373,10 +373,8 @@ describe("Plugin Hooks - Graph Recover", () => {
 
       graphSessionState.flushSync();
 
-      // Simulate restart: delete from in-memory maps without persisting
-      (graphSessionState as any).states.delete(sessionID);
-      (graphSessionState as any).graphs.delete(sessionID);
-      (graphSessionState as any).agentIds.delete(sessionID);
+      // Simulate restart: drop the in-memory session entry without persisting
+      (graphSessionState as any).sessions.delete(sessionID);
 
       expect(graphSessionState.getState(sessionID)).toBeUndefined();
 
@@ -406,9 +404,7 @@ describe("Plugin Hooks - Graph Recover", () => {
       graphSessionState.flushSync();
 
       // Simulate restart: clear memory
-      (graphSessionState as any).states.delete(sessionID);
-      (graphSessionState as any).graphs.delete(sessionID);
-      (graphSessionState as any).agentIds.delete(sessionID);
+      (graphSessionState as any).sessions.delete(sessionID);
       managerMap.clear();
 
       // Now create fresh hooks with a graphMap missing the agent

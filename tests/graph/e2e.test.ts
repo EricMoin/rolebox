@@ -940,16 +940,6 @@ describe("Collaboration Graph E2E", () => {
       expect(state.completed).toEqual(["a", "b", "c"]);
     });
 
-    it("getNextAction returns all frontier targets for star", () => {
-      const graph = starGraph();
-      graphSessionState.initGraph("star-3", graph);
-
-      const state = graphSessionState.getState("star-3")!;
-      const actions = graphSessionState.getNextAction(state, graph);
-      expect(actions.length).toBe(3);
-      expect(actions.map((e) => e.to).sort()).toEqual(["a", "b", "c"]);
-    });
-
     it("buildGraphStateBlock shows all frontier targets", () => {
       const graph = starGraph();
       graphSessionState.initGraph("star-4", graph);
@@ -1066,9 +1056,7 @@ describe("Collaboration Graph E2E", () => {
         graphSessionState.flushSync();
 
         // Clear in-memory state
-        (graphSessionState as any).states.clear();
-        (graphSessionState as any).graphs.clear();
-        (graphSessionState as any).agentIds.clear();
+        (graphSessionState as any).sessions.clear();
 
         // Recover — needs reattach callback
         graphSessionState.recover((sid, agentId) => {
@@ -1084,9 +1072,7 @@ describe("Collaboration Graph E2E", () => {
       } finally {
         // Cleanup
         graphSessionState.clear("persist-test");
-        (graphSessionState as any).states.clear();
-        (graphSessionState as any).graphs.clear();
-        (graphSessionState as any).agentIds.clear();
+        (graphSessionState as any).sessions.clear();
         try {
           rmSync(dir, { recursive: true, force: true });
         } catch {}

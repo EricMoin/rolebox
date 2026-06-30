@@ -257,16 +257,9 @@ describe("GraphSessionState — frontier model", () => {
       expect(r.kind).toBe("ignored");
     });
 
-    it("returns ignored when graph not found for session", () => {
+    it("returns ignored when session not found", () => {
       const gs = fresh();
-      // init state directly without graph
-      (gs as any).states.set("s1", {
-        frontier: ["agent-a"],
-        completed: [],
-        iterationCount: 0,
-        status: "active",
-      });
-      const r = gs.advanceStep("s1", "agent-a");
+      const r = gs.advanceStep("nonexistent-session", "agent-a");
       expect(r.kind).toBe("ignored");
     });
 
@@ -470,88 +463,6 @@ describe("GraphSessionState — frontier model", () => {
       gs.advanceStep("s1", "agent-a");
       expect(gs.getState("s1")).toBeDefined();
       expect(gs.getState("s1")!.status).toBe("active");
-    });
-  });
-
-  describe("getNextAction", () => {
-    it("returns all edges targeting frontier agents when active", () => {
-      const gs = fresh();
-      const edges: FlowEdge[] = [
-        { from: "parent", to: "agent-a" },
-        { from: "agent-a", to: "agent-b" },
-        { from: "agent-b", to: "parent", exit: true },
-      ];
-      const graph = makeGraph({ edges, nodes: ["agent-a", "agent-b"] });
-      gs.initGraph("s1", graph);
-
-      const state = gs.getState("s1")!;
-      const next = gs.getNextAction(state, graph);
-      expect(next.length).toBe(1);
-      expect(next[0]).toEqual(edges[0]); // parent→agent-a
-    });
-
-    it("returns correct edges after advanceStep updates frontier", () => {
-      const gs = fresh();
-      const edges: FlowEdge[] = [
-        { from: "parent", to: "agent-a" },
-        { from: "agent-a", to: "agent-b" },
-        { from: "agent-b", to: "parent", exit: true },
-      ];
-      const graph = makeGraph({ edges, nodes: ["agent-a", "agent-b"] });
-      gs.initGraph("s1", graph);
-      gs.advanceStep("s1", "agent-a"); // frontier now [agent-b]
-
-      const state = gs.getState("s1")!;
-      const next = gs.getNextAction(state, graph);
-      expect(next.length).toBe(1);
-      expect(next[0]).toEqual(edges[1]); // agent-a→agent-b
-    });
-
-    it("returns multiple edges for parallel frontier (star topology)", () => {
-      const gs = fresh();
-      const edges: FlowEdge[] = [
-        { from: "parent", to: "agent-a" },
-        { from: "parent", to: "agent-b" },
-        { from: "agent-a", to: "parent", exit: true },
-        { from: "agent-b", to: "parent", exit: true },
-      ];
-      const graph = makeGraph({ edges, nodes: ["agent-a", "agent-b"] });
-      gs.initGraph("s1", graph);
-
-      const state = gs.getState("s1")!;
-      const next = gs.getNextAction(state, graph);
-      expect(next.length).toBe(2);
-      expect(next.map((e) => e.to).sort()).toEqual(["agent-a", "agent-b"]);
-    });
-
-    it("returns empty array when status is complete", () => {
-      const gs = fresh();
-      const edges: FlowEdge[] = [
-        { from: "parent", to: "agent-a" },
-        { from: "agent-a", to: "parent", exit: true },
-      ];
-      const graph = makeGraph({ edges, nodes: ["agent-a"] });
-      gs.initGraph("s1", graph);
-      gs.advanceStep("s1", "agent-a");
-
-      const state = gs.getState("s1")!;
-      expect(gs.getNextAction(state, graph)).toEqual([]);
-    });
-
-    it("returns empty array when status is exhausted", () => {
-      const gs = fresh();
-      const edges: FlowEdge[] = [
-        { from: "parent", to: "agent-a" },
-        { from: "agent-a", to: "agent-b" },
-        { from: "agent-b", to: "agent-a" },
-      ];
-      const graph = makeGraph({ edges, nodes: ["agent-a", "agent-b"], maxIterations: 0 });
-      gs.initGraph("s1", graph);
-      gs.advanceStep("s1", "agent-a");
-      gs.advanceStep("s1", "agent-b");
-
-      const state = gs.getState("s1")!;
-      expect(gs.getNextAction(state, graph)).toEqual([]);
     });
   });
 

@@ -7,10 +7,12 @@ describe("stateRegistry", () => {
     expect(stateRegistry.functionRuntime).toBeInstanceOf(FunctionRuntimeManager);
   });
 
-  it("reset creates a fresh FunctionRuntimeManager", () => {
-    const old = stateRegistry.functionRuntime;
+  it("reset clears state in-place (same singleton instance)", () => {
+    const ref = stateRegistry.functionRuntime;
+    ref.init("test-session", "testFn", 1);
+    expect(ref.get("test-session", "testFn")).toBeDefined();
     stateRegistry.reset();
-    expect(stateRegistry.functionRuntime).toBeInstanceOf(FunctionRuntimeManager);
-    expect(stateRegistry.functionRuntime).not.toBe(old);
+    expect(stateRegistry.functionRuntime).toBe(ref);
+    expect(ref.get("test-session", "testFn")).toBeUndefined();
   });
 });
