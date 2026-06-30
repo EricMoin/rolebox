@@ -186,26 +186,110 @@ export async function createPluginHooks(
           const artifacts = new ArtifactStore(process.cwd());
 
           const activeFns = allFns.filter((f) => activeSet.has(f.name));
-          const needsCapture = activeFns.some((f) =>
+
+          // Fetch last assistant text (needed for text capture + handler context)
+          const hasCapture = activeFns.some((f) =>
             (f.observe ?? []).some((s) => s.on === "tool_after" && s.capture_artifact),
           );
-          if (needsCapture) {
-            const text = await fetchLastAssistantText(client, sid);
-            if (text) runTextCapture({ sessionID: sid, activeFns, artifacts, assistantText: text });
+          const hasHandlers = activeFns.some((f) => !!f.handlers);
+          const lastText = (hasCapture || hasHandlers)
+            ? await fetchLastAssistantText(client, sid)
+            : null;
+          if (hasCapture && lastText) {
+            runTextCapture({ sessionID: sid, activeFns, artifacts, assistantText: lastText });
           }
 
+          // --- Tier-2 handlers: onIdle (Phase 1 — side-effects for all handler fns) ---
+          if (hasHandlers) {
+            const { loadHandlers, safeCall } = await import("./function/handlers-loader.ts");
+            const { FunctionContext } = await import("./function/context.ts");
+            for (const fn of activeFns) {
+              if (!fn.handlers) continue;
+              const mod = await loadHandlers(fn.filePath, fn.handlers);
+              if (!mod?.onIdle) continue;
+              const ctx = new FunctionContext(
+                sid, fn.name, functionRuntime, artifacts,
+                lastText, fn.state_schema_version ?? 1,
+              );
+              await safeCall(() => mod.onIdle!(ctx));
+              let injBytes = 0;
+              for (const inj of ctx.injects) {
+                injBytes += inj.length;
+                if (injBytes > 4096) { log.warn("handler inject cap reached", { fn: fn.name }); break; }
+                const ex = pendingCorrections.get(sid);
+                pendingCorrections.set(sid, ex ? ex + "\n" + inj : inj);
+              }
+              let actCount = 0;
+              for (const name of ctx.pendingActivations.activate) {
+                if (++actCount > 3) { log.warn("handler activation cap reached", { fn: fn.name }); break; }
+                functionSessionState.activate(sid, [name]);
+                const resolved = allFns.find((f) => f.name === name);
+                functionRuntime.init(sid, name, resolved?.state_schema_version ?? 1);
+              }
+              for (const name of ctx.pendingActivations.deactivate) {
+                if (name === fn.name) functionSessionState.deactivate(sid, name);
+              }
+              if (ctx.continuationReasons.length > 0) {
+                const st = functionRuntime.get(sid, fn.name);
+                if (st) {
+                  const existing = (st.kv.__pendingContinuationReasons as string[]) ?? [];
+                  st.kv.__pendingContinuationReasons = [...existing, ...ctx.continuationReasons];
+                }
+              }
+            }
+            functionRuntime.markDirty();
+          }
+
+          // --- Continuation (Phase 2 — ONE continuation per idle) ---
           let burst = 0;
           for (const st of functionRuntime.all(sid).values()) burst += st.continuationCount;
           for (const name of activeSet) {
+            // Re-check active (onIdle may have deactivated)
+            if (!functionSessionState.getActive(sid).has(name)) continue;
             const fn = allFns.find((f) => f.name === name);
-            if (!fn?.continue_until) continue;
+            if (!fn) continue;
             const st = functionRuntime.get(sid, name);
             if (!st || st.phase === "complete") continue;
-            const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
-              requiredEvidence: fn.requires_evidence ?? [], userMessagedThisTurn: false };
-            if (evaluateCondition(fn.continue_until, env)) { st.phase = "complete"; functionRuntime.markDirty(); continue; }
+
+            let wantsContinue = false;
+            let reason = "completion condition not yet met";
+
+            // Declarative: continue_until
+            if (fn.continue_until) {
+              const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
+                requiredEvidence: fn.requires_evidence ?? [], userMessagedThisTurn: false };
+              if (evaluateCondition(fn.continue_until, env)) {
+                st.phase = "complete"; functionRuntime.markDirty(); continue;
+              }
+              wantsContinue = true;
+            }
+
+            // Imperative: shouldContinue (additive — can request but cannot veto declarative)
+            if (fn.handlers && hasHandlers) {
+              const { loadHandlers, safeCall } = await import("./function/handlers-loader.ts");
+              const { FunctionContext } = await import("./function/context.ts");
+              const mod = await loadHandlers(fn.filePath, fn.handlers);
+              if (mod?.shouldContinue) {
+                const ctx = new FunctionContext(
+                  sid, fn.name, functionRuntime, artifacts,
+                  lastText, fn.state_schema_version ?? 1,
+                );
+                const handlerWants = await safeCall(() => mod.shouldContinue!(ctx));
+                if (handlerWants === true) {
+                  wantsContinue = true;
+                  const stashed = (st.kv.__pendingContinuationReasons as string[]) ?? [];
+                  reason = stashed.length > 0 ? stashed.join("; ") : "handler requested continuation";
+                } else if (handlerWants === false && !fn.continue_until) {
+                  st.phase = "complete"; functionRuntime.markDirty(); continue;
+                }
+              }
+            }
+
+            delete st.kv.__pendingContinuationReasons;
+            if (!wantsContinue) continue;
+
             const decision = decideContinuation({
-              fnName: name, st, reason: "completion condition not yet met",
+              fnName: name, st, reason,
               cfg: { globalMaxTurns: 25, perFnMax: fn.continue_max ?? 5 },
               totalContinuationsThisBurst: burst,
             });
@@ -215,7 +299,7 @@ export async function createPluginHooks(
                 path: { id: sid },
                 body: { parts: [{ type: "text", text: decision.reminder }] },
               }).catch(() => {});
-              break;   // ONE continuation per idle event
+              break; // ONE continuation per idle event
             }
           }
           break;
@@ -436,6 +520,44 @@ export async function createPluginHooks(
         for (const inj of injects) {
           const existing = pendingCorrections.get(input.sessionID);
           pendingCorrections.set(input.sessionID, existing ? existing + "\n" + inj : inj);
+        }
+
+        // --- Tier-2 handlers: onToolAfter ---
+        const { loadHandlers, safeCall } = await import("./function/handlers-loader.ts");
+        const { FunctionContext } = await import("./function/context.ts");
+        for (const fn of activeFns) {
+          if (!fn.handlers) continue;
+          const mod = await loadHandlers(fn.filePath, fn.handlers);
+          if (!mod?.onToolAfter) continue;
+          const ctx = new FunctionContext(
+            input.sessionID, fn.name, functionRuntime, artifacts,
+            lastAssistantText, fn.state_schema_version ?? 1,
+          );
+          await safeCall(() => mod.onToolAfter!(ctx, { tool: input.tool!, args: input.args }));
+          // Drain injects (cap 4KB per fn per invocation)
+          let injBytes = 0;
+          for (const handlerInj of ctx.injects) {
+            injBytes += handlerInj.length;
+            if (injBytes > 4096) { log.warn("handler inject cap reached", { fn: fn.name }); break; }
+            const ex = pendingCorrections.get(input.sessionID);
+            pendingCorrections.set(input.sessionID, ex ? ex + "\n" + handlerInj : handlerInj);
+          }
+          // Drain activations (cap 3 per invocation, enforce self-deactivate)
+          let actCount = 0;
+          for (const name of ctx.pendingActivations.activate) {
+            if (++actCount > 3) { log.warn("handler activation cap reached", { fn: fn.name }); break; }
+            functionSessionState.activate(input.sessionID, [name]);
+            const resolved = allFns.find((f) => f.name === name);
+            functionRuntime.init(input.sessionID, name, resolved?.state_schema_version ?? 1);
+          }
+          for (const name of ctx.pendingActivations.deactivate) {
+            if (name === fn.name) functionSessionState.deactivate(input.sessionID, name);
+          }
+          // Stash continuation reasons for session.idle to consume
+          if (ctx.continuationReasons.length > 0) {
+            const st = functionRuntime.get(input.sessionID, fn.name);
+            if (st) { st.kv.__pendingContinuationReasons = ctx.continuationReasons; functionRuntime.markDirty(); }
+          }
         }
       } catch {}
     },
