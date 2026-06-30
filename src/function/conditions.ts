@@ -18,23 +18,37 @@ function uncheckedTodos(env: CondEnv): number {
   return m ? m.length : 0;
 }
 
+function stateEquals(arg: string, env: CondEnv): boolean {
+  const eq = arg.indexOf("=");
+  const key = (eq === -1 ? arg : arg.slice(0, eq)).trim();
+  const expected = eq === -1 ? "" : arg.slice(eq + 1).trim();
+  return String(env.state.kv[key]) === expected;
+}
+
+/**
+ * Closed vocabulary of named conditions, each mapping a parsed argument plus
+ * the evaluation environment to a boolean. This object is the single source of
+ * truth — {@link KNOWN_CONDITIONS} is derived from its keys so the validator
+ * can never drift from the implementations.
+ */
+const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> = {
+  user_approval:       (_arg, env) => env.userMessagedThisTurn,
+  artifact_exists:     (arg, env) => env.artifacts.exists(env.sessionID, arg),
+  plan_todos_complete: (_arg, env) => uncheckedTodos(env) === 0,
+  evidence_met:        (_arg, env) => env.requiredEvidence.every((t) => env.state.evidenceObserved[t] === true),
+  tool_observed:       (arg, env) => env.state.toolsObserved.includes(arg),
+  turn_count:          (arg, env) => (env.state.currentTurn - env.state.activatedAtTurn) >= Number(arg || "0"),
+  state_eq:            stateEquals,
+};
+
+const CALL_RE = /^([a-z][a-z0-9_]*)\(([^)]*)\)$/;
+
 function evalNamed(name: string, env: CondEnv): boolean {
-  const call = name.match(/^([a-z_]+)\(([^)]*)\)$/);
+  const call = name.match(CALL_RE);
   const id = call ? call[1] : name;
   const arg = call ? call[2].trim() : "";
-  switch (id) {
-    case "user_approval":       return env.userMessagedThisTurn;
-    case "artifact_exists":     return env.artifacts.exists(env.sessionID, arg);
-    case "plan_todos_complete": return uncheckedTodos(env) === 0;
-    case "evidence_met":        return env.requiredEvidence.every((t) => env.state.evidenceObserved[t] === true);
-    case "tool_observed":       return env.state.toolsObserved.includes(arg);
-    case "turn_count":          return (env.state.currentTurn - env.state.activatedAtTurn) >= Number(arg || "0");
-    case "state_eq": {
-      const [k, v] = arg.split("=");
-      return String(env.state.kv[k?.trim()]) === (v?.trim() ?? "");
-    }
-    default:                    return false;
-  }
+  const handler = NAMED_CONDITIONS[id];
+  return handler ? handler(arg, env) : false;
 }
 
 export function evaluateCondition(cond: Condition | undefined, env: CondEnv): boolean {
@@ -46,8 +60,5 @@ export function evaluateCondition(cond: Condition | undefined, env: CondEnv): bo
   return false;
 }
 
-/** The ONLY allowed named conditions — validate frontmatter against this. */
-export const KNOWN_CONDITIONS = new Set([
-  "user_approval", "artifact_exists", "plan_todos_complete",
-  "evidence_met", "tool_observed", "turn_count", "state_eq",
-]);
+/** The ONLY allowed named conditions, derived from the registry above. */
+export const KNOWN_CONDITIONS = new Set(Object.keys(NAMED_CONDITIONS));
