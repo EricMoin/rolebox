@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.13.0
+
+### Features
+
+- Add loop termination conditions: `timeout_ms`, `converged`, `result_matches`, `stuck` — configurable via `any_of`/`all_of` composition
+- Add v2 graph state machine with per-loop counters, sync termination, and structured `terminationReason`
+- Add gated prompt blocks and two-phase bridge with correction budget for review-loop workflows
+- Add SCC (strongly connected component) loop detection and termination parsing
+- Add sync/async termination evaluators, template edge locks, and persistence
+- Wire two-phase loop termination into runtime hooks
+- Add shared `state-paths` utility module with deterministic hash/path functions, migrate callers
+- Add monitor command enhancements: scan all state files, resolve project root up-tree
+
+### Bug Fixes
+
+- Normalize workspace directory in plugin hooks for consistent state paths
+- Skip creating empty agent/skill directories during sync
+
+### Documentation
+
+- Update README with state directory description and loop termination examples
+
 ## 0.12.0
 
 ### Features
