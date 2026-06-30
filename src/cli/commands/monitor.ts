@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { bold, dim, red, green, cyan, yellow } from "../format.ts";
-import { readMonitorSnapshot } from "./monitor-reader.ts";
+import { readMonitorSnapshot, resolveProjectRoot } from "./monitor-reader.ts";
 import type { MonitorSnapshot } from "./monitor-reader.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ export async function monitor(
   all: boolean,
   interval: number,
 ): Promise<void> {
-  const projectDir = process.cwd();
+  const projectDir = resolveProjectRoot(process.cwd());
 
   if (!watch) {
     const snapshot = readMonitorSnapshot(projectDir);

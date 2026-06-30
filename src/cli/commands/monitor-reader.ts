@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { stateFileHash } from "../state-hash.ts";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { normalizeWorkspaceDir, stateDirFor } from "../../state-paths.ts";
 
 export interface TaskSnapshot {
   id: string;
@@ -92,6 +92,18 @@ function tryReadJson(filePath: string): unknown | null {
   }
 }
 
+function listStateFiles(stateDir: string, prefix: string): string[] {
+  try {
+    return readdirSync(stateDir)
+      .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
+      .map((f) => join(stateDir, f));
+  } catch (err: unknown) {
+    if (isErrno(err) && err.code === "ENOENT") return [];
+    console.warn(`[monitor-reader] Failed to list ${stateDir}: ${(err as Error).message}`);
+    return [];
+  }
+}
+
 function computeDurationMs(startedAt: string | undefined, completedAt?: string): number {
   try {
     const start = startedAt ? new Date(startedAt).getTime() : NaN;
@@ -103,22 +115,41 @@ function computeDurationMs(startedAt: string | undefined, completedAt?: string):
   }
 }
 
-export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
-  const hash = stateFileHash(projectDir);
-  const stateDir = join(projectDir, ".rolebox", "state");
+/**
+ * Walk up from `start` to the nearest ancestor that already has a
+ * `.rolebox/state` directory, so `monitor` works from any sub-directory of the
+ * project (opencode keys state by the project root, not the shell's cwd).
+ * Normalized so the result matches the directory the plugin wrote under.
+ */
+export function resolveProjectRoot(start: string): string {
+  const normalizedStart = normalizeWorkspaceDir(start);
+  let dir = normalizedStart;
+  for (let i = 0; i < 64; i++) {
+    if (existsSync(stateDirFor(dir))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return normalizedStart;
+}
 
-  const tasks: TaskSnapshot[] = [];
+export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
+  const stateDir = stateDirFor(projectDir);
+
+  // Scan every state file rather than recomputing a single hashed name: the
+  // monitor then surfaces activity even if the writer's directory hash differs
+  // (symlinked/worktree paths, legacy files), which is the whole point here.
+  const taskById = new Map<string, TaskSnapshot>();
   const sessionAgentMap = new Map<string, string>();
 
-  const dispatchPath = join(stateDir, `dispatch-${hash}.json`);
-  const dispatchRaw = tryReadJson(dispatchPath);
-  if (dispatchRaw && typeof dispatchRaw === "object" && "tasks" in dispatchRaw) {
+  for (const dispatchPath of listStateFiles(stateDir, "dispatch-")) {
+    const dispatchRaw = tryReadJson(dispatchPath);
+    if (!dispatchRaw || typeof dispatchRaw !== "object" || !("tasks" in dispatchRaw)) continue;
     const file = dispatchRaw as RawDispatchFile;
+    if (!Array.isArray(file.tasks)) continue;
     for (const st of file.tasks) {
-      if (st.sessionId && st.agent) {
-        sessionAgentMap.set(st.sessionId, st.agent);
-      }
-      tasks.push({
+      if (st.sessionId && st.agent) sessionAgentMap.set(st.sessionId, st.agent);
+      taskById.set(st.id, {
         id: st.id,
         status: st.status as TaskSnapshot["status"],
         agent: st.agent,
@@ -134,14 +165,19 @@ export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
   }
 
   const activeFunctions: ActiveFunction[] = [];
-  const fnstatePath = join(stateDir, `fnstate-${hash}.json`);
-  const fnstateRaw = tryReadJson(fnstatePath);
-  if (fnstateRaw && typeof fnstateRaw === "object" && "sessions" in fnstateRaw) {
+  const seenFn = new Set<string>();
+  for (const fnstatePath of listStateFiles(stateDir, "fnstate-")) {
+    const fnstateRaw = tryReadJson(fnstatePath);
+    if (!fnstateRaw || typeof fnstateRaw !== "object" || !("sessions" in fnstateRaw)) continue;
     const file = fnstateRaw as RawFnStateFile;
+    if (!Array.isArray(file.sessions)) continue;
     for (const session of file.sessions) {
       if (!session.sessionId || !Array.isArray(session.fns)) continue;
       for (const fn of session.fns) {
         if (!fn.state || fn.state.phase !== "active") continue;
+        const key = `${session.sessionId}\u0000${fn.name}`;
+        if (seenFn.has(key)) continue;
+        seenFn.add(key);
         activeFunctions.push({
           sessionId: session.sessionId,
           agentId: null,
@@ -154,14 +190,13 @@ export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
   }
 
   const graphAgentMap = new Map<string, string>();
-  const graphPath = join(stateDir, `graph-${hash}.json`);
-  const graphRaw = tryReadJson(graphPath);
-  if (graphRaw && typeof graphRaw === "object" && "sessions" in graphRaw) {
+  for (const graphPath of listStateFiles(stateDir, "graph-")) {
+    const graphRaw = tryReadJson(graphPath);
+    if (!graphRaw || typeof graphRaw !== "object" || !("sessions" in graphRaw)) continue;
     const file = graphRaw as RawGraphFile;
+    if (!Array.isArray(file.sessions)) continue;
     for (const gs of file.sessions) {
-      if (gs.sessionId && gs.agentId) {
-        graphAgentMap.set(gs.sessionId, gs.agentId);
-      }
+      if (gs.sessionId && gs.agentId) graphAgentMap.set(gs.sessionId, gs.agentId);
     }
   }
 
@@ -175,7 +210,7 @@ export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
   return {
     projectDir,
     timestamp: new Date().toISOString(),
-    tasks,
+    tasks: [...taskById.values()],
     activeFunctions,
   };
 }
