@@ -4,6 +4,9 @@ import { applyParams } from "./function-resolver.ts";
 import { parseFunctionActivation } from "./function-parser.ts";
 import { functionSessionState } from "./session-state.ts";
 import { graphSessionState, buildGraphStateBlock, advanceGraphForDispatch } from "./graph/index.ts";
+import { setAdvanceJudge, extractDispatchTarget } from "./graph/advance.ts";
+import { extractResultBlock, normalizeResult, hashResult } from "./graph/result-capture.ts";
+import type { JudgeFn } from "./graph/termination-async.ts";
 import { buildFunctionBlock, buildActiveArtifactBlock } from "./prompt-builder.ts";
 import { buildAgentConfig, transformPermission } from "./prompt/agent-config.ts";
 import { DispatchManager } from "./dispatch/manager.ts";
@@ -59,6 +62,64 @@ async function fetchLastAssistantText(
   } catch {
     return null;
   }
+}
+
+function needsResultCapture(config: { any_of?: unknown[]; all_of?: unknown[] }): boolean {
+  const check = (arr: unknown[] | undefined): boolean =>
+    arr?.some(
+      (c) =>
+        typeof c === "object" && c !== null &&
+        ("converged" in c || "result_matches" in c || "stuck" in c),
+    ) ?? false;
+  return check(config.any_of) || check(config.all_of);
+}
+
+function isDispatchError(output: unknown): boolean {
+  if (typeof output === "object" && output !== null) {
+    const obj = output as Record<string, unknown>;
+    return "error" in obj || "failure" in obj;
+  }
+  return false;
+}
+
+function createJudgeFn(client: PluginInput["client"]): JudgeFn {
+  return async (nlCondition: string, context: string): Promise<boolean> => {
+    try {
+      const createResult = await client.session.create({});
+      if ((createResult as { error?: unknown }).error) return false;
+
+      const sessionId = ((createResult as { data?: { id?: string } }).data)?.id;
+      if (!sessionId) return false;
+
+      try {
+        const promptResult = await client.session.prompt({
+          path: { id: sessionId },
+          body: {
+            parts: [{
+              type: "text",
+              text: `Judge: "${nlCondition}"\n\nContext:\n${context}\n\nAnswer "YES" or "NO".`,
+            }],
+          },
+        });
+
+        if ((promptResult as { error?: unknown }).error) return false;
+
+        const data = (promptResult as {
+          data?: { parts: Array<{ type: string; text?: string }> };
+        }).data;
+        const text = data?.parts
+          ?.filter((p) => p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text!)
+          .join("") ?? "";
+
+        return /^\s*YES\b/mi.test(text);
+      } finally {
+        client.session.delete({ path: { id: sessionId } }).catch(() => {});
+      }
+    } catch {
+      return false;
+    }
+  };
 }
 
 export async function createPluginHooks(
@@ -148,6 +209,8 @@ export async function createPluginHooks(
       process.exit(143);
     });
   }
+
+  setAdvanceJudge(createJudgeFn(client));
 
   return {
     tool: {
@@ -492,6 +555,27 @@ export async function createPluginHooks(
       if (!input.sessionID || !input.tool) return;
 
       if (input.tool === "task" || input.tool === "dispatch") {
+        if (isDispatchError(_output)) {
+          log.debug("skipping advance: dispatch failed", { sessionID: input.sessionID });
+          return;
+        }
+
+        const gs = graphSessionState.getState(input.sessionID);
+        const graph = graphSessionState.getGraph(input.sessionID);
+        if (gs && graph?.termination?.config && needsResultCapture(graph.termination.config)) {
+          const target = extractDispatchTarget(input.tool, input.args);
+          if (target) {
+            const lastText = await fetchLastAssistantText(client, input.sessionID);
+            if (lastText) {
+              const resultBlock = extractResultBlock(lastText);
+              const normalized = normalizeResult(resultBlock);
+              const hash = hashResult(normalized);
+              if (!gs.lastResults) gs.lastResults = {};
+              gs.lastResults[target] = { hash, text: normalized };
+            }
+          }
+        }
+
         const { correction } = advanceGraphForDispatch(input.sessionID, input.tool, input.args);
         if (correction) {
           pendingCorrections.set(input.sessionID, correction);
