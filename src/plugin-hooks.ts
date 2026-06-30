@@ -11,6 +11,7 @@ import { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool,
 import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "./dispatch/config.ts";
 import type { ResolvedRole, ResolvedSubAgent, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { RoleMode } from "./constants.ts";
+import { normalizeWorkspaceDir } from "./state-paths.ts";
 import { createSubLogger } from "./logger.ts";
 import { runToolObserve, runTextCapture, runMessageObserve, runActivateObserve } from "./function/observe.ts";
 import { functionRuntime } from "./function/runtime-state.ts";
@@ -100,9 +101,13 @@ export async function createPluginHooks(
     }
   }
 
-  const dir = directory ?? process.cwd();
+  // Key the in-memory manager cache by the directory opencode handed us (stable
+  // across a session); persist all state under the normalized path so the
+  // `monitor` CLI, resolving the same project independently, reads the same files.
+  const rawDir = directory ?? process.cwd();
+  const dir = normalizeWorkspaceDir(rawDir);
 
-  let dispatchManager = managerMap.get(dir);
+  let dispatchManager = managerMap.get(rawDir);
   if (!dispatchManager) {
     const primaryRole = resolvedRoles.find((r) => r.config.mode === RoleMode.Primary);
     const mergedConfig = mergeConfig(
@@ -112,13 +117,13 @@ export async function createPluginHooks(
     );
     dispatchManager = new DispatchManager(client, mergedConfig, subagentModelKey);
     dispatchManager.setStoreDirectory(dir);
-    managerMap.set(dir, dispatchManager);
+    managerMap.set(rawDir, dispatchManager);
     await dispatchManager.recover();
   }
 
   if (directory) {
-    graphSessionState.setStoreDirectory(directory);
-    functionRuntime.setStoreDirectory(directory);
+    graphSessionState.setStoreDirectory(dir);
+    functionRuntime.setStoreDirectory(dir);
   }
   graphSessionState.recover((_sessionID, agentId) => roleGraphMap.get(agentId));
   functionRuntime.recover();
@@ -183,7 +188,7 @@ export async function createPluginHooks(
           const allFns: ResolvedFunction[] = [];
           for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
           const { ArtifactStore } = await import("./function/artifact-store.ts");
-          const artifacts = new ArtifactStore(process.cwd());
+          const artifacts = new ArtifactStore(dir);
 
           const activeFns = allFns.filter((f) => activeSet.has(f.name));
 
@@ -503,7 +508,7 @@ export async function createPluginHooks(
         const activeFns = allFns.filter((f) => activeNames.has(f.name));
         if (activeFns.length === 0) return;
 
-        const artifacts = new ArtifactStore(process.cwd());
+        const artifacts = new ArtifactStore(dir);
         const needsText = activeFns.some((f) =>
           (f.observe ?? []).some(
             (s) => s.on === "tool_after" && s.capture_artifact && (!s.tool || s.tool === input.tool),
@@ -628,7 +633,7 @@ export async function createPluginHooks(
       for (const [, st] of runtimeStates) {
         st.currentTurn += 1;
       }
-      const artifacts = new ArtifactStore(process.cwd());
+      const artifacts = new ArtifactStore(dir);
       for (const fn of activeFunctions) {
         const st = functionRuntime.get(input.sessionID, fn.name);
         if (!st) continue;
