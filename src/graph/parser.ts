@@ -2,11 +2,16 @@ import type {
   FlowEdge,
   ResolvedGraph,
   GraphTemplate,
+  TerminationConfig,
+  LoopCondition,
+  ResolvedTermination,
+  LoopGroup,
 } from "../types.ts";
 import { PARENT_NODE, GRAPH_TEMPLATE_VALUES } from "../constants.ts";
 import { expandTemplate } from "./templates.ts";
 import { validateGraph } from "./validator.ts";
 import { hasCycle, isExitEdge } from "./graph-utils.ts";
+import { detectLoopGroups } from "./loop-detector.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("graph-parser");
@@ -123,6 +128,19 @@ export function parseCollaboration(
   // ── Identify exit edges ──
   const exitEdges = edges.filter(isExitEdge);
 
+  // ── Detect loop groups via SCC ──
+  const loopGroups = detectLoopGroups(edges);
+
+  // ── Parse termination config ──
+  const termination = parseTermination(
+    obj.termination,
+    availableSubagentNames,
+    loopGroups,
+  );
+
+  // ── Use resolved loop groups (with per-loop maxIterations if from termination) ──
+  const finalLoopGroups = termination?.loopGroups ?? loopGroups;
+
   // ── Assemble resolved graph ──
   const resolvedGraph: ResolvedGraph = {
     edges,
@@ -130,7 +148,8 @@ export function parseCollaboration(
     maxIterations,
     exitEdges,
     template: topology,
-    loopGroups: [],
+    loopGroups: finalLoopGroups,
+    ...(termination ? { termination } : {}),
   };
 
   // ── Validate against known agents ──
@@ -301,6 +320,211 @@ function mergeEdges(
   }
 
   return Array.from(edgeMap.values());
+}
+
+// ─── Termination parsing helpers ─────────────────────────────────────
+
+const KNOWN_CONDITION_KEYS = new Set([
+  "max_iterations",
+  "timeout_ms",
+  "converged",
+  "result_matches",
+  "stuck",
+]);
+
+/**
+ * Parse a raw termination config into a normalized `ResolvedTermination`.
+ * Returns `undefined` when `raw` is absent, null, or not an object.
+ * Validates agent references in `result_matches.agent` and `converged`
+ * against `availableAgents` (logs warnings, not hard failures).
+ * Tolerates unknown condition keys (logs and skips).
+ */
+function parseTermination(
+  raw: unknown,
+  availableAgents: string[],
+  loopGroups: LoopGroup[],
+): ResolvedTermination | undefined {
+  if (raw === null || raw === undefined || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const obj = raw as Record<string, unknown>;
+  const anyOf = parseConditionList(obj.any_of, availableAgents);
+  const allOf = parseConditionList(obj.all_of, availableAgents);
+
+  if (!anyOf && !allOf) return undefined;
+
+  const config: TerminationConfig = {};
+  if (anyOf) config.any_of = anyOf;
+  if (allOf) config.all_of = allOf;
+
+  const perLoopMaxIter = extractPerLoopMaxIterations(config);
+
+  const resolvedGroups = loopGroups.map((lg) => ({
+    ...lg,
+    maxIterations: perLoopMaxIter ?? lg.maxIterations,
+  }));
+
+  return { config, loopGroups: resolvedGroups };
+}
+
+function parseConditionList(
+  raw: unknown,
+  availableAgents: string[],
+): LoopCondition[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: LoopCondition[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) {
+      log.warn("termination condition is not an object, skipping");
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const parsed = parseLoopCondition(obj, availableAgents);
+    if (parsed) result.push(parsed);
+  }
+  return result.length > 0 ? result : [];
+}
+
+function parseLoopCondition(
+  obj: Record<string, unknown>,
+  availableAgents: string[],
+): LoopCondition | null {
+  const keys = Object.keys(obj);
+  // Log and ignore completely unrecognized keys
+  if (keys.length === 0) {
+    log.warn("termination condition is an empty object, skipping");
+    return null;
+  }
+
+  // Check primary known key
+  for (const key of keys) {
+    if (KNOWN_CONDITION_KEYS.has(key)) {
+      return parseKnownCondition(key, obj[key], obj, availableAgents);
+    }
+  }
+
+  // No known key found
+  log.warn(
+    `unknown termination condition key(s): ${keys.join(", ")} — skipping`,
+  );
+  return null;
+}
+
+function parseKnownCondition(
+  key: string,
+  value: unknown,
+  fullObj: Record<string, unknown>,
+  availableAgents: string[],
+): LoopCondition | null {
+  // Warn about extra unknown keys alongside a known one
+  for (const extraKey of Object.keys(fullObj)) {
+    if (!KNOWN_CONDITION_KEYS.has(extraKey)) {
+      log.warn(
+        `unknown extra key "${extraKey}" in termination condition — ignored`,
+      );
+    }
+  }
+
+  switch (key) {
+    case "max_iterations": {
+      const n = typeof value === "number" ? value : NaN;
+      if (isNaN(n) || n < 0) {
+        log.warn(
+          `invalid max_iterations value in termination: ${value}, skipping`,
+        );
+        return null;
+      }
+      return { max_iterations: Math.max(0, n) };
+    }
+    case "timeout_ms": {
+      const n = typeof value === "number" ? value : NaN;
+      if (isNaN(n) || n <= 0) {
+        log.warn(
+          `invalid timeout_ms value in termination: ${value}, skipping`,
+        );
+        return null;
+      }
+      return { timeout_ms: n };
+    }
+    case "converged": {
+      if (typeof value !== "string" || value.trim() === "") {
+        log.warn(
+          `invalid converged agent reference: ${value}, skipping`,
+        );
+        return null;
+      }
+      const agent = value.trim();
+      if (!availableAgents.includes(agent)) {
+        log.warn(
+          `converged references unknown agent "${agent}"`,
+        );
+      }
+      return { converged: agent };
+    }
+    case "result_matches": {
+      if (typeof value !== "object" || value === null) {
+        log.warn(
+          `invalid result_matches value: ${value}, skipping`,
+        );
+        return null;
+      }
+      const rm = value as Record<string, unknown>;
+      if (typeof rm.agent !== "string" || rm.agent.trim() === "") {
+        log.warn(
+          "result_matches missing required 'agent' field, skipping",
+        );
+        return null;
+      }
+      const agent = rm.agent.trim();
+      if (!availableAgents.includes(agent)) {
+        log.warn(
+          `result_matches references unknown agent "${agent}"`,
+        );
+      }
+      const condition: Record<string, unknown> = { agent };
+      if (typeof rm.contains === "string") condition.contains = rm.contains;
+      if (typeof rm.regex === "string") condition.regex = rm.regex;
+      if (typeof rm.score_gte === "number") condition.score_gte = rm.score_gte;
+      if (typeof rm.no_changes === "boolean") {
+        condition.no_changes = rm.no_changes;
+      }
+      return { result_matches: condition } as LoopCondition;
+    }
+    case "stuck": {
+      if (typeof value !== "object" || value === null) {
+        log.warn(`invalid stuck value: ${value}, skipping`);
+        return null;
+      }
+      const s = value as Record<string, unknown>;
+      const repeats =
+        typeof s.repeats === "number" && s.repeats > 0 ? s.repeats : NaN;
+      if (isNaN(repeats)) {
+        log.warn(
+          `stuck missing valid 'repeats' field: ${JSON.stringify(value)}, skipping`,
+        );
+        return null;
+      }
+      return { stuck: { repeats } };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Extract a per-loop `max_iterations` value from termination conditions.
+ * Scans both `any_of` and `all_of` arrays; returns the first `max_iterations`
+ * found. Undefined when no per-loop cap is configured.
+ */
+function extractPerLoopMaxIterations(
+  config: TerminationConfig,
+): number | undefined {
+  const conditions = [...(config.any_of ?? []), ...(config.all_of ?? [])];
+  for (const c of conditions) {
+    if ("max_iterations" in c) return c.max_iterations;
+  }
+  return undefined;
 }
 
 

@@ -38,6 +38,7 @@ export function validateGraph(
   validateOrphanAgents(graph.edges, availableAgents, warnings);
   validateConnectivity(graph, warnings);
   validateCycles(graph, warnings);
+  validateTermination(graph, availableAgents, warnings);
 
   return { valid: true, warnings };
 }
@@ -174,6 +175,45 @@ function validateCycles(
       "Cycle detected in graph but maxIterations is not set, defaulting to 3";
     warnings.push(msg);
     log.info(msg);
+  }
+}
+
+/**
+ * Check 7: Validate termination condition agent references.
+ * `result_matches.agent` and `converged` values must reference known agents
+ * or "parent". Unknown agents produce warnings (non-fatal).
+ */
+function validateTermination(
+  graph: ResolvedGraph,
+  availableAgents: string[],
+  warnings: string[],
+): void {
+  const term = graph.termination;
+  if (!term) return;
+
+  const known = new Set([...availableAgents, PARENT_NODE]);
+
+  const conditions = [
+    ...(term.config.any_of ?? []),
+    ...(term.config.all_of ?? []),
+  ];
+
+  for (const cond of conditions) {
+    if ("converged" in cond && typeof cond.converged === "string") {
+      if (!known.has(cond.converged)) {
+        const msg = `termination converged references unknown agent "${cond.converged}"`;
+        warnings.push(msg);
+        log.info(msg);
+      }
+    }
+    if ("result_matches" in cond && cond.result_matches) {
+      const rm = cond.result_matches as { agent?: string };
+      if (typeof rm.agent === "string" && !known.has(rm.agent)) {
+        const msg = `termination result_matches references unknown agent "${rm.agent}"`;
+        warnings.push(msg);
+        log.info(msg);
+      }
+    }
   }
 }
 

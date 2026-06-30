@@ -1,0 +1,272 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`buildCollaborationBlock review-loop 2-agent (coder, reviewer) 1`] = `
+"<collaboration_graph>
+<topology>review-loop</topology>
+<routing>
+  Step 1: Dispatch initial work to Coder using task(subagent_type="coder", ...)
+  Step 2: Collect Coder's output and dispatch to Reviewer using task(subagent_type="reviewer", prompt="[previous agent's full output]", ...)
+  After the final agent responds, evaluate the result. If quality is insufficient, Reviewer may send work back to Coder by dispatching again with task(subagent_type="coder", prompt="[revision notes + previous output]", ...).
+</routing>
+<exit_conditions>
+The graph completes when: the final result meets quality criteria and exits, OR max 3 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+- Always pass the previous step's context and output when dispatching the next step.
+</routing_rules>
+</collaboration_graph>"
+`;
+
+exports[`buildCollaborationBlock review-loop 3-agent (writer, editor, publisher) 1`] = `
+"<collaboration_graph>
+<topology>review-loop</topology>
+<routing>
+  Step 1: Dispatch initial work to Writer using task(subagent_type="writer", ...)
+  Step 2: Collect Writer's output and dispatch to Editor using task(subagent_type="editor", prompt="[previous agent's full output]", ...)
+  Step 3: Collect Editor's output and dispatch to Publisher using task(subagent_type="publisher", prompt="[previous agent's full output]", ...)
+  After the final agent responds, evaluate the result. If quality is insufficient, Publisher may send work back to Writer by dispatching again with task(subagent_type="writer", prompt="[revision notes + previous output]", ...).
+</routing>
+<exit_conditions>
+The graph completes when: the final result meets quality criteria and exits, OR max 5 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+- Always pass the previous step's context and output when dispatching the next step.
+</routing_rules>
+</collaboration_graph>"
+`;
+
+exports[`buildCollaborationBlock star 3-agent (frontend, backend, devops) 1`] = `
+"<collaboration_graph>
+<topology>star</topology>
+<routing>
+Dispatch work to each specialist in sequence (V1 limitation — parallel dispatch not supported):
+
+  Step 1: Dispatch to Frontend using task(subagent_type="frontend", ...)
+  Step 2: Dispatch to Backend using task(subagent_type="backend", ...)
+  Step 3: Dispatch to DevOps using task(subagent_type="devops", ...)
+
+  Collect all outputs. The combined results from all agents complete the workflow.
+</routing>
+<exit_conditions>
+The graph completes when: all agents have returned their outputs, OR max 0 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+</routing_rules>
+</collaboration_graph>"
+`;
+
+exports[`buildCollaborationBlock custom flow with back-edge (researcher, writer, editor) 1`] = `
+"<collaboration_graph>
+<topology>custom</topology>
+<routing>
+  The orchestrator dispatches initial work to: Researcher.
+  Use task(subagent_type="<agent-id>", ...) to dispatch to each.
+
+  Agent-to-agent transitions: Researcher → Writer, Writer → Editor, Editor → Writer.
+
+  Exit points: Editor. Their output completes the workflow.
+</routing>
+<exit_conditions>
+The graph completes when: an exit-point agent returns their output, OR max 2 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+- Always pass the previous step's context and output when dispatching the next step.
+</routing_rules>
+</collaboration_graph>"
+`;
+
+exports[`buildSubagentRoleBlock review-loop 2-agent entry (coder) 1`] = `
+"<collaboration_role>
+You receive work from the orchestrator. Your output will be passed to: reviewer.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock review-loop 2-agent exit (reviewer) 1`] = `
+"<collaboration_role>
+You receive work from: coder. Your output completes the workflow.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock review-loop 3-agent entry (writer) 1`] = `
+"<collaboration_role>
+You receive work from the orchestrator. Your output will be passed to: editor.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock review-loop 3-agent middle (editor) 1`] = `
+"<collaboration_role>
+You are a middle agent in the collaboration. You receives work from: writer and passes output to: publisher.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock review-loop 3-agent exit (publisher) 1`] = `
+"<collaboration_role>
+You receive work from: editor. Your output completes the workflow.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock star 3-agent entry/exit (frontend) 1`] = `
+"<collaboration_role>
+You receive work from the orchestrator. Your output completes the workflow.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock star 3-agent entry/exit (backend) 1`] = `
+"<collaboration_role>
+You receive work from the orchestrator. Your output completes the workflow.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock star 3-agent entry/exit (devops) 1`] = `
+"<collaboration_role>
+You receive work from the orchestrator. Your output completes the workflow.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock custom flow with back-edge entry (researcher) 1`] = `
+"<collaboration_role>
+You receive work from the orchestrator. Your output will be passed to: writer.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock custom flow with back-edge middle (writer) 1`] = `
+"<collaboration_role>
+You are a middle agent in the collaboration. You receives work from: researcher, editor and passes output to: editor.
+</collaboration_role>"
+`;
+
+exports[`buildSubagentRoleBlock custom flow with back-edge exit (editor) 1`] = `
+"<collaboration_role>
+You receive work from: writer. Your output completes the workflow.
+</collaboration_role>"
+`;
+
+exports[`buildGraphStateBlock review-loop 2-agent initial (just parsed) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>coder</frontier>
+  <completed>none</completed>
+  <iteration>0/3</iteration>
+  <next_action>Dispatch to coder</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock review-loop 2-agent mid-loop (frontier moved) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>reviewer</frontier>
+  <completed>coder</completed>
+  <iteration>0/3</iteration>
+  <next_action>Dispatch to reviewer</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock review-loop 2-agent exhausted (iteration cap hit) 1`] = `
+"<collaboration_state>
+  <status>exhausted</status>
+  <frontier>coder</frontier>
+  <completed>coder, reviewer</completed>
+  <iteration>4/3</iteration>
+  <next_action>Workflow exhausted</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock review-loop 3-agent initial (just parsed) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>writer</frontier>
+  <completed>none</completed>
+  <iteration>0/5</iteration>
+  <next_action>Dispatch to writer</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock review-loop 3-agent mid-loop (after one full loop) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>writer</frontier>
+  <completed>writer, editor, publisher</completed>
+  <iteration>1/5</iteration>
+  <next_action>Dispatch to writer</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock review-loop 3-agent exhausted (iteration cap hit) 1`] = `
+"<collaboration_state>
+  <status>exhausted</status>
+  <frontier>writer</frontier>
+  <completed>writer, editor, publisher</completed>
+  <iteration>6/5</iteration>
+  <next_action>Workflow exhausted</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock star 3-agent initial (all workers in frontier) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>frontend, backend, devops</frontier>
+  <completed>none</completed>
+  <iteration>0/unlimited</iteration>
+  <next_action>Dispatch to frontend
+  Dispatch to backend
+  Dispatch to devops</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock star 3-agent mid-loop (one worker remaining) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>devops</frontier>
+  <completed>frontend, backend</completed>
+  <iteration>0/unlimited</iteration>
+  <next_action>Dispatch to devops</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock star 3-agent exhausted (simulated) 1`] = `
+"<collaboration_state>
+  <status>exhausted</status>
+  <frontier>frontend, backend, devops</frontier>
+  <completed>none</completed>
+  <iteration>1/unlimited</iteration>
+  <next_action>Workflow exhausted</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock custom flow with back-edge initial (just parsed) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>researcher</frontier>
+  <completed>none</completed>
+  <iteration>0/2</iteration>
+  <next_action>Dispatch to researcher</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock custom flow with back-edge mid-loop (first agent completed) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>writer</frontier>
+  <completed>researcher</completed>
+  <iteration>0/2</iteration>
+  <next_action>Dispatch to writer (research findings)</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock custom flow with back-edge exhausted (iteration cap hit) 1`] = `
+"<collaboration_state>
+  <status>exhausted</status>
+  <frontier>writer</frontier>
+  <completed>researcher, writer, editor</completed>
+  <iteration>3/2</iteration>
+  <next_action>Workflow exhausted</next_action>
+</collaboration_state>"
+`;
