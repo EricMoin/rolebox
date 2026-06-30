@@ -94,6 +94,8 @@ export interface CollaborationConfig {
   flow?: FlowEdge[];
   /** Maximum collaboration iterations before forced termination */
   max_iterations?: number;
+  /** Loop termination conditions (when to stop the collaboration flow) */
+  termination?: TerminationConfig;
 }
 
 /**
@@ -142,6 +144,10 @@ export interface ResolvedGraph {
   exitEdges: FlowEdge[];
   /** The template that was expanded, if any */
   template?: GraphTemplate;
+  /** Loop groups detected in the graph (cycles subject to termination rules) */
+  loopGroups: LoopGroup[];
+  /** Resolved termination configuration for the graph */
+  termination?: ResolvedTermination;
 }
 
 /**
@@ -159,6 +165,78 @@ export interface GraphNodeRole {
   isEntryPoint: boolean;
   /** Whether this agent is an exit point for the collaboration flow */
   isExitPoint: boolean;
+}
+
+// ── Loop & Termination Types ─────────────────────────────────────────────
+
+/**
+ * Reasons a collaboration loop can terminate.
+ * Each reason corresponds to a specific termination condition being met.
+ */
+export type TerminationReason =
+  | "max_iterations"
+  | "timeout"
+  | "stuck"
+  | "converged"
+  | "result_match"
+  | "error";
+
+/**
+ * A discriminated union of all possible loop termination conditions.
+ * Each variant describes a single condition under which a collaboration
+ * loop should stop executing.
+ */
+export type LoopCondition =
+  | { max_iterations: number }
+  | { timeout_ms: number }
+  | { converged: string }
+  | {
+      result_matches: {
+        agent: string;
+        contains?: string;
+        regex?: string;
+        score_gte?: number;
+        no_changes?: boolean;
+      };
+    }
+  | { stuck: { repeats: number } };
+
+/**
+ * Composition of loop termination conditions.
+ * - `any_of`: the loop terminates when ANY of the listed conditions is met
+ * - `all_of`: the loop terminates when ALL of the listed conditions are met
+ */
+export interface TerminationConfig {
+  /** Terminate when any one of these conditions is met */
+  any_of?: LoopCondition[];
+  /** Terminate only when all of these conditions are met */
+  all_of?: LoopCondition[];
+}
+
+/**
+ * A detected loop in a resolved collaboration graph.
+ * Captures the cycle metadata for runtime loop detection and termination.
+ */
+export interface LoopGroup {
+  /** Unique identifier for this loop group */
+  id: string;
+  /** Node IDs that participate in the loop */
+  nodes: string[];
+  /** Back-edges that form the cycle(s) in this loop */
+  backEdges: FlowEdge[];
+  /** Optional per-loop iteration cap (overrides global max where set) */
+  maxIterations?: number;
+}
+
+/**
+ * Resolved termination configuration attached to a resolved graph.
+ * Combines the user-facing TerminationConfig with the detected LoopGroup list.
+ */
+export interface ResolvedTermination {
+  /** The normalized termination config (may contain resolved defaults) */
+  config: TerminationConfig;
+  /** Loops detected in the graph that are subject to termination rules */
+  loopGroups: LoopGroup[];
 }
 
 /**

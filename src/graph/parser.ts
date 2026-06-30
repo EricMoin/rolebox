@@ -130,6 +130,7 @@ export function parseCollaboration(
     maxIterations,
     exitEdges,
     template: topology,
+    loopGroups: [],
   };
 
   // ── Validate against known agents ──
