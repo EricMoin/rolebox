@@ -257,8 +257,40 @@ export function buildGraphStateBlock(
   const completedStr = state.completed.join(", ") || "none";
   const iterStr = `${state.iterationCount}/${graph.maxIterations || "unlimited"}`;
 
+  // ── Termination fields (only when graph.termination is present) ──
+  let terminationXml = "";
+  if (graph.termination) {
+    const lines: string[] = [];
+
+    if (state.terminationReason) {
+      lines.push(
+        `  <termination_reason>${state.terminationReason}</termination_reason>`,
+      );
+    }
+
+    if (state.loopCounters) {
+      for (const [groupId, count] of Object.entries(state.loopCounters)) {
+        lines.push(
+          `  <loop_iterations group="${groupId}">${count}</loop_iterations>`,
+        );
+      }
+    }
+
+    if (state.convergenceSignal) {
+      lines.push(
+        `  <convergence>Workflow is converging — summarize final result</convergence>`,
+      );
+    }
+
+    if (lines.length > 0) {
+      terminationXml = "\n" + lines.join("\n");
+    }
+  }
+
   let nextAction: string;
-  if (state.status === "active") {
+  if (state.terminationReason) {
+    nextAction = `Workflow terminated (reason: ${state.terminationReason}) — synthesize the best final result from the completed agents' work`;
+  } else if (state.status === "active") {
     nextAction = state.frontier
       .map((target) => {
         const edge = graph.edges.find((e) => e.to === target);
@@ -275,7 +307,7 @@ export function buildGraphStateBlock(
   <status>${state.status}</status>
   <frontier>${frontierStr}</frontier>
   <completed>${completedStr}</completed>
-  <iteration>${iterStr}</iteration>
+  <iteration>${iterStr}</iteration>${terminationXml}
   <next_action>${nextAction}</next_action>
 </collaboration_state>`;
 }

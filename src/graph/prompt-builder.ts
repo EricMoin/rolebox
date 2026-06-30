@@ -1,4 +1,4 @@
-import type { ResolvedGraph, GraphNodeRole } from "../types.ts";
+import type { ResolvedGraph, GraphNodeRole, LoopCondition, ResolvedTermination } from "../types.ts";
 import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
 import { isExitEdge } from "./graph-utils.ts";
 import { RESULT_FENCE } from "../dispatch/result-extractor.ts";
@@ -81,6 +81,45 @@ function getStarWorkers(graph: ResolvedGraph): string[] {
     const toParent = graph.edges.some((e) => e.from === n && e.to === PARENT_NODE);
     return fromParent && toParent;
   });
+}
+
+// ── Termination description helpers ─────────────────────────────────────
+
+function describeTerminationCondition(cond: LoopCondition): string {
+  if ("max_iterations" in cond) return `${cond.max_iterations} iterations`;
+  if ("timeout_ms" in cond) {
+    const ms = cond.timeout_ms;
+    if (ms >= 60000) return `${Math.round(ms / 60000)}min elapsed`;
+    if (ms >= 1000) return `${Math.round(ms / 1000)}s elapsed`;
+    return `${ms}ms elapsed`;
+  }
+  if ("converged" in cond) {
+    return `${cond.converged.charAt(0).toUpperCase() + cond.converged.slice(1)} approves`;
+  }
+  if ("result_matches" in cond) {
+    return `${cond.result_matches.agent.charAt(0).toUpperCase() + cond.result_matches.agent.slice(1)} result matches criteria`;
+  }
+  if ("stuck" in cond) return `${cond.stuck.repeats} repeated identical results`;
+  return "";
+}
+
+function buildTerminationConditionsXml(
+  termination: ResolvedTermination,
+): string {
+  const { config } = termination;
+  const lines: string[] = [];
+
+  if (config.any_of && config.any_of.length > 0) {
+    const descs = config.any_of.map(describeTerminationCondition).join("; ");
+    lines.push(`  This graph stops when ANY of: ${descs}`);
+  }
+  if (config.all_of && config.all_of.length > 0) {
+    const descs = config.all_of.map(describeTerminationCondition).join(" AND ");
+    lines.push(`  This graph stops when ALL of: ${descs}`);
+  }
+
+  if (lines.length === 0) return "";
+  return `<termination_conditions>\n${lines.join("\n")}\n</termination_conditions>`;
 }
 
 // ── Routing instruction builders ───────────────────────────────────────
@@ -298,8 +337,14 @@ export function buildCollaborationBlock(
       break;
   }
 
+  let terminationBlock = "";
+  if (graph.termination) {
+    const xml = buildTerminationConditionsXml(graph.termination);
+    if (xml) terminationBlock = "\n" + xml;
+  }
+
   return `<collaboration_graph>
-${routingXml}
+${routingXml}${terminationBlock}
 </collaboration_graph>`;
 }
 

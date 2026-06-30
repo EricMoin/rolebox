@@ -270,3 +270,109 @@ exports[`buildGraphStateBlock custom flow with back-edge exhausted (iteration ca
   <next_action>Workflow exhausted</next_action>
 </collaboration_state>"
 `;
+
+exports[`buildCollaborationBlock with termination review-loop 2-agent with any_of termination (max_iterations, timeout, converged) 1`] = `
+"<collaboration_graph>
+<topology>review-loop</topology>
+<routing>
+  Step 1: Dispatch initial work to Coder using task(subagent_type="coder", ...)
+  Step 2: Collect Coder's output and dispatch to Reviewer using task(subagent_type="reviewer", prompt="[previous agent's full output]", ...)
+  After the final agent responds, evaluate the result. If quality is insufficient, Reviewer may send work back to Coder by dispatching again with task(subagent_type="coder", prompt="[revision notes + previous output]", ...).
+</routing>
+<exit_conditions>
+The graph completes when: the final result meets quality criteria and exits, OR max 3 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+- Always pass the previous step's context and output when dispatching the next step.
+</routing_rules>
+<termination_conditions>
+  This graph stops when ANY of: 5 iterations; 1min elapsed; Reviewer approves
+</termination_conditions>
+</collaboration_graph>"
+`;
+
+exports[`buildCollaborationBlock with termination review-loop 3-agent with all_of termination 1`] = `
+"<collaboration_graph>
+<topology>review-loop</topology>
+<routing>
+  Step 1: Dispatch initial work to Writer using task(subagent_type="writer", ...)
+  Step 2: Collect Writer's output and dispatch to Editor using task(subagent_type="editor", prompt="[previous agent's full output]", ...)
+  Step 3: Collect Editor's output and dispatch to Publisher using task(subagent_type="publisher", prompt="[previous agent's full output]", ...)
+  After the final agent responds, evaluate the result. If quality is insufficient, Publisher may send work back to Writer by dispatching again with task(subagent_type="writer", prompt="[revision notes + previous output]", ...).
+</routing>
+<exit_conditions>
+The graph completes when: the final result meets quality criteria and exits, OR max 5 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+- Always pass the previous step's context and output when dispatching the next step.
+</routing_rules>
+<termination_conditions>
+  This graph stops when ALL of: 8 iterations AND Publisher approves
+</termination_conditions>
+</collaboration_graph>"
+`;
+
+exports[`buildCollaborationBlock with termination star 3-agent with result_matches and stuck termination 1`] = `
+"<collaboration_graph>
+<topology>star</topology>
+<routing>
+Dispatch work to each specialist in sequence (V1 limitation — parallel dispatch not supported):
+
+  Step 1: Dispatch to Frontend using task(subagent_type="frontend", ...)
+  Step 2: Dispatch to Backend using task(subagent_type="backend", ...)
+  Step 3: Dispatch to DevOps using task(subagent_type="devops", ...)
+
+  Collect all outputs. The combined results from all agents complete the workflow.
+</routing>
+<exit_conditions>
+The graph completes when: all agents have returned their outputs, OR max 0 iteration(s) reached.
+</exit_conditions>
+<routing_rules>
+- NEVER do specialist work yourself. Always dispatch via task().
+- Never call more than one specialist in a single step.
+</routing_rules>
+<termination_conditions>
+  This graph stops when ANY of: Frontend result matches criteria; 3 repeated identical results
+</termination_conditions>
+</collaboration_graph>"
+`;
+
+exports[`buildGraphStateBlock with termination terminated (max_iterations, loopCounters, reason set) 1`] = `
+"<collaboration_state>
+  <status>exhausted</status>
+  <frontier>reviewer</frontier>
+  <completed>coder</completed>
+  <iteration>5/3</iteration>
+  <termination_reason>max_iterations</termination_reason>
+  <loop_iterations group="coder,reviewer">5</loop_iterations>
+  <next_action>Workflow terminated (reason: max_iterations) — synthesize the best final result from the completed agents' work</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock with termination converging (loopCounters + convergenceSignal, active status) 1`] = `
+"<collaboration_state>
+  <status>active</status>
+  <frontier>reviewer</frontier>
+  <completed>coder</completed>
+  <iteration>3/3</iteration>
+  <loop_iterations group="coder,reviewer">3</loop_iterations>
+  <convergence>Workflow is converging — summarize final result</convergence>
+  <next_action>Dispatch to reviewer</next_action>
+</collaboration_state>"
+`;
+
+exports[`buildGraphStateBlock with termination converged (terminationReason + loopCounters, complete status) 1`] = `
+"<collaboration_state>
+  <status>complete</status>
+  <frontier>reviewer</frontier>
+  <completed>coder, reviewer</completed>
+  <iteration>4/3</iteration>
+  <termination_reason>converged</termination_reason>
+  <loop_iterations group="coder,reviewer">4</loop_iterations>
+  <next_action>Workflow terminated (reason: converged) — synthesize the best final result from the completed agents' work</next_action>
+</collaboration_state>"
+`;

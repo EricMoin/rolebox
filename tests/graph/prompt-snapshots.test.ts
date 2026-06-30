@@ -176,6 +176,97 @@ function customStates(): StateTriple {
   };
 }
 
+// ── Termination-enabled fixtures ────────────────────────────────────
+
+const COLLAB_REVIEW_2_WITH_TERM = {
+  topology: "review-loop",
+  agents: ["coder", "reviewer"],
+  max_iterations: 3,
+  termination: {
+    any_of: [
+      { max_iterations: 5 },
+      { timeout_ms: 60000 },
+      { converged: "reviewer" },
+    ],
+  },
+};
+
+const COLLAB_REVIEW_3_ALL_OF = {
+  topology: "review-loop",
+  agents: ["writer", "editor", "publisher"],
+  max_iterations: 5,
+  termination: {
+    all_of: [{ max_iterations: 8 }, { converged: "publisher" }],
+  },
+};
+
+const COLLAB_STAR_WITH_RESULT = {
+  topology: "star",
+  agents: ["frontend", "backend", "devops"],
+  termination: {
+    any_of: [
+      { result_matches: { agent: "frontend", score_gte: 80 } },
+      { stuck: { repeats: 3 } },
+    ],
+  },
+};
+
+let termGraphs: Record<string, ResolvedGraph> = {};
+
+function parseTermGraphs(): void {
+  termGraphs = {
+    review2: parseCollaboration(COLLAB_REVIEW_2_WITH_TERM, [
+      "coder",
+      "reviewer",
+    ])!,
+    review3All: parseCollaboration(COLLAB_REVIEW_3_ALL_OF, [
+      "writer",
+      "editor",
+      "publisher",
+    ])!,
+    starResult: parseCollaboration(COLLAB_STAR_WITH_RESULT, [
+      "frontend",
+      "backend",
+      "devops",
+    ])!,
+  };
+}
+
+parseTermGraphs();
+
+function termStates(): {
+  terminated: GraphExecutionState;
+  converging: GraphExecutionState;
+  converged: GraphExecutionState;
+} {
+  return {
+    terminated: {
+      frontier: ["reviewer"],
+      completed: ["coder"],
+      iterationCount: 5,
+      status: "exhausted",
+      terminationReason: "max_iterations",
+      loopCounters: { "coder,reviewer": 5 },
+    },
+    converging: {
+      frontier: ["reviewer"],
+      completed: ["coder"],
+      iterationCount: 3,
+      status: "active",
+      loopCounters: { "coder,reviewer": 3 },
+      convergenceSignal: "Outputs stabilizing across iterations",
+    },
+    converged: {
+      frontier: ["reviewer"],
+      completed: ["coder", "reviewer"],
+      iterationCount: 4,
+      status: "complete",
+      terminationReason: "converged",
+      loopCounters: { "coder,reviewer": 4 },
+    },
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 1. buildCollaborationBlock snapshots (stable per graph)
 // ═══════════════════════════════════════════════════════════════════
@@ -334,6 +425,62 @@ describe("buildGraphStateBlock", () => {
     it("exhausted (iteration cap hit)", () => {
       expect(buildGraphStateBlock(s.exhausted, graphs.custom)).toMatchSnapshot();
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 3.5. buildCollaborationBlock with termination
+// ═══════════════════════════════════════════════════════════════════
+
+describe("buildCollaborationBlock with termination", () => {
+  it("review-loop 2-agent with any_of termination (max_iterations, timeout, converged)", () => {
+    expect(
+      buildCollaborationBlock(termGraphs.review2, META_REVIEW_2),
+    ).toMatchSnapshot();
+  });
+
+  it("review-loop 3-agent with all_of termination", () => {
+    expect(
+      buildCollaborationBlock(termGraphs.review3All, META_REVIEW_3),
+    ).toMatchSnapshot();
+  });
+
+  it("star 3-agent with result_matches and stuck termination", () => {
+    expect(
+      buildCollaborationBlock(termGraphs.starResult, META_STAR),
+    ).toMatchSnapshot();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 3.6. buildGraphStateBlock with termination
+// ═══════════════════════════════════════════════════════════════════
+
+describe("buildGraphStateBlock with termination", () => {
+  const s = termStates();
+
+  it("terminated (max_iterations, loopCounters, reason set)", () => {
+    expect(
+      buildGraphStateBlock(s.terminated, termGraphs.review2),
+    ).toMatchSnapshot();
+  });
+
+  it("converging (loopCounters + convergenceSignal, active status)", () => {
+    expect(
+      buildGraphStateBlock(s.converging, termGraphs.review2),
+    ).toMatchSnapshot();
+  });
+
+  it("converged (terminationReason + loopCounters, complete status)", () => {
+    expect(
+      buildGraphStateBlock(s.converged, termGraphs.review2),
+    ).toMatchSnapshot();
+  });
+
+  it("terminated state with term graph is deterministic", () => {
+    const a = buildGraphStateBlock(s.terminated, termGraphs.review2);
+    const b = buildGraphStateBlock(s.terminated, termGraphs.review2);
+    expect(a).toBe(b);
   });
 });
 

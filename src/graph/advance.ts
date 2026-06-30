@@ -1,5 +1,15 @@
 import { graphSessionState } from "./state.ts";
 import type { AdvanceResult } from "./state.ts";
+import { evaluateAsync } from "./termination-async.ts";
+import type { JudgeFn } from "./termination-async.ts";
+
+export const MAX_CORRECTIONS = 3;
+
+let _advanceJudge: JudgeFn | undefined;
+
+export function setAdvanceJudge(judge: JudgeFn): void {
+  _advanceJudge = judge;
+}
 
 // Regex patterns for string fallback extraction, matching the existing
 // patterns from the plugin-hooks tool.execute.after handler.
@@ -80,12 +90,21 @@ export function advanceGraphForDispatch(
   const result = graphSessionState.advanceStep(sessionID, target);
 
   if (result.kind === "off_route") {
+    state.correctionCount = (state.correctionCount ?? 0) + 1;
     const expected = result.expected.join(", ");
-    const correction = `<system-reminder>
+
+    let correction: string;
+    if (state.correctionCount >= MAX_CORRECTIONS) {
+      correction = `<system-reminder>
+The workflow has terminated due to repeated off-route dispatches. Stop dispatching and synthesize the best final result from the completed agents' work.
+</system-reminder>`;
+    } else {
+      correction = `<system-reminder>
 The dispatch to "${result.got}" went off the collaboration graph route.
 Expected next target(s): ${expected}.
 The graph state has not been advanced.
 </system-reminder>`;
+    }
     return { result, correction };
   }
 
@@ -97,5 +116,51 @@ The graph state has not been advanced.
     return { result, correction };
   }
 
+  // ── Async orchestration phase ─────────────────────────────────
+  // When the termination config includes converged/result_matches,
+  // fire evaluateAsync after sync advanceStep returns. Results are
+  // stored onto state for the next system.transform read.
+  const graph = graphSessionState.getGraph(sessionID);
+  const needsAsync = graph?.termination
+    ? hasAsyncCondition(graph.termination.config)
+    : false;
+
+  if (needsAsync && _advanceJudge && graph) {
+    const sessionIDCapture = sessionID;
+    Promise.resolve().then(async () => {
+      try {
+        const evalResult = await evaluateAsync(
+          graphSessionState.getState(sessionIDCapture)!,
+          graph,
+          { judge: _advanceJudge! },
+        );
+        const currentState = graphSessionState.getState(sessionIDCapture);
+        if (!currentState) return;
+
+        if (evalResult.converged) {
+          currentState.terminationReason = "converged";
+          currentState.convergenceSignal = "converged";
+          currentState.status = "complete";
+        } else if (evalResult.resultMatch) {
+          currentState.terminationReason = "result_match";
+          currentState.status = "complete";
+        }
+      } catch {
+        // converged async failure → not converged (no state change)
+      }
+    });
+  }
+
   return { result };
+}
+
+function hasAsyncCondition(
+  config: { any_of?: unknown[]; all_of?: unknown[] },
+): boolean {
+  const check = (arr: unknown[] | undefined): boolean =>
+    arr?.some(
+      (c) =>
+        typeof c === "object" && c !== null && ("converged" in c || "result_matches" in c),
+    ) ?? false;
+  return check(config.any_of) || check(config.all_of);
 }
