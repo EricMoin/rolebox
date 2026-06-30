@@ -95,6 +95,17 @@ export class FunctionRuntimeManager {
     const loaded = this.store.load();
     if (loaded) this.states = loaded;
   }
+
+  /**
+   * Clear all in-memory state without creating a new instance.
+   * Used by state-registry reset to avoid split-brain (multiple instances).
+   * Does NOT persist the empty state — caller re-initializes as needed via init().
+   */
+  resetAll(): void {
+    if (this._timer) { clearTimeout(this._timer); this._timer = undefined; }
+    this.states.clear();
+    this._dirty = false;
+  }
 }
 
 export const functionRuntime = new FunctionRuntimeManager();

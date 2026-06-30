@@ -1,6 +1,8 @@
 import type { ArtifactStore } from "./artifact-store.ts";
 import type { FunctionRuntimeManager, FnState } from "./runtime-state.ts";
 
+
+
 export interface PendingActivation { activate: string[]; deactivate: string[]; }
 
 export class FunctionContext {
@@ -14,9 +16,10 @@ export class FunctionContext {
     private rt: FunctionRuntimeManager,
     private artifacts: ArtifactStore,
     private lastAssistantMessage: string | null,
+    private schemaVersion: number = 1,
   ) {}
 
-  private self(): FnState { return this.rt.init(this.sessionID, this.fnName, 1); }
+  private self(): FnState { return this.rt.init(this.sessionID, this.fnName, this.schemaVersion); }
 
   state = {
     get: (k: string): unknown => this.self().kv[k],

@@ -2,6 +2,8 @@ import { join, dirname, isAbsolute } from "node:path";
 import type { FunctionContext } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
 
+
+
 const log = createSubLogger("function:handlers");
 
 type HandlerModule = {

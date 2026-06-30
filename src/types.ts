@@ -370,7 +370,7 @@ export type Condition =
 /** A reaction a function runs when a lifecycle event fires. */
 export interface ObserveSpec {
   /** Which lifecycle event triggers this reaction. */
-  on: "tool_after" | "message" | "activate" | "idle";
+  on: "tool_after" | "message" | "activate";
   /** For on:"tool_after", only fire when this tool was called. */
   tool?: string;
   /** Optional extra guard; reaction only runs when this condition is true. */

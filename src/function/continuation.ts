@@ -1,9 +1,24 @@
 import type { FnState } from "./runtime-state.ts";
 
+export interface CooldownRule {
+  atCount: number;
+  cooldownTurns: number;
+}
+
 export interface SafetyConfig {
   globalMaxTurns: number;
   perFnMax: number;
+  /**
+   * When `continuationCount` reaches `atCount`, force a cooldown of
+   * `cooldownTurns` turns. Defaults to {@link DEFAULT_COOLDOWN_RULES}.
+   */
+  cooldownRules?: CooldownRule[];
 }
+
+export const DEFAULT_COOLDOWN_RULES: CooldownRule[] = [
+  { atCount: 3, cooldownTurns: 1 },
+  { atCount: 5, cooldownTurns: 3 },
+];
 
 export interface ContinuationDecision {
   shouldContinue: boolean;
@@ -11,7 +26,7 @@ export interface ContinuationDecision {
   reason: string;
 }
 
-export function decideContinuation(opts: {
+export interface ContinuationInput {
   fnName: string;
   st: FnState;
   reason: string;
@@ -19,31 +34,33 @@ export function decideContinuation(opts: {
   totalContinuationsThisBurst: number;
   lastTwoOutputsIdentical?: boolean;
   modelAskedQuestion?: boolean;
-}): ContinuationDecision {
+}
+
+function blockingReason(opts: ContinuationInput): string | null {
   const { st, cfg } = opts;
+  if (opts.totalContinuationsThisBurst >= cfg.globalMaxTurns) return "global cap";
+  if (st.continuationCount >= cfg.perFnMax) return "per-fn cap";
+  if (opts.lastTwoOutputsIdentical) return "loop detected";
+  if (opts.modelAskedQuestion) return "model asked a question";
+  if (st.currentTurn < st.cooldownUntilTurn) return "cooldown";
+  return null;
+}
 
-  if (opts.totalContinuationsThisBurst >= cfg.globalMaxTurns) {
-    return { shouldContinue: false, reason: "global cap" };
-  }
-  if (st.continuationCount >= cfg.perFnMax) {
-    return { shouldContinue: false, reason: "per-fn cap" };
-  }
-  if (opts.lastTwoOutputsIdentical) {
-    return { shouldContinue: false, reason: "loop detected" };
-  }
-  if (opts.modelAskedQuestion) {
-    return { shouldContinue: false, reason: "model asked a question" };
-  }
-  if (st.currentTurn < st.cooldownUntilTurn) {
-    return { shouldContinue: false, reason: "cooldown" };
-  }
+/**
+ * SIDE EFFECT: when continuation is allowed this mutates `opts.st`
+ * (increments `continuationCount` and may set `cooldownUntilTurn`). Call
+ * exactly once per decision point — a second call counts as another turn.
+ */
+export function decideContinuation(opts: ContinuationInput): ContinuationDecision {
+  const blocked = blockingReason(opts);
+  if (blocked) return { shouldContinue: false, reason: blocked };
 
+  const { st, cfg } = opts;
   st.continuationCount += 1;
-  if (st.continuationCount === 3) {
-    st.cooldownUntilTurn = st.currentTurn + 1;
-  }
-  if (st.continuationCount === 5) {
-    st.cooldownUntilTurn = st.currentTurn + 3;
+  for (const rule of cfg.cooldownRules ?? DEFAULT_COOLDOWN_RULES) {
+    if (st.continuationCount === rule.atCount) {
+      st.cooldownUntilTurn = st.currentTurn + rule.cooldownTurns;
+    }
   }
 
   const finalWarning =
