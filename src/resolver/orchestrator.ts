@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { resolveSkills } from "../skill-resolver.ts";
 import { resolveAllReferences } from "../reference-resolver.ts";
 import { resolveFunctions } from "../function-resolver.ts";
-import { buildSubagentRoleBlock, buildResultContract, parseCollaboration } from "../graph/index.ts";
+import { buildSubagentRoleBlock, SUBAGENT_RESULT_CONTRACT, parseCollaboration } from "../graph/index.ts";
 import { buildAgentPrompt } from "../prompt-builder.ts";
 import { subagentDir, globalFunctionsPath } from "../paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
@@ -220,8 +220,7 @@ export async function resolveAllRoles(
           const nodeRole = computeNodeRole(graph, sa.id, childSlug);
           if (nodeRole) {
             const roleBlock = buildSubagentRoleBlock(nodeRole);
-            const contractBlock = buildResultContract();
-            sa.prompt = `${sa.prompt}\n\n${roleBlock}\n\n${contractBlock}`;
+            sa.prompt = `${sa.prompt}\n\n${roleBlock}\n\n${SUBAGENT_RESULT_CONTRACT}`;
           }
         }
       }

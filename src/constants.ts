@@ -90,3 +90,21 @@ export const ROLEBOX_AGENT_MARKER = "<!-- rolebox-managed -->";
 
 /** Plugin identifier. */
 export const PLUGIN_ID = "rolebox";
+
+// ── Inheritable Fields ─────────────────────────────────────────────────
+
+/**
+ * Fields that a child SubAgentConfig inherits from its parent RoleConfig
+ * when the child does not set them explicitly. Used by `applyInheritance`.
+ *
+ * Keep in sync with the "Config inheritance" table in README.md.
+ */
+export const INHERITABLE_FIELDS: readonly string[] = [
+  "model",
+  "color",
+  "variant",
+  "temperature",
+  "top_p",
+  "permission",
+  "tools",
+] as const;
