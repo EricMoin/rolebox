@@ -29,6 +29,26 @@ function createSkillEntry(entryPath: string, filePath: string): void {
  * - Single-file skills (.md): create a wrapper directory with SKILL.md symlink inside
  */
 export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: string): void {
+  const entries: { entryName: string; filePath: string }[] = [];
+  for (const role of resolvedRoles) {
+    for (const skill of role.skills) {
+      if (skill.scope !== SkillScope.Rolebox) continue;
+      if (!existsSync(skill.filePath)) continue;
+      entries.push({ entryName: `${ROLEBOX_SKILL_PREFIX}${skill.name}`, filePath: skill.filePath });
+    }
+    for (const sub of role.subagents) {
+      for (const skill of sub.skills) {
+        if (skill.scope !== SkillScope.Rolebox) continue;
+        if (!existsSync(skill.filePath)) continue;
+        entries.push({ entryName: `${ROLEBOX_SKILL_PREFIX}${sub.id}~${skill.name}`, filePath: skill.filePath });
+      }
+    }
+  }
+
+  // Don't materialize a global skills/ directory when there is nothing to sync
+  // and none exists yet — that empty folder is the "mystery" folder users see.
+  if (entries.length === 0 && !existsSync(globalSkillsDir)) return;
+
   try {
     mkdirSync(globalSkillsDir, { recursive: true });
   } catch (err) {
@@ -59,24 +79,7 @@ export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir
     log.warn("Failed to read skills directory", { dir: globalSkillsDir, error: formatError(err) });
   }
 
-  for (const role of resolvedRoles) {
-    for (const skill of role.skills) {
-      if (skill.scope !== SkillScope.Rolebox) continue;
-      if (!existsSync(skill.filePath)) continue;
-
-      const entryName = `${ROLEBOX_SKILL_PREFIX}${skill.name}`;
-      const entryPath = path.join(globalSkillsDir, entryName);
-      createSkillEntry(entryPath, skill.filePath);
-    }
-    for (const sub of role.subagents) {
-      for (const skill of sub.skills) {
-        if (skill.scope !== SkillScope.Rolebox) continue;
-        if (!existsSync(skill.filePath)) continue;
-
-        const entryName = `${ROLEBOX_SKILL_PREFIX}${sub.id}~${skill.name}`;
-        const entryPath = path.join(globalSkillsDir, entryName);
-        createSkillEntry(entryPath, skill.filePath);
-      }
-    }
+  for (const { entryName, filePath } of entries) {
+    createSkillEntry(path.join(globalSkillsDir, entryName), filePath);
   }
 }
