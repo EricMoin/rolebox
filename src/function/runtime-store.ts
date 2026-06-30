@@ -1,7 +1,6 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { atomicWrite, atomicWriteSync, hashId } from "./fs-util.ts";
 import type { FnState } from "./runtime-state.ts";
 
 interface FileShape {
@@ -16,7 +15,7 @@ export class FunctionRuntimeStore {
 
   constructor(directory: string) {
     this.directory = directory;
-    this.dirHash = createHash("sha256").update(directory).digest("hex").slice(0, 12);
+    this.dirHash = hashId(directory);
   }
 
   private statePath(): string {
@@ -41,35 +40,13 @@ export class FunctionRuntimeStore {
 
   private async _doSave(states: Map<string, Map<string, FnState>>): Promise<void> {
     try {
-      const p = this.statePath();
-      const stateDir = join(p, "..");
-      mkdirSync(stateDir, { recursive: true });
-
-      const tmp = p + ".tmp";
-      await writeFile(tmp, this.toFile(states), "utf-8");
-
-      try {
-        unlinkSync(p);
-      } catch {}
-
-      renameSync(tmp, p);
+      await atomicWrite(this.statePath(), this.toFile(states));
     } catch {}
   }
 
   saveSync(states: Map<string, Map<string, FnState>>): void {
     try {
-      const p = this.statePath();
-      const stateDir = join(p, "..");
-      mkdirSync(stateDir, { recursive: true });
-
-      const tmp = p + ".tmp";
-      writeFileSync(tmp, this.toFile(states), "utf-8");
-
-      try {
-        unlinkSync(p);
-      } catch {}
-
-      renameSync(tmp, p);
+      atomicWriteSync(this.statePath(), this.toFile(states));
     } catch {}
   }
 

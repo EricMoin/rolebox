@@ -1,6 +1,10 @@
-import type { FlowEdge, ResolvedGraph } from "../types.ts";
+import type { ResolvedGraph } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
+import { isExitEdge } from "./graph-utils.ts";
 import { GraphStore } from "./graph-store.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("graph:state");
 
 export interface GraphExecutionState {
   frontier: string[];
@@ -17,10 +21,14 @@ export type AdvanceResult =
   | { kind: "unknown"; got: string }
   | { kind: "ignored" };
 
+interface SessionEntry {
+  graph: ResolvedGraph;
+  state: GraphExecutionState;
+  agentId: string;
+}
+
 export class GraphSessionState {
-  private graphs: Map<string, ResolvedGraph> = new Map();
-  private states: Map<string, GraphExecutionState> = new Map();
-  private agentIds: Map<string, string> = new Map();
+  private sessions: Map<string, SessionEntry> = new Map();
   private store?: GraphStore;
   private _dirty = false;
   private _persistTimer?: ReturnType<typeof setTimeout>;
@@ -30,8 +38,6 @@ export class GraphSessionState {
   }
 
   initGraph(sessionID: string, graph: ResolvedGraph, agentId?: string): void {
-    this.graphs.set(sessionID, graph);
-    this.agentIds.set(sessionID, agentId ?? sessionID);
     const frontier: string[] = [];
     for (const e of graph.edges) {
       if (
@@ -42,19 +48,23 @@ export class GraphSessionState {
         frontier.push(e.to);
       }
     }
-    this.states.set(sessionID, {
-      frontier,
-      completed: [],
-      iterationCount: 0,
-      status: "active",
+    this.sessions.set(sessionID, {
+      graph,
+      agentId: agentId ?? sessionID,
+      state: {
+        frontier,
+        completed: [],
+        iterationCount: 0,
+        status: "active",
+      },
     });
     this._persist();
   }
 
   advanceStep(sessionID: string, completedAgent: string): AdvanceResult {
-    const state = this.states.get(sessionID);
-    const graph = this.graphs.get(sessionID);
-    if (!state || !graph) return { kind: "ignored" };
+    const entry = this.sessions.get(sessionID);
+    if (!entry) return { kind: "ignored" };
+    const { state, graph } = entry;
     if (state.status !== "active") return { kind: "ignored" };
 
     if (!graph.nodes.includes(completedAgent)) {
@@ -77,8 +87,8 @@ export class GraphSessionState {
     }
 
     const outgoing = graph.edges.filter((e) => e.from === completedAgent);
-    const exitEdges = outgoing.filter((e) => e.exit || e.to === PARENT_NODE);
-    const forward = outgoing.filter((e) => !e.exit && e.to !== PARENT_NODE);
+    const exitEdges = outgoing.filter(isExitEdge);
+    const forward = outgoing.filter((e) => !isExitEdge(e));
 
     let skippedLoopDueToCap = false;
     for (const e of forward) {
@@ -112,33 +122,31 @@ export class GraphSessionState {
     return { kind: "advanced", frontier: [...state.frontier] };
   }
 
-  getNextAction(
-    state: GraphExecutionState,
-    graph: ResolvedGraph,
-  ): FlowEdge[] {
-    if (state.status !== "active") return [];
-    return graph.edges.filter((e) => state.frontier.includes(e.to));
-  }
-
   getState(sessionID: string): GraphExecutionState | undefined {
-    return this.states.get(sessionID);
+    return this.sessions.get(sessionID)?.state;
   }
 
   getGraph(sessionID: string): ResolvedGraph | undefined {
-    return this.graphs.get(sessionID);
+    return this.sessions.get(sessionID)?.graph;
   }
 
   isComplete(sessionID: string): boolean {
-    const state = this.states.get(sessionID);
+    const state = this.sessions.get(sessionID)?.state;
     if (!state) return false;
     return state.status === "complete" || state.status === "exhausted";
   }
 
   clear(sessionID: string): void {
-    this.states.delete(sessionID);
-    this.graphs.delete(sessionID);
-    this.agentIds.delete(sessionID);
+    this.sessions.delete(sessionID);
     this._persist();
+  }
+
+  private _snapshotForStore(): Map<string, { agentId: string; state: GraphExecutionState }> {
+    const snapshot = new Map<string, { agentId: string; state: GraphExecutionState }>();
+    for (const [sessionID, entry] of this.sessions) {
+      snapshot.set(sessionID, { agentId: entry.agentId, state: entry.state });
+    }
+    return snapshot;
   }
 
   private _persist(): void {
@@ -150,15 +158,10 @@ export class GraphSessionState {
       if (!this._dirty) return;
       this._dirty = false;
       try {
-        const sessions = new Map<string, { agentId: string; state: GraphExecutionState }>();
-        for (const [sessionID, state] of this.states) {
-          sessions.set(sessionID, {
-            agentId: this.agentIds.get(sessionID) ?? sessionID,
-            state,
-          });
-        }
-        await this.store!.save(sessions);
-      } catch {}
+        await this.store!.save(this._snapshotForStore());
+      } catch (err) {
+        log.warn("Failed to persist graph state", err);
+      }
     }, 500);
   }
 
@@ -171,15 +174,10 @@ export class GraphSessionState {
     this._dirty = false;
     if (this.store) {
       try {
-        const sessions = new Map<string, { agentId: string; state: GraphExecutionState }>();
-        for (const [sessionID, state] of this.states) {
-          sessions.set(sessionID, {
-            agentId: this.agentIds.get(sessionID) ?? sessionID,
-            state,
-          });
-        }
-        this.store.saveSync(sessions);
-      } catch {}
+        this.store.saveSync(this._snapshotForStore());
+      } catch (err) {
+        log.warn("Failed to persist graph state (sync)", err);
+      }
     }
   }
 
@@ -190,9 +188,11 @@ export class GraphSessionState {
     for (const [sessionID, entry] of loaded) {
       const graph = reattach(sessionID, entry.agentId);
       if (graph) {
-        this.graphs.set(sessionID, graph);
-        this.states.set(sessionID, entry.state);
-        this.agentIds.set(sessionID, entry.agentId);
+        this.sessions.set(sessionID, {
+          graph,
+          state: entry.state,
+          agentId: entry.agentId,
+        });
       }
     }
   }

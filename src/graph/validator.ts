@@ -1,5 +1,6 @@
 import type { ResolvedGraph, FlowEdge } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
+import { hasCycle, isExitEdge } from "./graph-utils.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("graph-validator");
@@ -67,7 +68,7 @@ function validateNodesExist(
   }
 
   if (warnings.length > 0) {
-    log.info(
+    log.warn(
       `Validation failed: ${warnings.join("; ")}`,
     );
   }
@@ -80,13 +81,11 @@ function validateExitEdgeExists(
   graph: ResolvedGraph,
   warnings: string[],
 ): void {
-  const hasExit = graph.edges.some(
-    (e) => e.exit === true || e.to === PARENT_NODE,
-  );
+  const hasExit = graph.edges.some(isExitEdge);
   if (!hasExit) {
     const msg = "No exit edge found: graph has no termination path";
     warnings.push(msg);
-    log.info(msg);
+    log.warn(msg);
   }
 }
 
@@ -102,7 +101,7 @@ function validateEntryPointExists(
     const msg =
       'No entry point found: graph must have at least one edge from "parent"';
     warnings.push(msg);
-    log.info(msg);
+    log.warn(msg);
   }
 }
 
@@ -178,49 +177,4 @@ function validateCycles(
   }
 }
 
-/**
- * Detect a directed cycle in the subgraph of agent-to-agent edges.
- * Excludes edges to/from "parent" (which represent flow boundaries).
- * Uses DFS with a recursion stack for back-edge detection.
- */
-function hasCycle(edges: FlowEdge[]): boolean {
-  const nodes = new Set<string>();
-  for (const e of edges) {
-    if (e.from !== PARENT_NODE) nodes.add(e.from);
-    if (e.to !== PARENT_NODE) nodes.add(e.to);
-  }
 
-  // Build adjacency list (only agent-to-agent edges)
-  const adj = new Map<string, string[]>();
-  for (const n of nodes) adj.set(n, []);
-  for (const e of edges) {
-    if (e.from !== PARENT_NODE && e.to !== PARENT_NODE) {
-      adj.get(e.from)!.push(e.to);
-    }
-  }
-
-  // DFS cycle detection
-  const visited = new Set<string>();
-  const recStack = new Set<string>();
-
-  function dfs(node: string): boolean {
-    if (recStack.has(node)) return true;
-    if (visited.has(node)) return false;
-
-    visited.add(node);
-    recStack.add(node);
-
-    for (const neighbor of adj.get(node) || []) {
-      if (dfs(neighbor)) return true;
-    }
-
-    recStack.delete(node);
-    return false;
-  }
-
-  for (const node of nodes) {
-    if (dfs(node)) return true;
-  }
-
-  return false;
-}

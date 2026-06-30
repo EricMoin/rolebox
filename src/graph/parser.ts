@@ -6,6 +6,7 @@ import type {
 import { PARENT_NODE, GRAPH_TEMPLATE_VALUES } from "../constants.ts";
 import { expandTemplate } from "./templates.ts";
 import { validateGraph } from "./validator.ts";
+import { hasCycle, isExitEdge } from "./graph-utils.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("graph-parser");
@@ -44,7 +45,7 @@ export function parseCollaboration(
 ): ResolvedGraph | null {
   // ── Guard: must be a non-null, plain object ──
   if (raw === null || raw === undefined || typeof raw !== "object") {
-    log.info("collaboration config is not an object");
+    log.warn("collaboration config is not an object");
     return null;
   }
 
@@ -61,7 +62,7 @@ export function parseCollaboration(
 
   // ── Template requires at least one agent ──
   if (topology !== undefined && agents.length === 0) {
-    log.info(
+    log.warn(
       "topology requires at least one agent in 'agents' field",
     );
     return null;
@@ -82,7 +83,7 @@ export function parseCollaboration(
     try {
       templateEdges = expandTemplate(topology, agents);
     } catch (err) {
-      log.info(
+      log.warn(
         `expandTemplate failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
@@ -95,7 +96,7 @@ export function parseCollaboration(
   const edges = mergeEdges(templateEdges, flowEdges);
 
   if (edges.length === 0) {
-    log.info(
+    log.warn(
       "no edges defined — provide topology+agents or flow",
     );
     return null;
@@ -120,9 +121,7 @@ export function parseCollaboration(
   }
 
   // ── Identify exit edges ──
-  const exitEdges = edges.filter(
-    (e) => e.to === PARENT_NODE || e.exit === true,
-  );
+  const exitEdges = edges.filter(isExitEdge);
 
   // ── Assemble resolved graph ──
   const resolvedGraph: ResolvedGraph = {
@@ -141,7 +140,7 @@ export function parseCollaboration(
 
   if (!valid) {
     // validateGraph already logs its own warnings; surface here too
-    log.info(
+    log.warn(
       `validation failed: ${warnings.join("; ")}`,
     );
     return null;
@@ -168,7 +167,7 @@ function validateTopology(
   if (raw === undefined || raw === null) return undefined;
 
   if (typeof raw !== "string" || raw.trim() === "") {
-    log.info(
+    log.warn(
       `invalid topology — expected a string, got ${typeof raw}`,
     );
     return null;
@@ -176,7 +175,7 @@ function validateTopology(
 
   const trimmed = raw.trim();
   if (!GRAPH_TEMPLATE_VALUES.has(trimmed)) {
-    log.info(`unknown topology: "${trimmed}"`);
+    log.warn(`unknown topology: "${trimmed}"`);
     return null;
   }
 
@@ -209,7 +208,7 @@ function parseFlow(raw: unknown): FlowEdge[] {
       if (parsed) {
         edges.push(parsed);
       } else {
-        log.info(
+        log.warn(
           `invalid flow edge string: "${item}"`,
         );
       }
@@ -218,10 +217,10 @@ function parseFlow(raw: unknown): FlowEdge[] {
       if (parsed) {
         edges.push(parsed);
       } else {
-        log.info("invalid flow edge object");
+        log.warn("invalid flow edge object");
       }
     } else {
-      log.info(
+      log.warn(
         `unsupported flow entry type: ${typeof item}`,
       );
     }
@@ -303,47 +302,4 @@ function mergeEdges(
   return Array.from(edgeMap.values());
 }
 
-/**
- * Detect a directed cycle in the subgraph of agent-to-agent edges.
- * Excludes edges to/from `"parent"` (which represent flow boundaries, not cycles).
- * Uses DFS with a recursion-stack for back-edge detection.
- */
-function hasCycle(edges: FlowEdge[]): boolean {
-  const nodes = new Set<string>();
-  for (const e of edges) {
-    if (e.from !== PARENT_NODE) nodes.add(e.from);
-    if (e.to !== PARENT_NODE) nodes.add(e.to);
-  }
 
-  // Build adjacency list — only agent-to-agent edges
-  const adj = new Map<string, string[]>();
-  for (const n of nodes) adj.set(n, []);
-  for (const e of edges) {
-    if (e.from !== PARENT_NODE && e.to !== PARENT_NODE) {
-      adj.get(e.from)!.push(e.to);
-    }
-  }
-
-  const visited = new Set<string>();
-  const recStack = new Set<string>();
-
-  function dfs(node: string): boolean {
-    if (recStack.has(node)) return true;
-    if (visited.has(node)) return false;
-
-    visited.add(node);
-    recStack.add(node);
-
-    for (const neighbor of adj.get(node) || []) {
-      if (dfs(neighbor)) return true;
-    }
-
-    recStack.delete(node);
-    return false;
-  }
-
-  for (const node of nodes) {
-    if (dfs(node)) return true;
-  }
-  return false;
-}

@@ -1,6 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, existsSync, appendFileSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { atomicWriteSync, hashId } from "./fs-util.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("function:artifacts");
 
 function safe(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100);
@@ -10,8 +13,7 @@ export class ArtifactStore {
   constructor(private workspaceDir: string) {}
 
   private dir(sessionID: string): string {
-    const sid = createHash("sha256").update(sessionID).digest("hex").slice(0, 12);
-    return join(this.workspaceDir, ".rolebox", "artifacts", sid);
+    return join(this.workspaceDir, ".rolebox", "artifacts", hashId(sessionID));
   }
 
   private path(sessionID: string, name: string): string {
@@ -27,18 +29,14 @@ export class ArtifactStore {
   read(sessionID: string, name: string): string | null {
     try { return readFileSync(this.path(sessionID, name), "utf-8"); }
     catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT") log.warn("artifact read failed", { name, code });
       return null;
     }
   }
 
   write(sessionID: string, name: string, content: string): void {
-    const target = this.path(sessionID, name);
-    mkdirSync(this.dir(sessionID), { recursive: true });
-    const tmp = target + ".tmp";
-    writeFileSync(tmp, content, "utf-8");
-    try { unlinkSync(target); } catch {}
-    renameSync(tmp, target);
+    atomicWriteSync(this.path(sessionID, name), content);
   }
 
   append(sessionID: string, name: string, content: string): void {
@@ -47,10 +45,10 @@ export class ArtifactStore {
   }
 
   list(sessionID: string): string[] {
-    const d = this.dir(sessionID);
     try {
-      const { readdirSync } = require("node:fs");
-      return readdirSync(d).filter((f: string) => f.endsWith(".md")).map((f: string) => f.slice(0, -3));
+      return readdirSync(this.dir(sessionID))
+        .filter((f) => f.endsWith(".md"))
+        .map((f) => f.slice(0, -3));
     } catch { return []; }
   }
 }

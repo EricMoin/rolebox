@@ -1,5 +1,6 @@
 import type { ResolvedGraph, GraphNodeRole } from "../types.ts";
 import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
+import { isExitEdge } from "./graph-utils.ts";
 import { RESULT_FENCE } from "../dispatch/result-extractor.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -195,9 +196,7 @@ function buildCustomXml(
   const parentEdges = graph.edges.filter(
     (e) => e.from === PARENT_NODE,
   );
-  const exitEdges = graph.edges.filter(
-    (e) => e.exit === true || e.to === PARENT_NODE,
-  );
+  const exitEdges = graph.edges.filter(isExitEdge);
 
   const parts: string[] = [];
 
@@ -247,15 +246,6 @@ ${GUARD_RULES}
 export const SUBAGENT_RESULT_CONTRACT = `<result_contract>
 When you finish, put your final deliverable inside a fenced \`\`\`${RESULT_FENCE} block so the orchestrator can extract it cleanly. Everything outside the block is treated as working notes.
 </result_contract>`;
-
-/**
- * Build the `<result_contract>` guidance block for subagents.
- *
- * Injects a concise reminder to use the result fence.
- */
-export function buildResultContract(): string {
-  return SUBAGENT_RESULT_CONTRACT;
-}
 
 // ── Public API ─────────────────────────────────────────────────────────
 
