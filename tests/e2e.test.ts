@@ -57,12 +57,16 @@ describe("End-to-end", () => {
     it("discovers both example roles from examples/", async () => {
       const roles = await discoverRoles(examplesDir);
 
-      expect(roles.size).toBe(5);
+      expect(roles.size).toBe(9);
       expect(roles.has("code-reviewer")).toBe(true);
       expect(roles.has("tech-writer")).toBe(true);
       expect(roles.has("team-lead")).toBe(true);
       expect(roles.has("review-team")).toBe(true);
       expect(roles.has("review-team-custom")).toBe(true);
+      expect(roles.has("review-team-termination")).toBe(true);
+      expect(roles.has("review-team-approval")).toBe(true);
+      expect(roles.has("review-team-stuck")).toBe(true);
+      expect(roles.has("review-team-allof")).toBe(true);
     });
 
     it("returns an empty Map for a non-existent directory", async () => {

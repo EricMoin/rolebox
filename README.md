@@ -597,6 +597,96 @@ The orchestrator LLM sees the state on every turn, so it knows which agent to ca
 
 The `collaboration:` field is optional. Roles with subagents but no graph continue to work exactly as before — the parent decides dispatch order freely via `dispatch`.
 
+### Loop termination
+
+By default, loops stop when `max_iterations` is reached. The `termination:` block gives you finer control: stop when the reviewer approves, when output stops changing, when a timeout fires, or any combination.
+
+```yaml
+collaboration:
+  topology: review-loop
+  agents: [coder, reviewer]
+  max_iterations: 5
+  termination:
+    any_of:
+      - { max_iterations: 5 }
+      - { converged: "reviewer confirms code quality is satisfactory" }
+```
+
+#### Condition types
+
+Five condition types are available:
+
+```yaml
+# Stop after N loop iterations
+- { max_iterations: 5 }
+
+# Stop after N milliseconds since the first loop iteration
+- { timeout_ms: 120000 }
+
+# LLM judge evaluates a natural-language convergence criterion
+- { converged: "reviewer confirms code quality is satisfactory" }
+
+# Stop when a specific agent's output matches a pattern
+- result_matches:
+    agent: reviewer
+    contains: "APPROVED"      # substring match
+    # regex: "LGTM|APPROVED"  # or regex match
+    # score_gte: 8            # or numeric score threshold
+    # no_changes: true        # or output hash unchanged from previous iteration
+
+# Stop when the same agent produces identical output N times in a row
+- { stuck: { repeats: 2 } }
+```
+
+#### Composition
+
+Conditions compose with `any_of` (first condition wins) or `all_of` (every condition must be satisfied):
+
+```yaml
+# Stop on whichever fires first
+termination:
+  any_of:
+    - { max_iterations: 10 }
+    - { stuck: { repeats: 2 } }
+
+# Stop only when both are true
+termination:
+  all_of:
+    - { max_iterations: 2 }
+    - result_matches:
+        agent: reviewer
+        contains: "APPROVED"
+```
+
+You can use both `any_of` and `all_of` in the same config. Each group is evaluated independently, then the results are combined with AND logic.
+
+#### Termination reasons
+
+When the workflow ends, the state includes a structured `terminationReason` so the orchestrator knows why it stopped:
+
+| Reason | Trigger |
+|---|---|
+| `max_iterations` | Loop count reached the cap |
+| `timeout` | Wall-clock time exceeded `timeout_ms` |
+| `stuck` | Agent output repeated N times |
+| `converged` | LLM judge confirmed convergence |
+| `result_match` | Agent output matched `result_matches` criteria |
+| `error` | Unrecoverable error during evaluation |
+
+The orchestrator's system prompt shows the reason so it can synthesize an appropriate final response.
+
+#### Advisory enforcement
+
+Termination is advisory, not a hard stop. When a condition fires, the orchestrator receives guidance to wrap up and synthesize results. It doesn't forcibly deny tool calls or kill sessions mid-turn.
+
+#### Precedence and caveats
+
+**Per-loop vs global `max_iterations`:** The root-level `max_iterations` on the `collaboration:` block is a global safety cap. A `max_iterations` inside `termination.any_of` or `termination.all_of` is a per-loop-group cap. The per-loop cap fires its own termination reason; the global cap is the backstop that applies regardless of termination config.
+
+**`timeout_ms` overshoot:** The timeout is checked between turns, not mid-turn. A long-running agent turn that starts before the deadline will finish. Expect overshoot of up to one full turn.
+
+**Legacy compatibility:** Existing configs with just `max_iterations` (no `termination:` block) work exactly as before. No migration required.
+
 ## Configuration reference
 
 ### role.yaml
@@ -654,6 +744,16 @@ collaboration:
     - "from -> to: label"
     - { from: a, to: b, label: x, exit: true }
   max_iterations: number                   # Loop limit (default: 3 for cycles)
+  termination:                             # Loop termination conditions
+    any_of:                                # Stop when ANY condition fires
+      - { max_iterations: 5 }
+      - { timeout_ms: 120000 }
+      - { converged: "description" }
+      - { result_matches: { agent: name, contains: "text" } }
+      - { stuck: { repeats: 2 } }
+    all_of:                                # Stop when ALL conditions are met
+      - { max_iterations: 2 }
+      - { result_matches: { agent: name, contains: "APPROVED" } }
 
 # Dispatch configuration (override defaults for subagent dispatch)
 dispatch:

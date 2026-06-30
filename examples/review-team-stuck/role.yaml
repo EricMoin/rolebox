@@ -1,0 +1,21 @@
+name: Review Team Lead
+description: Code review with stuck detection
+model: gpt-4
+prompt: |
+  You are a team lead coordinating a code review workflow.
+  Follow the collaboration graph to dispatch work.
+subagents:
+  - name: Coder
+    description: Implements code changes
+    prompt: You are a senior developer. Write clean, testable code.
+  - name: Reviewer
+    description: Reviews code for quality
+    prompt: You review code for correctness, style, and edge cases.
+collaboration:
+  topology: review-loop
+  agents: [coder, reviewer]
+  max_iterations: 10
+  termination:
+    any_of:
+      - { max_iterations: 10 }
+      - { stuck: { repeats: 2 } }
