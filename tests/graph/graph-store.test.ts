@@ -109,7 +109,47 @@ describe("GraphStore", () => {
       expect(store.load()).toBeNull();
     });
 
-    it("returns null when version is unsupported", () => {
+    it("migrates v1 state to v2 with safe defaults and preserves original data", () => {
+      const { store, dir } = createTestStore();
+      const sp = stateFilePath(dir);
+      mkdirSync(join(sp, ".."), { recursive: true });
+      writeFileSync(
+        sp,
+        JSON.stringify({
+          version: 1,
+          sessions: [
+            {
+              sessionId: "s1",
+              agentId: "orchestrator",
+              state: {
+                frontier: ["agent-a"],
+                completed: ["agent-b"],
+                iterationCount: 3,
+                status: "active",
+              },
+            },
+          ],
+        }),
+        "utf-8",
+      );
+      const loaded = store.load();
+      expect(loaded).not.toBeNull();
+      const entry = loaded!.get("s1");
+      expect(entry).toBeDefined();
+      expect(entry!.agentId).toBe("orchestrator");
+      const state = entry!.state;
+      expect(state.frontier).toEqual(["agent-a"]);
+      expect(state.completed).toEqual(["agent-b"]);
+      expect(state.iterationCount).toBe(3);
+      expect(state.status).toBe("active");
+      expect(state.loopCounters).toEqual({});
+      expect(state.lastResults).toEqual({});
+      expect(state.loopStartTimeMs).toBeNull();
+      expect(state.terminationReason).toBeNull();
+      expect(state.correctionCount).toBe(0);
+    });
+
+    it("returns null when version is unknown (e.g., 99)", () => {
       const { store, dir } = createTestStore();
       const sp = stateFilePath(dir);
       mkdirSync(join(sp, ".."), { recursive: true });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createSubLogger } from "../logger.ts";
 import { shortHash } from "../state-paths.ts";
 import type { GraphExecutionState } from "./state.ts";
+import { truncateResult } from "./result-capture.ts";
 
 export interface SerializedGraphSession {
   sessionId: string;
@@ -13,7 +14,7 @@ export interface SerializedGraphSession {
 }
 
 interface GraphStateFile {
-  version: 1;
+  version: 1 | 2;
   sessions: SerializedGraphSession[];
 }
 
@@ -92,15 +93,18 @@ export class GraphStore {
     const parsed = this.deserialize(raw);
     if (!parsed) return null;
 
-    if (parsed.version !== 1) {
+    let file: GraphStateFile = parsed;
+    if (file.version === 1) {
+      file = migrateV1toV2(file);
+    } else if (file.version !== 2) {
       log.warn(
-        `Unsupported graph state schema version ${parsed.version}, starting fresh`,
+        `Unsupported graph state schema version ${file.version}, starting fresh`,
       );
       return null;
     }
 
     const map = new Map<string, { agentId: string; state: GraphExecutionState }>();
-    for (const raw of parsed.sessions as unknown[]) {
+    for (const raw of file.sessions as unknown[]) {
       if (!isValidSession(raw)) {
         const id = typeof raw === "object" && raw !== null && "sessionId" in raw
           ? String((raw as Record<string, unknown>).sessionId)
@@ -128,15 +132,26 @@ export class GraphStore {
   ): string {
     const serialized: SerializedGraphSession[] = [];
     for (const [sessionId, entry] of sessions) {
+      const state = { ...entry.state };
+      if (state.lastResults) {
+        const truncated: Record<string, { hash: string; text: string }> = {};
+        for (const [agentId, result] of Object.entries(state.lastResults)) {
+          truncated[agentId] = {
+            hash: result.hash,
+            text: truncateResult(result.text, 2048),
+          };
+        }
+        state.lastResults = truncated;
+      }
       serialized.push({
         sessionId,
         agentId: entry.agentId,
-        state: entry.state,
+        state,
       });
     }
 
     const file: GraphStateFile = {
-      version: 1,
+      version: 2,
       sessions: serialized,
     };
 
@@ -161,7 +176,7 @@ export class GraphStore {
 function isGraphStateFile(value: unknown): value is GraphStateFile {
   if (typeof value !== "object" || value === null) return false;
   const obj = value as Record<string, unknown>;
-  if (obj.version !== 1) return false;
+  if (obj.version !== 1 && obj.version !== 2) return false;
   if (!Array.isArray(obj.sessions)) return false;
   return true;
 }
@@ -180,6 +195,23 @@ function isValidSession(value: unknown): value is SerializedGraphSession {
   if (typeof state.iterationCount !== "number") return false;
   if (!VALID_STATUSES.has(state.status as string)) return false;
   return true;
+}
+
+function migrateV1toV2(oldState: GraphStateFile): GraphStateFile {
+  return {
+    version: 2,
+    sessions: oldState.sessions.map((session) => ({
+      ...session,
+      state: {
+        ...session.state,
+        loopCounters: {},
+        lastResults: {},
+        loopStartTimeMs: null,
+        terminationReason: null,
+        correctionCount: 0,
+      },
+    })),
+  };
 }
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {

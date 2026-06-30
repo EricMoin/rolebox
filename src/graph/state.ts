@@ -1,4 +1,4 @@
-import type { ResolvedGraph } from "../types.ts";
+import type { ResolvedGraph, TerminationReason } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
 import { isExitEdge } from "./graph-utils.ts";
 import { GraphStore } from "./graph-store.ts";
@@ -11,6 +11,12 @@ export interface GraphExecutionState {
   completed: string[];
   iterationCount: number;
   status: "active" | "complete" | "exhausted";
+  loopCounters?: Record<string, number>;
+  lastResults?: Record<string, { hash: string; text: string }>;
+  loopStartTimeMs?: number | null;
+  terminationReason?: TerminationReason | null;
+  correctionCount?: number;
+  convergenceSignal?: string;
 }
 
 export type AdvanceResult =
