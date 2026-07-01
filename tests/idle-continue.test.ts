@@ -295,3 +295,100 @@ describe("session.idle CONTINUE", () => {
     expect((promptAsyncMock as any).mock.calls[0][0].body.parts[0].text).toContain("auto-continue");
   });
 });
+
+describe("auto-continue counter persistence (regression)", () => {
+  type ChatMessageHook = (
+    input: { agent?: string; sessionID: string },
+    output: { parts: Array<{ type: string; text?: string }> },
+  ) => Promise<void>;
+
+  it("does not reset continuationCount when the auto-continue prompt re-enters via chat.message", async () => {
+    const client = createMockClient();
+    const fn = makeResolvedFn({
+      name: "synthesize",
+      continue_until: "plan_todos_complete",
+      continue_max: 3,
+    });
+    roleFunctionsMap.set("test-primary", [fn]);
+
+    const hooks = await createPluginHooks(
+      [makePrimaryRole()],
+      client,
+      roleFunctionsMap,
+      new Map(),
+      tmpDir,
+    );
+
+    const sessionID = "test-session";
+    functionSessionState.activate(sessionID, ["synthesize"]);
+    const st = functionRuntime.init(sessionID, "synthesize", 1);
+    st.kv["__todos"] = "- [ ] pending task";
+
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const chatMessage = (hooks as unknown as Record<"chat.message", ChatMessageHook>)["chat.message"];
+
+    const idle = () =>
+      hooks.event({ event: { type: "session.idle", properties: { sessionID } } as any });
+    const reminderReenters = (text: string) =>
+      chatMessage({ agent: "test-primary", sessionID }, { parts: [{ type: "text", text }] });
+
+    await idle();
+    expect(st.continuationCount).toBe(1);
+    expect(promptAsyncMock).toHaveBeenCalledTimes(1);
+    const reminder1 = (promptAsyncMock as any).mock.calls[0][0].body.parts[0].text as string;
+    expect(reminder1).toContain("1/3");
+
+    await reminderReenters(reminder1);
+    expect(st.continuationCount).toBe(1);
+
+    await idle();
+    expect(st.continuationCount).toBe(2);
+    expect((promptAsyncMock as any).mock.calls[1][0].body.parts[0].text).toContain("2/3");
+
+    await reminderReenters((promptAsyncMock as any).mock.calls[1][0].body.parts[0].text);
+    expect(st.continuationCount).toBe(2);
+
+    await idle();
+    expect(st.continuationCount).toBe(3);
+    expect((promptAsyncMock as any).mock.calls[2][0].body.parts[0].text).toContain("3/3");
+
+    await reminderReenters((promptAsyncMock as any).mock.calls[2][0].body.parts[0].text);
+    expect(st.continuationCount).toBe(3);
+
+    await idle();
+    expect(promptAsyncMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets continuationCount and cooldown when a genuine user message arrives", async () => {
+    const client = createMockClient();
+    const fn = makeResolvedFn({
+      name: "synthesize",
+      continue_until: "plan_todos_complete",
+      continue_max: 3,
+    });
+    roleFunctionsMap.set("test-primary", [fn]);
+
+    const hooks = await createPluginHooks(
+      [makePrimaryRole()],
+      client,
+      roleFunctionsMap,
+      new Map(),
+      tmpDir,
+    );
+
+    const sessionID = "test-session";
+    functionSessionState.activate(sessionID, ["synthesize"]);
+    const st = functionRuntime.init(sessionID, "synthesize", 1);
+    st.continuationCount = 2;
+    st.cooldownUntilTurn = 5;
+
+    const chatMessage = (hooks as unknown as Record<"chat.message", ChatMessageHook>)["chat.message"];
+    await chatMessage(
+      { agent: "test-primary", sessionID },
+      { parts: [{ type: "text", text: "please keep working on the task" }] },
+    );
+
+    expect(st.continuationCount).toBe(0);
+    expect(st.cooldownUntilTurn).toBe(0);
+  });
+});

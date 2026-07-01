@@ -601,8 +601,10 @@ export async function createPluginHooks(
       functionRuntime.markDirty();
       const isAutoContinue = (firstText?.text ?? "").includes("[auto-continue");
       const isLoopProgress = (firstText?.text ?? "").includes(LOOP_PROGRESS_MARKER);
-      // Reset continuation counters only on genuine user turns (skip loop-progress injections):
-      if (!isLoopProgress) {
+      // Reset only on genuine user turns. Auto-continue and loop-progress
+      // prompts re-enter through this hook; resetting on them pins the counter
+      // at "1/N" so the caps never fire (unbounded auto-continue spin).
+      if (!isAutoContinue && !isLoopProgress) {
         for (const [, st] of functionRuntime.all(input.sessionID)) {
           st.continuationCount = 0;
           st.cooldownUntilTurn = 0;
