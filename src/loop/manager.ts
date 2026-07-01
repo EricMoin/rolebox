@@ -116,6 +116,10 @@ export class LoopManager implements LoopManagerHooks {
     return this.childToOrigin.has(sid);
   }
 
+  getLoopState(originSessionId: string): LoopState | undefined {
+    return this.loops.get(originSessionId);
+  }
+
   getByActiveSession(sid: string): LoopState | undefined {
     for (const loop of this.loops.values()) {
       if (loop.activeSessionId === sid) return loop;

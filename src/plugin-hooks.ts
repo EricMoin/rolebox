@@ -266,7 +266,16 @@ export async function createPluginHooks(
             break;
           }
           const activeSet = functionSessionState.getActive(sid);
-          if (activeSet.size === 0) break;
+          if (activeSet.size === 0) {
+            // Loop advance for sessions with no active functions (e.g., fresh child sessions)
+            if (activeLoopManager && dispatchManager.getInflightCount(sid) === 0) {
+              const loop = activeLoopManager.getByActiveSession(sid);
+              if (loop && loop.status === "running") {
+                await activeLoopManager.onRoundComplete(sid);
+              }
+            }
+            break;
+          }
           const allFns: ResolvedFunction[] = [];
           for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
           const { ArtifactStore } = await import("./function/artifact-store.ts");
@@ -328,6 +337,7 @@ export async function createPluginHooks(
           }
 
           // --- Continuation (Phase 2 — ONE continuation per idle) ---
+          let sentContinuation = false;
           let burst = 0;
           for (const st of functionRuntime.all(sid).values()) burst += st.continuationCount;
           for (const name of activeSet) {
@@ -386,7 +396,15 @@ export async function createPluginHooks(
                 path: { id: sid },
                 body: { parts: [{ type: "text", text: decision.reminder }] },
               }).catch(() => {});
+              sentContinuation = true;
               break; // ONE continuation per idle event
+            }
+          }
+          // --- LOOP ADVANCE: advance a loop session on terminal idle ---
+          if (!sentContinuation && dispatchManager.getInflightCount(sid) === 0) {
+            const loop = activeLoopManager?.getByActiveSession(sid);
+            if (loop && loop.status === "running") {
+              await activeLoopManager!.onRoundComplete(sid);
             }
           }
           break;
@@ -405,7 +423,12 @@ export async function createPluginHooks(
         }
         case "session.error": {
           const sid = (props as { sessionID?: string } | undefined)?.sessionID;
-          if (sid) await dispatchManager.handleSessionError(sid, props?.error);
+          if (sid) {
+            await dispatchManager.handleSessionError(sid, props?.error);
+            if (activeLoopManager?.isLoopSession(sid)) {
+              activeLoopManager.handleSessionError(sid, props?.error as string | undefined);
+            }
+          }
           break;
         }
         case "session.deleted": {
@@ -583,6 +606,18 @@ export async function createPluginHooks(
         for (const [, st] of functionRuntime.all(input.sessionID)) {
           st.continuationCount = 0;
           st.cooldownUntilTurn = 0;
+        }
+      }
+
+      // Loop recovery notification on restart: detect interrupted loops
+      if (input.sessionID && activeLoopManager && !isAutoContinue && !isLoopProgress) {
+        const loopState = activeLoopManager.getLoopState(input.sessionID);
+        if (loopState && loopState.status === "interrupted") {
+          loopState.status = "cancelled";
+          const existing = pendingCorrections.get(input.sessionID);
+          pendingCorrections.set(input.sessionID,
+            (existing ? existing + "\n" : "") +
+            `${LOOP_PROGRESS_MARKER} loop interrupted by restart at round ${loopState.current}/${loopState.total}]`);
         }
       }
 
