@@ -36,6 +36,7 @@ export function createMockClient(overrides?: {
   sessionStatus?: () => unknown;
   sessionAbort?: () => unknown;
   sessionGet?: () => unknown;
+  sessionDelete?: () => unknown;
 }): OpencodeClient {
   return {
     session: {
@@ -96,6 +97,14 @@ export function createMockClient(overrides?: {
           (() =>
             Promise.resolve({
               data: { id: "test-session-1" },
+              error: undefined,
+            })),
+      ),
+      delete: mock(
+        overrides?.sessionDelete ??
+          (() =>
+            Promise.resolve({
+              data: true,
               error: undefined,
             })),
       ),
