@@ -22,12 +22,19 @@ import { evaluateGateAndTransitions } from "./function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "./function/conditions.ts";
 import { decideContinuation } from "./function/continuation.ts";
 import { ArtifactStore } from "./function/artifact-store.ts";
+import { LoopManager } from "./loop/manager.ts";
+import { parseLoopParams } from "./loop/params.ts";
+import { LOOP_PROGRESS_MARKER, LOOP_FUNCTION_NAME } from "./loop/constants.ts";
 
 const log = createSubLogger("plugin-hooks");
 
 let hooksRegistered = false;
 
 export const managerMap = new Map<string, DispatchManager>();
+
+export const loopManagerMap = new Map<string, LoopManager>();
+
+export let activeLoopManager: LoopManager | undefined;
 
 export const pendingCorrections = new Map<string, string>();
 
@@ -182,6 +189,15 @@ export async function createPluginHooks(
     await dispatchManager.recover();
   }
 
+  let loopManager = loopManagerMap.get(rawDir);
+  if (!loopManager) {
+    loopManager = new LoopManager(client);
+    loopManager.setStoreDirectory(dir);
+    loopManagerMap.set(rawDir, loopManager);
+    loopManager.recover();
+  }
+  activeLoopManager = loopManager;
+
   if (directory) {
     graphSessionState.setStoreDirectory(dir);
     functionRuntime.setStoreDirectory(dir);
@@ -192,17 +208,20 @@ export async function createPluginHooks(
   if (!hooksRegistered) {
     hooksRegistered = true;
     process.on("exit", () => {
+      loopManager.dispose();
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
       if (directory) functionRuntime.flushSync();
     });
     process.on("SIGINT", () => {
+      loopManager.dispose();
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
       if (directory) functionRuntime.flushSync();
       process.exit(130);
     });
     process.on("SIGTERM", () => {
+      loopManager.dispose();
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
       if (directory) functionRuntime.flushSync();
@@ -443,8 +462,13 @@ export async function createPluginHooks(
       const firstText = output.parts.find(
         (p: { type: string; text?: string }) => p.type === "text" && typeof p.text === "string",
       ) as { text?: string } | undefined;
-      if (input.sessionID && !(firstText?.text ?? "").includes("[auto-continue")) {
+      const firstTextStr = firstText?.text ?? "";
+      if (input.sessionID && !firstTextStr.includes("[auto-continue") && !firstTextStr.includes(LOOP_PROGRESS_MARKER)) {
         userMessagedSessions.add(input.sessionID);
+        // Loop cancel: genuine user message to a looping origin cancels remaining rounds
+        if (activeLoopManager?.isLoopOrigin(input.sessionID)) {
+          activeLoopManager.requestCancel(input.sessionID, "user message");
+        }
       }
 
       const textPartIndex = output.parts.findIndex(
@@ -509,6 +533,38 @@ export async function createPluginHooks(
         }
       }
 
+      // Loop function activation
+      if (parsedFunctions.includes(LOOP_FUNCTION_NAME) && agentId) {
+        const loopCall = calls.find(c => c.name === LOOP_FUNCTION_NAME);
+        if (loopCall && activeLoopManager) {
+          // Recursion block: reject nested loops
+          if (activeLoopManager.isLoopSession(input.sessionID)) {
+            const existing = pendingCorrections.get(input.sessionID);
+            pendingCorrections.set(input.sessionID, (existing ? existing + "\n" : "") + "Nested loops are not supported");
+          } else {
+            const result = parseLoopParams(loopCall);
+            if (!result.valid) {
+              const existing = pendingCorrections.get(input.sessionID);
+              pendingCorrections.set(input.sessionID, (existing ? existing + "\n" : "") + `Invalid loop params: ${result.reason}`);
+            } else {
+              const clamped = result.clamped ? ` (clamped to ${result.iterations})` : "";
+              const warn = result.warning ? ` (${result.warning})` : "";
+              if (result.clamped || result.warning) {
+                const existing = pendingCorrections.get(input.sessionID);
+                pendingCorrections.set(input.sessionID, (existing ? existing + "\n" : "") + `Loop: ${result.iterations} iterations${clamped}${warn}`);
+              }
+              activeLoopManager.register({
+                originSessionId: input.sessionID,
+                agent: agentId,
+                prompt: cleanedText,
+                mode: result.mode,
+                iterations: result.iterations,
+              });
+            }
+          }
+        }
+      }
+
       // --- function kernel: init runtime state for newly activated functions ---
       const roleId = input.agent;
       const roleFns = roleId ? roleFunctionsMap.get(roleId) : null;
@@ -520,13 +576,16 @@ export async function createPluginHooks(
         st.activatedAtTurn = st.currentTurn;
       }
       functionRuntime.markDirty();
-      // Reset continuation counters because a user message just arrived:
-      for (const [, st] of functionRuntime.all(input.sessionID)) {
-        st.continuationCount = 0;
-        st.cooldownUntilTurn = 0;
+      const isAutoContinue = (firstText?.text ?? "").includes("[auto-continue");
+      const isLoopProgress = (firstText?.text ?? "").includes(LOOP_PROGRESS_MARKER);
+      // Reset continuation counters only on genuine user turns (skip loop-progress injections):
+      if (!isLoopProgress) {
+        for (const [, st] of functionRuntime.all(input.sessionID)) {
+          st.continuationCount = 0;
+          st.cooldownUntilTurn = 0;
+        }
       }
 
-      const isAutoContinue = (firstText?.text ?? "").includes("[auto-continue");
       if (!isAutoContinue && agentId) {
         try {
           const activeNames = functionSessionState.getActive(input.sessionID);

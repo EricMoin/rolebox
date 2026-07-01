@@ -8,6 +8,7 @@ import { resolveAllRoles } from "./resolver/orchestrator.ts";
 import { syncAgentFiles } from "./sync/agent-files.ts";
 import { syncSkillSymlinks } from "./sync/skill-symlinks.ts";
 import { createPluginHooks } from "./plugin-hooks.ts";
+export { loopManagerMap, activeLoopManager } from "./plugin-hooks.js";
 import type { ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { PLUGIN_ID } from "./constants.ts";
 import { createSubLogger, getLogFilePath, configureLogDirectory } from "./logger.ts";
