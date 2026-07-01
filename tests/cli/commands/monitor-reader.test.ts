@@ -280,6 +280,97 @@ describe("readMonitorSnapshot", () => {
     expect(snapshot.activeFunctions).toEqual([]);
   });
 
+  it("populates resultPreview when tailChars > 0 and sidecar exists", async () => {
+    mkdirSync(stateDir(), { recursive: true });
+    const resultsDir = join(stateDir(), "results");
+    mkdirSync(resultsDir, { recursive: true });
+
+    const fullOutput = "Hello world, this is a long task output with many characters.";
+    writeFileSync(join(resultsDir, "t1.txt"), fullOutput);
+
+    writeFileSync(
+      join(stateDir(), `dispatch-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 5,
+        tasks: [
+          {
+            id: "t1",
+            sessionId: "ses_1",
+            parentSessionId: "ses_p",
+            status: "completed",
+            agent: "researcher",
+            prompt: "research",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            progress: { lastUpdate: new Date().toISOString(), toolCalls: 3 },
+            depth: 0,
+            mode: "background",
+            result: {
+              sidecarPath: join(resultsDir, "t1.txt"),
+              totalChars: fullOutput.length,
+              hadFence: false,
+              materializedAt: new Date().toISOString(),
+            },
+          },
+        ],
+      }),
+    );
+
+    const { readMonitorSnapshot } = await importReader();
+
+    // With tailChars=20, should get last 20 chars
+    const snapshot = readMonitorSnapshot(tmpDir, 20);
+    const task = snapshot.tasks[0];
+    expect(task.resultPreview).toBe(fullOutput.slice(-20));
+    expect(task.resultTotalChars).toBe(fullOutput.length);
+
+    // With tailChars=0 (default), no preview
+    const snapshotNoTail = readMonitorSnapshot(tmpDir);
+    expect(snapshotNoTail.tasks[0].resultPreview).toBeUndefined();
+    expect(snapshotNoTail.tasks[0].resultTotalChars).toBeUndefined();
+
+    // With tailChars larger than content, returns full content
+    const snapshotFull = readMonitorSnapshot(tmpDir, 9999);
+    expect(snapshotFull.tasks[0].resultPreview).toBe(fullOutput);
+  });
+
+  it("resultPreview is undefined when sidecar file is missing", async () => {
+    mkdirSync(stateDir(), { recursive: true });
+
+    writeFileSync(
+      join(stateDir(), `dispatch-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 5,
+        tasks: [
+          {
+            id: "t1",
+            sessionId: "ses_1",
+            parentSessionId: "ses_p",
+            status: "completed",
+            agent: "researcher",
+            prompt: "research",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            progress: { lastUpdate: new Date().toISOString(), toolCalls: 3 },
+            depth: 0,
+            mode: "background",
+            result: {
+              sidecarPath: "/nonexistent/path/t1.txt",
+              totalChars: 100,
+              hadFence: false,
+              materializedAt: new Date().toISOString(),
+            },
+          },
+        ],
+      }),
+    );
+
+    const { readMonitorSnapshot } = await importReader();
+    const snapshot = readMonitorSnapshot(tmpDir, 50);
+    expect(snapshot.tasks[0].resultPreview).toBeUndefined();
+    expect(snapshot.tasks[0].resultTotalChars).toBe(100);
+  });
+
   it("returns empty activeFunctions when all fnstate phases are non-active", async () => {
     mkdirSync(stateDir(), { recursive: true });
 

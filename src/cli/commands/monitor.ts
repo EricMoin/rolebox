@@ -51,7 +51,7 @@ function renderHeader(projectDir: string): void {
   console.log(`└${dashes}┘`);
 }
 
-function renderTasks(snapshot: MonitorSnapshot, all: boolean): void {
+function renderTasks(snapshot: MonitorSnapshot, all: boolean, tailChars: number): void {
   const visible = all
     ? snapshot.tasks
     : snapshot.tasks.filter((t) =>
@@ -85,6 +85,18 @@ function renderTasks(snapshot: MonitorSnapshot, all: boolean): void {
         ? t.error
         : `Error: ${t.error}`;
       console.log(`              ${dim("└─")} ${red(errLabel)}`);
+    }
+
+    if (tailChars > 0 && t.resultPreview) {
+      const charsLabel = t.resultTotalChars
+        ? dim(` [${t.resultPreview.length}/${t.resultTotalChars} chars]`)
+        : "";
+      console.log(`              ${dim("╭─ output")}${charsLabel}`);
+      const lines = t.resultPreview.split("\n");
+      for (const line of lines) {
+        console.log(`              ${dim("│")} ${line}`);
+      }
+      console.log(`              ${dim("╰─")}`);
     }
   }
 }
@@ -121,9 +133,9 @@ function renderActiveFunctions(snapshot: MonitorSnapshot): void {
   }
 }
 
-function renderHuman(snapshot: MonitorSnapshot, all: boolean): void {
+function renderHuman(snapshot: MonitorSnapshot, all: boolean, tailChars: number): void {
   renderHeader(snapshot.projectDir);
-  renderTasks(snapshot, all);
+  renderTasks(snapshot, all, tailChars);
   renderActiveFunctions(snapshot);
   console.log("");
 }
@@ -143,15 +155,16 @@ export async function monitor(
   json: boolean,
   all: boolean,
   interval: number,
+  tailChars = 0,
 ): Promise<void> {
   const projectDir = resolveProjectRoot(process.cwd());
 
   if (!watch) {
-    const snapshot = readMonitorSnapshot(projectDir);
+    const snapshot = readMonitorSnapshot(projectDir, tailChars);
     if (json) {
       renderJson(snapshot, false);
     } else {
-      renderHuman(snapshot, all);
+      renderHuman(snapshot, all, tailChars);
     }
     return;
   }
@@ -169,14 +182,14 @@ export async function monitor(
   const refreshLabel = interval >= 1000 ? `${interval / 1000}s` : `${interval}ms`;
 
   while (true) {
-    const snapshot = readMonitorSnapshot(projectDir);
+    const snapshot = readMonitorSnapshot(projectDir, tailChars);
 
     process.stdout.write("\x1b[2J\x1b[H");
 
     if (json) {
       renderJson(snapshot, true);
     } else {
-      renderHuman(snapshot, all);
+      renderHuman(snapshot, all, tailChars);
     }
 
     console.log(dim(`Refreshing every ${refreshLabel} · Ctrl+C to exit`));
@@ -213,6 +226,11 @@ export default defineCommand({
       alias: ["i"],
       description: "Refresh interval in ms (default: 2000)",
     },
+    tail: {
+      type: "string",
+      alias: ["t"],
+      description: "Show last N characters of each task's output (default: 0, disabled)",
+    },
   },
   async run({ args }) {
     const interval = args.interval ? parseInt(args.interval, 10) : 2000;
@@ -220,6 +238,11 @@ export default defineCommand({
       console.error("Error: --interval must be a number >= 500");
       process.exit(1);
     }
-    await monitor(args.watch ?? false, args.json ?? false, args.all ?? false, interval);
+    const tailChars = args.tail ? parseInt(args.tail, 10) : 0;
+    if (isNaN(tailChars) || tailChars < 0) {
+      console.error("Error: --tail must be a non-negative number");
+      process.exit(1);
+    }
+    await monitor(args.watch ?? false, args.json ?? false, args.all ?? false, interval, tailChars);
   },
 });

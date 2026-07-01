@@ -170,6 +170,64 @@ describe("monitor", () => {
     expect(allOutput).toContain("emperor--jinyiwei");
   });
 
+  it("shows result preview when --tail is specified", async () => {
+    const resultsDir = join(stateDir(), "results");
+    mkdirSync(resultsDir, { recursive: true });
+
+    const fullOutput = "Line 1\nLine 2\nLine 3\nFinal output here";
+    writeFileSync(join(resultsDir, "t1.txt"), fullOutput);
+
+    writeDispatch([
+      makeTask({
+        id: "t1",
+        status: "completed",
+        result: {
+          sidecarPath: join(resultsDir, "t1.txt"),
+          totalChars: fullOutput.length,
+          hadFence: false,
+          materializedAt: new Date().toISOString(),
+        },
+      }),
+    ]);
+
+    const { monitor } = await importMonitor();
+    const { logs, run } = captureLogs(() => monitor(false, false, true, 2000, 20));
+    await run();
+
+    const allOutput = logs.join("\n");
+    expect(allOutput).toContain("output");
+    expect(allOutput).toContain("Final output here");
+  });
+
+  it("does not show result preview when --tail is 0", async () => {
+    const resultsDir = join(stateDir(), "results");
+    mkdirSync(resultsDir, { recursive: true });
+
+    const fullOutput = "some output";
+    writeFileSync(join(resultsDir, "t1.txt"), fullOutput);
+
+    writeDispatch([
+      makeTask({
+        id: "t1",
+        status: "completed",
+        result: {
+          sidecarPath: join(resultsDir, "t1.txt"),
+          totalChars: fullOutput.length,
+          hadFence: false,
+          materializedAt: new Date().toISOString(),
+        },
+      }),
+    ]);
+
+    const { monitor } = await importMonitor();
+    const { logs, run } = captureLogs(() => monitor(false, false, true, 2000, 0));
+    await run();
+
+    const allOutput = logs.join("\n");
+    expect(allOutput).not.toContain("╭─ output");
+    expect(allOutput).not.toContain("some output");
+  });
+
   it("shows error details for errored tasks", async () => {
     writeDispatch([
       makeTask({

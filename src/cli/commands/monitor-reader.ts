@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { normalizeWorkspaceDir, stateDirFor } from "../../state-paths.ts";
+import { readResultSidecar } from "../../dispatch/result-extractor.ts";
 
 export interface TaskSnapshot {
   id: string;
@@ -13,6 +14,10 @@ export interface TaskSnapshot {
   error?: string;
   depth: number;
   mode: "background" | "sync";
+  /** Last N characters of the task's output (populated when tailChars > 0) */
+  resultPreview?: string;
+  /** Total character count of the full result */
+  resultTotalChars?: number;
 }
 
 export interface ActiveFunction {
@@ -41,6 +46,7 @@ interface RawDispatchTask {
   error?: string;
   depth?: number;
   mode?: string;
+  result?: { sidecarPath: string; totalChars: number };
 }
 
 interface RawDispatchFile {
@@ -133,7 +139,7 @@ export function resolveProjectRoot(start: string): string {
   return normalizedStart;
 }
 
-export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
+export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorSnapshot {
   const stateDir = stateDirFor(projectDir);
 
   // Scan every state file rather than recomputing a single hashed name: the
@@ -149,6 +155,19 @@ export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
     if (!Array.isArray(file.tasks)) continue;
     for (const st of file.tasks) {
       if (st.sessionId && st.agent) sessionAgentMap.set(st.sessionId, st.agent);
+
+      let resultPreview: string | undefined;
+      let resultTotalChars: number | undefined;
+      if (tailChars > 0 && st.result?.sidecarPath) {
+        resultTotalChars = st.result.totalChars;
+        const full = readResultSidecar(st.result.sidecarPath);
+        if (full !== null) {
+          resultPreview = full.length > tailChars
+            ? full.slice(-tailChars)
+            : full;
+        }
+      }
+
       taskById.set(st.id, {
         id: st.id,
         status: st.status as TaskSnapshot["status"],
@@ -160,6 +179,8 @@ export function readMonitorSnapshot(projectDir: string): MonitorSnapshot {
         error: st.error,
         depth: st.depth ?? 0,
         mode: (st.mode as "background" | "sync") ?? "background",
+        resultPreview,
+        resultTotalChars,
       });
     }
   }
