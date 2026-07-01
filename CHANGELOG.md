@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.0
+
+### Features
+
+- Add loop system with sequential state machine (LoopManager), configurable modes (fixed, until, forever, while), and per-loop counters
+- Add loop param parsing and validation with defaults, clamping, and alias resolution
+- Add loop state persistence store with save/load and version migration
+- Add summarizer session with configurable timeout, token cap, and fallback
+- Wire loop activation, cancellation, and function exclusions into plugin hooks
+- Add idle round-advance, error handling, session.error routing, and recovery notes for loop
+- Add round timeout watchdog and spawn retry for background dispatch
+- Add `--tail`/`-t` flag to monitor command to show last N characters of each completed task's output
+
+### Bug Fixes
+
+- Prevent unbounded auto-continue spin: exclude auto-continue reminder messages from continuation counter reset in chat.message hook
+
 ## 0.13.0
 
 ### Features
