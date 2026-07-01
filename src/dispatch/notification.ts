@@ -17,6 +17,25 @@ export interface NotifyOpts {
   maxDelayMs?: number;
 }
 
+// Markers for `<system-reminder>` messages the dispatch subsystem injects into a
+// PARENT session. They re-enter the chat.message hook and must NOT count as
+// genuine user turns — otherwise the auto-continue counter resets and loops get
+// cancelled (unbounded auto-continue spin). Keep in sync with every
+// parent-targeted reminder the subsystem emits.
+export const DISPATCH_COMPLETION_MARKER = "[BACKGROUND TASK COMPLETED]";
+export const DISPATCH_ALL_COMPLETE_MARKER = "[ALL BACKGROUND TASKS COMPLETE]";
+export const DISPATCH_RECOVERY_MARKER = "[RECOVERY: PENDING TASKS DROPPED]";
+
+export const DISPATCH_NOTIFICATION_MARKERS = [
+  DISPATCH_COMPLETION_MARKER,
+  DISPATCH_ALL_COMPLETE_MARKER,
+  DISPATCH_RECOVERY_MARKER,
+] as const;
+
+export function isDispatchNotification(text: string): boolean {
+  return DISPATCH_NOTIFICATION_MARKERS.some((m) => text.includes(m));
+}
+
 /** Per-parent-session queue for serializing notification sends. */
 const parentQueues = new Map<string, Promise<boolean>>();
 
@@ -65,7 +84,7 @@ export function buildNotificationText(payload: NotificationPayload): string {
   if (payload.remainingTasks > 0) {
     return [
       "<system-reminder>",
-      "[BACKGROUND TASK COMPLETED]",
+      DISPATCH_COMPLETION_MARKER,
       `**ID:** ${payload.taskId}`,
       `**Description:** ${payload.description || "N/A"}`,
       `**Duration:** ${duration}`,
@@ -78,7 +97,7 @@ export function buildNotificationText(payload: NotificationPayload): string {
 
   return [
     "<system-reminder>",
-    "[ALL BACKGROUND TASKS COMPLETE]",
+    DISPATCH_ALL_COMPLETE_MARKER,
     "**Completed:**",
     `- ${label} (${duration})`,
     "",

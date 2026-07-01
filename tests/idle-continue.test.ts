@@ -4,6 +4,7 @@ import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap } from "../src/plugin-hooks";
+import { buildNotificationText, isDispatchNotification } from "../src/dispatch/notification";
 import { roleFunctionsMap } from "../src/index";
 import { functionSessionState } from "../src/session-state";
 import { functionRuntime } from "../src/function/runtime-state";
@@ -390,5 +391,77 @@ describe("auto-continue counter persistence (regression)", () => {
 
     expect(st.continuationCount).toBe(0);
     expect(st.cooldownUntilTurn).toBe(0);
+  });
+});
+
+describe("dispatch-notification counter persistence (regression)", () => {
+  type ChatMessageHook = (
+    input: { agent?: string; sessionID: string },
+    output: { parts: Array<{ type: string; text?: string }> },
+  ) => Promise<void>;
+
+  it("classifies dispatch completion reminders as synthetic, not user turns", () => {
+    const intermediate = buildNotificationText({
+      taskId: "t1", description: "explore", duration: "1s", status: "completed", remainingTasks: 1,
+    });
+    const final = buildNotificationText({
+      taskId: "t1", description: "explore", duration: "1s", status: "completed", remainingTasks: 0,
+    });
+    expect(isDispatchNotification(intermediate)).toBe(true);
+    expect(isDispatchNotification(final)).toBe(true);
+    expect(isDispatchNotification("please keep working")).toBe(false);
+  });
+
+  it("does not reset continuationCount when a dispatch completion reminder re-enters via chat.message", async () => {
+    const client = createMockClient();
+    const fn = makeResolvedFn({
+      name: "synthesize",
+      continue_until: "plan_todos_complete",
+      continue_max: 3,
+    });
+    roleFunctionsMap.set("test-primary", [fn]);
+
+    const hooks = await createPluginHooks(
+      [makePrimaryRole()],
+      client,
+      roleFunctionsMap,
+      new Map(),
+      tmpDir,
+    );
+
+    const sessionID = "test-session";
+    functionSessionState.activate(sessionID, ["synthesize"]);
+    const st = functionRuntime.init(sessionID, "synthesize", 1);
+    st.kv["__todos"] = "- [ ] pending task";
+
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const chatMessage = (hooks as unknown as Record<"chat.message", ChatMessageHook>)["chat.message"];
+
+    const idle = () =>
+      hooks.event({ event: { type: "session.idle", properties: { sessionID } } as any });
+    const completionReenters = () =>
+      chatMessage(
+        { agent: "test-primary", sessionID },
+        { parts: [{ type: "text", text: buildNotificationText({
+          taskId: "bg1", description: "explore", duration: "2s", status: "completed", remainingTasks: 0,
+        }) }] },
+      );
+
+    await idle();
+    expect(st.continuationCount).toBe(1);
+
+    await completionReenters();
+    expect(st.continuationCount).toBe(1);
+
+    await idle();
+    expect(st.continuationCount).toBe(2);
+
+    await completionReenters();
+    await idle();
+    expect(st.continuationCount).toBe(3);
+
+    await completionReenters();
+    await idle();
+    expect(promptAsyncMock).toHaveBeenCalledTimes(3);
   });
 });

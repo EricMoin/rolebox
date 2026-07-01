@@ -25,6 +25,7 @@ import { ArtifactStore } from "./function/artifact-store.ts";
 import { LoopManager } from "./loop/manager.ts";
 import { parseLoopParams } from "./loop/params.ts";
 import { LOOP_PROGRESS_MARKER, LOOP_FUNCTION_NAME } from "./loop/constants.ts";
+import { isDispatchNotification } from "./dispatch/notification.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -486,7 +487,11 @@ export async function createPluginHooks(
         (p: { type: string; text?: string }) => p.type === "text" && typeof p.text === "string",
       ) as { text?: string } | undefined;
       const firstTextStr = firstText?.text ?? "";
-      if (input.sessionID && !firstTextStr.includes("[auto-continue") && !firstTextStr.includes(LOOP_PROGRESS_MARKER)) {
+      const isSyntheticInjection =
+        firstTextStr.includes("[auto-continue") ||
+        firstTextStr.includes(LOOP_PROGRESS_MARKER) ||
+        isDispatchNotification(firstTextStr);
+      if (input.sessionID && !isSyntheticInjection) {
         userMessagedSessions.add(input.sessionID);
         // Loop cancel: genuine user message to a looping origin cancels remaining rounds
         if (activeLoopManager?.isLoopOrigin(input.sessionID)) {
@@ -600,11 +605,11 @@ export async function createPluginHooks(
       }
       functionRuntime.markDirty();
       const isAutoContinue = (firstText?.text ?? "").includes("[auto-continue");
-      const isLoopProgress = (firstText?.text ?? "").includes(LOOP_PROGRESS_MARKER);
-      // Reset only on genuine user turns. Auto-continue and loop-progress
-      // prompts re-enter through this hook; resetting on them pins the counter
-      // at "1/N" so the caps never fire (unbounded auto-continue spin).
-      if (!isAutoContinue && !isLoopProgress) {
+      // Reset only on genuine user turns. Auto-continue, loop-progress, and
+      // dispatch-completion reminders all re-enter through this hook; resetting
+      // on them pins the counter at "1/N" so the caps never fire (unbounded
+      // auto-continue spin).
+      if (!isSyntheticInjection) {
         for (const [, st] of functionRuntime.all(input.sessionID)) {
           st.continuationCount = 0;
           st.cooldownUntilTurn = 0;
@@ -612,7 +617,7 @@ export async function createPluginHooks(
       }
 
       // Loop recovery notification on restart: detect interrupted loops
-      if (input.sessionID && activeLoopManager && !isAutoContinue && !isLoopProgress) {
+      if (input.sessionID && activeLoopManager && !isSyntheticInjection) {
         const loopState = activeLoopManager.getLoopState(input.sessionID);
         if (loopState && loopState.status === "interrupted") {
           loopState.status = "cancelled";

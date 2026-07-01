@@ -13,7 +13,7 @@ import { unlinkSync } from "node:fs";
 import { ConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
-import { notifyParent, hasFinalNotifyBeenSent } from "./notification.ts";
+import { notifyParent, hasFinalNotifyBeenSent, DISPATCH_RECOVERY_MARKER } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 
 import { TaskStateStore } from "./task-store.ts";
@@ -1217,7 +1217,7 @@ export class DispatchManager {
       .join("\n");
     const text = [
       "<system-reminder>",
-      "[RECOVERY: PENDING TASKS DROPPED]",
+      DISPATCH_RECOVERY_MARKER,
       `**${lostTasks.length} pending task(s) were lost during process restart:**`,
       taskList,
       "",
