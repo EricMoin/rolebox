@@ -6,6 +6,9 @@ import {
   LOOP_PROGRESS_MARKER,
   LOOP_STATE_SCHEMA_VERSION,
   SUMMARIZER_TIMEOUT_MS,
+  ROUND_TIMEOUT_MS,
+  SPAWN_MAX_RETRIES,
+  SPAWN_RETRY_BASE_DELAY_MS,
 } from "./constants.js";
 import { LoopStore } from "./loop-store.js";
 import { createSummarizerFn } from "./summarizer.js";
@@ -35,18 +38,49 @@ export class LoopManager implements LoopManagerHooks {
   private childToOrigin = new Map<string, string>();
   private store?: LoopStore;
   private timer?: ReturnType<typeof setTimeout>;
+  private _watchdog?: ReturnType<typeof setInterval>;
   private _dirty = false;
   private _advancing = new Set<string>();
   private _summarizer?: SummarizeFn;
   private readonly client: OpencodeClient;
   private readonly _delayMs: number;
+  private readonly _roundTimeoutMs: number;
 
   constructor(
     client: OpencodeClient,
-    opts?: { delayMs?: number },
+    opts?: { delayMs?: number; roundTimeoutMs?: number },
   ) {
     this.client = client;
     this._delayMs = opts?.delayMs ?? INTER_ROUND_DELAY_MS;
+    this._roundTimeoutMs = opts?.roundTimeoutMs ?? ROUND_TIMEOUT_MS;
+    this._startWatchdog();
+  }
+
+  private _startWatchdog(): void {
+    const interval = Math.min(this._roundTimeoutMs / 2, 60_000);
+    this._watchdog = setInterval(() => this._checkRoundTimeouts(), interval);
+    if (this._watchdog.unref) this._watchdog.unref();
+  }
+
+  private _checkRoundTimeouts(): void {
+    const now = Date.now();
+    for (const loop of this.loops.values()) {
+      if (loop.status !== "running") continue;
+      if (this._advancing.has(loop.originSessionId)) continue;
+      if (now - loop.roundStartedAt > this._roundTimeoutMs) {
+        loop.status = "error";
+        loop.errorReason = `Round ${loop.current} timed out after ${Math.round(this._roundTimeoutMs / 1000)}s`;
+        loop.updatedAt = now;
+        this._injectNote(
+          loop.originSessionId,
+          `${LOOP_PROGRESS_MARKER} error: ${loop.errorReason}]`,
+        );
+        if (loop.activeSessionId !== loop.originSessionId) {
+          this.childToOrigin.delete(loop.activeSessionId);
+        }
+        this._persist();
+      }
+    }
   }
 
   setStoreDirectory(dir: string): void {
@@ -121,6 +155,15 @@ export class LoopManager implements LoopManagerHooks {
   }
 
   getByActiveSession(sid: string): LoopState | undefined {
+    if (this.loops.has(sid)) {
+      const loop = this.loops.get(sid)!;
+      if (loop.activeSessionId === sid) return loop;
+    }
+    const origin = this.childToOrigin.get(sid);
+    if (origin) {
+      const loop = this.loops.get(origin);
+      if (loop && loop.activeSessionId === sid) return loop;
+    }
     for (const loop of this.loops.values()) {
       if (loop.activeSessionId === sid) return loop;
     }
@@ -193,23 +236,52 @@ export class LoopManager implements LoopManagerHooks {
         return;
       }
 
+      loop.status = "waiting";
+      loop.updatedAt = Date.now();
+      this._persist();
+
       await this._delay(this._delayMs);
 
-      loop.status = "spawning";
-      const createResult = await this.client.session.create({
-        body: { parentID: origin },
-      });
-      const childId = (
-        (createResult as { data?: { id?: string } }).data
-      )?.id;
-      if (!childId) {
-        loop.status = "error";
-        loop.errorReason = "Failed to create child session";
+      if (loop.cancelRequested) {
+        loop.status = "cancelled";
         loop.updatedAt = Date.now();
         await this._injectNote(
           origin,
-          `${LOOP_PROGRESS_MARKER} error: failed to create child session]`,
+          `${LOOP_PROGRESS_MARKER} loop cancelled]`,
         );
+        this.childToOrigin.delete(activeSessionId);
+        this._persist();
+        return;
+      }
+
+      loop.status = "spawning";
+      let childId: string | undefined;
+      for (let attempt = 0; attempt <= SPAWN_MAX_RETRIES; attempt++) {
+        if (loop.cancelRequested) break;
+        const createResult = await this.client.session.create({
+          body: { parentID: origin },
+        });
+        childId = (
+          (createResult as { data?: { id?: string } }).data
+        )?.id;
+        if (childId) break;
+        if (attempt < SPAWN_MAX_RETRIES) {
+          await this._delay(SPAWN_RETRY_BASE_DELAY_MS * (2 ** attempt));
+        }
+      }
+      if (!childId) {
+        if (loop.cancelRequested) {
+          loop.status = "cancelled";
+        } else {
+          loop.status = "error";
+          loop.errorReason = `Failed to create child session after ${SPAWN_MAX_RETRIES + 1} attempts`;
+        }
+        loop.updatedAt = Date.now();
+        await this._injectNote(
+          origin,
+          `${LOOP_PROGRESS_MARKER} ${loop.status === "cancelled" ? "loop cancelled" : "error: " + loop.errorReason}]`,
+        );
+        this.childToOrigin.delete(activeSessionId);
         this._persist();
         return;
       }
@@ -241,6 +313,12 @@ export class LoopManager implements LoopManagerHooks {
     }
   }
 
+  private static readonly TERMINAL_STATUSES = new Set([
+    "complete",
+    "cancelled",
+    "error",
+  ]);
+
   handleSessionError(sid: string, error?: string): void {
     let loop: LoopState | undefined;
     if (this.loops.has(sid)) {
@@ -254,6 +332,8 @@ export class LoopManager implements LoopManagerHooks {
     }
 
     if (!loop) return;
+    if (LoopManager.TERMINAL_STATUSES.has(loop.status)) return;
+    if (this._advancing.has(loop.originSessionId)) return;
 
     loop.errorReason = error ?? "Unknown error";
     loop.status = "error";
@@ -267,9 +347,17 @@ export class LoopManager implements LoopManagerHooks {
   }
 
   dispose(): void {
+    if (this._watchdog) {
+      clearInterval(this._watchdog);
+      this._watchdog = undefined;
+    }
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
+    }
+    if (this._dirty && this.store) {
+      this._dirty = false;
+      this.store.saveSync(this.loops);
     }
   }
 

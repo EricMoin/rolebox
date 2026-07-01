@@ -22,5 +22,11 @@ export const LOOP_STATE_SCHEMA_VERSION = 1;
 /** Marker string used to detect loop-progress signals in session output */
 export const LOOP_PROGRESS_MARKER = "[loop-progress";
 
+/** Maximum number of retries when spawning a child session fails */
+export const SPAWN_MAX_RETRIES = 2;
+
+/** Base delay (ms) between spawn retries (doubles each attempt) */
+export const SPAWN_RETRY_BASE_DELAY_MS = 2_000;
+
 /** Canonical name of the loop function */
 export const LOOP_FUNCTION_NAME = "loop";
