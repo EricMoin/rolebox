@@ -757,9 +757,9 @@ describe("LoopCoordinator", () => {
       expect(round2Input.prompt).not.toContain("---");
     });
 
-    it("does not pass sinceMessageId when boundary is undefined", async () => {
+    it("passes the captured message boundary to readOriginSummary", async () => {
       const { adapter, calls } = createFakeAdapter({
-        lastMessageId: undefined,
+        lastMessageId: "msg-boundary",
       });
       const c = new LoopCoordinator(adapter);
 
@@ -772,7 +772,7 @@ describe("LoopCoordinator", () => {
         (call) => call.method === "readOriginSummary",
       );
       expect(readCalls.length).toBe(1);
-      expect(readCalls[0]!.args[1]).toBeUndefined();
+      expect(readCalls[0]!.args[1]).toBe("msg-boundary");
     });
   });
 });
