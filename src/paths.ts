@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import os from "node:os";
+import { SKILL_MD } from "./constants.ts";
 
 /** `{baseDir}/{name}.md` */
 export function functionPath(baseDir: string, name: string): string {
@@ -8,7 +9,7 @@ export function functionPath(baseDir: string, name: string): string {
 
 /** `{baseDir}/{name}/SKILL.md` */
 export function skillDirPath(baseDir: string, name: string): string {
-  return join(baseDir, name, "SKILL.md");
+  return join(baseDir, name, SKILL_MD);
 }
 
 /** `{baseDir}/{name}.md` */

@@ -1,6 +1,7 @@
 import { defineCommand } from "citty";
 import { loadConfig, saveConfig, loadLock } from "../config.ts";
 import { parseGitHubUrl, fetchRegistryManifest } from "../registry-client.ts";
+import { DEFAULT_GIT_BRANCH } from "../../constants.ts";
 
 export function registryListFn(): void {
   const config = loadConfig();
@@ -22,7 +23,7 @@ export async function registryAddFn(url: string): Promise<void> {
 
   const entry = { name, url };
   try {
-    await fetchRegistryManifest(entry, "main", { noCache: true });
+    await fetchRegistryManifest(entry, DEFAULT_GIT_BRANCH, { noCache: true });
   } catch (err) {
     throw new Error(`Could not validate registry at ${url}: ${(err as Error).message}`);
   }

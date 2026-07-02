@@ -15,7 +15,7 @@ import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.ts";
 import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "./types.ts";
-import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS } from "./constants.ts";
+import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "./constants.ts";
 import { createSubLogger, formatError } from "./logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
@@ -152,7 +152,7 @@ export async function discoverRoles(
 
   let matches: string[];
   try {
-    matches = await fglob("**/role.yaml", {
+    matches = await fglob(`**/${ROLE_YAML}`, {
       cwd: roleboxDir,
       absolute: true,
       deep: 2,
@@ -582,7 +582,7 @@ async function discoverFileBasedSubagents(
 
   let matches: string[];
   try {
-    matches = await fglob("subagents/*/role.yaml", {
+    matches = await fglob(`subagents/*/${ROLE_YAML}`, {
       cwd: roleDir,
       absolute: true,
       deep: 2,

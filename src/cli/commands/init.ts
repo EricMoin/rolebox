@@ -5,6 +5,7 @@ import { checkTargetDir, deriveRoleId, validateInitRoleId } from "./init-utils.t
 import { scaffoldRole } from "./init-scaffold.ts";
 import { runInteractiveWizard } from "./init-prompts.ts";
 import type { InitConfig, TemplateType } from "../templates/index.ts";
+import { ROLE_YAML } from "../../constants.ts";
 
 const VALID_TEMPLATES: TemplateType[] = ["minimal", "standard", "subagents", "collaboration"];
 
@@ -67,7 +68,7 @@ export async function init(nameArg: string | undefined, yes: boolean, templateAr
   const dirState = checkTargetDir(targetDir);
 
   if (dirState.hasRoleYaml) {
-    throw new Error(`Target directory already contains a role.yaml: ${targetDir}`);
+    throw new Error(`Target directory already contains a ${ROLE_YAML}: ${targetDir}`);
   }
 
   // -----------------------------------------------------------------------

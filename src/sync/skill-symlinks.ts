@@ -1,19 +1,19 @@
 import path from "node:path";
 import { mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync } from "node:fs";
 import type { ResolvedRole } from "../types.ts";
-import { SkillScope, ROLEBOX_SKILL_PREFIX } from "../constants.ts";
+import { SkillScope, ROLEBOX_SKILL_PREFIX, SKILL_MD } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 
 const log = createSubLogger("sync");
 
 function createSkillEntry(entryPath: string, filePath: string): void {
-  const isDirectorySkill = path.basename(filePath).toLowerCase() === "skill.md";
+  const isDirectorySkill = path.basename(filePath).toLowerCase() === SKILL_MD.toLowerCase();
   try {
     if (isDirectorySkill) {
       symlinkSync(path.dirname(filePath), entryPath);
     } else {
       mkdirSync(entryPath, { recursive: true });
-      symlinkSync(filePath, path.join(entryPath, "SKILL.md"));
+      symlinkSync(filePath, path.join(entryPath, SKILL_MD));
     }
   } catch (err) {
     log.warn("Failed to create skill symlink", { entryPath, filePath, error: formatError(err) });
@@ -66,7 +66,7 @@ export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir
         if (stat.isSymbolicLink()) {
           unlinkSync(entryPath);
         } else if (stat.isDirectory()) {
-          const inner = path.join(entryPath, "SKILL.md");
+          const inner = path.join(entryPath, SKILL_MD);
           try { unlinkSync(inner); } catch (err) { log.debug("Cleanup failed", { path: inner, error: formatError(err) }); }
           try { rmdirSync(entryPath); } catch (err) { log.debug("Cleanup failed", { path: entryPath, error: formatError(err) }); }
         }

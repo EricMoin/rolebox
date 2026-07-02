@@ -2,6 +2,24 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { SyncTarget } from "../constants.ts";
 
+// ── Opencode Paths ────────────────────────────────────────────────
+
+export function getOpencodeConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg) return join(xdg, "opencode");
+  return join(homedir(), ".config", "opencode");
+}
+
+export function getOpencodeConfigPath(): string {
+  return join(getOpencodeConfigDir(), "opencode.jsonc");
+}
+
+export function getOpencodeSkillsDir(): string {
+  return join(getOpencodeConfigDir(), "skills");
+}
+
+// ── Rolebox Paths ─────────────────────────────────────────────────
+
 /**
  * Returns the rolebox data directory.
  * Respects XDG_DATA_HOME on Unix (default: ~/.local/share/rolebox).

@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
+import { ROLE_YAML } from "../../constants.ts";
 
 /**
  * Validates a role ID string against naming rules.
@@ -85,7 +86,7 @@ export function checkTargetDir(targetPath: string): {
 
   return {
     exists: true,
-    hasRoleYaml: filtered.includes("role.yaml"),
+    hasRoleYaml: filtered.includes(ROLE_YAML),
     isEmpty: filtered.length === 0,
   };
 }

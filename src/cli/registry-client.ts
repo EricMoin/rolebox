@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { getDataDir } from "./paths.ts";
 import { parseRegistryManifestFromYaml } from "./schemas.ts";
 import type { RegistryManifest } from "./types.ts";
+import { DEFAULT_GIT_BRANCH, REGISTRY_CACHE_TTL_MS } from "../constants.ts";
 
 // ── GitHub URL Parsing ────────────────────────────────────────────
 
@@ -44,7 +45,7 @@ export function resolveVersion(manifest: RegistryManifest, roleId: string): stri
 
 // ── Registry Manifest Fetching ────────────────────────────────────
 
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 
 /**
  * Fetch a registry manifest from a GitHub raw content URL with caching.
@@ -64,7 +65,7 @@ export async function fetchRegistryManifest(
       if (existsSync(timestampFile) && existsSync(cacheFile)) {
         const ts = readFileSync(timestampFile, "utf-8");
         const cachedAt = new Date(ts).getTime();
-        if (!isNaN(cachedAt) && Date.now() - cachedAt < CACHE_TTL_MS) {
+        if (!isNaN(cachedAt) && Date.now() - cachedAt < REGISTRY_CACHE_TTL_MS) {
           const cached = readFileSync(cacheFile, "utf-8");
           return parseRegistryManifestFromYaml(cached);
         }
@@ -76,7 +77,7 @@ export async function fetchRegistryManifest(
 
   // Build URL
   const { owner, repo } = parseGitHubUrl(registry.url);
-  const branch = ref || "main";
+  const branch = ref || DEFAULT_GIT_BRANCH;
   const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/registry.yaml`;
 
   // Prepare headers
@@ -144,7 +145,7 @@ export async function downloadRole(
   ref?: string
 ): Promise<string> {
   const { owner, repo } = parseGitHubUrl(registry.url);
-  const branch = ref || "main";
+  const branch = ref || DEFAULT_GIT_BRANCH;
   const url = `https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
 
   const headers: Record<string, string> = {};

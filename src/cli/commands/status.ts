@@ -2,9 +2,8 @@ import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
 import { loadLock, loadConfig, getConfigPath, getLockPath } from "../config.ts";
-import { getSyncTarget, getRolePath } from "../paths.ts";
+import { getSyncTarget, getRolePath, getOpencodeConfigPath, getOpencodeSkillsDir } from "../paths.ts";
 import { fetchRegistryManifest } from "../registry-client.ts";
 import { compareVersions } from "./update.ts";
 import { SyncTarget, PLUGIN_ID } from "../../constants.ts";
@@ -23,6 +22,7 @@ import {
   printField,
   checkSymlink,
   listSymlinks,
+  shortenPath,
 } from "../format.ts";
 
 interface StatusJson {
@@ -206,18 +206,6 @@ function findPackageJson(): string {
   throw new Error("Could not find package.json");
 }
 
-function getOpencodeConfigPath(): string {
-  const xdg = process.env.XDG_CONFIG_HOME;
-  const base = xdg || join(homedir(), ".config");
-  return join(base, "opencode", "opencode.jsonc");
-}
-
-function getOpencodeSkillsDir(): string {
-  const xdg = process.env.XDG_CONFIG_HOME;
-  const base = xdg || join(homedir(), ".config");
-  return join(base, "opencode", "skills");
-}
-
 function checkPluginRegistered(configPath: string): boolean {
   if (!existsSync(configPath)) return false;
   try {
@@ -263,13 +251,7 @@ function stripJsonComments(input: string): string {
   return result;
 }
 
-function shortenPath(p: string): string {
-  const home = homedir();
-  if (p.startsWith(home)) {
-    return "~" + p.slice(home.length);
-  }
-  return p;
-}
+
 
 async function fetchLatestVersions(
   config: { registries: Array<{ name: string; url: string }> },

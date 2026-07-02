@@ -5,7 +5,7 @@ import yaml from "js-yaml";
 import { loadLock, findInLock } from "../config.ts";
 import { getSyncTarget, getRolePath } from "../paths.ts";
 import { computeIntegrity } from "../registry-client.ts";
-import { DEFAULT_FUNCTIONS, RoleMode, SyncTarget } from "../../constants.ts";
+import { DEFAULT_FUNCTIONS, RoleMode, SyncTarget, ROLE_YAML } from "../../constants.ts";
 import {
   bold,
   dim,
@@ -21,8 +21,8 @@ import {
   printField,
   checkSymlink,
   listSymlinks,
+  shortenPath,
 } from "../format.ts";
-import { homedir } from "node:os";
 
 interface RoleYaml {
   name?: string;
@@ -74,7 +74,7 @@ export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: 
   }
 
   const rolePath = getRolePath(entry.registry, entry.role, entry.version);
-  const roleYamlPath = join(rolePath, "role.yaml");
+  const roleYamlPath = join(rolePath, ROLE_YAML);
 
   let roleConfig: RoleYaml = {};
   if (existsSync(roleYamlPath)) {
@@ -238,7 +238,7 @@ function discoverFileSubagents(rolePath: string): Array<{ name: string; descript
     const entries = readdirSync(subagentsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const subRoleYaml = join(subagentsDir, entry.name, "role.yaml");
+      const subRoleYaml = join(subagentsDir, entry.name, ROLE_YAML);
       if (existsSync(subRoleYaml)) {
         try {
           const config = yaml.load(readFileSync(subRoleYaml, "utf-8")) as { name?: string; description?: string } || {};
@@ -255,13 +255,7 @@ function discoverFileSubagents(rolePath: string): Array<{ name: string; descript
   return results;
 }
 
-function shortenPath(p: string): string {
-  const home = homedir();
-  if (p.startsWith(home)) {
-    return "~" + p.slice(home.length);
-  }
-  return p;
-}
+
 
 export default defineCommand({
   meta: {

@@ -6,6 +6,7 @@ import {
   statSync,
 } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -120,6 +121,19 @@ export function listSymlinks(dir: string, prefix?: string): SymlinkStatus[] {
     // Best-effort — UI formatting should never crash
   }
   return results;
+}
+
+// ── Path Utilities ───────────────────────────────────────────────
+
+/**
+ * Replace the home directory prefix with `~` for human-readable display.
+ */
+export function shortenPath(p: string): string {
+  const home = homedir();
+  if (p.startsWith(home)) {
+    return "~" + p.slice(home.length);
+  }
+  return p;
 }
 
 // ── Private ──────────────────────────────────────────────────────

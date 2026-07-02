@@ -91,6 +91,20 @@ export const ROLEBOX_AGENT_MARKER = "<!-- rolebox-managed -->";
 /** Plugin identifier. */
 export const PLUGIN_ID = "rolebox";
 
+// ── Well-Known File Names ──────────────────────────────────────────────
+
+export const ROLE_YAML = "role.yaml";
+export const SKILL_MD = "SKILL.md";
+export const PROMPT_MD = "PROMPT.md";
+
+// ── GitHub Defaults ───────────────────────────────────────────────────
+
+export const DEFAULT_GIT_BRANCH = "main";
+
+// ── Registry ──────────────────────────────────────────────────────────
+
+export const REGISTRY_CACHE_TTL_MS = 5 * 60 * 1000;
+
 // ── Inheritable Fields ─────────────────────────────────────────────────
 
 /**
