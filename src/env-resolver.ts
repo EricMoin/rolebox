@@ -7,18 +7,16 @@
  */
 
 import { createSubLogger } from "./logger.ts";
+import type { Logger } from "tslog";
+import type { ILogObj } from "tslog";
 
 const ENV_VAR_PATTERN = /(?<!\{env:)\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
-let log = createSubLogger("env-resolver");
+let log: Logger<ILogObj> = createSubLogger("env-resolver");
 
-export function __setLoggerForTest(mockLog: {
-  warn: (...args: unknown[]) => void;
-  debug: (...args: unknown[]) => void;
-  error: (...args: unknown[]) => void;
-  info: (...args: unknown[]) => void;
-}): void {
-  log = mockLog as any;
+/** @internal Test seam — swap the module-level logger for a mock. */
+export function __setLoggerForTest(mockLog: Logger<ILogObj>): void {
+  log = mockLog;
 }
 
 /**

@@ -22,6 +22,8 @@ import { evaluateGateAndTransitions } from "./function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "./function/conditions.ts";
 import { decideContinuation } from "./function/continuation.ts";
 import { ArtifactStore } from "./function/artifact-store.ts";
+import { loadHandlers, safeCall } from "./function/handlers-loader.ts";
+import { FunctionContext } from "./function/context.ts";
 import { LoopManager } from "./loop/manager.ts";
 import { parseLoopParams } from "./loop/params.ts";
 import { LOOP_PROGRESS_MARKER, LOOP_FUNCTION_NAME } from "./loop/constants.ts";
@@ -49,6 +51,14 @@ export const sessionAgentRegistry = new Map<string, string>();
 export const roleAutoActivateMap = new Map<string, string[]>();
 export const roleLockedMap = new Map<string, boolean>();
 export const autoActivatedSessions = new Set<string>();
+
+function collectAllFunctions(
+  fnMap: Map<string, ResolvedFunction[]>,
+): ResolvedFunction[] {
+  const result: ResolvedFunction[] = [];
+  for (const funcs of fnMap.values()) result.push(...funcs);
+  return result;
+}
 
 async function fetchLastAssistantText(
   client: PluginInput["client"],
@@ -280,9 +290,7 @@ export async function createPluginHooks(
             }
             break;
           }
-          const allFns: ResolvedFunction[] = [];
-          for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
-          const { ArtifactStore } = await import("./function/artifact-store.ts");
+          const allFns = collectAllFunctions(roleFunctionsMap);
           const artifacts = new ArtifactStore(dir);
 
           const activeFns = allFns.filter((f) => activeSet.has(f.name));
@@ -301,8 +309,6 @@ export async function createPluginHooks(
 
           // --- Tier-2 handlers: onIdle (Phase 1 — side-effects for all handler fns) ---
           if (hasHandlers) {
-            const { loadHandlers, safeCall } = await import("./function/handlers-loader.ts");
-            const { FunctionContext } = await import("./function/context.ts");
             for (const fn of activeFns) {
               if (!fn.handlers) continue;
               const mod = await loadHandlers(fn.filePath, fn.handlers);
@@ -367,8 +373,6 @@ export async function createPluginHooks(
 
             // Imperative: shouldContinue (additive — can request but cannot veto declarative)
             if (fn.handlers && hasHandlers) {
-              const { loadHandlers, safeCall } = await import("./function/handlers-loader.ts");
-              const { FunctionContext } = await import("./function/context.ts");
               const mod = await loadHandlers(fn.filePath, fn.handlers);
               if (mod?.shouldContinue) {
                 const ctx = new FunctionContext(
@@ -525,9 +529,7 @@ export async function createPluginHooks(
           functionSessionState.activateDefaults(input.sessionID, autoFns, lockedNames);
           autoActivatedSessions.add(input.sessionID);
 
-          const allFns: ResolvedFunction[] = [];
-          for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
-          const autoActiveFns = allFns.filter((f) => autoFns.includes(f.name));
+          const autoActiveFns = collectAllFunctions(roleFunctionsMap).filter((f) => autoFns.includes(f.name));
 
           // Init runtime state for auto-activated functions before firing on:activate
           for (const fn of autoActiveFns) {
@@ -643,9 +645,7 @@ export async function createPluginHooks(
         try {
           const activeNames = functionSessionState.getActive(input.sessionID);
           if (activeNames.size > 0) {
-            const allFns2: ResolvedFunction[] = [];
-            for (const funcs of roleFunctionsMap.values()) allFns2.push(...funcs);
-            const activeFns = allFns2.filter((f) => activeNames.has(f.name));
+            const activeFns = collectAllFunctions(roleFunctionsMap).filter((f) => activeNames.has(f.name));
             if (activeFns.length > 0) {
               const messageInjects = runMessageObserve({
                 sessionID: input.sessionID,
@@ -657,7 +657,9 @@ export async function createPluginHooks(
               }
             }
           }
-        } catch {}
+        } catch (err) {
+          log.debug("chat.message observe error", { error: err instanceof Error ? err.message : String(err) });
+        }
       }
     },
     "tool.execute.after": async (
@@ -699,8 +701,7 @@ export async function createPluginHooks(
       try {
         const activeNames = functionSessionState.getActive(input.sessionID);
         if (activeNames.size === 0) return;
-        const allFns: ResolvedFunction[] = [];
-        for (const funcs of roleFunctionsMap.values()) allFns.push(...funcs);
+        const allFns = collectAllFunctions(roleFunctionsMap);
         const activeFns = allFns.filter((f) => activeNames.has(f.name));
         if (activeFns.length === 0) return;
 
@@ -724,8 +725,6 @@ export async function createPluginHooks(
         }
 
         // --- Tier-2 handlers: onToolAfter ---
-        const { loadHandlers, safeCall } = await import("./function/handlers-loader.ts");
-        const { FunctionContext } = await import("./function/context.ts");
         for (const fn of activeFns) {
           if (!fn.handlers) continue;
           const mod = await loadHandlers(fn.filePath, fn.handlers);
@@ -760,7 +759,9 @@ export async function createPluginHooks(
             if (st) { st.kv.__pendingContinuationReasons = ctx.continuationReasons; functionRuntime.markDirty(); }
           }
         }
-      } catch {}
+      } catch (err) {
+        log.debug("tool.execute.after observe error", { error: err instanceof Error ? err.message : String(err) });
+      }
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },
@@ -803,10 +804,7 @@ export async function createPluginHooks(
         return;
       }
 
-      const allFunctions: ResolvedFunction[] = [];
-      for (const funcs of roleFunctionsMap.values()) {
-        allFunctions.push(...funcs);
-      }
+      const allFunctions = collectAllFunctions(roleFunctionsMap);
 
       const seen = new Set<string>();
       const activeFunctions: ResolvedFunction[] = [];

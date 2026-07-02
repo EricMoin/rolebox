@@ -17,8 +17,7 @@ import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.ts";
 import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "./types.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "./constants.ts";
 import { createSubLogger, formatError } from "./logger.ts";
-import type { Logger } from "tslog";
-import type { ILogObj } from "tslog";
+import type { Logger, ILogObj } from "tslog";
 
 let log: Logger<ILogObj> = createSubLogger("role-loader");
 

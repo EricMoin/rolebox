@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { writeFileSync, renameSync } from "node:fs";
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
 import type { DispatchManager } from "./manager.ts";
@@ -330,8 +330,8 @@ export function createDispatchMetricsTool() {
       const exportPath = input.export_path || process.env.ROLEBOX_METRICS_EXPORT;
       if (exportPath) {
         const tmpPath = exportPath + ".tmp";
-        fs.writeFileSync(tmpPath, jsonStr, "utf-8");
-        fs.renameSync(tmpPath, exportPath);
+        writeFileSync(tmpPath, jsonStr, "utf-8");
+        renameSync(tmpPath, exportPath);
       }
 
       if (input.format === "json") {
