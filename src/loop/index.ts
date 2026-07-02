@@ -5,3 +5,5 @@ export { LoopStore } from "./loop-store.js";
 export { createSummarizerFn } from "./summarizer.js";
 export * from "./types.js";
 export * from "./constants.js";
+export { DispatchAdapter } from "./dispatch-adapter.js";
+export type { IDispatchAdapter } from "./dispatch-adapter.js";

@@ -1,5 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { parseLoopParams } from "../../src/loop/params";
+import {
+  SEED_CHAR_CAP,
+  DISPATCH_ROUND_TIMEOUT_MS,
+  ROUND_TIMEOUT_MS,
+  SUMMARY_INPUT_CHAR_CAP,
+} from "../../src/loop/constants";
 import type { FunctionCall } from "../../src/function-parser";
 
 function callFromPositional(
@@ -233,5 +239,30 @@ describe("parseLoopParams", () => {
       expect(result.iterations).toBe(5);
       expect(result.mode).toBe("fresh");
     }
+  });
+
+  // ── New constants ──
+  it("SEED_CHAR_CAP is 8000", () => {
+    expect(SEED_CHAR_CAP).toBe(8_000);
+  });
+
+  it("DISPATCH_ROUND_TIMEOUT_MS is 900000", () => {
+    expect(DISPATCH_ROUND_TIMEOUT_MS).toBe(900_000);
+  });
+
+  it("ROUND_TIMEOUT_MS is alias for DISPATCH_ROUND_TIMEOUT_MS", () => {
+    expect(ROUND_TIMEOUT_MS).toBe(DISPATCH_ROUND_TIMEOUT_MS);
+  });
+
+  it("SEED_CHAR_CAP matches SUMMARY_INPUT_CHAR_CAP", () => {
+    expect(SEED_CHAR_CAP).toBe(SUMMARY_INPUT_CHAR_CAP);
+  });
+
+  // ── Deprecated constants (removed in T14) ──
+  it("SUMMARIZER_TIMEOUT_MS is still exported as deprecated", async () => {
+    const mod = await import("../../src/loop/constants");
+    expect((mod as Record<string, unknown>).SUMMARIZER_TIMEOUT_MS).toBe(60_000);
+    expect((mod as Record<string, unknown>).SPAWN_MAX_RETRIES).toBe(2);
+    expect((mod as Record<string, unknown>).SPAWN_RETRY_BASE_DELAY_MS).toBe(2_000);
   });
 });

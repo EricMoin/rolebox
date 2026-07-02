@@ -20,6 +20,17 @@ export type LoopParamsResult = ValidLoopParams | InvalidLoopParams;
 const FRESH_ALIASES = new Set(["no-inherit", "off", "false"]);
 const INHERIT_ALIASES = new Set(["on", "true"]);
 
+/**
+ * Parse a `FunctionCall` from `|loop:N,mode|` syntax into validated loop params.
+ *
+ * @param call - FunctionCall with `args` containing `_0`/`iterations` and `_1`/`mode`.
+ *
+ * Mode semantics in the unified-seed model:
+ * - `"inherit"`: Prepend the unified summary from the previous round as a seed
+ *   context for the next round (aliases: `"on"`, `"true"`).
+ * - `"fresh"`: Start each round with no seed context — a clean slate
+ *   (aliases: `"no-inherit"`, `"off"`, `"false"`).
+ */
 export function parseLoopParams(call: FunctionCall): LoopParamsResult {
   const { args } = call;
 
