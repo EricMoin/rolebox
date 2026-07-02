@@ -171,6 +171,11 @@ class LogTransport {
   }
 }
 
+function resolveMaxBytes(): number {
+  const raw = process.env.ROLEBOX_LOG_MAX_BYTES;
+  return raw ? parseInt(raw, 10) || DEFAULT_MAX_FILE_BYTES : DEFAULT_MAX_FILE_BYTES;
+}
+
 let _rootLogger: Logger<ILogObj> | null = null;
 let _logFilePath: string | null | undefined;
 let _parsedLevel: number | undefined;
@@ -190,11 +195,7 @@ function ensureInitialized(): void {
   });
 
   if (_logFilePath) {
-    const maxBytes = process.env.ROLEBOX_LOG_MAX_BYTES
-      ? parseInt(process.env.ROLEBOX_LOG_MAX_BYTES, 10) || DEFAULT_MAX_FILE_BYTES
-      : DEFAULT_MAX_FILE_BYTES;
-
-    _transport = new LogTransport(_logFilePath, maxBytes);
+    _transport = new LogTransport(_logFilePath, resolveMaxBytes());
 
     _rootLogger.attachTransport((logObj) => {
       try {
@@ -280,11 +281,7 @@ export function configureLogDirectory(directory: string): void {
   _logFilePath = newPath;
 
   if (_logFilePath && _rootLogger) {
-    const maxBytes = process.env.ROLEBOX_LOG_MAX_BYTES
-      ? parseInt(process.env.ROLEBOX_LOG_MAX_BYTES, 10) || DEFAULT_MAX_FILE_BYTES
-      : DEFAULT_MAX_FILE_BYTES;
-
-    _transport = new LogTransport(_logFilePath, maxBytes);
+    _transport = new LogTransport(_logFilePath, resolveMaxBytes());
 
     _rootLogger.attachTransport((logObj) => {
       try {
