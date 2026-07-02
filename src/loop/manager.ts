@@ -150,6 +150,21 @@ export class LoopManager implements LoopManagerHooks {
     return this.childToOrigin.has(sid);
   }
 
+  /**
+   * A user message cancels the loop only after it has advanced to a background
+   * child session (round 2+). While round 1 still runs in the origin session,
+   * ordinary user input there (including scoring or the activating turn itself)
+   * is not an interrupt. Terminal/interrupted loops never cancel again.
+   */
+  shouldCancelOnUserMessage(originSessionId: string): boolean {
+    const loop = this.loops.get(originSessionId);
+    if (!loop) return false;
+    if (LoopManager.TERMINAL_STATUSES.has(loop.status)) return false;
+    if (loop.status === "interrupted") return false;
+    if (loop.activeSessionId === originSessionId) return false;
+    return true;
+  }
+
   getLoopState(originSessionId: string): LoopState | undefined {
     return this.loops.get(originSessionId);
   }

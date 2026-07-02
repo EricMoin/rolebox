@@ -504,8 +504,7 @@ export async function createPluginHooks(
         isDispatchNotification(firstTextStr);
       if (input.sessionID && !isSyntheticInjection) {
         userMessagedSessions.add(input.sessionID);
-        // Loop cancel: genuine user message to a looping origin cancels remaining rounds
-        if (activeLoopManager?.isLoopOrigin(input.sessionID)) {
+        if (activeLoopManager?.shouldCancelOnUserMessage(input.sessionID)) {
           activeLoopManager.requestCancel(input.sessionID, "user message");
         }
       }

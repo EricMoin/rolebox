@@ -233,6 +233,65 @@ describe("LoopManager", () => {
     });
   });
 
+  // ── shouldCancelOnUserMessage ───────────────────────────────────
+
+  describe("shouldCancelOnUserMessage", () => {
+    it("returns false during round 1 (activeSessionId === origin)", () => {
+      const manager = freshManager();
+      manager.register({
+        originSessionId: ORIGIN_SID,
+        agent: AGENT,
+        prompt: PROMPT,
+        mode: "fresh",
+        iterations: 3,
+      });
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+    });
+
+    it("returns true after loop advances to a child session", async () => {
+      const client = loopMockClient({ sessionCreate: sequentialIds("child") });
+      const manager = freshManager(client);
+      manager.register({
+        originSessionId: ORIGIN_SID,
+        agent: AGENT,
+        prompt: PROMPT,
+        mode: "fresh",
+        iterations: 3,
+      });
+
+      await manager.onRoundComplete(ORIGIN_SID);
+
+      expect(manager.getByActiveSession("child-1")!.activeSessionId).toBe("child-1");
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(true);
+    });
+
+    it("returns false for unknown, terminal, and interrupted loops", async () => {
+      const client = loopMockClient({ sessionCreate: sequentialIds("child") });
+      const manager = freshManager(client);
+
+      expect(manager.shouldCancelOnUserMessage("unknown")).toBe(false);
+
+      manager.register({
+        originSessionId: ORIGIN_SID,
+        agent: AGENT,
+        prompt: PROMPT,
+        mode: "fresh",
+        iterations: 3,
+      });
+      await manager.onRoundComplete(ORIGIN_SID);
+      const loop = manager.getLoopState(ORIGIN_SID)!;
+
+      loop.status = "complete";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+      loop.status = "cancelled";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+      loop.status = "error";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+      loop.status = "interrupted";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+    });
+  });
+
   // ── getByActiveSession ──────────────────────────────────────────
 
   describe("getByActiveSession", () => {

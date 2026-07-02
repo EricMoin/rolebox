@@ -143,7 +143,7 @@ describe("loop activation", () => {
     expect(correction).toContain("clamped");
   });
 
-  it("cancels loop when genuine user message arrives on origin", async () => {
+  it("does NOT cancel when user message arrives during round 1 (loop still on origin)", async () => {
     const output1 = {
       parts: [{ type: "text" as const, text: "|loop:5| keep going" }],
     };
@@ -153,21 +153,52 @@ describe("loop activation", () => {
     );
 
     expect(activeLoopManager?.isLoopOrigin("ses_006")).toBe(true);
+    expect(activeLoopManager!.getLoopState("ses_006")!.activeSessionId).toBe("ses_006");
 
     const cancelSpy = spyOn(activeLoopManager!, "requestCancel");
 
     const output2 = {
-      parts: [
-        { type: "text" as const, text: "stop everything" },
-      ],
+      parts: [{ type: "text" as const, text: "another message" }],
     };
     await hooks["chat.message"](
       { agent: "test-agent", sessionID: "ses_006" },
       output2,
     );
 
-    expect(cancelSpy).toHaveBeenCalledWith("ses_006", "user message");
-    expect(userMessagedSessions.has("ses_006")).toBe(true);
+    expect(cancelSpy).not.toHaveBeenCalled();
+    expect(activeLoopManager!.getLoopState("ses_006")!.status).not.toBe("cancelled");
+    cancelSpy.mockRestore();
+  });
+
+  it("cancels loop when user message arrives after loop advanced off origin (round 2+)", async () => {
+    const output1 = {
+      parts: [{ type: "text" as const, text: "|loop:5| keep going" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_006b" },
+      output1,
+    );
+
+    expect(activeLoopManager?.isLoopOrigin("ses_006b")).toBe(true);
+
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID: "ses_006b" } },
+    });
+    expect(activeLoopManager!.getLoopState("ses_006b")!.activeSessionId).not.toBe("ses_006b");
+
+    const cancelSpy = spyOn(activeLoopManager!, "requestCancel");
+
+    const output2 = {
+      parts: [{ type: "text" as const, text: "stop everything" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_006b" },
+      output2,
+    );
+
+    expect(cancelSpy).toHaveBeenCalledWith("ses_006b", "user message");
+    expect(userMessagedSessions.has("ses_006b")).toBe(true);
+    cancelSpy.mockRestore();
   });
 
   it("does NOT add userMessagedSessions for LOOP_PROGRESS_MARKER messages", async () => {
