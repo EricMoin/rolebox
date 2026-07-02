@@ -151,6 +151,7 @@ export async function notifyParent(
           await client.session.promptAsync({
             path: { id: task.parentSessionId },
             body: {
+              ...task.parentAgent ? { agent: task.parentAgent } : {},
               parts: [{ type: "text", text }],
               noReply: false,
             },
@@ -182,6 +183,7 @@ export async function notifyParent(
         await client.session.promptAsync({
           path: { id: task.parentSessionId },
           body: {
+            ...task.parentAgent ? { agent: task.parentAgent } : {},
             parts: [{ type: "text", text }],
             noReply: true,
           },

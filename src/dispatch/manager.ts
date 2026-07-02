@@ -169,6 +169,7 @@ export class DispatchManager {
         id: taskId,
         sessionId: "",
         parentSessionId: parentContext.sessionID,
+        parentAgent: parentContext.agent,
         depth: this.computeDepth(parentContext.sessionID),
         status: "error",
         agent: input.subagent,
@@ -194,6 +195,7 @@ export class DispatchManager {
       id: taskId,
       sessionId: "",
       parentSessionId: parentContext.sessionID,
+      parentAgent: parentContext.agent,
       depth: this.computeDepth(parentContext.sessionID),
       status: "pending",
       agent: input.subagent,
@@ -455,6 +457,7 @@ export class DispatchManager {
       id: taskId,
       sessionId: "",
       parentSessionId: parentContext.sessionID,
+      parentAgent: parentContext.agent,
       depth: this.computeDepth(parentContext.sessionID),
       status: "pending",
       agent: input.subagent,
@@ -1225,10 +1228,12 @@ export class DispatchManager {
       "</system-reminder>",
     ].join("\n");
 
+    const parentAgent = lostTasks[0]?.parentAgent;
     try {
       await this.client.session.promptAsync({
         path: { id: parentSessionId },
         body: {
+          ...parentAgent ? { agent: parentAgent } : {},
           parts: [{ type: "text", text }],
           noReply: true,
         },

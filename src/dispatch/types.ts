@@ -83,6 +83,8 @@ export interface DispatchTask {
   messageCountAtStart?: number;
   /** Per-task timeout in ms. Overrides background default. Set from DispatchInput.timeout_ms. */
   timeoutMs?: number;
+  /** Agent ID of the parent session that dispatched this task */
+  parentAgent?: string;
   /** Execution mode: "background" (async, default) or "sync" (blocks caller). */
   mode?: "background" | "sync";
   /** Reference to materialized output once the task completes.

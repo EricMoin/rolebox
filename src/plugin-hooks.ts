@@ -43,6 +43,9 @@ export const pendingCorrections = new Map<string, string>();
 // gate). Auto-continuation prompts are excluded so they never count as approval.
 export const userMessagedSessions = new Set<string>();
 
+// Maps sessionID → agentID so promptAsync can include the agent field.
+export const sessionAgentRegistry = new Map<string, string>();
+
 export const roleAutoActivateMap = new Map<string, string[]>();
 export const roleLockedMap = new Map<string, boolean>();
 export const autoActivatedSessions = new Set<string>();
@@ -393,9 +396,13 @@ export async function createPluginHooks(
             });
             functionRuntime.markDirty();
             if (decision.shouldContinue && decision.reminder) {
+              const sessionAgent = sessionAgentRegistry.get(sid);
               await client.session.promptAsync({
                 path: { id: sid },
-                body: { parts: [{ type: "text", text: decision.reminder }] },
+                body: {
+                  ...sessionAgent ? { agent: sessionAgent } : {},
+                  parts: [{ type: "text", text: decision.reminder }],
+                },
               }).catch(() => {});
               sentContinuation = true;
               break; // ONE continuation per idle event
@@ -506,6 +513,10 @@ export async function createPluginHooks(
 
       const part = output.parts[textPartIndex] as { type: string; text: string };
       const agentId = input.agent as string | undefined;
+
+      if (agentId && input.sessionID) {
+        sessionAgentRegistry.set(input.sessionID, agentId);
+      }
 
       if (agentId && input.sessionID && !autoActivatedSessions.has(input.sessionID)) {
         const autoFns = roleAutoActivateMap.get(agentId);

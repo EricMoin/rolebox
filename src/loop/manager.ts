@@ -433,10 +433,12 @@ export class LoopManager implements LoopManagerHooks {
   private _injectNote(
     sessionId: string,
     text: string,
+    agent?: string,
   ): ReturnType<OpencodeClient["session"]["promptAsync"]> {
     return this.client.session.promptAsync({
       path: { id: sessionId },
       body: {
+        ...agent ? { agent } : {},
         noReply: true,
         parts: [{ type: "text", text }],
       },

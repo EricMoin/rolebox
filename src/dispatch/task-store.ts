@@ -38,6 +38,7 @@ export interface SerializedDispatchTask {
   id: string;
   sessionId: string;
   parentSessionId: string;
+  parentAgent?: string;
   status: DispatchTaskStatus;
   agent: string;
   prompt: string;
@@ -194,6 +195,7 @@ export class TaskStateStore {
         id: st.id,
         sessionId: st.sessionId,
         parentSessionId: st.parentSessionId,
+        parentAgent: st.parentAgent,
         status: st.status,
         agent: st.agent,
         prompt: st.prompt,
@@ -285,6 +287,7 @@ export class TaskStateStore {
         id: task.id,
         sessionId: task.sessionId,
         parentSessionId: task.parentSessionId,
+        parentAgent: task.parentAgent,
         status: task.status,
         agent: task.agent,
         prompt: task.prompt,
