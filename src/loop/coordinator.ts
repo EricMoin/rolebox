@@ -165,6 +165,8 @@ export class LoopCoordinator {
         return;
       }
 
+      const lastMsgId = await this.adapter.getLastMessageId(originSessionId);
+      loop.summaryBoundaryMessageId = lastMsgId;
       loop.phase = "summarizing";
       loop.updatedAt = Date.now();
       // DispatchManager's notifyParent re-prompts origin → origin produces summary → onOriginIdle fires
@@ -231,6 +233,15 @@ export class LoopCoordinator {
     );
   }
 
+  /** Feed a recovered loop state back into the coordinator (startup recovery). */
+  restoreState(state: LoopState): void {
+    if (this.loops.has(state.originSessionId)) return;
+    this.loops.set(state.originSessionId, state);
+    if (state.activeWorkerTaskId) {
+      this._workerToOrigin.set(state.activeWorkerTaskId, state.originSessionId);
+    }
+  }
+
   dispose(): void {
     this.loops.clear();
     this._workerToOrigin.clear();
@@ -266,7 +277,10 @@ export class LoopCoordinator {
   }
 
   private async _handleSummary(loop: LoopState): Promise<void> {
-    const summary = await this.adapter.readOriginSummary(loop.originSessionId);
+    const summary = await this.adapter.readOriginSummary(
+      loop.originSessionId,
+      loop.summaryBoundaryMessageId,
+    );
 
     loop.lastSummary =
       summary.length > SEED_CHAR_CAP

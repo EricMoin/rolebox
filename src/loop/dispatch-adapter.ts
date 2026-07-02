@@ -38,6 +38,9 @@ export interface IDispatchAdapter {
     sinceMessageId?: string,
   ): Promise<string>;
 
+  /** Return the ID of the most recent message in a session, or undefined if empty. */
+  getLastMessageId(originSessionId: string): Promise<string | undefined>;
+
   /** Inject a silent progress note into the origin session (noReply:true). */
   injectNote(sessionId: string, text: string): Promise<void>;
 }
@@ -140,6 +143,17 @@ export class DispatchAdapter implements IDispatchAdapter {
     }
 
     return text;
+  }
+
+  async getLastMessageId(originSessionId: string): Promise<string | undefined> {
+    const messagesResult = await this.client.session.messages({
+      path: { id: originSessionId },
+    });
+    const messages = (
+      messagesResult as { data?: Array<{ info?: { id?: string } }> }
+    ).data;
+    if (!messages || messages.length === 0) return undefined;
+    return messages[messages.length - 1]?.info?.id;
   }
 
   async injectNote(sessionId: string, text: string): Promise<void> {

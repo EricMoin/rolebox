@@ -1,20 +1,11 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { LoopState, LoopMode } from "./types.js";
 import {
-  SUMMARY_INPUT_CHAR_CAP,
-  INTER_ROUND_DELAY_MS,
   LOOP_PROGRESS_MARKER,
   LOOP_STATE_SCHEMA_VERSION,
-  SUMMARIZER_TIMEOUT_MS,
-  ROUND_TIMEOUT_MS,
-  SPAWN_MAX_RETRIES,
-  SPAWN_RETRY_BASE_DELAY_MS,
 } from "./constants.js";
 import { LoopStore } from "./loop-store.js";
-import { createSummarizerFn } from "./summarizer.js";
 import { shouldCancelLoop } from "./coordinator.js";
-
-type SummarizeFn = ReturnType<typeof createSummarizerFn>;
 
 const NON_TERMINAL_STATUSES = new Set([
   "running",
@@ -31,7 +22,6 @@ interface LoopManagerHooks {
     mode: LoopMode;
     iterations: number;
   }): void;
-  onRoundComplete(activeSessionId: string): Promise<void>;
 }
 
 export class LoopManager implements LoopManagerHooks {
@@ -39,49 +29,15 @@ export class LoopManager implements LoopManagerHooks {
   private childToOrigin = new Map<string, string>();
   private store?: LoopStore;
   private timer?: ReturnType<typeof setTimeout>;
-  private _watchdog?: ReturnType<typeof setInterval>;
   private _dirty = false;
   private _advancing = new Set<string>();
-  private _summarizer?: SummarizeFn;
   private readonly client: OpencodeClient;
-  private readonly _delayMs: number;
-  private readonly _roundTimeoutMs: number;
 
   constructor(
     client: OpencodeClient,
-    opts?: { delayMs?: number; roundTimeoutMs?: number },
+    _opts?: { delayMs?: number; roundTimeoutMs?: number },
   ) {
     this.client = client;
-    this._delayMs = opts?.delayMs ?? INTER_ROUND_DELAY_MS;
-    this._roundTimeoutMs = opts?.roundTimeoutMs ?? ROUND_TIMEOUT_MS;
-    this._startWatchdog();
-  }
-
-  private _startWatchdog(): void {
-    const interval = Math.min(this._roundTimeoutMs / 2, 60_000);
-    this._watchdog = setInterval(() => this._checkRoundTimeouts(), interval);
-    if (this._watchdog.unref) this._watchdog.unref();
-  }
-
-  private _checkRoundTimeouts(): void {
-    const now = Date.now();
-    for (const loop of this.loops.values()) {
-      if (loop.status !== "running") continue;
-      if (this._advancing.has(loop.originSessionId)) continue;
-      if (now - loop.roundStartedAt > this._roundTimeoutMs) {
-        loop.status = "error";
-        loop.errorReason = `Round ${loop.current} timed out after ${Math.round(this._roundTimeoutMs / 1000)}s`;
-        loop.updatedAt = now;
-        this._injectNote(
-          loop.originSessionId,
-          `${LOOP_PROGRESS_MARKER} error: ${loop.errorReason}]`,
-        );
-        if (loop.activeSessionId !== loop.originSessionId) {
-          this.childToOrigin.delete(loop.activeSessionId);
-        }
-        this._persist();
-      }
-    }
   }
 
   setStoreDirectory(dir: string): void {
@@ -240,131 +196,6 @@ export class LoopManager implements LoopManagerHooks {
     }
   }
 
-  async onRoundComplete(activeSessionId: string): Promise<void> {
-    const loop = this.getByActiveSession(activeSessionId);
-    if (!loop || loop.status !== "running") return;
-
-    const origin = loop.originSessionId;
-
-    if (this._advancing.has(origin)) return;
-    this._advancing.add(origin);
-
-    try {
-      if (loop.cancelRequested) {
-        loop.status = "cancelled";
-        loop.updatedAt = Date.now();
-        await this._injectNote(
-          origin,
-          `${LOOP_PROGRESS_MARKER} loop cancelled]`,
-        );
-        this.childToOrigin.delete(activeSessionId);
-        this._persist();
-        return;
-      }
-
-      if (loop.current >= loop.total) {
-        loop.status = "complete";
-        loop.updatedAt = Date.now();
-        await this._injectNote(
-          origin,
-          `${LOOP_PROGRESS_MARKER} loop complete (round ${loop.current}/${loop.total})]`,
-        );
-        this.childToOrigin.delete(activeSessionId);
-        this._persist();
-        return;
-      }
-
-      const nextPrompt = await this._determineNextPrompt(loop, activeSessionId);
-
-      if (loop.cancelRequested) {
-        loop.status = "cancelled";
-        loop.updatedAt = Date.now();
-        await this._injectNote(
-          origin,
-          `${LOOP_PROGRESS_MARKER} loop cancelled]`,
-        );
-        this.childToOrigin.delete(activeSessionId);
-        this._persist();
-        return;
-      }
-
-      loop.status = "waiting";
-      loop.updatedAt = Date.now();
-      this._persist();
-
-      await this._delay(this._delayMs);
-
-      if (loop.cancelRequested) {
-        loop.status = "cancelled";
-        loop.updatedAt = Date.now();
-        await this._injectNote(
-          origin,
-          `${LOOP_PROGRESS_MARKER} loop cancelled]`,
-        );
-        this.childToOrigin.delete(activeSessionId);
-        this._persist();
-        return;
-      }
-
-      loop.status = "spawning";
-      let childId: string | undefined;
-      for (let attempt = 0; attempt <= SPAWN_MAX_RETRIES; attempt++) {
-        if (loop.cancelRequested) break;
-        const createResult = await this.client.session.create({
-          body: { parentID: origin },
-        });
-        childId = (
-          (createResult as { data?: { id?: string } }).data
-        )?.id;
-        if (childId) break;
-        if (attempt < SPAWN_MAX_RETRIES) {
-          await this._delay(SPAWN_RETRY_BASE_DELAY_MS * (2 ** attempt));
-        }
-      }
-      if (!childId) {
-        if (loop.cancelRequested) {
-          loop.status = "cancelled";
-        } else {
-          loop.status = "error";
-          loop.errorReason = `Failed to create child session after ${SPAWN_MAX_RETRIES + 1} attempts`;
-        }
-        loop.updatedAt = Date.now();
-        await this._injectNote(
-          origin,
-          `${LOOP_PROGRESS_MARKER} ${loop.status === "cancelled" ? "loop cancelled" : "error: " + loop.errorReason}]`,
-        );
-        this.childToOrigin.delete(activeSessionId);
-        this._persist();
-        return;
-      }
-
-      await this.client.session.promptAsync({
-        path: { id: childId },
-        body: {
-          agent: loop.agent,
-          parts: [{ type: "text", text: nextPrompt }],
-        },
-      });
-
-      const prevCurrent = loop.current;
-      loop.current += 1;
-      loop.activeSessionId = childId;
-      this.childToOrigin.set(childId, origin);
-      loop.roundStartedAt = Date.now();
-      loop.status = "running";
-      loop.updatedAt = Date.now();
-
-      await this._injectNote(
-        origin,
-        `${LOOP_PROGRESS_MARKER} round ${prevCurrent}/${loop.total} done → starting round ${loop.current} (child ${childId})]`,
-      );
-
-      this._persist();
-    } finally {
-      this._advancing.delete(origin);
-    }
-  }
-
   private static readonly TERMINAL_STATUSES = new Set([
     "complete",
     "cancelled",
@@ -399,10 +230,6 @@ export class LoopManager implements LoopManagerHooks {
   }
 
   dispose(): void {
-    if (this._watchdog) {
-      clearInterval(this._watchdog);
-      this._watchdog = undefined;
-    }
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -414,73 +241,6 @@ export class LoopManager implements LoopManagerHooks {
   }
 
   // ── private ─────────────────────────────────────────────────────
-
-  private _delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private _getSummarizer(): SummarizeFn {
-    if (!this._summarizer) {
-      this._summarizer = createSummarizerFn(this.client, {
-        timeoutMs: SUMMARIZER_TIMEOUT_MS,
-      });
-    }
-    return this._summarizer;
-  }
-
-  private async _determineNextPrompt(
-    loop: LoopState,
-    activeSessionId: string,
-  ): Promise<string> {
-    if (loop.mode !== "inherit") {
-      return loop.prompt;
-    }
-
-    loop.status = "summarizing";
-
-    try {
-      const messagesResult = await this.client.session.messages({
-        path: { id: activeSessionId },
-      });
-      const data = (
-        messagesResult as {
-          data?: Array<{
-            info?: { role?: string };
-            parts?: Array<{ type: string; text?: string }>;
-          }>;
-        }
-      ).data;
-
-      let conversation = "";
-      if (data) {
-        for (const msg of data) {
-          if (msg.info?.role === "assistant" && msg.parts) {
-            for (const part of msg.parts) {
-              if (part.type === "text" && typeof part.text === "string") {
-                conversation += part.text;
-              }
-            }
-          }
-        }
-      }
-
-      if (conversation.length > SUMMARY_INPUT_CHAR_CAP) {
-        conversation = conversation.slice(-SUMMARY_INPUT_CHAR_CAP);
-      }
-
-      const summarizer = this._getSummarizer();
-      const result = await summarizer(loop.agent, conversation);
-
-      if (result.ok) {
-        loop.lastSummary = result.summary;
-        return result.summary + "\n\n---\n\n" + loop.prompt;
-      }
-
-      return loop.prompt;
-    } catch {
-      return loop.prompt;
-    }
-  }
 
   private _injectNote(
     sessionId: string,

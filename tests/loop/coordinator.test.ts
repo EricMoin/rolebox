@@ -2,7 +2,7 @@ import { describe, it, expect, mock } from "bun:test";
 import { LoopCoordinator } from "../../src/loop/coordinator";
 import type { IDispatchAdapter } from "../../src/loop/dispatch-adapter";
 import type { LoopState } from "../../src/loop/types";
-import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
+import { LOOP_PROGRESS_MARKER, SEED_CHAR_CAP } from "../../src/loop/constants";
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 
@@ -20,10 +20,12 @@ function createFakeAdapter(
       errorReason?: string;
     };
     readOriginSummaryResult: string;
+    lastMessageId: string | undefined;
   }>,
 ): { adapter: IDispatchAdapter; calls: FakeAdapterCall[] } {
   const calls: FakeAdapterCall[] = [];
   let taskCounter = 0;
+  let msgIdCounter = 0;
 
   const adapter: IDispatchAdapter = {
     dispatchRound: mock(
@@ -71,6 +73,20 @@ function createFakeAdapter(
         });
         return overrides?.readOriginSummaryResult ??
           "Round 1 summary: completed successfully.";
+      },
+    ),
+
+    getLastMessageId: mock(
+      async (_originSessionId: string) => {
+        calls.push({
+          method: "getLastMessageId",
+          args: [_originSessionId],
+        });
+        if (overrides?.lastMessageId !== undefined) {
+          return overrides.lastMessageId;
+        }
+        msgIdCounter += 1;
+        return `msg-${msgIdCounter}`;
       },
     ),
 
@@ -592,6 +608,171 @@ describe("LoopCoordinator", () => {
         { prompt: string },
       ];
       expect(round3Args[0].prompt).toContain("Summary for round 2.");
+    });
+  });
+
+  describe("summary capture", () => {
+    it("round 1 has no seed or boundary after register", () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.lastSummary).toBeUndefined();
+      expect(state.summaryBoundaryMessageId).toBeUndefined();
+    });
+
+    it("records summaryBoundaryMessageId in onWorkerCompleted", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.summaryBoundaryMessageId).toBe("msg-1");
+
+      const lastMsgIdCalls = calls.filter(
+        (call) => call.method === "getLastMessageId",
+      );
+      expect(lastMsgIdCalls.length).toBe(1);
+      expect(lastMsgIdCalls[0]!.args[0]).toBe("origin-1");
+    });
+
+    it("passes sinceMessageId boundary to readOriginSummary", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await c.onOriginIdle("origin-1");       // activating → dispatch
+      await c.onWorkerCompleted("task-1");     // → summarizing (boundary=msg-1)
+      await c.onOriginIdle("origin-1");        // → _handleSummary
+
+      const readCalls = calls.filter(
+        (call) => call.method === "readOriginSummary",
+      );
+      expect(readCalls.length).toBe(1);
+      expect(readCalls[0]!.args[0]).toBe("origin-1");
+      expect(readCalls[0]!.args[1]).toBe("msg-1");
+    });
+
+    it("only captures summary after boundary across rounds", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT); // iterations=3
+
+      // Round 1: boundary=msg-1, summary read with sinceMessageId=msg-1
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+      await c.onOriginIdle("origin-1");
+
+      // Round 2: boundary=msg-2 (from getLastMessageId counter), summary read with sinceMessageId=msg-2
+      await c.onWorkerCompleted("task-2");
+      await c.onOriginIdle("origin-1");
+
+      // Round 3: boundary=msg-3
+      await c.onWorkerCompleted("task-3");
+      await c.onOriginIdle("origin-1");
+
+      // Each readOriginSummary should have a distinct sinceMessageId
+      const readCalls = calls.filter(
+        (call) => call.method === "readOriginSummary",
+      );
+      expect(readCalls.length).toBe(3);
+      expect(readCalls[0]!.args[1]).toBe("msg-1");
+      expect(readCalls[1]!.args[1]).toBe("msg-2");
+      expect(readCalls[2]!.args[1]).toBe("msg-3");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("complete");
+      expect(state.current).toBe(4);
+    });
+
+    it("caps lastSummary at SEED_CHAR_CAP", async () => {
+      const longSummary = "x".repeat(SEED_CHAR_CAP + 500);
+      const { adapter } = createFakeAdapter({
+        readOriginSummaryResult: longSummary,
+      });
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+      await c.onOriginIdle("origin-1");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.lastSummary!.length).toBe(SEED_CHAR_CAP);
+      // tail slice: should contain the last SEED_CHAR_CAP chars
+      expect(state.lastSummary).toBe("x".repeat(SEED_CHAR_CAP));
+    });
+
+    it("inherit mode threads seed with boundary-isolated summary", async () => {
+      const { adapter, calls } = createFakeAdapter({
+        readOriginSummaryResult: "isolated round 1 result.",
+      });
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT); // mode=inherit, iterations=3
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+      await c.onOriginIdle("origin-1");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.lastSummary).toBe("isolated round 1 result.");
+
+      // Round 2 dispatch should include seed
+      const dispatchCalls = calls.filter(
+        (call) => call.method === "dispatchRound",
+      );
+      expect(dispatchCalls.length).toBe(2);
+      const round2Input = dispatchCalls[1]!.args[0] as { prompt: string };
+      expect(round2Input.prompt).toContain("isolated round 1 result.");
+      expect(round2Input.prompt).toContain("---");
+      expect(round2Input.prompt).toContain("Do the thing");
+    });
+
+    it("fresh mode does not thread seed and still records boundary", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register({ ...REGISTER_INPUT, mode: "fresh" });
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+      await c.onOriginIdle("origin-1");
+
+      const state = c.getLoopState("origin-1")!;
+      // lastSummary is still captured (for monitoring/recovery)
+      expect(state.lastSummary).not.toBeUndefined();
+
+      // But round 2 dispatch should NOT include seed
+      const dispatchCalls = calls.filter(
+        (call) => call.method === "dispatchRound",
+      );
+      expect(dispatchCalls.length).toBe(2);
+      const round2Input = dispatchCalls[1]!.args[0] as { prompt: string };
+      expect(round2Input.prompt).toBe("Do the thing");
+      expect(round2Input.prompt).not.toContain("---");
+    });
+
+    it("does not pass sinceMessageId when boundary is undefined", async () => {
+      const { adapter, calls } = createFakeAdapter({
+        lastMessageId: undefined,
+      });
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+      await c.onOriginIdle("origin-1");
+
+      const readCalls = calls.filter(
+        (call) => call.method === "readOriginSummary",
+      );
+      expect(readCalls.length).toBe(1);
+      expect(readCalls[0]!.args[1]).toBeUndefined();
     });
   });
 });

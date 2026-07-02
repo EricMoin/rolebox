@@ -6,24 +6,11 @@ import type { LoopState } from "../../src/loop/types";
 
 // ── mock factory ──────────────────────────────────────────────────
 
-/** Creates an OpencodeClient mock with all session methods needed by LoopManager. */
 function loopMockClient(overrides?: {
-  sessionCreate?: (...args: unknown[]) => unknown;
   sessionPromptAsync?: (...args: unknown[]) => unknown;
-  sessionPrompt?: (...args: unknown[]) => unknown;
-  sessionMessages?: (...args: unknown[]) => unknown;
-  sessionDelete?: (...args: unknown[]) => unknown;
 }): OpencodeClient {
   return {
     session: {
-      create: mock(
-        overrides?.sessionCreate ??
-          (() =>
-            Promise.resolve({
-              data: { id: "test-session-1" },
-              error: undefined,
-            })),
-      ),
       promptAsync: mock(
         overrides?.sessionPromptAsync ??
           (() =>
@@ -32,44 +19,11 @@ function loopMockClient(overrides?: {
               error: undefined,
             })),
       ),
-      prompt: mock(
-        overrides?.sessionPrompt ??
-          (() =>
-            Promise.resolve({
-              data: {
-                parts: [{ type: "text" as const, text: "summary from mock" }],
-              },
-              error: undefined,
-            })),
-      ),
-      messages: mock(
-        overrides?.sessionMessages ??
-          (() =>
-            Promise.resolve({
-              data: [],
-              error: undefined,
-            })),
-      ),
-      delete: mock(
-        overrides?.sessionDelete ??
-          (() =>
-            Promise.resolve({
-              data: true,
-              error: undefined,
-            })),
-      ),
     },
   } as unknown as OpencodeClient;
 }
 
 // ── helpers ───────────────────────────────────────────────────────
-
-/** Build a sequential ID generator for session.create mocks. */
-function sequentialIds(prefix: string): () => unknown {
-  let n = 1;
-  return () =>
-    Promise.resolve({ data: { id: `${prefix}-${n++}` }, error: undefined });
-}
 
 /** Extract the text part body from a promptAsync call args[0]. */
 function promptAsyncBody(call: unknown[]): {
@@ -89,12 +43,6 @@ function promptAsyncBody(call: unknown[]): {
 function promptAsyncPathId(call: unknown[]): string | undefined {
   const arg = call[0] as { path?: { id?: string } } | undefined;
   return arg?.path?.id;
-}
-
-/** Extract the body from a session.create call args[0]. */
-function createBody(call: unknown[]): { parentID?: string } | undefined {
-  const arg = call[0] as { body?: { parentID?: string } } | undefined;
-  return arg?.body;
 }
 
 /** Find promptAsync calls targeting a specific session ID. */
@@ -117,8 +65,7 @@ describe("LoopManager", () => {
   });
 
   function freshManager(client?: OpencodeClient): LoopManager {
-    // delayMs=0 so tests run instantly
-    return new LoopManager(client ?? loopMockClient(), { delayMs: 0 });
+    return new LoopManager(client ?? loopMockClient());
   }
 
   // ── register ──────────────────────────────────────────────────
@@ -209,12 +156,8 @@ describe("LoopManager", () => {
       expect(manager.isLoopOrigin("some-child")).toBe(false);
     });
 
-    it("isLoopChild returns false for origin, true for registered child", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
-      const manager = freshManager(client);
-
+    it("isLoopChild returns false for origin, true for manually registered child", () => {
+      const manager = freshManager();
       manager.register({
         originSessionId: ORIGIN_SID,
         agent: AGENT,
@@ -223,11 +166,13 @@ describe("LoopManager", () => {
         iterations: 3,
       });
 
-      // Advance to create first child
-      await manager.onRoundComplete(ORIGIN_SID);
-
+      // Manually register a child (simulating what onRoundComplete used to do)
       const childId = "child-1";
-        expect(manager.isLoopChild(childId)).toBe(true);
+      const loop = manager.getLoopState(ORIGIN_SID)!;
+      loop.activeSessionId = childId;
+      (manager as any).childToOrigin.set(childId, ORIGIN_SID);
+
+      expect(manager.isLoopChild(childId)).toBe(true);
       expect(manager.isLoopSession(childId)).toBe(true);
       expect(manager.isLoopChild(ORIGIN_SID)).toBe(false);
     });
@@ -267,9 +212,8 @@ describe("LoopManager", () => {
       expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
     });
 
-    it("returns true when loop is in awaiting_worker phase", async () => {
-      const client = loopMockClient({ sessionCreate: sequentialIds("child") });
-      const manager = freshManager(client);
+    it("returns true when loop is in awaiting_worker phase", () => {
+      const manager = freshManager();
       manager.register({
         originSessionId: ORIGIN_SID,
         agent: AGENT,
@@ -277,18 +221,14 @@ describe("LoopManager", () => {
         mode: "fresh",
         iterations: 3,
       });
-
-      await manager.onRoundComplete(ORIGIN_SID);
       const loop = manager.getLoopState(ORIGIN_SID)!;
       (loop as any).phase = "awaiting_worker";
 
       expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(true);
     });
 
-    it("returns false for unknown, terminal, and origin-owned phases", async () => {
-      const client = loopMockClient({ sessionCreate: sequentialIds("child") });
-      const manager = freshManager(client);
-
+    it("returns false for unknown, terminal, and origin-owned phases", () => {
+      const manager = freshManager();
       expect(manager.shouldCancelOnUserMessage("unknown", "user message")).toBe(false);
 
       manager.register({
@@ -298,7 +238,6 @@ describe("LoopManager", () => {
         mode: "fresh",
         iterations: 3,
       });
-      await manager.onRoundComplete(ORIGIN_SID);
       const loop = manager.getLoopState(ORIGIN_SID)!;
 
       (loop as any).phase = "complete";
@@ -327,12 +266,8 @@ describe("LoopManager", () => {
       expect(manager.getByActiveSession("nope")).toBeUndefined();
     });
 
-    it("returns loop by child session ID after advance", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
-      const manager = freshManager(client);
-
+    it("returns loop by child session ID after manual setup", () => {
+      const manager = freshManager();
       manager.register({
         originSessionId: ORIGIN_SID,
         agent: AGENT,
@@ -341,255 +276,23 @@ describe("LoopManager", () => {
         iterations: 3,
       });
 
-      await manager.onRoundComplete(ORIGIN_SID);
-
+      // Manually set up child state
       const childId = "child-1";
-      const loop = manager.getByActiveSession(childId);
-      expect(loop).toBeDefined();
-      expect(loop!.originSessionId).toBe(ORIGIN_SID);
-    });
-  });
+      const loop = manager.getLoopState(ORIGIN_SID)!;
+      loop.activeSessionId = childId;
+      (manager as any).childToOrigin.set(childId, ORIGIN_SID);
 
-  // ── onRoundComplete: iterations=1 ───────────────────────────────
-
-  describe("onRoundComplete — iterations=1", () => {
-    it("completes immediately with ZERO session.create calls", async () => {
-      const client = loopMockClient();
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "fresh",
-        iterations: 1,
-      });
-
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      expect(client.session.create).not.toHaveBeenCalled();
-
-      const loop = manager.getByActiveSession(ORIGIN_SID);
-      expect(loop).toBeDefined();
-      expect(loop!.status).toBe("complete");
-    });
-
-    it("injects a completion note into origin with LOOP_PROGRESS_MARKER and noReply:true", async () => {
-      const client = loopMockClient();
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "fresh",
-        iterations: 1,
-      });
-
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      const allCalls = (client.session.promptAsync as any).mock.calls as unknown[][];
-      const originCalls = callsTo(allCalls, ORIGIN_SID);
-      expect(originCalls.length).toBeGreaterThanOrEqual(1);
-
-      const last = originCalls[originCalls.length - 1];
-      const body = promptAsyncBody(last);
-      expect(body.noReply).toBe(true);
-      const text = body.parts?.[0]?.text ?? "";
-      expect(text).toContain(LOOP_PROGRESS_MARKER);
-      expect(text).toContain("loop complete");
-    });
-  });
-
-  // ── onRoundComplete: iterations=3 fresh ─────────────────────────
-
-  describe("onRoundComplete — iterations=3 fresh", () => {
-    it("performs 2 session.create + 2 child promptAsync with correct agent/prompt", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "fresh",
-        iterations: 3,
-      });
-
-      // Round 1 → creates child-1
-      await manager.onRoundComplete(ORIGIN_SID);
-      // Round 2 → creates child-2
-      const loop = manager.getByActiveSession("child-1")!;
-      await manager.onRoundComplete("child-1");
-      // Round 3 → complete
-      await manager.onRoundComplete("child-2");
-
-      // 2 child sessions created
-      expect(client.session.create).toHaveBeenCalledTimes(2);
-
-      // Both create calls used parentID = origin
-      const createCalls = (client.session.create as any).mock
-        .calls as unknown[][];
-      for (const call of createCalls) {
-        expect(createBody(call)?.parentID).toBe(ORIGIN_SID);
-      }
-
-      // 2 promptAsync for children (not counting origin notes)
-      const allPromptCalls = (client.session.promptAsync as any).mock
-        .calls as unknown[][];
-      const childCalls = allPromptCalls.filter(
-        (c) => promptAsyncPathId(c)?.startsWith("child-"),
-      );
-      expect(childCalls.length).toBe(2);
-
-      // Each child promptAsync has correct agent and the base prompt
-      for (const call of childCalls) {
-        const body = promptAsyncBody(call);
-        expect(body.agent).toBe(AGENT);
-        expect(body.parts?.[0]?.text).toBe(PROMPT);
-      }
-    });
-
-    it("final status is complete after all rounds", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "fresh",
-        iterations: 3,
-      });
-
-      await manager.onRoundComplete(ORIGIN_SID);
-      await manager.onRoundComplete("child-1");
-      await manager.onRoundComplete("child-2");
-
-      const loop = manager.getByActiveSession("child-2");
-      expect(loop!.status).toBe("complete");
-      expect(loop!.current).toBe(3);
-    });
-  });
-
-  // ── onRoundComplete: iterations=3 inherit ───────────────────────
-
-  describe("onRoundComplete — iterations=3 inherit", () => {
-    it("summarizer invoked between rounds; child prompt begins with summary", async () => {
-      const SUMMARY_TEXT = "**Round summary**: fixed 3 bugs, wrote 5 tests.";
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-        sessionMessages: () =>
-          Promise.resolve({
-            data: [
-              {
-                info: { role: "user" as const },
-                parts: [{ type: "text" as const, text: "do something" }],
-              },
-              {
-                info: { role: "assistant" as const },
-                parts: [
-                  { type: "text" as const, text: "I fixed 3 bugs." },
-                  { type: "text" as const, text: "I wrote 5 tests." },
-                ],
-              },
-            ],
-            error: undefined,
-          }),
-        sessionPrompt: () =>
-          Promise.resolve({
-            data: {
-              parts: [{ type: "text" as const, text: SUMMARY_TEXT }],
-            },
-            error: undefined,
-          }),
-      });
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "inherit",
-        iterations: 3,
-      });
-
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      // Summarizer was called (session.prompt used for summarization)
-      expect(client.session.prompt).toHaveBeenCalled();
-
-      // Child prompt starts with summary text followed by separator + base prompt
-      const allPromptCalls = (client.session.promptAsync as any).mock
-        .calls as unknown[][];
-      const childCalls = allPromptCalls.filter(
-        (c) => promptAsyncPathId(c)?.startsWith("child-"),
-      );
-      expect(childCalls.length).toBe(1);
-
-      const childPrompt = promptAsyncBody(childCalls[0]).parts?.[0]?.text ?? "";
-      expect(childPrompt).toContain(SUMMARY_TEXT);
-      expect(childPrompt).toContain("---");
-      expect(childPrompt).toContain(PROMPT);
-
-      // lastSummary is stored (summarizer consumed child-1 for its temp session)
-      const loop = manager.getByActiveSession("child-2");
-      expect(loop!.lastSummary).toBe(SUMMARY_TEXT);
-    });
-
-    it("falls back to base prompt when summarizer returns ok:false", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-        sessionMessages: () =>
-          Promise.resolve({
-            data: [
-              {
-                info: { role: "assistant" as const },
-                parts: [{ type: "text" as const, text: "Round 1 output." }],
-              },
-            ],
-            error: undefined,
-          }),
-        sessionPrompt: () =>
-          Promise.resolve({
-            data: undefined,
-            error: { message: "summarizer failed" },
-          }),
-      });
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "inherit",
-        iterations: 3,
-      });
-
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      // Child prompt is just the base prompt (fresh fallback)
-      const allPromptCalls = (client.session.promptAsync as any).mock
-        .calls as unknown[][];
-      const childCalls = allPromptCalls.filter(
-        (c) => promptAsyncPathId(c)?.startsWith("child-"),
-      );
-      expect(childCalls.length).toBe(1);
-      expect(promptAsyncBody(childCalls[0]).parts?.[0]?.text).toBe(PROMPT);
+      const found = manager.getByActiveSession(childId);
+      expect(found).toBeDefined();
+      expect(found!.originSessionId).toBe(ORIGIN_SID);
     });
   });
 
   // ── requestCancel ────────────────────────────────────────────────
 
   describe("requestCancel", () => {
-    it("before advance → cancelRequested=true; next onRoundComplete cancels immediately", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
+    it("sets cancelRequested=true", () => {
+      const client = loopMockClient();
       const manager = freshManager(client);
 
       manager.register({
@@ -600,28 +303,13 @@ describe("LoopManager", () => {
         iterations: 3,
       });
 
-      // Complete first round (advance to child-1)
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      // Request cancel BEFORE next onRoundComplete
       manager.requestCancel(ORIGIN_SID);
 
-      const loop = manager.getByActiveSession("child-1");
+      const loop = manager.getByActiveSession(ORIGIN_SID);
       expect(loop!.cancelRequested).toBe(true);
-
-      // Now advance → should cancel instead of creating new session
-      await manager.onRoundComplete("child-1");
-
-      expect(loop!.status).toBe("cancelled");
-
-      // session.create should NOT have been called a second time
-      expect(client.session.create).toHaveBeenCalledTimes(1);
     });
 
-    it("during waiting status → finalizes to cancelled immediately", async () => {
-      // We can't easily test the "waiting" transition directly since
-      // onRoundComplete doesn't go through waiting. But requestCancel
-      // handles it via the status check — verify the mechanism works.
+    it("during waiting status → finalizes to cancelled immediately", () => {
       const client = loopMockClient();
       const manager = freshManager(client);
 
@@ -653,48 +341,11 @@ describe("LoopManager", () => {
     });
   });
 
-  // ── progress notes ───────────────────────────────────────────────
-
-  describe("progress notes", () => {
-    it("use noReply:true and contain LOOP_PROGRESS_MARKER", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "fresh",
-        iterations: 3,
-      });
-
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      const allCalls = (client.session.promptAsync as any).mock
-        .calls as unknown[][];
-      const originCalls = callsTo(allCalls, ORIGIN_SID);
-
-      // There should be at least 1 progress note to origin
-      expect(originCalls.length).toBeGreaterThanOrEqual(1);
-
-      for (const call of originCalls) {
-        const body = promptAsyncBody(call);
-        expect(body.noReply).toBe(true);
-        const text = body.parts?.[0]?.text ?? "";
-        expect(text).toContain(LOOP_PROGRESS_MARKER);
-      }
-    });
-  });
-
   // ── handleSessionError ───────────────────────────────────────────
 
   describe("handleSessionError", () => {
-    it("child error → status=error, origin note injected, child mapping cleared", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
+    it("child error → status=error, origin note injected, child mapping cleared", () => {
+      const client = loopMockClient();
       const manager = freshManager(client);
 
       manager.register({
@@ -705,17 +356,18 @@ describe("LoopManager", () => {
         iterations: 3,
       });
 
-      await manager.onRoundComplete(ORIGIN_SID);
-
+      // Manually set up child state
       const childId = "child-1";
+      const loop = manager.getLoopState(ORIGIN_SID)!;
+      loop.activeSessionId = childId;
+      (manager as any).childToOrigin.set(childId, ORIGIN_SID);
+
       expect(manager.isLoopChild(childId)).toBe(true);
 
       manager.handleSessionError(childId, "API rate limit exceeded");
 
-      const loop = manager.getByActiveSession(childId);
-      expect(loop).toBeDefined();
-      expect(loop!.status).toBe("error");
-      expect(loop!.errorReason).toBe("API rate limit exceeded");
+      expect(loop.status).toBe("error");
+      expect(loop.errorReason).toBe("API rate limit exceeded");
 
       // Child mapping cleared
       expect(manager.isLoopChild(childId)).toBe(false);
@@ -723,7 +375,6 @@ describe("LoopManager", () => {
       // Error note injected into origin
       const allCalls = (client.session.promptAsync as any).mock
         .calls as unknown[][];
-      // Find origin calls that mention error
       const errorCalls = allCalls.filter(
         (c) =>
           promptAsyncPathId(c) === ORIGIN_SID &&
@@ -767,53 +418,12 @@ describe("LoopManager", () => {
     });
   });
 
-  // ── non-running status guard ─────────────────────────────────────
-
-  describe("onRoundComplete guards", () => {
-    it("returns early when status is not running", async () => {
-      const client = loopMockClient({
-        sessionCreate: sequentialIds("child"),
-      });
-      const manager = freshManager(client);
-
-      manager.register({
-        originSessionId: ORIGIN_SID,
-        agent: AGENT,
-        prompt: PROMPT,
-        mode: "fresh",
-        iterations: 3,
-      });
-
-      // Manually set status to error
-      const loop = manager.getByActiveSession(ORIGIN_SID)!;
-      loop.status = "error";
-
-      await manager.onRoundComplete(ORIGIN_SID);
-
-      // No session.create should have been called
-      expect(client.session.create).not.toHaveBeenCalled();
-    });
-
-    it("returns early for unknown session ID", async () => {
-      const client = loopMockClient();
-      const manager = freshManager(client);
-
-      await manager.onRoundComplete("unknown");
-
-      expect(client.session.create).not.toHaveBeenCalled();
-      expect(client.session.promptAsync).not.toHaveBeenCalled();
-    });
-  });
-
   // ── setStoreDirectory + recover ──────────────────────────────────
 
   describe("setStoreDirectory + recover", () => {
     it("recover loads persisted loops and marks non-terminal as interrupted", () => {
-      // We test the recover logic by using an in-memory map directly
-      // since mkdtemp is available but we test the pure logic.
       const manager = freshManager();
 
-      // First, set up a store and persist a loop
       const fs = require("node:fs");
       const path = require("node:path");
       const os = require("node:os");

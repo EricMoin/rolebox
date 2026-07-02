@@ -29,7 +29,9 @@ export async function handleChatMessage(
     isDispatchNotification(firstTextStr);
   if (input.sessionID && !isSyntheticInjection) {
     state.userMessagedSessions.add(input.sessionID);
-    state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr);
+    if (state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr)) {
+      // cancellation already marked by shouldCancelOnUserMessage
+    }
   }
 
   const textPartIndex = output.parts.findIndex(
@@ -119,6 +121,7 @@ export async function handleChatMessage(
             mode: result.mode,
             iterations: result.iterations,
           });
+          // Activation acknowledgment is handled by the orchestrator prompt (T3)
         }
       }
     }
@@ -150,10 +153,13 @@ export async function handleChatMessage(
   // Loop recovery notification on restart: detect interrupted loops
   if (input.sessionID && state.activeLoopManager && !isSyntheticInjection) {
     const loopState = state.activeLoopManager.getLoopState(input.sessionID);
-    if (loopState && loopState.status === "interrupted") {
-      loopState.status = "cancelled";
-      appendCorrection(state.pendingCorrections, input.sessionID,
-        `${LOOP_PROGRESS_MARKER} loop interrupted by restart at round ${loopState.current}/${loopState.total}]`);
+    if (loopState) {
+      const interrupted = loopState.phase === "interrupted" || (loopState as any).status === "interrupted";
+      if (interrupted) {
+        loopState.phase = "cancelled";
+        appendCorrection(state.pendingCorrections, input.sessionID,
+          `${LOOP_PROGRESS_MARKER} loop interrupted by restart at round ${loopState.current}/${loopState.total}]`);
+      }
     }
   }
 

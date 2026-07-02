@@ -10,6 +10,7 @@ import { runTextCapture } from "../function/observe.ts";
 import { collectAllFunctions, fetchLastAssistantText, appendCorrection } from "./context.ts";
 import { drainHandlerContext } from "./drain-handler.ts";
 import { createSubLogger } from "../logger.ts";
+import type { LoopCoordinator } from "../loop/coordinator.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
 
@@ -58,12 +59,17 @@ export async function handleEvent(
       }
       const activeSet = functionSessionState.getActive(sid);
       if (activeSet.size === 0) {
-        // Loop advance for sessions with no active functions (e.g., fresh child sessions)
+        // Loop advance for sessions with no active functions
         if (state.activeLoopManager && deps.dispatchManager.getInflightCount(sid) === 0) {
-          const loop = state.activeLoopManager.getByActiveSession(sid);
-          if (loop && loop.status === "running") {
-            await state.activeLoopManager.onRoundComplete(sid);
+          const coord = state.activeLoopManager as LoopCoordinator | undefined;
+          if (coord && coord.isActiveLoopOrigin(sid) && typeof (coord as any).onOriginIdle === "function") {
+            const loopState = coord.getLoopState(sid);
+            if (loopState && (loopState.phase === "activating" || loopState.phase === "summarizing")) {
+              await coord.onOriginIdle(sid);
+              break;
+            }
           }
+          // For worker sessions, DispatchManager handles completion via notifyParent
         }
         break;
       }
@@ -168,9 +174,12 @@ export async function handleEvent(
       }
       // --- LOOP ADVANCE: advance a loop session on terminal idle ---
       if (!sentContinuation && deps.dispatchManager.getInflightCount(sid) === 0) {
-        const loop = state.activeLoopManager?.getByActiveSession(sid);
-        if (loop && loop.status === "running") {
-          await state.activeLoopManager!.onRoundComplete(sid);
+        const coord = state.activeLoopManager as LoopCoordinator | undefined;
+        if (coord && coord.isActiveLoopOrigin(sid) && typeof (coord as any).onOriginIdle === "function") {
+          const loopState = coord.getLoopState(sid);
+          if (loopState && (loopState.phase === "activating" || loopState.phase === "summarizing")) {
+            await coord.onOriginIdle(sid);
+          }
         }
       }
       break;
@@ -191,8 +200,16 @@ export async function handleEvent(
       const sid = (props as { sessionID?: string } | undefined)?.sessionID;
       if (sid) {
         await deps.dispatchManager.handleSessionError(sid, props?.error);
-        if (state.activeLoopManager?.isLoopSession(sid)) {
-          state.activeLoopManager.handleSessionError(sid, props?.error as string | undefined);
+        const coord = state.activeLoopManager as LoopCoordinator | undefined;
+        if (coord?.isLoopSession(sid)) {
+          // Worker errors are handled by onWorkerCompleted/getRoundResult
+          // Origin errors are terminal
+          const loopState = coord.getLoopState(sid);
+          if (loopState && loopState.phase !== "error" && loopState.phase !== "complete" && loopState.phase !== "cancelled") {
+            loopState.phase = "error";
+            loopState.errorReason = typeof props?.error === "string" ? props.error : "Session error";
+            loopState.updatedAt = Date.now();
+          }
         }
       }
       break;

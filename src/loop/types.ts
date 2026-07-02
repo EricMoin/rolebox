@@ -56,6 +56,12 @@ export interface LoopState {
   activeWorkerSessionId?: string;
   /** Summary text produced after the most recent round */
   lastSummary?: string;
+  /**
+   * Message ID in the origin session that marks the boundary before the
+   * current summarizing phase. Only messages AFTER this ID are captured
+   * by readOriginSummary. Prevents summary accumulation across rounds.
+   */
+  summaryBoundaryMessageId?: string;
   /** Whether cancellation has been requested */
   cancelRequested: boolean;
   /** Error description when phase is "error" */

@@ -11,7 +11,9 @@ import type { ResolvedRole, ResolvedSubAgent, ResolvedFunction, ResolvedGraph } 
 import { RoleMode } from "./constants.ts";
 import { normalizeWorkspaceDir } from "./state-paths.ts";
 import { createSubLogger } from "./logger.ts";
-import { LoopManager } from "./loop/manager.ts";
+import { LoopCoordinator } from "./loop/coordinator.ts";
+import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
+import { LoopStore } from "./loop/loop-store.ts";
 import type { JudgeFn } from "./graph/termination-async.ts";
 import { hookState } from "./hooks/state.ts";
 import type { HookDeps } from "./hooks/deps.ts";
@@ -131,10 +133,29 @@ export async function createPluginHooks(
 
   let loopManager = hookState.loopManagerMap.get(rawDir);
   if (!loopManager) {
-    loopManager = new LoopManager(client);
-    loopManager.setStoreDirectory(dir);
+    const adapter = new DispatchAdapter(dispatchManager, client);
+    const coordinator = new LoopCoordinator(adapter);
+    const store = new LoopStore(dir);
+
+    // Recovery: reconcile persisted loops with dispatch state
+    const loaded = store.load();
+    if (loaded) {
+      const reconciled = await store.reconcile(loaded, async (taskId) => {
+        try {
+          const task = dispatchManager.getTask(taskId);
+          if (task) return { status: task.status, exists: true };
+        } catch {
+          // Fall through to unknown
+        }
+        return { status: "unknown", exists: false };
+      });
+      for (const [, state] of reconciled) {
+        coordinator.restoreState(state);
+      }
+    }
+
+    loopManager = coordinator;
     hookState.loopManagerMap.set(rawDir, loopManager);
-    loopManager.recover();
   }
   hookState.activeLoopManager = loopManager;
   activeLoopManager = loopManager;
