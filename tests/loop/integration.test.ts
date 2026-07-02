@@ -435,7 +435,7 @@ describe("LoopManager integration", () => {
 
       mock.restore();
 
-      const cancelSpy = spyOn(activeLoopManager!, "requestCancel");
+      const cancelSpy = spyOn(activeLoopManager!, "shouldCancelOnUserMessage");
       const output = {
         parts: [{ type: "text" as const, text: "stop the loop" }],
       };
@@ -444,7 +444,8 @@ describe("LoopManager integration", () => {
         output,
       );
 
-      expect(cancelSpy).toHaveBeenCalledWith(sid, "user message");
+      expect(cancelSpy).toHaveBeenCalledWith(sid, "stop the loop");
+      expect(activeLoopManager!.getLoopState(sid)!.cancelRequested).toBe(true);
       expect(userMessagedSessions.has(sid)).toBe(true);
     });
 

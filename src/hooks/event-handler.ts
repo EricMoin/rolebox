@@ -45,6 +45,17 @@ export async function handleEvent(
         });
         break;
       }
+      // Suppress continuation for active loop origins during loop-owned phases
+      // (summarizing, activating, finalizing). Worker continuation is unaffected.
+      if (state.activeLoopManager?.isActiveLoopOrigin(sid)) {
+        const loopState = state.activeLoopManager.getLoopState(sid);
+        if (loopState && (loopState.phase === "summarizing" || loopState.phase === "activating" || loopState.phase === "finalizing")) {
+          log.debug("suppressing auto-continue: origin session in loop-owned phase", {
+            sessionID: sid, phase: loopState.phase,
+          });
+          break;
+        }
+      }
       const activeSet = functionSessionState.getActive(sid);
       if (activeSet.size === 0) {
         // Loop advance for sessions with no active functions (e.g., fresh child sessions)

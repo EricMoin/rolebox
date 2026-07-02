@@ -12,6 +12,7 @@ import {
 } from "./constants.js";
 import { LoopStore } from "./loop-store.js";
 import { createSummarizerFn } from "./summarizer.js";
+import { shouldCancelLoop } from "./coordinator.js";
 
 type SummarizeFn = ReturnType<typeof createSummarizerFn>;
 
@@ -139,7 +140,12 @@ export class LoopManager implements LoopManagerHooks {
   }
 
   isLoopSession(sid: string): boolean {
-    return this.loops.has(sid) || this.childToOrigin.has(sid);
+    if (this.loops.has(sid) || this.childToOrigin.has(sid)) return true;
+    // New dispatch model: check if this session is an active worker for any loop
+    for (const loop of this.loops.values()) {
+      if (loop.activeWorkerSessionId === sid) return true;
+    }
+    return false;
   }
 
   isLoopOrigin(sid: string): boolean {
@@ -147,21 +153,52 @@ export class LoopManager implements LoopManagerHooks {
   }
 
   isLoopChild(sid: string): boolean {
-    return this.childToOrigin.has(sid);
+    if (this.childToOrigin.has(sid)) return true;
+    for (const loop of this.loops.values()) {
+      if (loop.activeWorkerSessionId === sid) return true;
+    }
+    return false;
   }
 
   /**
-   * A user message cancels the loop only after it has advanced to a background
-   * child session (round 2+). While round 1 still runs in the origin session,
-   * ordinary user input there (including scoring or the activating turn itself)
-   * is not an interrupt. Terminal/interrupted loops never cancel again.
+   * Returns true if this session is the origin of an active loop.
+   * Used by the continuation guard to prevent auto-continue during
+   * loop-owned phases (summarizing, activating, finalizing).
    */
-  shouldCancelOnUserMessage(originSessionId: string): boolean {
-    const loop = this.loops.get(originSessionId);
+  isActiveLoopOrigin(sid: string): boolean {
+    return this.loops.has(sid);
+  }
+
+  /**
+   * Cancellation decision for user messages.
+   *
+   * Supports both the new phase-based model (LoopCoordinator) via delegation
+   * to {@link shouldCancelLoop}, and the old status-based model (backward compat).
+   * System re-prompts (dispatch markers, auto-continue, loop-progress) are
+   * explicitly excluded in both models.
+   */
+  shouldCancelOnUserMessage(sessionId: string, messageText: string): boolean {
+    let loop = this.loops.get(sessionId);
+    if (!loop) {
+      const originId = this.childToOrigin.get(sessionId);
+      if (originId) loop = this.loops.get(originId);
+    }
     if (!loop) return false;
+
+    // Phase-based model (new): delegate to shouldCancelLoop
+    if (loop.phase) {
+      if (!shouldCancelLoop(loop, messageText)) return false;
+      loop.cancelRequested = true;
+      loop.updatedAt = Date.now();
+      return true;
+    }
+
+    // Status-based model (old): backward-compatible logic
     if (LoopManager.TERMINAL_STATUSES.has(loop.status)) return false;
     if (loop.status === "interrupted") return false;
-    if (loop.activeSessionId === originSessionId) return false;
+    if (loop.activeSessionId === sessionId) return false;
+    loop.cancelRequested = true;
+    loop.updatedAt = Date.now();
     return true;
   }
 

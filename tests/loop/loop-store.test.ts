@@ -1,11 +1,39 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { LoopStore } from "../../src/loop/loop-store.ts";
+import { LoopStore, isTerminalPhase } from "../../src/loop/loop-store.ts";
 import type { LoopState } from "../../src/loop/types.ts";
+import type { WorkerTaskState } from "../../src/loop/loop-store.ts";
 
-describe("LoopStore", () => {
+function makeLoop(overrides: Partial<LoopState> = {}): LoopState {
+  return {
+    originSessionId: "ses_001",
+    agent: "test-agent",
+    basePrompt: "do the thing",
+    mode: "inherit",
+    total: 5,
+    current: 2,
+    phase: "awaiting_worker",
+    activeWorkerTaskId: "bg_abc123",
+    activeWorkerSessionId: "ses_worker_001",
+    cancelRequested: false,
+    startedAt: 1000,
+    updatedAt: 2000,
+    roundStartedAt: 1500,
+    schemaVersion: 1,
+    ...overrides,
+  };
+}
+
+function makeWorkerState(
+  status: string,
+  exists: boolean,
+): WorkerTaskState {
+  return { status, exists };
+}
+
+describe("LoopStore persistence", () => {
   let tempDir: string;
   let store: LoopStore;
 
@@ -17,41 +45,33 @@ describe("LoopStore", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("save → load round-trips a Map with 2 entries", async () => {
+  beforeEach(() => {
     store = new LoopStore(tempDir);
+    const { shortHash } = require("../../src/state-paths.ts");
+    const stateDir = join(tempDir, ".rolebox", "state");
+    mkdirSync(stateDir, { recursive: true });
+    const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
+    try { rmSync(filePath, { force: true }); } catch {}
+  });
 
-    const loop1: LoopState = {
-      originSessionId: "ses_001",
-      agent: "test-agent",
-      prompt: "do something",
-      mode: "inherit",
-      total: 5,
-      current: 2,
-      status: "running",
-      activeSessionId: "ses_002",
-      cancelRequested: false,
-      startedAt: 1000,
-      updatedAt: 2000,
-      roundStartedAt: 1500,
-      schemaVersion: 1,
-    };
-
-    const loop2: LoopState = {
+  it("save → load round-trips a Map with 2 entries", async () => {
+    const loop1 = makeLoop({ current: 2, phase: "awaiting_worker" });
+    const loop2 = makeLoop({
       originSessionId: "ses_010",
       agent: "other-agent",
-      prompt: "build feature",
+      basePrompt: "build feature",
       mode: "fresh",
       total: 3,
       current: 1,
-      status: "waiting",
-      activeSessionId: "ses_011",
+      phase: "summarizing",
+      activeWorkerTaskId: "bg_def456",
+      activeWorkerSessionId: "ses_worker_002",
       cancelRequested: true,
+      lastSummary: "round 1 done",
       startedAt: 3000,
       updatedAt: 4000,
       roundStartedAt: 3500,
-      lastSummary: "round 1 done",
-      schemaVersion: 1,
-    };
+    });
 
     const input = new Map<string, LoopState>([
       ["loop-1", loop1],
@@ -67,8 +87,56 @@ describe("LoopStore", () => {
     expect(loaded!.get("loop-2")).toEqual(loop2);
   });
 
+  it("save → load preserves all new LoopState fields", async () => {
+    const loop = makeLoop({
+      phase: "dispatching",
+      activeWorkerTaskId: "bg_xyz789",
+      activeWorkerSessionId: "ses_w3",
+      basePrompt: "custom base prompt",
+      errorReason: "something went wrong",
+      lastSummary: "previous summary text",
+    });
+
+    const input = new Map<string, LoopState>([["full", loop]]);
+    await store.save(input);
+
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    const restored = loaded!.get("full")!;
+    expect(restored.phase).toBe("dispatching");
+    expect(restored.activeWorkerTaskId).toBe("bg_xyz789");
+    expect(restored.activeWorkerSessionId).toBe("ses_w3");
+    expect(restored.basePrompt).toBe("custom base prompt");
+    expect(restored.errorReason).toBe("something went wrong");
+    expect(restored.lastSummary).toBe("previous summary text");
+  });
+
+  it("saveSync → load round-trips correctly", () => {
+    const loop = makeLoop({
+      originSessionId: "ses_sync",
+      agent: "sync-agent",
+      basePrompt: "sync test",
+      mode: "fresh",
+      total: 1,
+      current: 1,
+      phase: "complete",
+      activeWorkerTaskId: "bg_sync_001",
+      activeWorkerSessionId: "ses_sync_w1",
+      startedAt: 5000,
+      updatedAt: 6000,
+      roundStartedAt: 5000,
+    });
+
+    const input = new Map<string, LoopState>([["sync-loop", loop]]);
+    store.saveSync(input);
+
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.size).toBe(1);
+    expect(loaded!.get("sync-loop")).toEqual(loop);
+  });
+
   it("corrupt JSON → load() returns null", () => {
-    store = new LoopStore(tempDir);
     const { shortHash } = require("../../src/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
@@ -80,7 +148,6 @@ describe("LoopStore", () => {
   });
 
   it("version mismatch → load() returns null", () => {
-    store = new LoopStore(tempDir);
     const { shortHash } = require("../../src/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
@@ -92,7 +159,6 @@ describe("LoopStore", () => {
   });
 
   it("empty file → load() returns null", () => {
-    store = new LoopStore(tempDir);
     const { shortHash } = require("../../src/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
@@ -102,32 +168,226 @@ describe("LoopStore", () => {
     const result = store.load();
     expect(result).toBeNull();
   });
+});
 
-  it("saveSync → load round-trips correctly", () => {
-    store = new LoopStore(tempDir);
+describe("LoopStore reconcile", () => {
+  let store: LoopStore;
 
-    const loop: LoopState = {
-      originSessionId: "ses_sync",
-      agent: "sync-agent",
-      prompt: "sync test",
-      mode: "fresh",
-      total: 1,
-      current: 1,
-      status: "complete",
-      activeSessionId: "ses_sync_001",
-      cancelRequested: false,
-      startedAt: 5000,
-      updatedAt: 6000,
-      roundStartedAt: 5000,
-      schemaVersion: 1,
+  beforeEach(() => {
+    store = new LoopStore("/tmp/irrelevant-reconcile");
+  });
+
+  it("removes terminal loops", async () => {
+    const loops = new Map<string, LoopState>([
+      ["l1", makeLoop({ phase: "complete" })],
+      ["l2", makeLoop({ phase: "cancelled" })],
+      ["l3", makeLoop({ phase: "interrupted" })],
+      ["l4", makeLoop({ phase: "error" })],
+    ]);
+
+    const getWorkerState = async (_taskId: string) => {
+      throw new Error("should not be called");
     };
 
-    const input = new Map<string, LoopState>([["sync-loop", loop]]);
-    store.saveSync(input);
+    await store.reconcile(loops, getWorkerState);
 
-    const loaded = store.load();
-    expect(loaded).not.toBeNull();
-    expect(loaded!.size).toBe(1);
-    expect(loaded!.get("sync-loop")).toEqual(loop);
+    expect(loops.size).toBe(0);
+  });
+
+  it("preserves non-terminal loops", async () => {
+    const loops = new Map<string, LoopState>([
+      ["l1", makeLoop({ phase: "activating" })],
+      ["l2", makeLoop({ phase: "awaiting_worker" })],
+    ]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("running", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loops.size).toBe(2);
+  });
+
+  it("marks interrupted when no activeWorkerTaskId", async () => {
+    const loop = makeLoop({
+      phase: "dispatching",
+      activeWorkerTaskId: undefined,
+      activeWorkerSessionId: undefined,
+    });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) => {
+      throw new Error("should not be called");
+    };
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("interrupted");
+    expect(loop.errorReason).toContain("No active worker task");
+  });
+
+  it("sets summarizing when worker completed", async () => {
+    const loop = makeLoop({ phase: "awaiting_worker" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("completed", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("summarizing");
+  });
+
+  it("sets awaiting_worker when worker is running", async () => {
+    const loop = makeLoop({ phase: "dispatching" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("running", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("awaiting_worker");
+  });
+
+  it("sets awaiting_worker when worker is pending", async () => {
+    const loop = makeLoop({ phase: "dispatching" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("pending", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("awaiting_worker");
+  });
+
+  it("marks interrupted when worker does not exist", async () => {
+    const loop = makeLoop({ phase: "awaiting_worker" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("completed", false);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("interrupted");
+    expect(loop.errorReason).toContain("lost");
+  });
+
+  it("marks interrupted when worker is in error", async () => {
+    const loop = makeLoop({ phase: "awaiting_worker" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("error", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("interrupted");
+    expect(loop.errorReason).toContain("error");
+  });
+
+  it("marks interrupted when worker is cancelled", async () => {
+    const loop = makeLoop({ phase: "awaiting_worker" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("cancelled", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("interrupted");
+    expect(loop.errorReason).toContain("cancelled");
+  });
+
+  it("marks interrupted when worker is timeout", async () => {
+    const loop = makeLoop({ phase: "awaiting_worker" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("timeout", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("interrupted");
+    expect(loop.errorReason).toContain("timeout");
+  });
+
+  it("marks interrupted when getWorkerState throws", async () => {
+    const loop = makeLoop({ phase: "awaiting_worker" });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) => {
+      throw new Error("dispatch down");
+    };
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.phase).toBe("interrupted");
+    expect(loop.errorReason).toContain("lookup failed");
+  });
+
+  it("handles mixed recovery scenarios", async () => {
+    const loops = new Map<string, LoopState>([
+      ["complete", makeLoop({ phase: "complete", activeWorkerTaskId: "bg_c1" })],
+      ["no-worker", makeLoop({ phase: "dispatching", activeWorkerTaskId: undefined })],
+      ["worker-done", makeLoop({ phase: "awaiting_worker", activeWorkerTaskId: "bg_done" })],
+      ["worker-running", makeLoop({ phase: "awaiting_worker", activeWorkerTaskId: "bg_run" })],
+      ["worker-lost", makeLoop({ phase: "awaiting_worker", activeWorkerTaskId: "bg_lost" })],
+      ["worker-error", makeLoop({ phase: "awaiting_worker", activeWorkerTaskId: "bg_err" })],
+    ]);
+
+    const getWorkerState = async (taskId: string): Promise<WorkerTaskState> => {
+      switch (taskId) {
+        case "bg_done": return makeWorkerState("completed", true);
+        case "bg_run": return makeWorkerState("running", true);
+        case "bg_lost": return makeWorkerState("completed", false);
+        case "bg_err": return makeWorkerState("error", true);
+        default: throw new Error("unexpected taskId");
+      }
+    };
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loops.has("complete")).toBe(false);
+    expect(loops.get("no-worker")!.phase).toBe("interrupted");
+    expect(loops.get("worker-done")!.phase).toBe("summarizing");
+    expect(loops.get("worker-running")!.phase).toBe("awaiting_worker");
+    expect(loops.get("worker-lost")!.phase).toBe("interrupted");
+    expect(loops.get("worker-error")!.phase).toBe("interrupted");
+  });
+
+  it("updates updatedAt on every non-terminal mutation", async () => {
+    const originalTime = 1000;
+    const loop = makeLoop({
+      phase: "awaiting_worker",
+      updatedAt: originalTime,
+    });
+    const loops = new Map<string, LoopState>([["l1", loop]]);
+
+    const getWorkerState = async (_taskId: string) =>
+      makeWorkerState("completed", true);
+
+    await store.reconcile(loops, getWorkerState);
+
+    expect(loop.updatedAt).toBeGreaterThan(originalTime);
+  });
+});
+
+describe("isTerminalPhase", () => {
+  it("returns true for terminal phases", () => {
+    expect(isTerminalPhase("complete")).toBe(true);
+    expect(isTerminalPhase("cancelled")).toBe(true);
+    expect(isTerminalPhase("interrupted")).toBe(true);
+    expect(isTerminalPhase("error")).toBe(true);
+  });
+
+  it("returns false for non-terminal phases", () => {
+    expect(isTerminalPhase("activating")).toBe(false);
+    expect(isTerminalPhase("dispatching")).toBe(false);
+    expect(isTerminalPhase("awaiting_worker")).toBe(false);
+    expect(isTerminalPhase("summarizing")).toBe(false);
+    expect(isTerminalPhase("finalizing")).toBe(false);
   });
 });

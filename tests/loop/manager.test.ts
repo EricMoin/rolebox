@@ -227,16 +227,12 @@ describe("LoopManager", () => {
       await manager.onRoundComplete(ORIGIN_SID);
 
       const childId = "child-1";
-      expect(manager.isLoopChild(childId)).toBe(true);
+        expect(manager.isLoopChild(childId)).toBe(true);
       expect(manager.isLoopSession(childId)).toBe(true);
       expect(manager.isLoopChild(ORIGIN_SID)).toBe(false);
     });
-  });
 
-  // ── shouldCancelOnUserMessage ───────────────────────────────────
-
-  describe("shouldCancelOnUserMessage", () => {
-    it("returns false during round 1 (activeSessionId === origin)", () => {
+    it("isLoopSession returns true for activeWorkerSessionId (dispatch model)", () => {
       const manager = freshManager();
       manager.register({
         originSessionId: ORIGIN_SID,
@@ -245,10 +241,33 @@ describe("LoopManager", () => {
         mode: "fresh",
         iterations: 3,
       });
-      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+      // Set activeWorkerSessionId directly (as DispatchAdapter would)
+      const loop = manager.getLoopState(ORIGIN_SID)!;
+      (loop as any).activeWorkerSessionId = "worker-ses-001";
+
+      expect(manager.isLoopSession("worker-ses-001")).toBe(true);
+      expect(manager.isLoopChild("worker-ses-001")).toBe(true);
+      expect(manager.isLoopSession("unknown-worker")).toBe(false);
+    });
+  });
+
+  // ── shouldCancelOnUserMessage ───────────────────────────────────
+
+  describe("shouldCancelOnUserMessage", () => {
+    it("returns false during round 1 (origin-owned phase)", () => {
+      const manager = freshManager();
+      manager.register({
+        originSessionId: ORIGIN_SID,
+        agent: AGENT,
+        prompt: PROMPT,
+        mode: "fresh",
+        iterations: 3,
+      });
+      // Phase is undefined → shouldCancelLoop returns false (no match)
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
     });
 
-    it("returns true after loop advances to a child session", async () => {
+    it("returns true when loop is in awaiting_worker phase", async () => {
       const client = loopMockClient({ sessionCreate: sequentialIds("child") });
       const manager = freshManager(client);
       manager.register({
@@ -260,16 +279,17 @@ describe("LoopManager", () => {
       });
 
       await manager.onRoundComplete(ORIGIN_SID);
+      const loop = manager.getLoopState(ORIGIN_SID)!;
+      (loop as any).phase = "awaiting_worker";
 
-      expect(manager.getByActiveSession("child-1")!.activeSessionId).toBe("child-1");
-      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(true);
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(true);
     });
 
-    it("returns false for unknown, terminal, and interrupted loops", async () => {
+    it("returns false for unknown, terminal, and origin-owned phases", async () => {
       const client = loopMockClient({ sessionCreate: sequentialIds("child") });
       const manager = freshManager(client);
 
-      expect(manager.shouldCancelOnUserMessage("unknown")).toBe(false);
+      expect(manager.shouldCancelOnUserMessage("unknown", "user message")).toBe(false);
 
       manager.register({
         originSessionId: ORIGIN_SID,
@@ -281,14 +301,21 @@ describe("LoopManager", () => {
       await manager.onRoundComplete(ORIGIN_SID);
       const loop = manager.getLoopState(ORIGIN_SID)!;
 
-      loop.status = "complete";
-      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
-      loop.status = "cancelled";
-      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
-      loop.status = "error";
-      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
-      loop.status = "interrupted";
-      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID)).toBe(false);
+      (loop as any).phase = "complete";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
+      (loop as any).phase = "cancelled";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
+      (loop as any).phase = "error";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
+      (loop as any).phase = "interrupted";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
+      // Origin-owned phases also return false
+      (loop as any).phase = "activating";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
+      (loop as any).phase = "summarizing";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
+      (loop as any).phase = "finalizing";
+      expect(manager.shouldCancelOnUserMessage(ORIGIN_SID, "user message")).toBe(false);
     });
   });
 

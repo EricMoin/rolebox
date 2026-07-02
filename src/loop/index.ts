@@ -7,3 +7,4 @@ export * from "./types.js";
 export * from "./constants.js";
 export { DispatchAdapter } from "./dispatch-adapter.js";
 export type { IDispatchAdapter } from "./dispatch-adapter.js";
+export { LoopCoordinator } from "./coordinator.js";

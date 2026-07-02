@@ -37,6 +37,9 @@ export interface IDispatchAdapter {
     originSessionId: string,
     sinceMessageId?: string,
   ): Promise<string>;
+
+  /** Inject a silent progress note into the origin session (noReply:true). */
+  injectNote(sessionId: string, text: string): Promise<void>;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────
@@ -137,5 +140,15 @@ export class DispatchAdapter implements IDispatchAdapter {
     }
 
     return text;
+  }
+
+  async injectNote(sessionId: string, text: string): Promise<void> {
+    await this.client.session.promptAsync({
+      path: { id: sessionId },
+      body: {
+        noReply: true,
+        parts: [{ type: "text", text }],
+      },
+    });
   }
 }

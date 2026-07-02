@@ -29,9 +29,7 @@ export async function handleChatMessage(
     isDispatchNotification(firstTextStr);
   if (input.sessionID && !isSyntheticInjection) {
     state.userMessagedSessions.add(input.sessionID);
-    if (state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID)) {
-      state.activeLoopManager.requestCancel(input.sessionID, "user message");
-    }
+    state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr);
   }
 
   const textPartIndex = output.parts.findIndex(

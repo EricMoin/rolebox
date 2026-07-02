@@ -27,6 +27,12 @@ describe("parseFunctionActivation", () => {
     expect(result.cleanedText).toBe("hello |plan| world");
   });
 
+  it("does not activate |loop| from mid-text (worker prompt safety)", () => {
+    const result = parseFunctionActivation("Show |loop| 3 times");
+    expect(result.functions).toEqual([]);
+    expect(result.cleanedText).toBe("Show |loop| 3 times");
+  });
+
   it("returns empty for empty string", () => {
     const result = parseFunctionActivation("");
     expect(result.functions).toEqual([]);
