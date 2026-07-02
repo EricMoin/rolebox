@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Loop rewrite**: The `|loop|` semantics have been rewritten. Every round (including the first) now runs in a child worker session. The main session becomes an orchestrator that summarizes each round for the user. The summary also seeds the next round (inherit mode). See README for details.
+
 ## 0.14.0
 
 ### Features

@@ -73,7 +73,7 @@ describe("loop activation", () => {
       output,
     );
 
-    expect(activeLoopManager?.isLoopOrigin("ses_001")).toBe(true);
+    expect(activeLoopManager?.isLoopSession("ses_001")).toBe(true);
   });
 
   it("registers a loop with fresh mode when |loop:5,fresh| is parsed", async () => {
@@ -87,7 +87,7 @@ describe("loop activation", () => {
       output,
     );
 
-    expect(activeLoopManager?.isLoopOrigin("ses_002")).toBe(true);
+    expect(activeLoopManager?.isLoopSession("ses_002")).toBe(true);
   });
 
   it("rejects |loop| inside an active loop (recursion block)", async () => {
@@ -124,7 +124,7 @@ describe("loop activation", () => {
 
     const correction = pendingCorrections.get("ses_004");
     expect(correction).toContain("Invalid loop params");
-    expect(activeLoopManager?.isLoopOrigin("ses_004")).toBe(false);
+    expect(activeLoopManager?.isLoopSession("ses_004")).toBe(false);
   });
 
   it("clamps to hard cap when |loop:999| exceeds limit", async () => {
@@ -138,7 +138,7 @@ describe("loop activation", () => {
       output,
     );
 
-    expect(activeLoopManager?.isLoopOrigin("ses_005")).toBe(true);
+    expect(activeLoopManager?.isLoopSession("ses_005")).toBe(true);
     const correction = pendingCorrections.get("ses_005");
     expect(correction).toContain("clamped");
   });
@@ -152,8 +152,8 @@ describe("loop activation", () => {
       output1,
     );
 
-    expect(activeLoopManager?.isLoopOrigin("ses_006")).toBe(true);
-    expect(activeLoopManager!.getLoopState("ses_006")!.activeSessionId).toBe("ses_006");
+    expect(activeLoopManager?.isLoopSession("ses_006")).toBe(true);
+    expect(activeLoopManager!.getLoopState("ses_006")!.phase).toBe("activating");
 
     const output2 = {
       parts: [{ type: "text" as const, text: "another message" }],
@@ -164,7 +164,7 @@ describe("loop activation", () => {
     );
 
     expect(activeLoopManager!.getLoopState("ses_006")!.cancelRequested).toBe(false);
-    expect(activeLoopManager!.getLoopState("ses_006")!.status).toBe("running");
+    expect(activeLoopManager!.getLoopState("ses_006")!.phase).toBe("activating");
   });
 
   it("cancels loop when user message arrives after loop advanced off origin (round 2+)", async () => {
@@ -176,12 +176,11 @@ describe("loop activation", () => {
       output1,
     );
 
-    expect(activeLoopManager?.isLoopOrigin("ses_006b")).toBe(true);
+    expect(activeLoopManager?.isLoopSession("ses_006b")).toBe(true);
 
-    await hooks.event({
-      event: { type: "session.idle", properties: { sessionID: "ses_006b" } },
-    });
-    expect(activeLoopManager!.getLoopState("ses_006b")!.activeSessionId).not.toBe("ses_006b");
+    // Manually advance phase to simulate loop having dispatched a worker round
+    const loop = activeLoopManager!.getLoopState("ses_006b")!;
+    loop.phase = "awaiting_worker";
 
     const output2 = {
       parts: [{ type: "text" as const, text: "stop everything" }],

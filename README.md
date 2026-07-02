@@ -270,6 +270,30 @@ disable_functions:
 
 **execute** — Instructs the agent to implement step by step with tool-based verification (lsp_diagnostics, build, tests) after each change. Handles failures with a two-attempt escalation policy.
 
+**loop** — Runs the same task repeatedly across isolated worker sessions. The origin session becomes a pure orchestrator: it acknowledges activation, dispatches each round to a child worker via the dispatch system, and produces a user-facing summary when the round completes. The orchestrator never executes the task itself.
+
+```
+|loop| refactor the utils module        # 5 rounds (default), inherit mode
+|loop:3| run the test suite             # 3 rounds
+|loop:10,fresh| generate examples       # 10 rounds, fresh mode
+```
+
+**How it works:**
+
+1. Every round (including the first) executes in a fresh child worker session dispatched through the dispatch system
+2. The origin session is a pure orchestrator/observer. It acknowledges activation, produces one user-facing summary per completed round, and never executes the task
+3. Each round's summary becomes the seed context for the next round (`inherit` mode), creating a self-contained context chain
+4. The iteration count controls stopping. There's no LLM early-stop mechanism
+
+**Modes:**
+
+| Mode | Behavior |
+|---|---|
+| `inherit` (default) | Round N+1 gets round N's summary prepended as seed context |
+| `fresh` | Each round starts with only the base task, no prior context |
+
+**Cancellation:** Any user message sent while a round is running cancels the loop immediately. System re-prompts (dispatch completion notifications, auto-continue signals) never cancel.
+
 ## Skills
 
 Skills are on-demand knowledge modules the agent loads via the `skill` tool when needed. Unlike functions (which are always-on once activated), skills are pulled in contextually.
