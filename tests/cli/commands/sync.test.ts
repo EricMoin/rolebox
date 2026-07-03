@@ -167,6 +167,34 @@ describe("sync", () => {
     expect(logs.some((l) => l.includes("1 cleaned"))).toBe(true);
   });
 
+  it("replaces broken symlink from old version with new version", async () => {
+    setupLock([
+      {
+        role: "upgraded-role",
+        registry: "hub",
+        version: "2.0.0",
+        installedAt: "2025-01-01T00:00:00Z",
+        integrity: "sha256-abc",
+      },
+    ]);
+    const newSource = setupRoleSource("hub", "upgraded-role", "2.0.0");
+
+    // Simulate a leftover broken symlink from a previous version (1.0.0)
+    // that was uninstalled — the symlink target no longer exists
+    const targetDir = syncTarget();
+    mkdirSync(targetDir, { recursive: true });
+    const oldVersionPath = roleSourcePath("hub", "upgraded-role", "1.0.0");
+    symlinkSync(oldVersionPath, join(targetDir, "upgraded-role"));
+
+    const { sync } = await importSync();
+    await sync("opencode");
+
+    const targetPath = join(syncTarget(), "upgraded-role");
+    expect(lstatSync(targetPath).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(targetPath)).toBe(newSource);
+    expect(logs.some((l) => l.includes("Synced 1 roles"))).toBe(true);
+  });
+
   it("is idempotent — running twice produces same result", async () => {
     setupLock([
       {

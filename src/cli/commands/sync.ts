@@ -36,31 +36,31 @@ export async function sync(target: string): Promise<void> {
       continue;
     }
 
-    if (existsSync(targetPath)) {
-      let linkStat;
-      try {
-        linkStat = lstatSync(targetPath);
-      } catch {
-        console.warn(
-          `Warning: could not access '${targetPath}', skipping`,
-        );
-        skipped++;
-        continue;
-      }
+    // lstatSync (not existsSync): existsSync follows symlinks and misses broken ones
+    let targetStat;
+    try {
+      targetStat = lstatSync(targetPath);
+    } catch {
+      targetStat = null;
+    }
 
-      if (linkStat.isSymbolicLink()) {
-        unlinkSync(targetPath);
-        symlinkSync(sourcePath, targetPath);
-        synced++;
-      } else {
-        console.warn(
-          `Warning: '${targetPath}' is a regular directory, skipping`,
-        );
-        skipped++;
-      }
-    } else {
+    if (targetStat === null) {
       symlinkSync(sourcePath, targetPath);
       synced++;
+    } else if (targetStat.isSymbolicLink()) {
+      unlinkSync(targetPath);
+      symlinkSync(sourcePath, targetPath);
+      synced++;
+    } else if (targetStat.isDirectory()) {
+      console.warn(
+        `Warning: '${targetPath}' is a regular directory, skipping`,
+      );
+      skipped++;
+    } else {
+      console.warn(
+        `Warning: '${targetPath}' is a regular file, skipping`,
+      );
+      skipped++;
     }
   }
 
