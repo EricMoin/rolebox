@@ -67,6 +67,7 @@ export class DispatchAdapter implements IDispatchAdapter {
       prompt: input.prompt,
       run_in_background: true,
       description: input.description,
+      noParentInherit: true,
       ...(input.timeoutMs !== undefined ? { timeout_ms: input.timeoutMs } : {}),
     };
 

@@ -112,6 +112,8 @@ export interface DispatchInput {
   timeout_ms?: number;
   /** Timeout for the prompt phase of sync dispatch. Overrides syncPromptTimeoutMs config. */
   sync_timeout_ms?: number;
+  /** When true, the dispatched session is created without parentID — it does NOT inherit the parent session's conversation history. Used by the loop system to ensure each round starts fresh. */
+  noParentInherit?: boolean;
 }
 
 /**

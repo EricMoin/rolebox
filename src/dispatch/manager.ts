@@ -271,7 +271,7 @@ export class DispatchManager {
 
     try {
       const createResult = await this.client.session.create({
-        body: { parentID: parentContext.sessionID },
+        body: input.noParentInherit ? {} : { parentID: parentContext.sessionID },
         query: { directory: parentContext.directory },
       });
 

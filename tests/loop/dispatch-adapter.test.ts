@@ -108,6 +108,7 @@ describe("DispatchAdapter", () => {
       expect(input.prompt).toBe("do the thing");
       expect(input.run_in_background).toBe(true);
       expect(input.description).toBe("round 1");
+      expect(input.noParentInherit).toBe(true);
       expect(parentContext.sessionID).toBe("origin-123");
 
       expect(result.workerTaskId).toBe("fake-task-id");
