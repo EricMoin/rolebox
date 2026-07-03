@@ -315,7 +315,9 @@ export class DispatchManager {
       debugLog("launch", taskId, `ERROR: ${task.error}`);
       if (didMarkRunning) {
         this.sessionToTask.delete(task.sessionId); // edge-case #4
+        task.completedAt = new Date();
         this.leaveRunning(taskId);
+        void notifyParent(this.client, task, 0, { maxRetries: 0 });
       } else {
         this.concurrency.release(task.concurrencyKey!, task.parentSessionId);
         this.decInflight(task.parentSessionId);
