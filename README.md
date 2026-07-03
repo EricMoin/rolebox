@@ -1,8 +1,23 @@
 # rolebox
 
-Define custom AI agent roles for [opencode](https://github.com/nicholasgriffintn/opencode) via YAML. Each role gets its own prompt, model, skills, functions, and permissions. No code required.
+> Define AI agent roles in YAML. Each role gets its own prompt, model, skills, functions, and subagents. Build multi-agent systems without writing code.
 
-## Install
+[opencode](https://github.com/nicholasgriffintn/opencode) is an AI coding assistant. Rolebox is the plugin that makes it extensible — turning single agents into composable, configurable teams.
+
+Instead of hardcoding system prompts and tool configurations, you declare everything in YAML:
+
+```yaml
+name: Copywriter
+description: Writes concise, punchy copy
+prompt: |
+  You are a copywriter. Short sentences. No jargon. Every word earns its place.
+```
+
+Roles can define their own model, temperature, skills, functions, references, subagents, and collaboration graphs. Share them across projects, teams, or registries. No code required.
+
+---
+
+## Quick Start
 
 ```bash
 cd ~/.config/opencode && npm install rolebox
@@ -15,6 +30,56 @@ Add to `opencode.jsonc`:
   "plugin": ["rolebox"]
 }
 ```
+
+**Create your first role in 30 seconds:**
+
+```bash
+rolebox init my-agent -y
+```
+
+A ready-to-use role directory lands in `~/.config/opencode/rolebox/my-agent/`. Restart opencode and pick it from your agent list.
+
+---
+
+## Featured Role: Emperor
+
+[Emperor](https://github.com/EricMoin/oh-my-role) is a top-level orchestrator that plans, delegates, and validates complex work across a team of specialist sub-agents — without writing any code itself.
+
+```bash
+rolebox install emperor
+```
+
+Emperor classifies incoming requests, dispatches work to a planner/executor subtree, and synthesizes results. Its architecture:
+
+- **3-stage planner** — draft → review → finalize
+- **Executor/router** with 6 department workers: `ui`, `backend`, `test`, `data`, `docs`, `quality`
+- **Validator** for closed-loop validation
+- **Multi-subtask dependency scheduling** — parallel where possible, sequential where not
+- **Live risk gate** — high-risk operations require user approval before proceeding
+- **2-round revise loop** — per-item re-dispatch with correction budget
+- **Budget-bounded concurrency** — respects model pool limits automatically
+
+Emperor NEVER writes code. It reads, routes, and summarizes. Best for complex multi-step work, architecture decisions, refactoring, and anything that needs strategy before execution.
+
+Install it: `rolebox install emperor`, restart opencode, and select Emperor as your agent.
+
+---
+
+## Table of Contents
+
+- [CLI](/README.md#cli) — Commands for installing and managing roles
+- [Create a role](/README.md#create-a-role) — Hand-written role setup
+- [Functions](/README.md#functions) — Composable behavior modules activated via `|name|` syntax
+- [Skills](/README.md#skills) — On-demand knowledge modules loaded contextually
+- [References](/README.md#references) — Deep-knowledge documents for agent context
+- [Subagents](/README.md#subagents) — Child agents with their own prompts and configs
+- [Collaboration Graph](/README.md#collaboration-graph) — Structured multi-agent workflows
+- [Configuration reference](/README.md#configuration-reference) — Full role.yaml schema
+- [Directory structure](/README.md#directory-structure) — File layout reference
+- [Examples](/README.md#examples) — Real role configurations
+- [Creating a Registry](/README.md#creating-a-registry) — Publishing your own role registry
+
+---
 
 ## CLI
 
@@ -973,6 +1038,7 @@ To publish your own registry:
 
 The default registry is [oh-my-role](https://github.com/EricMoin/oh-my-role), which provides a curated set of roles:
 
+- `emperor` — Top-level orchestrator with planner/executor/validator architecture
 - `software-architect` — System design and architecture
 - `react-frontend` — React/Next.js frontend development
 - `ai-designer` — AI application design
