@@ -234,7 +234,7 @@ describe("generateRoleYaml", () => {
 
     expect(parsed.name).toBe("Code Reviewer");
     expect(parsed.skills).toEqual([]);
-    expect(parsed.functions).toEqual(["plan", "execute"]);
+    expect(parsed.functions).toEqual(["plan", "execute", "loop"]);
     expect(parsed.subagents).toBeUndefined();
     expect(parsed.collaboration).toBeUndefined();
   });
@@ -525,7 +525,7 @@ describe("init CLI (--yes mode)", () => {
 
     const yaml = load(readFileSync(join(roleDir, "role.yaml"), "utf-8")) as Record<string, unknown>;
     expect(yaml.name).toBe("my-test-role");
-    expect(yaml.functions).toEqual(["plan", "execute"]);
+    expect(yaml.functions).toEqual(["plan", "execute", "loop"]);
   });
 
   it("prints success and sync hint messages", async () => {
@@ -661,7 +661,7 @@ describe("init CLI (mocked interactive mode)", () => {
       readFileSync(join(roleDir, "role.yaml"), "utf-8"),
     ) as Record<string, unknown>;
     expect(yaml.name).toBe("Mocked Role");
-    expect(yaml.functions).toEqual(["plan", "execute"]);
+    expect(yaml.functions).toEqual(["plan", "execute", "loop"]);
     expect(yaml.model).toBe("gpt-4o");
   });
 });
