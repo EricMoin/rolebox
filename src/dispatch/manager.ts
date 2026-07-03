@@ -66,6 +66,8 @@ export class DispatchManager {
   private sessionsByRequest = new Map<string, number>();
   private _cancelQueue: Map<string, () => void> = new Map();
   private _syncControllers: Map<string, AbortController> = new Map();
+  /** Maps completed sync task IDs to their opencode session IDs for continuation support. */
+  private completedSyncSessions = new Map<string, string>();
   private subagentModelKey: Map<string, string>;
   private _dirty = false;
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
@@ -446,6 +448,23 @@ export class DispatchManager {
     const budget = this.config.maxTotalSessionsPerRequest;
     const root = parentContext.sessionID;
     const isNewSession = !input.session_id;
+
+    // Step 0: Session continuation lookup — reuse existing session when session_id is provided
+    let existingSessionId: string | undefined;
+    if (input.session_id) {
+      const prevTask = this.tasks.get(input.session_id);
+      if (prevTask && prevTask.sessionId) {
+        existingSessionId = prevTask.sessionId;
+      } else if (this.completedSyncSessions.has(input.session_id)) {
+        existingSessionId = this.completedSyncSessions.get(input.session_id)!;
+      } else {
+        throw new Error(JSON.stringify({
+          error: `Session continuation: task '${input.session_id}' not found or has no session`,
+          phase: "continuation",
+        }));
+      }
+    }
+
     if (isNewSession && budget !== undefined && this.getRequestSessions(root) >= budget) {
       metrics.counter("dispatch_rejected_total", { reason: "budget-exhausted" }).inc();
       throw new Error(JSON.stringify({
@@ -458,7 +477,7 @@ export class DispatchManager {
     const taskId = `sync_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
     const task: DispatchTask = {
       id: taskId,
-      sessionId: "",
+      sessionId: existingSessionId ?? "",
       parentSessionId: parentContext.sessionID,
       parentAgent: parentContext.agent,
       depth: this.computeDepth(parentContext.sessionID),
@@ -469,6 +488,7 @@ export class DispatchManager {
       startedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
       mode: "sync",
+      continuationOf: existingSessionId ? input.session_id : undefined,
     };
     this.tasks.set(taskId, task);
 
@@ -498,42 +518,50 @@ export class DispatchManager {
       metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
       metrics.gauge("inflight_tasks").inc();
 
-      // Step 2: Session create
-      const createTimeoutMs = this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
-      let createResult: Awaited<ReturnType<typeof this.client.session.create>>;
-      try {
-        createResult = await withTimeout(
-          this.client.session.create({
-            body: { parentID: parentContext.sessionID },
-            query: { directory: parentContext.directory },
-          }),
-          createTimeoutMs,
-          "session.create",
-        );
-      } catch (e) {
-        if (e instanceof TimeoutError) {
+      // Step 2: Session create or reuse existing session for continuation
+      if (existingSessionId) {
+        // Reuse existing session — no session.create(), no budget charge
+        task.sessionId = existingSessionId;
+        this.sessionToTask.set(existingSessionId, taskId);
+        debugLog("launch", taskId, `continuing session ${existingSessionId}`);
+      } else {
+        const createTimeoutMs = this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
+        let createResult: Awaited<ReturnType<typeof this.client.session.create>>;
+        try {
+          createResult = await withTimeout(
+            this.client.session.create({
+              body: { parentID: parentContext.sessionID },
+              query: { directory: parentContext.directory },
+            }),
+            createTimeoutMs,
+            "session.create",
+          );
+        } catch (e) {
+          if (e instanceof TimeoutError) {
+            const err = JSON.stringify({
+              error: `Session create timed out after ${createTimeoutMs}ms`,
+              phase: "session",
+              timeout_ms: createTimeoutMs,
+            });
+            throw new Error(err);
+          }
+          throw e;
+        }
+        const session = createResult.data;
+        if (!session) {
           const err = JSON.stringify({
-            error: `Session create timed out after ${createTimeoutMs}ms`,
+            error: "Failed to create session: empty response",
             phase: "session",
-            timeout_ms: createTimeoutMs,
+            timeout_ms: promptTimeoutMs,
           });
           throw new Error(err);
         }
-        throw e;
-      }
-      const session = createResult.data;
-      if (!session) {
-        const err = JSON.stringify({
-          error: "Failed to create session: empty response",
-          phase: "session",
-          timeout_ms: promptTimeoutMs,
-        });
-        throw new Error(err);
-      }
 
-      task.sessionId = session.id;
-      this.sessionToTask.set(session.id, taskId);
-      if (isNewSession) this.incRequestSessions(root);
+        task.sessionId = session.id;
+        this.sessionToTask.set(session.id, taskId);
+        this.completedSyncSessions.set(taskId, session.id);
+        if (isNewSession) this.incRequestSessions(root);
+      }
 
       // Step 3: Prompt with abort + split timeout
       const controller = new AbortController();
@@ -542,7 +570,7 @@ export class DispatchManager {
       const promptTimeout = new Promise<never>((_, rej) => {
         promptTimer = setTimeout(() => {
           controller.abort();
-          void this.client.session.abort({ path: { id: session.id } });
+          void this.client.session.abort({ path: { id: task.sessionId } });
           const err = JSON.stringify({
             error: `Prompt timed out after ${promptTimeoutMs}ms`,
             phase: "prompt",
@@ -556,7 +584,7 @@ export class DispatchManager {
         const promptResult: { data?: { parts: Array<{ type: string; text?: string }> } } =
           await Promise.race([
             this.client.session.prompt({
-              path: { id: session.id },
+              path: { id: task.sessionId },
               body: {
                 agent: input.subagent,
                 parts: [{ type: "text", text: input.prompt }],
