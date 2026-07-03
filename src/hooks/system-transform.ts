@@ -6,7 +6,7 @@ import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
 import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock } from "../prompt-builder.ts";
-import { collectAllFunctions } from "./context.ts";
+import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
 import type { ResolvedFunction } from "../types.ts";
 import type { HookState } from "./state.ts";
@@ -21,6 +21,22 @@ export async function handleSystemTransform(
   deps: HookDeps,
 ): Promise<void> {
   if (!input.sessionID) return;
+  const sid: string = input.sessionID;
+
+  // Custom hooks: before phase
+  await deps.customHooks.runHooks(
+    "system.transform",
+    "before",
+    () => ({
+      hookName: "[custom.before]",
+      config: undefined,
+      sessionID: sid,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+      log: createSubLogger("hook:custom-before"),
+    }),
+    { system: output.system },
+  );
 
   const correction = state.pendingCorrections.get(input.sessionID);
   if (correction) {
@@ -63,6 +79,20 @@ export async function handleSystemTransform(
     }
     const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
     log.debug("System prompt augmented", { totalChars, addedFunctions: 0, hasGraphBlock: !!graphState });
+
+    await deps.customHooks.runHooks(
+      "system.transform",
+      "after",
+      () => ({
+        hookName: "[custom.after]",
+        config: undefined,
+        sessionID: sid,
+        agent: input.agent,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+        log: createSubLogger("hook:custom-after"),
+      }),
+      { system: output.system },
+    );
     return;
   }
 
@@ -146,6 +176,20 @@ export async function handleSystemTransform(
     }
     const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
     log.debug("System prompt augmented", { totalChars, addedFunctions: 0, hasGraphBlock: !!graphState });
+
+    await deps.customHooks.runHooks(
+      "system.transform",
+      "after",
+      () => ({
+        hookName: "[custom.after]",
+        config: undefined,
+        sessionID: sid,
+        agent: input.agent,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+        log: createSubLogger("hook:custom-after"),
+      }),
+      { system: output.system },
+    );
     return;
   }
 
@@ -171,4 +215,19 @@ export async function handleSystemTransform(
 
   const totalChars = output.system.reduce((sum, s) => sum + s.length, 0);
   log.debug("System prompt augmented", { totalChars, addedFunctions: guarded.length, hasGraphBlock: !!graphState });
+
+  // Custom hooks: after phase
+  await deps.customHooks.runHooks(
+    "system.transform",
+    "after",
+    () => ({
+      hookName: "[custom.after]",
+      config: undefined,
+      sessionID: sid,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+      log: createSubLogger("hook:custom-after"),
+    }),
+    { system: output.system },
+  );
 }

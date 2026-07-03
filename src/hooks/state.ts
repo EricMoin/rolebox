@@ -1,6 +1,7 @@
 import type { DispatchManager } from "../dispatch/manager.ts";
 import type { LoopCoordinator } from "../loop/coordinator.ts";
 import type { LoopStore } from "../loop/loop-store.ts";
+import type { CustomHookRegistry } from "./custom/registry.ts";
 
 export class HookState {
   // Keyed by raw directory path
@@ -21,6 +22,8 @@ export class HookState {
 
   readonly autoActivatedSessions = new Set<string>();
   shutdownRegistered = false;
+
+  customHookRegistry: CustomHookRegistry | undefined;
 }
 
 export const hookState = new HookState();

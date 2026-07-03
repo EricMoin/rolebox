@@ -520,6 +520,9 @@ function buildRoleConfig(
     ...(typeof resolved.version === "string"
       ? { version: resolved.version }
       : {}),
+    ...(resolved.hooks != null && typeof resolved.hooks === "object"
+      ? { hooks: resolved.hooks as RoleConfig["hooks"] }
+      : {}),
   };
 }
 

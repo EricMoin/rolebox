@@ -40,6 +40,24 @@ export async function handleToolAfter(
   deps: HookDeps,
 ): Promise<void> {
   if (!input.sessionID || !input.tool) return;
+  const sid: string = input.sessionID;
+
+  // Custom hooks: before phase
+  const toolArgs = input.args;
+  const toolBeforeCtx = () => ({
+    hookName: "[custom.before]",
+    config: undefined,
+    sessionID: sid,
+    agent: state.sessionAgentRegistry.get(sid),
+    inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+    log: createSubLogger("hook:custom-before"),
+  });
+  await deps.customHooks.runHooks(
+    "tool.execute.after",
+    "before",
+    toolBeforeCtx,
+    { tool: input.tool, args: toolArgs, output },
+  );
 
   if (input.tool === "task" || input.tool === "dispatch") {
     if (isDispatchError(output)) {
@@ -112,4 +130,19 @@ export async function handleToolAfter(
   } catch (err) {
     log.debug("tool.execute.after observe error", { error: err instanceof Error ? err.message : String(err) });
   }
+
+  // Custom hooks: after phase
+  await deps.customHooks.runHooks(
+    "tool.execute.after",
+    "after",
+    () => ({
+      hookName: "[custom.after]",
+      config: undefined,
+      sessionID: sid,
+      agent: state.sessionAgentRegistry.get(sid),
+      inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+      log: createSubLogger("hook:custom-after"),
+    }),
+    { tool: input.tool, args: toolArgs, output },
+  );
 }

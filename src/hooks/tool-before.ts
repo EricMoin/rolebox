@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { createSubLogger } from "../logger.ts";
+import { appendCorrection } from "./context.ts";
+import type { HookState } from "./state.ts";
+import type { HookDeps } from "./deps.ts";
 
 const log = createSubLogger("hook-tool-before");
 
@@ -27,7 +30,25 @@ export function registerToolSchema(toolName: string, args: z.ZodRawShape): void 
 export async function handleToolBefore(
   input: { tool: string; sessionID: string; callID: string },
   output: { args: any },
+  state?: HookState,
+  deps?: HookDeps,
 ): Promise<void> {
+  // Custom hooks: before phase
+  if (deps && state) {
+    await deps.customHooks.runHooks(
+      "tool.execute.before",
+      "before",
+      () => ({
+        hookName: "[custom.before]",
+        config: undefined,
+        sessionID: input.sessionID,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+        log: createSubLogger("hook:custom-before"),
+      }),
+      { tool: input.tool, args: output.args },
+    );
+  }
+
   const schema = toolSchemaRegistry.get(input.tool);
   if (!schema) return; // Unknown tool — let opencode handle it
 
@@ -80,4 +101,20 @@ export async function handleToolBefore(
 
   // Validation passed — update args with the parsed result (normalized)
   output.args = result.data;
+
+  // Custom hooks: after phase
+  if (deps && state) {
+    await deps.customHooks.runHooks(
+      "tool.execute.before",
+      "after",
+      () => ({
+        hookName: "[custom.after]",
+        config: undefined,
+        sessionID: input.sessionID,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+        log: createSubLogger("hook:custom-after"),
+      }),
+      { tool: input.tool, args: output.args },
+    );
+  }
 }

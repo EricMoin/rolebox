@@ -37,6 +37,7 @@ import { handleChatMessage } from "./hooks/chat-message.ts";
 import { handleToolAfter } from "./hooks/tool-after.ts";
 import { handleToolBefore, registerToolSchema } from "./hooks/tool-before.ts";
 import { handleSystemTransform } from "./hooks/system-transform.ts";
+import { CustomHookRegistry } from "./hooks/custom/registry.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -225,6 +226,23 @@ export async function createPluginHooks(
 
   const sessionClient = new SessionClientWrapper(client);
 
+  // --- Custom Hook Registry ---
+  const customHookRegistry = new CustomHookRegistry();
+  hookState.customHookRegistry = customHookRegistry;
+
+  for (const role of resolvedRoles) {
+    const hookConfigs = role.config.hooks?.custom;
+    if (hookConfigs && hookConfigs.length > 0) {
+      for (const hook of hookConfigs) {
+        await customHookRegistry.register(hook, dir);
+        log.debug("Registered custom hook for role", {
+          role: role.id,
+          hook: hook.name,
+        });
+      }
+    }
+  }
+
   const deps: HookDeps = {
     client,
     roleFunctionsMap,
@@ -232,6 +250,7 @@ export async function createPluginHooks(
     dir,
     dispatchManager,
     loopManager,
+    customHooks: customHookRegistry,
   };
 
   const tools = {
@@ -323,7 +342,7 @@ export async function createPluginHooks(
       input: { tool: string; sessionID: string; callID: string },
       output: { args: any },
     ) => {
-      await handleToolBefore(input, output);
+      await handleToolBefore(input, output, hookState, deps);
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },
@@ -334,6 +353,7 @@ export async function createPluginHooks(
       await handleSystemTransform({ sessionID: input.sessionID, agent }, output, hookState, deps);
     },
     dispose: async () => {
+      try { await customHookRegistry.dispose(); } catch {}
       try { lspDocManager.closeAll(lspClientManager); } catch {}
       try { await lspClientManager.shutdownAll(); } catch {}
     },

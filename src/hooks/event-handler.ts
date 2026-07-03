@@ -64,6 +64,23 @@ export async function handleEvent(
 ): Promise<void> {
   const props = event.properties as Record<string, unknown> | undefined;
 
+  // Custom hooks: before phase
+  await deps.customHooks.runHooks(
+    "event",
+    "before",
+    () => ({
+      hookName: "[custom.before]",
+      config: undefined,
+      sessionID: typeof props?.sessionID === "string" ? props.sessionID : undefined,
+      inject: (text: string) => {
+        const sid = typeof props?.sessionID === "string" ? props.sessionID : undefined;
+        if (sid) appendCorrection(state.pendingCorrections, sid, text);
+      },
+      log: createSubLogger("hook:custom-before"),
+    }),
+    { type: event.type, properties: props },
+  );
+
   switch (event.type) {
     case "session.idle": {
       const sid = (props as { sessionID?: string } | undefined)?.sessionID;
@@ -271,4 +288,21 @@ export async function handleEvent(
       break;
     }
   }
+
+  // Custom hooks: after phase
+  await deps.customHooks.runHooks(
+    "event",
+    "after",
+    () => ({
+      hookName: "[custom.after]",
+      config: undefined,
+      sessionID: typeof props?.sessionID === "string" ? props.sessionID : undefined,
+      inject: (text: string) => {
+        const sid = typeof props?.sessionID === "string" ? props.sessionID : undefined;
+        if (sid) appendCorrection(state.pendingCorrections, sid, text);
+      },
+      log: createSubLogger("hook:custom-after"),
+    }),
+    { type: event.type, properties: props },
+  );
 }

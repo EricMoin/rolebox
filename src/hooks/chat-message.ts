@@ -27,6 +27,22 @@ export async function handleChatMessage(
     firstTextStr.includes("[auto-continue") ||
     firstTextStr.includes(LOOP_PROGRESS_MARKER) ||
     isDispatchNotification(firstTextStr);
+
+  // Custom hooks: before phase
+  await deps.customHooks.runHooks(
+    "chat.message",
+    "before",
+    () => ({
+      hookName: "[custom.before]",
+      config: undefined,
+      sessionID: input.sessionID,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+      log: createSubLogger("hook:custom-before"),
+    }),
+    { text: firstTextStr },
+  );
+
   if (input.sessionID && !isSyntheticInjection) {
     state.userMessagedSessions.add(input.sessionID);
     if (state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr)) {
@@ -185,4 +201,19 @@ export async function handleChatMessage(
       log.debug("chat.message observe error", { error: err instanceof Error ? err.message : String(err) });
     }
   }
+
+  // Custom hooks: after phase
+  await deps.customHooks.runHooks(
+    "chat.message",
+    "after",
+    () => ({
+      hookName: "[custom.after]",
+      config: undefined,
+      sessionID: input.sessionID,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+      log: createSubLogger("hook:custom-after"),
+    }),
+    { text: firstTextStr },
+  );
 }
