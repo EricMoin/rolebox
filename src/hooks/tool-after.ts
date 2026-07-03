@@ -52,8 +52,27 @@ export async function handleToolAfter(
     );
   }
 
-  // Custom hooks: before phase
   const toolArgs = input.args;
+
+  // Built-in hooks: before phase (runs before custom hooks)
+  const builtinBeforeCtx = () => ({
+    hookName: "[builtin.before]",
+    config: undefined,
+    sessionID: sid,
+    agent: state.sessionAgentRegistry.get(sid),
+    inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+    log: createSubLogger("hook:builtin-before"),
+  });
+  await deps.builtInHooks?.runHooks(
+    "tool.execute.after",
+    "before",
+    builtinBeforeCtx,
+    { tool: input.tool, args: toolArgs, output },
+    state.builtinConfig ?? {},
+  );
+
+  // Custom hooks: before phase
+
   const toolBeforeCtx = () => ({
     hookName: "[custom.before]",
     config: undefined,
@@ -154,5 +173,21 @@ export async function handleToolAfter(
       log: createSubLogger("hook:custom-after"),
     }),
     { tool: input.tool, args: toolArgs, output },
+  );
+
+  // Built-in hooks: after phase (runs after custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "tool.execute.after",
+    "after",
+    () => ({
+      hookName: "[builtin.after]",
+      config: undefined,
+      sessionID: sid,
+      agent: state.sessionAgentRegistry.get(sid),
+      inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+      log: createSubLogger("hook:builtin-after"),
+    }),
+    { tool: input.tool, args: toolArgs, output },
+    state.builtinConfig ?? {},
   );
 }

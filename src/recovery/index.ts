@@ -1,0 +1,13 @@
+export { RecoveryEngine } from "./engine.ts";
+export type { RecoveryEngineDeps } from "./engine.ts";
+export { RecoveryChainExecutor } from "./chain-executor.ts";
+export type { ChainResult } from "./chain-executor.ts";
+export { RecoveryStateStore } from "./state.ts";
+export { RecoveryMetricsCollector } from "./metrics.ts";
+export { PatternRegistry, createDefaultPatterns } from "./error-detection.ts";
+export { StrategyRegistry } from "./strategies/registry.ts";
+export { registerBuiltinStrategies } from "./strategies/index.ts";
+export { BuiltInHookRegistry } from "./builtin/registry.ts";
+export { registerBuiltinHooks } from "./builtin/index.ts";
+export * from "./types.ts";
+export { parseRecoveryConfig, mergeBuiltinFlags, DEFAULT_RECOVERY_CONFIG, DEFAULT_CHAINS, KNOWN_STRATEGIES } from "./config.ts";

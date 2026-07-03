@@ -2,6 +2,8 @@ import type { DispatchManager } from "../dispatch/manager.ts";
 import type { LoopCoordinator } from "../loop/coordinator.ts";
 import type { LoopStore } from "../loop/loop-store.ts";
 import type { CustomHookRegistry } from "./custom/registry.ts";
+import type { RecoveryEngine } from "../recovery/engine.ts";
+import type { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
 
 export class HookState {
   // Keyed by raw directory path
@@ -24,6 +26,9 @@ export class HookState {
   shutdownRegistered = false;
 
   customHookRegistry: CustomHookRegistry | undefined;
+  recoveryEngine?: RecoveryEngine;
+  builtInHookRegistry?: BuiltInHookRegistry;
+  builtinConfig?: Record<string, boolean>;
 }
 
 export const hookState = new HookState();

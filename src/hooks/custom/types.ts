@@ -1,4 +1,5 @@
 import type { Logger, ILogObj } from "tslog";
+import type { RecoveryConfig } from "../../recovery/types.ts";
 
 /** The lifecycle events a custom hook can listen to. */
 export type HookEvent =
@@ -32,6 +33,7 @@ export interface CustomHookConfig {
 export interface HooksBlock {
   builtin?: Record<string, boolean>;
   custom?: CustomHookConfig[];
+  recovery?: RecoveryConfig;
 }
 
 /** Context passed to every custom hook handler invocation. */

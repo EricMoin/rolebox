@@ -29,6 +29,22 @@ export async function handleChatMessage(
     isDispatchNotification(firstTextStr);
 
   // Custom hooks: before phase
+  // Built-in hooks: before phase (runs before custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "chat.message",
+    "before",
+    () => ({
+      hookName: "[builtin.before]",
+      config: undefined,
+      sessionID: input.sessionID,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+      log: createSubLogger("hook:builtin-before"),
+    }),
+    { text: firstTextStr },
+    state.builtinConfig ?? {},
+  );
+
   await deps.customHooks.runHooks(
     "chat.message",
     "before",
@@ -215,5 +231,21 @@ export async function handleChatMessage(
       log: createSubLogger("hook:custom-after"),
     }),
     { text: firstTextStr },
+  );
+
+  // Built-in hooks: after phase (runs after custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "chat.message",
+    "after",
+    () => ({
+      hookName: "[builtin.after]",
+      config: undefined,
+      sessionID: input.sessionID,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+      log: createSubLogger("hook:builtin-after"),
+    }),
+    { text: firstTextStr },
+    state.builtinConfig ?? {},
   );
 }

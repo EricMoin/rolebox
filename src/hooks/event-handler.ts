@@ -64,6 +64,24 @@ export async function handleEvent(
 ): Promise<void> {
   const props = event.properties as Record<string, unknown> | undefined;
 
+  // Built-in hooks: before phase (runs before custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "event",
+    "before",
+    () => ({
+      hookName: "[builtin.before]",
+      config: undefined,
+      sessionID: typeof props?.sessionID === "string" ? props.sessionID : undefined,
+      inject: (text: string) => {
+        const sid = typeof props?.sessionID === "string" ? props.sessionID : undefined;
+        if (sid) appendCorrection(state.pendingCorrections, sid, text);
+      },
+      log: createSubLogger("hook:builtin-before"),
+    }),
+    { type: event.type, properties: props },
+    state.builtinConfig ?? {},
+  );
+
   // Custom hooks: before phase
   await deps.customHooks.runHooks(
     "event",
@@ -304,5 +322,23 @@ export async function handleEvent(
       log: createSubLogger("hook:custom-after"),
     }),
     { type: event.type, properties: props },
+  );
+
+  // Built-in hooks: after phase (runs after custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "event",
+    "after",
+    () => ({
+      hookName: "[builtin.after]",
+      config: undefined,
+      sessionID: typeof props?.sessionID === "string" ? props.sessionID : undefined,
+      inject: (text: string) => {
+        const sid = typeof props?.sessionID === "string" ? props.sessionID : undefined;
+        if (sid) appendCorrection(state.pendingCorrections, sid, text);
+      },
+      log: createSubLogger("hook:builtin-after"),
+    }),
+    { type: event.type, properties: props },
+    state.builtinConfig ?? {},
   );
 }

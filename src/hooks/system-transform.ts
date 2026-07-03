@@ -23,6 +23,22 @@ export async function handleSystemTransform(
   if (!input.sessionID) return;
   const sid: string = input.sessionID;
 
+  // Built-in hooks: before phase (runs before custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "system.transform",
+    "before",
+    () => ({
+      hookName: "[builtin.before]",
+      config: undefined,
+      sessionID: sid,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+      log: createSubLogger("hook:builtin-before"),
+    }),
+    { system: output.system },
+    state.builtinConfig ?? {},
+  );
+
   // Custom hooks: before phase
   await deps.customHooks.runHooks(
     "system.transform",
@@ -92,6 +108,22 @@ export async function handleSystemTransform(
         log: createSubLogger("hook:custom-after"),
       }),
       { system: output.system },
+    );
+
+    // Built-in hooks: after phase (runs after custom hooks)
+    await deps.builtInHooks?.runHooks(
+      "system.transform",
+      "after",
+      () => ({
+        hookName: "[builtin.after]",
+        config: undefined,
+        sessionID: sid,
+        agent: input.agent,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+        log: createSubLogger("hook:builtin-after"),
+      }),
+      { system: output.system },
+      state.builtinConfig ?? {},
     );
     return;
   }
@@ -190,6 +222,22 @@ export async function handleSystemTransform(
       }),
       { system: output.system },
     );
+
+    // Built-in hooks: after phase (runs after custom hooks)
+    await deps.builtInHooks?.runHooks(
+      "system.transform",
+      "after",
+      () => ({
+        hookName: "[builtin.after]",
+        config: undefined,
+        sessionID: sid,
+        agent: input.agent,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+        log: createSubLogger("hook:builtin-after"),
+      }),
+      { system: output.system },
+      state.builtinConfig ?? {},
+    );
     return;
   }
 
@@ -229,5 +277,21 @@ export async function handleSystemTransform(
       log: createSubLogger("hook:custom-after"),
     }),
     { system: output.system },
+  );
+
+  // Built-in hooks: after phase (runs after custom hooks)
+  await deps.builtInHooks?.runHooks(
+    "system.transform",
+    "after",
+    () => ({
+      hookName: "[builtin.after]",
+      config: undefined,
+      sessionID: sid,
+      agent: input.agent,
+      inject: (text: string) => appendCorrection(state.pendingCorrections, sid, text),
+      log: createSubLogger("hook:builtin-after"),
+    }),
+    { system: output.system },
+    state.builtinConfig ?? {},
   );
 }

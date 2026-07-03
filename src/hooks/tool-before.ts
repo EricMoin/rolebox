@@ -33,7 +33,22 @@ export async function handleToolBefore(
   state?: HookState,
   deps?: HookDeps,
 ): Promise<void> {
-  // Custom hooks: before phase
+  // Built-in hooks: before phase (runs before custom hooks)
+  if (deps && state) {
+    await deps.builtInHooks?.runHooks(
+      "tool.execute.before",
+      "before",
+      () => ({
+        hookName: "[builtin.before]",
+        config: undefined,
+        sessionID: input.sessionID,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+        log: createSubLogger("hook:builtin-before"),
+      }),
+      { tool: input.tool, args: output.args },
+      state.builtinConfig ?? {},
+    );
+  }
   if (deps && state) {
     await deps.customHooks.runHooks(
       "tool.execute.before",
@@ -129,6 +144,21 @@ export async function handleToolBefore(
         log: createSubLogger("hook:custom-after"),
       }),
       { tool: input.tool, args: output.args },
+    );
+
+    // Built-in hooks: after phase (runs after custom hooks)
+    await deps.builtInHooks?.runHooks(
+      "tool.execute.before",
+      "after",
+      () => ({
+        hookName: "[builtin.after]",
+        config: undefined,
+        sessionID: input.sessionID,
+        inject: (text: string) => appendCorrection(state.pendingCorrections, input.sessionID, text),
+        log: createSubLogger("hook:builtin-after"),
+      }),
+      { tool: input.tool, args: output.args },
+      state.builtinConfig ?? {},
     );
   }
 }
