@@ -35,6 +35,7 @@ import type { HookDeps } from "./hooks/deps.ts";
 import { handleEvent } from "./hooks/event-handler.ts";
 import { handleChatMessage } from "./hooks/chat-message.ts";
 import { handleToolAfter } from "./hooks/tool-after.ts";
+import { handleToolBefore, registerToolSchema } from "./hooks/tool-before.ts";
 import { handleSystemTransform } from "./hooks/system-transform.ts";
 
 const log = createSubLogger("plugin-hooks");
@@ -233,26 +234,33 @@ export async function createPluginHooks(
     loopManager,
   };
 
+  const tools = {
+    dispatch: createDispatchTool(dispatchManager, resolvedSubagents, subagentModelKey),
+    dispatch_output: createDispatchOutputTool(dispatchManager),
+    dispatch_cancel: createDispatchCancelTool(dispatchManager),
+    dispatch_metrics: createDispatchMetricsTool(),
+    session_list: createSessionListTool(sessionClient),
+    session_read: createSessionReadTool(sessionClient),
+    session_search: createSessionSearchTool(sessionClient),
+    session_info: createSessionInfoTool(sessionClient),
+    session_diff: createSessionDiffTool(sessionClient),
+    session_fork: createSessionForkTool(sessionClient),
+    // Alternative names to avoid built-in tool name conflicts
+    session_inspect: createSessionInfoTool(sessionClient),
+    session_changes: createSessionDiffTool(sessionClient),
+    session_branch: createSessionForkTool(sessionClient),
+    ...createAllLspTools(lspClientManager, lspDocManager),
+    hashline_read: createHashlineReadTool(),
+    hashline_edit: createHashlineEditTool(),
+  };
+
+  // Register tool schemas for tool.execute.before validation
+  for (const [name, def] of Object.entries(tools)) {
+    registerToolSchema(name, def.args);
+  }
+
   return {
-    tool: {
-      dispatch: createDispatchTool(dispatchManager, resolvedSubagents, subagentModelKey),
-      dispatch_output: createDispatchOutputTool(dispatchManager),
-      dispatch_cancel: createDispatchCancelTool(dispatchManager),
-      dispatch_metrics: createDispatchMetricsTool(),
-      session_list: createSessionListTool(sessionClient),
-      session_read: createSessionReadTool(sessionClient),
-      session_search: createSessionSearchTool(sessionClient),
-      session_info: createSessionInfoTool(sessionClient),
-      session_diff: createSessionDiffTool(sessionClient),
-      session_fork: createSessionForkTool(sessionClient),
-      // Alternative names to avoid built-in tool name conflicts
-      session_inspect: createSessionInfoTool(sessionClient),
-      session_changes: createSessionDiffTool(sessionClient),
-      session_branch: createSessionForkTool(sessionClient),
-      ...createAllLspTools(lspClientManager, lspDocManager),
-      hashline_read: createHashlineReadTool(),
-      hashline_edit: createHashlineEditTool(),
-    },
+    tool: tools,
     event: async (input: { event: Event }) => {
       await handleEvent(input.event, hookState, deps);
     },
@@ -310,6 +318,12 @@ export async function createPluginHooks(
       output: unknown,
     ) => {
       await handleToolAfter(input, output, hookState, deps);
+    },
+    "tool.execute.before": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: any },
+    ) => {
+      await handleToolBefore(input, output);
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },
