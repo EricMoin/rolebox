@@ -226,7 +226,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "bg_test123", block: false, timeout: 60000 },
+      { task_id: "bg_test123" },
       mockToolContext,
     );
 
@@ -252,7 +252,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "nonexistent", block: false, timeout: 60000 },
+      { task_id: "nonexistent" },
       mockToolContext,
     );
 
@@ -260,7 +260,7 @@ describe("createDispatchOutputTool", () => {
     expect(result).toContain("nonexistent");
   });
 
-  it("returns status for running task with block=false", async () => {
+  it("returns status for running task", async () => {
     const running = makeTask({ status: "running", completedAt: undefined });
     const manager = {
       getTask: mock(() => running),
@@ -268,7 +268,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "bg_test123", block: false, timeout: 60000 },
+      { task_id: "bg_test123" },
       mockToolContext,
     );
 
@@ -276,37 +276,7 @@ describe("createDispatchOutputTool", () => {
     expect(result).toContain("still running");
   });
 
-  it("ignores a stale block param: returns immediately, no poll loop, no deprecation note", async () => {
-    const running = makeTask({
-      status: "running",
-      completedAt: undefined,
-    });
-
-    let callCount = 0;
-    const manager = {
-      getTask: mock((_taskId: string) => {
-        callCount++;
-        return running;
-      }),
-    } as unknown as DispatchManager;
-
-    const tool = createDispatchOutputTool(manager);
-
-    const start = Date.now();
-    const result = await tool.execute(
-      { task_id: "bg_test123", block: true, timeout: 5000 } as never,
-      mockToolContext,
-    );
-    const elapsed = Date.now() - start;
-
-    expect(elapsed).toBeLessThan(500);
-    expect(result).toContain("Task Status");
-    expect(result).toContain("still running");
-    expect(result).not.toContain("deprecated");
-    expect(callCount).toBe(1);
-  });
-
-  it("running task with block=false returns guidance, no deprecation note", async () => {
+  it("running task returns guidance, no deprecation note", async () => {
     const running = makeTask({ status: "running", completedAt: undefined });
     const manager = {
       getTask: mock(() => running),
@@ -314,7 +284,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "bg_test123", block: false, timeout: 60000 },
+      { task_id: "bg_test123" },
       mockToolContext,
     );
 
@@ -341,7 +311,7 @@ describe("createDispatchOutputTool", () => {
       ),
     } as unknown as DispatchManager;
     const r1 = await createDispatchOutputTool(manager1).execute(
-      { task_id: "bg_comp", block: false, timeout: 60000 },
+      { task_id: "bg_comp" },
       mockToolContext,
     );
     expect(r1).toContain("Task Result");
@@ -355,7 +325,7 @@ describe("createDispatchOutputTool", () => {
       ),
     } as unknown as DispatchManager;
     const r2 = await createDispatchOutputTool(manager2).execute(
-      { task_id: "bg_err", block: false, timeout: 60000 },
+      { task_id: "bg_err" },
       mockToolContext,
     );
     expect(r2).toContain("Task Error");
@@ -374,7 +344,7 @@ describe("createDispatchOutputTool", () => {
       ),
     } as unknown as DispatchManager;
     const r3 = await createDispatchOutputTool(manager3).execute(
-      { task_id: "bg_timeout", block: false, timeout: 60000 },
+      { task_id: "bg_timeout" },
       mockToolContext,
     );
     expect(r3).toContain("Task Timeout");
@@ -389,7 +359,7 @@ describe("createDispatchOutputTool", () => {
       ),
     } as unknown as DispatchManager;
     const r4 = await createDispatchOutputTool(manager4).execute(
-      { task_id: "bg_cancel", block: false, timeout: 60000 },
+      { task_id: "bg_cancel" },
       mockToolContext,
     );
     expect(r4).toContain("Task Cancelled");
@@ -409,7 +379,7 @@ describe("createDispatchOutputTool", () => {
       ),
     } as unknown as DispatchManager;
     const r5 = await createDispatchOutputTool(manager5).execute(
-      { task_id: "bg_expired", block: false, timeout: 60000 },
+      { task_id: "bg_expired" },
       mockToolContext,
     );
     expect(r5).toContain("Task Expired");
@@ -430,7 +400,7 @@ describe("createDispatchOutputTool", () => {
       ),
     } as unknown as DispatchManager;
     const r6 = await createDispatchOutputTool(manager6).execute(
-      { task_id: "nonexistent", block: false, timeout: 60000 },
+      { task_id: "nonexistent" },
       mockToolContext,
     );
     expect(r6).toContain("Task Not Found");
@@ -458,7 +428,7 @@ describe("createDispatchOutputTool", () => {
     } as unknown as DispatchManager;
     const tool = createDispatchOutputTool(manager);
     const result = await tool.execute(
-      { task_id: "bg_fe", block: false, timeout: 60000 },
+      { task_id: "bg_fe" },
       mockToolContext,
     );
     // fetch_error should NOT appear in result body as text
@@ -488,7 +458,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "bg_test123", block: false, timeout: 60000 },
+      { task_id: "bg_test123" },
       mockToolContext,
     );
 
@@ -522,7 +492,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "bg_spill", block: false, timeout: 60000, max_chars: maxChars },
+      { task_id: "bg_spill", max_chars: maxChars },
       mockToolContext,
     );
 
@@ -567,8 +537,6 @@ describe("createDispatchOutputTool", () => {
     const r1 = await tool.execute(
       {
         task_id: "bg_test123",
-        block: false,
-        timeout: 60000,
         max_chars: 100,
         offset: 5,
         limit: 5,
@@ -583,8 +551,6 @@ describe("createDispatchOutputTool", () => {
     const r2 = await tool.execute(
       {
         task_id: "bg_test123",
-        block: false,
-        timeout: 60000,
         max_chars: 5,
         tail: true,
       },
@@ -622,7 +588,7 @@ describe("createDispatchOutputTool", () => {
     const tool = createDispatchOutputTool(manager);
 
     const result = await tool.execute(
-      { task_id: "bg_test123", block: false, timeout: 60000 },
+      { task_id: "bg_test123" },
       mockToolContext,
     );
 
