@@ -205,7 +205,7 @@ describe("DispatchAdapter", () => {
       expect(summary).toBe("part one part two");
     });
 
-    it("filters by sinceMessageId", async () => {
+    it("captures only messages after sinceMessageId (exclusive)", async () => {
       freshAdapter({
         messages: [
           {
@@ -221,7 +221,7 @@ describe("DispatchAdapter", () => {
 
       const summary = await adapter.readOriginSummary("origin-123", "msg-1");
 
-      expect(summary).toBe("old contentnew content");
+      expect(summary).toBe("new content");
     });
 
     it("caps output at SUMMARY_INPUT_CHAR_CAP", async () => {

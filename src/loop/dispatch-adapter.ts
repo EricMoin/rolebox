@@ -124,6 +124,7 @@ export class DispatchAdapter implements IDispatchAdapter {
     for (const msg of messages) {
       if (!capture && msg.info?.id === sinceMessageId) {
         capture = true;
+        continue;
       }
       if (!capture) continue;
 
