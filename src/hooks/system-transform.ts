@@ -5,7 +5,7 @@ import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
-import { buildFunctionBlock, buildActiveArtifactBlock } from "../prompt-builder.ts";
+import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock } from "../prompt-builder.ts";
 import { collectAllFunctions } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
 import type { ResolvedFunction } from "../types.ts";
@@ -36,6 +36,18 @@ export async function handleSystemTransform(
     if (graph) {
       graphSessionState.initGraph(input.sessionID, graph);
       graphState = graphSessionState.getState(input.sessionID);
+    }
+  }
+
+  // Available functions block — lists all resolved functions for the current agent
+  // even when none are active, so the user can see what's available.
+  if (agentId) {
+    const agentFunctions = deps.roleFunctionsMap.get(agentId);
+    if (agentFunctions && agentFunctions.length > 0) {
+      const availBlock = buildAvailableFunctionsBlock(agentFunctions);
+      if (availBlock) {
+        output.system.push(availBlock);
+      }
     }
   }
 

@@ -177,3 +177,25 @@ export function buildFunctionStateBlock(fnName: string, s: FnState, todosRemaini
 export function buildActiveArtifactBlock(name: string, content: string): string {
   return `<active_artifact name="${name}">\n${content}\n</active_artifact>`;
 }
+
+export function buildAvailableFunctionsBlock(functions: ResolvedFunction[]): string {
+  if (functions.length === 0) return "";
+  return renderSection(
+    "available_functions",
+    "These functions are available for activation. Use |function_name| or |function_name:params| syntax to activate them.",
+    functions.map((fn) => {
+      const children: (XmlChild | CdataNode)[] = [
+        xml("name", [fn.name]),
+        xml("description", [fn.description]),
+      ];
+      if (fn.params) {
+        const paramsStr = Object.entries(fn.params)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ");
+        children.push(xml("params", [paramsStr]));
+      }
+      children.push(xml("content", [cdata(fn.content)]));
+      return xml("function", children);
+    }),
+  );
+}
