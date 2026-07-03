@@ -18,16 +18,42 @@ const log = createSubLogger("hook-event");
 
 // `awaiting_worker` bridges to onWorkerCompleted: when inflight hits 0 the worker
 // already finished and re-prompted, so no separate coordinator event will fire.
+//
+// IMPORTANT: This function loops until the state machine reaches a stable waiting
+// phase (awaiting_worker, dispatching) or a terminal phase. Without the loop,
+// calling onWorkerCompleted() transitions to "summarizing" but nobody calls
+// onOriginIdle() to advance further — deadlocking the loop until an external
+// event (potentially minutes later) fires another session.idle for the origin.
 async function bridgeLoopAdvance(
   coord: LoopCoordinator,
   sid: string,
 ): Promise<void> {
-  const loopState = coord.getLoopState(sid);
-  if (!loopState) return;
-  if (loopState.phase === "activating" || loopState.phase === "summarizing") {
-    await coord.onOriginIdle(sid);
-  } else if (loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
-    await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
+  // Safety cap prevents infinite loops if state transitions cycle unexpectedly
+  const MAX_ADVANCES = 5;
+  for (let i = 0; i < MAX_ADVANCES; i++) {
+    const loopState = coord.getLoopState(sid);
+    if (!loopState) return;
+
+    const prevPhase = loopState.phase;
+
+    if (loopState.phase === "activating" || loopState.phase === "summarizing") {
+      await coord.onOriginIdle(sid);
+    } else if (loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
+      await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
+    } else {
+      // Terminal or dispatching — nothing more to advance synchronously
+      return;
+    }
+
+    // Re-read state after the transition
+    const newState = coord.getLoopState(sid);
+    if (!newState) return;
+
+    // If phase didn't change, the transition was a no-op — bail to avoid livelock
+    if (newState.phase === prevPhase) return;
+
+    // If we entered a phase that requires waiting for external input, stop
+    if (newState.phase === "awaiting_worker" || newState.phase === "dispatching") return;
   }
 }
 

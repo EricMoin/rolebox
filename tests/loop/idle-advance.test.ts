@@ -229,4 +229,26 @@ describe("idle-advance", () => {
     const correction = pendingCorrections.get(sid);
     expect(correction ?? "").not.toContain("loop interrupted by restart");
   });
+
+  it("advances from awaiting_worker through summarizing to next dispatch without deadlock", async () => {
+    const sid = "ses_bridge_deadlock";
+    activeLoopManager!.register({
+      originSessionId: sid,
+      agent: "test-agent",
+      prompt: "do work",
+      mode: "fresh",
+      iterations: 3,
+    });
+
+    await activeLoopManager!.onOriginIdle(sid);
+    const loopState = activeLoopManager!.getLoopState(sid)!;
+    expect(loopState.phase).toBe("awaiting_worker");
+
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID: sid } },
+    });
+
+    const afterState = activeLoopManager!.getLoopState(sid)!;
+    expect(afterState.phase).not.toBe("summarizing");
+  });
 });
