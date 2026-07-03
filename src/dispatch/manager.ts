@@ -1009,6 +1009,7 @@ export class DispatchManager {
     if (t?.sessionId) this.sessionToTask.delete(t.sessionId); // edge-case #4 index cleanup
     this.eventState.delete(taskId);
     this.tasks.delete(taskId);
+
     this.persistState();
     this.cleanedUpTasks.set(taskId, Date.now());
     if (this.cleanedUpTasks.size > 500) {
@@ -1674,6 +1675,7 @@ export class DispatchManager {
     t.completedAt = fields && "completedAt" in fields ? fields.completedAt : new Date();
     if (fields?.error !== undefined) t.error = fields.error;
     return true;
+
   }
 
   private handleTaskCompleted(taskId: string): void {
