@@ -106,6 +106,7 @@ export class LoopCoordinator {
       startedAt: now,
       updatedAt: now,
       roundStartedAt: now,
+      rounds: [],
       schemaVersion: LOOP_STATE_SCHEMA_VERSION,
     };
 
@@ -157,9 +158,29 @@ export class LoopCoordinator {
       loop.activeWorkerTaskId = undefined;
       loop.activeWorkerSessionId = undefined;
 
+      // Update round history
+      const lastRound = loop.rounds?.[loop.rounds.length - 1];
+      if (lastRound && lastRound.status === "running") {
+        const now = Date.now();
+        lastRound.completedAt = now;
+        lastRound.durationMs = now - lastRound.startedAt;
+        lastRound.status = result.hadError ? "error" : "completed";
+      }
+
       if (result.hadError) {
         await this._failLoop(loop, result.errorReason ?? "Worker round failed");
         return;
+      }
+
+      // Inject per-round progress note with session ID for discoverability
+      if (lastRound) {
+        const dur = lastRound.durationMs !== undefined ? `${(lastRound.durationMs / 1000).toFixed(1)}s` : "?";
+        await this.adapter
+          .injectNote(
+            loop.originSessionId,
+            `${LOOP_PROGRESS_MARKER} round ${lastRound.round}/${loop.total} ${lastRound.status}, session=${lastRound.workerSessionId}, duration=${dur}]`,
+          )
+          .catch(() => {});
       }
 
       const lastMsgId = await this.adapter.getLastMessageId(originSessionId);
@@ -312,6 +333,15 @@ export class LoopCoordinator {
 
     loop.activeWorkerTaskId = result.workerTaskId;
     loop.activeWorkerSessionId = result.workerSessionId;
+    // Record round history
+    if (!loop.rounds) loop.rounds = [];
+    loop.rounds.push({
+      round: loop.current,
+      workerTaskId: result.workerTaskId,
+      workerSessionId: result.workerSessionId,
+      startedAt: Date.now(),
+      status: "running",
+    });
     loop.phase = "awaiting_worker";
     loop.roundStartedAt = Date.now();
     loop.updatedAt = Date.now();
@@ -375,13 +405,29 @@ export class LoopCoordinator {
       loop.activeWorkerSessionId = undefined;
     }
 
+    // Mark current round as cancelled in history
+    const lastRound = loop.rounds?.[loop.rounds.length - 1];
+    if (lastRound && lastRound.status === "running") {
+      lastRound.completedAt = Date.now();
+      lastRound.durationMs = lastRound.completedAt - lastRound.startedAt;
+      lastRound.status = "cancelled";
+    }
+
     loop.phase = terminalPhase;
     loop.updatedAt = Date.now();
 
+    // Build round summary for session discovery
+    const roundsSummary = (loop.rounds ?? [])
+      .map((r) => {
+        const dur = r.durationMs !== undefined ? `${(r.durationMs / 1000).toFixed(1)}s` : "?";
+        return `r${r.round}:${r.workerSessionId}(${dur},${r.status})`;
+      })
+      .join(", ");
+
     const marker =
       terminalPhase === "complete"
-        ? `${LOOP_PROGRESS_MARKER} loop complete]`
-        : `${LOOP_PROGRESS_MARKER} loop cancelled]`;
+        ? `${LOOP_PROGRESS_MARKER} loop complete]\nRounds: ${roundsSummary}`
+        : `${LOOP_PROGRESS_MARKER} loop cancelled]\nRounds: ${roundsSummary}`;
 
     await this.adapter.injectNote(loop.originSessionId, marker);
   }
@@ -396,6 +442,15 @@ export class LoopCoordinator {
     loop.phase = "error";
     loop.errorReason = reason;
     loop.updatedAt = Date.now();
+
+    // Mark current round as errored in history
+    const lastRound = loop.rounds?.[loop.rounds.length - 1];
+    if (lastRound && lastRound.status === "running") {
+      lastRound.completedAt = Date.now();
+      lastRound.durationMs = lastRound.completedAt - lastRound.startedAt;
+      lastRound.status = "error";
+    }
+
     await this.adapter
       .injectNote(loop.originSessionId, `${LOOP_PROGRESS_MARKER} error: ${reason}]`)
       .catch(() => {});

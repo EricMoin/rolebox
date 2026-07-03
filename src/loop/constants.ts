@@ -29,7 +29,7 @@ export const SPAWN_MAX_RETRIES = 2;
 export const SPAWN_RETRY_BASE_DELAY_MS = 2_000;
 
 /** Current schema version for persisted LoopState records */
-export const LOOP_STATE_SCHEMA_VERSION = 1;
+export const LOOP_STATE_SCHEMA_VERSION = 2;
 
 /** Marker string used to detect loop-progress signals in session output */
 export const LOOP_PROGRESS_MARKER = "[loop-progress";

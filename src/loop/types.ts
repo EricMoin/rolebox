@@ -32,6 +32,27 @@ export type LoopPhase =
   | "error";
 
 /**
+ * Record of a single completed (or failed/cancelled) loop round.
+ * Persisted in LoopState.rounds for post-hoc session discovery.
+ */
+export interface RoundRecord {
+  /** 1-based round number */
+  round: number;
+  /** Dispatch task ID for this round's worker */
+  workerTaskId: string;
+  /** Session ID of the worker (key for session_read/session_info) */
+  workerSessionId: string;
+  /** Unix timestamp (ms) when the round was dispatched */
+  startedAt: number;
+  /** Unix timestamp (ms) when the round completed (undefined if still running) */
+  completedAt?: number;
+  /** Duration in milliseconds (completedAt - startedAt) */
+  durationMs?: number;
+  /** Terminal status of this round */
+  status: "running" | "completed" | "error" | "cancelled";
+}
+
+/**
  * Full runtime state for a single loop execution.
  * Persisted between rounds to enable recovery and monitoring.
  */
@@ -72,6 +93,8 @@ export interface LoopState {
   updatedAt: number;
   /** Unix timestamp (ms) when the current round started */
   roundStartedAt: number;
+  /** History of all dispatched rounds with their worker session IDs */
+  rounds?: RoundRecord[];
   /** Schema version for forward-compatible persistence */
   schemaVersion: number;
 }
