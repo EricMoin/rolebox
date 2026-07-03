@@ -11,6 +11,7 @@ import {
   loopManagerMap,
   managerMap,
 } from "../../src/plugin-hooks";
+import { STOP_LOOP_SIGNAL } from "../../src/loop/constants";
 
 function pluginMockClient(): OpencodeClient {
   return {
@@ -148,7 +149,7 @@ describe("LoopManager integration", () => {
       loopState.phase = "awaiting_worker";
 
       const output = {
-        parts: [{ type: "text" as const, text: "stop the loop" }],
+        parts: [{ type: "text" as const, text: STOP_LOOP_SIGNAL }],
       };
       await hooks["chat.message"](
         { agent: AGENT, sessionID: sid },

@@ -5,6 +5,7 @@ import {
   DISPATCH_ROUND_TIMEOUT_MS,
   LOOP_PROGRESS_MARKER,
   LOOP_STATE_SCHEMA_VERSION,
+  STOP_LOOP_SIGNAL,
 } from "./constants.js";
 import {
   DISPATCH_COMPLETION_MARKER,
@@ -40,32 +41,23 @@ const AUTO_CONTINUE_PREFIX = "[auto-continue";
 /**
  * Determine whether an incoming message should cancel the loop.
  *
- * Only **genuine human messages** during user-owned phases (`awaiting_worker`,
- * `dispatching`) trigger cancellation. System re-prompts (dispatch completion
- * markers, auto-continue, loop-progress notes) are explicitly excluded — they
- * re-enter the chat.message hook as synthetic injections and must never cancel
- * the loop.
+ * Cancellation requires an **explicit stop signal** (the `/stop-loop` command
+ * injects `STOP_LOOP_SIGNAL` into the message text). Ordinary user messages
+ * no longer interrupt a running loop — only the dedicated command does.
+ *
+ * System re-prompts (dispatch completion markers, auto-continue, loop-progress
+ * notes) are still excluded for safety.
  */
 export function shouldCancelLoop(
   loopState: LoopState,
   messageText: string,
 ): boolean {
-  // 1. Never cancel on dispatch system re-prompts
-  if (isDispatchNotification(messageText)) return false;
+  // Only cancel when the explicit stop-loop signal is present
+  if (!messageText.includes(STOP_LOOP_SIGNAL)) return false;
 
-  // 2. Never cancel on auto-continue injections
-  if (messageText.includes(AUTO_CONTINUE_PREFIX)) return false;
-
-  // 3. Never cancel on loop-progress markers
-  if (messageText.includes(LOOP_PROGRESS_MARKER)) return false;
-
-  // 4. Never cancel on terminal phases
   if (TERMINAL_PHASES.has(loopState.phase)) return false;
-
-  // 5. Never cancel on origin-owned phases (activating, summarizing, finalizing)
   if (ORIGIN_OWNED_PHASES.has(loopState.phase)) return false;
 
-  // 6. Only cancel during user-owned phases
   if (loopState.phase === "awaiting_worker") return true;
   if (loopState.phase === "dispatching") return true;
 

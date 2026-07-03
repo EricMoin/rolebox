@@ -36,3 +36,9 @@ export const LOOP_PROGRESS_MARKER = "[loop-progress";
 
 /** Canonical name of the loop function */
 export const LOOP_FUNCTION_NAME = "loop";
+
+/** Command name registered by the plugin to stop an active loop */
+export const STOP_LOOP_COMMAND = "stop-loop";
+
+/** Text injected by the stop-loop command; used by shouldCancelLoop to detect explicit cancellation */
+export const STOP_LOOP_SIGNAL = "[rolebox:stop-loop]";

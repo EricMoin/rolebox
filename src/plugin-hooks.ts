@@ -14,7 +14,7 @@ import { createSubLogger } from "./logger.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopStore } from "./loop/loop-store.ts";
-import { INTER_ROUND_DELAY_MS } from "./loop/constants.ts";
+import { INTER_ROUND_DELAY_MS, STOP_LOOP_COMMAND, STOP_LOOP_SIGNAL } from "./loop/constants.ts";
 import type { JudgeFn } from "./graph/termination-async.ts";
 import { hookState } from "./hooks/state.ts";
 import type { HookDeps } from "./hooks/deps.ts";
@@ -252,6 +252,16 @@ export async function createPluginHooks(
         config.agent[resolved.id] = agentConfig;
 
         registerSubAgentConfigs(resolved.subagents, config);
+      }
+
+      // Register /stop-loop command so users can explicitly cancel a running loop
+      (config as Record<string, unknown>).command ??= {};
+      const commands = (config as Record<string, unknown>).command as Record<string, unknown>;
+      if (!commands[STOP_LOOP_COMMAND]) {
+        commands[STOP_LOOP_COMMAND] = {
+          template: STOP_LOOP_SIGNAL,
+          description: "Stop the active loop",
+        };
       }
     },
     "chat.message": async (

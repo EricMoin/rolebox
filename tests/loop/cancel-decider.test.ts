@@ -5,7 +5,7 @@ import {
   DISPATCH_ALL_COMPLETE_MARKER,
   DISPATCH_RECOVERY_MARKER,
 } from "../../src/dispatch/notification";
-import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
+import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL } from "../../src/loop/constants";
 import type { LoopState } from "../../src/loop/types";
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -108,22 +108,41 @@ describe("shouldCancelLoop — loop-progress markers", () => {
   });
 });
 
-// ── human messages during user-owned phases ────────────────────────
+// ── explicit stop-loop signal ──────────────────────────────────────
 
-describe("shouldCancelLoop — human messages", () => {
-  it("plain human message during awaiting_worker → true", () => {
+describe("shouldCancelLoop — stop-loop signal", () => {
+  it("stop-loop signal during awaiting_worker → true", () => {
     const state = mockLoopState("awaiting_worker");
-    expect(shouldCancelLoop(state, "stop the loop please")).toBe(true);
+    expect(shouldCancelLoop(state, STOP_LOOP_SIGNAL)).toBe(true);
   });
 
-  it("plain human message during dispatching → true", () => {
+  it("stop-loop signal during dispatching → true", () => {
     const state = mockLoopState("dispatching");
-    expect(shouldCancelLoop(state, "cancel everything")).toBe(true);
+    expect(shouldCancelLoop(state, STOP_LOOP_SIGNAL)).toBe(true);
   });
 
-  it("human message containing 'cancel' during awaiting_worker → true", () => {
+  it("stop-loop signal embedded in longer message → true", () => {
     const state = mockLoopState("awaiting_worker");
-    expect(shouldCancelLoop(state, "I want to cancel this loop")).toBe(true);
+    expect(shouldCancelLoop(state, `please ${STOP_LOOP_SIGNAL} now`)).toBe(true);
+  });
+});
+
+// ── plain human messages no longer cancel ──────────────────────────
+
+describe("shouldCancelLoop — plain human messages (no cancel)", () => {
+  it("plain human message during awaiting_worker → false", () => {
+    const state = mockLoopState("awaiting_worker");
+    expect(shouldCancelLoop(state, "stop the loop please")).toBe(false);
+  });
+
+  it("plain human message during dispatching → false", () => {
+    const state = mockLoopState("dispatching");
+    expect(shouldCancelLoop(state, "cancel everything")).toBe(false);
+  });
+
+  it("human message containing 'cancel' during awaiting_worker → false", () => {
+    const state = mockLoopState("awaiting_worker");
+    expect(shouldCancelLoop(state, "I want to cancel this loop")).toBe(false);
   });
 });
 
@@ -172,27 +191,24 @@ describe("shouldCancelLoop — terminal phases", () => {
 // ── edge cases ─────────────────────────────────────────────────────
 
 describe("shouldCancelLoop — edge cases", () => {
-  it("empty message during awaiting_worker → true (empty = likely human trigger)", () => {
+  it("empty message during awaiting_worker → false (no stop signal)", () => {
     const state = mockLoopState("awaiting_worker");
-    expect(shouldCancelLoop(state, "")).toBe(true);
+    expect(shouldCancelLoop(state, "")).toBe(false);
   });
 
-  it("whitespace-only message during awaiting_worker → true", () => {
+  it("whitespace-only message during awaiting_worker → false", () => {
     const state = mockLoopState("awaiting_worker");
-    expect(shouldCancelLoop(state, "   ")).toBe(true);
+    expect(shouldCancelLoop(state, "   ")).toBe(false);
   });
 
-  it("message matching dispatch prefix but user-text following → false (conservative)", () => {
-    // If the message begins with a dispatch marker, it's synthetic — even if human text follows
-    const state = mockLoopState("awaiting_worker");
-    const msg = `${DISPATCH_COMPLETION_MARKER} actually I changed my mind, cancel`;
-    expect(shouldCancelLoop(state, msg)).toBe(false);
+  it("stop signal during terminal phase → false", () => {
+    const state = mockLoopState("complete");
+    expect(shouldCancelLoop(state, STOP_LOOP_SIGNAL)).toBe(false);
   });
 
-  it("marker as substring mid-message → still detected (conservative)", () => {
-    const state = mockLoopState("awaiting_worker");
-    const msg = `here is a note: ${DISPATCH_RECOVERY_MARKER} was received`;
-    expect(shouldCancelLoop(state, msg)).toBe(false);
+  it("stop signal during origin-owned phase → false", () => {
+    const state = mockLoopState("activating");
+    expect(shouldCancelLoop(state, STOP_LOOP_SIGNAL)).toBe(false);
   });
 });
 

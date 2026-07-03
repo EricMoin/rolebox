@@ -10,7 +10,7 @@ import {
   pendingCorrections,
   loopManagerMap,
 } from "../../src/plugin-hooks";
-import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
+import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL } from "../../src/loop/constants";
 import { functionRuntime } from "../../src/function/runtime-state";
 
 function createMockClient(): OpencodeClient {
@@ -183,7 +183,7 @@ describe("loop activation", () => {
     loop.phase = "awaiting_worker";
 
     const output2 = {
-      parts: [{ type: "text" as const, text: "stop everything" }],
+      parts: [{ type: "text" as const, text: STOP_LOOP_SIGNAL }],
     };
     await hooks["chat.message"](
       { agent: "test-agent", sessionID: "ses_006b" },
