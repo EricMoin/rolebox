@@ -23,6 +23,8 @@ import {
 import { LspClientManager } from "./lsp/client-manager.ts";
 import { LspDocumentManager } from "./lsp/document-manager.ts";
 import { createAllLspTools } from "./lsp/index.ts";
+import { createHashlineReadTool } from "./hashline/hashline-read.ts";
+import { createHashlineEditTool } from "./hashline/hashline-edit.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopStore } from "./loop/loop-store.ts";
@@ -248,6 +250,8 @@ export async function createPluginHooks(
       session_changes: createSessionDiffTool(sessionClient),
       session_branch: createSessionForkTool(sessionClient),
       ...createAllLspTools(lspClientManager, lspDocManager),
+      hashline_read: createHashlineReadTool(),
+      hashline_edit: createHashlineEditTool(),
     },
     event: async (input: { event: Event }) => {
       await handleEvent(input.event, hookState, deps);
