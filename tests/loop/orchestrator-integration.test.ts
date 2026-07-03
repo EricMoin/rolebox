@@ -562,9 +562,10 @@ describe("Orchestrator Integration", () => {
       );
       expect(injectCalls.length).toBeGreaterThanOrEqual(1);
       const errorInject = injectCalls.find((call) =>
-        (call.args[1] as string).includes(LOOP_PROGRESS_MARKER),
+        (call.args[1] as string).includes("error"),
       );
       expect(errorInject).not.toBeUndefined();
+      expect((errorInject!.args[1] as string)).toContain(LOOP_PROGRESS_MARKER);
       expect((errorInject!.args[1] as string)).toContain("worker crash");
     });
 
