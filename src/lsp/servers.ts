@@ -160,37 +160,39 @@ function findCommandOnPath(command: string): string | null {
 
 export function autoDetectServers(directory: string): string[] {
   const detected: string[] = [];
+  const searchDirs = [directory, process.cwd()];
 
   for (const [langId, configs] of Object.entries(LANGUAGE_SERVER_REGISTRY)) {
     for (const config of configs) {
-      let projectFound = false;
-
-      for (const pattern of config.filePatterns) {
-        const candidate = path.join(directory, pattern);
-        if (existsSync(candidate)) {
-          projectFound = true;
-          break;
-        }
-      }
-
-      if (!projectFound && config.filePatterns.length === 0 && config.extensions.length > 0) {
+      const binaryPath = findCommandOnPath(config.command);
+      if (!binaryPath) {
         continue;
       }
 
-      if (projectFound) {
-        const binaryPath = findCommandOnPath(config.command);
-        if (binaryPath) {
-          if (!detected.includes(langId)) {
-            detected.push(langId);
-            log.info(`Detected ${langId} server: ${config.command} at ${binaryPath}`);
-          }
-        } else {
-          log.warn(
-            `Detected ${langId} project but server binary '${config.command}' not found on PATH`,
-          );
+      if (config.filePatterns.length === 0 && config.extensions.length > 0) {
+        if (!detected.includes(langId)) {
+          detected.push(langId);
+          log.info(`Detected ${langId} server: ${config.command} at ${binaryPath}`);
         }
         break;
       }
+
+      let projectFound = false;
+      for (const searchDir of searchDirs) {
+        for (const pattern of config.filePatterns) {
+          if (existsSync(path.join(searchDir, pattern))) {
+            projectFound = true;
+            break;
+          }
+        }
+        if (projectFound) break;
+      }
+
+      if (!detected.includes(langId)) {
+        detected.push(langId);
+        log.info(`Detected ${langId} server: ${config.command} at ${binaryPath}`);
+      }
+      break;
     }
   }
 
