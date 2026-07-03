@@ -188,6 +188,43 @@ describe("LoopCoordinator", () => {
       expect(input.description).toContain("round 1/3");
     });
 
+    it("injects a loop-started note on the first round only", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await c.onOriginIdle("origin-1");
+
+      const startedNotes = calls.filter(
+        (call) =>
+          call.method === "injectNote" &&
+          typeof call.args[1] === "string" &&
+          (call.args[1] as string).includes("loop started"),
+      );
+      expect(startedNotes.length).toBe(1);
+      expect((startedNotes[0]!.args[1] as string)).toContain(LOOP_PROGRESS_MARKER);
+      expect((startedNotes[0]!.args[1] as string)).toContain("3 rounds");
+      expect((startedNotes[0]!.args[1] as string)).toContain("inherit");
+    });
+
+    it("does NOT inject loop-started note on round 2+", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1");
+      await c.onOriginIdle("origin-1");
+
+      const startedNotes = calls.filter(
+        (call) =>
+          call.method === "injectNote" &&
+          typeof call.args[1] === "string" &&
+          (call.args[1] as string).includes("loop started"),
+      );
+      expect(startedNotes.length).toBe(1);
+    });
+
     it("no-ops for unknown originSessionId", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
@@ -240,10 +277,13 @@ describe("LoopCoordinator", () => {
       expect(state.phase).toBe("error");
       expect(state.errorReason).toBe("boom");
 
-      const injectCall = calls.find((call) => call.method === "injectNote");
-      expect(injectCall).not.toBeUndefined();
-      expect((injectCall!.args[1] as string)).toContain(LOOP_PROGRESS_MARKER);
-      expect((injectCall!.args[1] as string)).toContain("boom");
+      const injectCalls = calls.filter((call) => call.method === "injectNote");
+      const errorNote = injectCalls.find(
+        (c) => typeof c.args[1] === "string" && (c.args[1] as string).includes("boom"),
+      );
+      expect(errorNote).not.toBeUndefined();
+      expect((errorNote!.args[1] as string)).toContain(LOOP_PROGRESS_MARKER);
+      expect((errorNote!.args[1] as string)).toContain("boom");
     });
 
     it("no-ops for unknown workerTaskId", async () => {
@@ -336,9 +376,12 @@ describe("LoopCoordinator", () => {
       expect(state.phase).toBe("complete");
       expect(state.current).toBe(2);
 
-      const injectCall = calls.find((call) => call.method === "injectNote");
-      expect(injectCall).not.toBeUndefined();
-      expect((injectCall!.args[1] as string)).toContain("loop complete");
+      const injectCalls = calls.filter((call) => call.method === "injectNote");
+      const completeNote = injectCalls.find(
+        (c) => typeof c.args[1] === "string" && (c.args[1] as string).includes("loop complete"),
+      );
+      expect(completeNote).not.toBeUndefined();
+      expect((completeNote!.args[1] as string)).toContain("loop complete");
     });
 
     it("iterations=3 runs three worker+summary cycles", async () => {
@@ -369,9 +412,12 @@ describe("LoopCoordinator", () => {
       );
       expect(dispatchCalls.length).toBe(3);
 
-      const injectCall = calls.find((call) => call.method === "injectNote");
-      expect(injectCall).not.toBeUndefined();
-      expect((injectCall!.args[1] as string)).toContain("loop complete");
+      const injectCalls = calls.filter((call) => call.method === "injectNote");
+      const completeNote = injectCalls.find(
+        (c) => typeof c.args[1] === "string" && (c.args[1] as string).includes("loop complete"),
+      );
+      expect(completeNote).not.toBeUndefined();
+      expect((completeNote!.args[1] as string)).toContain("loop complete");
     });
   });
 
@@ -400,9 +446,12 @@ describe("LoopCoordinator", () => {
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("cancelled");
 
-      const injectCall = calls.find((call) => call.method === "injectNote");
-      expect(injectCall).not.toBeUndefined();
-      expect((injectCall!.args[1] as string)).toContain("loop cancelled");
+      const injectCalls = calls.filter((call) => call.method === "injectNote");
+      const cancelNote = injectCalls.find(
+        (c) => typeof c.args[1] === "string" && (c.args[1] as string).includes("loop cancelled"),
+      );
+      expect(cancelNote).not.toBeUndefined();
+      expect((cancelNote!.args[1] as string)).toContain("loop cancelled");
     });
   });
 

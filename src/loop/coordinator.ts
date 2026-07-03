@@ -317,6 +317,17 @@ export class LoopCoordinator {
     loop.updatedAt = Date.now();
 
     this._workerToOrigin.set(result.workerTaskId, loop.originSessionId);
+
+    // Inject a "loop started" progress note on the first round so the user
+    // knows the loop has begun (mirrors the end-of-loop notes in _finalize).
+    if (loop.current === 1) {
+      await this.adapter
+        .injectNote(
+          loop.originSessionId,
+          `${LOOP_PROGRESS_MARKER} loop started: ${loop.total} rounds, ${loop.mode} mode]`,
+        )
+        .catch(() => {});
+    }
   }
 
   private async _handleSummary(loop: LoopState): Promise<void> {
