@@ -42,6 +42,16 @@ export async function handleToolAfter(
   if (!input.sessionID || !input.tool) return;
   const sid: string = input.sessionID;
 
+  // Defense-in-depth: if dispatch_output returned "still running" (edge cases),
+  // inject a correction to prevent repeated polling
+  if (input.tool === "dispatch_output" && typeof output === "string" && output.includes("still running")) {
+    appendCorrection(state.pendingCorrections, sid,
+      "WARNING: dispatch_output was called on a task that is still running. " +
+      "Do NOT call dispatch_output again for this task_id. " +
+      "Wait for the <system-reminder> notification.",
+    );
+  }
+
   // Custom hooks: before phase
   const toolArgs = input.args;
   const toolBeforeCtx = () => ({

@@ -102,6 +102,20 @@ export async function handleToolBefore(
   // Validation passed — update args with the parsed result (normalized)
   output.args = result.data;
 
+  // Guard: block dispatch_output on running/pending tasks
+  if (input.tool === "dispatch_output" && deps?.dispatchManager) {
+    const taskId = (result.data as { task_id?: string }).task_id;
+    if (taskId) {
+      const task = deps.dispatchManager.getTask(taskId);
+      if (task && (task.status === "running" || task.status === "pending")) {
+        throw new Error(
+          `dispatch_output blocked: task ${taskId} is still running (status: ${task.status}). ` +
+          `Wait for the <system-reminder> completion notification before calling dispatch_output.`,
+        );
+      }
+    }
+  }
+
   // Custom hooks: after phase
   if (deps && state) {
     await deps.customHooks.runHooks(

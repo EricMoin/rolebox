@@ -273,18 +273,12 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           .join("\n");
       }
 
-      const lines = [
-        "Task Status\n",
-        `Task ID: ${task.id}`,
-        `Description: ${task.description || "N/A"}`,
-        `Status: ${task.status}`,
-        "",
-        "Task is still running. Do NOT poll dispatch_output repeatedly.",
-        "You will receive a <system-reminder> notification when this task completes.",
-        "Wait for the notification, then call dispatch_output to retrieve results.",
-      ];
-
-      return lines.join("\n");
+      throw new Error(
+        `Task ${task.id} is still running (status: ${task.status}). ` +
+        `Do NOT call dispatch_output again — you will receive a <system-reminder> ` +
+        `notification when this task completes. Call dispatch_output only AFTER ` +
+        `receiving that notification.`,
+      );
     },
   });
 }
