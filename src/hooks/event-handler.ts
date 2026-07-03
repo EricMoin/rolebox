@@ -129,13 +129,22 @@ export async function handleEvent(
         const st = functionRuntime.get(sid, name);
         if (!st || st.phase === "complete") continue;
 
+        // Skip continuation entirely if requires_evidence is declared but not yet met.
+        // This prevents e.g. synthesize from auto-continuing on DIRECT-path responses
+        // where dispatch_output was never called and evidence was never observed.
+        const requiredEvidence = fn.requires_evidence ?? [];
+        if (requiredEvidence.length > 0) {
+          const allMet = requiredEvidence.every((t) => st.evidenceObserved[t] === true);
+          if (!allMet) continue;
+        }
+
         let wantsContinue = false;
         let reason = "completion condition not yet met";
 
         // Declarative: continue_until
         if (fn.continue_until) {
           const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
-            requiredEvidence: fn.requires_evidence ?? [], userMessagedThisTurn: false };
+            requiredEvidence, userMessagedThisTurn: false };
           if (evaluateCondition(fn.continue_until, env)) {
             st.phase = "complete"; functionRuntime.markDirty(); continue;
           }
