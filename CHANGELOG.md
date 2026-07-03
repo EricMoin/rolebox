@@ -2,9 +2,44 @@
 
 ## [Unreleased]
 
+## 0.15.0
+
 ### Breaking Changes
 
-- **Loop rewrite**: The `|loop|` semantics have been rewritten. Every round (including the first) now runs in a child worker session. The main session becomes an orchestrator that summarizes each round for the user. The summary also seeds the next round (inherit mode). See README for details.
+- **Loop rewrite**: The `|loop|` semantics have been rewritten. Every round (including the first) now runs in a child worker session dispatched through the dispatch system. The main session becomes a pure orchestrator that summarizes each round for the user. The summary also seeds the next round (inherit mode). The old LoopManager sequential state machine has been removed and replaced by LoopCoordinator.
+
+### Features
+
+- Implement LoopCoordinator with phased state machine (idle → running → summarizing) and cancellation support
+- Wire LoopCoordinator into event-handler and plugin lifecycle, replacing the old LoopManager
+- Harden LoopCoordinator with persistence, cancelNow, and failure recovery
+- Add `loop` to DEFAULT_FUNCTIONS — available in every role without explicit declaration
+- Gate loop activation on functionSessionState to prevent spurious activations
+- Refine loop cancellation: only cancel on user message after round 1, then further restricted to explicit `/stop-loop` command only
+- Propagate agent identity through dispatch notifications and continuation flow
+- Add evidence-based continuation gating — auto-continue now requires dispatch completion evidence
+- Gate loop activation on functionSessionState in chat-message hook
+- Add orchestrator integration tests and remove dead LoopManager code
+
+### Bug Fixes
+
+- Fix CLI optional positional args: mark `role` (update), `query` (search), and `name` (init) as `required: false` — citty defaults positional args to required, causing `rolebox update` and `rolebox search` without arguments to fail
+- Fix dispatch-manager: notify parent session when a task errors while running
+- Fix dispatch-adapter: make readOriginSummary `sinceMessageId` boundary exclusive
+- Fix event-handler: replace `break` with flag to allow loop advance after suppression
+- Fix loop coordinator test assertion to match boundary tracking
+- Fix plugin-hooks: exclude dispatch completion reminders from auto-continue counter reset
+- Add safer gate to terminate loop
+
+### Refactors
+
+- Add LoopPhase model, IDispatchAdapter interface, and unified-seed constants for LoopCoordinator
+- Extract `bridgeLoopAdvance` helper in event-handler
+- Extract `failSession` method and use in event-handler
+- Extract `resolveMaxBytes` helper in logger
+- Extract hook handlers into `src/hooks/` module
+- Extract `collectAllFunctions` helper and hoist dynamic imports
+- Extract magic strings to constants and consolidate duplicate utilities
 
 ## 0.14.0
 
