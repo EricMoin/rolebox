@@ -16,6 +16,21 @@ import type { HookDeps } from "./deps.ts";
 
 const log = createSubLogger("hook-event");
 
+// `awaiting_worker` bridges to onWorkerCompleted: when inflight hits 0 the worker
+// already finished and re-prompted, so no separate coordinator event will fire.
+async function bridgeLoopAdvance(
+  coord: LoopCoordinator,
+  sid: string,
+): Promise<void> {
+  const loopState = coord.getLoopState(sid);
+  if (!loopState) return;
+  if (loopState.phase === "activating" || loopState.phase === "summarizing") {
+    await coord.onOriginIdle(sid);
+  } else if (loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
+    await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
+  }
+}
+
 export async function handleEvent(
   event: Event,
   state: HookState,
@@ -66,18 +81,8 @@ export async function handleEvent(
         if (state.activeLoopManager && deps.dispatchManager.getInflightCount(sid) === 0) {
           const coord = state.activeLoopManager as LoopCoordinator | undefined;
           if (coord && coord.isActiveLoopOrigin(sid)) {
-            const loopState = coord.getLoopState(sid);
-            if (loopState && (loopState.phase === "activating" || loopState.phase === "summarizing")) {
-              await coord.onOriginIdle(sid);
-              break;
-            }
-            // Bug 2 fix: worker completed but onWorkerCompleted was never called.
-            // When inflight=0 and phase is still awaiting_worker, the worker has
-            // finished and notifyParent already fired — bridge to onWorkerCompleted.
-            if (loopState && loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
-              await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
-              break;
-            }
+            await bridgeLoopAdvance(coord, sid);
+            break;
           }
         }
         if (activeSet.size === 0) break;
@@ -196,12 +201,7 @@ export async function handleEvent(
       if (!sentContinuation && deps.dispatchManager.getInflightCount(sid) === 0) {
         const coord = state.activeLoopManager as LoopCoordinator | undefined;
         if (coord && coord.isActiveLoopOrigin(sid)) {
-          const loopState = coord.getLoopState(sid);
-          if (loopState && (loopState.phase === "activating" || loopState.phase === "summarizing")) {
-            await coord.onOriginIdle(sid);
-          } else if (loopState && loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
-            await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
-          }
+          await bridgeLoopAdvance(coord, sid);
         }
       }
       break;
