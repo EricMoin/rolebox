@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Features
+
+- **Session management tools** — 6 new tools for session introspection: `session_list`, `session_read`, `session_search`, `session_info`, `session_diff`, `session_fork`. New `src/session/` module.
+- **Available functions prompt block** — System prompt now includes an `<available_functions>` block listing activated functions and their descriptions.
+- **Sync dispatch session continuation** — Sync dispatch tasks can now use `session_id` to continue a previous session, preserving conversation history. Previously only background tasks supported this.
+- **Language Server Protocol integration** — Full LSP client with 30+ tools covering completions, diagnostics, hover, go-to-definition, references, rename, code actions, formatting, document symbols, workspace symbols, folding ranges, inlay hints, call hierarchy, type hierarchy, semantic tokens, selection ranges, signature help, and code lenses. (Client manager, document manager, server detection, position translation — ~4,375 lines)
+- **Hash-anchored edit system** — New `hashline_read` and `hashline_edit` tools with configurable hash width (2-4 chars, auto-escalates by file size), SHA-256 file version guard for staleness detection, Myers diff re-anchoring, fuzzy anchor recovery with offset auto-correction, and atomic writes (temp+rename). 13 source modules, 5 test suites (251 tests).
+- **Inline result text in completion notification** — The final "all tasks complete" system-reminder now includes result text inline (truncated at 4000 chars), so the orchestrator sees results directly without needing `dispatch_output`.
+- **Output-gated observe specs** — `ObserveSpec` gains a `when_output` gate that conditionally fires based on tool output content (`contains?`, `not_contains?`). Also suppresses `requires_evidence` auto-mark when an output-gated observe covers the same tool+evidence pair.
+
+### Refactors
+
+- **LSP server detection order** — Check for binary in PATH before scanning project files, avoiding unnecessary filesystem traversal.
+- **Derive inflight count from tasks map** — Removed the fragile `inflightByParent` map (maintained via inc/dec at every terminal path) and replaced it with authoritative derivation from the tasks map. `notifyCompletion` now accepts an explicit remaining count.
+
 ## 0.15.0
 
 ### Breaking Changes
