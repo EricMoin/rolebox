@@ -29,19 +29,37 @@ export function runToolObserve(opts: {
   artifacts: ArtifactStore;
   lastAssistantText: string | null;
   toolArgs?: unknown;
+  toolOutput?: unknown;
 }): string[] {
   const injects: string[] = [];
   for (const fn of opts.activeFns) {
     const st = functionRuntime.get(opts.sessionID, fn.name);
     if (!st) continue;
     if (!st.toolsObserved.includes(opts.tool)) st.toolsObserved.push(opts.tool);
-    // requires_evidence auto-mark
+    // requires_evidence auto-mark (skip when output-gated observe covers same pair)
     for (const tag of fn.requires_evidence ?? []) {
+      const hasOutputGate = (fn.observe ?? []).some(
+        (s) =>
+          s.on === "tool_after" &&
+          s.tool === opts.tool &&
+          s.set_evidence === tag &&
+          s.when_output,
+      );
+      if (hasOutputGate) continue;
       if (tag === opts.tool) st.evidenceObserved[tag] = true;
     }
     for (const spec of fn.observe ?? []) {
       if (spec.on !== "tool_after") continue;
       if (spec.tool && spec.tool !== opts.tool) continue;
+      // when_output gate: skip spec if output doesn't meet conditions
+      if (spec.when_output) {
+        const outputStr =
+          typeof opts.toolOutput === "string"
+            ? opts.toolOutput
+            : JSON.stringify(opts.toolOutput ?? "");
+        if (spec.when_output.contains && !outputStr.includes(spec.when_output.contains)) continue;
+        if (spec.when_output.not_contains && outputStr.includes(spec.when_output.not_contains)) continue;
+      }
       if (spec.set_evidence) st.evidenceObserved[spec.set_evidence] = true;
       if (spec.capture_artifact && opts.lastAssistantText) {
         const block = extractResultBlockNamed(opts.lastAssistantText, spec.capture_artifact);

@@ -146,6 +146,110 @@ describe("runToolObserve", () => {
     expect(st).toBeDefined();
     expect(st!.evidenceObserved).toEqual({});
   });
+
+  it("when_output.contains matches and fires spec", () => {
+    const fn = makeFn({
+      observe: [{ on: "tool_after", tool: "test_tool", set_evidence: "ev", when_output: { contains: "success" } }],
+    });
+    functionRuntime.init("sid-7", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-7",
+      tool: "test_tool",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolOutput: "operation success",
+    });
+
+    const st = functionRuntime.get("sid-7", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.ev).toBe(true);
+  });
+
+  it("when_output.contains does not match and skips spec", () => {
+    const fn = makeFn({
+      observe: [{ on: "tool_after", tool: "test_tool", set_evidence: "ev", when_output: { contains: "success" } }],
+    });
+    functionRuntime.init("sid-8", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-8",
+      tool: "test_tool",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolOutput: "operation failed",
+    });
+
+    const st = functionRuntime.get("sid-8", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.ev).toBeUndefined();
+  });
+
+  it("when_output.not_contains suppresses spec on matching output", () => {
+    const fn = makeFn({
+      observe: [{ on: "tool_after", tool: "test_tool", set_evidence: "ev", when_output: { not_contains: "still running" } }],
+    });
+    functionRuntime.init("sid-9", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-9",
+      tool: "test_tool",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolOutput: "Task is still running",
+    });
+
+    const st = functionRuntime.get("sid-9", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.ev).toBeUndefined();
+  });
+
+  it("when_output.not_contains allows spec on non-matching output", () => {
+    const fn = makeFn({
+      observe: [{ on: "tool_after", tool: "test_tool", set_evidence: "ev", when_output: { not_contains: "still running" } }],
+    });
+    functionRuntime.init("sid-10", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-10",
+      tool: "test_tool",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolOutput: "Task Result\nhello",
+    });
+
+    const st = functionRuntime.get("sid-10", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.ev).toBe(true);
+  });
+
+  it("requires_evidence auto-mark suppressed when output-gated observe covers same tool+evidence", () => {
+    const fn = makeFn({
+      requires_evidence: ["test_tool"],
+      observe: [{ on: "tool_after", tool: "test_tool", set_evidence: "test_tool", when_output: { not_contains: "still running" } }],
+    });
+    functionRuntime.init("sid-11", "plan", 1);
+
+    // Call with output that should NOT match the observe spec
+    runToolObserve({
+      sessionID: "sid-11",
+      tool: "test_tool",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolOutput: "still running",
+    });
+
+    const st = functionRuntime.get("sid-11", "plan");
+    expect(st).toBeDefined();
+    // Auto-mark should be suppressed because output-gated observe covers same tool+evidence
+    // AND the when_output condition prevents the spec from firing
+    expect(st!.evidenceObserved.test_tool).toBeUndefined();
+  });
 });
 
 describe("runTextCapture (idle-time artifact capture)", () => {

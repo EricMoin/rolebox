@@ -307,9 +307,9 @@ export async function createPluginHooks(
     },
     "tool.execute.after": async (
       input: { sessionID?: string; tool?: string; args?: unknown },
-      _output: unknown,
+      output: unknown,
     ) => {
-      await handleToolAfter(input, _output, hookState, deps);
+      await handleToolAfter(input, output, hookState, deps);
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },

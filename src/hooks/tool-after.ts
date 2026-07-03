@@ -35,14 +35,14 @@ function needsResultCapture(config: { any_of?: unknown[]; all_of?: unknown[] }):
 
 export async function handleToolAfter(
   input: { sessionID?: string; tool?: string; args?: unknown },
-  _output: unknown,
+  output: unknown,
   state: HookState,
   deps: HookDeps,
 ): Promise<void> {
   if (!input.sessionID || !input.tool) return;
 
   if (input.tool === "task" || input.tool === "dispatch") {
-    if (isDispatchError(_output)) {
+    if (isDispatchError(output)) {
       log.debug("skipping advance: dispatch failed", { sessionID: input.sessionID });
       return;
     }
@@ -91,6 +91,7 @@ export async function handleToolAfter(
       sessionID: input.sessionID, tool: input.tool,
       activeFns, artifacts, lastAssistantText,
       toolArgs: input.args,
+      toolOutput: output,
     });
     for (const inj of injects) {
       appendCorrection(state.pendingCorrections, input.sessionID, inj);

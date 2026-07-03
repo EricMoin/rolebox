@@ -461,6 +461,13 @@ export interface ObserveSpec {
   capture_artifact?: string;
   /** Mirror the latest todowrite state into function STATE under key "__todos". */
   sync_todos?: boolean;
+  /** Only fire when the tool output matches these content conditions. */
+  when_output?: {
+    /** Output must contain this string (case-sensitive). */
+    contains?: string;
+    /** Output must NOT contain this string (case-sensitive). */
+    not_contains?: string;
+  };
 }
 
 /** When `when` becomes true, activate/deactivate the listed functions. */
