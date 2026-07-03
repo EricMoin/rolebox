@@ -72,6 +72,7 @@ export class DispatchManager {
   private sessionMonitor: SessionMonitor;
   private notifyOutbox = new Set<string>();
   private sweeperTimer: ReturnType<typeof setInterval> | undefined;
+  private _deferredIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private _directory: string;
 
   constructor(
@@ -1055,11 +1056,15 @@ export class DispatchManager {
       clearTimeout(timer);
     }
     this.sidecarGCTimers.clear();
+    for (const timer of this._deferredIdleTimers.values()) {
+      clearTimeout(timer);
+    }
+    this._deferredIdleTimers.clear();
     for (const timer of this.cleanupTimers.values()) {
       clearTimeout(timer);
     }
     this.cleanupTimers.clear();
-    this.watchdog.dispose(); // decision 8 — prevent timer leak on process exit
+    this.watchdog.dispose();
   }
 
   private restoreState(): void {
@@ -1480,8 +1485,19 @@ export class DispatchManager {
 
     const elapsed = Date.now() - task.startedAt.getTime();
     if (elapsed < this.config.minRuntimeMs) {
-      debugLog("event", taskId, `session.idle too early (${elapsed}ms) — discarding, resetting watchdog`);
-      this.watchdog.resetWatchdog(taskId); // edge-case #3: still reset watchdog
+      if (!this._deferredIdleTimers.has(taskId)) {
+        const remaining = this.config.minRuntimeMs - elapsed;
+        debugLog("event", taskId, `session.idle too early (${elapsed}ms) — deferring by ${remaining}ms`);
+        const timer = setTimeout(() => {
+          this._deferredIdleTimers.delete(taskId);
+          const t = this.tasks.get(taskId);
+          if (t && t.status === "running") {
+            void this.handleSessionIdle(sessionId);
+          }
+        }, remaining);
+        this._deferredIdleTimers.set(taskId, timer);
+      }
+      this.watchdog.resetWatchdog(taskId);
       return;
     }
 
@@ -1765,10 +1781,19 @@ export class DispatchManager {
     } else {
       debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
     }
+    this._clearDeferredIdle(taskId);
     this.decInflight(t.parentSessionId);
     metrics.gauge("inflight_tasks").dec();
     this.persistState();
     this.scheduleCleanup(taskId);
+  }
+
+  private _clearDeferredIdle(taskId: string): void {
+    const timer = this._deferredIdleTimers.get(taskId);
+    if (timer) {
+      clearTimeout(timer);
+      this._deferredIdleTimers.delete(taskId);
+    }
   }
 
   private scheduleCleanup(taskId: string): void {
