@@ -31,7 +31,7 @@ export function createLspDocumentSymbolsTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.documentSymbol")) {
+        if (!checkCapability(languageId, clientManager, "documentSymbolProvider")) {
           return capabilityNotSupported("document symbols");
         }
 

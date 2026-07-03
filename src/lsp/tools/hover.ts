@@ -30,7 +30,7 @@ export function createLspHoverTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.hover")) {
+        if (!checkCapability(languageId, clientManager, "hoverProvider")) {
           return capabilityNotSupported("hover");
         }
 
@@ -129,7 +129,7 @@ export function createLspSignatureHelpTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.signatureHelp")) {
+        if (!checkCapability(languageId, clientManager, "signatureHelpProvider")) {
           return capabilityNotSupported("signature help");
         }
 

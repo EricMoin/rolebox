@@ -120,7 +120,7 @@ export function createLspGotoDefinitionTool(
   return createNavigationTool(
     "Go to definition of the symbol at the given position. Returns the location(s) where the symbol is defined.",
     "textDocument/definition",
-    "textDocument.definition",
+    "definitionProvider",
     "Definitions",
     clientManager,
     docManager,
@@ -134,7 +134,7 @@ export function createLspGotoTypeDefinitionTool(
   return createNavigationTool(
     "Go to type definition of the symbol at the given position. Returns the location(s) of the type definition.",
     "textDocument/typeDefinition",
-    "textDocument.typeDefinition",
+    "typeDefinitionProvider",
     "Type Definitions",
     clientManager,
     docManager,
@@ -148,7 +148,7 @@ export function createLspGotoImplementationTool(
   return createNavigationTool(
     "Go to implementation(s) of the symbol at the given position.",
     "textDocument/implementation",
-    "textDocument.implementation",
+    "implementationProvider",
     "Implementations",
     clientManager,
     docManager,
@@ -162,7 +162,7 @@ export function createLspGotoDeclarationTool(
   return createNavigationTool(
     "Go to declaration of the symbol at the given position.",
     "textDocument/declaration",
-    "textDocument.declaration",
+    "declarationProvider",
     "Declarations",
     clientManager,
     docManager,
@@ -190,7 +190,7 @@ export function createLspFindReferencesTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.references")) {
+        if (!checkCapability(languageId, clientManager, "referencesProvider")) {
           return capabilityNotSupported("find references");
         }
 
@@ -261,7 +261,7 @@ export function createLspDocumentHighlightsTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.documentHighlight")) {
+        if (!checkCapability(languageId, clientManager, "documentHighlightProvider")) {
           return capabilityNotSupported("document highlights");
         }
 

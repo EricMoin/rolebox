@@ -35,7 +35,7 @@ export function createLspCompletionTool(
       try {
         const languageId = extractLanguageId(input.filePath);
 
-        if (!checkCapability(languageId, clientManager, "textDocument.completion")) {
+        if (!checkCapability(languageId, clientManager, "completionProvider")) {
           return capabilityNotSupported("completion");
         }
 
