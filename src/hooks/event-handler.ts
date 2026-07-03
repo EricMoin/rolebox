@@ -46,33 +46,44 @@ export async function handleEvent(
         });
         break;
       }
-      // Suppress continuation for active loop origins during loop-owned phases
-      // (summarizing, activating, finalizing). Worker continuation is unaffected.
+      // Suppress function continuation for active loop origins during loop-owned
+      // phases (summarizing, activating, finalizing). Worker continuation is
+      // unaffected. NOTE: we use a flag instead of `break` so that the loop
+      // advance logic further down can still execute.
+      let suppressLoopContinuation = false;
       if (state.activeLoopManager?.isActiveLoopOrigin(sid)) {
         const loopState = state.activeLoopManager.getLoopState(sid);
         if (loopState && (loopState.phase === "summarizing" || loopState.phase === "activating" || loopState.phase === "finalizing")) {
           log.debug("suppressing auto-continue: origin session in loop-owned phase", {
             sessionID: sid, phase: loopState.phase,
           });
-          break;
+          suppressLoopContinuation = true;
         }
       }
       const activeSet = functionSessionState.getActive(sid);
-      if (activeSet.size === 0) {
-        // Loop advance for sessions with no active functions
+      if (activeSet.size === 0 || suppressLoopContinuation) {
+        // Loop advance: handle phase transitions when no continuation is needed
         if (state.activeLoopManager && deps.dispatchManager.getInflightCount(sid) === 0) {
           const coord = state.activeLoopManager as LoopCoordinator | undefined;
-          if (coord && coord.isActiveLoopOrigin(sid) && typeof (coord as any).onOriginIdle === "function") {
+          if (coord && coord.isActiveLoopOrigin(sid)) {
             const loopState = coord.getLoopState(sid);
             if (loopState && (loopState.phase === "activating" || loopState.phase === "summarizing")) {
               await coord.onOriginIdle(sid);
               break;
             }
+            // Bug 2 fix: worker completed but onWorkerCompleted was never called.
+            // When inflight=0 and phase is still awaiting_worker, the worker has
+            // finished and notifyParent already fired — bridge to onWorkerCompleted.
+            if (loopState && loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
+              await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
+              break;
+            }
           }
-          // For worker sessions, DispatchManager handles completion via notifyParent
         }
-        break;
+        if (activeSet.size === 0) break;
       }
+      if (suppressLoopContinuation) break;
+
       const allFns = collectAllFunctions(deps.roleFunctionsMap);
       const artifacts = new ArtifactStore(deps.dir);
 
@@ -175,10 +186,12 @@ export async function handleEvent(
       // --- LOOP ADVANCE: advance a loop session on terminal idle ---
       if (!sentContinuation && deps.dispatchManager.getInflightCount(sid) === 0) {
         const coord = state.activeLoopManager as LoopCoordinator | undefined;
-        if (coord && coord.isActiveLoopOrigin(sid) && typeof (coord as any).onOriginIdle === "function") {
+        if (coord && coord.isActiveLoopOrigin(sid)) {
           const loopState = coord.getLoopState(sid);
           if (loopState && (loopState.phase === "activating" || loopState.phase === "summarizing")) {
             await coord.onOriginIdle(sid);
+          } else if (loopState && loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
+            await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
           }
         }
       }
