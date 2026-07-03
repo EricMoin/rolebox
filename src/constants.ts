@@ -66,7 +66,7 @@ export const PARENT_NODE = "parent";
 // ── Default Functions ──────────────────────────────────────────────────
 
 /** Functions loaded by default when no explicit `functions:` field is set. */
-export const DEFAULT_FUNCTIONS: readonly string[] = ["plan", "execute"];
+export const DEFAULT_FUNCTIONS: readonly string[] = ["plan", "execute", "loop"];
 
 // ── Sync Targets ───────────────────────────────────────────────────────
 
