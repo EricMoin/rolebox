@@ -56,6 +56,7 @@ export default defineCommand({
   args: {
     query: {
       type: "positional",
+      required: false,
       description: "Search query (matches name, description, tags)",
     },
     noCache: {

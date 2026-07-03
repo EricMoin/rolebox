@@ -112,6 +112,7 @@ export default defineCommand({
   args: {
     role: {
       type: "positional",
+      required: false,
       description: "Specific role to update (updates all if omitted)",
     },
     noCache: {

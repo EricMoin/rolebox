@@ -91,6 +91,7 @@ export default defineCommand({
   args: {
     name: {
       type: "positional",
+      required: false,
       description: "Role name",
     },
     yes: {
