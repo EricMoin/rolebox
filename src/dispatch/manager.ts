@@ -122,7 +122,15 @@ export class DispatchManager {
           this.notifyOutbox.delete(taskId);
           continue;
         }
-        const sent = await this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
+        // Try to extract result text from materialized result for sweeper re-sends
+        let sweeperResultText: string | undefined;
+        if (task.result?.sidecarPath && !task.result.fetchError) {
+          const sidecarText = readResultSidecar(task.result.sidecarPath);
+          if (sidecarText !== null) {
+            sweeperResultText = extractResultBlock(sidecarText).result;
+          }
+        }
+        const sent = await this.notifyCompletion(task, this.getInflightCount(task.parentSessionId), sweeperResultText);
         if (sent) {
           this.notifyOutbox.delete(taskId);
         }
@@ -1275,10 +1283,10 @@ export class DispatchManager {
     this.cleanupTimers.set(taskId, timer);
   }
 
-  async notifyCompletion(task: DispatchTask, remainingTasks: number): Promise<boolean> {
+  async notifyCompletion(task: DispatchTask, remainingTasks: number, resultText?: string): Promise<boolean> {
     this.pendingNotifications.add(task.id);
     try {
-      return await notifyParent(this.client, task, remainingTasks);
+      return await notifyParent(this.client, task, remainingTasks, undefined, resultText);
     } finally {
       this.pendingNotifications.delete(task.id);
     }
@@ -1719,9 +1727,18 @@ export class DispatchManager {
     this.scheduleSidecarGC(taskId);
     this.persistState();
 
+    // Extract result text for notification
+    let resultText: string | undefined;
+    if (ref.sidecarPath && !ref.fetchError) {
+      const sidecarText = readResultSidecar(ref.sidecarPath);
+      if (sidecarText !== null) {
+        resultText = extractResultBlock(sidecarText).result;
+      }
+    }
+
     // Add to outbox before notify — sweeper re-sends if this fails
     this.addToOutbox(taskId);
-    await this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
+    await this.notifyCompletion(t, this.getInflightCount(t.parentSessionId), resultText);
     // Outbox entry is pruned by sweeper on next tick if notify succeeded
   }
 

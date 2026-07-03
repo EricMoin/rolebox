@@ -95,15 +95,34 @@ export function buildNotificationText(payload: NotificationPayload): string {
     ].join("\n");
   }
 
-  return [
+  // Final notification
+  const lines = [
     "<system-reminder>",
     DISPATCH_ALL_COMPLETE_MARKER,
     "**Completed:**",
     `- ${label} (${duration})`,
     "",
-    "All background tasks have finished. You may continue.",
-    "</system-reminder>",
-  ].join("\n");
+  ];
+
+  if (payload.resultText) {
+    const MAX_INLINE_CHARS = 4000;
+    const truncated = payload.resultText.length > MAX_INLINE_CHARS
+      ? payload.resultText.slice(0, MAX_INLINE_CHARS) + "\n\n[... result truncated, use dispatch_output for full content ...]"
+      : payload.resultText;
+    lines.push("**Result:**");
+    lines.push("");
+    lines.push("```result");
+    lines.push(truncated);
+    lines.push("```");
+    lines.push("");
+    lines.push(`Use dispatch_output(task_id="${payload.taskId}") to retrieve the full result or paginate.`);
+    lines.push("</system-reminder>");
+  } else {
+    lines.push("All background tasks have finished. You may continue.");
+    lines.push("</system-reminder>");
+  }
+
+  return lines.join("\n");
 }
 
 /**
@@ -116,6 +135,7 @@ export async function notifyParent(
   task: DispatchTask,
   remainingProvider: (() => number) | number,
   opts?: NotifyOpts,
+  resultText?: string,
 ): Promise<boolean> {
   const maxRetries = opts?.maxRetries ?? NOTIFY_MAX_RETRIES;
   const baseDelayMs = opts?.baseDelayMs ?? NOTIFY_BASE_DELAY_MS;
@@ -135,6 +155,7 @@ export async function notifyParent(
       duration,
       status: task.status,
       remainingTasks: remainingCount,
+      resultText,
     };
 
     const text = buildNotificationText(payload);

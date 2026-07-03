@@ -152,6 +152,8 @@ export interface NotificationPayload {
   status: DispatchTaskStatus;
   /** Number of remaining in-flight or queued background tasks */
   remainingTasks: number;
+  /** Truncated result text included in the final (remainingTasks=0) notification */
+  resultText?: string;
 }
 
 // ─── Dispatch Event-Tracking Types ─────────────────────────────────────────

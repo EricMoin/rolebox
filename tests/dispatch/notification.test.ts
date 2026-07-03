@@ -113,6 +113,83 @@ describe("buildNotificationText", () => {
     expect(text).toContain("3 task(s) still in progress");
     expect(text).toContain("lint check");
   });
+
+  it("final notification includes result text when provided", () => {
+    const payload: NotificationPayload = {
+      taskId: "bg_res",
+      description: "test task",
+      duration: "5.0s",
+      status: "completed",
+      remainingTasks: 0,
+      resultText: "some result",
+    };
+
+    const text = buildNotificationText(payload);
+
+    expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(text).toContain("```result");
+    expect(text).toContain("some result");
+    expect(text).toContain("</system-reminder>");
+    expect(text).toContain('dispatch_output(task_id="bg_res")');
+  });
+
+  it("final notification without resultText falls back to legacy format", () => {
+    const payload: NotificationPayload = {
+      taskId: "bg_nr",
+      description: "no result",
+      duration: "3.0s",
+      status: "completed",
+      remainingTasks: 0,
+    };
+
+    const text = buildNotificationText(payload);
+
+    expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(text).toContain("All background tasks have finished");
+    expect(text).not.toContain("```result");
+    expect(text).not.toContain("**Result:**");
+    expect(text).not.toContain("dispatch_output");
+  });
+
+  it("intermediate notification ignores resultText", () => {
+    const payload: NotificationPayload = {
+      taskId: "bg_int",
+      description: "intermediate",
+      duration: "2.0s",
+      status: "completed",
+      remainingTasks: 1,
+      resultText: "should not appear",
+    };
+
+    const text = buildNotificationText(payload);
+
+    expect(text).toContain("[BACKGROUND TASK COMPLETED]");
+    expect(text).not.toContain("```result");
+    expect(text).not.toContain("should not appear");
+    expect(text).toContain("1 task(s) still in progress");
+  });
+
+  it("result text truncated at 4000 chars", () => {
+    const longText = "X".repeat(5000);
+    const payload: NotificationPayload = {
+      taskId: "bg_trunc",
+      description: "truncation test",
+      duration: "1.0s",
+      status: "completed",
+      remainingTasks: 0,
+      resultText: longText,
+    };
+
+    const text = buildNotificationText(payload);
+
+    expect(text).toContain("```result");
+    // First 4000 chars should be present
+    expect(text).toContain("X".repeat(4000));
+    // Truncation note should be present
+    expect(text).toContain("result truncated, use dispatch_output for full content");
+    // The full 5000 chars should NOT be present
+    expect(text).not.toContain("X".repeat(5000));
+  });
 });
 
 // ── tests: notifyParent ──────────────────────────────────────────
@@ -183,6 +260,25 @@ describe("notifyParent", () => {
     expect(text).toContain("completed");
     // duration should be computed from startedAt to completedAt — 30s
     expect(text).toContain("30.0s");
+  });
+
+  it("notifyParent passes resultText through to notification payload", async () => {
+    const client = createClient();
+    const task = createTask({ status: "completed" });
+
+    await notifyParent(client, task, 0, undefined, "custom result text");
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+
+    const callArgs = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls[0][0];
+    const text: string = callArgs.body.parts[0].text;
+
+    expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(text).toContain("```result");
+    expect(text).toContain("custom result text");
+    expect(text).not.toContain("All background tasks have finished");
   });
 
   it("does not throw when promptAsync fails", async () => {
