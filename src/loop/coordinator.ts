@@ -191,11 +191,7 @@ export class LoopCoordinator {
     this._persist();
   }
 
-  /**
-   * Immediately cancel a loop on a genuine user message: cancels the in-flight
-   * worker round and finalizes as cancelled instead of waiting a full round.
-   * Accepts an origin OR worker session id.
-   */
+  /** Immediately cancel a loop: cancels the in-flight worker and finalizes as cancelled. */
   async cancelNow(sessionId: string): Promise<void> {
     let loop = this.loops.get(sessionId);
     if (!loop) {
@@ -277,6 +273,13 @@ export class LoopCoordinator {
     return [...this.loops.values()].filter(
       (l) => !TERMINAL_PHASES.has(l.phase),
     );
+  }
+
+  async failSession(sessionId: string, reason: string): Promise<void> {
+    const loop = this.loops.get(sessionId);
+    if (!loop || TERMINAL_PHASES.has(loop.phase)) return;
+    await this._failLoop(loop, reason);
+    this._persist();
   }
 
   /** Feed a recovered loop state back into the coordinator (startup recovery). */

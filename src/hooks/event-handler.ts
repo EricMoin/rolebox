@@ -224,13 +224,9 @@ export async function handleEvent(
         await deps.dispatchManager.handleSessionError(sid, props?.error);
         const coord = state.activeLoopManager as LoopCoordinator | undefined;
         if (coord?.isLoopSession(sid)) {
-          // Worker errors are handled by onWorkerCompleted/getRoundResult
-          // Origin errors are terminal
           const loopState = coord.getLoopState(sid);
           if (loopState && loopState.phase !== "error" && loopState.phase !== "complete" && loopState.phase !== "cancelled") {
-            loopState.phase = "error";
-            loopState.errorReason = typeof props?.error === "string" ? props.error : "Session error";
-            loopState.updatedAt = Date.now();
+            await coord.failSession(sid, typeof props?.error === "string" ? props.error : "Session error");
           }
         }
       }
