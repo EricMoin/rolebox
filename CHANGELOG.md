@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0
+
+### Features
+
+- **Model repetition prevention** — Added validation gate that detects and rejects model output that repeats the same or similar content consecutively. Prevents echo/loop patterns in agent responses, improving output quality and reducing wasted token usage.
+
 ## 0.17.0
 
 ### Features
