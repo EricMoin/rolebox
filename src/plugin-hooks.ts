@@ -11,6 +11,15 @@ import type { ResolvedRole, ResolvedSubAgent, ResolvedFunction, ResolvedGraph } 
 import { RoleMode } from "./constants.ts";
 import { normalizeWorkspaceDir } from "./state-paths.ts";
 import { createSubLogger } from "./logger.ts";
+import { SessionClientWrapper } from "./session/client.ts";
+import {
+  createSessionListTool,
+  createSessionReadTool,
+  createSessionSearchTool,
+  createSessionInfoTool,
+  createSessionDiffTool,
+  createSessionForkTool,
+} from "./session/tools.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopStore } from "./loop/loop-store.ts";
@@ -202,6 +211,8 @@ export async function createPluginHooks(
 
   setAdvanceJudge(createJudgeFn(client));
 
+  const sessionClient = new SessionClientWrapper(client);
+
   const deps: HookDeps = {
     client,
     roleFunctionsMap,
@@ -217,6 +228,16 @@ export async function createPluginHooks(
       dispatch_output: createDispatchOutputTool(dispatchManager),
       dispatch_cancel: createDispatchCancelTool(dispatchManager),
       dispatch_metrics: createDispatchMetricsTool(),
+      session_list: createSessionListTool(sessionClient),
+      session_read: createSessionReadTool(sessionClient),
+      session_search: createSessionSearchTool(sessionClient),
+      session_info: createSessionInfoTool(sessionClient),
+      session_diff: createSessionDiffTool(sessionClient),
+      session_fork: createSessionForkTool(sessionClient),
+      // Alternative names to avoid built-in tool name conflicts
+      session_inspect: createSessionInfoTool(sessionClient),
+      session_changes: createSessionDiffTool(sessionClient),
+      session_branch: createSessionForkTool(sessionClient),
     },
     event: async (input: { event: Event }) => {
       await handleEvent(input.event, hookState, deps);
