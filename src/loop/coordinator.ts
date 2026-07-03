@@ -2,7 +2,6 @@ import type { LoopState, LoopMode, LoopPhase } from "./types.js";
 import type { IDispatchAdapter } from "./dispatch-adapter.js";
 import {
   SEED_CHAR_CAP,
-  INTER_ROUND_DELAY_MS,
   DISPATCH_ROUND_TIMEOUT_MS,
   LOOP_PROGRESS_MARKER,
   LOOP_STATE_SCHEMA_VERSION,
@@ -80,8 +79,16 @@ export class LoopCoordinator {
 
   constructor(
     private adapter: IDispatchAdapter,
-    private opts?: { delayMs?: number; roundTimeoutMs?: number },
+    private opts?: {
+      delayMs?: number;
+      roundTimeoutMs?: number;
+      persist?: (loops: Map<string, LoopState>) => void;
+    },
   ) {}
+
+  private _persist(): void {
+    this.opts?.persist?.(this.loops);
+  }
 
   // ── Public API ──────────────────────────────────────────────────────────
 
@@ -111,6 +118,7 @@ export class LoopCoordinator {
     };
 
     this.loops.set(input.originSessionId, state);
+    this._persist();
   }
 
   async onOriginIdle(originSessionId: string): Promise<void> {
@@ -131,8 +139,11 @@ export class LoopCoordinator {
         default:
           break;
       }
+    } catch (err) {
+      await this._failLoop(loop, err instanceof Error ? err.message : String(err));
     } finally {
       this._advancing.delete(originSessionId);
+      this._persist();
     }
   }
 
@@ -155,13 +166,7 @@ export class LoopCoordinator {
       loop.activeWorkerSessionId = undefined;
 
       if (result.hadError) {
-        loop.phase = "error";
-        loop.errorReason = result.errorReason ?? "Worker round failed";
-        loop.updatedAt = Date.now();
-        await this.adapter.injectNote(
-          originSessionId,
-          `${LOOP_PROGRESS_MARKER} error: ${loop.errorReason}]`,
-        );
+        await this._failLoop(loop, result.errorReason ?? "Worker round failed");
         return;
       }
 
@@ -170,8 +175,11 @@ export class LoopCoordinator {
       loop.phase = "summarizing";
       loop.updatedAt = Date.now();
       // DispatchManager's notifyParent re-prompts origin → origin produces summary → onOriginIdle fires
+    } catch (err) {
+      await this._failLoop(loop, err instanceof Error ? err.message : String(err));
     } finally {
       this._advancing.delete(originSessionId);
+      this._persist();
     }
   }
 
@@ -180,6 +188,44 @@ export class LoopCoordinator {
     if (!loop) return;
     loop.cancelRequested = true;
     loop.updatedAt = Date.now();
+    this._persist();
+  }
+
+  /**
+   * Immediately cancel a loop on a genuine user message: cancels the in-flight
+   * worker round and finalizes as cancelled instead of waiting a full round.
+   * Accepts an origin OR worker session id.
+   */
+  async cancelNow(sessionId: string): Promise<void> {
+    let loop = this.loops.get(sessionId);
+    if (!loop) {
+      const originId = this._workerToOrigin.get(sessionId);
+      if (originId) loop = this.loops.get(originId);
+    }
+    if (!loop) return;
+
+    loop.cancelRequested = true;
+    loop.updatedAt = Date.now();
+
+    if (TERMINAL_PHASES.has(loop.phase) || loop.phase === "finalizing") {
+      this._persist();
+      return;
+    }
+    if (this._advancing.has(loop.originSessionId)) {
+      this._persist();
+      return;
+    }
+
+    this._advancing.add(loop.originSessionId);
+    try {
+      loop.phase = "finalizing";
+      await this._finalize(loop, "cancelled");
+    } catch (err) {
+      await this._failLoop(loop, err instanceof Error ? err.message : String(err));
+    } finally {
+      this._advancing.delete(loop.originSessionId);
+      this._persist();
+    }
   }
 
   /** Phase-aware cancellation decision with source-tagging.
@@ -240,6 +286,7 @@ export class LoopCoordinator {
     if (state.activeWorkerTaskId) {
       this._workerToOrigin.set(state.activeWorkerTaskId, state.originSessionId);
     }
+    this._persist();
   }
 
   dispose(): void {
@@ -265,6 +312,7 @@ export class LoopCoordinator {
       agent: loop.agent,
       prompt,
       description: `Loop round ${loop.current}/${loop.total}`,
+      timeoutMs: this.opts?.roundTimeoutMs ?? DISPATCH_ROUND_TIMEOUT_MS,
     });
 
     loop.activeWorkerTaskId = result.workerTaskId;
@@ -303,6 +351,10 @@ export class LoopCoordinator {
     }
 
     loop.phase = "dispatching";
+    const delay = this.opts?.delayMs ?? 0;
+    if (delay > 0) {
+      await new Promise((r) => setTimeout(r, delay));
+    }
     await this._dispatchRound(loop);
   }
 
@@ -326,5 +378,20 @@ export class LoopCoordinator {
         : `${LOOP_PROGRESS_MARKER} loop cancelled]`;
 
     await this.adapter.injectNote(loop.originSessionId, marker);
+  }
+
+  private async _failLoop(loop: LoopState, reason: string): Promise<void> {
+    if (loop.activeWorkerTaskId) {
+      await this.adapter.cancelRound(loop.activeWorkerTaskId).catch(() => {});
+      this._workerToOrigin.delete(loop.activeWorkerTaskId);
+      loop.activeWorkerTaskId = undefined;
+      loop.activeWorkerSessionId = undefined;
+    }
+    loop.phase = "error";
+    loop.errorReason = reason;
+    loop.updatedAt = Date.now();
+    await this.adapter
+      .injectNote(loop.originSessionId, `${LOOP_PROGRESS_MARKER} error: ${reason}]`)
+      .catch(() => {});
   }
 }

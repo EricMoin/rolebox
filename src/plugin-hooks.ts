@@ -14,6 +14,7 @@ import { createSubLogger } from "./logger.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopStore } from "./loop/loop-store.ts";
+import { INTER_ROUND_DELAY_MS } from "./loop/constants.ts";
 import type { JudgeFn } from "./graph/termination-async.ts";
 import { hookState } from "./hooks/state.ts";
 import type { HookDeps } from "./hooks/deps.ts";
@@ -134,8 +135,13 @@ export async function createPluginHooks(
   let loopManager = hookState.loopManagerMap.get(rawDir);
   if (!loopManager) {
     const adapter = new DispatchAdapter(dispatchManager, client);
-    const coordinator = new LoopCoordinator(adapter);
     const store = new LoopStore(dir);
+    const coordinator = new LoopCoordinator(adapter, {
+      delayMs: INTER_ROUND_DELAY_MS,
+      persist: (loops) => {
+        void store.save(loops);
+      },
+    });
 
     // Recovery: reconcile persisted loops with dispatch state
     const loaded = store.load();
@@ -156,6 +162,7 @@ export async function createPluginHooks(
 
     loopManager = coordinator;
     hookState.loopManagerMap.set(rawDir, loopManager);
+    hookState.loopStoreMap.set(rawDir, store);
   }
   hookState.activeLoopManager = loopManager;
   activeLoopManager = loopManager;
@@ -169,24 +176,26 @@ export async function createPluginHooks(
 
   if (!hookState.shutdownRegistered) {
     hookState.shutdownRegistered = true;
-    process.on("exit", () => {
-      loopManager.dispose();
+    const flushAllSync = () => {
+      for (const [d, mgr] of hookState.loopManagerMap) {
+        try {
+          hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates());
+        } catch {}
+        mgr.dispose();
+      }
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
       if (directory) functionRuntime.flushSync();
+    };
+    process.on("exit", () => {
+      flushAllSync();
     });
     process.on("SIGINT", () => {
-      loopManager.dispose();
-      dispatchManager.flushPersistSync();
-      if (directory) graphSessionState.flushSync();
-      if (directory) functionRuntime.flushSync();
+      flushAllSync();
       process.exit(130);
     });
     process.on("SIGTERM", () => {
-      loopManager.dispose();
-      dispatchManager.flushPersistSync();
-      if (directory) graphSessionState.flushSync();
-      if (directory) functionRuntime.flushSync();
+      flushAllSync();
       process.exit(143);
     });
   }

@@ -16,6 +16,8 @@ export interface IDispatchAdapter {
     agent: string;
     prompt: string;
     description?: string;
+    /** Per-round hard timeout (ms), forwarded to the dispatch watchdog as `timeout_ms`. */
+    timeoutMs?: number;
   }): Promise<{ workerTaskId: string; workerSessionId: string }>;
 
   /** Retrieve the result of a completed worker round. */
@@ -58,12 +60,14 @@ export class DispatchAdapter implements IDispatchAdapter {
     agent: string;
     prompt: string;
     description?: string;
+    timeoutMs?: number;
   }): Promise<{ workerTaskId: string; workerSessionId: string }> {
     const dispatchInput: DispatchInput = {
       subagent: input.agent,
       prompt: input.prompt,
       run_in_background: true,
       description: input.description,
+      ...(input.timeoutMs !== undefined ? { timeout_ms: input.timeoutMs } : {}),
     };
 
     const task = await this.dispatchManager.launch(dispatchInput, {

@@ -30,7 +30,7 @@ export async function handleChatMessage(
   if (input.sessionID && !isSyntheticInjection) {
     state.userMessagedSessions.add(input.sessionID);
     if (state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr)) {
-      // cancellation already marked by shouldCancelOnUserMessage
+      await state.activeLoopManager.cancelNow(input.sessionID);
     }
   }
 

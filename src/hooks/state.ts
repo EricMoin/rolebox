@@ -1,10 +1,12 @@
 import type { DispatchManager } from "../dispatch/manager.ts";
 import type { LoopCoordinator } from "../loop/coordinator.ts";
+import type { LoopStore } from "../loop/loop-store.ts";
 
 export class HookState {
   // Keyed by raw directory path
   readonly managerMap = new Map<string, DispatchManager>();
   readonly loopManagerMap = new Map<string, LoopCoordinator>();
+  readonly loopStoreMap = new Map<string, LoopStore>();
 
   activeLoopManager: LoopCoordinator | undefined;
 
