@@ -20,6 +20,9 @@ import {
   createSessionDiffTool,
   createSessionForkTool,
 } from "./session/tools.ts";
+import { LspClientManager } from "./lsp/client-manager.ts";
+import { LspDocumentManager } from "./lsp/document-manager.ts";
+import { createAllLspTools } from "./lsp/index.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopStore } from "./loop/loop-store.ts";
@@ -176,6 +179,10 @@ export async function createPluginHooks(
   hookState.activeLoopManager = loopManager;
   activeLoopManager = loopManager;
 
+  // LSP managers
+  const lspClientManager = new LspClientManager(dir);
+  const lspDocManager = new LspDocumentManager();
+
   if (directory) {
     graphSessionState.setStoreDirectory(dir);
     functionRuntime.setStoreDirectory(dir);
@@ -195,6 +202,8 @@ export async function createPluginHooks(
       dispatchManager.flushPersistSync();
       if (directory) graphSessionState.flushSync();
       if (directory) functionRuntime.flushSync();
+      try { lspDocManager.closeAll(lspClientManager); } catch {}
+      try { void lspClientManager.shutdownAll(); } catch {}
     };
     process.on("exit", () => {
       flushAllSync();
@@ -238,6 +247,7 @@ export async function createPluginHooks(
       session_inspect: createSessionInfoTool(sessionClient),
       session_changes: createSessionDiffTool(sessionClient),
       session_branch: createSessionForkTool(sessionClient),
+      ...createAllLspTools(lspClientManager, lspDocManager),
     },
     event: async (input: { event: Event }) => {
       await handleEvent(input.event, hookState, deps);
@@ -304,6 +314,10 @@ export async function createPluginHooks(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const agent = (input as any).agent as string | undefined;
       await handleSystemTransform({ sessionID: input.sessionID, agent }, output, hookState, deps);
+    },
+    dispose: async () => {
+      try { lspDocManager.closeAll(lspClientManager); } catch {}
+      try { await lspClientManager.shutdownAll(); } catch {}
     },
   };
 }
