@@ -80,7 +80,9 @@ export class LspClientManager {
     child.on("exit", (code: number | null, signal: string | null) => {
       log.warn(`Server ${languageId} exited (code=${code}, signal=${signal})`);
       const s = this.servers.get(languageId);
-      if (s) {
+      // Only mutate state if this is still the current server process.
+      // If restartServer replaced it, the old exit should not clobber the new state.
+      if (s === state) {
         s.status = "dead";
         for (const [, entry] of s.pendingRequests) {
           clearTimeout(entry.timeout);
@@ -90,14 +92,15 @@ export class LspClientManager {
         }
         s.pendingRequests.clear();
         s.restartCount = (s.restartCount ?? 0) + 1;
+        this.buffers.delete(languageId);
       }
-      this.buffers.delete(languageId);
     });
 
     child.on("error", (err: Error) => {
       log.error(`Failed to spawn server ${languageId}: ${formatError(err).message}`);
       const s = this.servers.get(languageId);
-      if (s) {
+      // Same guard: only act if this is still the current server.
+      if (s === state) {
         s.status = "failed";
         for (const [, entry] of s.pendingRequests) {
           clearTimeout(entry.timeout);
@@ -207,7 +210,7 @@ export class LspClientManager {
     }
 
     let state = this.servers.get(languageId);
-    if (!state || state.status === "dead" || state.status === "failed") {
+    if ((!state || state.status === "dead" || state.status === "failed") && method !== "shutdown") {
       if (state && (state.restartCount ?? 0) >= MAX_RESTART_ATTEMPTS) {
         throw new Error(
           `Server ${languageId} exceeded max restart attempts (${MAX_RESTART_ATTEMPTS})`,
@@ -215,6 +218,10 @@ export class LspClientManager {
       }
       await this.startServer(languageId);
       state = this.servers.get(languageId)!;
+    }
+
+    if (!state) {
+      throw new Error(`Server ${languageId} not found`);
     }
 
     if (state.status !== "running" && state.status !== "starting") {
@@ -298,13 +305,17 @@ export class LspClientManager {
     }
     state.pendingRequests.clear();
 
-    try {
-      await this.request("shutdown", {}, languageId);
-    } catch (err) {
-      log.warn(`Shutdown error for ${languageId}: ${formatError(err).message}`);
+    // Only send shutdown request if the server is still running.
+    // If it's already dead/failed, skip the LSP shutdown handshake
+    // and go straight to process cleanup.
+    if (state.status === "running") {
+      try {
+        await this.request("shutdown", {}, languageId);
+      } catch (err) {
+        log.warn(`Shutdown error for ${languageId}: ${formatError(err).message}`);
+      }
+      this.notify("exit", {}, languageId);
     }
-
-    this.notify("exit", {}, languageId);
 
     try {
       if (state.process && !state.process.killed) {
