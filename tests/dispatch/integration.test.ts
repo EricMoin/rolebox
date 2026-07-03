@@ -400,14 +400,14 @@ describe("integration: FINAL notification idempotency", () => {
 
     const mgr = manager as any;
 
-    // Complete t1: notifyCompletion before leaveRunning preserves remaining count
+    // Complete t1: notifyCompletion with remaining count (t2 still running)
     mgr.transition(t1.id, ["running"], "completed");
-    await mgr.notifyCompletion(mgr.tasks.get(t1.id));
+    await mgr.notifyCompletion(mgr.tasks.get(t1.id), mgr.getInflightCount(t1.parentSessionId));
     mgr.leaveRunning(t1.id);
 
     // Complete t2: last task → FINAL
     mgr.transition(t2.id, ["running"], "completed");
-    await mgr.notifyCompletion(mgr.tasks.get(t2.id));
+    await mgr.notifyCompletion(mgr.tasks.get(t2.id), mgr.getInflightCount(t2.parentSessionId));
     mgr.leaveRunning(t2.id);
 
     await new Promise((r) => setTimeout(r, 200));
@@ -799,7 +799,7 @@ describe("integration: outbox resend", () => {
       expect(mgr.notifyOutbox.has(task.id)).toBe(true);
       expect(hasFinalNotifyBeenSent(task.id)).toBe(false);
 
-      const sent = await mgr.notifyCompletion(task);
+      const sent = await mgr.notifyCompletion(task, 0);
       expect(sent).toBe(true);
       expect(hasFinalNotifyBeenSent(task.id)).toBe(true);
     },

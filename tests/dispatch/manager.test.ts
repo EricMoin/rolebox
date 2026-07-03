@@ -1357,19 +1357,19 @@ describe("DispatchManager", () => {
         ctx,
       );
 
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(3);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(3);
 
       // Complete first
       mgr.handleTaskCompleted(t1.id);
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(2);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(2);
 
       // Complete second
       mgr.handleTaskCompleted(t2.id);
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(1);
 
       // Complete third — counter cleaned up at 0
       mgr.handleTaskCompleted(t3.id);
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
     });
 
     it("handles multiple parents independently", async () => {
@@ -1393,15 +1393,15 @@ describe("DispatchManager", () => {
         ctx2,
       );
 
-      expect(mgr.inflightByParent.get("parent-A")).toBe(1);
-      expect(mgr.inflightByParent.get("parent-B")).toBe(2);
+      expect(mgr.getInflightCount("parent-A")).toBe(1);
+      expect(mgr.getInflightCount("parent-B")).toBe(2);
 
       mgr.handleTaskCompleted(tA.id);
-      expect(mgr.inflightByParent.get("parent-A")).toBeUndefined();
-      expect(mgr.inflightByParent.get("parent-B")).toBe(2);
+      expect(mgr.getInflightCount("parent-A")).toBe(0);
+      expect(mgr.getInflightCount("parent-B")).toBe(2);
 
       mgr.handleTaskCompleted(tB1.id);
-      expect(mgr.inflightByParent.get("parent-B")).toBe(1);
+      expect(mgr.getInflightCount("parent-B")).toBe(1);
     });
 
     it("decrements on task error", async () => {
@@ -1414,10 +1414,10 @@ describe("DispatchManager", () => {
         { subagent: "h", prompt: "p", run_in_background: true },
         ctx,
       );
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(1);
 
       mgr.handleTaskError(task.id, "something broke");
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
     });
 
     it("decrements on task timeout", async () => {
@@ -1430,10 +1430,10 @@ describe("DispatchManager", () => {
         { subagent: "h", prompt: "p", run_in_background: true },
         ctx,
       );
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(1);
 
       mgr.handleTaskTimeout(task.id, "timed out");
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
     });
 
     it("decrements on cancel", async () => {
@@ -1446,10 +1446,10 @@ describe("DispatchManager", () => {
         { subagent: "h", prompt: "p", run_in_background: true },
         ctx,
       );
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(1);
 
       await manager.cancelTask(task.id);
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
     });
 
     it("does not double-decrement on double-completion", async () => {
@@ -1462,14 +1462,14 @@ describe("DispatchManager", () => {
         { subagent: "h", prompt: "p", run_in_background: true },
         ctx,
       );
-      expect(mgr.inflightByParent.get("parent-session-1")).toBe(1);
+      expect(mgr.getInflightCount("parent-session-1")).toBe(1);
 
       mgr.handleTaskCompleted(task.id);
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
 
       // Second completion is no-op (transition fails), counter stays gone
       mgr.handleTaskCompleted(task.id);
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
     });
 
     it("reverts inflight count when launch fails after reaching running", async () => {
@@ -1486,7 +1486,7 @@ describe("DispatchManager", () => {
       );
 
       expect(task.status).toBe("error");
-      expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+      expect(mgr.getInflightCount("parent-session-1")).toBe(0);
     });
 
     it("getInflightCount returns 0 for unknown parent", () => {
@@ -2537,7 +2537,7 @@ describe("recover()", () => {
     await manager.recover();
 
     const mgr = manager as any;
-    expect(mgr.inflightByParent.get("ses_parent")).toBe(3);
+    expect(mgr.getInflightCount("ses_parent")).toBe(3);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -2712,8 +2712,8 @@ describe("recover()", () => {
     await manager.recover();
 
     const mgr = manager as any;
-    // Only ses_1 and ses_2 re-attached — inflightByParent must be 2, not 5
-    expect(mgr.inflightByParent.get("ses_parent")).toBe(2);
+    // Only ses_1 and ses_2 re-attached — getInflightCount must be 2, not 5
+    expect(mgr.getInflightCount("ses_parent")).toBe(2);
 
     // Dead ones are errored
     for (let i = 3; i <= 5; i++) {
@@ -2751,7 +2751,7 @@ describe("recover()", () => {
     const mgr = manager as any;
 
     // Both re-attached — inflight should be 2
-    expect(mgr.inflightByParent.get("ses_parent")).toBe(2);
+    expect(mgr.getInflightCount("ses_parent")).toBe(2);
 
     // Complete task 0
     const task0 = manager.getTask("bg_notify_0");
@@ -2759,12 +2759,12 @@ describe("recover()", () => {
     mgr.handleTaskCompleted("bg_notify_0");
 
     // After leaveRunning, inflight decremented to 1
-    expect(mgr.inflightByParent.get("ses_parent")).toBe(1);
+    expect(mgr.getInflightCount("ses_parent")).toBe(1);
     expect(manager.getTask("bg_notify_0")!.status).toBe("completed");
 
     // Complete task 1 — should reach 0 and clean up entry
     mgr.handleTaskCompleted("bg_notify_1");
-    expect(mgr.inflightByParent.get("ses_parent")).toBeUndefined();
+    expect(mgr.getInflightCount("ses_parent")).toBe(0);
     expect(manager.getTask("bg_notify_1")!.status).toBe("completed");
 
     rmSync(tempDir, { recursive: true, force: true });
@@ -2772,7 +2772,7 @@ describe("recover()", () => {
 
   // ── 11b. Task 11: authoritative inflight rebuild + terminal notify ──
 
-  it("Task-11: authoritative inflightByParent rebuild from actualByParent after recovery", async () => {
+  it("Task-11: authoritative getInflightCount after recovery", async () => {
     const tempDir = createTempDir();
 
     // 5 running tasks across 2 parents: parent-A has 3 tasks, parent-B has 2
@@ -2820,8 +2820,8 @@ describe("recover()", () => {
     const mgr = manager as any;
 
     // Authoritative: only actually re-attached running tasks count
-    expect(mgr.inflightByParent.get("parent-A")).toBe(2); // ses_a1, ses_a3 alive; ses_a2 dead
-    expect(mgr.inflightByParent.get("parent-B")).toBe(1); // ses_b1 alive; ses_b2 dead
+    expect(mgr.getInflightCount("parent-A")).toBe(2); // ses_a1, ses_a3 alive; ses_a2 dead
+    expect(mgr.getInflightCount("parent-B")).toBe(1); // ses_b1 alive; ses_b2 dead
 
     // Dead sessions are errored
     expect(manager.getTask("bg_a2")!.status).toBe("error");
@@ -3873,9 +3873,8 @@ describe("T8: Notification outbox", () => {
       );
       task.status = "completed";
       task.completedAt = new Date();
-      mgr.inflightByParent.delete(task.parentSessionId);
 
-      const result = await mgr.notifyCompletion(task);
+      const result = await mgr.notifyCompletion(task, 0);
       expect(result).toBe(true);
 
       const { hasFinalNotifyBeenSent: hfs } =
@@ -4036,9 +4035,9 @@ describe("Task 12: per-parent fairness", () => {
     await manager.recover();
 
     const mgr = manager as any;
-    // inflightByParent should reflect recovered active counts
-    expect(mgr.inflightByParent.get("parent-A")).toBe(2);
-    expect(mgr.inflightByParent.get("parent-B")).toBe(1);
+    // getInflightCount should reflect recovered active counts
+    expect(mgr.getInflightCount("parent-A")).toBe(2);
+    expect(mgr.getInflightCount("parent-B")).toBe(1);
 
     // Concurrency activeByParent should be populated
     const slot = mgr.concurrency.slots.get("default") as any;
@@ -4138,8 +4137,8 @@ describe("Task 12: backpressure retry", () => {
     expect(parsed.retry_after).toBeGreaterThan(0);
     expect(updated.completedAt).toBeInstanceOf(Date);
 
-    // Inflight counter decremented (decInflight called on exhaustion)
-    expect(mgr.inflightByParent.get("parent-session-1")).toBeUndefined();
+    // Inflight count derived from tasks with running status
+    expect(mgr.getInflightCount("parent-session-1")).toBe(0);
 
     // Notification was sent
     const notifyCalls = (client.session.promptAsync as any).mock.calls;

@@ -62,7 +62,7 @@ export class DispatchManager {
   private eventState: Map<string, TaskEventState> = new Map();
   private store: TaskStateStore;
   private _recovered = false;
-  private inflightByParent = new Map<string, number>();
+
   private sessionsByRequest = new Map<string, number>();
   private _cancelQueue: Map<string, () => void> = new Map();
   private _syncControllers: Map<string, AbortController> = new Map();
@@ -122,7 +122,7 @@ export class DispatchManager {
           this.notifyOutbox.delete(taskId);
           continue;
         }
-        const sent = await this.notifyCompletion(task);
+        const sent = await this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
         if (sent) {
           this.notifyOutbox.delete(taskId);
         }
@@ -190,7 +190,7 @@ export class DispatchManager {
       };
       this.tasks.set(taskId, task);
       this.scheduleCleanup(taskId);
-      void this.notifyCompletion(task);
+      void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
       return task;
     }
 
@@ -210,7 +210,6 @@ export class DispatchManager {
     };
 
     this.tasks.set(taskId, task);
-    this.incInflight(task.parentSessionId);
     this.incRequestSessions(root);
 
     debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
@@ -240,9 +239,8 @@ export class DispatchManager {
         });
         task.completedAt = new Date();
         debugLog("launch", taskId, `REJECTED: queue-full depth=${acqResult.error.depth}/${acqResult.error.limit}`);
-        this.decInflight(task.parentSessionId);
         this.scheduleCleanup(taskId);
-        void this.notifyCompletion(task);
+        void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
         return task;
       }
 
@@ -323,7 +321,6 @@ export class DispatchManager {
         void notifyParent(this.client, task, 0, { maxRetries: 0 });
       } else {
         this.concurrency.release(task.concurrencyKey!, task.parentSessionId);
-        this.decInflight(task.parentSessionId);
         this.scheduleCleanup(taskId);
       }
     }
@@ -399,9 +396,8 @@ export class DispatchManager {
           limit: acqResult.error.limit,
         });
         task.completedAt = new Date();
-        this.decInflight(task.parentSessionId);
         this.scheduleCleanup(taskId);
-        void this.notifyCompletion(task);
+        void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
         return;
       }
 
@@ -413,8 +409,8 @@ export class DispatchManager {
 
   /**
    * Execute a synchronous (blocking) dispatch. Tracked in this.tasks with
-   * mode:"sync" for crash visibility / cancellability, but NOT counted in
-   * inflightByParent (caller is blocked, needs no async countdown).
+   * mode:"sync" for crash visibility / cancellability, but NOT returned by
+   * getInflightCount (caller is blocked, needs no async countdown).
    *
    * Protected by:
    * - Sync concurrency acquire (can use reserved slots)
@@ -654,7 +650,7 @@ export class DispatchManager {
       task.completedAt = new Date();
       debugLog("reopen", taskId, `REJECTED: no slot available`);
       this.scheduleCleanup(taskId);
-      void this.notifyCompletion(task);
+      void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
       return task;
     }
 
@@ -704,7 +700,6 @@ export class DispatchManager {
 
     this.sessionToTask.set(task.sessionId, taskId); // edge-case #5
     metrics.gauge("inflight_tasks").inc();
-    this.incInflight(task.parentSessionId);
     this.persistState();
 
     return task;
@@ -761,8 +756,7 @@ export class DispatchManager {
       const t = this.tasks.get(taskId)!;
       infoLog("lifecycle", taskId, `✕ cancelled (queued) agent=${t.agent}`);
       metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
-      this.decInflight(t.parentSessionId);
-      void this.notifyCompletion(t);
+      void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
       this.scheduleCleanup(taskId);
       return true;
     }
@@ -802,7 +796,7 @@ export class DispatchManager {
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
     this.watchdog.unregisterTask(taskId);
     this.watchdog.cancelDebounce(taskId);
-    void this.notifyCompletion(t);
+    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
     this.leaveRunning(taskId);
     return true;
   }
@@ -1126,11 +1120,6 @@ export class DispatchManager {
 
     this.restoreState();
 
-    // Rebuild inflightByParent from scratch — only re-attached tasks count.
-    // Stale counts from pre-crash dispatches whose terminal state didn't
-    // persist would otherwise leak into the post-recovery world.
-    this.inflightByParent.clear();
-
     const runningTasks: DispatchTask[] = [];
     const toRemove: string[] = [];
     const lostPendingByParent = new Map<string, DispatchTask[]>();
@@ -1202,14 +1191,13 @@ export class DispatchManager {
               messageCountAtStart: task.messageCountAtStart ?? 0,
               lastEventAt: Date.now(),
             });
-            this.incInflight(task.parentSessionId);
             debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
           } else {
             // Would exceed concurrency limit — error the task out
             this.transition(task.id, ["running"], "error", {
               error: "Exceeded concurrency limit on recovery",
             });
-            void this.notifyCompletion(task);
+            void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
             this.scheduleCleanup(task.id);
             debugLog("recover", task.id, "dropped — concurrency limit exceeded on recovery");
           }
@@ -1217,7 +1205,7 @@ export class DispatchManager {
           task.status = "error";
           task.error = "Session lost after process restart — You can re-dispatch with dispatch(...)";
           task.completedAt = new Date();
-          void this.notifyCompletion(task);
+          void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
           this.scheduleCleanup(task.id);
           debugLog("recover", task.id, "session gone after restart");
         }
@@ -1225,21 +1213,10 @@ export class DispatchManager {
         task.status = "error";
         task.error = "Session verification failed after restart — You can re-dispatch with dispatch(...)";
         task.completedAt = new Date();
-        void this.notifyCompletion(task);
+        void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
         this.scheduleCleanup(task.id);
       }
     }
-
-    // Rebuild inflightByParent authoritatively from actual running tasks.
-    // IncInflight during the loop above is best-effort; this assignment
-    // guarantees the map reflects only truly re-attached running tasks.
-    const actualByParent = new Map<string, number>();
-    for (const [, task] of this.tasks) {
-      if (task.status === "running") {
-        actualByParent.set(task.parentSessionId, (actualByParent.get(task.parentSessionId) ?? 0) + 1);
-      }
-    }
-    this.inflightByParent = actualByParent;
 
     if (toRemove.length > 0 || runningTasks.length > 0) {
       this.persistState();
@@ -1298,17 +1275,10 @@ export class DispatchManager {
     this.cleanupTimers.set(taskId, timer);
   }
 
-  async notifyCompletion(task: DispatchTask): Promise<boolean> {
+  async notifyCompletion(task: DispatchTask, remainingTasks: number): Promise<boolean> {
     this.pendingNotifications.add(task.id);
     try {
-      return await notifyParent(this.client, task, () => {
-        const raw = this.getInflightCount(task.parentSessionId);
-        // If leaveRunning hasn't been called yet for this task, the inflight
-        // count still includes it. Subtract 1 so the notification reflects
-        // only *other* running tasks for this parent.
-        const taskStillCounted = raw > 0 && task.status !== "running" && task.status !== "pending";
-        return taskStillCounted ? raw - 1 : raw;
-      });
+      return await notifyParent(this.client, task, remainingTasks);
     } finally {
       this.pendingNotifications.delete(task.id);
     }
@@ -1395,7 +1365,7 @@ export class DispatchManager {
             this.watchdog.cancelDebounce(taskId);
             const t = this.tasks.get(taskId)!;
             debugLog("evaluate", taskId, `session gone (verifyExistence=missing) — erroring task`);
-            void this.notifyCompletion(t);
+            void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
             this.leaveRunning(taskId);
           }
           return;
@@ -1463,7 +1433,7 @@ export class DispatchManager {
               const t = this.tasks.get(taskId)!;
               infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: Never produced output`);
               metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-              void this.notifyCompletion(t);
+              void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
               this.leaveRunning(taskId);
             }
             break;
@@ -1475,7 +1445,7 @@ export class DispatchManager {
               const t = this.tasks.get(taskId)!;
               infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: Task stalled`);
               metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-              void this.notifyCompletion(t);
+              void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
               this.leaveRunning(taskId);
             }
             break;
@@ -1658,22 +1628,15 @@ export class DispatchManager {
     return (parentTask.depth ?? 0) + 1;
   }
 
-  private incInflight(parentSessionId: string): void {
-    this.inflightByParent.set(parentSessionId, (this.inflightByParent.get(parentSessionId) ?? 0) + 1);
-  }
-
-  private decInflight(parentSessionId: string): void {
-    const current = this.inflightByParent.get(parentSessionId);
-    if (current === undefined) return;
-    if (current <= 1) {
-      this.inflightByParent.delete(parentSessionId);
-    } else {
-      this.inflightByParent.set(parentSessionId, current - 1);
-    }
-  }
-
   getInflightCount(parentSessionId: string): number {
-    return this.inflightByParent.get(parentSessionId) ?? 0;
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (task.parentSessionId === parentSessionId &&
+          (task.status === "running" || task.status === "pending")) {
+        count++;
+      }
+    }
+    return count;
   }
 
   private getRequestSessions(rootSession: string): number {
@@ -1721,7 +1684,7 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
     metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
-    void this.notifyCompletion(t);
+    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
     this.leaveRunning(taskId);
   }
 
@@ -1730,7 +1693,7 @@ export class DispatchManager {
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
     metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-    void this.notifyCompletion(t);
+    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
     this.leaveRunning(taskId);
   }
 
@@ -1741,7 +1704,7 @@ export class DispatchManager {
     infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
     metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
     metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
-    void this.notifyCompletion(t);
+    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
     this.leaveRunning(taskId);
   }
 
@@ -1758,7 +1721,7 @@ export class DispatchManager {
 
     // Add to outbox before notify — sweeper re-sends if this fails
     this.addToOutbox(taskId);
-    await this.notifyCompletion(t);
+    await this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
     // Outbox entry is pruned by sweeper on next tick if notify succeeded
   }
 
@@ -1793,7 +1756,6 @@ export class DispatchManager {
   /**
    * Centralized teardown for all terminal paths. Handles:
    * - concurrency slot release (guarded: only if concurrencyKey set)
-   * - parent inflight counter decrement
    * - inflight_tasks gauge decrement
    * - state persistence
    * - delayed cleanup scheduling
@@ -1810,7 +1772,6 @@ export class DispatchManager {
       debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
     }
     this._clearDeferredIdle(taskId);
-    this.decInflight(t.parentSessionId);
     metrics.gauge("inflight_tasks").dec();
     this.persistState();
     this.scheduleCleanup(taskId);
