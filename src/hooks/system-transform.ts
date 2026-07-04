@@ -61,7 +61,7 @@ export async function handleSystemTransform(
     log.debug("guardrail correction injected", { sessionID: input.sessionID });
   }
 
-  const agentId = input.agent;
+  const agentId = input.agent ?? state.sessionAgentRegistry.get(sid);
   let graphState = graphSessionState.getState(input.sessionID);
   if (!graphState && agentId) {
     const graph = deps.roleGraphMap.get(agentId);
