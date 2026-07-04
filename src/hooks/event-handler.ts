@@ -104,6 +104,7 @@ export async function handleEvent(
       const sid = (props as { sessionID?: string } | undefined)?.sessionID;
       if (!sid) break;
       await deps.dispatchManager.handleSessionIdle(sid);
+      deps.notificationManager?.scheduleIdle(sid);
       // --- function CONTINUE ---
       // Skip continuation for sync dispatch sessions: promptAsync would
       // prevent session.prompt() from resolving, causing an infinite hang.
@@ -290,19 +291,26 @@ export async function handleEvent(
             await coord.failSession(sid, typeof props?.error === "string" ? props.error : "Session error");
           }
         }
+        deps.notificationManager?.handleSessionError(sid);
       }
       break;
     }
     case "session.deleted": {
       const info = props?.info as { id?: string } | undefined;
       const did = info?.id;
-      if (did) await deps.dispatchManager.handleSessionDeleted(did);
+      if (did) {
+        await deps.dispatchManager.handleSessionDeleted(did);
+        deps.notificationManager?.handleSessionDeleted(did);
+      }
       break;
     }
     case "message.updated": {
       const info = props?.info as { sessionID?: string } | undefined;
       const msid = info?.sessionID;
-      if (msid) deps.dispatchManager.handleMessageUpdated(msid);
+      if (msid) {
+        deps.dispatchManager.handleMessageUpdated(msid);
+        deps.notificationManager?.handleMessageUpdated(msid);
+      }
       break;
     }
   }

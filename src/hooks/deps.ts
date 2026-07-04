@@ -5,6 +5,7 @@ import type { LoopCoordinator } from "../loop/coordinator.ts";
 import type { CustomHookRegistry } from "./custom/registry.ts";
 import type { RecoveryEngine } from "../recovery/engine.ts";
 import type { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
+import type { NotificationManager } from "../notifications/manager.ts";
 
 export interface HookDeps {
   client: PluginInput["client"];
@@ -16,4 +17,5 @@ export interface HookDeps {
   customHooks: CustomHookRegistry;
   recoveryEngine?: RecoveryEngine;
   builtInHooks?: BuiltInHookRegistry;
+  notificationManager?: NotificationManager;
 }

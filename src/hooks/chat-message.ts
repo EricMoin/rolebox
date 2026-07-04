@@ -61,6 +61,7 @@ export async function handleChatMessage(
 
   if (input.sessionID && !isSyntheticInjection) {
     state.userMessagedSessions.add(input.sessionID);
+    state.notificationManager?.handleChatMessage(input.sessionID, input.agent);
     if (state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr)) {
       await state.activeLoopManager.cancelNow(input.sessionID);
     }

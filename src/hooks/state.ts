@@ -4,6 +4,7 @@ import type { LoopStore } from "../loop/loop-store.ts";
 import type { CustomHookRegistry } from "./custom/registry.ts";
 import type { RecoveryEngine } from "../recovery/engine.ts";
 import type { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
+import type { NotificationManager } from "../notifications/manager.ts";
 
 export class HookState {
   // Keyed by raw directory path
@@ -28,6 +29,7 @@ export class HookState {
   customHookRegistry: CustomHookRegistry | undefined;
   recoveryEngine?: RecoveryEngine;
   builtInHookRegistry?: BuiltInHookRegistry;
+  notificationManager?: NotificationManager;
   builtinConfig?: Record<string, boolean>;
 }
 

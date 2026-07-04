@@ -122,3 +122,11 @@ export const INHERITABLE_FIELDS: readonly string[] = [
   "permission",
   "tools",
 ] as const;
+
+// ── Notification defaults ──────────────────────────────────────────────
+export const DEFAULT_NOTIFICATION_IDLE_DELAY_MS = 1500;
+export const DEFAULT_NOTIFICATION_THROTTLE_WINDOW_MS = 3000;
+export const DEFAULT_NOTIFICATION_MAX_PER_WINDOW = 3;
+export const DEFAULT_NOTIFICATION_ACTIVITY_GRACE_MS = 100;
+export const DEFAULT_NOTIFICATION_MAX_TRACKED_SESSIONS = 100;
+export const DEFAULT_QUESTION_TOOL_NAMES = ["question", "ask_user_question", "askuserquestion"];

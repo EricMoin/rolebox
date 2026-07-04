@@ -43,6 +43,12 @@ import { RecoveryStateStore } from "./recovery/state.ts";
 import { BuiltInHookRegistry } from "./recovery/builtin/registry.ts";
 import { registerBuiltinHooks } from "./recovery/builtin/index.ts";
 import { parseRecoveryConfig, mergeBuiltinFlags, DEFAULT_RECOVERY_CONFIG } from "./recovery/config.ts";
+import { NotificationManager } from "./notifications/manager.ts";
+import type { NotificationConfig } from "./notifications/types.ts";
+import { parseNotificationConfig, mergeNotificationConfigs, resolveEnvVarsInConfig, DEFAULT_NOTIFICATION_CONFIG } from "./notifications/config.ts";
+import { createNotificationHook } from "./notifications/hook.ts";
+import { readFileSync, existsSync } from "node:fs";
+import { load as loadYaml } from "js-yaml";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -188,6 +194,45 @@ export async function createPluginHooks(
   hookState.activeLoopManager = loopManager;
   activeLoopManager = loopManager;
 
+  // Notification manager
+  let notificationManager = hookState.notificationManager;
+  if (!notificationManager) {
+    // Parse global config from env var ROLEBOX_NOTIFICATIONS_CONFIG (path to YAML file)
+    let globalNotifConfig: NotificationConfig = { ...DEFAULT_NOTIFICATION_CONFIG };
+    const notifConfigPath = process.env.ROLEBOX_NOTIFICATIONS_CONFIG;
+    if (notifConfigPath && existsSync(notifConfigPath)) {
+      try {
+        const raw = readFileSync(notifConfigPath, "utf-8");
+        const parsed = loadYaml(raw);
+        globalNotifConfig = resolveEnvVarsInConfig(parseNotificationConfig(parsed));
+      } catch (e) {
+        log.warn("Failed to parse notification config file", { path: notifConfigPath, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    // Also check env var to enable/disable
+    if (process.env.ROLEBOX_NOTIFICATIONS_ENABLED === "false" || process.env.ROLEBOX_NOTIFICATIONS_ENABLED === "0") {
+      globalNotifConfig = { ...globalNotifConfig, enabled: false };
+    }
+
+    // Collect per-role notification configs from resolved roles
+    const roleNotifConfigs = new Map<string, NotificationConfig>();
+    for (const role of resolvedRoles) {
+      if (role.config.notifications) {
+        const parsed = parseNotificationConfig(role.config.notifications);
+        const resolved = resolveEnvVarsInConfig(parsed);
+        roleNotifConfigs.set(role.id, resolved);
+      }
+    }
+
+    notificationManager = new NotificationManager({
+      globalConfig: globalNotifConfig,
+      roleConfigs: roleNotifConfigs,
+      client,
+      dir,
+    });
+    hookState.notificationManager = notificationManager;
+  }
+
   // LSP managers
   const lspClientManager = new LspClientManager(dir);
   const lspDocManager = new LspDocumentManager();
@@ -328,6 +373,7 @@ export async function createPluginHooks(
     customHooks: customHookRegistry,
     recoveryEngine,
     builtInHooks: builtInHookRegistry,
+    notificationManager,
   };
 
   const tools = {
@@ -355,10 +401,15 @@ export async function createPluginHooks(
     registerToolSchema(name, def.args);
   }
 
+  const notifHook = notificationManager ? createNotificationHook(notificationManager) : null;
+
   return {
     tool: tools,
     event: async (input: { event: Event }) => {
       await handleEvent(input.event, hookState, deps);
+      if (notifHook) {
+        try { await notifHook.event(input); } catch {}
+      }
     },
     config: async (config: Config) => {
       function registerSubAgentConfigs(subagents: ResolvedSubAgent[], cfg: Config): void {
@@ -408,6 +459,9 @@ export async function createPluginHooks(
       output: { parts: Array<{ type: string; text?: string }> },
     ) => {
       await handleChatMessage(input, output, hookState, deps);
+      if (notifHook) {
+        try { notifHook.chatMessage(input); } catch {}
+      }
     },
     "tool.execute.after": async (
       input: { sessionID?: string; tool?: string; args?: unknown },
@@ -420,6 +474,9 @@ export async function createPluginHooks(
       output: { args: any },
     ) => {
       await handleToolBefore(input, output, hookState, deps);
+      if (notifHook) {
+        try { notifHook.toolBefore({ tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args }); } catch {}
+      }
     },
     "experimental.chat.system.transform": async (
       input: { sessionID?: string },
@@ -430,6 +487,7 @@ export async function createPluginHooks(
       await handleSystemTransform({ sessionID: input.sessionID, agent }, output, hookState, deps);
     },
     dispose: async () => {
+      try { await notificationManager?.dispose(); } catch {}
       try { await customHookRegistry.dispose(); } catch {}
       try { lspDocManager.closeAll(lspClientManager); } catch {}
       try { await lspClientManager.shutdownAll(); } catch {}

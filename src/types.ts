@@ -7,6 +7,7 @@ import type {
 } from "./constants.ts";
 import type { DispatchManagerConfig } from "./dispatch/config.ts";
 import type { HooksBlock } from "./hooks/custom/types.ts";
+import type { NotificationConfig } from "./notifications/types.ts";
 
 /**
  * Permission configuration, mirroring opencode's PermissionConfig structure.
@@ -292,6 +293,8 @@ export interface RoleConfig {
   locked?: boolean;
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;
+  /** Notification configuration for session lifecycle events */
+  notifications?: NotificationConfig;
   /** Custom hook declarations for lifecycle event hooks */
   hooks?: HooksBlock;
 }
