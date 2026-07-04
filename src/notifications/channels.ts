@@ -7,9 +7,10 @@ import { dirname } from "node:path";
 import type {
   NotificationMessage,
   NotificationChannelConfig,
+  NotificationChannelKind,
   PlatformInfo,
 } from "./types.ts";
-import { NotificationChannelKind } from "./types.ts";
+import { NOTIFICATION_CHANNEL_KINDS } from "./types.ts";
 import {
   detectPlatform,
   commandExists,
@@ -44,7 +45,7 @@ export interface NotificationChannel {
 // ── SystemToastChannel ──────────────────────────────────────────────
 
 class SystemToastChannel implements NotificationChannel {
-  readonly kind = NotificationChannelKind.SystemToast;
+  readonly kind = NOTIFICATION_CHANNEL_KINDS.SystemToast;
   private platform: PlatformInfo;
   private primary: string | null;
   private fallback: string | null;
@@ -121,7 +122,7 @@ class SystemToastChannel implements NotificationChannel {
 // ── SoundChannel ────────────────────────────────────────────────────
 
 class SoundChannel implements NotificationChannel {
-  readonly kind = NotificationChannelKind.Sound;
+  readonly kind = NOTIFICATION_CHANNEL_KINDS.Sound;
   private platform: PlatformInfo;
   private player: string | null;
   private soundPath: string;
@@ -173,7 +174,7 @@ class SoundChannel implements NotificationChannel {
 // ── CustomCommandChannel ────────────────────────────────────────────
 
 class CustomCommandChannel implements NotificationChannel {
-  readonly kind = NotificationChannelKind.CustomCommand;
+  readonly kind = NOTIFICATION_CHANNEL_KINDS.CustomCommand;
   private command: string;
   private passAsStdin: boolean;
   private additionalEnv: Record<string, string> | undefined;
@@ -267,7 +268,7 @@ class CustomCommandChannel implements NotificationChannel {
 // ── WebhookChannel ──────────────────────────────────────────────────
 
 class WebhookChannel implements NotificationChannel {
-  readonly kind = NotificationChannelKind.Webhook;
+  readonly kind = NOTIFICATION_CHANNEL_KINDS.Webhook;
   private url: string;
   private headers: Record<string, string>;
   private timeoutMs: number;
@@ -321,7 +322,7 @@ class WebhookChannel implements NotificationChannel {
 // ── FileChannel ─────────────────────────────────────────────────────
 
 class FileChannel implements NotificationChannel {
-  readonly kind = NotificationChannelKind.File;
+  readonly kind = NOTIFICATION_CHANNEL_KINDS.File;
   private path: string;
 
   constructor(path: string) {
@@ -343,7 +344,7 @@ class FileChannel implements NotificationChannel {
 // ── LogChannel ──────────────────────────────────────────────────────
 
 class LogChannel implements NotificationChannel {
-  readonly kind = NotificationChannelKind.Log;
+  readonly kind = NOTIFICATION_CHANNEL_KINDS.Log;
   private level: "info" | "warn" | "error" | "debug";
   private channelLogger = createSubLogger("notification");
 
@@ -395,7 +396,7 @@ export async function createChannel(
       return new SystemToastChannel(platform, primary, fallback);
     }
 
-    case NotificationChannelKind.Sound: {
+    case NOTIFICATION_CHANNEL_KINDS.Sound: {
       if (!config.enabled) return null;
       const platform = detectPlatform();
       if (platform.os === "unknown") return null;

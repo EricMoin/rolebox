@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 // ── Module imports ─────────────────────────────────────────────────────
 
 // Types
-import { NotificationEventType, NotificationChannelKind } from "../../src/notifications/types";
+import { NOTIFICATION_EVENT_TYPES, NOTIFICATION_CHANNEL_KINDS } from "../../src/notifications/types";
 import type {
   NotificationConfig,
   NotificationMessage,
@@ -140,14 +140,14 @@ describe("Notification Config", () => {
     expect(config.idleDelayMs).toBe(5000);
     expect(config.questionToolNames).toEqual(["ask"]);
     expect(config.channels).toHaveLength(1);
-    expect(config.channels[0]!.kind).toBe(NotificationChannelKind.Log);
+    expect(config.channels[0]!.kind).toBe(NOTIFICATION_CHANNEL_KINDS.Log);
     expect(config.quietHours.enabled).toBe(true);
     expect(config.quietHours.ranges).toHaveLength(1);
     expect(config.quietHours.ranges[0]!.start).toBe("22:00");
     expect(config.throttle.windowMs).toBe(5000);
     expect(config.throttle.maxPerWindow).toBe(5);
     expect(config.events).toBeDefined();
-    expect(config.events![NotificationEventType.Idle]).toBeDefined();
+    expect(config.events![NOTIFICATION_EVENT_TYPES.Idle]).toBeDefined();
   });
 
   it("returns defaults for invalid input", () => {
@@ -165,30 +165,30 @@ describe("Notification Config", () => {
     const global: NotificationConfig = {
       ...DEFAULT_NOTIFICATION_CONFIG,
       channels: [
-        { kind: NotificationChannelKind.Log, enabled: true },
-        { kind: NotificationChannelKind.File, enabled: true, path: "/tmp/global.log" },
+        { kind: NOTIFICATION_CHANNEL_KINDS.Log, enabled: true },
+        { kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: "/tmp/global.log" },
       ],
     };
 
     const role: NotificationConfig = {
       ...DEFAULT_NOTIFICATION_CONFIG,
-      channels: [{ kind: NotificationChannelKind.Sound, enabled: true, soundPath: "/sounds/ding.aiff" }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.Sound, enabled: true, soundPath: "/sounds/ding.aiff" }],
     };
 
     const merged = mergeNotificationConfigs(global, role);
     expect(merged.channels).toHaveLength(1);
-    expect(merged.channels[0]!.kind).toBe(NotificationChannelKind.Sound);
+    expect(merged.channels[0]!.kind).toBe(NOTIFICATION_CHANNEL_KINDS.Sound);
   });
 
   it("merges global and role configs — role event configs replace at event key level", () => {
     const global: NotificationConfig = {
       ...DEFAULT_NOTIFICATION_CONFIG,
       events: {
-        [NotificationEventType.Idle]: {
+        [NOTIFICATION_EVENT_TYPES.Idle]: {
           enabled: true,
           titleTemplate: "Global Idle",
         },
-        [NotificationEventType.Error]: {
+        [NOTIFICATION_EVENT_TYPES.Error]: {
           enabled: true,
           titleTemplate: "Global Error",
         },
@@ -198,7 +198,7 @@ describe("Notification Config", () => {
     const role: NotificationConfig = {
       ...DEFAULT_NOTIFICATION_CONFIG,
       events: {
-        [NotificationEventType.Idle]: {
+        [NOTIFICATION_EVENT_TYPES.Idle]: {
           enabled: false,
           titleTemplate: "Role Idle",
         },
@@ -207,11 +207,11 @@ describe("Notification Config", () => {
 
     const merged = mergeNotificationConfigs(global, role);
     // Role overwrites Idle
-    expect(merged.events![NotificationEventType.Idle]!.enabled).toBe(false);
-    expect(merged.events![NotificationEventType.Idle]!.titleTemplate).toBe("Role Idle");
+    expect(merged.events![NOTIFICATION_EVENT_TYPES.Idle]!.enabled).toBe(false);
+    expect(merged.events![NOTIFICATION_EVENT_TYPES.Idle]!.titleTemplate).toBe("Role Idle");
     // Global Error preserved
-    expect(merged.events![NotificationEventType.Error]!.enabled).toBe(true);
-    expect(merged.events![NotificationEventType.Error]!.titleTemplate).toBe("Global Error");
+    expect(merged.events![NOTIFICATION_EVENT_TYPES.Error]!.enabled).toBe(true);
+    expect(merged.events![NOTIFICATION_EVENT_TYPES.Error]!.titleTemplate).toBe("Global Error");
   });
 
   it("validates config and returns warnings for invalid values", () => {
@@ -220,8 +220,8 @@ describe("Notification Config", () => {
       idleDelayMs: -1,
       throttle: { windowMs: -100, maxPerWindow: 0 },
       channels: [
-        { kind: NotificationChannelKind.Sound, enabled: true, soundPath: "" },
-        { kind: NotificationChannelKind.Webhook, enabled: true, url: "" },
+        { kind: NOTIFICATION_CHANNEL_KINDS.Sound, enabled: true, soundPath: "" },
+        { kind: NOTIFICATION_CHANNEL_KINDS.Webhook, enabled: true, url: "" },
       ],
       questionToolNames: [],
     };
@@ -245,7 +245,7 @@ describe("Notification Config", () => {
         ...DEFAULT_NOTIFICATION_CONFIG,
         channels: [
           {
-            kind: NotificationChannelKind.Webhook,
+            kind: NOTIFICATION_CHANNEL_KINDS.Webhook,
             enabled: true,
             url: "{env:NOTIF_TEST_URL}",
           },
@@ -253,8 +253,8 @@ describe("Notification Config", () => {
       };
 
       const resolved = resolveEnvVarsInConfig(config);
-      expect(resolved.channels[0]!.kind).toBe(NotificationChannelKind.Webhook);
-      const webhook = resolved.channels[0]! as NotificationChannelConfig & { kind: NotificationChannelKind.Webhook };
+      expect(resolved.channels[0]!.kind).toBe(NOTIFICATION_CHANNEL_KINDS.Webhook);
+      const webhook = resolved.channels[0]! as NotificationChannelConfig & { kind: NOTIFICATION_CHANNEL_KINDS.Webhook };
       expect(webhook.url).toBe("https://hooks.example.com/notify");
     } finally {
       if (original) process.env.NOTIF_TEST_URL = original;
@@ -297,7 +297,7 @@ describe("Template Rendering", () => {
   it("buildTemplateVars includes all expected keys", () => {
     const vars = buildTemplateVars({
       sessionId: "ses_1",
-      eventType: NotificationEventType.Question,
+      eventType: NOTIFICATION_EVENT_TYPES.Question,
       agent: "helper",
       roleName: "Coder",
       sessionTitle: "My Session",
@@ -317,7 +317,7 @@ describe("Template Rendering", () => {
   it("buildTemplateVars falls back to sessionId for session_title", () => {
     const vars = buildTemplateVars({
       sessionId: "ses_fallback",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
     });
     expect(vars.session_title).toBe("ses_fallback");
   });
@@ -352,7 +352,7 @@ describe("Content Building", () => {
     const client = createMockClient();
     const msg = await buildNotificationContent({
       sessionID: "ses_test",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
       client,
       agent: "helper",
       roleName: "TestRole",
@@ -360,7 +360,7 @@ describe("Content Building", () => {
     });
 
     expect(msg.sessionId).toBe("ses_test");
-    expect(msg.eventType).toBe(NotificationEventType.Idle);
+    expect(msg.eventType).toBe(NOTIFICATION_EVENT_TYPES.Idle);
     expect(msg.title).toBe("Rolebox · idle");
     expect(msg.body).toBe("Test Session");
     expect(msg.agent).toBe("helper");
@@ -372,7 +372,7 @@ describe("Content Building", () => {
     const client = createMockClient();
     const msg = await buildNotificationContent({
       sessionID: "ses_cfg",
-      eventType: NotificationEventType.Error,
+      eventType: NOTIFICATION_EVENT_TYPES.Error,
       client,
       eventConfig: {
         enabled: true,
@@ -407,32 +407,32 @@ describe("NotificationThrottle", () => {
   });
 
   it("allows first notification", () => {
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(true);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
   });
 
   it("blocks rapid duplicate within 1000ms", () => {
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(true);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
     // Second call is too close (< 1000ms minimum interval)
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(false);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(false);
   });
 
   it("allows after window expires", async () => {
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(true);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
     // Wait for minimum interval to pass
     await new Promise((r) => setTimeout(r, 1100));
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(true);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
   });
 
   it("respects maxPerWindow limit", async () => {
     const config: ThrottleConfig = { windowMs: 500, maxPerWindow: 2 };
     const t = new NotificationThrottle(config);
 
-    expect(t.allow("ses_1", NotificationEventType.Error)).toBe(true);
+    expect(t.allow("ses_1", NOTIFICATION_EVENT_TYPES.Error)).toBe(true);
     await new Promise((r) => setTimeout(r, 1100));
-    expect(t.allow("ses_1", NotificationEventType.Error)).toBe(true);
+    expect(t.allow("ses_1", NOTIFICATION_EVENT_TYPES.Error)).toBe(true);
     await new Promise((r) => setTimeout(r, 1100));
     // Third one should be allowed since old stamps aged out
-    expect(t.allow("ses_1", NotificationEventType.Error)).toBe(true);
+    expect(t.allow("ses_1", NOTIFICATION_EVENT_TYPES.Error)).toBe(true);
   });
 
   it("applies per-event-type override", () => {
@@ -440,26 +440,26 @@ describe("NotificationThrottle", () => {
       windowMs: 5000,
       maxPerWindow: 10,
       perEventType: {
-        [NotificationEventType.Error]: { windowMs: 5000, maxPerWindow: 1 },
+        [NOTIFICATION_EVENT_TYPES.Error]: { windowMs: 5000, maxPerWindow: 1 },
       },
     });
 
-    expect(t.allow("ses_1", NotificationEventType.Error)).toBe(true);
-    expect(t.allow("ses_1", NotificationEventType.Error)).toBe(false);
+    expect(t.allow("ses_1", NOTIFICATION_EVENT_TYPES.Error)).toBe(true);
+    expect(t.allow("ses_1", NOTIFICATION_EVENT_TYPES.Error)).toBe(false);
     // Different event type uses global limit
-    expect(t.allow("ses_1", NotificationEventType.Idle)).toBe(true);
+    expect(t.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
   });
 
   it("reset() clears all state", () => {
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(true);
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(false);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(false);
     throttle.reset();
-    expect(throttle.allow("ses_1", NotificationEventType.Idle)).toBe(true);
+    expect(throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle)).toBe(true);
   });
 
   it("stats returns correct counts", () => {
     expect(throttle.stats()).toEqual({ totalTracked: 0, keys: 0 });
-    throttle.allow("ses_1", NotificationEventType.Idle);
+    throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle);
     const s = throttle.stats();
     expect(s.keys).toBe(1);
     expect(s.totalTracked).toBe(1);
@@ -659,7 +659,7 @@ describe("Channels", () => {
 
   it("LogChannel always available and logs message", async () => {
     const channel = await createChannel({
-      kind: NotificationChannelKind.Log,
+      kind: NOTIFICATION_CHANNEL_KINDS.Log,
       enabled: true,
     });
     expect(channel).not.toBeNull();
@@ -668,7 +668,7 @@ describe("Channels", () => {
       title: "Test",
       body: "Body",
       sessionId: "ses_1",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
       timestamp: new Date().toISOString(),
     };
 
@@ -680,7 +680,7 @@ describe("Channels", () => {
   it("FileChannel writes JSON line to file", async () => {
     const logFile = join(tmpDir, "notifications.jsonl");
     const channel = await createChannel({
-      kind: NotificationChannelKind.File,
+      kind: NOTIFICATION_CHANNEL_KINDS.File,
       enabled: true,
       path: logFile,
     });
@@ -690,7 +690,7 @@ describe("Channels", () => {
       title: "File Test",
       body: "Hello",
       sessionId: "ses_file",
-      eventType: NotificationEventType.Error,
+      eventType: NOTIFICATION_EVENT_TYPES.Error,
       timestamp: "2025-01-01T00:00:00.000Z",
     };
 
@@ -710,7 +710,7 @@ describe("Channels", () => {
 
     try {
       const channel = await createChannel({
-        kind: NotificationChannelKind.Webhook,
+        kind: NOTIFICATION_CHANNEL_KINDS.Webhook,
         enabled: true,
         url: "https://example.com/webhook",
       });
@@ -720,7 +720,7 @@ describe("Channels", () => {
         title: "Webhook Test",
         body: "Payload",
         sessionId: "ses_web",
-        eventType: NotificationEventType.DispatchComplete,
+        eventType: NOTIFICATION_EVENT_TYPES.DispatchComplete,
         timestamp: "2025-06-01T12:00:00.000Z",
       };
 
@@ -744,21 +744,21 @@ describe("Channels", () => {
 
   it("createChannels filters out null channels", async () => {
     const channels = await createChannels([
-      { kind: NotificationChannelKind.Log, enabled: true },
-      { kind: NotificationChannelKind.SystemToast, enabled: true },
-      { kind: NotificationChannelKind.File, enabled: false, path: "/tmp/nope.log" },
+      { kind: NOTIFICATION_CHANNEL_KINDS.Log, enabled: true },
+      { kind: NOTIFICATION_CHANNEL_KINDS.SystemToast, enabled: true },
+      { kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: false, path: "/tmp/nope.log" },
     ] as NotificationChannelConfig[]);
 
     expect(channels.length).toBeGreaterThanOrEqual(1);
     // LogChannel should be present
-    expect(channels.some((c) => c.kind === NotificationChannelKind.Log)).toBe(true);
+    expect(channels.some((c) => c.kind === NOTIFICATION_CHANNEL_KINDS.Log)).toBe(true);
     // Disabled FileChannel should be filtered out
-    expect(channels.every((c) => c.kind !== NotificationChannelKind.File)).toBe(true);
+    expect(channels.every((c) => c.kind !== NOTIFICATION_CHANNEL_KINDS.File)).toBe(true);
   });
 
   it("channel send failure does not throw", async () => {
     const channel = await createChannel({
-      kind: NotificationChannelKind.File,
+      kind: NOTIFICATION_CHANNEL_KINDS.File,
       enabled: true,
       path: join(tmpDir, "nonexistent", "subdir", "log.jsonl"),
     });
@@ -768,7 +768,7 @@ describe("Channels", () => {
       title: "Fail",
       body: "Should not throw",
       sessionId: "ses_fail",
-      eventType: NotificationEventType.Custom,
+      eventType: NOTIFICATION_EVENT_TYPES.Custom,
       timestamp: new Date().toISOString(),
     };
 
@@ -847,12 +847,12 @@ describe("NotificationManager", () => {
     const logFile = join(tmpDir, "log.jsonl");
     const mgr = createManager({
       enabled: false,
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
     });
 
     await mgr.notify({
       sessionID: "ses_1",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
     });
 
     // No file should have been written
@@ -863,15 +863,15 @@ describe("NotificationManager", () => {
   it("respects per-event enabled=false", async () => {
     const logFile = join(tmpDir, "log2.jsonl");
     const mgr = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
       events: {
-        [NotificationEventType.Idle]: { enabled: false },
+        [NOTIFICATION_EVENT_TYPES.Idle]: { enabled: false },
       },
     });
 
     await mgr.notify({
       sessionID: "ses_2",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
     });
 
     expect(existsSync(logFile)).toBe(false);
@@ -898,13 +898,13 @@ describe("NotificationManager", () => {
       } as DateConstructor;
 
       const mgr = createManager({
-        channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+        channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
         quietHours: { enabled: true, ranges: [{ start: "09:00", end: "17:00" }] },
       });
 
       await mgr.notify({
         sessionID: "ses_3",
-        eventType: NotificationEventType.Idle,
+        eventType: NOTIFICATION_EVENT_TYPES.Idle,
       });
 
       // Should be blocked by quiet hours
@@ -918,14 +918,14 @@ describe("NotificationManager", () => {
   it("checks throttle", async () => {
     const logFile = join(tmpDir, "log4.jsonl");
     const mgr = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
       throttle: { windowMs: 5000, maxPerWindow: 1 },
     });
 
     // First notification goes through
     await mgr.notify({
       sessionID: "ses_4",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
     });
 
     // Wait for throttle minimum interval
@@ -934,13 +934,13 @@ describe("NotificationManager", () => {
     // Second should be throttled (maxPerWindow=1 and rapid duplicate)
     const logFile2 = join(tmpDir, "log5.jsonl");
     const mgr2 = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile2 }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile2 }],
       throttle: { windowMs: 5000, maxPerWindow: 1 },
     });
 
     await mgr2.notify({
       sessionID: "ses_4",
-      eventType: NotificationEventType.Idle,
+      eventType: NOTIFICATION_EVENT_TYPES.Idle,
     });
 
     // Should have written to first file
@@ -952,12 +952,12 @@ describe("NotificationManager", () => {
   it("builds content and sends to channels", async () => {
     const logFile = join(tmpDir, "log_send.jsonl");
     const mgr = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
     });
 
     await mgr.notify({
       sessionID: "ses_5",
-      eventType: NotificationEventType.DispatchComplete,
+      eventType: NOTIFICATION_EVENT_TYPES.DispatchComplete,
       agent: "helper",
       roleName: "Helper",
     });
@@ -978,7 +978,7 @@ describe("NotificationManager", () => {
     const mgr = createManager({
       channels: [
         {
-          kind: NotificationChannelKind.File,
+          kind: NOTIFICATION_CHANNEL_KINDS.File,
           enabled: true,
           path: join("/nonexistent_dir_xyz", "log.jsonl"),
         },
@@ -989,7 +989,7 @@ describe("NotificationManager", () => {
     await expect(
       mgr.notify({
         sessionID: "ses_fail",
-        eventType: NotificationEventType.Error,
+        eventType: NOTIFICATION_EVENT_TYPES.Error,
       }),
     ).resolves.toBeUndefined();
 
@@ -1001,7 +1001,7 @@ describe("NotificationManager", () => {
     roleConfigs.set("coder", {
       ...DEFAULT_NOTIFICATION_CONFIG,
       idleDelayMs: 9999,
-      channels: [{ kind: NotificationChannelKind.Log, enabled: true }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.Log, enabled: true }],
     });
 
     const mgr = createManager({ idleDelayMs: 1000 }, roleConfigs);
@@ -1032,7 +1032,7 @@ describe("NotificationManager", () => {
   it("handleSessionError fires error notification", async () => {
     const logFile = join(tmpDir, "log_error.jsonl");
     const mgr = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
     });
 
     mgr.handleSessionError("ses_err", "helper");
@@ -1050,7 +1050,7 @@ describe("NotificationManager", () => {
   it("handleDispatchComplete fires notification", async () => {
     const logFile = join(tmpDir, "log_dc.jsonl");
     const mgr = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
     });
 
     mgr.handleDispatchComplete("ses_dc");
@@ -1067,7 +1067,7 @@ describe("NotificationManager", () => {
   it("handleLoopComplete fires notification", async () => {
     const logFile = join(tmpDir, "log_lc.jsonl");
     const mgr = createManager({
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
     });
 
     mgr.handleLoopComplete("ses_lc");
@@ -1097,7 +1097,7 @@ describe("NotificationManager", () => {
     const mgr = createManager({
       // Override idleDelayMs for the scheduler
       idleDelayMs: 50,
-      channels: [{ kind: NotificationChannelKind.File, enabled: true, path: logFile }],
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
     });
 
     mgr.scheduleIdle("ses_idle", "helper");

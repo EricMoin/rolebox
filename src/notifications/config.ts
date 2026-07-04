@@ -11,13 +11,14 @@ import {
   DEFAULT_QUESTION_TOOL_NAMES,
 } from "../constants.ts";
 import {
-  NotificationEventType,
-  NotificationChannelKind,
+  NOTIFICATION_EVENT_TYPES,
+  NOTIFICATION_CHANNEL_KINDS,
 } from "./types.ts";
 import type {
   NotificationConfig,
   NotificationChannelConfig,
   NotificationEventConfig,
+  NotificationEventType,
   QuietHoursConfig,
   ThrottleConfig,
   QuietHoursRange,
@@ -145,44 +146,44 @@ function parseChannel(raw: unknown): NotificationChannelConfig | null {
   const enabled = asBoolean(raw.enabled) ?? true;
 
   switch (kind) {
-    case NotificationChannelKind.SystemToast:
-      return { kind: NotificationChannelKind.SystemToast, enabled };
+    case NOTIFICATION_CHANNEL_KINDS.SystemToast:
+      return { kind: NOTIFICATION_CHANNEL_KINDS.SystemToast, enabled };
 
-    case NotificationChannelKind.Sound:
+    case NOTIFICATION_CHANNEL_KINDS.Sound:
       return {
-        kind: NotificationChannelKind.Sound,
+        kind: NOTIFICATION_CHANNEL_KINDS.Sound,
         enabled,
         soundPath: typeof raw.soundPath === "string" ? raw.soundPath : "",
       };
 
-    case NotificationChannelKind.CustomCommand:
+    case NOTIFICATION_CHANNEL_KINDS.CustomCommand:
       return {
-        kind: NotificationChannelKind.CustomCommand,
+        kind: NOTIFICATION_CHANNEL_KINDS.CustomCommand,
         enabled,
         command: typeof raw.command === "string" ? raw.command : "",
         passAsStdin: asBoolean(raw.passAsStdin),
         env: isObject(raw.env) ? (raw.env as Record<string, string>) : undefined,
       };
 
-    case NotificationChannelKind.Webhook:
+    case NOTIFICATION_CHANNEL_KINDS.Webhook:
       return {
-        kind: NotificationChannelKind.Webhook,
+        kind: NOTIFICATION_CHANNEL_KINDS.Webhook,
         enabled,
         url: typeof raw.url === "string" ? raw.url : "",
         headers: isObject(raw.headers) ? (raw.headers as Record<string, string>) : undefined,
         timeoutMs: asNumber(raw.timeoutMs),
       };
 
-    case NotificationChannelKind.File:
+    case NOTIFICATION_CHANNEL_KINDS.File:
       return {
-        kind: NotificationChannelKind.File,
+        kind: NOTIFICATION_CHANNEL_KINDS.File,
         enabled,
         path: typeof raw.path === "string" ? raw.path : "",
       };
 
-    case NotificationChannelKind.Log:
+    case NOTIFICATION_CHANNEL_KINDS.Log:
       return {
-        kind: NotificationChannelKind.Log,
+        kind: NOTIFICATION_CHANNEL_KINDS.Log,
         enabled,
         level: typeof raw.level === "string" &&
           ["info", "warn", "error", "debug"].includes(raw.level)
@@ -277,7 +278,7 @@ export function parseNotificationConfig(raw: unknown): NotificationConfig {
   if (isObject(raw.events)) {
     const parsedEvents: NotificationConfig["events"] = {};
     for (const [key, val] of Object.entries(raw.events)) {
-      const validEventTypes = Object.values(NotificationEventType) as string[];
+      const validEventTypes = Object.values(NOTIFICATION_EVENT_TYPES) as string[];
       if (!validEventTypes.includes(key)) {
         log.warn(`Skipping unknown notification event type "${key}"`);
         continue;
@@ -356,7 +357,7 @@ function deepCloneConfig(config: NotificationConfig): NotificationConfig {
       ? Object.fromEntries(
           Object.entries(config.events).map(([key, evt]) => [
             key,
-            {
+            evt ? {
               ...evt,
               channels: evt.channels ? evt.channels.map((ch) => ({ ...ch })) : undefined,
               throttle: evt.throttle ? { ...evt.throttle } : undefined,
@@ -366,7 +367,7 @@ function deepCloneConfig(config: NotificationConfig): NotificationConfig {
                     ranges: evt.quietHoursOverride.ranges.map((r) => ({ ...r })),
                   }
                 : undefined,
-            },
+            } : undefined,
           ]),
         )
       : undefined,
@@ -515,27 +516,27 @@ export function validateNotificationConfig(config: NotificationConfig): string[]
     }
   }
 
-  const validKinds = new Set(Object.values(NotificationChannelKind));
+  const validKinds = new Set(Object.values(NOTIFICATION_CHANNEL_KINDS));
   for (let i = 0; i < config.channels.length; i++) {
     const ch = config.channels[i];
     if (!validKinds.has(ch.kind)) {
       warnings.push(`channels[${i}] has unknown kind "${ch.kind}"`);
     }
-    if (ch.kind === NotificationChannelKind.Sound && !ch.soundPath) {
+    if (ch.kind === NOTIFICATION_CHANNEL_KINDS.Sound && !ch.soundPath) {
       warnings.push(`channels[${i}] (Sound) has an empty soundPath`);
     }
-    if (ch.kind === NotificationChannelKind.CustomCommand && !ch.command) {
+    if (ch.kind === NOTIFICATION_CHANNEL_KINDS.CustomCommand && !ch.command) {
       warnings.push(`channels[${i}] (CustomCommand) has an empty command`);
     }
-    if (ch.kind === NotificationChannelKind.Webhook && !ch.url) {
+    if (ch.kind === NOTIFICATION_CHANNEL_KINDS.Webhook && !ch.url) {
       warnings.push(`channels[${i}] (Webhook) has an empty url`);
     }
-    if (ch.kind === NotificationChannelKind.File && !ch.path) {
+    if (ch.kind === NOTIFICATION_CHANNEL_KINDS.File && !ch.path) {
       warnings.push(`channels[${i}] (File) has an empty path`);
     }
   }
 
-  const validEventTypes = new Set(Object.values(NotificationEventType));
+  const validEventTypes = new Set<string>(Object.values(NOTIFICATION_EVENT_TYPES));
   if (config.events) {
     for (const [key, evt] of Object.entries(config.events)) {
       if (!validEventTypes.has(key as NotificationEventType)) {

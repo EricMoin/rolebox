@@ -9,7 +9,7 @@ import { createSubLogger } from "../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import {
-  NotificationEventType,
+  NOTIFICATION_EVENT_TYPES,
 } from "./types.ts";
 import type {
   NotificationConfig,
@@ -106,7 +106,7 @@ export class NotificationManager {
    */
   async notify(opts: {
     sessionID: string;
-    eventType: NotificationEventType;
+    eventType: string;
     agent?: string;
     roleName?: string;
     questionText?: string;
@@ -223,7 +223,7 @@ export class NotificationManager {
     this.scheduler.scheduleIdleNotification(sessionID, () => {
       this.notify({
         sessionID,
-        eventType: NotificationEventType.Idle,
+        eventType: NOTIFICATION_EVENT_TYPES.Idle,
         agent,
       }).catch(() => {});
     });
@@ -240,7 +240,7 @@ export class NotificationManager {
   handleSessionError(sessionID: string, agent?: string): void {
     this.notify({
       sessionID,
-      eventType: NotificationEventType.Error,
+      eventType: NOTIFICATION_EVENT_TYPES.Error,
       agent,
     }).catch(() => {});
   }
@@ -295,7 +295,7 @@ export class NotificationManager {
 
       this.notify({
         sessionID,
-        eventType: NotificationEventType.Question,
+        eventType: NOTIFICATION_EVENT_TYPES.Question,
         agent,
         questionText,
       }).catch(() => {});
@@ -310,7 +310,7 @@ export class NotificationManager {
   handleDispatchComplete(sessionID: string, agent?: string): void {
     this.notify({
       sessionID,
-      eventType: NotificationEventType.DispatchComplete,
+      eventType: NOTIFICATION_EVENT_TYPES.DispatchComplete,
       agent,
     }).catch(() => {});
   }
@@ -319,7 +319,7 @@ export class NotificationManager {
   handleLoopComplete(sessionID: string, agent?: string): void {
     this.notify({
       sessionID,
-      eventType: NotificationEventType.LoopComplete,
+      eventType: NOTIFICATION_EVENT_TYPES.LoopComplete,
       agent,
     }).catch(() => {});
   }

@@ -1,26 +1,38 @@
 // ── Notification Event Types ──────────────────────────────────────────
 
-export enum NotificationEventType {
-  Idle = "idle",
-  Question = "question",
-  Permission = "permission",
-  Error = "error",
-  DispatchComplete = "dispatch_complete",
-  LoopComplete = "loop_complete",
-  SessionDeleted = "session_deleted",
-  Custom = "custom",
-}
+export const NOTIFICATION_EVENT_TYPES = {
+  Idle: "idle",
+  Question: "question",
+  Permission: "permission",
+  Error: "error",
+  DispatchComplete: "dispatch_complete",
+  LoopComplete: "loop_complete",
+  SessionDeleted: "session_deleted",
+  Custom: "custom",
+} as const;
+
+/**
+ * Notification event type — open string type.
+ * Built-in values are in NOTIFICATION_EVENT_TYPES; custom values can be any string.
+ */
+export type NotificationEventType = string;
 
 // ── Notification Channel Kinds ───────────────────────────────────────
 
-export enum NotificationChannelKind {
-  SystemToast = "system_toast",
-  Sound = "sound",
-  CustomCommand = "custom_command",
-  Webhook = "webhook",
-  File = "file",
-  Log = "log",
-}
+export const NOTIFICATION_CHANNEL_KINDS = {
+  SystemToast: "system_toast",
+  Sound: "sound",
+  CustomCommand: "custom_command",
+  Webhook: "webhook",
+  File: "file",
+  Log: "log",
+} as const;
+
+/**
+ * Notification channel kind — open string type.
+ * Built-in values are in NOTIFICATION_CHANNEL_KINDS; custom values can be any string.
+ */
+export type NotificationChannelKind = string;
 
 // ── Platform Info ─────────────────────────────────────────────────────
 
@@ -86,19 +98,19 @@ export interface NotificationMessage {
 // ── Channel Config (discriminated union by kind) ─────────────────────
 
 export interface SystemToastChannelConfig {
-  kind: NotificationChannelKind.SystemToast;
+  kind: typeof NOTIFICATION_CHANNEL_KINDS.SystemToast;
   enabled: boolean;
 }
 
 export interface SoundChannelConfig {
-  kind: NotificationChannelKind.Sound;
+  kind: typeof NOTIFICATION_CHANNEL_KINDS.Sound;
   enabled: boolean;
   /** Path to the sound file to play. */
   soundPath: string;
 }
 
 export interface CustomCommandChannelConfig {
-  kind: NotificationChannelKind.CustomCommand;
+  kind: typeof NOTIFICATION_CHANNEL_KINDS.CustomCommand;
   enabled: boolean;
   /** Shell command to execute. */
   command: string;
@@ -109,7 +121,7 @@ export interface CustomCommandChannelConfig {
 }
 
 export interface WebhookChannelConfig {
-  kind: NotificationChannelKind.Webhook;
+  kind: typeof NOTIFICATION_CHANNEL_KINDS.Webhook;
   enabled: boolean;
   /** Target URL for the webhook POST request. */
   url: string;
@@ -120,14 +132,14 @@ export interface WebhookChannelConfig {
 }
 
 export interface FileChannelConfig {
-  kind: NotificationChannelKind.File;
+  kind: typeof NOTIFICATION_CHANNEL_KINDS.File;
   enabled: boolean;
   /** Absolute or relative path to the notification log file. */
   path: string;
 }
 
 export interface LogChannelConfig {
-  kind: NotificationChannelKind.Log;
+  kind: typeof NOTIFICATION_CHANNEL_KINDS.Log;
   enabled: boolean;
   /** Log level for the notification entry (default: "info"). */
   level?: "info" | "warn" | "error" | "debug";
