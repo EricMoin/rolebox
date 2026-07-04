@@ -98,6 +98,9 @@ export const METRICS_PERSIST_INTERVAL_MS = 5_000;
 /** Default max NDJSON metrics event log file size (100 KB). */
 export const DEFAULT_METRICS_EVENT_LOG_MAX_BYTES = 102_400;
 
+/** Default budget sampling interval (30 s): how often to sample token/cost from sessions. */
+export const DEFAULT_BUDGET_SAMPLE_INTERVAL_MS = 30_000;
+
 // ── Configuration interface ─────────────────────────────────────────
 
 /**
@@ -115,6 +118,18 @@ export interface DispatchManagerConfig {
   maxActivePerParent?: number;
   /** Cumulative session budget per request — undefined means unlimited (opt-in) */
   maxTotalSessionsPerRequest?: number;
+  /** Maximum cumulative input tokens across all dispatched sessions in a request (undefined = unlimited). */
+  maxInputTokensPerRequest?: number;
+  /** Maximum cumulative output tokens across all dispatched sessions in a request (undefined = unlimited). */
+  maxOutputTokensPerRequest?: number;
+  /** Maximum cumulative cost (USD) across all dispatched sessions in a request (undefined = unlimited). */
+  maxCostPerRequest?: number;
+  /** Maximum input tokens for a single dispatched session (undefined = unlimited). */
+  maxInputTokensPerSession?: number;
+  /** Maximum cost for a single dispatched session (undefined = unlimited). */
+  maxCostPerSession?: number;
+  /** How often (ms) to sample token/cost from sessions (default: 30000). */
+  budgetSampleIntervalMs?: number;
   /** Time-to-live (ms) for completed task records before cleanup — default: 30 minutes */
   taskTtlMs: number;
   /** Minimum wall-clock time (ms) before a task can be reaped — default: 5000 */
@@ -189,6 +204,7 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   outboxFirstRetryMs: OUTBOX_FIRST_RETRY_MS,
   outboxMaxRetryMs: OUTBOX_MAX_RETRY_MS,
   outboxSweepIntervalMs: OUTBOX_SWEEP_INTERVAL_MS,
+  budgetSampleIntervalMs: DEFAULT_BUDGET_SAMPLE_INTERVAL_MS,
 };
 
 // ── Environment variable resolution ─────────────────────────────────

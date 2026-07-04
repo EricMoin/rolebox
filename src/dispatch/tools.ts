@@ -382,3 +382,22 @@ export function createDispatchMetricsTool() {
     },
   });
 }
+
+export function createDispatchBudgetTool(manager: DispatchManager) {
+  return tool({
+    description:
+      "Retrieve token/cost budget status for the current dispatch request. " +
+      "Shows configured limits, current usage, remaining budget, and percentage used. " +
+      "The orchestrator agent can call this to check remaining budget before dispatching more tasks.",
+    args: {
+      parent_session_id: z
+        .string()
+        .optional()
+        .describe("Parent session ID to query budget for (defaults to current session)"),
+    },
+    async execute(input, context) {
+      const parentSessionId = input.parent_session_id || context.sessionID;
+      return manager.getBudgetStatus(parentSessionId);
+    },
+  });
+}

@@ -8,7 +8,7 @@ import type {
   SessionMessageSnapshot,
   MaterializedResultRef,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS, OUTBOX_SWEEP_INTERVAL_MS, RESULT_RETENTION_MS } from "./config.ts";
+import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS, OUTBOX_SWEEP_INTERVAL_MS, RESULT_RETENTION_MS, DEFAULT_BUDGET_SAMPLE_INTERVAL_MS } from "./config.ts";
 import { unlinkSync } from "node:fs";
 import { ConcurrencyManager, type IConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
@@ -16,6 +16,7 @@ import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent, hasFinalNotifyBeenSent, DISPATCH_RECOVERY_MARKER } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 import { MetricsPersister } from "./metrics-persister.ts";
+import { BudgetTracker } from "./budget-tracker.ts";
 
 import { TaskStateStore } from "./task-store.ts";
 import { extractResultBlock, readResultSidecar, resultSidecarPath, writeResultSidecar } from "./result-extractor.ts";
@@ -74,6 +75,8 @@ export class DispatchManager {
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
   private sessionMonitor: SessionMonitor;
   private metricsPersister: MetricsPersister;
+  private budgetTracker: BudgetTracker;
+  private _budgetSamplerTimer: ReturnType<typeof setInterval> | undefined;
   private notifyOutbox = new Set<string>();
   private sweeperTimer: ReturnType<typeof setInterval> | undefined;
   private _deferredIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -109,6 +112,7 @@ export class DispatchManager {
     this.subagentModelKey = subagentModelKey ?? new Map();
     this.sessionMonitor = new SessionMonitor();
     this.metricsPersister = new MetricsPersister(this._directory);
+    this.budgetTracker = new BudgetTracker(this.config);
     this.watchdog = new TaskWatchdogManager(
       {
         onReconcile: (taskId: string) => this.evaluateAndComplete(taskId, "watchdog-reconcile"),
@@ -126,6 +130,7 @@ export class DispatchManager {
       },
     );
     this.startSweeper();
+    this.startBudgetSampler();
   }
 
   private startSweeper(): void {
@@ -156,6 +161,101 @@ export class DispatchManager {
   private addToOutbox(taskId: string): void {
     this.notifyOutbox.add(taskId);
     this.persistState();
+  }
+
+  /**
+   * Start periodic budget sampler that fetches token/cost data from active
+   * dispatched sessions and checks per-session budgets.
+   */
+  private startBudgetSampler(): void {
+    const interval = this.config.budgetSampleIntervalMs ?? DEFAULT_BUDGET_SAMPLE_INTERVAL_MS;
+
+    // Only start the sampler if at least one token/cost budget is configured
+    const hasBudgetLimits =
+      this.config.maxInputTokensPerRequest !== undefined ||
+      this.config.maxOutputTokensPerRequest !== undefined ||
+      this.config.maxCostPerRequest !== undefined ||
+      this.config.maxInputTokensPerSession !== undefined ||
+      this.config.maxCostPerSession !== undefined;
+
+    if (!hasBudgetLimits) return;
+
+    this._budgetSamplerTimer = setInterval(async () => {
+      await this.sampleBudgetUsage();
+    }, interval);
+  }
+
+  /**
+   * Sample token/cost data from all active dispatched sessions and check
+   * per-session budgets. Cancels sessions that exceed their per-session budget.
+   */
+  private async sampleBudgetUsage(): Promise<void> {
+    for (const [sessionId, taskId] of this.sessionToTask) {
+      const task = this.tasks.get(taskId);
+      if (!task || task.status !== "running") continue;
+
+      try {
+        const msgResult = await withTimeout(
+          this.client.session.messages({ path: { id: sessionId } }),
+          this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
+          "budgetSampler:session.messages",
+        );
+
+        if (msgResult.error !== undefined || !msgResult.data) continue;
+
+        const messages = msgResult.data as Array<{
+          cost?: number;
+          tokens?: { input?: number; output?: number; reasoning?: number; cache?: number };
+        }>;
+
+        // Accumulate token/cost from all messages
+        let inputTokens = 0;
+        let outputTokens = 0;
+        let cost = 0;
+
+        for (const msg of messages) {
+          if (msg.tokens) {
+            inputTokens += msg.tokens.input ?? 0;
+            outputTokens += msg.tokens.output ?? 0;
+          }
+          if (msg.cost !== undefined) {
+            cost += msg.cost;
+          }
+        }
+
+        // Record usage — the tracker accumulates, so this is additive
+        this.budgetTracker.recordUsage(
+          sessionId,
+          task.parentSessionId,
+          { input: inputTokens, output: outputTokens },
+          cost,
+        );
+
+        // Check per-session budget
+        const sessionCheck = this.budgetTracker.isSessionBudgetExceeded(sessionId);
+        if (sessionCheck.exceeded) {
+          infoLog("budget", taskId, `session budget exceeded — cancelling: ${sessionCheck.reason}`);
+          metrics.counter("dispatch_rejected_total", { reason: "session-budget-exceeded" }).inc();
+          void this.cancelTask(taskId);
+        }
+      } catch (err) {
+        debugLog("budget", taskId, `sampler error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Get the BudgetTracker instance (for use by tools / metrics).
+   */
+  getBudgetTracker(): BudgetTracker {
+    return this.budgetTracker;
+  }
+
+  /**
+   * Get budget status summary string for the given parent session.
+   */
+  getBudgetStatus(parentSessionId: string): string {
+    return this.budgetTracker.getStatus(parentSessionId);
   }
 
   getConfig(): Readonly<DispatchManagerConfig> {
@@ -1107,6 +1207,10 @@ export class DispatchManager {
       this.metricsPersister.flushSync();
       this.metricsPersister.dispose();
     }
+    if (this._budgetSamplerTimer) {
+      clearInterval(this._budgetSamplerTimer);
+      this._budgetSamplerTimer = undefined;
+    }
     if (this.sweeperTimer) {
       clearInterval(this.sweeperTimer);
       this.sweeperTimer = undefined;
@@ -1667,6 +1771,8 @@ export class DispatchManager {
 
   async handleSessionDeleted(sessionId: string): Promise<void> {
     this.resetRequestSessions(sessionId);
+    this.budgetTracker.removeRequest(sessionId);
+    this.budgetTracker.removeSession(sessionId);
     const taskId = this.sessionToTask.get(sessionId);
     if (!taskId) return; // edge-case #2
     debugLog("event", taskId, `session.deleted — routing to evaluateAndComplete`);

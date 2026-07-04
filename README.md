@@ -538,6 +538,8 @@ Rolebox exposes three dispatch tools to the parent agent:
 
 A fourth tool, `dispatch_metrics`, provides runtime counters, gauges, and histograms for the dispatch subsystem when `ROLEBOX_METRICS` is set.
 
+A fifth tool, `dispatch_budget`, reports token/cost budget status for the current dispatch request. It shows configured limits, current usage, remaining budget, and percentage used. The orchestrator agent calls this before dispatching more tasks to avoid exceeding budget limits.
+
 **Background tasks** run asynchronously. The parent gets a task ID back immediately and receives a `<system-reminder>` notification when the task finishes. Call `dispatch_output` after the notification to collect results.
 
 **Sync tasks** block until the subagent finishes (10 min timeout). Use these for short work where the parent needs the result right away.
@@ -1024,6 +1026,12 @@ dispatch:
   syncReservedSlots: number         # Slots reserved for sync dispatch (default: 1)
   maxActivePerParent: number        # Max active tasks per parent session (default: 3)
   maxTotalSessionsPerRequest: number # Max cumulative sessions per user request (default: unlimited / opt-in)
+  maxInputTokensPerRequest: number  # Max cumulative input tokens per request (default: unlimited / opt-in)
+  maxOutputTokensPerRequest: number # Max cumulative output tokens per request (default: unlimited / opt-in)
+  maxCostPerRequest: number         # Max cumulative cost (USD) per request (default: unlimited / opt-in)
+  maxInputTokensPerSession: number  # Max input tokens per dispatched session (default: unlimited / opt-in)
+  maxCostPerSession: number         # Max cost (USD) per dispatched session (default: unlimited / opt-in)
+  budgetSampleIntervalMs: number    # Budget sampling interval in ms (default: 30000)
   backgroundStaleTimeoutMs: number  # Stale timeout for background tasks (default: 900000)
   syncAcquireTimeoutMs: number      # Timeout to acquire sync slot (default: 120000)
   syncPromptTimeoutMs: number       # Timeout for sync prompt (default: 600000)
@@ -1083,6 +1091,12 @@ Override dispatch configuration globally via environment variables (takes preced
 | `ROLEBOX_DISPATCH_BG_STALE_MS` | Background stale timeout (ms) | 900000 |
 | `ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS` | Result fetch timeout (ms) | 10000 |
 | `ROLEBOX_DISPATCH_RESULT_RETENTION_MS` | Result file retention (ms) | 3600000 |
+| `ROLEBOX_DISPATCH_MAX_INPUT_TOKENS_PER_REQUEST` | Max cumulative input tokens per request | unlimited / opt-in |
+| `ROLEBOX_DISPATCH_MAX_OUTPUT_TOKENS_PER_REQUEST` | Max cumulative output tokens per request | unlimited / opt-in |
+| `ROLEBOX_DISPATCH_MAX_COST_PER_REQUEST` | Max cumulative cost (USD) per request | unlimited / opt-in |
+| `ROLEBOX_DISPATCH_MAX_INPUT_TOKENS_PER_SESSION` | Max input tokens per dispatched session | unlimited / opt-in |
+| `ROLEBOX_DISPATCH_MAX_COST_PER_SESSION` | Max cost (USD) per dispatched session | unlimited / opt-in |
+| `ROLEBOX_DISPATCH_BUDGET_SAMPLE_INTERVAL_MS` | Budget sampling interval (ms) | 30000 |
 | `ROLEBOX_METRICS` | Enable dispatch metrics (set to any truthy value) | unset |
 
 ## Directory structure
