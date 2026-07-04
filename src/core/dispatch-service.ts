@@ -1,0 +1,121 @@
+import type { PluginService } from "./service.ts";
+import type { PluginContext } from "./context.ts";
+import type { ToolContributor } from "./tool-registry.ts";
+import { DispatchManager } from "../dispatch/manager.ts";
+import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "../dispatch/config.ts";
+import { RoleMode } from "../constants.ts";
+import { hookState } from "../hooks/state.ts";
+import type { ResolvedSubAgent } from "../types.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("dispatch-service");
+
+/**
+ * Extracts the DispatchManager lifecycle from plugin-hooks.ts into its own
+ * PluginService. Owns the resolvedSubagents and subagentModelKey maps that
+ * were previously local to createPluginHooks.
+ *
+ * Init order: no dependencies (empty dependencies list).
+ * Tool registration is deferred to ToolService (S8).
+ */
+export class DispatchService implements PluginService, ToolContributor {
+  readonly name = "dispatch-service";
+  readonly dependencies: string[] = [];
+
+  private dispatchManager!: DispatchManager;
+  private resolvedSubagents = new Map<string, { parentFullId: string }>();
+  private subagentModelKey = new Map<string, string>();
+
+  async init(ctx: PluginContext): Promise<void> {
+    // 1. Build subagent lineage maps (was registerSubagentLineage in plugin-hooks.ts)
+    for (const role of ctx.resolvedRoles) {
+      this.registerSubagentLineage(role.subagents, role.id, role.config.model);
+    }
+
+    // 2. Reuse or create DispatchManager (was lines 155-167 in plugin-hooks.ts)
+    // Use rawDirectory for map keys to match test expectations and legacy behavior
+    const mapDir = ctx.rawDirectory;
+    const storeDir = ctx.directory;
+    let dispatchManager = hookState.managerMap.get(mapDir);
+    if (!dispatchManager) {
+      const primaryRole = ctx.resolvedRoles.find(
+        (r) => r.config.mode === RoleMode.Primary,
+      );
+      const mergedConfig = mergeConfig(
+        DEFAULT_CONFIG,
+        primaryRole?.dispatchConfig,
+        resolveEnvConfig(),
+      );
+      dispatchManager = new DispatchManager(
+        ctx.client,
+        mergedConfig,
+        this.subagentModelKey,
+      );
+      dispatchManager.setStoreDirectory(storeDir);
+      hookState.managerMap.set(mapDir, dispatchManager);
+      await dispatchManager.recover();
+    }
+
+    this.dispatchManager = dispatchManager;
+  }
+
+  /**
+   * Recursively register a subagent subtree into resolvedSubagents and
+   * subagentModelKey. Models cascade down: a child without an explicit
+   * model inherits its parent's model.
+   */
+  private registerSubagentLineage(
+    subagents: ResolvedSubAgent[],
+    parentFullId: string,
+    parentModel: string | undefined,
+  ): void {
+    for (const sub of subagents) {
+      this.resolvedSubagents.set(sub.id, { parentFullId });
+      const model = sub.config.model ?? parentModel;
+      const key = model ? model : "default";
+      this.subagentModelKey.set(sub.id, key);
+      log.debug("model key", { subagent: sub.id, key, parentFullId });
+      if (sub.subagents.length > 0) {
+        this.registerSubagentLineage(sub.subagents, sub.id, model);
+      }
+    }
+  }
+
+  async dispose(): Promise<void> {
+    try {
+      this.dispatchManager.flushPersistSync();
+    } catch (err) {
+      log.warn("dispatch flush during dispose failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ── ToolContributor ─────────────────────────────────────────────
+
+  /** Tools are registered by ToolService (S8). No-op until then. */
+  getTools(): Record<
+    string,
+    {
+      description: string;
+      args: Record<string, unknown>;
+      exec: (...args: unknown[]) => Promise<unknown>;
+    }
+  > {
+    return {};
+  }
+
+  // ── Public getters ──────────────────────────────────────────────
+
+  getDispatchManager(): DispatchManager {
+    return this.dispatchManager;
+  }
+
+  getResolvedSubagents(): Map<string, { parentFullId: string }> {
+    return this.resolvedSubagents;
+  }
+
+  getSubagentModelKey(): Map<string, string> {
+    return this.subagentModelKey;
+  }
+}
