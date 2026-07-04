@@ -1,5 +1,7 @@
 import type { CondEnv } from "../function/conditions.ts";
 import type { FlowEdge } from "../types.ts";
+import type { ConditionCapability, ObserveCapability } from "./capabilities.ts";
+import type { IConcurrencyManager } from "../dispatch/concurrency.ts";
 
 /** All supported extension scopes. */
 export type ExtensionScope =
@@ -10,7 +12,8 @@ export type ExtensionScope =
   | "recovery_patterns"
   | "notification_channels"
   | "notification_events"
-  | "observe_events";
+  | "observe_events"
+  | "concurrency_policies";
 
 /** A generic extension entry from role.yaml's extensions: block. */
 export interface ExtensionEntry {
@@ -54,6 +57,7 @@ export interface ExtensionConfig {
   notification_channels?: NotificationChannelEntry[];
   notification_events?: ExtensionEntry[];
   observe_events?: ExtensionEntry[];
+  concurrency_policies?: ExtensionEntry[];
 }
 
 // ── Module Contract Interfaces ──────────────────────────────────────
@@ -111,13 +115,42 @@ export interface ObserveHandlerModule {
   handle: (ctx: unknown, spec: unknown) => string[];
 }
 
+/** Condition module contract using ConditionCapability (recommended for new modules). */
+export interface ConditionCapabilityModule {
+  /** Handler called when the condition is evaluated. Returns boolean. */
+  handler: (arg: string, cap: ConditionCapability) => boolean;
+}
+
+/** Observe event module contract using ObserveCapability (recommended for new modules). */
+export interface ObserveCapabilityModule {
+  /** Handle an observe event with typed capability. */
+  handle: (cap: ObserveCapability, spec: unknown) => string[];
+}
+
+/** Concurrency policy module contract. */
+export interface ConcurrencyPolicyModule {
+  /**
+   * Factory to create a custom IConcurrencyManager instance.
+   * Called with the dispatch config defaults.
+   */
+  create: (opts: {
+    defaultLimit: number;
+    maxQueueDepth: number;
+    reserved: number;
+    retryAfterMs: number;
+  }) => IConcurrencyManager;
+}
+
 /** Union type for all possible extension module exports. */
 export type ExtensionModule =
   | ConditionModule
+  | ConditionCapabilityModule
   | TopologyModule
   | TerminationParserModule
   | RecoveryStrategyModule
   | RecoveryPatternModule
   | NotificationChannelModule
   | ObserveHandlerModule
+  | ObserveCapabilityModule
+  | ConcurrencyPolicyModule
   | Record<string, unknown>;

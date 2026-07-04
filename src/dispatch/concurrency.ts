@@ -26,7 +26,7 @@ interface ConcurrencySlot {
   activeByParent: Map<string, number>;
 }
 
-type AcquireBackgroundResult =
+export type AcquireBackgroundResult =
   | { outcome: "acquired"; cancel: () => void }
   | { outcome: "queued"; promise: Promise<void>; cancel: () => void }
   | { outcome: "full"; error: QueueFullError; cancel: () => void };
@@ -46,7 +46,26 @@ export class QueueFullError extends Error {
   }
 }
 
-export class ConcurrencyManager {
+/**
+ * Interface for concurrency management. The default implementation is
+ * ConcurrencyManager (per-model semaphore + FIFO queue). Custom implementations
+ * can be plugged in via the concurrency_policies extension point or
+ * the concurrency_policy config field.
+ */
+export interface IConcurrencyManager {
+  acquireBackground(key: string, opts?: { parentId?: string; maxActivePerParent?: number }): AcquireBackgroundResult;
+  acquireSync(key: string): { promise: Promise<void>; cancel: () => void };
+  release(key: string, parentId?: string): void;
+  getActiveCount(key: string): number;
+  getLimit(key: string): number;
+  forceOccupyBackground(key: string, count?: number, parentId?: string): number;
+  getReserved(key: string): number;
+  setReserved(key: string, count: number): void;
+  canAcquireForParent(key: string, parentId: string, maxActivePerParent: number): boolean;
+  setSlotReserved(key: string, reserved: number): void;
+}
+
+export class ConcurrencyManager implements IConcurrencyManager {
   private slots: Map<string, ConcurrencySlot> = new Map();
   private defaultLimit: number;
   private defaultMaxQueueDepth: number;

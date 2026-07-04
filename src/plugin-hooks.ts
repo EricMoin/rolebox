@@ -6,6 +6,7 @@ import { graphSessionState } from "./graph/index.ts";
 import { functionRuntime } from "./function/runtime-state.ts";
 import { createSubLogger } from "./logger.ts";
 import { PluginCore } from "./core/plugin-core.ts";
+import { HotReloadService } from "./core/hot-reload-service.ts";
 import { DispatchService } from "./core/dispatch-service.ts";
 import { LoopService } from "./core/loop-service.ts";
 import { LspService } from "./core/lsp-service.ts";
@@ -15,6 +16,7 @@ import { RecoveryService } from "./core/recovery-service.ts";
 import { ExtensionService } from "./core/extension-service.ts";
 import { ToolService } from "./core/tool-service.ts";
 import { HookService } from "./core/hook-service.ts";
+import { HealthMonitorService } from "./core/health-monitor-service.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -49,6 +51,7 @@ export async function createPluginHooks(
   }
 
   const core = new PluginCore();
+  core.registerService(new HotReloadService());
   core.registerService(new DispatchService());
   core.registerService(new LoopService());
   core.registerService(new LspService());
@@ -58,6 +61,7 @@ export async function createPluginHooks(
   core.registerService(new ExtensionService());
   core.registerService(new ToolService());
   core.registerService(new HookService());
+  core.registerService(new HealthMonitorService());
 
   await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus() });
 

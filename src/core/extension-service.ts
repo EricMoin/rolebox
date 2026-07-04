@@ -1,6 +1,7 @@
 import type { PluginService } from "./service.ts";
 import type { PluginContext } from "./context.ts";
 import { ExtensionRegistry } from "../extensions/index.ts";
+import type { ConcurrencyPolicyModule } from "../extensions/types.ts";
 import { createSubLogger } from "../logger.ts";
 import type { RecoveryStrategy, ErrorPattern } from "../recovery/types.ts";
 
@@ -52,12 +53,29 @@ export class ExtensionService implements PluginService {
       }
     }
 
-    // Bridge recovery metrics into DispatchManager
+    // Bridge loaded concurrency policies into DispatchManager
     const dispatchService = ctx.core.getService<import("./dispatch-service.ts").DispatchService>("dispatch-service");
     const dispatchManager = dispatchService?.getDispatchManager();
 
     if (recoveryEngine && dispatchManager) {
       dispatchManager.setRecoverySnapshotProvider(() => recoveryEngine.getMetrics());
+    }
+
+    // Hot-swap concurrency manager if a custom policy was loaded via extensions
+    if (dispatchManager) {
+      const policyMod = this.extensionRegistry.getLoadedPolicies();
+      for (const [, mod] of policyMod) {
+        const cfg = dispatchManager.getConfig();
+        const customMgr = mod.create({
+          defaultLimit: cfg.maxConcurrent,
+          maxQueueDepth: cfg.maxQueueDepth ?? 10,
+          reserved: cfg.syncReservedSlots ?? 1,
+          retryAfterMs: cfg.retryAfterMs,
+        });
+        dispatchManager.setConcurrencyManager(customMgr);
+        log.debug("Hot-swapped concurrency manager from extension policy");
+        break; // Use the first registered policy
+      }
     }
   }
 
@@ -71,5 +89,9 @@ export class ExtensionService implements PluginService {
 
   getExtensionRegistry(): ExtensionRegistry {
     return this.extensionRegistry;
+  }
+
+  getLoadedPolicies(): Map<string, ConcurrencyPolicyModule> {
+    return this.extensionRegistry.getLoadedPolicies();
   }
 }

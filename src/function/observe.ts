@@ -3,6 +3,7 @@ import { functionRuntime, type FnState } from "./runtime-state.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import { extractResultBlockNamed } from "./fence.ts";
 import { evaluateCondition } from "./conditions.ts";
+import { wrapObserveCapability } from "../extensions/capabilities.ts";
 
 // Shared skeleton for the message/activate observers. Always marks the runtime
 // dirty, even when no spec matched.
@@ -146,13 +147,27 @@ export function runActivateObserve(opts: {
   return injects;
 }
 
-const customObserveHandlers = new Map<string, (ctx: unknown, spec: ObserveSpec) => string[]>();
+interface CustomObserveEntry {
+  handler: (ctx: unknown, spec: ObserveSpec) => string[];
+  /** When true, the handler receives an ObserveCapability instead of raw ctx. */
+  capability: boolean;
+}
 
+const customObserveHandlers = new Map<string, CustomObserveEntry>();
+
+/**
+ * Register a custom observe event handler.
+ * @param eventName Event name to listen for.
+ * @param handler Handler function receiving (ctx, spec).
+ * @param capability When true, the handler's ctx parameter is wrapped into an
+ *   ObserveCapability before invocation.
+ */
 export function registerObserveHandler(
   eventName: string,
   handler: (ctx: unknown, spec: ObserveSpec) => string[],
+  capability: boolean = false,
 ): void {
-  customObserveHandlers.set(eventName, handler);
+  customObserveHandlers.set(eventName, { handler, capability });
 }
 
 export function runCustomObserve(opts: {
@@ -160,17 +175,32 @@ export function runCustomObserve(opts: {
   eventName: string;
   activeFns: ResolvedFunction[];
   ctx?: unknown;
+  /** Optional extra fields forwarded to ObserveCapability when capability mode is on. */
+  observeExtras?: {
+    toolName?: string;
+    toolArgs?: unknown;
+    toolOutput?: unknown;
+    lastAssistantText?: string;
+  };
 }): string[] {
   const injects: string[] = [];
-  const handler = customObserveHandlers.get(opts.eventName);
-  if (!handler) return injects;
+  const entry = customObserveHandlers.get(opts.eventName);
+  if (!entry) return injects;
 
   for (const fn of opts.activeFns) {
     const st = functionRuntime.get(opts.sessionID, fn.name);
     if (!st) continue;
     for (const spec of fn.observe ?? []) {
       if (spec.on !== opts.eventName) continue;
-      const result = handler(opts.ctx, spec);
+      const ctx = entry.capability
+        ? wrapObserveCapability(
+            opts.ctx,
+            opts.sessionID,
+            opts.eventName,
+            opts.observeExtras,
+          )
+        : opts.ctx;
+      const result = entry.handler(ctx, spec);
       injects.push(...result);
     }
   }

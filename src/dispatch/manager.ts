@@ -10,7 +10,7 @@ import type {
 } from "./types.ts";
 import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS, OUTBOX_SWEEP_INTERVAL_MS, RESULT_RETENTION_MS } from "./config.ts";
 import { unlinkSync } from "node:fs";
-import { ConcurrencyManager } from "./concurrency.ts";
+import { ConcurrencyManager, type IConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent, hasFinalNotifyBeenSent, DISPATCH_RECOVERY_MARKER } from "./notification.ts";
@@ -55,7 +55,7 @@ export class DispatchManager {
   private sidecarGCTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingNotifications: Set<string> = new Set();
   private cleanedUpTasks = new Map<string, number>();
-  private concurrency: ConcurrencyManager;
+  private concurrency: IConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: OpencodeClient;
   private watchdog: TaskWatchdogManager;
@@ -83,15 +83,27 @@ export class DispatchManager {
     client: OpencodeClient,
     config?: Partial<DispatchManagerConfig>,
     subagentModelKey?: Map<string, string>,
+    customConcurrency?: IConcurrencyManager,
   ) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.concurrency = new ConcurrencyManager(
-      this.config.maxConcurrent,
-      this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
-      this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
-      this.config.retryAfterMs,
-    );
+    if (customConcurrency) {
+      this.concurrency = customConcurrency;
+    } else if (this.config.concurrency_policy) {
+      this.concurrency = this.config.concurrency_policy(
+        this.config.maxConcurrent,
+        this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
+        this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+        this.config.retryAfterMs,
+      );
+    } else {
+      this.concurrency = new ConcurrencyManager(
+        this.config.maxConcurrent,
+        this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
+        this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+        this.config.retryAfterMs,
+      );
+    }
     this._directory = process.cwd();
     this.store = new TaskStateStore(this._directory);
     this.subagentModelKey = subagentModelKey ?? new Map();
@@ -148,6 +160,11 @@ export class DispatchManager {
 
   getConfig(): Readonly<DispatchManagerConfig> {
     return this.config;
+  }
+
+  /** Replace the concurrency manager at runtime. Used by extension hot-loading. */
+  setConcurrencyManager(manager: IConcurrencyManager): void {
+    this.concurrency = manager;
   }
 
   /**

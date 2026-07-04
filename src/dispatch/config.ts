@@ -1,3 +1,5 @@
+import type { IConcurrencyManager } from "./concurrency.ts";
+
 /**
  * Centralized configuration constants for the dispatch subsystem.
  * This is the single source of truth — all other files import from here.
@@ -153,6 +155,13 @@ export interface DispatchManagerConfig {
   outboxMaxRetryMs?: number;
   /** Outbox sweeper polling interval (ms) — default: 5000 */
   outboxSweepIntervalMs?: number;
+
+  /**
+   * Optional factory for creating a custom IConcurrencyManager.
+   * When undefined, the default ConcurrencyManager is used.
+   * Set this to use a custom concurrency policy (e.g., priority-based, fairness-based).
+   */
+  concurrency_policy?: (defaultLimit: number, maxQueueDepth: number, reserved: number, retryAfterMs: number) => IConcurrencyManager;
 }
 
 // ── Default configuration ───────────────────────────────────────────

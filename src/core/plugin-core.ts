@@ -55,6 +55,69 @@ export class PluginCore implements PluginCoreLike {
     }
   }
 
+  /**
+   * Restart a single service and all its transitive dependents.
+   * Disposes the target service, re-initializes it, then disposes and
+   * re-initializes every service that depends on it (transitively).
+   * Errors during dispose are caught and logged; re-init errors propagate.
+   */
+  async restartService(name: string): Promise<void> {
+    const svc = this.services.get(name);
+    if (!svc) {
+      log.warn("restartService: service not found", { name });
+      return;
+    }
+    if (!this.ctx) {
+      log.warn("restartService: no context, cannot restart", { name });
+      return;
+    }
+
+    // Build reverse dependency map to compute transitive dependents
+    const revDeps = new Map<string, string[]>();
+    for (const [, s] of this.services) {
+      for (const dep of s.dependencies) {
+        const list = revDeps.get(dep);
+        if (list) {
+          list.push(s.name);
+        } else {
+          revDeps.set(dep, [s.name]);
+        }
+      }
+    }
+
+    // BFS to find the target + all transitive dependents
+    const affected = new Set<string>([name]);
+    const queue = [name];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const dependent of revDeps.get(current) ?? []) {
+        if (!affected.has(dependent)) {
+          affected.add(dependent);
+          queue.push(dependent);
+        }
+      }
+    }
+
+    // Reorder affected services by the topological sort order
+    const ordered = this.topoSort();
+    const toRestart = ordered.filter(s => affected.has(s.name));
+
+    for (const s of toRestart) {
+      log.debug("Restarting service", { name: s.name });
+      try {
+        await s.dispose();
+      } catch (err) {
+        log.warn("Service dispose during restart failed", {
+          name: s.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      await s.init(this.ctx);
+    }
+
+    log.info("Service restart complete", { target: name, restarted: toRestart.map(s => s.name) });
+  }
+
   private topoSort(): PluginService[] {
     const visited = new Set<string>();
     const result: PluginService[] = [];

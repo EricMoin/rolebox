@@ -2,7 +2,8 @@ import type { PluginService } from "./service.ts";
 import type { PluginContext } from "./context.ts";
 import type { ToolContributor } from "./tool-registry.ts";
 import { DispatchManager } from "../dispatch/manager.ts";
-import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG } from "../dispatch/config.ts";
+import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS } from "../dispatch/config.ts";
+import type { IConcurrencyManager } from "../dispatch/concurrency.ts";
 import { RoleMode } from "../constants.ts";
 import { hookState } from "../hooks/state.ts";
 import type { ResolvedSubAgent } from "../types.ts";
@@ -46,10 +47,22 @@ export class DispatchService implements PluginService, ToolContributor {
         primaryRole?.dispatchConfig,
         resolveEnvConfig(),
       );
+      // Check for custom concurrency policy from role config
+      let customConcurrency: IConcurrencyManager | undefined;
+      if (primaryRole?.dispatchConfig?.concurrency_policy) {
+        customConcurrency = primaryRole.dispatchConfig.concurrency_policy(
+          mergedConfig.maxConcurrent,
+          mergedConfig.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
+          mergedConfig.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+          mergedConfig.retryAfterMs,
+        );
+      }
+
       dispatchManager = new DispatchManager(
         ctx.client,
         mergedConfig,
         this.subagentModelKey,
+        customConcurrency,
       );
       dispatchManager.setStoreDirectory(storeDir);
       hookState.managerMap.set(mapDir, dispatchManager);
@@ -117,5 +130,14 @@ export class DispatchService implements PluginService, ToolContributor {
 
   getSubagentModelKey(): Map<string, string> {
     return this.subagentModelKey;
+  }
+
+  // ── Health ───────────────────────────────────────────────────
+
+  health(): import("./service.ts").ServiceHealth {
+    if (!this.dispatchManager) {
+      return { status: "unhealthy", detail: "DispatchManager not initialized" };
+    }
+    return { status: "healthy" };
   }
 }

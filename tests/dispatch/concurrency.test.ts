@@ -1,7 +1,23 @@
 import { describe, it, expect } from "bun:test";
-import { ConcurrencyManager } from "../../src/dispatch/concurrency.ts";
+import { ConcurrencyManager, type IConcurrencyManager } from "../../src/dispatch/concurrency.ts";
 
 describe("ConcurrencyManager", () => {
+  it("implements IConcurrencyManager interface", () => {
+    const cm: IConcurrencyManager = new ConcurrencyManager(5, 10, 0);
+    expect(cm).toBeInstanceOf(ConcurrencyManager);
+    // Verify all interface methods are callable
+    expect(typeof cm.acquireBackground).toBe("function");
+    expect(typeof cm.acquireSync).toBe("function");
+    expect(typeof cm.release).toBe("function");
+    expect(typeof cm.getActiveCount).toBe("function");
+    expect(typeof cm.getLimit).toBe("function");
+    expect(typeof cm.forceOccupyBackground).toBe("function");
+    expect(typeof cm.getReserved).toBe("function");
+    expect(typeof cm.setReserved).toBe("function");
+    expect(typeof cm.canAcquireForParent).toBe("function");
+    expect(typeof cm.setSlotReserved).toBe("function");
+  });
+
   it("acquire within limit resolves immediately", async () => {
     const cm = new ConcurrencyManager(5, 10, 0);
     for (let i = 0; i < 5; i++) {

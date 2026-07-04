@@ -90,4 +90,13 @@ export class LoopService implements PluginService {
   getLoopStore(): LoopStore {
     return this.loopStore;
   }
+
+  // ── Health ───────────────────────────────────────────────────
+
+  health(): import("./service.ts").ServiceHealth {
+    if (!this.loopManager) {
+      return { status: "unhealthy", detail: "LoopCoordinator not initialized" };
+    }
+    return { status: "healthy" };
+  }
 }

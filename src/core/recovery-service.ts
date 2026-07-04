@@ -96,4 +96,21 @@ export class RecoveryService implements PluginService {
   getRecoveryEngine(): RecoveryEngine | undefined { return this.recoveryEngine; }
   getBuiltInHookRegistry(): BuiltInHookRegistry | undefined { return this.builtInHookRegistry; }
   getBuiltinConfig(): Record<string, boolean> | undefined { return this.builtinConfig; }
+
+  // ── Health ───────────────────────────────────────────────────
+
+  health(): import("./service.ts").ServiceHealth {
+    if (!this.recoveryEngine) {
+      // Recovery engine not created (possibly disabled by config)
+      return { status: "healthy", detail: "recovery engine not created" };
+    }
+    // Check recovery metrics for high failure rate
+    const metrics = this.recoveryEngine.getMetrics();
+    const totalAttempts = metrics.totalAttempts;
+    const abortedChains = metrics.abortedChains;
+    if (totalAttempts > 10 && abortedChains / totalAttempts > 0.5) {
+      return { status: "degraded", detail: `high abort rate: ${abortedChains}/${totalAttempts}` };
+    }
+    return { status: "healthy" };
+  }
 }

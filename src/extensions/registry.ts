@@ -1,4 +1,4 @@
-import type { ExtensionConfig, ExtensionEntry, RecoveryStrategyModule, RecoveryPatternModule } from "./types.ts";
+import type { ExtensionConfig, ExtensionEntry, RecoveryStrategyModule, RecoveryPatternModule, ConcurrencyPolicyModule } from "./types.ts";
 import type { ExtensionPoint } from "./extension-point.ts";
 import { createSubLogger } from "../logger.ts";
 import {
@@ -10,6 +10,7 @@ import {
   NotificationChannelExtensionPoint,
   NotificationEventExtensionPoint,
   ObserveEventExtensionPoint,
+  ConcurrencyPolicyExtensionPoint,
 } from "./points/index.ts";
 
 const log = createSubLogger("ext:registry");
@@ -32,10 +33,11 @@ export class ExtensionRegistry {
   private readonly points = new Map<string, ExtensionPoint>();
   private readonly strategiesPoint: RecoveryStrategyExtensionPoint;
   private readonly patternsPoint: RecoveryPatternExtensionPoint;
+  private readonly policiesPoint: ConcurrencyPolicyExtensionPoint;
 
   constructor() {
-    // Instantiate all 8 built-in extension points and hold references to
-    // the two that expose loaded-module state.
+    // Instantiate all 9 built-in extension points and hold references to
+    // the three that expose loaded-module state.
     const conditions = new ConditionExtensionPoint();
     const graphTopologies = new GraphTopologyExtensionPoint();
     const terminationConditions = new TerminationConditionExtensionPoint();
@@ -44,6 +46,7 @@ export class ExtensionRegistry {
     const notificationChannels = new NotificationChannelExtensionPoint();
     const notificationEvents = new NotificationEventExtensionPoint();
     const observeEvents = new ObserveEventExtensionPoint();
+    this.policiesPoint = new ConcurrencyPolicyExtensionPoint();
 
     // Register every point by its scope name.
     const builtins: ExtensionPoint[] = [
@@ -55,6 +58,7 @@ export class ExtensionRegistry {
       notificationChannels,
       notificationEvents,
       observeEvents,
+      this.policiesPoint,
     ];
     for (const point of builtins) {
       this.points.set(point.name, point);
@@ -78,6 +82,10 @@ export class ExtensionRegistry {
 
   getLoadedPatterns(): Map<string, RecoveryPatternModule> {
     return this.patternsPoint.getLoadedPatterns();
+  }
+
+  getLoadedPolicies(): Map<string, ConcurrencyPolicyModule> {
+    return this.policiesPoint.getPolicies();
   }
 
   /**

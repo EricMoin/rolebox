@@ -1,3 +1,9 @@
+/** Health status of a service, returned by the optional health() method. */
+export interface ServiceHealth {
+  status: "healthy" | "degraded" | "unhealthy";
+  detail?: string;
+}
+
 import type { PluginContext } from "./context.ts";
 
 /**
@@ -14,6 +20,8 @@ export interface PluginService {
   init(ctx: PluginContext): Promise<void>;
   /** Called on shutdown or hot-reload. Must be safe to call even if init failed. */
   dispose(): Promise<void>;
+  /** Optional health check. When defined, HealthMonitorService polls it periodically. */
+  health?(): ServiceHealth;
 }
 
 /**
@@ -23,4 +31,6 @@ export interface PluginService {
 export interface PluginCoreLike {
   getService<T>(name: string): T | undefined;
   getServices(): Map<string, PluginService>;
+  /** Restart a service and all its transitive dependents. */
+  restartService(name: string): Promise<void>;
 }

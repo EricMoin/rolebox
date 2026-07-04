@@ -5,6 +5,10 @@ import { createSubLogger } from "../../logger.ts";
 
 const log = createSubLogger("ext:point:observe-events");
 
+function hasCapabilityFlag(mod: Record<string, unknown>): boolean {
+  return mod.capability === true;
+}
+
 export class ObserveEventExtensionPoint implements ExtensionPoint {
   readonly name = "observe_events";
 
@@ -17,10 +21,17 @@ export class ObserveEventExtensionPoint implements ExtensionPoint {
 
       const observeMod = mod as Partial<ObserveHandlerModule>;
       if (typeof observeMod.handle === "function") {
-        registerObserveHandler(entry.name, observeMod.handle);
-        log.debug("Registered custom observe event handler", { name: entry.name });
+        const useCapability = hasCapabilityFlag(mod as Record<string, unknown>);
+        registerObserveHandler(entry.name, observeMod.handle, useCapability);
+        log.debug("Registered custom observe event handler", {
+          name: entry.name,
+          capability: useCapability,
+        });
       } else {
-        log.warn("Observe module missing handle function", { name: entry.name, module: entry.module });
+        log.warn("Observe module missing handle function", {
+          name: entry.name,
+          module: entry.module,
+        });
       }
     }
   }
