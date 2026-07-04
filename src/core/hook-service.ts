@@ -16,6 +16,7 @@ import { handleChatMessage } from "../hooks/chat-message.ts";
 import { handleToolAfter } from "../hooks/tool-after.ts";
 import { handleToolBefore } from "../hooks/tool-before.ts";
 import { handleSystemTransform } from "../hooks/system-transform.ts";
+import { handleCompacting } from "../hooks/compaction.ts";
 import { CustomHookRegistry } from "../hooks/custom/registry.ts";
 import { STOP_LOOP_COMMAND, STOP_LOOP_SIGNAL } from "../loop/constants.ts";
 import type { JudgeFn } from "../graph/termination-async.ts";
@@ -218,6 +219,12 @@ export class HookService implements PluginService {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const agent = (input as any).agent as string | undefined;
         await handleSystemTransform({ sessionID: input.sessionID, agent }, output, hookState, deps);
+      },
+      "experimental.session.compacting": async (
+        input: { sessionID: string },
+        output: { context: string[]; prompt?: string },
+      ) => {
+        await handleCompacting(input, output, deps.dir);
       },
       dispose: async () => {
         try { await this.customHookRegistry?.dispose(); } catch { /* best effort */ }
