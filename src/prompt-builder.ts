@@ -1,4 +1,4 @@
-import type { ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "./types.ts";
+import type { MemorySummary, ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "./types.ts";
 import type { FnState } from "./function/runtime-state.ts";
 import { buildCollaborationBlock } from "./graph/index.ts";
 import { createSubLogger } from "./logger.ts";
@@ -138,6 +138,21 @@ export function buildReferenceBlock(references: ResolvedReference[]): string {
       xml("name", [r.name]),
       xml("path", [r.filePath]),
       xml("description", [r.description]),
+    ])),
+  );
+}
+
+export function buildMemoryBlock(memories: MemorySummary[]): string {
+  if (memories.length === 0) return "";
+  return renderSection(
+    "available_memory",
+    "Memory entries from previous sessions. Use memory_recall to search for specific memories.",
+    memories.map((m) => xml("memory", [
+      xml("id", [m.id]),
+      xml("title", [m.title]),
+      xml("category", [m.category]),
+      xml("relevance", [m.relevance]),
+      xml("updated", [m.updated_at]),
     ])),
   );
 }
