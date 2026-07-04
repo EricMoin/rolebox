@@ -5,7 +5,7 @@ import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
-import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock } from "../prompt-builder.ts";
+import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock, buildMemoryBlock } from "../prompt-builder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
 import type { ResolvedFunction } from "../types.ts";
@@ -79,6 +79,31 @@ export async function handleSystemTransform(
       const availBlock = buildAvailableFunctionsBlock(agentFunctions);
       if (availBlock) {
         output.system.push(availBlock);
+      }
+    }
+  }
+
+  // Memory injection — runs in BOTH code paths (functions active and inactive)
+  if (agentId) {
+    const role = deps.roleMap?.get(agentId);
+    const memConfig = role?.config?.memory ?? { inject: true, max_inject: 10, min_relevance: "medium", scope: "both" };
+
+    if (memConfig.inject !== false) {
+      try {
+        const { MemoryStore } = await import("../memory/store.ts");
+        const store = new MemoryStore(deps.dir);
+        const memories = store.list({
+          scope: memConfig.scope ?? "both",
+          limit: memConfig.max_inject ?? 10,
+          minRelevance: memConfig.min_relevance ?? "medium",
+        });
+        store.close();
+        const block = buildMemoryBlock(memories);
+        if (block) {
+          output.system.push(block);
+        }
+      } catch (err) {
+        log.warn("Failed to inject memory block", { error: String(err) });
       }
     }
   }

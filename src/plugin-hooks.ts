@@ -27,6 +27,12 @@ import { createHashlineReadTool } from "./hashline/hashline-read.ts";
 import { createHashlineEditTool } from "./hashline/hashline-edit.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
+import {
+  createMemoryWriteTool,
+  createMemoryRecallTool,
+  createMemoryListTool,
+  createMemoryUpdateTool,
+} from "./memory/tools.ts";
 import { LoopStore } from "./loop/loop-store.ts";
 import { INTER_ROUND_DELAY_MS, STOP_LOOP_COMMAND, STOP_LOOP_SIGNAL } from "./loop/constants.ts";
 import type { JudgeFn } from "./graph/termination-async.ts";
@@ -405,10 +411,12 @@ export async function createPluginHooks(
   if (recoveryEngine) {
     dispatchManager.setRecoverySnapshotProvider(() => recoveryEngine.getMetrics());
   }
+  const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
   const deps: HookDeps = {
     client,
     roleFunctionsMap,
     roleGraphMap,
+    roleMap,
     dir,
     dispatchManager,
     loopManager,
@@ -437,6 +445,10 @@ export async function createPluginHooks(
     ...createAllLspTools(lspClientManager, lspDocManager),
     hashline_read: createHashlineReadTool(),
     hashline_edit: createHashlineEditTool(),
+    memory_write: createMemoryWriteTool(),
+    memory_recall: createMemoryRecallTool(),
+    memory_list: createMemoryListTool(),
+    memory_update: createMemoryUpdateTool(),
   };
 
   // Register tool schemas for tool.execute.before validation

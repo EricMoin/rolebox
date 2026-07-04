@@ -28,6 +28,7 @@ const main = defineCommand({
     status: () => import("./cli/commands/status.ts").then((m) => m.default),
     info: () => import("./cli/commands/info.ts").then((m) => m.default),
     monitor: () => import("./cli/commands/monitor.ts").then((m) => m.default),
+    memory: () => import("./cli/commands/memory.ts").then((m) => m.default),
   },
   cleanup() {
     return checkForUpdate(version);
