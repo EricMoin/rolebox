@@ -39,3 +39,11 @@ export function workspaceHash(dir: string): string {
 export function stateDirFor(dir: string): string {
   return join(dir, ROLEBOX_DIR, STATE_SUBDIR);
 }
+
+/**
+ * Return the path to the memory SQLite database file for the given
+ * workspace directory. The file lives directly under `.rolebox/`.
+ */
+export function memoryDbPath(dir: string): string {
+  return join(dir, ROLEBOX_DIR, "memory.db");
+}
