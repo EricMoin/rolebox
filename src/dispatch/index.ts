@@ -1,5 +1,6 @@
 export { DispatchManager } from "./manager.ts";
 export { ConcurrencyManager } from "./concurrency.ts";
+export { MetricsPersister } from "./metrics-persister.ts";
 export { SessionMonitor } from "./session-monitor.ts";
 export { TaskWatchdogManager } from "./watchdog.ts";
 export { detectCompletion } from "./completion-detector.ts";

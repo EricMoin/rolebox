@@ -398,6 +398,13 @@ export async function createPluginHooks(
       recoveryEngine.registerErrorPattern({ name, category: mod.category, match: mod.match } as unknown as import("./recovery/types.ts").ErrorPattern);
     }
   }
+
+  // Bridge recovery metrics into the persisted metrics pipeline.
+  // DispatchManager's MetricsPersister will call the provider during
+  // serialization to include recovery data in the metrics-*.json file.
+  if (recoveryEngine) {
+    dispatchManager.setRecoverySnapshotProvider(() => recoveryEngine.getMetrics());
+  }
   const deps: HookDeps = {
     client,
     roleFunctionsMap,

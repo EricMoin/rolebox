@@ -15,6 +15,7 @@ import { TaskWatchdogManager } from "./watchdog.ts";
 import { detectCompletion } from "./completion-detector.ts";
 import { notifyParent, hasFinalNotifyBeenSent, DISPATCH_RECOVERY_MARKER } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
+import { MetricsPersister } from "./metrics-persister.ts";
 
 import { TaskStateStore } from "./task-store.ts";
 import { extractResultBlock, readResultSidecar, resultSidecarPath, writeResultSidecar } from "./result-extractor.ts";
@@ -72,6 +73,7 @@ export class DispatchManager {
   private _dirty = false;
   private _persistTimer: ReturnType<typeof setTimeout> | undefined;
   private sessionMonitor: SessionMonitor;
+  private metricsPersister: MetricsPersister;
   private notifyOutbox = new Set<string>();
   private sweeperTimer: ReturnType<typeof setInterval> | undefined;
   private _deferredIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -94,6 +96,7 @@ export class DispatchManager {
     this.store = new TaskStateStore(this._directory);
     this.subagentModelKey = subagentModelKey ?? new Map();
     this.sessionMonitor = new SessionMonitor();
+    this.metricsPersister = new MetricsPersister(this._directory);
     this.watchdog = new TaskWatchdogManager(
       {
         onReconcile: (taskId: string) => this.evaluateAndComplete(taskId, "watchdog-reconcile"),
@@ -1042,6 +1045,11 @@ export class DispatchManager {
       } catch (err) {
         debugLog("persist", "*", `async save failed: ${err}`);
       }
+      try {
+        await this.metricsPersister.persist();
+      } catch (err) {
+        debugLog("persist", "*", `metrics persist failed: ${err}`);
+      }
     }, 500);
   }
 
@@ -1058,6 +1066,7 @@ export class DispatchManager {
       this._dirty = false;
       await this.store.save(this.tasks, this.notifyOutbox);
     }
+    await this.metricsPersister.persist();
   }
 
   /**
@@ -1078,6 +1087,8 @@ export class DispatchManager {
       } catch (err) {
         debugLog("persist", "*", `sync flush failed: ${err}`);
       }
+      this.metricsPersister.flushSync();
+      this.metricsPersister.dispose();
     }
     if (this.sweeperTimer) {
       clearInterval(this.sweeperTimer);
@@ -1117,6 +1128,22 @@ export class DispatchManager {
   setStoreDirectory(directory: string): void {
     this._directory = directory;
     this.store = new TaskStateStore(directory);
+    this.metricsPersister = new MetricsPersister(directory);
+  }
+
+  /**
+   * Register a provider for recovery metrics snapshots.
+   * Delegates to MetricsPersister so recovery data is included in the
+   * persisted metrics file. No-op when the underlying persister has no
+   * provider registered (recovery data simply absent from the file).
+   *
+   * Wired from plugin-hooks.ts where both DispatchManager and RecoveryEngine
+   * are available.
+   */
+  setRecoverySnapshotProvider(
+    provider: (() => import("../recovery/types.ts").RecoveryMetricsSnapshot | null) | null,
+  ): void {
+    this.metricsPersister.setRecoverySnapshotProvider(provider);
   }
 
   async recover(): Promise<void> {

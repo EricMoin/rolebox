@@ -90,6 +90,12 @@ export const OUTBOX_MAX_RETRY_MS = 60_000;
 /** Outbox sweeper polling interval (ms) — default: 5 s */
 export const OUTBOX_SWEEP_INTERVAL_MS = 5_000;
 
+/** Metrics persist interval (ms) — how often to flush metrics to disk — default: 5 s */
+export const METRICS_PERSIST_INTERVAL_MS = 5_000;
+
+/** Default max NDJSON metrics event log file size (100 KB). */
+export const DEFAULT_METRICS_EVENT_LOG_MAX_BYTES = 102_400;
+
 // ── Configuration interface ─────────────────────────────────────────
 
 /**

@@ -241,6 +241,8 @@ export class MetricsRegistry {
     this.counters.clear();
     this.gauges.clear();
     this.histograms.clear();
+    this.coreCounters.clear();
+    this.coreGauges.clear();
   }
 }
 
