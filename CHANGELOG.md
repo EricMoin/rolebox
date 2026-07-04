@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.19.0
+
+### Features
+
+- **Comprehensive monitoring system** — `rolebox monitor` rebuilt from a simple task list into a full observability dashboard:
+  - **Metrics persistence bridge** — In-process `MetricsRegistry` now flushes to `.rolebox/state/metrics-{hash}.json` via a new `MetricsPersister` class (atomic writes, NDJSON ring-buffer event log capped at 100KB). Integrated into `DispatchManager` lifecycle (persist/flush/dispose).
+  - **Recovery metrics bridge** — `RecoveryMetricsCollector` snapshots are now embedded in the persisted metrics file via a provider callback wired in `plugin-hooks.ts`, making recovery chain data (attempts, successes, aborted/exhausted, by-category, by-strategy, error-type frequency) visible to the monitor.
+  - **Metrics panel** — Counter totals (dispatch_total, completed, error, cancelled, timeout, rejected, backpressure_retry), gauge snapshots (inflight_tasks, concurrency_active/queued/limit), and histogram summaries (task_duration_ms, queue_wait_ms with avg/p50/p95) rendered in the CLI.
+  - **Filtering & sorting** — `--agent=<pattern>` (case-insensitive substring), `--status=<list>` (comma-separated), `--sort=<field>` (status/agent/duration/started).
+  - **Task detail view** — `--task-id=<id>` one-shot mode with `--offset`/`--limit` pagination for full result sidecar text.
+  - **Incremental diff watch** — Watch mode now updates only changed lines via ANSI cursor positioning instead of full-screen clear. Tracks added/removed/changed tasks with a `diff: +N ~M -N` summary. SIGWINCH triggers full redraw. `--full-redraw` falls back to old behavior.
+  - **Notification display** — `--show-notifications` reveals quiet-hours status, throttle stats, and recent events.
+  - **Export** — `--export=json|prometheus|summary` with `--output=<path>`. Prometheus format includes HELP/TYPE lines, labeled metrics, and histogram buckets with `le=` labels.
+- **Plugin-style extension system** — Users can now extend rolebox with custom conditions, graph topologies, notification channels, and hooks via a registry-based extension API. New `src/extensions/` module with loader and type-safe registries.
+- **Configurable error recovery framework** — YAML-configurable error recovery system with provider-agnostic error pattern detection (7+ patterns), 7 built-in recovery strategies (retry, compact, fallback_model, etc.), recovery strategy chains (try A → B → C → abort), state persistence across restarts, metrics collection, 5 error-recovery hooks (default ON: session, edit, JSON, context, empty), and 4 guard hooks (default OFF). Extensible via `RecoveryStrategy` interface and `PatternRegistry`.
+- **Custom hook registration** — Users can declare hooks in `role.yaml` that subscribe to agent lifecycle events (`chat.message`, `tool.execute.before/after`, `system.transform`, `event`). Each hook is a JS/TS module with typed handlers, configurable phase (before/after built-in), priority-based ordering, and tool/event filtering.
+- **Notification manager** — Full notification subsystem integrated with session lifecycle: multi-channel delivery (terminal, file, system), quiet hours, throttling, scheduling, and content formatting. New `src/notifications/` module (12 files).
+
+### Bug Fixes
+
+- **dispatch_output on running tasks** — Replace the successful text response ("Task is still running") with an Error throw when `dispatch_output` is called on a running/pending task, preventing the LLM from entering a polling loop. Three layers of defense: primary tool throw, tool-before guard, tool-after correction injection.
+
+### Refactors
+
+- **Notifications enums → const objects** — Convert enums to const objects for extensibility, enabling the extension system to register new notification channels.
+- **Metrics `reset()` fix** — `MetricsRegistry.reset()` now also clears `coreCounters`/`coreGauges`, fixing a state leak across test runs.
+
 ## 0.18.0
 
 ### Features
