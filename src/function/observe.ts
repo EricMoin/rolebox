@@ -145,3 +145,35 @@ export function runActivateObserve(opts: {
   });
   return injects;
 }
+
+const customObserveHandlers = new Map<string, (ctx: unknown, spec: ObserveSpec) => string[]>();
+
+export function registerObserveHandler(
+  eventName: string,
+  handler: (ctx: unknown, spec: ObserveSpec) => string[],
+): void {
+  customObserveHandlers.set(eventName, handler);
+}
+
+export function runCustomObserve(opts: {
+  sessionID: string;
+  eventName: string;
+  activeFns: ResolvedFunction[];
+  ctx?: unknown;
+}): string[] {
+  const injects: string[] = [];
+  const handler = customObserveHandlers.get(opts.eventName);
+  if (!handler) return injects;
+
+  for (const fn of opts.activeFns) {
+    const st = functionRuntime.get(opts.sessionID, fn.name);
+    if (!st) continue;
+    for (const spec of fn.observe ?? []) {
+      if (spec.on !== opts.eventName) continue;
+      const result = handler(opts.ctx, spec);
+      injects.push(...result);
+    }
+  }
+  functionRuntime.markDirty();
+  return injects;
+}

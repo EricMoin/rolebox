@@ -5,6 +5,7 @@ import { PatternRegistry, createDefaultPatterns } from "./error-detection.ts";
 import { StrategyRegistry } from "./strategies/registry.ts";
 import { registerBuiltinStrategies } from "./strategies/index.ts";
 import { RecoveryChainExecutor } from "./chain-executor.ts";
+import { addKnownStrategy } from "./config.ts";
 import { appendCorrection } from "../hooks/context.ts";
 import { createSubLogger } from "../logger.ts";
 
@@ -161,6 +162,7 @@ export class RecoveryEngine {
 
   registerStrategy(strategy: import("./types.ts").RecoveryStrategy): void {
     this.strategyRegistry.register(strategy);
+    addKnownStrategy(strategy.name);
   }
 
   registerErrorPattern(pattern: import("./types.ts").ErrorPattern): void {

@@ -8,6 +8,7 @@ import type {
 import type { DispatchManagerConfig } from "./dispatch/config.ts";
 import type { HooksBlock } from "./hooks/custom/types.ts";
 import type { NotificationConfig } from "./notifications/types.ts";
+import type { ExtensionConfig } from "./extensions/types.ts";
 
 /**
  * Permission configuration, mirroring opencode's PermissionConfig structure.
@@ -145,7 +146,7 @@ export interface ResolvedGraph {
   /** Subset of edges marked as exit transitions */
   exitEdges: FlowEdge[];
   /** The template that was expanded, if any */
-  template?: GraphTemplate;
+  template?: string;
   /** Loop groups detected in the graph (cycles subject to termination rules) */
   loopGroups: LoopGroup[];
   /** Resolved termination configuration for the graph */
@@ -297,6 +298,8 @@ export interface RoleConfig {
   notifications?: NotificationConfig;
   /** Custom hook declarations for lifecycle event hooks */
   hooks?: HooksBlock;
+  /** Extension modules to register custom conditions, topologies, channels, etc. */
+  extensions?: ExtensionConfig;
 }
 
 /**
@@ -454,7 +457,7 @@ export type Condition =
 /** A reaction a function runs when a lifecycle event fires. */
 export interface ObserveSpec {
   /** Which lifecycle event triggers this reaction. */
-  on: "tool_after" | "message" | "activate";
+  on: string;
   /** For on:"tool_after", only fire when this tool was called. */
   tool?: string;
   /** Optional extra guard; reaction only runs when this condition is true. */
@@ -475,6 +478,8 @@ export interface ObserveSpec {
     not_contains?: string;
   };
 }
+
+export const BUILTIN_OBSERVE_EVENTS = ["tool_after", "message", "activate"] as const;
 
 /** When `when` becomes true, activate/deactivate the listed functions. */
 export interface TransitionSpec {

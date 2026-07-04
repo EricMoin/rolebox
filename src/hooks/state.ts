@@ -5,6 +5,7 @@ import type { CustomHookRegistry } from "./custom/registry.ts";
 import type { RecoveryEngine } from "../recovery/engine.ts";
 import type { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
 import type { NotificationManager } from "../notifications/manager.ts";
+import type { ExtensionRegistry } from "../extensions/registry.ts";
 
 export class HookState {
   // Keyed by raw directory path
@@ -31,6 +32,7 @@ export class HookState {
   builtInHookRegistry?: BuiltInHookRegistry;
   notificationManager?: NotificationManager;
   builtinConfig?: Record<string, boolean>;
+  extensionRegistry?: ExtensionRegistry;
 }
 
 export const hookState = new HookState();

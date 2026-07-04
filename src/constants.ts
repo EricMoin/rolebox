@@ -54,9 +54,16 @@ export const GraphTemplate = {
 export type GraphTemplate = (typeof GraphTemplate)[keyof typeof GraphTemplate];
 
 /** All valid GraphTemplate values, for runtime validation. */
-export const GRAPH_TEMPLATE_VALUES: ReadonlySet<string> = new Set(
+export const GRAPH_TEMPLATE_VALUES: Set<string> = new Set(
   Object.values(GraphTemplate),
 );
+
+/**
+ * Register a custom graph template value at runtime.
+ */
+export function addGraphTemplateValue(name: string): void {
+  GRAPH_TEMPLATE_VALUES.add(name);
+}
 
 // ── Graph Sentinel ─────────────────────────────────────────────────────
 

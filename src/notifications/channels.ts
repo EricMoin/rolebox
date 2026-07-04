@@ -373,13 +373,32 @@ class LogChannel implements NotificationChannel {
   async dispose(): Promise<void> {}
 }
 
+// ── Custom Channel Factory Registry ──────────────────────────────────
+
+const customChannelFactories = new Map<
+  string,
+  (config: Record<string, unknown>) => Promise<NotificationChannel | null>
+>();
+
+export function registerChannelFactory(
+  kind: string,
+  factory: (config: Record<string, unknown>) => Promise<NotificationChannel | null>,
+): void {
+  customChannelFactories.set(kind, factory);
+}
+
 // ── Factory ─────────────────────────────────────────────────────────
 
 export async function createChannel(
   config: NotificationChannelConfig,
 ): Promise<NotificationChannel | null> {
+  const customFactory = customChannelFactories.get(config.kind);
+  if (customFactory) {
+    return customFactory(config as unknown as Record<string, unknown>);
+  }
+
   switch (config.kind) {
-    case NotificationChannelKind.SystemToast: {
+    case NOTIFICATION_CHANNEL_KINDS.SystemToast: {
       if (!config.enabled) return null;
       const platform = detectPlatform();
       if (platform.os === "unknown") return null;
@@ -405,7 +424,7 @@ export async function createChannel(
       return new SoundChannel(platform, player, config.soundPath);
     }
 
-    case NotificationChannelKind.CustomCommand: {
+    case NOTIFICATION_CHANNEL_KINDS.CustomCommand: {
       if (!config.enabled) return null;
       if (!config.command || config.command.trim().length === 0) return null;
       return new CustomCommandChannel(
@@ -415,19 +434,19 @@ export async function createChannel(
       );
     }
 
-    case NotificationChannelKind.Webhook: {
+    case NOTIFICATION_CHANNEL_KINDS.Webhook: {
       if (!config.enabled) return null;
       if (!config.url || config.url.trim().length === 0) return null;
       return new WebhookChannel(config.url, config.headers, config.timeoutMs);
     }
 
-    case NotificationChannelKind.File: {
+    case NOTIFICATION_CHANNEL_KINDS.File: {
       if (!config.enabled) return null;
       if (!config.path || config.path.trim().length === 0) return null;
       return new FileChannel(config.path);
     }
 
-    case NotificationChannelKind.Log: {
+    case NOTIFICATION_CHANNEL_KINDS.Log: {
       if (!config.enabled) return null;
       return new LogChannel(config.level);
     }

@@ -1,6 +1,9 @@
 import type { Condition } from "../types.ts";
 import type { FnState } from "./runtime-state.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("conditions");
 
 export interface CondEnv {
   sessionID: string;
@@ -60,5 +63,34 @@ export function evaluateCondition(cond: Condition | undefined, env: CondEnv): bo
   return false;
 }
 
-/** The ONLY allowed named conditions, derived from the registry above. */
-export const KNOWN_CONDITIONS = new Set(Object.keys(NAMED_CONDITIONS));
+/** Known condition names, derived from NAMED_CONDITIONS keys.
+ * Includes both built-in conditions and any registered via registerCondition().
+ */
+export const KNOWN_CONDITIONS = new Set<string>(Object.keys(NAMED_CONDITIONS));
+
+/**
+ * Refresh KNOWN_CONDITIONS to include any dynamically registered conditions.
+ * Called after registerCondition() adds new entries.
+ */
+export function refreshKnownConditions(): void {
+  for (const key of Object.keys(NAMED_CONDITIONS)) {
+    KNOWN_CONDITIONS.add(key);
+  }
+}
+
+/**
+ * Register a custom named condition at runtime.
+ * If the name already exists, logs a warning and overwrites.
+ * @param name Condition name (used in frontmatter gate/transition/continue_until)
+ * @param handler Function that evaluates the condition given an arg string and CondEnv
+ */
+export function registerCondition(
+  name: string,
+  handler: (arg: string, env: CondEnv) => boolean,
+): void {
+  if (NAMED_CONDITIONS[name]) {
+    log.warn(`Condition '${name}' already registered — overwriting`);
+  }
+  NAMED_CONDITIONS[name] = handler;
+  refreshKnownConditions();
+}

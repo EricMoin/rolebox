@@ -36,20 +36,34 @@ export interface HooksBlock {
   recovery?: RecoveryConfig;
 }
 
-/** Context passed to every custom hook handler invocation. */
+export interface PromptBlock {
+  tag: string;
+  content: string;
+}
+
+export interface DispatchSnapshot {
+  activeTaskCount: number;
+  tasks: Array<{ id: string; status: string; subagent: string }>;
+}
+
 export interface HookContext {
-  /** The hook's name (from config) */
   hookName: string;
-  /** The hook's config (from role.yaml, passed through as-is) */
   config: Record<string, unknown> | undefined;
-  /** Current session ID (when available) */
   sessionID?: string;
-  /** Current agent ID (when available) */
   agent?: string;
-  /** Inject text into the next system prompt (same mechanism as appendCorrection) */
   inject: (text: string) => void;
-  /** Structured logger scoped to this hook */
   log: Logger<ILogObj>;
+
+  replaceBlock?: (tag: string, newContent: string) => void;
+  removeBlock?: (tag: string) => void;
+  getBlocks?: () => PromptBlock[];
+
+  getFunctionState?: (fnName: string) => unknown | undefined;
+  getDispatchState?: () => DispatchSnapshot | undefined;
+  getGraphState?: () => unknown | undefined;
+
+  skip?: () => void;
+  retry?: () => void;
 }
 
 /** The module interface that custom hook files must export. */

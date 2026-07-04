@@ -1,14 +1,41 @@
 import type { FlowEdge, GraphTemplate } from "../types.ts";
 import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("graph-templates");
+
+// Private registry for custom topologies
+const customTopologies = new Map<string, (agents: string[]) => FlowEdge[]>();
+
+/**
+ * Register a custom graph topology expander at runtime.
+ * If the name already exists, logs a warning and overwrites.
+ */
+export function registerTopology(
+  name: string,
+  expander: (agents: string[]) => FlowEdge[],
+): void {
+  if (customTopologies.has(name)) {
+    log.warn(`overwriting existing custom topology: "${name}"`);
+  }
+  customTopologies.set(name, expander);
+}
 
 export function expandTemplate(
-  topology: GraphTemplate,
+  topology: GraphTemplate | string,
   agents: string[],
 ): FlowEdge[] {
   if (agents.length === 0) {
     return [];
   }
 
+  // Check custom topologies first
+  const customExpander = customTopologies.get(topology);
+  if (customExpander) {
+    return customExpander(agents);
+  }
+
+  // Fall through to built-in templates
   switch (topology) {
     case GT.Pipeline:
       return expandPipeline(agents);

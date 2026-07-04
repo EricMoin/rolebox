@@ -6,6 +6,7 @@ import type { CustomHookRegistry } from "./custom/registry.ts";
 import type { RecoveryEngine } from "../recovery/engine.ts";
 import type { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
 import type { NotificationManager } from "../notifications/manager.ts";
+import type { ExtensionRegistry } from "../extensions/registry.ts";
 
 export interface HookDeps {
   client: PluginInput["client"];
@@ -18,4 +19,5 @@ export interface HookDeps {
   recoveryEngine?: RecoveryEngine;
   builtInHooks?: BuiltInHookRegistry;
   notificationManager?: NotificationManager;
+  extensionRegistry?: ExtensionRegistry;
 }

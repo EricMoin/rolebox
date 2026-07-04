@@ -49,6 +49,7 @@ import { parseNotificationConfig, mergeNotificationConfigs, resolveEnvVarsInConf
 import { createNotificationHook } from "./notifications/hook.ts";
 import { readFileSync, existsSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
+import { ExtensionRegistry } from "./extensions/index.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -280,6 +281,12 @@ export async function createPluginHooks(
   // --- Custom Hook Registry ---
   const customHookRegistry = new CustomHookRegistry();
   hookState.customHookRegistry = customHookRegistry;
+  customHookRegistry.setDeps({
+    pendingCorrections: hookState.pendingCorrections,
+    functionRuntime,
+    dispatchManager,
+    graphSessionState,
+  });
 
   for (const role of resolvedRoles) {
     const hookConfigs = role.config.hooks?.custom;
@@ -293,6 +300,9 @@ export async function createPluginHooks(
       }
     }
   }
+  // --- Extension Registry ---
+  const extensionRegistry = new ExtensionRegistry();
+  hookState.extensionRegistry = extensionRegistry;
   // --- Recovery Engine ---
   const builtinFlagsList: Record<string, boolean>[] = [];
   const recoveryConfigsList: unknown[] = [];
@@ -363,6 +373,31 @@ export async function createPluginHooks(
     hookState.recoveryEngine = recoveryEngine;
     hookState.builtInHookRegistry = builtInHookRegistry;
   }
+
+  // --- Load Extension Modules (after RecoveryEngine creation) ---
+  for (const role of resolvedRoles) {
+    if (role.config.extensions) {
+      try {
+        await extensionRegistry.loadExtensions(role.config.extensions, dir);
+        log.debug("Loaded extensions for role", { role: role.id });
+      } catch (err) {
+        log.warn("Failed to load extensions for role", {
+          role: role.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // Register custom recovery strategies/patterns into the engine
+  if (recoveryEngine) {
+    for (const [name, mod] of extensionRegistry.getLoadedStrategies()) {
+      recoveryEngine.registerStrategy({ name, execute: mod.execute } as import("./recovery/types.ts").RecoveryStrategy);
+    }
+    for (const [name, mod] of extensionRegistry.getLoadedPatterns()) {
+      recoveryEngine.registerErrorPattern({ name, category: mod.category, match: mod.match } as unknown as import("./recovery/types.ts").ErrorPattern);
+    }
+  }
   const deps: HookDeps = {
     client,
     roleFunctionsMap,
@@ -374,6 +409,7 @@ export async function createPluginHooks(
     recoveryEngine,
     builtInHooks: builtInHookRegistry,
     notificationManager,
+    extensionRegistry,
   };
 
   const tools = {

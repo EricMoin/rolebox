@@ -85,7 +85,7 @@ export const DEFAULT_CHAINS: Partial<Record<RecoveryErrorCategory, RecoveryChain
  * Used for validation during config parsing — unknown strategy names are
  * warned about and skipped to prevent silent misconfiguration.
  */
-export const KNOWN_STRATEGIES = new Set([
+export const KNOWN_STRATEGIES = new Set<string>([
   "retry",
   "compact",
   "fallback_model",
@@ -94,6 +94,13 @@ export const KNOWN_STRATEGIES = new Set([
   "truncate",
   "summarize",
 ]);
+
+/**
+ * Register a custom recovery strategy name so it passes YAML config validation.
+ */
+export function addKnownStrategy(name: string): void {
+  KNOWN_STRATEGIES.add(name);
+}
 
 // ── Config Parser ───────────────────────────────────────────────────────
 

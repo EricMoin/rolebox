@@ -17,6 +17,16 @@ interface RegisteredHook {
 
 export class CustomHookRegistry {
   private byEvent = new Map<HookEvent, RegisteredHook[]>();
+  private deps?: {
+    pendingCorrections: Map<string, string>;
+    functionRuntime: { get: (sid: string, fn: string) => unknown };
+    dispatchManager: { getTasksByParent?: (sid: string) => Array<{ id: string; status: string; agent: string }> };
+    graphSessionState: { getState: (sid: string) => unknown };
+  };
+
+  setDeps(deps: NonNullable<CustomHookRegistry["deps"]>): void {
+    this.deps = deps;
+  }
 
   async register(hook: CustomHookConfig, roleDir: string): Promise<void> {
     const mod = await loadHookModule(hook.module, roleDir);
@@ -69,6 +79,7 @@ export class CustomHookRegistry {
       if (!hook.module) continue;
 
       const ctx = ctxFactory();
+      if (this.deps) this.enrichContext(ctx, event, input);
       const mod = hook.module;
       const name = hook.config.name;
 
@@ -119,6 +130,61 @@ export class CustomHookRegistry {
         log.warn(`Custom hook "${name}" failed on ${event}`, { err });
       }
     }
+  }
+
+  private enrichContext(ctx: HookContext, event: HookEvent, input: unknown): void {
+    const deps = this.deps!;
+
+    ctx.getFunctionState = (fnName: string) =>
+      deps.functionRuntime.get(ctx.sessionID ?? "", fnName);
+
+    ctx.getDispatchState = () => {
+      const tasks = deps.dispatchManager.getTasksByParent?.(ctx.sessionID ?? "") ?? [];
+      return {
+        activeTaskCount: tasks.filter((t) => t.status === "running").length,
+        tasks: tasks.map(t => ({ id: t.id, status: t.status, subagent: t.agent })),
+      };
+    };
+
+    ctx.getGraphState = () =>
+      deps.graphSessionState.getState(ctx.sessionID ?? "");
+
+    ctx.getBlocks = () => {
+      if (event !== "system.transform") return [];
+      const sysInput = input as { system?: string[] };
+      return (sysInput.system ?? []).map((s) => {
+        const match = s.match(/^<(\w+)>/);
+        return { tag: match ? match[1] : "text", content: s };
+      });
+    };
+
+    ctx.replaceBlock = (tag: string, newContent: string) => {
+      if (event !== "system.transform") return;
+      const sysInput = input as { system?: string[] };
+      if (!sysInput.system) return;
+      const idx = sysInput.system.findIndex((s) => s.includes(`<${tag}>`));
+      if (idx >= 0) sysInput.system[idx] = newContent;
+    };
+
+    ctx.removeBlock = (tag: string) => {
+      if (event !== "system.transform") return;
+      const sysInput = input as { system?: string[] };
+      if (!sysInput.system) return;
+      const idx = sysInput.system.findIndex((s) => s.includes(`<${tag}>`));
+      if (idx >= 0) sysInput.system.splice(idx, 1);
+    };
+
+    ctx.skip = () => {
+      if (typeof input === "object" && input !== null) {
+        (input as Record<string, unknown>).__skip = true;
+      }
+    };
+
+    ctx.retry = () => {
+      if (typeof input === "object" && input !== null) {
+        (input as Record<string, unknown>).__retry = true;
+      }
+    };
   }
 
   async dispose(): Promise<void> {

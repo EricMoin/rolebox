@@ -1,7 +1,6 @@
 import type {
   FlowEdge,
   ResolvedGraph,
-  GraphTemplate,
   TerminationConfig,
   LoopCondition,
   ResolvedTermination,
@@ -183,7 +182,7 @@ export function parseCollaboration(
  */
 function validateTopology(
   raw: unknown,
-): GraphTemplate | undefined | null {
+): string | undefined | null {
   if (raw === undefined || raw === null) return undefined;
 
   if (typeof raw !== "string" || raw.trim() === "") {
@@ -199,7 +198,7 @@ function validateTopology(
     return null;
   }
 
-  return trimmed as GraphTemplate;
+  return trimmed;
 }
 
 /**
@@ -324,13 +323,45 @@ function mergeEdges(
 
 // ─── Termination parsing helpers ─────────────────────────────────────
 
-const KNOWN_CONDITION_KEYS = new Set([
+const KNOWN_CONDITION_KEYS = new Set<string>([
   "max_iterations",
   "timeout_ms",
   "converged",
   "result_matches",
   "stuck",
 ]);
+
+/**
+ * Register a custom termination condition key.
+ */
+export function addTerminationConditionKey(key: string): void {
+  KNOWN_CONDITION_KEYS.add(key);
+}
+
+// Custom termination condition parsers
+const customTerminationParsers = new Map<
+  string,
+  (
+    value: unknown,
+    fullObj: Record<string, unknown>,
+    availableAgents: string[],
+  ) => unknown | null
+>();
+
+/**
+ * Register a custom termination condition parser.
+ */
+export function registerTerminationParser(
+  key: string,
+  parser: (
+    value: unknown,
+    fullObj: Record<string, unknown>,
+    availableAgents: string[],
+  ) => unknown | null,
+): void {
+  customTerminationParsers.set(key, parser);
+  addTerminationConditionKey(key);
+}
 
 /**
  * Parse a raw termination config into a normalized `ResolvedTermination`.
@@ -401,6 +432,14 @@ function parseLoopCondition(
   for (const key of keys) {
     if (KNOWN_CONDITION_KEYS.has(key)) {
       return parseKnownCondition(key, obj[key], obj, availableAgents);
+    }
+  }
+
+  // Check custom termination parsers before falling back to skip
+  for (const [customKey, customParser] of customTerminationParsers) {
+    if (customKey in obj) {
+      const result = customParser(obj[customKey], obj, availableAgents);
+      if (result !== null) return result as LoopCondition;
     }
   }
 
