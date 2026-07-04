@@ -25,4 +25,12 @@ export interface PluginContext {
   core: PluginCoreLike;
   /** The plugin's event bus for inter-service pub/sub. */
   bus: EventBus;
+  /** Rolebox role directory path (for hot-reload re-discovery). */
+  roleboxDir?: string;
+  /** Global skills directory path (for hot-reload skill sync). */
+  globalSkillsDir?: string;
+  /** OpenCode config directory path (for resolver context). */
+  configDir?: string;
+  /** Builtin functions directory path (for resolver context). */
+  builtinDir?: string;
 }

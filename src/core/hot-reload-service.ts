@@ -4,6 +4,10 @@ import { createSubLogger } from "../logger.ts";
 import { clearExtensionModuleCache } from "../extensions/loader.ts";
 import { watch, type FSWatcher } from "node:fs";
 import { join, dirname } from "node:path";
+import { discoverRoles } from "../role-loader.ts";
+import { resolveAllRoles, type ResolveContext } from "../resolver/orchestrator.ts";
+import { syncAgentFiles } from "../sync/agent-files.ts";
+import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
 
 const log = createSubLogger("hot-reload-service");
 
@@ -49,9 +53,10 @@ export class HotReloadService implements PluginService {
       dirsToWatch.add(ctx.directory);
     }
 
-    // ResolvedRole doesn't directly expose its base directory, but we can watch
-    // parent directories of reference/function/skill files to catch role-level changes.
-    // The workspace and config directories cover most cases.
+    // Watch the rolebox role directory explicitly if available
+    if (ctx.roleboxDir) {
+      dirsToWatch.add(ctx.roleboxDir);
+    }
 
     for (const dir of dirsToWatch) {
       try {
@@ -96,23 +101,60 @@ export class HotReloadService implements PluginService {
   }
 
   private async performReload(): Promise<void> {
-    log.info("Hot reload triggered — clearing cache and restarting services");
+    if (this.disabled) return;
 
-    // Clear extension module cache so re-imports get fresh code
-    try {
-      clearExtensionModuleCache();
-    } catch (err) {
-      log.warn("Failed to clear extension module cache", {
-        error: err instanceof Error ? err.message : String(err),
-      });
+    log.info("Hot reload triggered — re-discovering and re-resolving roles");
+
+    // Guard: we need the resolver context to reload
+    if (!this.ctx.roleboxDir || !this.ctx.globalSkillsDir || !this.ctx.configDir || !this.ctx.builtinDir) {
+      log.warn("Hot reload aborted: resolver context fields not set on PluginContext");
+      return;
     }
 
-    // Restart extension-service (which cascades to hook-service since it depends on it)
     try {
-      await this.ctx.core.restartService("extension-service");
-      log.info("Hot reload complete — extension-service and dependents restarted");
+      // 1. Re-discover roles from disk
+      const newRoles = await discoverRoles(this.ctx.roleboxDir);
+
+      // 2. Construct resolver context from PluginContext fields
+      const resolverCtx: ResolveContext = {
+        roleboxDir: this.ctx.roleboxDir,
+        globalSkillsDir: this.ctx.globalSkillsDir,
+        configDir: this.ctx.configDir,
+        builtinDir: this.ctx.builtinDir,
+        roleFunctionsMap: this.ctx.roleFunctionsMap,
+        roleGraphMap: this.ctx.roleGraphMap,
+      };
+
+      // 3. Re-resolve all roles (populates roleFunctionsMap and roleGraphMap)
+      const newResolvedRoles = await resolveAllRoles(newRoles, resolverCtx);
+
+      // 4. Sync agent files and skill symlinks
+      syncAgentFiles(newResolvedRoles);
+      syncSkillSymlinks(newResolvedRoles, this.ctx.globalSkillsDir);
+
+      // 5. Update the resolvedRoles array in-place (keep the reference stable)
+      this.ctx.resolvedRoles.length = 0;
+      this.ctx.resolvedRoles.push(...newResolvedRoles);
+
+      // 6. Clear extension module cache so re-imports get fresh code
+      try {
+        clearExtensionModuleCache();
+      } catch (err) {
+        log.warn("Failed to clear extension module cache", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // 7. Restart hook-service (rebuilds all hook handlers with new role data)
+      await this.ctx.core.restartService("hook-service");
+
+      log.info("Hot reload complete", {
+        discovered: newRoles.size,
+        resolved: newResolvedRoles.length,
+        skipped: newRoles.size - newResolvedRoles.length,
+      });
     } catch (err) {
-      log.error("Hot reload failed during service restart", {
+      log.error("Hot reload failed — previous state preserved", {
         error: err instanceof Error ? err.message : String(err),
       });
     }

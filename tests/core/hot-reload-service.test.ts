@@ -25,6 +25,11 @@ function makeCtx(dir: string, core: any = makeMockCore()) {
     directory: dir,
     core,
     bus: { on: mock(), off: mock(), emit: mock(), clear: mock() },
+    // Resolver context fields required for hot reload to proceed
+    roleboxDir: dir,
+    globalSkillsDir: dir,
+    configDir: dir,
+    builtinDir: dir,
   };
 }
 
@@ -101,9 +106,9 @@ describe("HotReloadService", () => {
     // Wait for debounce to fire
     await new Promise((resolve) => setTimeout(resolve, 600));
 
-    // restartService should have been called with "extension-service"
+    // restartService should have been called with "hook-service"
     expect(core.restartService).toHaveBeenCalledTimes(1);
-    expect(core.restartService).toHaveBeenCalledWith("extension-service");
+    expect(core.restartService).toHaveBeenCalledWith("hook-service");
 
     await svc.dispose();
   });
@@ -162,7 +167,7 @@ describe("HotReloadService", () => {
 
     // restartService should have been called (which is the proxy for
     // the reload happening — clearExtensionModuleCache is called before it)
-    expect(core.restartService).toHaveBeenCalledWith("extension-service");
+    expect(core.restartService).toHaveBeenCalledWith("hook-service");
 
     await svc.dispose();
   });

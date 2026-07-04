@@ -37,6 +37,10 @@ export async function createPluginHooks(
   roleFunctionsMap: Map<string, ResolvedFunction[]>,
   roleGraphMap: Map<string, ResolvedGraph>,
   directory?: string,
+  roleboxDir?: string,
+  globalSkillsDir?: string,
+  configDir?: string,
+  builtinDir?: string,
 ) {
   const rawDir = directory ?? process.cwd();
   const dir = normalizeWorkspaceDir(rawDir);
@@ -63,7 +67,7 @@ export async function createPluginHooks(
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
 
-  await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus() });
+  await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget)
   if (!hookState.shutdownRegistered) {

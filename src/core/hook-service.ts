@@ -43,6 +43,11 @@ export class HookService implements PluginService {
   private customHookRegistry?: CustomHookRegistry;
   private deps?: HookDeps;
   private handlers?: ReturnType<typeof this.buildHandlers>;
+  /**
+   * Stable reference wrapper returned to opencode. On hot-reload, init()
+   * replaces the methods in-place so the external reference stays valid.
+   */
+  private handlersWrapper: Record<string, unknown> = {};
 
   async init(ctx: PluginContext): Promise<void> {
     const { client, resolvedRoles, roleFunctionsMap, roleGraphMap, directory } = ctx;
@@ -109,7 +114,16 @@ export class HookService implements PluginService {
     // --- Build handlers ---
     const toolService = ctx.core.getService<ToolService>("tool-service")!;
 
-    this.handlers = this.buildHandlers(toolService.getTools(), ctx.bus, resolvedRoles);
+    const newHandlers = this.buildHandlers(toolService.getTools(), ctx.bus, resolvedRoles);
+
+    // Update the stable wrapper in-place so opencode's reference stays valid
+    for (const key of Object.keys(this.handlersWrapper)) {
+      delete this.handlersWrapper[key];
+    }
+    for (const [key, value] of Object.entries(newHandlers)) {
+      this.handlersWrapper[key] = value;
+    }
+    this.handlers = newHandlers;
   }
 
   async dispose(): Promise<void> {
@@ -117,7 +131,7 @@ export class HookService implements PluginService {
   }
 
   getHandlers() {
-    return this.handlers;
+    return this.handlersWrapper as ReturnType<typeof this.buildHandlers>;
   }
 
   private buildHandlers(tools: Record<string, any>, bus: EventBus, resolvedRoles: any[]) {
