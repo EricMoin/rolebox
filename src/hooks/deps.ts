@@ -21,4 +21,5 @@ export interface HookDeps {
   builtInHooks?: BuiltInHookRegistry;
   notificationManager?: NotificationManager;
   extensionRegistry?: ExtensionRegistry;
+  builtinConfig?: Record<string, boolean>;
 }

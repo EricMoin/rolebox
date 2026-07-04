@@ -71,7 +71,6 @@ export class RecoveryService implements PluginService {
       builtinConfig.recovery = true;
     }
 
-    hookState.builtinConfig = builtinConfig;
     this.builtinConfig = builtinConfig;
 
     const recoveryConfig = recoveryConfigsList.length > 0
@@ -87,8 +86,6 @@ export class RecoveryService implements PluginService {
       this.builtInHookRegistry = new BuiltInHookRegistry();
       registerBuiltinHooks(this.builtInHookRegistry, this.recoveryEngine);
 
-      hookState.recoveryEngine = this.recoveryEngine;
-      hookState.builtInHookRegistry = this.builtInHookRegistry;
     }
   }
 

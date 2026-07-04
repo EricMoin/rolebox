@@ -1,6 +1,7 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "../types.ts";
 import type { PluginCoreLike } from "./service.ts";
+import type { EventBus } from "./event-bus.ts";
 
 /**
  * Context passed to every PluginService's init() method.
@@ -22,4 +23,6 @@ export interface PluginContext {
   directory: string;
   /** Reference to the PluginCore for inter-service access. */
   core: PluginCoreLike;
+  /** The plugin's event bus for inter-service pub/sub. */
+  bus: EventBus;
 }

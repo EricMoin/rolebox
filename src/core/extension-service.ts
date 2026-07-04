@@ -1,7 +1,6 @@
 import type { PluginService } from "./service.ts";
 import type { PluginContext } from "./context.ts";
 import { ExtensionRegistry } from "../extensions/index.ts";
-import { hookState } from "../hooks/state.ts";
 import { createSubLogger } from "../logger.ts";
 import type { RecoveryStrategy, ErrorPattern } from "../recovery/types.ts";
 
@@ -21,9 +20,7 @@ export class ExtensionService implements PluginService {
   private extensionRegistry!: ExtensionRegistry;
 
   async init(ctx: PluginContext): Promise<void> {
-    // Create ExtensionRegistry and store in hookState
     this.extensionRegistry = new ExtensionRegistry();
-    hookState.extensionRegistry = this.extensionRegistry;
 
     const { resolvedRoles, directory } = ctx;
 

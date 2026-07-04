@@ -1,5 +1,6 @@
 import type { PluginService } from "./service.ts";
 import type { PluginContext } from "./context.ts";
+import type { EventBus } from "./event-bus.ts";
 import type { AgentConfig, Event } from "@opencode-ai/sdk";
 import type { Config } from "@opencode-ai/plugin";
 import { graphSessionState } from "../graph/index.ts";
@@ -60,7 +61,6 @@ export class HookService implements PluginService {
 
     // --- Custom Hook Registry (original lines 288-308) ---
     this.customHookRegistry = new CustomHookRegistry();
-    hookState.customHookRegistry = this.customHookRegistry;
 
     const dispatchService = ctx.core.getService<DispatchService>("dispatch-service")!;
     const dispatchManager = dispatchService.getDispatchManager();
@@ -103,13 +103,13 @@ export class HookService implements PluginService {
       builtInHooks: recoveryService?.getBuiltInHookRegistry(),
       notificationManager: notificationService?.getNotificationManager(),
       extensionRegistry: extensionService?.getExtensionRegistry(),
+      builtinConfig: recoveryService?.getBuiltinConfig(),
     };
 
     // --- Build handlers ---
     const toolService = ctx.core.getService<ToolService>("tool-service")!;
-    const notifHook = notificationService?.createNotificationHook() ?? null;
 
-    this.handlers = this.buildHandlers(toolService.getTools(), notifHook, resolvedRoles);
+    this.handlers = this.buildHandlers(toolService.getTools(), ctx.bus, resolvedRoles);
   }
 
   async dispose(): Promise<void> {
@@ -120,14 +120,20 @@ export class HookService implements PluginService {
     return this.handlers;
   }
 
-  private buildHandlers(tools: Record<string, any>, notifHook: any, resolvedRoles: any[]) {
+  private buildHandlers(tools: Record<string, any>, bus: EventBus, resolvedRoles: any[]) {
     const deps = this.deps!;
     const handlers = {
       tool: tools,
       event: async (input: { event: Event }) => {
         await handleEvent(input.event, hookState, deps);
-        if (notifHook) {
-          try { await notifHook.event(input); } catch { /* best effort */ }
+        // Emit to bus for notification and other subscribers
+        const props = input.event.properties as Record<string, unknown> | undefined;
+        const sessionID = typeof props?.sessionID === "string" ? props.sessionID
+          : typeof props?.sessionId === "string" ? props.sessionId
+          : (props?.info as any)?.sessionID ?? (props?.info as any)?.sessionId ?? (props?.info as any)?.id;
+        const agent = typeof props?.agent === "string" ? props.agent : undefined;
+        if (sessionID) {
+          await bus.emit(`event:${input.event.type}`, { sessionID, agent, properties: props });
         }
       },
       config: async (config: Config) => {
@@ -176,9 +182,7 @@ export class HookService implements PluginService {
         output: { parts: Array<{ type: string; text?: string }> },
       ) => {
         await handleChatMessage(input, output, hookState, deps);
-        if (notifHook) {
-          try { notifHook.chatMessage(input); } catch { /* best effort */ }
-        }
+        await bus.emit("hook:chat.message", { sessionID: input.sessionID, agent: input.agent });
       },
       "tool.execute.after": async (
         input: { sessionID?: string; tool?: string; args?: unknown },
@@ -191,9 +195,7 @@ export class HookService implements PluginService {
         output: { args: any },
       ) => {
         await handleToolBefore(input, output, hookState, deps);
-        if (notifHook) {
-          try { notifHook.toolBefore({ tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args }); } catch { /* best effort */ }
-        }
+        await bus.emit("hook:tool.execute.before", { tool: input.tool, sessionID: input.sessionID, callID: input.callID, args: output.args });
       },
       "experimental.chat.system.transform": async (
         input: { sessionID?: string },
@@ -204,7 +206,6 @@ export class HookService implements PluginService {
         await handleSystemTransform({ sessionID: input.sessionID, agent }, output, hookState, deps);
       },
       dispose: async () => {
-        try { await this.deps?.notificationManager?.dispose(); } catch { /* best effort */ }
         try { await this.customHookRegistry?.dispose(); } catch { /* best effort */ }
       },
     };

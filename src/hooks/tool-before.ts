@@ -46,7 +46,7 @@ export async function handleToolBefore(
         log: createSubLogger("hook:builtin-before"),
       }),
       { tool: input.tool, args: output.args },
-      state.builtinConfig ?? {},
+      deps.builtinConfig ?? {},
     );
   }
   if (deps && state) {
@@ -158,7 +158,7 @@ export async function handleToolBefore(
         log: createSubLogger("hook:builtin-after"),
       }),
       { tool: input.tool, args: output.args },
-      state.builtinConfig ?? {},
+      deps.builtinConfig ?? {},
     );
   }
 }

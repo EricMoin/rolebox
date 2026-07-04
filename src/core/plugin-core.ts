@@ -1,5 +1,6 @@
 import type { PluginService, PluginCoreLike } from "./service.ts";
 import type { PluginContext } from "./context.ts";
+import { EventBus } from "./event-bus.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("plugin-core");
@@ -8,6 +9,7 @@ export class PluginCore implements PluginCoreLike {
   private services = new Map<string, PluginService>();
   private ctx!: PluginContext;
   private disposed = false;
+  private bus = new EventBus();
 
   registerService(svc: PluginService): void {
     if (this.services.has(svc.name)) {
@@ -24,14 +26,18 @@ export class PluginCore implements PluginCoreLike {
     return this.services;
   }
 
+  getBus(): EventBus {
+    return this.bus;
+  }
+
   async init(ctx: PluginContext): Promise<void> {
-    this.ctx = ctx;
+    this.ctx = { ...ctx, bus: this.bus };
     // Topological sort by dependencies
     const ordered = this.topoSort();
     log.info("Initializing services", { count: ordered.length, order: ordered.map(s => s.name) });
     for (const svc of ordered) {
       log.debug("Initializing service", { name: svc.name, deps: svc.dependencies });
-      await svc.init(ctx);
+      await svc.init(this.ctx);
     }
   }
 

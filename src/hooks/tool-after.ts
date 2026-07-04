@@ -68,7 +68,7 @@ export async function handleToolAfter(
     "before",
     builtinBeforeCtx,
     { tool: input.tool, args: toolArgs, output },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 
   // Custom hooks: before phase
@@ -188,6 +188,6 @@ export async function handleToolAfter(
       log: createSubLogger("hook:builtin-after"),
     }),
     { tool: input.tool, args: toolArgs, output },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 }

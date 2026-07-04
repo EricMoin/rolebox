@@ -42,7 +42,7 @@ export async function handleChatMessage(
       log: createSubLogger("hook:builtin-before"),
     }),
     { text: firstTextStr },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 
   await deps.customHooks.runHooks(
@@ -61,7 +61,7 @@ export async function handleChatMessage(
 
   if (input.sessionID && !isSyntheticInjection) {
     state.userMessagedSessions.add(input.sessionID);
-    state.notificationManager?.handleChatMessage(input.sessionID, input.agent);
+    deps.notificationManager?.handleChatMessage(input.sessionID, input.agent);
     if (state.activeLoopManager?.shouldCancelOnUserMessage(input.sessionID, firstTextStr)) {
       await state.activeLoopManager.cancelNow(input.sessionID);
     }
@@ -247,6 +247,6 @@ export async function handleChatMessage(
       log: createSubLogger("hook:builtin-after"),
     }),
     { text: firstTextStr },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 }

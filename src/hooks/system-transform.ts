@@ -36,7 +36,7 @@ export async function handleSystemTransform(
       log: createSubLogger("hook:builtin-before"),
     }),
     { system: output.system },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 
   // Custom hooks: before phase
@@ -148,7 +148,7 @@ export async function handleSystemTransform(
         log: createSubLogger("hook:builtin-after"),
       }),
       { system: output.system },
-      state.builtinConfig ?? {},
+      deps.builtinConfig ?? {},
     );
     return;
   }
@@ -261,7 +261,7 @@ export async function handleSystemTransform(
         log: createSubLogger("hook:builtin-after"),
       }),
       { system: output.system },
-      state.builtinConfig ?? {},
+      deps.builtinConfig ?? {},
     );
     return;
   }
@@ -317,6 +317,6 @@ export async function handleSystemTransform(
       log: createSubLogger("hook:builtin-after"),
     }),
     { system: output.system },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 }

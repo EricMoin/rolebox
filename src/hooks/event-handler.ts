@@ -79,7 +79,7 @@ export async function handleEvent(
       log: createSubLogger("hook:builtin-before"),
     }),
     { type: event.type, properties: props },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 
   // Custom hooks: before phase
@@ -128,8 +128,8 @@ export async function handleEvent(
       // unaffected. NOTE: we use a flag instead of `break` so that the loop
       // advance logic further down can still execute.
       let suppressLoopContinuation = false;
-      if (state.activeLoopManager?.isActiveLoopOrigin(sid)) {
-        const loopState = state.activeLoopManager.getLoopState(sid);
+      if (deps.loopManager?.isActiveLoopOrigin(sid)) {
+        const loopState = deps.loopManager.getLoopState(sid);
         if (loopState && (loopState.phase === "summarizing" || loopState.phase === "activating" || loopState.phase === "finalizing")) {
           log.debug("suppressing auto-continue: origin session in loop-owned phase", {
             sessionID: sid, phase: loopState.phase,
@@ -140,8 +140,8 @@ export async function handleEvent(
       const activeSet = functionSessionState.getActive(sid);
       if (activeSet.size === 0 || suppressLoopContinuation) {
         // Loop advance: handle phase transitions when no continuation is needed
-        if (state.activeLoopManager && deps.dispatchManager.getInflightCount(sid) === 0) {
-          const coord = state.activeLoopManager as LoopCoordinator | undefined;
+        if (deps.loopManager && deps.dispatchManager.getInflightCount(sid) === 0) {
+          const coord = deps.loopManager as LoopCoordinator | undefined;
           if (coord && coord.isActiveLoopOrigin(sid)) {
             await bridgeLoopAdvance(coord, sid);
             break;
@@ -261,7 +261,7 @@ export async function handleEvent(
       }
       // --- LOOP ADVANCE: advance a loop session on terminal idle ---
       if (!sentContinuation && deps.dispatchManager.getInflightCount(sid) === 0) {
-        const coord = state.activeLoopManager as LoopCoordinator | undefined;
+        const coord = deps.loopManager as LoopCoordinator | undefined;
         if (coord && coord.isActiveLoopOrigin(sid)) {
           await bridgeLoopAdvance(coord, sid);
         }
@@ -284,7 +284,7 @@ export async function handleEvent(
       const sid = (props as { sessionID?: string } | undefined)?.sessionID;
       if (sid) {
         await deps.dispatchManager.handleSessionError(sid, props?.error);
-        const coord = state.activeLoopManager as LoopCoordinator | undefined;
+        const coord = deps.loopManager as LoopCoordinator | undefined;
         if (coord?.isLoopSession(sid)) {
           const loopState = coord.getLoopState(sid);
           if (loopState && loopState.phase !== "error" && loopState.phase !== "complete" && loopState.phase !== "cancelled") {
@@ -347,6 +347,6 @@ export async function handleEvent(
       log: createSubLogger("hook:builtin-after"),
     }),
     { type: event.type, properties: props },
-    state.builtinConfig ?? {},
+    deps.builtinConfig ?? {},
   );
 }

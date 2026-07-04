@@ -59,7 +59,7 @@ export async function createPluginHooks(
   core.registerService(new ToolService());
   core.registerService(new HookService());
 
-  await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core });
+  await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus() });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget)
   if (!hookState.shutdownRegistered) {
