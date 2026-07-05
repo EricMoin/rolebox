@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- **Status Overview Panel** — New status panel in `rolebox monitor` showing active loops, graph workflows, dispatch summary, and concurrency pool health. Use `--no-status` to hide.
+
+
 ## 0.19.0
 
 ### Features

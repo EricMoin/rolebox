@@ -96,9 +96,8 @@ describe("monitor", () => {
     await run();
 
     const allOutput = logs.join("\n");
-    expect(allOutput).toContain("rolebox monitor ·");
-    expect(allOutput).toContain("No dispatch activity recorded.");
-    expect(allOutput).toContain("No active functions.");
+    expect(allOutput).toContain("rolebox monitor");
+    expect(allOutput).toContain("no dispatch activity");
   });
 
   it("outputs valid JSON with --json flag", async () => {
@@ -224,7 +223,7 @@ describe("monitor", () => {
     await run();
 
     const allOutput = logs.join("\n");
-    expect(allOutput).not.toContain("╭─ output");
+    expect(allOutput).not.toContain("╤═ output");
     expect(allOutput).not.toContain("some output");
   });
 
@@ -268,6 +267,10 @@ function makeMonitorSnapshot(overrides?: Partial<MonitorSnapshot>): MonitorSnaps
     timestamp: "2025-01-01T00:00:00.000Z",
     tasks: [],
     activeFunctions: [],
+    loops: [],
+    graphSessions: [],
+    dispatchSummary: { pending: 0, running: 0, completed: 0, error: 0, cancelled: 0 },
+    concurrency: { active: 0, limit: 0, queued: 0 },
     ...overrides,
   };
 }
@@ -341,7 +344,7 @@ describe("histogramPercentile", () => {
 });
 
 describe("renderMetrics", () => {
-  it("shows 'Metrics not enabled' when metrics is null", async () => {
+  it("suppresses section when metrics is null", async () => {
     const { renderMetrics } = await importMonitor();
     const logs: string[] = [];
     const origLog = console.log;
@@ -354,8 +357,8 @@ describe("renderMetrics", () => {
     }
 
     const output = logs.join("\n");
-    expect(output).toContain("Metrics");
-    expect(output).toContain("not enabled");
+    // Section is suppressed entirely when no metrics data
+    expect(output).toBe("");
   });
 
   it("renders counters with values", async () => {
@@ -471,17 +474,16 @@ describe("renderMetrics", () => {
     await run();
 
     const output = logs.join("\n");
-    expect(output).not.toContain("Metrics\\x1b");
     // But header and tasks should still appear
     expect(output).toContain("rolebox monitor");
-    expect(output).toContain("Background Tasks");
+    expect(output).toContain("Tasks");
   });
 });
 
 // ── (g) Recovery Display Tests ───────────────────────────────────◀
 
 describe("renderRecovery", () => {
-  it("shows 'No recovery activity recorded' when recovery is null", async () => {
+  it("suppresses section when recovery is null", async () => {
     const { renderRecovery } = await importMonitor();
     const logs: string[] = [];
     const origLog = console.log;
@@ -494,8 +496,8 @@ describe("renderRecovery", () => {
     }
 
     const output = logs.join("\n");
-    expect(output).toContain("Recovery");
-    expect(output).toContain("No recovery activity recorded");
+    // Section is suppressed entirely when no recovery data
+    expect(output).toBe("");
   });
 
   it("renders recovery overview with populated data", async () => {
@@ -554,7 +556,7 @@ describe("renderRecovery", () => {
     expect(output).toContain("JSONParseError");
   });
 
-  it("renders with minimal (empty) recovery data without crashing", async () => {
+  it("suppresses section when totalAttempts is 0", async () => {
     const { renderRecovery } = await importMonitor();
     const logs: string[] = [];
     const origLog = console.log;
@@ -577,8 +579,8 @@ describe("renderRecovery", () => {
     }
 
     const output = logs.join("\n");
-    expect(output).toContain("Recovery");
-    expect(output).toContain("0");
+    // Section is suppressed when totalAttempts is 0
+    expect(output).toBe("");
   });
 
   it("--no-metrics flag suppresses recovery section via monitor()", async () => {
@@ -899,8 +901,8 @@ describe("monitor --task-id", () => {
 
     const output = logs.join("\n");
     // Should NOT contain normal display headers
-    expect(output).not.toContain("Background Tasks");
-    expect(output).not.toContain("Active Functions");
+    expect(output).not.toContain("Tasks");
+    expect(output).not.toContain("Functions");
     // Should contain task detail
     expect(output).toContain("Task Detail: task-skip");
   });
@@ -920,7 +922,7 @@ describe("DiffRenderer", () => {
     const tasks = [
       makeTaskSnapshot({ id: "t1" }),
     ];
-    renderer.endFrame(10, tasks, false);
+    renderer.endFrame(tasks, false);
     expect(renderer.isFirstRender).toBe(false);
   });
 
@@ -930,7 +932,7 @@ describe("DiffRenderer", () => {
 
     // First frame: 1 task
     renderer.beginFrame();
-    renderer.endFrame(5, [makeTaskSnapshot({ id: "t1" })], false);
+    renderer.endFrame([makeTaskSnapshot({ id: "t1" })], false);
 
     // Second frame: 2 tasks (1 added)
     const stdout: string[] = [];
@@ -947,7 +949,7 @@ describe("DiffRenderer", () => {
         makeTaskSnapshot({ id: "t1" }),
         makeTaskSnapshot({ id: "t2" }),
       ];
-      renderer.endFrame(8, tasks, false);
+      renderer.endFrame(tasks, false);
     } finally {
       process.stdout.write = origWrite;
       console.log = origLog;
@@ -966,7 +968,7 @@ describe("DiffRenderer", () => {
 
     // First frame: 2 tasks
     renderer.beginFrame();
-    renderer.endFrame(5, [
+    renderer.endFrame([
       makeTaskSnapshot({ id: "t1" }),
       makeTaskSnapshot({ id: "t2" }),
     ], false);
@@ -978,7 +980,7 @@ describe("DiffRenderer", () => {
 
     try {
       renderer.beginFrame();
-      renderer.endFrame(5, [makeTaskSnapshot({ id: "t1" })], false);
+      renderer.endFrame([makeTaskSnapshot({ id: "t1" })], false);
     } finally {
       console.log = origLog;
     }
@@ -995,7 +997,7 @@ describe("DiffRenderer", () => {
 
     // First frame: task t1 with status running
     renderer.beginFrame();
-    renderer.endFrame(5, [makeTaskSnapshot({ id: "t1", status: "running" })], false);
+    renderer.endFrame([makeTaskSnapshot({ id: "t1", status: "running" })], false);
 
     // Second frame: same t1 but different status (the renderer considers it "changed" if present in both sets)
     const logs: string[] = [];
@@ -1004,7 +1006,7 @@ describe("DiffRenderer", () => {
 
     try {
       renderer.beginFrame();
-      renderer.endFrame(5, [makeTaskSnapshot({ id: "t1", status: "completed" })], false);
+      renderer.endFrame([makeTaskSnapshot({ id: "t1", status: "completed" })], false);
     } finally {
       console.log = origLog;
     }
@@ -1016,67 +1018,55 @@ describe("DiffRenderer", () => {
     expect(diffOutput).toContain("∼1");
   });
 
-  it("SIGWINCH sets needsFullRedraw flag", async () => {
+  it("fullRedrawForced skips diff output", async () => {
     const { DiffRenderer } = await importMonitor();
     const renderer = new DiffRenderer();
 
     // First frame
     renderer.beginFrame();
-    renderer.endFrame(5, [makeTaskSnapshot({ id: "t1" })], false);
+    renderer.endFrame([makeTaskSnapshot({ id: "t1" })], false);
 
-    // Simulate SIGWINCH — this should set needsFullRedraw internally
-    process.emit("SIGWINCH" as any);
-
-    // Second frame: SIGWINCH triggered needsFullRedraw, which causes
-    // the watch loop to use \x1b[2J\x1b[H instead of incremental diff.
-    // DiffRenderer.beginFrame() only writes cursor-up when NOT on first render
-    // AND NOT needsFullRedraw — so with needsFullRedraw=true, it skips cursor movement.
-    const stdout: string[] = [];
-    const origWrite = process.stdout.write;
-    process.stdout.write = (chunk: any) => { stdout.push(String(chunk)); return true; };
+    // Second frame with fullRedrawForced=true → diff is skipped
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: any[]) => logs.push(args.join(" "));
 
     try {
-      renderer.beginFrame(); // needsFullRedraw=true → skip cursor movement
-      // endFrame with fullRedrawForced=true resets needsFullRedraw and skips diff
-      renderer.endFrame(5, [makeTaskSnapshot({ id: "t1" })], true);
+      renderer.beginFrame();
+      renderer.endFrame([makeTaskSnapshot({ id: "t1" })], true);
     } finally {
-      process.stdout.write = origWrite;
+      console.log = origLog;
     }
 
-    // beginFrame skipped writing when needsFullRedraw=true
-    // so no escape sequences should have been emitted
-    expect(stdout.length).toBe(0);
+    // With fullRedrawForced=true, no diff output
+    expect(logs.join("\n")).toBe("");
   });
 
-  it("dispose cleans up SIGWINCH handler", async () => {
+  it("beginFrame always clears screen (no side effects after dispose)", async () => {
     const { DiffRenderer } = await importMonitor();
     const renderer = new DiffRenderer();
 
     // First render to set firstRender=false
     renderer.beginFrame();
-    renderer.endFrame(5, [makeTaskSnapshot({ id: "t1" })], false);
+    renderer.endFrame([makeTaskSnapshot({ id: "t1" })], false);
     expect(renderer.isFirstRender).toBe(false);
 
     renderer.dispose();
 
-    // After dispose, SIGWINCH should not trigger needsFullRedraw
-    process.emit("SIGWINCH" as any);
-
-    // beginFrame with needsFullRedraw=false (since handler was removed)
-    // and NOT firstRender → should write cursor-up + clear
+    // After dispose, beginFrame should still clear the screen
     const stdout: string[] = [];
     const origWrite = process.stdout.write;
     process.stdout.write = (chunk: any) => { stdout.push(String(chunk)); return true; };
 
     try {
-      renderer.beginFrame(); // should write \x1b[5A\x1b[J (cursor up 5 + clear)
+      renderer.beginFrame(); // should write \x1b[2J\x1b[H
     } finally {
       process.stdout.write = origWrite;
     }
 
-    // Should have written cursor movement for non-first render
+    // Should have written clear-screen escape sequence
     expect(stdout.length).toBeGreaterThan(0);
-    expect(stdout.join("")).toContain("\x1b[J");
+    expect(stdout.join("")).toContain("\x1b[2J\x1b[H");
   });
 
   it("--full-redraw flag uses clear-screen behavior", async () => {
@@ -1377,7 +1367,7 @@ describe("monitor --export", () => {
 
     const output = logs.join("\n");
     expect(output).toContain("rolebox monitor");
-    expect(output).toContain("Background Tasks");
+    expect(output).toContain("Tasks");
   });
 
   it("--output=<path> writes to file", async () => {
@@ -1558,6 +1548,6 @@ describe("monitor CLI arg parsing", () => {
     await run();
 
     const output = logs.join("\n");
-    expect(output).toContain("No tasks match filters");
+    expect(output).toContain("no tasks match filters");
   });
 });

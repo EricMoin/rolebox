@@ -1,12 +1,13 @@
 import { defineCommand } from "citty";
-import { bold, dim, red, green, cyan, yellow } from "../format.ts";
+import { bold, dim, red, green, cyan, yellow, magenta, gray, soft, border, sub, bright, white, padRight, stripAnsi, bar, shortenPath, SYM_DISPATCH, SYM_AWAIT, SYM_SUMMARIZE, SYM_COMPLETE, SYM_ERROR, SYM_CANCELLED, HLTH_OK, HLTH_DEGRADED, HLTH_ERROR } from "../format.ts";
 import { readMonitorSnapshot, resolveProjectRoot, readTaskDetail } from "./monitor-reader.ts";
-import type { MonitorSnapshot, TaskSnapshot, RecoveryMetrics } from "./monitor-reader.ts";
+import type { MonitorSnapshot, TaskSnapshot, ActiveFunction, RecoveryMetrics, LoopSnapshot, GraphSessionSnapshot, DispatchSummary, ConcurrencyStatus } from "./monitor-reader.ts";
 
 // ── Monitor options interface ──────────────────────────────────────
 
 export interface MonitorOptions {
   noMetrics?: boolean;
+  noStatus?: boolean;
   agent?: string;
   status?: string;
   sort?: string;
@@ -19,9 +20,25 @@ export interface MonitorOptions {
   output?: string;
 }
 
+// ── Layout helpers ──────────────────────────────────────────────
+
+/**
+ * Compute a consistent content width based on terminal columns.
+ * Clamped to [60, 96] for readability on wide terminals.
+ */
+function contentWidth(): number {
+  const cols = process.stdout?.columns ?? 80;
+  return Math.max(60, Math.min(cols - 2, 96));
+}
+
+/** Whether the terminal is in narrow mode (< 70 cols). */
+function isNarrow(): boolean {
+  return (process.stdout?.columns ?? 80) < 70;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
   const mins = Math.floor(ms / 60000);
@@ -29,45 +46,117 @@ function formatDuration(ms: number): string {
   return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
 }
 
-function truncate(s: string, maxLen: number): string {
+export function truncate(s: string, maxLen: number): string {
   return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
-}
-
-function statusIcon(status: string): string {
-  switch (status) {
-    case "running":
-      return cyan("\u25cf");
-    case "completed":
-      return green("\u2713");
-    case "error":
-      return red("\u2717");
-    case "pending":
-      return yellow("\u26a1");
-    case "cancelled":
-      return dim("\u2298");
-    case "timeout":
-      return yellow("\u231b");
-    default:
-      return "?";
-  }
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ── Metric name parser ─────────────────────────────────────────────
+/**
+ * Canonical glyph table for status display.
+ * Returns just the glyph (caller adds color).
+ */
+function statusGlyph(status: string): string {
+  switch (status) {
+    case "running": return "\u25b8"; // ▸
+    case "completed": return "\u2713"; // ✓
+    case "error": return "\u2717"; // ✗
+    case "pending": return "\u25cf"; // ●
+    case "cancelled": return "\u2298"; // ⊘
+    case "timeout": return "\u23f1"; // ⏱
+    default: return "?";
+  }
+}
+
+function statusColor(status: string): (s: string) => string {
+  switch (status) {
+    case "running": return cyan;
+    case "completed": return green;
+    case "error": return red;
+    case "pending": return yellow;
+    case "cancelled": return gray;
+    case "timeout": return magenta;
+    default: return dim;
+  }
+}
 
 /**
- * Parse a metric key like `dispatch_total{agent=chancellor,mode=background}`
- * into its base name and label record.
+ * Format a status line item: colored glyph + padded status word.
+ * Total width: 11 chars.
  */
+function statusCell(status: string): string {
+  const color = statusColor(status);
+  const glyph = statusGlyph(status);
+  return color(`${glyph} ${status.padEnd(9)}`);
+}
+
+/**
+ * Format a session ID for display, showing only the last 8 characters.
+ */
+function shortSessionId(sessionId: string): string {
+  if (sessionId.length <= 12) return sessionId;
+  return "\u2026" + sessionId.slice(-8);
+}
+
+/**
+ * Unified panel renderer — wraps content in a straight box-drawing
+ * border with the title embedded in the top border.
+ * In narrow mode, renders as a plain title + rule instead.
+ */
+function panel(title: string, lines: string[]): void {
+  const w = contentWidth();
+  const narrow = isNarrow();
+
+  if (narrow) {
+    console.log("");
+    console.log(`  ${bold(cyan(title))}`);
+    console.log(`  ${border("\u2500".repeat(Math.min(w, 50)))}`);
+    for (const line of lines) {
+      console.log(`  ${line}`);
+    }
+    return;
+  }
+
+  // ── Normal (wide) panel ──
+  const titlePart = bold(cyan(title));
+  const titleWidth = stripAnsi(titlePart).length;
+  const fillLen = Math.max(1, w - 4 - titleWidth); // "┌ " + title + " ──... ┐"
+  const borderTop = `  ${border("\u250c ")}${titlePart} ${border("\u2500".repeat(fillLen))}${border("\u2510")}`;
+  console.log(borderTop);
+
+  const innerWidth = w - 4; // 2 border chars each side
+  for (const line of lines) {
+    const trimmed = line.replace(/^  /, "");
+    const content = stripAnsi(trimmed).length > innerWidth ? truncate(trimmed, innerWidth) : trimmed;
+    const padLen = Math.max(0, innerWidth - stripAnsi(content).length);
+    console.log(`  ${border("\u2502 ")}${content}${" ".repeat(padLen)}${border(" \u2502")}`);
+  }
+
+  const borderBottom = `  ${border("\u2514")}${border("\u2500".repeat(w - 2))}${border("\u2518")}`;
+  console.log(borderBottom);
+}
+
+function computeHealthState(snapshot: MonitorSnapshot): { state: string; color: (s: string) => string } {
+  const ds = snapshot.dispatchSummary;
+  const hasError = ds.error > 0 || snapshot.loops.some((l) => l.phase === "error") || snapshot.tasks.some((t) => t.status === "error");
+  if (hasError) return { state: "ERROR", color: red };
+
+  const hasActive = ds.running > 0 || ds.pending > 0 || snapshot.loops.length > 0 || snapshot.activeFunctions.length > 0 || snapshot.graphSessions.some((g) => g.status === "active");
+  if (hasActive) return { state: "ACTIVE", color: green };
+
+  return { state: "IDLE", color: yellow };
+}
+
+// ── Metric name parser ─────────────────────────────────────────────
+
 export function parseMetricKey(key: string): { name: string; labels: Record<string, string> } {
   const braceIdx = key.indexOf("{");
   if (braceIdx === -1) return { name: key, labels: {} };
 
   const name = key.slice(0, braceIdx);
-  const labelsPart = key.slice(braceIdx + 1, key.length - 1); // drop trailing }
+  const labelsPart = key.slice(braceIdx + 1, key.length - 1);
   const labels: Record<string, string> = {};
   for (const part of labelsPart.split(",")) {
     const eqIdx = part.indexOf("=");
@@ -77,9 +166,6 @@ export function parseMetricKey(key: string): { name: string; labels: Record<stri
   return { name, labels };
 }
 
-/**
- * Format labels as Prometheus-style `{key="value"}` string.
- */
 export function formatPromLabels(labels: Record<string, string>): string {
   const keys = Object.keys(labels);
   if (keys.length === 0) return "";
@@ -107,260 +193,118 @@ export function histogramPercentile(
   return sorted.length > 0 ? sorted[sorted.length - 1][0] : 0;
 }
 
-// ── Render: Metrics ────────────────────────────────────────────────
+// ── Render: Header ─────────────────────────────────────────────────
 
-export function renderMetrics(snapshot: MonitorSnapshot): void {
-  const metrics = snapshot.metrics;
-  if (!metrics) {
-    console.log("");
-    console.log(bold("Metrics"));
-    console.log(dim("\u2500".repeat(50)));
-    console.log(`  ${dim("Metrics not enabled (set ROLEBOX_METRICS=1)")}`);
-    return;
+function renderHeader(projectDir: string, refreshLabel?: string): void {
+  const w = contentWidth();
+  const shortPath = shortenPath(projectDir);
+  const pathDisplay = shortPath.length > 40 ? "\u2026" + shortPath.slice(-38) : shortPath;
+
+  // Line 1: title + path (left) + refresh info (right-aligned)
+  const title = `  ${bold(cyan("rolebox monitor"))}  ${soft(pathDisplay)}`;
+  let rightPart = "";
+  if (refreshLabel) {
+    rightPart = soft(`watch \u00b7 ${refreshLabel}`);
   }
+  const titleWidth = stripAnsi(title).length;
+  const rightWidth = stripAnsi(rightPart).length;
+  const gap = Math.max(1, w - titleWidth - rightWidth);
+  console.log(title + " ".repeat(gap) + rightPart);
 
-  console.log("");
-  console.log(bold("Metrics"));
-  console.log(dim("\u2500".repeat(50)));
-
-  // ── Counters ──
-  const counterKeys = Object.keys(metrics.counters);
-  // Group by base name
-  const counterGroups = new Map<string, Array<{ labels: Record<string, string>; value: number }>>();
-  for (const key of counterKeys) {
-    const { name, labels } = parseMetricKey(key);
-    const entry = { labels, value: metrics.counters[key].value };
-    const group = counterGroups.get(name) ?? [];
-    group.push(entry);
-    counterGroups.set(name, group);
-  }
-
-  for (const [name, entries] of counterGroups) {
-    // Separate unlabeled from labeled
-    const unlabeled = entries.filter((e) => Object.keys(e.labels).length === 0);
-    const labeled = entries.filter((e) => Object.keys(e.labels).length > 0);
-
-    if (unlabeled.length > 0) {
-      for (const e of unlabeled) {
-        console.log(`  ${dim(name)} ${cyan(String(e.value))}`);
-      }
-    }
-    if (labeled.length > 0) {
-      // Group by label key
-      for (const e of labeled) {
-        const labelStr = Object.entries(e.labels)
-          .map(([k, v]) => `${dim(k)}:${v}`)
-          .join(" ");
-        console.log(`  ${dim(name)} ${labelStr} ${cyan(String(e.value))}`);
-      }
-    }
-  }
-
-  // ── Gauges ──
-  const gaugeKeys = Object.keys(metrics.gauges);
-  if (gaugeKeys.length > 0) {
-    console.log(`  ${dim("\u2500")}`);
-    for (const key of gaugeKeys) {
-      const { name, labels } = parseMetricKey(key);
-      const value = metrics.gauges[key].value;
-      if (Object.keys(labels).length === 0) {
-        console.log(`  ${dim(name)} ${yellow(String(value))}`);
-      } else {
-        const labelStr = Object.entries(labels)
-          .map(([k, v]) => `${dim(k)}:${v}`)
-          .join(" ");
-        console.log(`  ${dim(name)} ${labelStr} ${yellow(String(value))}`);
-      }
-    }
-  }
-
-  // ── Histograms ──
-  const histKeys = Object.keys(metrics.histograms);
-  if (histKeys.length > 0) {
-    console.log(`  ${dim("\u2500")}`);
-    for (const key of histKeys) {
-      const { name, labels } = parseMetricKey(key);
-      const h = metrics.histograms[key];
-      const avg = h.count > 0 ? Math.round(h.sum / h.count) : 0;
-      const p50 = histogramPercentile(h.buckets, h.count, 0.5);
-      const p95 = histogramPercentile(h.buckets, h.count, 0.95);
-
-      let labelStr = "";
-      if (Object.keys(labels).length > 0) {
-        labelStr =
-          " " +
-          Object.entries(labels)
-            .map(([k, v]) => `${dim(k)}:${v}`)
-            .join(" ");
-      }
-      console.log(
-        `  ${dim(name)}${labelStr} ${cyan(`avg=${avg}ms`)} ${cyan(`p50=${p50}ms`)} ${cyan(`p95=${p95}ms`)}  ${dim(`n=${h.count}`)}`,
-      );
-    }
-  }
+  // Line 2: full-width rule
+  console.log(`  ${border("\u2500".repeat(w))}`);
 }
 
-// ── Render: Notifications ──────────────────────────────────────────
+// ── Render: System Pulse ──────────────────────────────────────────
 
-export function renderNotifications(snapshot: MonitorSnapshot): void {
-  const notif = snapshot.notifications;
-  console.log("");
-  console.log(bold("Notifications"));
-  console.log(dim("\u2500".repeat(50)));
+export function renderSystemPulse(snapshot: MonitorSnapshot): void {
+  const hs = computeHealthState(snapshot);
+  const ds = snapshot.dispatchSummary;
 
-  if (!notif) {
-    console.log(`  ${dim("No notification state available.")}`);
-    return;
-  }
+  const parts: string[] = [];
+  parts.push(`${hs.color("\u25cf")} ${hs.color(hs.state)}`);
 
-  const enabledSymbol = notif.enabled ? green("\u2713") : red("\u2717");
-  console.log(`  ${dim("Enabled:")} ${enabledSymbol}`);
+  if (ds.running > 0) parts.push(`${cyan("\u25b8")} ${cyan(String(ds.running))} ${dim("running")}`);
+  if (ds.pending > 0) parts.push(`${yellow("\u25cf")} ${yellow(String(ds.pending))} ${dim("pending")}`);
+  if (ds.completed > 0) parts.push(`${green("\u2713")} ${green(String(ds.completed))} ${dim("done")}`);
+  if (ds.error > 0) parts.push(`${red("\u2717")} ${red(String(ds.error))} ${dim("error")}`);
+  const elapsedTasks = snapshot.tasks.filter((t) => t.status === "running" || t.status === "completed" || t.status === "error");
+  const elapsed = elapsedTasks.length > 0
+    ? formatDuration(Math.max(...elapsedTasks.map((t) => t.durationMs)))
+    : "";
+  if (elapsed) parts.push(dim(elapsed));
 
-  if (notif.quietHoursActive) {
-    console.log(`  ${dim("Quiet hours:")} ${yellow("active")}`);
-  }
-
-  if (notif.throttleStats) {
-    console.log(
-      `  ${dim("Throttle:")} ${notif.throttleStats.recentCount}/${notif.throttleStats.windowMs}ms`,
-    );
-  }
-
-  if (notif.recentEvents.length > 0) {
-    const recent = notif.recentEvents.slice(-5);
-    console.log(`  ${dim("Recent events:")}`);
-    for (const evt of recent) {
-      const ts = evt.ts.length > 19 ? evt.ts.slice(0, 19) : evt.ts;
-      console.log(`    ${dim(ts)} ${evt.type}`);
-    }
-  }
+  const pulseLine = parts.join("  ");
+  panel("System Pulse", [pulseLine]);
 }
 
-// ── Render: Recovery ────────────────────────────────────────────────
+// ── Render: Orchestration ─────────────────────────────────────────
 
-/**
- * Render recovery metrics section.
- * Shows total attempts, success rate, per-category/per-strategy breakdown,
- * and top error types. Suppressed when --no-metrics is set (same as Metrics).
- */
-export function renderRecovery(snapshot: MonitorSnapshot): void {
-  const recovery = snapshot.recovery;
+function renderOrchestration(snapshot: MonitorSnapshot): void {
+  const loops = snapshot.loops;
+  const graphs = snapshot.graphSessions;
 
-  console.log("");
-  console.log(bold("Recovery"));
-  console.log(dim("\u2500".repeat(50)));
+  if (loops.length === 0 && graphs.length === 0) return; // SUPPRESS
 
-  if (!recovery) {
-    console.log(`  ${dim("No recovery activity recorded.")}`);
-    return;
-  }
+  const lines: string[] = [];
 
-  // Overview line
-  const totalAttempts = recovery.totalAttempts;
-  const successes = recovery.successfulRecoveries;
-  const aborted = recovery.abortedChains;
-  const exhausted = recovery.exhaustedChains;
-  const successRate = totalAttempts > 0
-    ? Math.round((successes / totalAttempts) * 100)
-    : 0;
-  console.log(
-    `  ${dim("attempts")} ${cyan(String(totalAttempts))}` +
-    `  ${dim("recovered")} ${green(String(successes))}` +
-    `  ${dim("aborted")} ${yellow(String(aborted))}` +
-    `  ${dim("exhausted")} ${red(String(exhausted))}` +
-    `  ${dim("rate")} ${successRate > 0 ? cyan(`${successRate}%`) : dim(`${successRate}%`)}`,
-  );
-
-  // By category
-  const catKeys = Object.keys(recovery.byCategory);
-  if (catKeys.length > 0) {
-    console.log(`  ${dim("\u2500")}  ${dim("by category")}`);
-    for (const cat of catKeys) {
-      const entry = recovery.byCategory[cat];
-      const rate = entry.attempts > 0
-        ? Math.round((entry.successes / entry.attempts) * 100)
-        : 0;
-      console.log(
-        `    ${dim(cat.padEnd(20))}` +
-        ` ${cyan(String(entry.attempts))}/${green(String(entry.successes))}` +
-        `  ${cyan(`${rate}%`)}`,
-      );
+  // Loop rows
+  for (const l of loops) {
+    const phaseIcon = l.phase === "active"
+      ? cyan("\u25b8")
+      : l.phase === "error"
+        ? red("\u2717")
+        : yellow("\u25cf");
+    const agentPart = bold(l.agent);
+    const progressBar = l.total > 0 ? bar(l.current, l.total, 10) : "";
+    const roundPart = l.total > 0 ? `${dim("round")} ${l.current}/${l.total}` : "";
+    const elapsedPart = dim(formatDuration(l.elapsedMs));
+    lines.push(`  ${phaseIcon} ${agentPart} ${roundPart} ${progressBar} ${elapsedPart}`.trim());
+    if (l.errorReason) {
+      // Strip "Error:" prefix if present
+      const reason = l.errorReason.startsWith("Error:") ? l.errorReason.slice(6).trim() : l.errorReason;
+      lines.push(`  ${" ".repeat(2)}${border("\u2514\u2500")} ${red(reason)}`);
     }
   }
 
-  // By strategy
-  const stratKeys = Object.keys(recovery.byStrategy);
-  if (stratKeys.length > 0) {
-    console.log(`  ${dim("\u2500")}  ${dim("by strategy")}`);
-    for (const strat of stratKeys) {
-      const entry = recovery.byStrategy[strat];
-      const rate = entry.attempts > 0
-        ? Math.round((entry.successes / entry.attempts) * 100)
-        : 0;
-      console.log(
-        `    ${dim(strat.padEnd(20))}` +
-        ` ${cyan(String(entry.attempts))}/${green(String(entry.successes))}` +
-        `  ${cyan(`${rate}%`)}`,
-      );
+  // Graph session rows — group by agentId for multi-session detection
+  const graphByAgent = new Map<string, GraphSessionSnapshot[]>();
+  for (const g of graphs) {
+    const group = graphByAgent.get(g.agentId) ?? [];
+    group.push(g);
+    graphByAgent.set(g.agentId, group);
+  }
+
+  for (const [, sessions] of graphByAgent) {
+    const showSessionIds = sessions.length > 1;
+    for (const g of sessions) {
+      const statusIcon = g.status === "active"
+        ? cyan("\u25cf")
+        : g.status === "complete"
+          ? green("\u2713")
+          : yellow("\u2298");
+      let agentPart = bold(g.agentId);
+      if (showSessionIds) {
+        agentPart += ` ${soft("\u2026" + g.sessionId.slice(-8))}`;
+      }
+      const iterPart = `${dim("iter")} ${g.iterationCount}`;
+      const frontierPreview = g.frontier
+        .slice(0, 3)
+        .map((n) => {
+          const dotIdx = n.indexOf(".");
+          return dotIdx > 0 ? n.slice(0, dotIdx) : n;
+        });
+      const frontStr = frontierPreview.length > 0
+        ? ` [${frontierPreview.join(" ")}${g.frontier.length > 3 ? " \u2026" : ""}]`
+        : "";
+      lines.push(`  ${statusIcon} ${agentPart} ${iterPart}${frontStr}`);
+      if (g.terminationReason && g.status !== "active") {
+        lines.push(`  ${" ".repeat(2)}${border("\u2514\u2500")} ${dim(g.terminationReason)}`);
+      }
     }
   }
 
-  // Top error types (top 5)
-  const errorKeys = Object.keys(recovery.errorTypeFrequency);
-  if (errorKeys.length > 0) {
-    console.log(`  ${dim("\u2500")}  ${dim("top errors")}`);
-    const sorted = errorKeys
-      .map((k) => ({ type: k, count: recovery.errorTypeFrequency[k] }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
-    for (const err of sorted) {
-      console.log(`    ${dim(err.type.padEnd(30))} ${yellow(String(err.count))}`);
-    }
-  }
-}
-
-
-// ── Render: Task Detail ────────────────────────────────────────────
-
-export function renderTaskDetail(projectDir: string, taskId: string, offset: number, limit: number | undefined): void {
-  const detail = readTaskDetail(projectDir, taskId, offset, limit);
-  if (!detail) {
-    console.error(`Error: Task "${taskId}" not found.`);
-    process.exit(1);
-  }
-
-  const t = detail.task;
-  console.log(bold(`Task Detail: ${t.id}`));
-  console.log(dim("\u2500".repeat(50)));
-  console.log(`  ${dim("Status:".padEnd(14))} ${statusIcon(t.status)} ${t.status}`);
-  console.log(`  ${dim("Agent:".padEnd(14))} ${t.agent}`);
-  if (t.description) console.log(`  ${dim("Description:".padEnd(14))} ${t.description}`);
-  console.log(`  ${dim("Started:".padEnd(14))} ${t.startedAt}`);
-  if (t.completedAt) console.log(`  ${dim("Completed:".padEnd(14))} ${t.completedAt}`);
-  console.log(`  ${dim("Duration:".padEnd(14))} ${formatDuration(t.durationMs)}`);
-  console.log(`  ${dim("Depth:".padEnd(14))} ${t.depth}`);
-  console.log(`  ${dim("Mode:".padEnd(14))} ${t.mode}`);
-  if (t.error) console.log(`  ${dim("Error:".padEnd(14))} ${red(t.error)}`);
-
-  // Show result text
-  if (detail.totalChars > 0) {
-    console.log("");
-    const rangeStr = detail.truncated
-      ? `showing ${detail.offset}..${detail.offset + detail.fullText.length} of ${detail.totalChars} chars`
-      : `showing 0..${detail.totalChars} of ${detail.totalChars} chars`;
-    console.log(bold(`Result  ${dim(rangeStr)}`));
-    console.log(dim("\u2500".repeat(50)));
-    // Output the result text line by line
-    const lines = detail.fullText.split("\n");
-    for (const line of lines) {
-      console.log(line);
-    }
-    if (detail.truncated) {
-      console.log(dim(`... ${detail.totalChars - detail.offset - detail.fullText.length} more chars (use --offset and --limit)`));
-    }
-  } else {
-    console.log(`  ${dim("No result output.")}`);
-  }
+  panel("Orchestration", lines);
 }
 
 // ── Filtering & Sorting ────────────────────────────────────────────
@@ -376,19 +320,16 @@ export function filterAndSortTasks(
     ? tasks
     : tasks.filter((t) => ["running", "pending", "error"].includes(t.status));
 
-  // Apply --agent filter (substring match, case-insensitive)
   if (agentFilter && agentFilter.length > 0) {
     const pattern = agentFilter.toLowerCase();
     visible = visible.filter((t) => t.agent.toLowerCase().includes(pattern));
   }
 
-  // Apply --status filter (comma-separated list)
   if (statusFilter && statusFilter.length > 0) {
     const statuses = statusFilter.split(",").map((s) => s.trim().toLowerCase());
     visible = visible.filter((t) => statuses.includes(t.status));
   }
 
-  // Apply --sort
   if (sortField) {
     switch (sortField) {
       case "status": {
@@ -417,7 +358,6 @@ export function filterAndSortTasks(
         );
         break;
       default:
-        // unrecognized sort — keep insertion order
         break;
     }
   }
@@ -425,7 +365,7 @@ export function filterAndSortTasks(
   return visible;
 }
 
-// ── Render: Tasks ──────────────────────────────────────────────────
+// ── Render: Tasks + Concurrency ────────────────────────────────────
 
 function renderTasks(
   snapshot: MonitorSnapshot,
@@ -436,86 +376,425 @@ function renderTasks(
   sortField?: string,
 ): void {
   const visible = filterAndSortTasks(snapshot.tasks, all, agentFilter, statusFilter, sortField);
+  const concur = snapshot.concurrency;
+  const w = contentWidth();
+  const narrow = isNarrow();
+  const lines: string[] = [];
 
-  console.log("");
-  console.log(bold("Background Tasks"));
-  console.log(dim("\u2500".repeat(50)));
-
-  // Check if user-specified filters produced empty results vs. natural empty
   const hasActiveFilters = (agentFilter && agentFilter.length > 0) || (statusFilter && statusFilter.length > 0);
 
   if (visible.length === 0) {
+    let emptyMsg: string;
     if (hasActiveFilters) {
-      console.log(`  ${dim("No tasks match filters.")}`);
+      emptyMsg = dim("\u25cb no tasks match filters");
     } else if (snapshot.tasks.length === 0) {
-      console.log(`  ${dim("No dispatch activity recorded.")}`);
+      emptyMsg = dim("\u25cb no dispatch activity");
     } else {
-      console.log(`  ${dim("No active tasks. Use --all to show completed tasks.")}`);
+      emptyMsg = dim("\u25cb all tasks completed. use --all to show");
     }
+    lines.push(`  ${emptyMsg}`);
+    panel("Tasks", lines);
     return;
   }
 
-  for (const t of visible) {
-    const icon = statusIcon(t.status);
-    const statusPart = `${icon} ${t.status.padEnd(9)}`;
-    const agentPart = truncate(t.agent, 24).padEnd(26);
-    const descPart = (t.description || "").slice(0, 40);
-    const durPart = formatDuration(t.durationMs);
-
-    console.log(`  ${statusPart} ${agentPart} ${descPart.padEnd(30)} ${durPart}`);
-
-    if (t.error) {
-      const errLabel = t.error.startsWith("Error:")
-        ? t.error
-        : `Error: ${t.error}`;
-      console.log(`              ${dim("\u2514\u2500")} ${red(errLabel)}`);
-    }
-
-    if (tailChars > 0 && t.resultPreview) {
-      const charsLabel = t.resultTotalChars
-        ? dim(` [${t.resultPreview.length}/${t.resultTotalChars} chars]`)
-        : "";
-      console.log(`              ${dim("\u2564\u2500 output")}${charsLabel}`);
-      const lines = t.resultPreview.split("\n");
-      for (const line of lines) {
-        console.log(`              ${dim("\u2502")} ${line}`);
+  if (narrow) {
+    // Narrow mode: simple list
+    for (const t of visible) {
+      const icon = statusGlyph(t.status);
+      const color = statusColor(t.status);
+      const statusPart = color(`${icon} ${t.status}`);
+      const descPart = (t.description || "").slice(0, 40);
+      lines.push(`  ${statusPart}  ${bold(truncate(t.agent, 20))}  ${descPart}`);
+      if (t.error) {
+        const errMsg = t.error.startsWith("Error:") ? t.error.slice(6).trim() : t.error;
+        lines.push(`    ${border("\u2514\u2500")} ${red(errMsg)}`);
       }
-      console.log(`              ${dim("\u2570\u2500")}`);
+      if (tailChars > 0 && t.resultPreview) {
+        const previewLines = t.resultPreview.split("\n").slice(0, 3);
+        for (const pl of previewLines) {
+          lines.push(`    ${border("\u2502")} ${dim(pl)}`);
+        }
+      }
+    }
+  } else {
+    // Default sort by urgency: running → pending → error → completed → cancelled → timeout
+    const urgencyOrder: Record<string, number> = {
+      running: 0,
+      pending: 1,
+      error: 2,
+      completed: 3,
+      cancelled: 4,
+      timeout: 5,
+    };
+    const sorted = [...visible].sort(
+      (a, b) => (urgencyOrder[a.status] ?? 99) - (urgencyOrder[b.status] ?? 99),
+    );
+
+    // Fixed-width columns
+    const agentW = 20;
+    // Description: flex, truncated to fit. Content width minus fixed columns.
+    const statusW = 11; // glyph + space + status word, padded
+    const durW = 8; // right-aligned
+    const fixedW = statusW + 1 + agentW + 1 + durW + 1; // +1 for spacing
+    const descW = Math.max(10, Math.min(50, w - 4 - fixedW)); // contentWidth - panel padding - fixed
+
+    for (const t of sorted) {
+      const sc = statusCell(t.status);
+      const agentPart = bold(truncate(t.agent, agentW).padEnd(agentW));
+      const descPart = truncate((t.description || ""), descW).padEnd(descW);
+      const durPart = t.status === "pending" ? dim("\u2014".padStart(durW)) : dim(formatDuration(t.durationMs).padStart(durW));
+      lines.push(`  ${sc} ${agentPart} ${descPart} ${durPart}`);
+
+      if (t.error) {
+        const errMsg = t.error.startsWith("Error:") ? t.error.slice(6).trim() : t.error;
+        lines.push(`  ${" ".repeat(statusW + 1)}${border("\u2514\u2500")} ${red(errMsg)}`);
+      }
+
+      if (tailChars > 0 && t.resultPreview) {
+        const totalChars = t.resultTotalChars ?? t.resultPreview.length;
+        const charsLabel = dim(` [${t.resultPreview.length}/${totalChars} chars]`);
+        lines.push(`  ${" ".repeat(statusW + 1)}${border("\u2564\u2500 output")}${charsLabel}`);
+        const previewLines = t.resultPreview.split("\n");
+        for (const pl of previewLines) {
+          lines.push(`  ${" ".repeat(statusW + 1)}${border("\u2502")} ${pl}`);
+        }
+        lines.push(`  ${" ".repeat(statusW + 1)}${border("\u2570\u2500")}`);
+      }
     }
   }
+
+  // Concurrency inline (1 line under tasks)
+  const shouldShowConcurrency = !(concur.limit === 0 && concur.active === 0 && concur.queued === 0);
+  if (shouldShowConcurrency) {
+    const activePart = `${cyan(String(concur.active))}${dim("/")}${white(String(concur.limit))}`;
+    const queuedPart = concur.queued > 0 ? ` ${yellow("+" + String(concur.queued))} ${dim("queued")}` : "";
+    lines.push(`  ${dim("slots")} ${activePart}${queuedPart}`);
+  }
+
+  panel("Tasks", lines);
 }
 
 // ── Render: Active Functions ───────────────────────────────────────
 
 function renderActiveFunctions(snapshot: MonitorSnapshot): void {
-  console.log("");
-  console.log(bold("Active Functions"));
-  console.log(dim("\u2500".repeat(50)));
+  if (snapshot.activeFunctions.length === 0) return; // SUPPRESS
 
-  if (snapshot.activeFunctions.length === 0) {
-    console.log(`  ${dim("No active functions.")}`);
+  const lines: string[] = [];
+  const w = contentWidth();
+  const narrow = isNarrow();
+
+  // Group by agent, not session
+  const agentMap = new Map<string, typeof snapshot.activeFunctions>();
+  for (const af of snapshot.activeFunctions) {
+    const agent = af.agentId ?? "(primary)";
+    const group = agentMap.get(agent) ?? [];
+    group.push(af);
+    agentMap.set(agent, group);
+  }
+
+  // Track session IDs per agent for dedup
+  const agentSessions = new Map<string, Set<string>>();
+  for (const af of snapshot.activeFunctions) {
+    const agent = af.agentId ?? "(primary)";
+    const s = agentSessions.get(agent) ?? new Set();
+    s.add(af.sessionId);
+    agentSessions.set(agent, s);
+  }
+
+  for (const [agentName, fns] of agentMap) {
+    const sessions = agentSessions.get(agentName)!;
+    let header = `  ${bold(agentName)}`;
+    if (sessions.size > 1) {
+      // Show session IDs only when multiple sessions for same agent
+      const sessionList = [...sessions].map((sid) => shortSessionId(sid)).join(", ");
+      header += `  ${soft("[" + sessionList + "]")}`;
+    }
+    lines.push(header);
+
+    for (const fn of fns) {
+      const phaseGlyph = fn.phase === "active" ? cyan("\u2192") : yellow("\u23f8"); // → active, ⏸ gated
+      const fnName = truncate(fn.name, narrow ? 24 : 30);
+      const contPart = dim(`cont ${fn.continuationCount}`);
+      const turnPart = fn.currentTurn !== undefined ? dim(`turn ${fn.currentTurn}`) : "";
+      const gatePart = fn.phase === "gated"
+        ? (fn.gateSatisfied ? dim("gate \u2713") : dim("gate \u2717"))
+        : "";
+      lines.push(`  ${" ".repeat(2)}${phaseGlyph} ${fnName}  ${contPart}${turnPart ? `  ${turnPart}` : ""}${gatePart ? `  ${gatePart}` : ""}`);
+    }
+  }
+
+  panel("Functions", lines);
+}
+
+// ── Render: Recovery ────────────────────────────────────────────────
+
+export function renderRecovery(snapshot: MonitorSnapshot): void {
+  const recovery = snapshot.recovery;
+
+  // SUPPRESS if no recovery data or totalAttempts === 0
+  if (!recovery || recovery.totalAttempts === 0) return;
+
+  const totalAttempts = recovery.totalAttempts;
+  const successes = recovery.successfulRecoveries;
+  const aborted = recovery.abortedChains;
+  const exhausted = recovery.exhaustedChains;
+  const successRate = totalAttempts > 0
+    ? Math.round((successes / totalAttempts) * 100)
+    : 0;
+
+  const rateColor = successRate >= 80 ? green : successRate >= 50 ? yellow : red;
+
+  const lines: string[] = [];
+
+  // Summary line
+  const summaryParts: string[] = [];
+  summaryParts.push(`${bright(String(totalAttempts))} ${dim("attempts")}`);
+  summaryParts.push(`${green(String(successes))} ${dim("recovered")}`);
+  if (aborted > 0) summaryParts.push(`${yellow(String(aborted))} ${dim("aborted")}`);
+  if (exhausted > 0) summaryParts.push(`${gray(String(exhausted))} ${dim("exhausted")}`);
+  summaryParts.push(`${rateColor(`${successRate}%`)} ${dim("rate")}`);
+  lines.push(`  ${summaryParts.join("  ")}`);
+
+  // By category
+  const catKeys = Object.keys(recovery.byCategory);
+  if (catKeys.length > 0) {
+    lines.push(`  ${sub("\u2500")} ${dim("by category")}`);
+    for (const cat of catKeys) {
+      const entry = recovery.byCategory[cat];
+      const rate = entry.attempts > 0 ? Math.round((entry.successes / entry.attempts) * 100) : 0;
+      lines.push(`    ${dim(cat.padEnd(20))} ${cyan(String(entry.attempts))}/${green(String(entry.successes))}  ${cyan(`${rate}%`)}`);
+    }
+  }
+
+  // By strategy
+  const stratKeys = Object.keys(recovery.byStrategy);
+  if (stratKeys.length > 0) {
+    lines.push(`  ${sub("\u2500")} ${dim("by strategy")}`);
+    for (const strat of stratKeys) {
+      const entry = recovery.byStrategy[strat];
+      const rate = entry.attempts > 0 ? Math.round((entry.successes / entry.attempts) * 100) : 0;
+      lines.push(`    ${dim(strat.padEnd(20))} ${cyan(String(entry.attempts))}/${green(String(entry.successes))}  ${cyan(`${rate}%`)}`);
+    }
+  }
+
+  // Top errors (top 5)
+  const errorKeys = Object.keys(recovery.errorTypeFrequency);
+  if (errorKeys.length > 0) {
+    lines.push(`  ${sub("\u2500")} ${dim("top errors")}`);
+    const sorted = errorKeys
+      .map((k) => ({ type: k, count: recovery.errorTypeFrequency[k] }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+    for (const err of sorted) {
+      lines.push(`    ${dim(err.type.padEnd(30))} ${yellow(String(err.count))}`);
+    }
+  }
+
+  panel("Recovery", lines);
+}
+
+// ── Render: Metrics ────────────────────────────────────────────────
+
+export function renderMetrics(snapshot: MonitorSnapshot): void {
+  const metrics = snapshot.metrics;
+
+  // SUPPRESS if no metrics data
+  if (!metrics) return;
+
+  const lines: string[] = [];
+  const w = contentWidth();
+  const narrow = isNarrow();
+
+  // ── Counters ──
+  const counterKeys = Object.keys(metrics.counters);
+  const counterGroups = new Map<string, Array<{ labels: Record<string, string>; value: number }>>();
+  for (const key of counterKeys) {
+    const { name, labels } = parseMetricKey(key);
+    const entry = { labels, value: metrics.counters[key].value };
+    const group = counterGroups.get(name) ?? [];
+    group.push(entry);
+    counterGroups.set(name, group);
+  }
+
+  for (const [name, entries] of counterGroups) {
+    const unlabeled = entries.filter((e) => Object.keys(e.labels).length === 0);
+    const labeled = entries.filter((e) => Object.keys(e.labels).length > 0);
+
+    if (unlabeled.length > 0) {
+      for (const e of unlabeled) {
+        lines.push(`  ${dim(name)} ${bright(String(e.value))}`);
+      }
+    }
+    if (labeled.length > 0) {
+      for (const e of labeled) {
+        const labelStr = Object.entries(e.labels)
+          .map(([k, v]) => `${dim(k)}:${v}`)
+          .join(" ");
+        lines.push(`  ${dim(name)} ${labelStr} ${bright(String(e.value))}`);
+      }
+    }
+  }
+
+  // ── Gauges ──
+  const gaugeKeys = Object.keys(metrics.gauges);
+  if (gaugeKeys.length > 0) {
+    lines.push(`  ${sub("\u2500")} ${dim("gauges")}`);
+    for (const key of gaugeKeys) {
+      const { name, labels } = parseMetricKey(key);
+      const value = metrics.gauges[key].value;
+      if (Object.keys(labels).length === 0) {
+        lines.push(`  ${dim(name)} ${yellow(String(value))}`);
+      } else {
+        const labelStr = Object.entries(labels)
+          .map(([k, v]) => `${dim(k)}:${v}`)
+          .join(" ");
+        lines.push(`  ${dim(name)} ${labelStr} ${yellow(String(value))}`);
+      }
+    }
+  }
+
+  // ── Histograms ──
+  const histKeys = Object.keys(metrics.histograms);
+  if (histKeys.length > 0) {
+    lines.push(`  ${sub("\u2500")} ${dim("histograms")}`);
+    for (const key of histKeys) {
+      const { name, labels } = parseMetricKey(key);
+      const h = metrics.histograms[key];
+      const avg = h.count > 0 ? Math.round(h.sum / h.count) : 0;
+      const p50 = histogramPercentile(h.buckets, h.count, 0.5);
+      const p95 = histogramPercentile(h.buckets, h.count, 0.95);
+
+      let labelStr = "";
+      if (Object.keys(labels).length > 0) {
+        labelStr = " " + Object.entries(labels)
+          .map(([k, v]) => `${dim(k)}:${v}`)
+          .join(" ");
+      }
+      lines.push(
+        `  ${dim(name)}${labelStr} ${cyan(`avg=${avg}ms`)} ${cyan(`p50=${p50}ms`)} ${cyan(`p95=${p95}ms`)}  ${dim(`n=${h.count}`)}`,
+      );
+    }
+  }
+
+  panel("Metrics", lines);
+}
+
+// ── Render: Notifications ──────────────────────────────────────────
+
+export function renderNotifications(snapshot: MonitorSnapshot): void {
+  const notif = snapshot.notifications;
+  const lines: string[] = [];
+
+  if (!notif) {
+    lines.push(`  ${dim("\u25cb No notification state available.")}`);
+    panel("Notifications", lines);
     return;
   }
 
-  const sessionMap = new Map<string, typeof snapshot.activeFunctions>();
-  for (const af of snapshot.activeFunctions) {
-    const group = sessionMap.get(af.sessionId) ?? [];
-    group.push(af);
-    sessionMap.set(af.sessionId, group);
+  const enabledSymbol = notif.enabled ? green("\u2713") : red("\u2717");
+  lines.push(`  ${dim("Enabled")} ${enabledSymbol}`);
+
+  if (notif.quietHoursActive) {
+    lines.push(`  ${dim("Quiet hours")} ${yellow("active")}`);
   }
 
-  for (const [sessionId, fns] of sessionMap) {
-    const agentName = truncate(fns[0]?.agentId ?? "(primary)", 24);
-    const shortId =
-      sessionId.length > 3 ? sessionId.slice(0, 3) + "\u2026" : sessionId;
-    console.log(`  ${agentName} (session ${shortId})`);
+  if (notif.throttleStats) {
+    lines.push(`  ${dim("Throttle")} ${notif.throttleStats.recentCount}/${notif.throttleStats.windowMs}ms`);
+  }
 
-    for (const fn of fns) {
-      const arrow = dim("\u2192");
-      console.log(
-        `    ${arrow} ${fn.name}  ${fn.phase}  continuations: ${fn.continuationCount}`,
-      );
+  if (notif.recentEvents.length > 0) {
+    const recent = notif.recentEvents.slice(-5);
+    lines.push(`  ${dim("Recent events")}`);
+    for (const evt of recent) {
+      const ts = evt.ts.length > 19 ? evt.ts.slice(0, 19) : evt.ts;
+      lines.push(`    ${dim(ts)} ${evt.type}`);
     }
+  }
+
+  panel("Notifications", lines);
+}
+
+// ── Render: Task Detail ────────────────────────────────────────────
+
+export function renderTaskDetail(projectDir: string, taskId: string, offset: number, limit: number | undefined): void {
+  const detail = readTaskDetail(projectDir, taskId, offset, limit);
+  if (!detail) {
+    console.error(`Error: Task "${taskId}" not found.`);
+    process.exit(1);
+  }
+
+  const t = detail.task;
+  console.log(bold(`Task Detail: ${t.id}`));
+  console.log(dim("\u2500".repeat(50)));
+  console.log(`  ${dim("Status:".padEnd(14))} ${statusGlyph(t.status)} ${t.status}`);
+  console.log(`  ${dim("Agent:".padEnd(14))} ${t.agent}`);
+  if (t.description) console.log(`  ${dim("Description:".padEnd(14))} ${t.description}`);
+  console.log(`  ${dim("Started:".padEnd(14))} ${t.startedAt}`);
+  if (t.completedAt) console.log(`  ${dim("Completed:".padEnd(14))} ${t.completedAt}`);
+  console.log(`  ${dim("Duration:".padEnd(14))} ${formatDuration(t.durationMs)}`);
+  console.log(`  ${dim("Depth:".padEnd(14))} ${t.depth}`);
+  console.log(`  ${dim("Mode:".padEnd(14))} ${t.mode}`);
+  if (t.error) console.log(`  ${dim("Error:".padEnd(14))} ${red(t.error)}`);
+
+  if (detail.totalChars > 0) {
+    console.log("");
+    const rangeStr = detail.truncated
+      ? `showing ${detail.offset}..${detail.offset + detail.fullText.length} of ${detail.totalChars} chars`
+      : `showing 0..${detail.totalChars} of ${detail.totalChars} chars`;
+    console.log(bold(`Result  ${dim(rangeStr)}`));
+    console.log(dim("\u2500".repeat(50)));
+    const lines = detail.fullText.split("\n");
+    for (const line of lines) {
+      console.log(line);
+    }
+    if (detail.truncated) {
+      console.log(dim(`... ${detail.totalChars - detail.offset - detail.fullText.length} more chars (use --offset and --limit)`));
+    }
+  } else {
+    console.log(`  ${dim("No result output.")}`);
+  }
+}
+
+// ── Render: Human (composite) ─────────────────────────────────────
+
+function renderHuman(
+  snapshot: MonitorSnapshot,
+  all: boolean,
+  tailChars: number,
+  options?: MonitorOptions,
+): void {
+  const opts = options ?? {};
+
+  // Section order: Title Bar → System Pulse → Orchestration → Tasks
+  // → Functions → Recovery → Metrics → (Notifications optional)
+
+  renderHeader(snapshot.projectDir);
+
+  if (!opts.noStatus) {
+    renderSystemPulse(snapshot);
+  }
+
+  renderOrchestration(snapshot);
+  renderTasks(snapshot, all, tailChars, opts.agent, opts.status, opts.sort);
+  renderActiveFunctions(snapshot);
+
+  if (!opts.noMetrics) {
+    renderRecovery(snapshot);
+    renderMetrics(snapshot);
+  }
+
+  if (opts.showNotifications) {
+    renderNotifications(snapshot);
+  }
+}
+
+// ── Render: JSON ───────────────────────────────────────────────────
+
+function renderJson(snapshot: MonitorSnapshot, ndjson: boolean): void {
+  if (ndjson) {
+    console.log(JSON.stringify(snapshot));
+  } else {
+    console.log(JSON.stringify(snapshot, null, 2));
   }
 }
 
@@ -523,50 +802,17 @@ function renderActiveFunctions(snapshot: MonitorSnapshot): void {
 
 export class DiffRenderer {
   private prevTaskIds = new Set<string>();
-  private prevLineCount = 0;
   private firstRender = true;
-  private sigwinchHandler: (() => void) | null = null;
-  private needsFullRedraw = false;
 
-  constructor() {
-    // Handle terminal resize — request full redraw on next cycle
-    this.sigwinchHandler = () => {
-      this.needsFullRedraw = true;
-    };
-
-    if (typeof process !== "undefined" && process.on) {
-      process.on("SIGWINCH", this.sigwinchHandler);
-    }
+  beginFrame(): void {
+    process.stdout.write("\x1b[2J\x1b[H");
   }
 
   dispose(): void {
-    if (this.sigwinchHandler && typeof process !== "undefined" && process.removeListener) {
-      process.removeListener("SIGWINCH", this.sigwinchHandler);
-    }
+    // No cleanup needed.
   }
 
-  /**
-   * Begin a new render frame.
-   * On first render, no cursor adjustment. On subsequent renders, move cursor
-   * up by previous line count and clear from cursor to end of screen.
-   */
-  beginFrame(): void {
-    if (!this.firstRender && !this.needsFullRedraw) {
-      if (this.prevLineCount > 0) {
-        process.stdout.write(`\x1b[${this.prevLineCount}A`);
-      }
-      process.stdout.write(`\x1b[J`);
-    }
-  }
-
-  /**
-   * End a render frame. Computes diff stats and prints them.
-   * Call this AFTER all render*() functions have been called.
-   * @param lineCount — Total number of lines output in this frame
-   * @param currentTasks — Current task list
-   * @param fullRedrawForced — Whether a full redraw was forced this cycle
-   */
-  endFrame(lineCount: number, currentTasks: TaskSnapshot[], fullRedrawForced: boolean): void {
+  endFrame(currentTasks: TaskSnapshot[], fullRedrawForced: boolean): void {
     const currentIds = new Set(currentTasks.map((t) => t.id));
 
     if (!this.firstRender && !fullRedrawForced) {
@@ -579,15 +825,12 @@ export class DiffRenderer {
         if (added.length > 0) parts.push(green(`+${added.length}`));
         if (removed.length > 0) parts.push(red(`-${removed.length}`));
         if (changed.length > 0) parts.push(yellow(`\u223c${changed.length}`));
-        console.log(`  ${dim("diff:")} ${parts.join(" ")}`);
-        lineCount++;
+        console.log(`  ${soft("diff:")} ${parts.join(" ")}`);
       }
     }
 
-    this.prevLineCount = lineCount;
     this.prevTaskIds = currentIds;
     this.firstRender = false;
-    this.needsFullRedraw = false;
   }
 
   get isFirstRender(): boolean {
@@ -605,7 +848,6 @@ export function renderPrometheus(snapshot: MonitorSnapshot): string {
     return "# No metrics data available.\n";
   }
 
-  // Known metric HELP/TYPE descriptions
   const knownMetrics: Record<string, { help: string; type: string }> = {
     dispatch_total: { help: "Total tasks dispatched", type: "counter" },
     dispatch_completed_total: { help: "Total tasks completed", type: "counter" },
@@ -622,7 +864,6 @@ export function renderPrometheus(snapshot: MonitorSnapshot): string {
     queue_wait_ms: { help: "Queue wait time in milliseconds", type: "histogram" },
   };
 
-  // Emit counters
   for (const [key, cs] of Object.entries(metrics.counters)) {
     const { name, labels } = parseMetricKey(key);
     const info = knownMetrics[name];
@@ -634,7 +875,6 @@ export function renderPrometheus(snapshot: MonitorSnapshot): string {
     lines.push(`${name}${labelStr} ${cs.value}`);
   }
 
-  // Emit gauges
   for (const [key, gs] of Object.entries(metrics.gauges)) {
     const { name, labels } = parseMetricKey(key);
     const info = knownMetrics[name];
@@ -646,7 +886,6 @@ export function renderPrometheus(snapshot: MonitorSnapshot): string {
     lines.push(`${name}${labelStr} ${gs.value}`);
   }
 
-  // Emit histograms
   for (const [key, hs] of Object.entries(metrics.histograms)) {
     const { name, labels } = parseMetricKey(key);
     const info = knownMetrics[name];
@@ -669,50 +908,6 @@ export function renderPrometheus(snapshot: MonitorSnapshot): string {
   }
 
   return lines.join("\n") + "\n";
-}
-
-
-function renderHuman(
-  snapshot: MonitorSnapshot,
-  all: boolean,
-  tailChars: number,
-  options?: MonitorOptions,
-): void {
-  const opts = options ?? {};
-  renderHeader(snapshot.projectDir);
-  renderTasks(snapshot, all, tailChars, opts.agent, opts.status, opts.sort);
-  renderActiveFunctions(snapshot);
-
-  if (!opts.noMetrics) {
-    renderMetrics(snapshot);
-    renderRecovery(snapshot);
-  }
-
-  if (opts.showNotifications) {
-    renderNotifications(snapshot);
-  }
-
-  console.log("");
-}
-// ── Render: JSON ───────────────────────────────────────────────────
-
-function renderJson(snapshot: MonitorSnapshot, ndjson: boolean): void {
-  if (ndjson) {
-    console.log(JSON.stringify(snapshot));
-  } else {
-    console.log(JSON.stringify(snapshot, null, 2));
-  }
-}
-
-// ── Render: Header ─────────────────────────────────────────────────
-
-function renderHeader(projectDir: string): void {
-  const headerContent = `  rolebox monitor \u00b7 ${projectDir}`;
-  const boxWidth = Math.max(headerContent.length + 4, 50);
-  const dashes = "\u2500".repeat(boxWidth - 2);
-  console.log(`\u250c${dashes}\u2510`);
-  console.log(headerContent);
-  console.log(`\u2514${dashes}\u2518`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────
@@ -777,12 +972,16 @@ export async function monitor(
   const diffRenderer = new DiffRenderer();
   let exiting = false;
 
+  // Enter alternate screen buffer to preserve user's terminal history
+  process.stdout.write("\x1b[?1049h");
+
   process.on("SIGINT", () => {
     if (exiting) process.exit(0);
     exiting = true;
+    // Exit alternate screen buffer — restores original terminal content
+    process.stdout.write("\x1b[?1049l");
     diffRenderer.dispose();
-    process.stdout.write("\n");
-    console.log(dim("\nMonitor stopped."));
+    console.log(dim("Monitor stopped."));
     process.exit(0);
   });
 
@@ -791,37 +990,16 @@ export async function monitor(
   while (true) {
     const snapshot = readMonitorSnapshot(projectDir, tailChars);
 
-    // In watch mode, use diff-based or full-redraw rendering
     if (json || opts.export === "json") {
-      // JSON watch mode: still do full-clear for JSON (it's streaming)
-      if (opts.fullRedraw || diffRenderer.isFirstRender) {
-        process.stdout.write("\x1b[2J\x1b[H");
-      }
-      renderJson(snapshot, true);
-    } else if (opts.fullRedraw) {
       process.stdout.write("\x1b[2J\x1b[H");
-      renderHuman(snapshot, all, tailChars, opts);
+      renderJson(snapshot, true);
     } else {
-      // Diff-based incremental rendering
       diffRenderer.beginFrame();
-
-      // Capture line count by wrapping console.log
-      const lines: string[] = [];
-      const origLog = console.log;
-      console.log = (...args: any[]) => {
-        const line = args.join(" ");
-        lines.push(line);
-        origLog(...args);
-      };
-
       renderHuman(snapshot, all, tailChars, opts);
-
-      console.log = origLog;
-
-      diffRenderer.endFrame(lines.length, snapshot.tasks, false);
+      diffRenderer.endFrame(snapshot.tasks, false);
     }
 
-    console.log(dim(`Refreshing every ${refreshLabel} \u00b7 Ctrl+C to exit`));
+    console.log(soft(`refreshing every ${refreshLabel} \u00b7 Ctrl+C to exit`));
 
     await sleep(interval);
   }
@@ -863,6 +1041,10 @@ export default defineCommand({
     "no-metrics": {
       type: "boolean",
       description: "Suppress the metrics section from output",
+    },
+    "no-status": {
+      type: "boolean",
+      description: "Hide the status overview panel",
     },
     agent: {
       type: "string",
@@ -929,6 +1111,7 @@ export default defineCommand({
 
     const options: MonitorOptions = {
       noMetrics: args["no-metrics"] ?? false,
+      noStatus: args["no-status"] ?? false,
       agent: args.agent,
       status: args.status,
       sort: args.sort,

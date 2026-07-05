@@ -17,6 +17,15 @@ export const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
 export const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
 export const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
 export const magenta = (s: string) => `\x1b[35m${s}\x1b[39m`;
+export const white = (s: string) => `\x1b[37m${s}\x1b[39m`;
+
+// ── TUI Color Primitives ───────────────────────────────────────────
+
+export const gray = (s: string) => `\x1b[38;5;244m${s}\x1b[39m`;
+export const soft = (s: string) => `\x1b[38;5;240m${s}\x1b[39m`;
+export const border = (s: string) => `\x1b[38;5;238m${s}\x1b[39m`;
+export const sub = (s: string) => `\x1b[38;5;236m${s}\x1b[39m`;
+export const bright = (s: string) => `\x1b[97m${s}\x1b[39m`;
 
 // ── Status Symbols ───────────────────────────────────────────────
 
@@ -25,6 +34,21 @@ export const SYM_FAIL = red("✗");
 export const SYM_WARN = yellow("⚠");
 export const SYM_ARROW = dim("→");
 export const SYM_BULLET = dim("•");
+
+// ── Phase Status Icons ────────────────────────────────────────────
+
+export const SYM_DISPATCH = "▶";
+export const SYM_AWAIT = "◷";
+export const SYM_SUMMARIZE = "◆";
+export const SYM_COMPLETE = "✓";
+export const SYM_ERROR = "✗";
+export const SYM_CANCELLED = "⊘";
+
+// ── Health Indicators ─────────────────────────────────────────────
+
+export const HLTH_OK = green("●");
+export const HLTH_DEGRADED = yellow("●");
+export const HLTH_ERROR = red("●");
 
 // ── Layout Helpers ───────────────────────────────────────────────
 
@@ -36,6 +60,25 @@ export function padEnd(s: string, width: number): string {
   const visible = stripAnsi(s).length;
   const padding = Math.max(0, width - visible);
   return s + " ".repeat(padding);
+}
+
+export function padRight(s: string, width: number): string {
+  const visible = stripAnsi(s).length;
+  const padding = Math.max(0, width - visible);
+  return s + " ".repeat(padding);
+}
+
+/**
+ * Draw a filled progress bar. Useful for showing rounds/task completion.
+ * @param current — completed count
+ * @param total — total count (must be > 0)
+ * @param width — total character width of the bar (default 10)
+ * @returns a visual bar like ■■■□□□□□□□ for 3/10
+ */
+export function bar(current: number, total: number, width = 10): string {
+  const filled = Math.max(0, Math.min(width, Math.round((current / total) * width)));
+  const empty = Math.max(0, width - filled);
+  return "■".repeat(filled) + "□".repeat(empty);
 }
 
 export function printHeader(title: string): void {

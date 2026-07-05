@@ -29,6 +29,18 @@ export interface ActiveFunction {
   name: string;
   phase: "active" | "gated" | "complete";
   continuationCount: number;
+  /** Current turn number in the session */
+  currentTurn?: number;
+  /** Turn at which the function was activated */
+  activatedAtTurn?: number;
+  /** Whether the gate condition has been satisfied */
+  gateSatisfied?: boolean;
+  /** Turn until which the function is in cooldown */
+  cooldownUntilTurn?: number;
+  /** Tools observed being used during this function's activation */
+  toolsObserved?: string[];
+  /** Evidence types observed (keys of the evidenceObserved map) */
+  evidenceObserved?: string[];
 }
 
 export interface MonitorSnapshot {
@@ -41,7 +53,75 @@ export interface MonitorSnapshot {
   notifications?: NotificationState;
   /** Recovery metrics snapshot, present when the persisted file has a `recovery` key. */
   recovery?: RecoveryMetrics;
+  /** Non-terminal loop execution snapshots */
+  loops: LoopSnapshot[];
+  /** Full graph execution state snapshots (frontier, completed, status) */
+  graphSessions: GraphSessionSnapshot[];
+  /** Summary of task status counts computed from the tasks array */
+  dispatchSummary: DispatchSummary;
+  /** Aggregate concurrency status derived from metrics or dispatch state */
+  concurrency: ConcurrencyStatus;
   }
+
+export interface LoopSnapshot {
+  /** Session ID of the origin loop session */
+  originSessionId: string;
+  /** Name of the agent running the loop */
+  agent: string;
+  /** Current orchestrator phase */
+  phase: string;
+  /** Current round number (1-based) */
+  current: number;
+  /** Total number of rounds requested */
+  total: number;
+  /** Loop mode (inherit conversation or fresh start) */
+  mode: string;
+  /** Elapsed milliseconds since the loop started */
+  elapsedMs: number;
+  /** Error description when the loop is in error phase */
+  errorReason?: string;
+  /** Session ID of the active worker round (if any) */
+  activeWorkerSessionId?: string;
+}
+
+export interface GraphSessionSnapshot {
+  /** Session ID of the graph session */
+  sessionId: string;
+  /** Agent ID assigned to this session */
+  agentId: string;
+  /** Execution status of the graph */
+  status: "active" | "complete" | "exhausted";
+  /** Current frontier nodes (nodes awaiting dispatch) */
+  frontier: string[];
+  /** Nodes that have completed execution */
+  completed: string[];
+  /** Number of iterations executed */
+  iterationCount: number;
+  /** Termination reason, null while active, absent when not-terminated */
+  terminationReason?: string | null;
+}
+
+export interface DispatchSummary {
+  /** Number of tasks with status pending */
+  pending: number;
+  /** Number of tasks with status running */
+  running: number;
+  /** Number of tasks with status completed */
+  completed: number;
+  /** Number of tasks with status error */
+  error: number;
+  /** Number of tasks with status cancelled */
+  cancelled: number;
+}
+
+export interface ConcurrencyStatus {
+  /** Total actively executing tasks across all concurrency slots */
+  active: number;
+  /** Total concurrency slot limit across all keys */
+  limit: number;
+  /** Total tasks queued waiting for concurrency slots */
+  queued: number;
+}
 
 export interface NDJSONEvent {
   ts: string;
@@ -102,7 +182,17 @@ interface RawDispatchFile {
 
 interface RawFnEntry {
   name: string;
-  state: { phase: string; continuationCount: number };
+  state: {
+    phase: string;
+    continuationCount: number;
+    currentTurn?: number;
+    activatedAtTurn?: number;
+    gateSatisfied?: boolean;
+    cooldownUntilTurn?: number;
+    toolsObserved?: string[];
+    evidenceObserved?: Record<string, unknown>;
+    schemaVersion?: number;
+  };
 }
 
 interface RawFnSession {
@@ -123,6 +213,56 @@ interface RawGraphSession {
 interface RawGraphFile {
   version: number;
   sessions: RawGraphSession[];
+}
+
+// ── Loop file raw types ──────────────────────────────────────────────
+
+interface RawLoopState {
+  originSessionId: string;
+  agent: string;
+  phase: string;
+  current: number;
+  total: number;
+  mode: string;
+  startedAt: number;
+  updatedAt: number;
+  errorReason?: string;
+  activeWorkerSessionId?: string;
+  activeWorkerTaskId?: string;
+}
+
+interface RawLoopEntry {
+  id: string;
+  state: RawLoopState;
+}
+
+interface RawLoopFile {
+  version: number;
+  loops: RawLoopEntry[];
+}
+
+// ── Full graph session with execution state ──────────────────────────
+
+interface RawGraphSessionFull {
+  sessionId: string;
+  agentId: string;
+  state: {
+    frontier: string[];
+    completed: string[];
+    iterationCount: number;
+    status: string;
+    loopCounters?: Record<string, number>;
+    lastResults?: Record<string, { hash: string; text: string }>;
+    loopStartTimeMs?: number;
+    terminationReason?: string | null;
+    correctionCount?: number;
+    convergenceSignal?: string;
+  };
+}
+
+interface RawGraphFileFull {
+  version: number;
+  sessions: RawGraphSessionFull[];
 }
 
 function isErrno(err: unknown): err is NodeJS.ErrnoException {
@@ -357,6 +497,180 @@ export function readRecoveryMetrics(stateDir: string): RecoveryMetrics | null {
   return null;
 }
 
+const TERMINAL_LOOP_PHASES = new Set([
+  "complete",
+  "cancelled",
+  "interrupted",
+  "error",
+]);
+
+const CONCURRENCY_GAUGE_ACTIVE = "concurrency_active";
+const CONCURRENCY_GAUGE_QUEUED = "concurrency_queued";
+const CONCURRENCY_GAUGE_LIMIT = "concurrency_limit";
+
+/**
+ * Parse all `loops-{hash}.json` files in the state directory and return
+ * LoopSnapshot entries for non-terminal loops only.
+ *
+ * The loop coordinator persists the full LoopState map via LoopStore.
+ * Terminal phases (complete, cancelled, interrupted, error) are excluded.
+ * Returns an empty array when no loop files exist.
+ */
+export function readLoopSnapshots(stateDir: string): LoopSnapshot[] {
+  const loopFiles = listStateFiles(stateDir, "loops-");
+  if (loopFiles.length === 0) return [];
+
+  const snapshots: LoopSnapshot[] = [];
+
+  for (const filePath of loopFiles) {
+    const raw = tryReadJson(filePath);
+    if (!raw || typeof raw !== "object" || !("loops" in raw)) continue;
+    const file = raw as RawLoopFile;
+    if (!Array.isArray(file.loops)) continue;
+
+    for (const entry of file.loops) {
+      if (!entry.state || typeof entry.state !== "object") continue;
+      const st = entry.state;
+
+      // Skip terminal phases
+      if (typeof st.phase === "string" && TERMINAL_LOOP_PHASES.has(st.phase)) continue;
+
+      const startedAt =
+        typeof st.startedAt === "number" ? st.startedAt : 0;
+      const elapsedMs = startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
+
+      snapshots.push({
+        originSessionId: st.originSessionId ?? entry.id,
+        agent: st.agent ?? "",
+        phase: st.phase ?? "unknown",
+        current: typeof st.current === "number" ? st.current : 0,
+        total: typeof st.total === "number" ? st.total : 0,
+        mode: st.mode ?? "inherit",
+        elapsedMs,
+        errorReason: st.errorReason,
+        activeWorkerSessionId: st.activeWorkerSessionId,
+      });
+    }
+  }
+
+  return snapshots;
+}
+
+/**
+ * Parse all `graph-{hash}.json` files in the state directory and return
+ * the full GraphSessionSnapshot array including execution state (frontier,
+ * completed, iterationCount, status, terminationReason).
+ *
+ * Unlike the existing session-id-to-agent mapping that only extracts
+ * sessionId/agentId, this reader also extracts the GraphExecutionState
+ * that the graph state machine persists for each session.
+ * Returns an empty array when no graph files exist.
+ */
+export function readGraphSessions(stateDir: string): GraphSessionSnapshot[] {
+  const graphFiles = listStateFiles(stateDir, "graph-");
+  if (graphFiles.length === 0) return [];
+
+  const snapshots: GraphSessionSnapshot[] = [];
+
+  for (const filePath of graphFiles) {
+    const raw = tryReadJson(filePath);
+    if (!raw || typeof raw !== "object" || !("sessions" in raw)) continue;
+    const file = raw as RawGraphFileFull;
+    if (!Array.isArray(file.sessions)) continue;
+
+    for (const gs of file.sessions) {
+      if (!gs.state || typeof gs.state !== "object") continue;
+      const state = gs.state;
+
+      // Map any status-like string to the union; fallback to "active"
+      let status: GraphSessionSnapshot["status"] = "active";
+      if (state.status === "complete") status = "complete";
+      else if (state.status === "exhausted") status = "exhausted";
+
+      snapshots.push({
+        sessionId: gs.sessionId ?? "",
+        agentId: gs.agentId ?? "",
+        status,
+        frontier: Array.isArray(state.frontier) ? state.frontier : [],
+        completed: Array.isArray(state.completed) ? state.completed : [],
+        iterationCount:
+          typeof state.iterationCount === "number" ? state.iterationCount : 0,
+        terminationReason: state.terminationReason,
+      });
+    }
+  }
+
+  return snapshots;
+}
+
+/**
+ * Compute a DispatchSummary from an array of TaskSnapshot objects.
+ * Counts tasks by their status field.
+ */
+export function computeDispatchSummary(tasks: TaskSnapshot[]): DispatchSummary {
+  let pending = 0;
+  let running = 0;
+  let completed = 0;
+  let error = 0;
+  let cancelled = 0;
+
+  for (const t of tasks) {
+    switch (t.status) {
+      case "pending":
+        pending++;
+        break;
+      case "running":
+        running++;
+        break;
+      case "completed":
+        completed++;
+        break;
+      case "error":
+        error++;
+        break;
+      case "cancelled":
+        cancelled++;
+        break;
+      // "timeout" is counted as error for summary purposes
+      default:
+        break;
+    }
+  }
+
+  return { pending, running, completed, error, cancelled };
+}
+
+/**
+ * Compute an aggregate ConcurrencyStatus from a MetricsSnapshot.
+ *
+ * Scans the metrics gauges for keys matching known concurrency gauge
+ * patterns (concurrency_active, concurrency_queued, concurrency_limit)
+ * and aggregates their values across all model keys.
+ *
+ * Returns a zeroed ConcurrencyStatus when no metrics or no concurrency
+ * gauges are present.
+ */
+export function computeConcurrencyStatus(
+  metrics: MetricsSnapshot | null | undefined,
+): ConcurrencyStatus {
+  const result: ConcurrencyStatus = { active: 0, limit: 0, queued: 0 };
+
+  if (!metrics) return result;
+
+  // Aggregate across all model keys by matching gauge name prefix
+  for (const [key, gs] of Object.entries(metrics.gauges)) {
+    if (key.startsWith(CONCURRENCY_GAUGE_ACTIVE + "{") || key === CONCURRENCY_GAUGE_ACTIVE) {
+      result.active += gs.value;
+    } else if (key.startsWith(CONCURRENCY_GAUGE_QUEUED + "{") || key === CONCURRENCY_GAUGE_QUEUED) {
+      result.queued += gs.value;
+    } else if (key.startsWith(CONCURRENCY_GAUGE_LIMIT + "{") || key === CONCURRENCY_GAUGE_LIMIT) {
+      result.limit += gs.value;
+    }
+  }
+
+  return result;
+}
+
 
 /**
  * Read the full result sidecar for a specific task.
@@ -499,6 +813,12 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
           name: fn.name,
           phase: fn.state.phase as ActiveFunction["phase"],
           continuationCount: fn.state.continuationCount ?? 0,
+          currentTurn: fn.state.currentTurn,
+          activatedAtTurn: fn.state.activatedAtTurn,
+          gateSatisfied: fn.state.gateSatisfied,
+          cooldownUntilTurn: fn.state.cooldownUntilTurn,
+          toolsObserved: fn.state.toolsObserved,
+          evidenceObserved: Object.keys(fn.state.evidenceObserved ?? {}),
         });
       }
     }
@@ -528,11 +848,26 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
   const notifications = readNotificationState(stateDir);
   const recovery = readRecoveryMetrics(stateDir);
 
+  // Read loop and full graph session snapshots
+  const loops = readLoopSnapshots(stateDir);
+  const graphSessions = readGraphSessions(stateDir);
+
+  // Compute dispatch summary from collected tasks
+  const tasks = [...taskById.values()];
+  const dispatchSummary = computeDispatchSummary(tasks);
+
+  // Aggregate concurrency status from metrics gauges
+  const concurrency = computeConcurrencyStatus(metrics);
+
   return {
     projectDir,
     timestamp: new Date().toISOString(),
-    tasks: [...taskById.values()],
+    tasks,
     activeFunctions,
+    loops,
+    graphSessions,
+    dispatchSummary,
+    concurrency,
     metrics: metrics ?? undefined,
     metricsRecentEvents: metricsRecentEvents.length > 0 ? metricsRecentEvents : undefined,
     notifications: notifications ?? undefined,
