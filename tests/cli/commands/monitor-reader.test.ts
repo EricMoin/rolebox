@@ -371,7 +371,7 @@ describe("readMonitorSnapshot", () => {
     expect(snapshot.tasks[0].resultTotalChars).toBe(100);
   });
 
-  it("returns empty activeFunctions when all fnstate phases are non-active", async () => {
+  it("filters only complete-phase functions; gated and active are included", async () => {
     mkdirSync(stateDir(), { recursive: true });
 
     // Valid dispatch with 1 running task
@@ -396,7 +396,7 @@ describe("readMonitorSnapshot", () => {
       }),
     );
 
-    // FnState with only complete/gated phases
+    // FnState with complete (filtered), gated (included), and active (included)
     writeFileSync(
       join(stateDir(), `fnstate-${KNOWN_HASH}.json`),
       JSON.stringify({
@@ -408,7 +408,10 @@ describe("readMonitorSnapshot", () => {
           },
           {
             sessionId: "ses_other",
-            fns: [{ name: "think", state: { phase: "gated", continuationCount: 1 } }],
+            fns: [
+              { name: "think", state: { phase: "gated", continuationCount: 1 } },
+              { name: "act", state: { phase: "active", continuationCount: 0 } },
+            ],
           },
         ],
       }),
@@ -419,7 +422,10 @@ describe("readMonitorSnapshot", () => {
 
     expect(snapshot.tasks.length).toBe(1);
     expect(snapshot.tasks[0].id).toBe("t1");
-    expect(snapshot.activeFunctions).toEqual([]);
+    // "complete" is filtered out; "gated" and "active" are included.
+    expect(snapshot.activeFunctions.length).toBe(2);
+    expect(snapshot.activeFunctions.map((f) => f.name).sort()).toEqual(["act", "think"]);
+    expect(snapshot.activeFunctions.every((f) => f.phase !== "complete")).toBe(true);
   });
 
   it("backward compat: snapshot without metrics file still returns valid snapshot", async () => {

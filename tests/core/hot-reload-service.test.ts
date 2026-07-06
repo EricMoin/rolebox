@@ -35,6 +35,14 @@ function makeCtx(dir: string, core: any = makeMockCore()) {
 
 // ── tests ──────────────────────────────────────────────────────────
 
+async function waitForRestart(core: any, expectedCalls = 1, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (core.restartService.mock.calls.length >= expectedCalls) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 describe("HotReloadService", () => {
   let tempDir: string;
 
@@ -103,8 +111,7 @@ describe("HotReloadService", () => {
     const testFile = join(tempDir, "test-role.yaml");
     writeFileSync(testFile, "name: test\n", "utf-8");
 
-    // Wait for debounce to fire
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await waitForRestart(core, 1);
 
     // restartService should have been called with "hook-service"
     expect(core.restartService).toHaveBeenCalledTimes(1);
@@ -124,8 +131,7 @@ describe("HotReloadService", () => {
     writeFileSync(f1, "name: a\n", "utf-8");
     writeFileSync(f2, "name: b\n", "utf-8");
 
-    // Wait for debounce to fire
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await waitForRestart(core, 1);
 
     // Should have been called only once (debounced)
     expect(core.restartService).toHaveBeenCalledTimes(1);
@@ -142,8 +148,8 @@ describe("HotReloadService", () => {
     const testFile = join(tempDir, "test.txt");
     writeFileSync(testFile, "hello", "utf-8");
 
-    // Wait enough for debounce
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    // Wait enough for debounce — longer wait since restart should NOT fire
+    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Should NOT have triggered restart
     expect(core.restartService).not.toHaveBeenCalled();
@@ -162,8 +168,7 @@ describe("HotReloadService", () => {
     const testFile = join(tempDir, "test-role.yaml");
     writeFileSync(testFile, "name: test\n", "utf-8");
 
-    // Wait for debounce
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await waitForRestart(core, 1);
 
     // restartService should have been called (which is the proxy for
     // the reload happening — clearExtensionModuleCache is called before it)
@@ -186,8 +191,7 @@ describe("HotReloadService", () => {
     const testFile = join(tempDir, "test-role.yaml");
     writeFileSync(testFile, "name: test\n", "utf-8");
 
-    // Wait for any potential debounce — should be clean
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   });
 
   it("uses correct watch extensions", async () => {
@@ -202,8 +206,7 @@ describe("HotReloadService", () => {
       writeFileSync(file, `content for ${ext}`, "utf-8");
     }
 
-    // Wait for debounce (all changes within debounce window should collapse into one call)
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    await waitForRestart(core, 1);
 
     // All changes were rapid, so should be debounced to 1 call
     expect(core.restartService).toHaveBeenCalledTimes(1);
