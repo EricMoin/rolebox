@@ -14,5 +14,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["bun-types"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/tui"]
 }
