@@ -1031,7 +1031,7 @@ export default defineCommand({
     interval: {
       type: "string",
       alias: ["i"],
-      description: "Refresh interval in ms (default: 2000)",
+      description: "Refresh interval in ms (default: 1000)",
     },
     tail: {
       type: "string",
@@ -1088,7 +1088,7 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    const interval = args.interval ? parseInt(args.interval, 10) : 2000;
+    const interval = args.interval ? parseInt(args.interval, 10) : 1000;
     if (isNaN(interval) || interval < 500) {
       console.error("Error: --interval must be a number >= 500");
       process.exit(1);

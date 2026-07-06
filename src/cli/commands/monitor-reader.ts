@@ -15,6 +15,8 @@ export interface TaskSnapshot {
   error?: string;
   depth: number;
   mode: "background" | "sync";
+  /** Session ID of the task (the worker session, not the parent) */
+  sessionId?: string;
   /** Last N characters of the task's output (populated when tailChars > 0) */
   resultPreview?: string;
   /** Total character count of the full result */
@@ -787,6 +789,7 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
         error: st.error,
         depth: st.depth ?? 0,
         mode: (st.mode as "background" | "sync") ?? "background",
+        sessionId: st.sessionId,
         resultPreview,
         resultTotalChars,
       });
@@ -803,7 +806,7 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
     for (const session of file.sessions) {
       if (!session.sessionId || !Array.isArray(session.fns)) continue;
       for (const fn of session.fns) {
-        if (!fn.state || fn.state.phase !== "active") continue;
+        if (!fn.state || fn.state.phase === "complete") continue;
         const key = `${session.sessionId}\u0000${fn.name}`;
         if (seenFn.has(key)) continue;
         seenFn.add(key);
