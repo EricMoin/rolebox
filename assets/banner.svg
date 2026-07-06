@@ -8,15 +8,15 @@
       <!-- Logomark: Isometric cube ("box") with R, scaled to ~160px tile area -->
       <g transform="translate(70,118) scale(0.32)">
             <!-- Isometric flat-shaded cube -->
-            <polygon points="256,76 412,166 256,256 100,166" fill="#38BDF8"/>
-            <polygon points="100,166 256,256 256,436 100,346" fill="#0EA5E9"/>
-            <polygon points="412,166 412,346 256,436 256,256" fill="#0284C7"/>
+            <polygon points="256,76 412,166 256,256 100,166" fill="#38BDF8" />
+            <polygon points="100,166 256,256 256,436 100,346" fill="#0EA5E9" />
+            <polygon points="412,166 412,346 256,436 256,256" fill="#0284C7" />
             <!-- R lettermark -->
             <text x="256" y="252"
                   text-anchor="middle"
                   dominant-baseline="central"
                   font-family="'Space Grotesk','SpaceGrotesk','Space Grotesk Bold',system-ui,sans-serif"
-                  font-weight="700" font-size="248" fill="#FFFFFF">R</text>
+                  font-weight="700" font-size="200" fill="#FFFFFF">R</text>
       </g>
 
       <!-- Wordmark -->
