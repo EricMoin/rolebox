@@ -4,6 +4,7 @@ import type { ToolContributor } from "./tool-registry.ts";
 import type { DispatchManager } from "../dispatch/manager.ts";
 import type { ResolvedRole } from "../types.ts";
 import { createTaskSearchTool } from "../search/task-search.ts";
+import { createAssetSearchTool } from "../search/asset-search.ts";
 import { createSubLogger } from "../logger.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 
@@ -32,6 +33,7 @@ export class SearchService implements PluginService, ToolContributor {
   getTools(): Record<string, any> {
     return {
       task_search: createTaskSearchTool(this.dispatchManager, this.directory),
+      asset_search: createAssetSearchTool(this.resolvedRoles),
     };
   }
 }
