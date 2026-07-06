@@ -12,6 +12,7 @@ import { createFunctionStateTool } from "../search/function-state.ts";
 import { createFunctionGraphTool } from "../search/function-graph.ts";
 import { createTaskBudgetTool } from "../search/task-budget.ts";
 import { createTaskGraphTool } from "../search/task-graph.ts";
+import { createTaskRetryTool } from "../search/task-retry.ts";
 import { createSubLogger } from "../logger.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 
@@ -48,6 +49,7 @@ export class SearchService implements PluginService, ToolContributor {
       function_graph: createFunctionGraphTool(this.resolvedRoles),
       task_budget: createTaskBudgetTool(this.dispatchManager),
       task_graph: createTaskGraphTool(this.dispatchManager),
+      task_retry: createTaskRetryTool(this.dispatchManager),
     };
   }
 }
