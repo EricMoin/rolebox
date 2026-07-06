@@ -50,6 +50,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.9.0",
+    "@fontsource/space-grotesk": "^5.2.10",
     "citty": "^0.2.2",
     "fast-glob": "^3.3.0",
     "js-yaml": "^4.1.0",
@@ -81,6 +82,7 @@
     "@opentui/core": "0.2.16",
     "@opentui/keymap": "0.2.16",
     "@opentui/solid": "0.2.16",
+    "@resvg/resvg-js": "^2.6.2",
     "@types/js-yaml": "^4.0.0",
     "bun-types": "latest",
     "solid-js": "1.9.12",

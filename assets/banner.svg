@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img"
+      aria-label="rolebox banner">
+      <title>rolebox — Composable AI agent teams, defined in YAML</title>
+
+      <!-- Background: GitHub dark surface -->
+      <rect width="1280" height="400" fill="#0D1117" />
+
+      <!-- Logomark: R in Space Grotesk Bold, slightly-lifted rounded tile -->
+      <g transform="translate(72,120)">
+            <rect width="160" height="160" rx="36" ry="36" fill="#161B22" />
+            <text x="80" y="80"
+                  text-anchor="middle"
+                  dominant-baseline="central"
+                  font-family="'Space Grotesk','SpaceGrotesk','Space Grotesk Bold',system-ui,sans-serif"
+                  font-weight="700" font-size="108" fill="#0EA5E9">R</text>
+      </g>
+
+      <!-- Wordmark -->
+      <text x="262" y="190"
+            font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+            font-weight="700" font-size="68" fill="#E6EDF3">rolebox</text>
+
+      <!-- Accent line under wordmark -->
+      <rect x="264" y="206" width="120" height="2" fill="#0EA5E9" />
+
+      <!-- Tagline -->
+      <text x="264" y="236"
+            font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+            font-weight="400" font-size="22" fill="#7D8590">Composable AI agent teams, defined in
+            YAML.</text>
+
+      <!-- Right-side YAML snippet: content-as-texture. Real rolebox schema, low opacity -->
+      <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
+            font-size="18" fill="#7D8590" opacity="0.34">
+            <text x="728" y="96">name: software-architect</text>
+            <text x="728" y="124">model: claude-sonnet</text>
+            <text x="728" y="152">temperature: 0.2</text>
+            <text x="728" y="180">skills: [c4, adr, tradeoff]</text>
+            <text x="728" y="208">subagents:</text>
+            <text x="752" y="236">- backend</text>
+            <text x="752" y="264">- data</text>
+            <text x="728" y="292">dispatch:</text>
+            <text x="752" y="320">topology: review-loop</text>
+      </g>
+</svg>
