@@ -10,12 +10,13 @@ import { createSubLogger } from "../logger.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 import type { LspService } from "./lsp-service.ts";
 import type { SessionService } from "./session-service.ts";
+import type { SearchService } from "./search-service.ts";
 
 const log = createSubLogger("tool-service");
 
 export class ToolService implements PluginService {
   readonly name = "tool-service";
-  readonly dependencies = ["dispatch-service", "lsp-service", "session-service"];
+  readonly dependencies = ["dispatch-service", "lsp-service", "session-service", "search-service"];
 
   private tools: Record<string, any> = {};
 
@@ -34,6 +35,10 @@ export class ToolService implements PluginService {
     // 3. Get session tools from SessionService
     const sessionService = ctx.core.getService<SessionService>("session-service");
     if (!sessionService) throw new Error("session-service not found");
+
+    // 3.5. Get search tools from SearchService
+    const searchService = ctx.core.getService<SearchService>("search-service");
+
 
     // 4. Assemble all tools
     this.tools = {
@@ -54,6 +59,8 @@ export class ToolService implements PluginService {
       memory_recall: createMemoryRecallTool(),
       memory_list: createMemoryListTool(),
       memory_update: createMemoryUpdateTool(),
+      // Search tools
+      ...(searchService ? searchService.getTools() : {}),
     };
 
     // 5. Register tool schemas

@@ -847,6 +847,16 @@ export class DispatchManager {
     return result;
   }
 
+  /**
+   * Return a snapshot of ALL tasks currently in memory (active + completed-not-yet-cleaned-up).
+   * Used by search tools to query task history.
+   * Note: cleaned-up tasks are not included — they only exist in the persisted state file.
+   */
+  getAllTasks(): DispatchTask[] {
+    return [...this.tasks.values()];
+  }
+
+
   /** Return a snapshot of current dispatch metrics. */
   getMetricsSnapshot(): import("./metrics.ts").MetricsSnapshot {
     return metrics.snapshot();
