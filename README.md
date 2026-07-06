@@ -202,19 +202,19 @@ rolebox info software-architect --check   # Verify integrity hash
 ```
 
 #### `monitor`
-
-Show runtime dispatch activity and activated roles for the current project. Reads persisted state files from the project-local `.rolebox/state/` directory (resolved from the nearest ancestor of the current directory).
+Show runtime dispatch activity, activated functions, and agent workflows for the current project. Reads persisted state files from the project-local `.rolebox/state/` directory. Supports a TUI dashboard (Solid.js + OpenTU) with live-updating status panels, task tables, and function state tracking.
 
 ```bash
-rolebox monitor                              # Snapshot of active tasks and functions
+rolebox monitor                              # TUI dashboard with snapshot of active tasks and functions
 rolebox monitor --all                        # Include completed/cancelled tasks
 rolebox monitor --json                       # JSON output
-rolebox monitor --watch                      # Live-refresh dashboard (2s interval)
+rolebox monitor --no-status                  # Hide the status overview panel
+rolebox monitor --watch                      # Live-refresh dashboard (1s default interval)
 rolebox monitor --watch --interval 5000      # Custom refresh rate
 rolebox monitor --watch --json               # NDJSON output (one JSON line per interval)
 ```
 
-Supports four visibility categories for tasks: `pending`, `running`, `error` tasks are shown by default; use `--all` to also show `completed`, `cancelled`, and `timeout` tasks.
+The TUI dashboard shows: active loops, graph workflows, dispatch summary (queue depth, concurrent slots), and concurrency pool health. Use `--no-status` to hide the overview panel.
 
 #### `status`
 
@@ -1190,7 +1190,7 @@ Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skil
 
 ## Limitations
 
-- No hot-reload (restart opencode to pick up changes)
+
 - No role inheritance
 - No runtime role switching
 - Functions persist for the entire session (no per-message deactivation yet)

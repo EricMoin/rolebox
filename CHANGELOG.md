@@ -1,12 +1,30 @@
 # Changelog
 
-## [Unreleased]
+## 0.20.0
 
 ### Features
 
+- **Persistent memory system** — SQLite-backed persistent memory store with CLI tools (`rolebox memory` commands) and automatic prompt injection for cross-session knowledge retention. New `src/memory/` module (store, tools).
+- **Microkernel architecture (P0–P3)** — Complete architectural refactor introducing:
+  - **P0**: Service pattern + unified extension points
+  - **P1**: Event bus + state isolation across services
+  - **P2+P3**: Capability-based security, full role hot-reload pipeline, health monitor, and pluggable concurrency adapter
+- **Full role hot-reload** — Real-time role reload on file changes with stable handler reference, debounced file watcher (300ms), and module cache invalidation. No opencode restart required. New `src/core/hot-reload-service.ts`.
+- **Token/cost budget management** — Configurable budget limits for multi-agent dispatch: total sessions, input/output tokens, and cost per request and per session. Model pool limits are respected automatically. New `dispatch_budget` tool and `src/dispatch/budget-tracker.ts`.
+- **Session compaction** — Runtime state injection via compaction hook during dispatch lifecycle, preserving session continuity. New `src/hooks/compaction.ts`.
+- **TUI dashboard** — Redesigned `rolebox monitor` with Solid.js + OpenTU TUI rendering, proper screen refresh and layout management. New `src/tui/` module and `./tui` package export path.
 - **Status Overview Panel** — New status panel in `rolebox monitor` showing active loops, graph workflows, dispatch summary, and concurrency pool health. Use `--no-status` to hide.
+- **Monitor improvements** — `sessionId` field added to task snapshots for task-to-session tracing; fnstate active function filtering fixed (gated/active phases included, complete excluded); default watch interval reduced from 2s to 1s.
+
+### Bug Fixes
+
+- **hooks system.transform** — Fallback to `sessionAgentRegistry` when agent ID is undefined in `system.transform` hook context, preventing errors during prompt assembly.
+- **Hot-reload test reliability** — Replace brittle `setTimeout` waits with polling-based `waitForRestart` utility in hot-reload service tests, eliminating flakiness.
+
+### Refactors
 
 
+- **Microkernel architecture** — Full P0–P3 decomposition into service pattern with event bus, state isolation, capability security, and pluggable concurrency adapters.
 ## 0.19.0
 
 ### Features
