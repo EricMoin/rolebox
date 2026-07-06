@@ -8,6 +8,8 @@ import { createAssetSearchTool } from "../search/asset-search.ts";
 import { createReferenceSearchTool } from "../search/reference-search.ts";
 import { createAssetInspectTool } from "../search/asset-inspect.ts";
 import { createAssetValidateTool } from "../search/asset-validate.ts";
+import { createFunctionStateTool } from "../search/function-state.ts";
+import { createFunctionGraphTool } from "../search/function-graph.ts";
 import { createSubLogger } from "../logger.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 
@@ -40,6 +42,8 @@ export class SearchService implements PluginService, ToolContributor {
       reference_search: createReferenceSearchTool(this.resolvedRoles),
       asset_inspect: createAssetInspectTool(this.resolvedRoles),
       asset_validate: createAssetValidateTool(this.resolvedRoles),
+      function_state: createFunctionStateTool(this.directory),
+      function_graph: createFunctionGraphTool(this.resolvedRoles),
     };
   }
 }
