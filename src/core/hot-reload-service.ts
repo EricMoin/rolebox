@@ -100,6 +100,15 @@ export class HotReloadService implements PluginService {
     }, DEBOUNCE_MS);
   }
 
+  /**
+   * Public trigger to force a hot reload. If disabled, returns a resolved promise.
+   * Useful for P2 tools to programmatically trigger a reload.
+   */
+  async triggerReload(): Promise<void> {
+    if (this.disabled) return;
+    return this.performReload();
+  }
+
   private async performReload(): Promise<void> {
     if (this.disabled) return;
 

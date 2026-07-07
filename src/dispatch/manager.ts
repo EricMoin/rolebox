@@ -856,6 +856,46 @@ export class DispatchManager {
     return [...this.tasks.values()];
   }
 
+  /**
+   * Returns a structured snapshot of the current concurrency state for all keys.
+   * Each key reports active, limit, available, reserved, and queueDepth.
+   * Includes a total aggregate across all keys.
+   */
+  getConcurrencyStatus(): {
+    keys: Array<{
+      key: string;
+      active: number;
+      limit: number;
+      available: number;
+      reserved: number;
+      queueDepth: number;
+    }>;
+    total: {
+      active: number;
+      limit: number;
+      queueDepth: number;
+      keys: number;
+    };
+  } {
+    const allKeys = this.concurrency.getAllKeys();
+    const keys = allKeys.map(key => {
+      const active = this.concurrency.getActiveCount(key);
+      const limit = this.concurrency.getLimit(key);
+      const reserved = this.concurrency.getReserved(key);
+      const queueDepth = this.concurrency.getQueueDepth(key);
+      const available = Math.max(0, limit - active);
+      return { key, active, limit, available, reserved, queueDepth };
+    });
+
+    const total = {
+      active: keys.reduce((s, k) => s + k.active, 0),
+      limit: keys.reduce((s, k) => s + k.limit, 0),
+      queueDepth: keys.reduce((s, k) => s + k.queueDepth, 0),
+      keys: keys.length,
+    };
+
+    return { keys, total };
+  }
 
   /** Return a snapshot of current dispatch metrics. */
   getMetricsSnapshot(): import("./metrics.ts").MetricsSnapshot {

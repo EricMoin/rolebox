@@ -63,6 +63,8 @@ export interface IConcurrencyManager {
   setReserved(key: string, count: number): void;
   canAcquireForParent(key: string, parentId: string, maxActivePerParent: number): boolean;
   setSlotReserved(key: string, reserved: number): void;
+  getQueueDepth(key: string): number;
+  getAllKeys(): string[];
 }
 
 export class ConcurrencyManager implements IConcurrencyManager {
@@ -325,4 +327,15 @@ export class ConcurrencyManager implements IConcurrencyManager {
     return this.slots.get(key)?.limit ?? this.defaultLimit;
   }
 
+  /** Returns the count of non-cancelled waiters in the queue for the given key (0 if key not found). */
+  getQueueDepth(key: string): number {
+    const slot = this.slots.get(key);
+    if (!slot) return 0;
+    return slot.queue.filter(w => !w.cancelled).length;
+  }
+
+  /** Returns all concurrency keys that have been created. */
+  getAllKeys(): string[] {
+    return Array.from(this.slots.keys());
+  }
 }
