@@ -3934,6 +3934,78 @@ describe("T8: Notification outbox", () => {
     }
   });
 
+  // Regression: a queued FINAL notification whose first send failed must be
+  // retried by the sweeper EVEN WHEN unrelated tasks are inflight for the same
+  // parent. A previous "defensive guard" deleted such notifications whenever
+  // getInflightCount(parent) > 0, silently dropping the completion signal and
+  // hanging the parent forever. Everything in the outbox is a final notification
+  // by construction (materializeAndNotify only enqueues when remaining === 0), so
+  // the sweeper must rely solely on hasFinalNotifyBeenSent for idempotency.
+  it("sweeper retries queued final notification while an unrelated sibling is inflight", async () => {
+    let finalNotifyAttempts = 0;
+    const client = createMockClient({
+      sessionPromptAsync: (...args: any[]) => {
+        const opts = args[0] as any;
+        // Count final-notification (noReply:false) attempts; always succeed so the
+        // sweeper delivers on its first try. We simulate the "initial send failed"
+        // state by parking the task in the outbox directly (below) rather than
+        // driving notifyCompletion's slow backoff loop.
+        if (opts?.body && opts.body.noReply === false) {
+          finalNotifyAttempts++;
+        }
+        return Promise.resolve({ data: undefined, error: undefined });
+      },
+    });
+
+    const capturedCallbacks: Array<() => void> = [];
+    const origSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((fn: () => void, _ms: number) => {
+      capturedCallbacks.push(fn);
+      return setTimeout(() => {}, 999999) as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval;
+
+    try {
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+      const sweepCb = capturedCallbacks[capturedCallbacks.length - 1];
+      expect(sweepCb).toBeDefined();
+
+      const { hasFinalNotifyBeenSent: hfs } =
+        await import("../../src/dispatch/notification");
+
+      // Task A is the last of its cohort → final notification. Simulate that its
+      // initial send failed by parking it in the outbox without a recorded delivery.
+      const taskA = await manager.launch(
+        { subagent: "h", prompt: "A", run_in_background: true },
+        parentContext(),
+      );
+      taskA.status = "completed";
+      taskA.completedAt = new Date();
+      mgr.notifyOutbox.add(taskA.id);
+      expect(hfs(taskA.id)).toBe(false);
+      expect(mgr.notifyOutbox.has(taskA.id)).toBe(true);
+
+      // An UNRELATED new task for the SAME parent is now inflight.
+      const taskB = await manager.launch(
+        { subagent: "h", prompt: "B", run_in_background: true },
+        parentContext(),
+      );
+      expect(taskB.status).toBe("running");
+      expect(mgr.getInflightCount(taskA.parentSessionId)).toBeGreaterThan(0);
+
+      // Sweeper must retry and deliver A's final notification — NOT drop it.
+      await sweepCb();
+
+      expect(hfs(taskA.id)).toBe(true);
+      expect(finalNotifyAttempts).toBeGreaterThanOrEqual(1);
+      expect(mgr.notifyOutbox.has(taskA.id)).toBe(false);
+
+      mgr.flushPersistSync();
+    } finally {
+      globalThis.setInterval = origSetInterval;
+    }
+  });
+
   it("recover repopulates outbox from persisted v4 state", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "manager-outbox-recover-"));
     const client = createMockClient();

@@ -225,16 +225,17 @@ export class CompletionOrchestrator {
           continue;
         }
 
-        // Defensive guard: skip intermediate notifications (remaining > 0).
-        // The sweeper should only retry FINAL notifications. Intermediate notifications
-        // are fire-and-forget (noReply=true) and MUST NOT be resent — doing so would
-        // cause <system-reminder> to repeat indefinitely because sentFinalNotifies is
-        // never set for intermediate notifications. The primary fix in materializeAndNotify
-        // prevents intermediate tasks from entering the outbox; this is a secondary safeguard.
-        if (this.d.getInflightCount(task.parentSessionId) > 0) {
-          this.d.notifyOutbox.delete(taskId);
-          continue;
-        }
+        // INVARIANT: every taskId in notifyOutbox is a FINAL notification.
+        // materializeAndNotify() only calls addToOutbox() when remaining === 0, and
+        // restoreState() rehydrates only previously-final entries. Intermediate
+        // notifications (remaining > 0) are fire-and-forget and never enter the outbox.
+        //
+        // Therefore the sweeper MUST NOT re-check the live inflight count here. That
+        // count is mutable — the parent may dispatch UNRELATED new tasks after this
+        // final notification was queued but before its send succeeds. Gating on it would
+        // silently drop a legitimate, undelivered final notification, leaving the parent
+        // waiting forever for a completion signal it never receives. Idempotency is
+        // already guaranteed by the hasFinalNotifyBeenSent() check above.
 
         let sweeperResultText: string | undefined;
         if (task.result?.sidecarPath && !task.result.fetchError) {
