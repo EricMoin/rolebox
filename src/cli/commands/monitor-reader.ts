@@ -1,167 +1,40 @@
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { normalizeWorkspaceDir, stateDirFor } from "../../state-paths.ts";
 import { readResultSidecar, resultSidecarPath } from "../../dispatch/result-extractor.ts";
 import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
+import type {
+  TaskSnapshot,
+  ActiveFunction,
+  MonitorSnapshot,
+  LoopSnapshot,
+  GraphSessionSnapshot,
+  DispatchSummary,
+  ConcurrencyStatus,
+  NDJSONEvent,
+  NotificationState,
+  RecoveryMetrics,
+  TaskDetail,
+} from "./monitor-reader-types.ts";
+import { readMetricsSnapshot, readMetricsRecentEvents } from "./monitor-reader-metrics.ts";
+import { readLoopSnapshots, readGraphSessions } from "./monitor-reader-graph.ts";
+import { tryReadJson, listStateFiles } from "./monitor-reader-utils.ts";
 
-export interface TaskSnapshot {
-  id: string;
-  status: "pending" | "running" | "completed" | "error" | "cancelled" | "timeout";
-  agent: string;
-  description?: string;
-  startedAt: string;
-  completedAt?: string;
-  durationMs: number;
-  error?: string;
-  depth: number;
-  mode: "background" | "sync";
-  /** Session ID of the task (the worker session, not the parent) */
-  sessionId?: string;
-  /** Last N characters of the task's output (populated when tailChars > 0) */
-  resultPreview?: string;
-  /** Total character count of the full result */
-  resultTotalChars?: number;
-  /** Full result text (lazy-loaded, only populated by readTaskDetail) */
-  resultFullText?: string;
-}
-
-export interface ActiveFunction {
-  sessionId: string;
-  agentId: string | null;
-  name: string;
-  phase: "active" | "gated" | "complete";
-  continuationCount: number;
-  /** Current turn number in the session */
-  currentTurn?: number;
-  /** Turn at which the function was activated */
-  activatedAtTurn?: number;
-  /** Whether the gate condition has been satisfied */
-  gateSatisfied?: boolean;
-  /** Turn until which the function is in cooldown */
-  cooldownUntilTurn?: number;
-  /** Tools observed being used during this function's activation */
-  toolsObserved?: string[];
-  /** Evidence types observed (keys of the evidenceObserved map) */
-  evidenceObserved?: string[];
-}
-
-export interface MonitorSnapshot {
-  projectDir: string;
-  timestamp: string;
-  tasks: TaskSnapshot[];
-  activeFunctions: ActiveFunction[];
-  metrics?: MetricsSnapshot;
-  metricsRecentEvents?: NDJSONEvent[];
-  notifications?: NotificationState;
-  /** Recovery metrics snapshot, present when the persisted file has a `recovery` key. */
-  recovery?: RecoveryMetrics;
-  /** Non-terminal loop execution snapshots */
-  loops: LoopSnapshot[];
-  /** Full graph execution state snapshots (frontier, completed, status) */
-  graphSessions: GraphSessionSnapshot[];
-  /** Summary of task status counts computed from the tasks array */
-  dispatchSummary: DispatchSummary;
-  /** Aggregate concurrency status derived from metrics or dispatch state */
-  concurrency: ConcurrencyStatus;
-  }
-
-export interface LoopSnapshot {
-  /** Session ID of the origin loop session */
-  originSessionId: string;
-  /** Name of the agent running the loop */
-  agent: string;
-  /** Current orchestrator phase */
-  phase: string;
-  /** Current round number (1-based) */
-  current: number;
-  /** Total number of rounds requested */
-  total: number;
-  /** Loop mode (inherit conversation or fresh start) */
-  mode: string;
-  /** Elapsed milliseconds since the loop started */
-  elapsedMs: number;
-  /** Error description when the loop is in error phase */
-  errorReason?: string;
-  /** Session ID of the active worker round (if any) */
-  activeWorkerSessionId?: string;
-}
-
-export interface GraphSessionSnapshot {
-  /** Session ID of the graph session */
-  sessionId: string;
-  /** Agent ID assigned to this session */
-  agentId: string;
-  /** Execution status of the graph */
-  status: "active" | "complete" | "exhausted";
-  /** Current frontier nodes (nodes awaiting dispatch) */
-  frontier: string[];
-  /** Nodes that have completed execution */
-  completed: string[];
-  /** Number of iterations executed */
-  iterationCount: number;
-  /** Termination reason, null while active, absent when not-terminated */
-  terminationReason?: string | null;
-}
-
-export interface DispatchSummary {
-  /** Number of tasks with status pending */
-  pending: number;
-  /** Number of tasks with status running */
-  running: number;
-  /** Number of tasks with status completed */
-  completed: number;
-  /** Number of tasks with status error */
-  error: number;
-  /** Number of tasks with status cancelled */
-  cancelled: number;
-}
-
-export interface ConcurrencyStatus {
-  /** Total actively executing tasks across all concurrency slots */
-  active: number;
-  /** Total concurrency slot limit across all keys */
-  limit: number;
-  /** Total tasks queued waiting for concurrency slots */
-  queued: number;
-}
-
-export interface NDJSONEvent {
-  ts: string;
-  counters: Record<string, unknown>;
-  gauges: Record<string, unknown>;
-  histograms?: Record<string, unknown>;
-}
-
-export interface NotificationState {
-  enabled: boolean;
-  quietHoursActive: boolean;
-  recentEvents: Array<{ ts: string; type: string }>;
-  throttleStats?: { recentCount: number; windowMs: number };
-}
-
-/**
- * Recovery metrics as persisted in the metrics-*.json file.
- * Mirrors the RecoveryMetricsSnapshot shape from the recovery subsystem.
- * Optional — only present when a recovery engine is wired and metrics are enabled.
- */
-export interface RecoveryMetrics {
-  totalAttempts: number;
-  successfulRecoveries: number;
-  abortedChains: number;
-  exhaustedChains: number;
-  byCategory: Record<string, { attempts: number; successes: number }>;
-  byStrategy: Record<string, { attempts: number; successes: number }>;
-  errorTypeFrequency: Record<string, number>;
-}
-
-export interface TaskDetail {
-  task: TaskSnapshot;
-  fullText: string;
-  totalChars: number;
-  offset: number;
-  limit?: number;
-  truncated: boolean;
-}
+export type {
+  TaskSnapshot,
+  ActiveFunction,
+  MonitorSnapshot,
+  LoopSnapshot,
+  GraphSessionSnapshot,
+  DispatchSummary,
+  ConcurrencyStatus,
+  NDJSONEvent,
+  NotificationState,
+  RecoveryMetrics,
+  TaskDetail,
+} from "./monitor-reader-types.ts";
+export { readMetricsSnapshot, readMetricsRecentEvents } from "./monitor-reader-metrics.ts";
+export { readLoopSnapshots, readGraphSessions } from "./monitor-reader-graph.ts";
 
 interface RawDispatchTask {
   id: string;
@@ -217,86 +90,11 @@ interface RawGraphFile {
   sessions: RawGraphSession[];
 }
 
-// ── Loop file raw types ──────────────────────────────────────────────
 
-interface RawLoopState {
-  originSessionId: string;
-  agent: string;
-  phase: string;
-  current: number;
-  total: number;
-  mode: string;
-  startedAt: number;
-  updatedAt: number;
-  errorReason?: string;
-  activeWorkerSessionId?: string;
-  activeWorkerTaskId?: string;
-}
 
-interface RawLoopEntry {
-  id: string;
-  state: RawLoopState;
-}
 
-interface RawLoopFile {
-  version: number;
-  loops: RawLoopEntry[];
-}
 
-// ── Full graph session with execution state ──────────────────────────
 
-interface RawGraphSessionFull {
-  sessionId: string;
-  agentId: string;
-  state: {
-    frontier: string[];
-    completed: string[];
-    iterationCount: number;
-    status: string;
-    loopCounters?: Record<string, number>;
-    lastResults?: Record<string, { hash: string; text: string }>;
-    loopStartTimeMs?: number;
-    terminationReason?: string | null;
-    correctionCount?: number;
-    convergenceSignal?: string;
-  };
-}
-
-interface RawGraphFileFull {
-  version: number;
-  sessions: RawGraphSessionFull[];
-}
-
-function isErrno(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error && "code" in err;
-}
-
-function tryReadJson(filePath: string): unknown | null {
-  try {
-    const raw = readFileSync(filePath, "utf-8");
-    return JSON.parse(raw);
-  } catch (err: unknown) {
-    if (isErrno(err) && err.code === "ENOENT") return null;
-    const message =
-      err instanceof SyntaxError
-        ? `Malformed JSON in ${filePath}: ${err.message}`
-        : `Failed to read ${filePath}: ${(err as Error).message}`;
-    console.warn(`[monitor-reader] ${message}`);
-    return null;
-  }
-}
-
-function listStateFiles(stateDir: string, prefix: string): string[] {
-  try {
-    return readdirSync(stateDir)
-      .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
-      .map((f) => join(stateDir, f));
-  } catch (err: unknown) {
-    if (isErrno(err) && err.code === "ENOENT") return [];
-    console.warn(`[monitor-reader] Failed to list ${stateDir}: ${(err as Error).message}`);
-    return [];
-  }
-}
 
 function computeDurationMs(startedAt: string | undefined, completedAt?: string): number {
   try {
@@ -307,98 +105,6 @@ function computeDurationMs(startedAt: string | undefined, completedAt?: string):
   } catch {
     return 0;
   }
-}
-
-function listNDJSONFiles(stateDir: string, prefix: string): string[] {
-  try {
-    return readdirSync(stateDir)
-      .filter((f) => f.startsWith(prefix) && f.endsWith(".ndjson"))
-      .map((f) => join(stateDir, f));
-  } catch (err: unknown) {
-    if (isErrno(err) && err.code === "ENOENT") return [];
-    console.warn(`[monitor-reader] Failed to list ${stateDir}: ${(err as Error).message}`);
-    return [];
-  }
-}
-
-/**
- * Parse the metrics sidecar JSON file and NDJSON event log from the state
- * directory. Returns the MetricsSnapshot (the `metrics` field from the sidecar
- * file) or null if no valid metrics file exists.
- *
- * Also populates `recentEvents` with the last N lines of the NDJSON event log.
- * Handles missing files, malformed JSON, and partial data gracefully (returns
- * null, never throws).
- */
-export function readMetricsSnapshot(
-  stateDir: string,
-  opts?: { maxEventLines?: number },
-): MetricsSnapshot | null {
-  const maxEventLines = opts?.maxEventLines ?? 20;
-
-  // Read the metrics JSON sidecar
-  const metricsFiles = listStateFiles(stateDir, "metrics-");
-  if (metricsFiles.length === 0) return null;
-
-  for (const filePath of metricsFiles) {
-    const raw = tryReadJson(filePath);
-    if (!raw || typeof raw !== "object") continue;
-    const obj = raw as Record<string, unknown>;
-    if (typeof obj.metrics !== "object" || obj.metrics === null) continue;
-    const metrics = obj.metrics as MetricsSnapshot;
-    if (typeof metrics.counters !== "object" || typeof metrics.gauges !== "object") continue;
-    return metrics;
-  }
-
-  return null;
-}
-
-/**
- * Read the last N lines of the NDJSON event log (metrics-events-*.ndjson) and
- * return them as parsed NDJSONEvent objects. Returns an empty array when the
- * log file does not exist or cannot be read.
- */
-export function readMetricsRecentEvents(
-  stateDir: string,
-  maxLines = 20,
-): NDJSONEvent[] {
-  const eventFiles = listNDJSONFiles(stateDir, "metrics-events-");
-  if (eventFiles.length === 0) return [];
-
-  for (const filePath of eventFiles) {
-    try {
-      const content = readFileSync(filePath, "utf-8");
-      const lines = content.split("\n").filter((l) => l.trim().length > 0);
-      const lastLines = lines.slice(-maxLines);
-      const events: NDJSONEvent[] = [];
-
-      for (const line of lastLines) {
-        try {
-          const parsed = JSON.parse(line);
-          if (
-            parsed &&
-            typeof parsed === "object" &&
-            typeof parsed.ts === "string"
-          ) {
-            events.push({
-              ts: parsed.ts,
-              counters: parsed.counters ?? {},
-              gauges: parsed.gauges ?? {},
-              histograms: parsed.histograms,
-            });
-          }
-        } catch {
-          // Skip malformed lines
-        }
-      }
-
-      if (events.length > 0) return events;
-    } catch {
-      // Skip unreadable files
-    }
-  }
-
-  return [];
 }
 
 /**
@@ -499,111 +205,13 @@ export function readRecoveryMetrics(stateDir: string): RecoveryMetrics | null {
   return null;
 }
 
-const TERMINAL_LOOP_PHASES = new Set([
-  "complete",
-  "cancelled",
-  "interrupted",
-  "error",
-]);
+
 
 const CONCURRENCY_GAUGE_ACTIVE = "concurrency_active";
 const CONCURRENCY_GAUGE_QUEUED = "concurrency_queued";
 const CONCURRENCY_GAUGE_LIMIT = "concurrency_limit";
 
-/**
- * Parse all `loops-{hash}.json` files in the state directory and return
- * LoopSnapshot entries for non-terminal loops only.
- *
- * The loop coordinator persists the full LoopState map via LoopStore.
- * Terminal phases (complete, cancelled, interrupted, error) are excluded.
- * Returns an empty array when no loop files exist.
- */
-export function readLoopSnapshots(stateDir: string): LoopSnapshot[] {
-  const loopFiles = listStateFiles(stateDir, "loops-");
-  if (loopFiles.length === 0) return [];
 
-  const snapshots: LoopSnapshot[] = [];
-
-  for (const filePath of loopFiles) {
-    const raw = tryReadJson(filePath);
-    if (!raw || typeof raw !== "object" || !("loops" in raw)) continue;
-    const file = raw as RawLoopFile;
-    if (!Array.isArray(file.loops)) continue;
-
-    for (const entry of file.loops) {
-      if (!entry.state || typeof entry.state !== "object") continue;
-      const st = entry.state;
-
-      // Skip terminal phases
-      if (typeof st.phase === "string" && TERMINAL_LOOP_PHASES.has(st.phase)) continue;
-
-      const startedAt =
-        typeof st.startedAt === "number" ? st.startedAt : 0;
-      const elapsedMs = startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0;
-
-      snapshots.push({
-        originSessionId: st.originSessionId ?? entry.id,
-        agent: st.agent ?? "",
-        phase: st.phase ?? "unknown",
-        current: typeof st.current === "number" ? st.current : 0,
-        total: typeof st.total === "number" ? st.total : 0,
-        mode: st.mode ?? "inherit",
-        elapsedMs,
-        errorReason: st.errorReason,
-        activeWorkerSessionId: st.activeWorkerSessionId,
-      });
-    }
-  }
-
-  return snapshots;
-}
-
-/**
- * Parse all `graph-{hash}.json` files in the state directory and return
- * the full GraphSessionSnapshot array including execution state (frontier,
- * completed, iterationCount, status, terminationReason).
- *
- * Unlike the existing session-id-to-agent mapping that only extracts
- * sessionId/agentId, this reader also extracts the GraphExecutionState
- * that the graph state machine persists for each session.
- * Returns an empty array when no graph files exist.
- */
-export function readGraphSessions(stateDir: string): GraphSessionSnapshot[] {
-  const graphFiles = listStateFiles(stateDir, "graph-");
-  if (graphFiles.length === 0) return [];
-
-  const snapshots: GraphSessionSnapshot[] = [];
-
-  for (const filePath of graphFiles) {
-    const raw = tryReadJson(filePath);
-    if (!raw || typeof raw !== "object" || !("sessions" in raw)) continue;
-    const file = raw as RawGraphFileFull;
-    if (!Array.isArray(file.sessions)) continue;
-
-    for (const gs of file.sessions) {
-      if (!gs.state || typeof gs.state !== "object") continue;
-      const state = gs.state;
-
-      // Map any status-like string to the union; fallback to "active"
-      let status: GraphSessionSnapshot["status"] = "active";
-      if (state.status === "complete") status = "complete";
-      else if (state.status === "exhausted") status = "exhausted";
-
-      snapshots.push({
-        sessionId: gs.sessionId ?? "",
-        agentId: gs.agentId ?? "",
-        status,
-        frontier: Array.isArray(state.frontier) ? state.frontier : [],
-        completed: Array.isArray(state.completed) ? state.completed : [],
-        iterationCount:
-          typeof state.iterationCount === "number" ? state.iterationCount : 0,
-        terminationReason: state.terminationReason,
-      });
-    }
-  }
-
-  return snapshots;
-}
 
 /**
  * Compute a DispatchSummary from an array of TaskSnapshot objects.

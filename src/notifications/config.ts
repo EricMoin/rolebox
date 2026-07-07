@@ -1,4 +1,3 @@
-// ── Config parsing, merging, defaults, and env var resolution ──────
 
 import { createSubLogger } from "../logger.ts";
 import { resolveEnvVarsDeep } from "../env-resolver.ts";
@@ -23,7 +22,15 @@ import type {
   ThrottleConfig,
   QuietHoursRange,
 } from "./types.ts";
-
+import {
+  asBoolean,
+  asNumber,
+  isObject,
+  parseQuietHours,
+  parseThrottle,
+  parseChannelConfig,
+  parseEventConfigs,
+} from "./config-parsers.ts";
 const log: Logger<ILogObj> = createSubLogger("notification-config");
 
 // ── Defaults ────────────────────────────────────────────────────────
@@ -49,153 +56,6 @@ export const DEFAULT_NOTIFICATION_CONFIG: Readonly<NotificationConfig> = Object.
     maxPerWindow: DEFAULT_NOTIFICATION_MAX_PER_WINDOW,
   },
 });
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-function asBoolean(value: unknown): boolean | undefined {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const lower = value.toLowerCase().trim();
-    if (lower === "true") return true;
-    if (lower === "false") return false;
-  }
-  return undefined;
-}
-
-function asNumber(value: unknown): number | undefined {
-  if (typeof value === "number") return value;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
-      const n = Number(trimmed);
-      if (!Number.isNaN(n)) return n;
-    }
-  }
-  return undefined;
-}
-
-/** Check whether a raw value is a plain object (not null, not array). */
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// ── Sub-parsers ─────────────────────────────────────────────────────
-
-function parseQuietHoursRange(raw: unknown): QuietHoursRange | null {
-  if (!isObject(raw)) return null;
-  const start = raw.start;
-  const end = raw.end;
-  if (typeof start !== "string" || typeof end !== "string") return null;
-  const result: QuietHoursRange = { start, end };
-  if (Array.isArray(raw.days) && raw.days.every((d: unknown) => typeof d === "string")) {
-    result.days = raw.days as string[];
-  }
-  return result;
-}
-
-function parseQuietHours(raw: unknown): QuietHoursConfig | undefined {
-  if (!isObject(raw)) return undefined;
-  const enabled = asBoolean(raw.enabled);
-  return {
-    enabled: enabled ?? false,
-    timezone: typeof raw.timezone === "string" ? raw.timezone : undefined,
-    ranges: Array.isArray(raw.ranges)
-      ? raw.ranges.map((r: unknown) => parseQuietHoursRange(r)).filter((r: unknown): r is QuietHoursRange => r !== null)
-      : [],
-  };
-}
-
-function parseThrottle(raw: unknown): ThrottleConfig | undefined {
-  if (!isObject(raw)) return undefined;
-  const rawWindowMs = raw.windowMs;
-  const rawMaxPerWindow = raw.maxPerWindow;
-  const windowMs = asNumber(rawWindowMs);
-  const maxPerWindow = asNumber(rawMaxPerWindow);
-  if (windowMs === undefined && maxPerWindow === undefined) return undefined;
-  const result: ThrottleConfig = {
-    windowMs: windowMs ?? DEFAULT_NOTIFICATION_THROTTLE_WINDOW_MS,
-    maxPerWindow: maxPerWindow ?? DEFAULT_NOTIFICATION_MAX_PER_WINDOW,
-  };
-  if (isObject(raw.perEventType)) {
-    const perEventType: ThrottleConfig["perEventType"] = {};
-    for (const [key, val] of Object.entries(raw.perEventType)) {
-      if (isObject(val)) {
-        const evtWindow = asNumber(val.windowMs);
-        const evtMax = asNumber(val.maxPerWindow);
-        if (evtWindow !== undefined || evtMax !== undefined) {
-          const typedKey = key as NotificationEventType;
-          perEventType[typedKey] = {
-            windowMs: evtWindow ?? DEFAULT_NOTIFICATION_THROTTLE_WINDOW_MS,
-            maxPerWindow: evtMax ?? DEFAULT_NOTIFICATION_MAX_PER_WINDOW,
-          };
-        }
-      }
-    }
-    if (Object.keys(perEventType).length > 0) {
-      result.perEventType = perEventType;
-    }
-  }
-  return result;
-}
-
-function parseChannel(raw: unknown): NotificationChannelConfig | null {
-  if (!isObject(raw)) return null;
-  const kind = raw.kind;
-  if (typeof kind !== "string") return null;
-
-  const enabled = asBoolean(raw.enabled) ?? true;
-
-  switch (kind) {
-    case NOTIFICATION_CHANNEL_KINDS.SystemToast:
-      return { kind: NOTIFICATION_CHANNEL_KINDS.SystemToast, enabled };
-
-    case NOTIFICATION_CHANNEL_KINDS.Sound:
-      return {
-        kind: NOTIFICATION_CHANNEL_KINDS.Sound,
-        enabled,
-        soundPath: typeof raw.soundPath === "string" ? raw.soundPath : "",
-      };
-
-    case NOTIFICATION_CHANNEL_KINDS.CustomCommand:
-      return {
-        kind: NOTIFICATION_CHANNEL_KINDS.CustomCommand,
-        enabled,
-        command: typeof raw.command === "string" ? raw.command : "",
-        passAsStdin: asBoolean(raw.passAsStdin),
-        env: isObject(raw.env) ? (raw.env as Record<string, string>) : undefined,
-      };
-
-    case NOTIFICATION_CHANNEL_KINDS.Webhook:
-      return {
-        kind: NOTIFICATION_CHANNEL_KINDS.Webhook,
-        enabled,
-        url: typeof raw.url === "string" ? raw.url : "",
-        headers: isObject(raw.headers) ? (raw.headers as Record<string, string>) : undefined,
-        timeoutMs: asNumber(raw.timeoutMs),
-      };
-
-    case NOTIFICATION_CHANNEL_KINDS.File:
-      return {
-        kind: NOTIFICATION_CHANNEL_KINDS.File,
-        enabled,
-        path: typeof raw.path === "string" ? raw.path : "",
-      };
-
-    case NOTIFICATION_CHANNEL_KINDS.Log:
-      return {
-        kind: NOTIFICATION_CHANNEL_KINDS.Log,
-        enabled,
-        level: typeof raw.level === "string" &&
-          ["info", "warn", "error", "debug"].includes(raw.level)
-          ? (raw.level as "info" | "warn" | "error" | "debug")
-          : undefined,
-      };
-
-    default:
-      log.warn(`Unknown notification channel kind "${String(kind)}"; skipping channel entry`);
-      return null;
-  }
-}
 
 // ── Public API ──────────────────────────────────────────────────────
 
@@ -263,7 +123,7 @@ export function parseNotificationConfig(raw: unknown): NotificationConfig {
   if (Array.isArray(raw.channels)) {
     const parsed: NotificationChannelConfig[] = [];
     for (let i = 0; i < raw.channels.length; i++) {
-      const ch = parseChannel(raw.channels[i]);
+      const ch = parseChannelConfig(raw.channels[i]);
       if (ch !== null) {
         parsed.push(ch);
       } else {
@@ -274,53 +134,12 @@ export function parseNotificationConfig(raw: unknown): NotificationConfig {
   } else if (raw.channels !== undefined) {
     log.warn(`Invalid "channels" value; expected array, got ${typeof raw.channels}`);
   }
-
-  if (isObject(raw.events)) {
-    const parsedEvents: NotificationConfig["events"] = {};
-    for (const [key, val] of Object.entries(raw.events)) {
-      const validEventTypes = Object.values(NOTIFICATION_EVENT_TYPES) as string[];
-      if (!validEventTypes.includes(key)) {
-        log.warn(`Skipping unknown notification event type "${key}"`);
-        continue;
-      }
-      const eventType = key as NotificationEventType;
-      if (isObject(val)) {
-        const evtObj = val as Record<string, unknown>;
-        const eventConfig: Partial<NotificationEventConfig> = {};
-        const evtEnabled = asBoolean(evtObj.enabled);
-        if (evtEnabled !== undefined) eventConfig.enabled = evtEnabled;
-        if (Array.isArray(evtObj.channels)) {
-          const parsedChs: NotificationChannelConfig[] = [];
-          for (let i = 0; i < evtObj.channels.length; i++) {
-            const ch = parseChannel(evtObj.channels[i]);
-            if (ch !== null) parsedChs.push(ch);
-          }
-          if (parsedChs.length > 0) eventConfig.channels = parsedChs;
-        }
-        if (typeof evtObj.titleTemplate === "string") eventConfig.titleTemplate = evtObj.titleTemplate;
-        if (typeof evtObj.messageTemplate === "string") eventConfig.messageTemplate = evtObj.messageTemplate;
-        if (isObject(evtObj.throttle)) {
-          const t = parseThrottle(evtObj.throttle);
-          if (t) eventConfig.throttle = t;
-        }
-        if (isObject(evtObj.quietHoursOverride)) {
-          const q = parseQuietHours(evtObj.quietHoursOverride);
-          if (q) eventConfig.quietHoursOverride = q;
-        }
-        if (Object.keys(eventConfig).length > 0) {
-          parsedEvents[eventType] = eventConfig as NotificationEventConfig;
-        }
-      } else {
-        log.warn(`Invalid event config for "${key}"; expected object, got ${typeof val}`);
-      }
-    }
-    if (Object.keys(parsedEvents).length > 0) {
-      result.events = parsedEvents;
-    }
+  const events = parseEventConfigs(raw.events, Object.values(NOTIFICATION_EVENT_TYPES) as string[]);
+  if (events) {
+    result.events = events;
   } else if (raw.events !== undefined) {
     log.warn(`Invalid "events" value; expected object, got ${typeof raw.events}`);
   }
-
   if (isObject(raw.quietHours)) {
     const qh = parseQuietHours(raw.quietHours);
     if (qh) result.quietHours = qh;

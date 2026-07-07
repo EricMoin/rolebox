@@ -2,32 +2,34 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import type {
   DispatchInput,
   DispatchTask,
-  DispatchTaskStatus,
   DispatchManagerConfig,
-  TaskEventState,
-  SessionMessageSnapshot,
-  MaterializedResultRef,
 } from "./types.ts";
-import { DEFAULT_CONFIG, SYNC_TIMEOUT_MS, DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS, WATCHDOG_INTERVAL_MS, GLOBAL_SWEEP_INTERVAL_MS, IDLE_DEBOUNCE_MS, BACKGROUND_STALE_TIMEOUT_MS, MATERIALIZE_TIMEOUT_MS, OUTBOX_SWEEP_INTERVAL_MS, RESULT_RETENTION_MS, DEFAULT_BUDGET_SAMPLE_INTERVAL_MS } from "./config.ts";
-import { unlinkSync } from "node:fs";
+import {
+  DEFAULT_CONFIG,
+  WATCHDOG_INTERVAL_MS,
+  GLOBAL_SWEEP_INTERVAL_MS,
+  IDLE_DEBOUNCE_MS,
+} from "./config.ts";
 import { ConcurrencyManager, type IConcurrencyManager } from "./concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
-import { detectCompletion } from "./completion-detector.ts";
-import { notifyParent, hasFinalNotifyBeenSent, DISPATCH_RECOVERY_MARKER } from "./notification.ts";
+import { notifyParent } from "./notification.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 import { MetricsPersister } from "./metrics-persister.ts";
 import { BudgetTracker } from "./budget-tracker.ts";
 
 import { TaskStateStore } from "./task-store.ts";
-import { extractResultBlock, readResultSidecar, resultSidecarPath, writeResultSidecar } from "./result-extractor.ts";
-import { debugLog, infoLog } from "./debug-log.ts";
+import { debugLog } from "./debug-log.ts";
 import { metrics } from "./metrics.ts";
-import { withTimeout, TimeoutError } from "./with-timeout.ts";
+import { TaskLifecycleManager } from "./task-lifecycle.ts";
+import { CompletionOrchestrator, type CompletionOrchestratorDeps } from "./completion-orchestrator.ts";
 
-const DEFAULT_CONCURRENCY_KEY = "default";
-
-// Opencode session.error payloads vary (Error | string | { name, data: { message } }).
-// String(obj) would yield "[object Object]" and hide the real cause, so dig out a message.
+/**
+ * Extract a human-readable error message from various session.error shapes.
+ * Re-exported from the original manager.ts for test backward compatibility.
+ *
+ * Opencode session.error payloads vary (Error | string | { name, data: { message } }).
+ * String(obj) would yield "[object Object]" and hide the real cause, so dig out a message.
+ */
 export function extractSessionErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message || error.name || "Error";
   if (typeof error === "string") return error.trim() || "Unknown session error";
@@ -51,6 +53,7 @@ export function extractSessionErrorMessage(error: unknown): string {
 }
 
 export class DispatchManager {
+  // ── Shared mutable state (owned here, shared with lifecycle & orchestrator) ─
   private tasks: Map<string, DispatchTask> = new Map();
   private cleanupTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private sidecarGCTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -61,9 +64,8 @@ export class DispatchManager {
   private client: OpencodeClient;
   private watchdog: TaskWatchdogManager;
   private sessionToTask: Map<string, string> = new Map();
-  private eventState: Map<string, TaskEventState> = new Map();
+  private eventState: Map<string, import("./types.ts").TaskEventState> = new Map();
   private store: TaskStateStore;
-  private _recovered = false;
 
   private sessionsByRequest = new Map<string, number>();
   private _cancelQueue: Map<string, () => void> = new Map();
@@ -71,16 +73,17 @@ export class DispatchManager {
   /** Maps completed sync task IDs to their opencode session IDs for continuation support. */
   private completedSyncSessions = new Map<string, string>();
   private subagentModelKey: Map<string, string>;
-  private _dirty = false;
-  private _persistTimer: ReturnType<typeof setTimeout> | undefined;
   private sessionMonitor: SessionMonitor;
   private metricsPersister: MetricsPersister;
   private budgetTracker: BudgetTracker;
-  private _budgetSamplerTimer: ReturnType<typeof setInterval> | undefined;
   private notifyOutbox = new Set<string>();
-  private sweeperTimer: ReturnType<typeof setInterval> | undefined;
   private _deferredIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private _directory: string;
+
+  /** Delegated lifecycle manager. */
+  private lifecycle: TaskLifecycleManager;
+  /** Delegated completion orchestrator. */
+  private orchestrator: CompletionOrchestrator;
 
   constructor(
     client: OpencodeClient,
@@ -95,15 +98,15 @@ export class DispatchManager {
     } else if (this.config.concurrency_policy) {
       this.concurrency = this.config.concurrency_policy(
         this.config.maxConcurrent,
-        this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
-        this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+        this.config.maxQueueDepth ?? DEFAULT_CONFIG.maxQueueDepth ?? 100,
+        this.config.syncReservedSlots ?? 2,
         this.config.retryAfterMs,
       );
     } else {
       this.concurrency = new ConcurrencyManager(
         this.config.maxConcurrent,
-        this.config.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
-        this.config.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
+        this.config.maxQueueDepth ?? 100,
+        this.config.syncReservedSlots ?? 2,
         this.config.retryAfterMs,
       );
     }
@@ -113,15 +116,19 @@ export class DispatchManager {
     this.sessionMonitor = new SessionMonitor();
     this.metricsPersister = new MetricsPersister(this._directory);
     this.budgetTracker = new BudgetTracker(this.config);
+
+    // Create TaskWatchdogManager — lifecycle deps require it.
+    // The `?.` guard on this.lifecycle covers the brief window before construction completes;
+    // no tasks are registered yet so no callbacks fire during that window.
     this.watchdog = new TaskWatchdogManager(
       {
-        onReconcile: (taskId: string) => this.evaluateAndComplete(taskId, "watchdog-reconcile"),
+        onReconcile: (taskId: string) => this.lifecycle?.evaluateAndComplete(taskId, "watchdog-reconcile"),
         onSweep: (taskId: string) => {
           if (!this.watchdog.isDebouncing(taskId)) {
-            return this.evaluateAndComplete(taskId, "global-sweep");
+            return this.lifecycle?.evaluateAndComplete(taskId, "global-sweep");
           }
         },
-        onDebounceElapsed: (taskId: string) => this.evaluateAndComplete(taskId, "idle-debounce"),
+        onDebounceElapsed: (taskId: string) => this.lifecycle?.evaluateAndComplete(taskId, "idle-debounce"),
       },
       {
         watchdogIntervalMs: this.config.watchdogIntervalMs ?? WATCHDOG_INTERVAL_MS,
@@ -129,622 +136,82 @@ export class DispatchManager {
         idleDebounceMs: this.config.idleDebounceMs ?? IDLE_DEBOUNCE_MS,
       },
     );
-    this.startSweeper();
-    this.startBudgetSampler();
+
+    // Create CompletionOrchestrator — share all Map/Set references via deps.
+    // getInflightCount and sendNotification callbacks bounce through DispatchManager
+    // so they resolve after lifecycle is created below.
+    const orchestratorDeps: CompletionOrchestratorDeps = {
+      tasks: this.tasks,
+      eventState: this.eventState,
+      client: this.client,
+      concurrency: this.concurrency,
+      watchdog: this.watchdog,
+      config: this.config,
+      sessionToTask: this.sessionToTask,
+      notifyOutbox: this.notifyOutbox,
+      cleanupTimers: this.cleanupTimers,
+      sidecarGCTimers: this.sidecarGCTimers,
+      cleanedUpTasks: this.cleanedUpTasks,
+      deferredIdleTimers: this._deferredIdleTimers,
+      pendingNotifications: this.pendingNotifications,
+      sessionMonitor: this.sessionMonitor,
+      budgetTracker: this.budgetTracker,
+      store: this.store,
+      metricsPersister: this.metricsPersister,
+      directory: this._directory,
+      getInflightCount: (parentSessionId: string) => this.getInflightCount(parentSessionId),
+      sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) =>
+        this.notifyCompletion(task, remainingTasks, resultText),
+      cancelTask: (taskId: string) => this.cancelTask(taskId),
+    };
+    this.orchestrator = new CompletionOrchestrator(orchestratorDeps);
+
+    // Create TaskLifecycleManager — from this point onward, watchdog callbacks see a real lifecycle
+    this.lifecycle = new TaskLifecycleManager({
+      tasks: this.tasks,
+      eventState: this.eventState,
+      client: this.client,
+      concurrency: this.concurrency,
+      watchdog: this.watchdog,
+      config: this.config,
+      cancelQueue: this._cancelQueue,
+      syncControllers: this._syncControllers,
+      completedSyncSessions: this.completedSyncSessions,
+      cleanupTimers: this.cleanupTimers,
+      sidecarGCTimers: this.sidecarGCTimers,
+      pendingNotifications: this.pendingNotifications,
+      sessionToTask: this.sessionToTask,
+      sessionsByRequest: this.sessionsByRequest,
+      notifyOutbox: this.notifyOutbox,
+      deferredIdleTimers: this._deferredIdleTimers,
+      cleanedUpTasks: this.cleanedUpTasks,
+      subagentModelKey: this.subagentModelKey,
+      directory: this._directory,
+      sessionMonitor: this.sessionMonitor,
+      cleanupTask: (taskId: string) => this.orchestrator.cleanupTask(taskId),
+      persistState: () => this.orchestrator.persistState(),
+      addToOutbox: (taskId: string) => this.orchestrator.addToOutbox(taskId),
+      sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) =>
+        this.notifyCompletion(task, remainingTasks, resultText),
+    });
+    this.orchestrator.startSweeper();
+    this.orchestrator.startBudgetSampler();
   }
 
-  private startSweeper(): void {
-    const interval = this.config.outboxSweepIntervalMs ?? OUTBOX_SWEEP_INTERVAL_MS;
-    this.sweeperTimer = setInterval(async () => {
-      for (const taskId of this.notifyOutbox) {
-        const task = this.tasks.get(taskId);
-        if (!task || hasFinalNotifyBeenSent(taskId)) {
-          this.notifyOutbox.delete(taskId);
-          continue;
-        }
-        // Try to extract result text from materialized result for sweeper re-sends
-        let sweeperResultText: string | undefined;
-        if (task.result?.sidecarPath && !task.result.fetchError) {
-          const sidecarText = readResultSidecar(task.result.sidecarPath);
-          if (sidecarText !== null) {
-            sweeperResultText = extractResultBlock(sidecarText).result;
-          }
-        }
-        const sent = await this.notifyCompletion(task, this.getInflightCount(task.parentSessionId), sweeperResultText);
-        if (sent) {
-          this.notifyOutbox.delete(taskId);
-        }
-      }
-    }, interval);
-  }
-
-  private addToOutbox(taskId: string): void {
-    this.notifyOutbox.add(taskId);
-    this.persistState();
-  }
-
-  /**
-   * Start periodic budget sampler that fetches token/cost data from active
-   * dispatched sessions and checks per-session budgets.
-   */
-  private startBudgetSampler(): void {
-    const interval = this.config.budgetSampleIntervalMs ?? DEFAULT_BUDGET_SAMPLE_INTERVAL_MS;
-
-    // Only start the sampler if at least one token/cost budget is configured
-    const hasBudgetLimits =
-      this.config.maxInputTokensPerRequest !== undefined ||
-      this.config.maxOutputTokensPerRequest !== undefined ||
-      this.config.maxCostPerRequest !== undefined ||
-      this.config.maxInputTokensPerSession !== undefined ||
-      this.config.maxCostPerSession !== undefined;
-
-    if (!hasBudgetLimits) return;
-
-    this._budgetSamplerTimer = setInterval(async () => {
-      await this.sampleBudgetUsage();
-    }, interval);
-  }
-
-  /**
-   * Sample token/cost data from all active dispatched sessions and check
-   * per-session budgets. Cancels sessions that exceed their per-session budget.
-   */
-  private async sampleBudgetUsage(): Promise<void> {
-    for (const [sessionId, taskId] of this.sessionToTask) {
-      const task = this.tasks.get(taskId);
-      if (!task || task.status !== "running") continue;
-
-      try {
-        const msgResult = await withTimeout(
-          this.client.session.messages({ path: { id: sessionId } }),
-          this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
-          "budgetSampler:session.messages",
-        );
-
-        if (msgResult.error !== undefined || !msgResult.data) continue;
-
-        const messages = msgResult.data as Array<{
-          cost?: number;
-          tokens?: { input?: number; output?: number; reasoning?: number; cache?: number };
-        }>;
-
-        // Accumulate token/cost from all messages
-        let inputTokens = 0;
-        let outputTokens = 0;
-        let cost = 0;
-
-        for (const msg of messages) {
-          if (msg.tokens) {
-            inputTokens += msg.tokens.input ?? 0;
-            outputTokens += msg.tokens.output ?? 0;
-          }
-          if (msg.cost !== undefined) {
-            cost += msg.cost;
-          }
-        }
-
-        // Record usage — the tracker accumulates, so this is additive
-        this.budgetTracker.recordUsage(
-          sessionId,
-          task.parentSessionId,
-          { input: inputTokens, output: outputTokens },
-          cost,
-        );
-
-        // Check per-session budget
-        const sessionCheck = this.budgetTracker.isSessionBudgetExceeded(sessionId);
-        if (sessionCheck.exceeded) {
-          infoLog("budget", taskId, `session budget exceeded — cancelling: ${sessionCheck.reason}`);
-          metrics.counter("dispatch_rejected_total", { reason: "session-budget-exceeded" }).inc();
-          void this.cancelTask(taskId);
-        }
-      } catch (err) {
-        debugLog("budget", taskId, `sampler error: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  }
-
-  /**
-   * Get the BudgetTracker instance (for use by tools / metrics).
-   */
-  getBudgetTracker(): BudgetTracker {
-    return this.budgetTracker;
-  }
-
-  /**
-   * Get budget status summary string for the given parent session.
-   */
-  getBudgetStatus(parentSessionId: string): string {
-    return this.budgetTracker.getStatus(parentSessionId);
-  }
-
-  getConfig(): Readonly<DispatchManagerConfig> {
-    return this.config;
-  }
-
-  /** Replace the concurrency manager at runtime. Used by extension hot-loading. */
-  setConcurrencyManager(manager: IConcurrencyManager): void {
-    this.concurrency = manager;
-  }
-
-  /**
-   * Returns true if the given session is currently owned by a synchronous
-   * dispatch task. Used by plugin-hooks to suppress function continuation
-   * for sync sessions (continuation would prevent session.prompt() from
-   * ever resolving).
-   */
-  isSyncSession(sessionId: string): boolean {
-    const taskId = this.sessionToTask.get(sessionId);
-    if (!taskId) return false;
-    const task = this.tasks.get(taskId);
-    return task?.mode === "sync";
-  }
-
-  private deriveKey(subagentId: string): string {
-    return this.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
-  }
+  // ── Delegated lifecycle methods ───────────────────────────────
 
   async launch(
     input: DispatchInput,
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<DispatchTask> {
-    const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
-    const concurrencyKey = this.deriveKey(input.subagent);
-
-    // Budget gate
-    const budget = this.config.maxTotalSessionsPerRequest;
-    const root = parentContext.sessionID;
-    if (budget !== undefined && this.getRequestSessions(root) >= budget) {
-      metrics.counter("dispatch_rejected_total", { reason: "budget-exhausted" }).inc();
-      const task: DispatchTask = {
-        id: taskId,
-        sessionId: "",
-        parentSessionId: parentContext.sessionID,
-        parentAgent: parentContext.agent,
-        depth: this.computeDepth(parentContext.sessionID),
-        status: "error",
-        agent: input.subagent,
-        prompt: input.prompt,
-        description: input.description,
-        startedAt: new Date(),
-        completedAt: new Date(),
-        progress: { lastUpdate: new Date(), toolCalls: 0 },
-        timeoutMs: input.timeout_ms,
-        error: JSON.stringify({
-          error: "Session budget exhausted",
-          limit: budget,
-          spawned: this.getRequestSessions(root),
-        }),
-      };
-      this.tasks.set(taskId, task);
-      this.scheduleCleanup(taskId);
-      void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-      return task;
-    }
-
-    const task: DispatchTask = {
-      id: taskId,
-      sessionId: "",
-      parentSessionId: parentContext.sessionID,
-      parentAgent: parentContext.agent,
-      depth: this.computeDepth(parentContext.sessionID),
-      status: "pending",
-      agent: input.subagent,
-      prompt: input.prompt,
-      description: input.description,
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-      timeoutMs: input.timeout_ms,
-    };
-
-    this.tasks.set(taskId, task);
-    this.incRequestSessions(root);
-
-    debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
-
-    const acqResult = this.concurrency.acquireBackground(concurrencyKey, {
-      parentId: task.parentSessionId,
-      maxActivePerParent: this.config.maxActivePerParent,
-    });
-
-    switch (acqResult.outcome) {
-      case "full": {
-        const maxRetries = this.config.backpressureMaxRetries ?? 0;
-        if (maxRetries > 0) {
-          task.concurrencyKey = concurrencyKey;
-          debugLog("launch", taskId, `QUEUE-FULL — scheduling backpressure retry (0/${maxRetries})`);
-          this._scheduleBackpressureRetry(taskId, concurrencyKey, input, parentContext, 0, maxRetries);
-          return task;
-        }
-
-        metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
-        task.status = "error";
-        task.error = JSON.stringify({
-          error: "Queue is full",
-          retry_after: acqResult.error.retryAfter,
-          queue_depth: acqResult.error.depth,
-          limit: acqResult.error.limit,
-        });
-        task.completedAt = new Date();
-        debugLog("launch", taskId, `REJECTED: queue-full depth=${acqResult.error.depth}/${acqResult.error.limit}`);
-        this.scheduleCleanup(taskId);
-        void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-        return task;
-      }
-
-      case "acquired": {
-        task.concurrencyKey = concurrencyKey;
-        await this.startBackgroundTask(taskId, input, parentContext);
-        return task;
-      }
-
-      case "queued": {
-        task.concurrencyKey = concurrencyKey;
-        this._cancelQueue.set(taskId, acqResult.cancel);
-        debugLog("launch", taskId, `QUEUED — returning pending task immediately`);
-        void acqResult.promise.then(() => this._promoteQueued(taskId, input, parentContext));
-        return task;
-      }
-    }
+    return this.lifecycle.launch(input, parentContext);
   }
 
-  private async startBackgroundTask(
-    taskId: string,
-    input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string },
-  ): Promise<void> {
-    const task = this.tasks.get(taskId);
-    if (!task) return;
-
-    let didMarkRunning = false;
-
-    try {
-      const createResult = await this.client.session.create({
-        body: input.noParentInherit ? {} : { parentID: parentContext.sessionID },
-        query: { directory: parentContext.directory },
-      });
-
-      const session = createResult.data;
-      if (!session) throw new Error("Failed to create session: empty response");
-
-      task.sessionId = session.id;
-      this.sessionToTask.set(session.id, taskId);
-      this.eventState.set(taskId, {
-        lastMessageCount: 0,
-        lastProgressUpdate: Date.now(),
-        hasProducedOutput: false,
-        messageCountAtStart: 0,
-        lastEventAt: Date.now(),
-      });
-      task.status = "running";
-      didMarkRunning = true;
-      infoLog("launch", taskId, `running agent=${input.subagent}`);
-      metrics.counter("dispatch_total", { agent: input.subagent, mode: "background" }).inc();
-      metrics.gauge("inflight_tasks").inc();
-      task.progress.lastUpdate = new Date();
-      this.persistState();
-
-      debugLog("launch", taskId, `session created: ${session.id}`);
-
-      if (input.run_in_background) {
-        await this.client.session.promptAsync({
-          path: { id: session.id },
-          body: {
-            agent: input.subagent,
-            parts: [{ type: "text", text: input.prompt }],
-          },
-        });
-
-        debugLog("launch", taskId, "promptAsync sent — registering with watchdog");
-        this.watchdog.registerTask(taskId);
-      }
-    } catch (err) {
-      task.status = "error";
-      task.error = err instanceof Error ? err.message : String(err);
-      debugLog("launch", taskId, `ERROR: ${task.error}`);
-      if (didMarkRunning) {
-        this.sessionToTask.delete(task.sessionId); // edge-case #4
-        task.completedAt = new Date();
-        this.leaveRunning(taskId);
-        void notifyParent(this.client, task, 0, { maxRetries: 0 });
-      } else {
-        this.concurrency.release(task.concurrencyKey!, task.parentSessionId);
-        this.scheduleCleanup(taskId);
-      }
-    }
-  }
-
-  private async _promoteQueued(
-    taskId: string,
-    input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string },
-  ): Promise<void> {
-    this._cancelQueue.delete(taskId);
-
-    const task = this.tasks.get(taskId);
-    if (!task || task.status !== "pending") {
-      this.concurrency.release(task?.concurrencyKey ?? this.deriveKey(input.subagent), task?.parentSessionId);
-      return;
-    }
-
-    await this.startBackgroundTask(taskId, input, parentContext);
-  }
-
-  private _scheduleBackpressureRetry(
-    taskId: string,
-    concurrencyKey: string,
-    input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string },
-    attempt: number,
-    maxRetries: number,
-  ): void {
-    const task = this.tasks.get(taskId);
-    if (!task || task.status !== "pending") return;
-
-    const retryAfterMs = this.config.retryAfterMs;
-    const maxDelayMs = this.config.backpressureMaxDelayMs ?? 60000;
-    const delay = Math.min(retryAfterMs * Math.pow(2, attempt), maxDelayMs);
-    metrics.counter("dispatch_backpressure_retry_total", { key: concurrencyKey }).inc();
-
-    debugLog("launch", taskId, `backpressure retry attempt=${attempt + 1}/${maxRetries} delay=${delay}ms`);
-
-    const timer = setTimeout(() => {
-      this._cancelQueue.delete(taskId);
-      const currentTask = this.tasks.get(taskId);
-      if (!currentTask || currentTask.status !== "pending") return;
-
-      const acqResult = this.concurrency.acquireBackground(concurrencyKey, {
-        parentId: task.parentSessionId,
-        maxActivePerParent: this.config.maxActivePerParent,
-      });
-
-      if (acqResult.outcome === "acquired") {
-        debugLog("launch", taskId, `backpressure retry ${attempt + 1}: acquired`);
-        void this.startBackgroundTask(taskId, input, parentContext);
-        return;
-      }
-
-      if (acqResult.outcome === "queued") {
-        debugLog("launch", taskId, `backpressure retry ${attempt + 1}: queued`);
-        this._cancelQueue.set(taskId, acqResult.cancel);
-        void acqResult.promise.then(() => this._promoteQueued(taskId, input, parentContext));
-        return;
-      }
-
-      // Still full
-      if (attempt + 1 >= maxRetries) {
-        debugLog("launch", taskId, `backpressure exhausted after ${maxRetries} attempts`);
-        metrics.counter("dispatch_rejected_total", { reason: "backpressure-exhausted" }).inc();
-        task.status = "error";
-        task.error = JSON.stringify({
-          error: "Queue is full after backpressure retries exhausted",
-          attempts: attempt + 1,
-          retry_after: acqResult.error.retryAfter,
-          queue_depth: acqResult.error.depth,
-          limit: acqResult.error.limit,
-        });
-        task.completedAt = new Date();
-        this.scheduleCleanup(taskId);
-        void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-        return;
-      }
-
-      this._scheduleBackpressureRetry(taskId, concurrencyKey, input, parentContext, attempt + 1, maxRetries);
-    }, delay);
-
-    this._cancelQueue.set(taskId, () => clearTimeout(timer));
-  }
-
-  /**
-   * Execute a synchronous (blocking) dispatch. Tracked in this.tasks with
-   * mode:"sync" for crash visibility / cancellability, but NOT returned by
-   * getInflightCount (caller is blocked, needs no async countdown).
-   *
-   * Protected by:
-   * - Sync concurrency acquire (can use reserved slots)
-   * - Split timeouts: syncAcquireTimeoutMs for acquire, syncPromptTimeoutMs for prompt
-   * - Dynamic override: input.sync_timeout_ms overrides prompt-phase timeout
-   * - AbortController + session.abort() for prompt timeout / cancellation
-   * - Leak-free: cancelAcq on acquire timeout, finally-block teardown
-   *
-   * Returns the joined text of all assistant text parts.
-   * Throws structured JSON error: { error, phase, timeout_ms }.
-   */
   async executeSync(
     input: DispatchInput,
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<string> {
-    const acquireTimeoutMs = this.config.syncAcquireTimeoutMs ?? DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS;
-    const promptTimeoutMs = input.sync_timeout_ms
-      ?? this.config.syncPromptTimeoutMs
-      ?? this.config.syncTimeoutMs
-      ?? SYNC_TIMEOUT_MS;
-    const concurrencyKey = this.deriveKey(input.subagent);
-
-    const callerDepth = this.computeDepth(parentContext.sessionID);
-    if (callerDepth > 0) {
-      throw new Error(JSON.stringify({
-        error: "Synchronous dispatch forbidden at depth>0",
-        depth: callerDepth,
-      }));
-    }
-
-    const budget = this.config.maxTotalSessionsPerRequest;
-    const root = parentContext.sessionID;
-    const isNewSession = !input.session_id;
-
-    // Step 0: Session continuation lookup — reuse existing session when session_id is provided
-    let existingSessionId: string | undefined;
-    if (input.session_id) {
-      const prevTask = this.tasks.get(input.session_id);
-      if (prevTask && prevTask.sessionId) {
-        existingSessionId = prevTask.sessionId;
-      } else if (this.completedSyncSessions.has(input.session_id)) {
-        existingSessionId = this.completedSyncSessions.get(input.session_id)!;
-      } else {
-        throw new Error(JSON.stringify({
-          error: `Session continuation: task '${input.session_id}' not found or has no session`,
-          phase: "continuation",
-        }));
-      }
-    }
-
-    if (isNewSession && budget !== undefined && this.getRequestSessions(root) >= budget) {
-      metrics.counter("dispatch_rejected_total", { reason: "budget-exhausted" }).inc();
-      throw new Error(JSON.stringify({
-        error: "Session budget exhausted",
-        limit: budget,
-        spawned: this.getRequestSessions(root),
-      }));
-    }
-
-    const taskId = `sync_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
-    const task: DispatchTask = {
-      id: taskId,
-      sessionId: existingSessionId ?? "",
-      parentSessionId: parentContext.sessionID,
-      parentAgent: parentContext.agent,
-      depth: this.computeDepth(parentContext.sessionID),
-      status: "pending",
-      agent: input.subagent,
-      prompt: input.prompt,
-      description: input.description,
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-      mode: "sync",
-      continuationOf: existingSessionId ? input.session_id : undefined,
-    };
-    this.tasks.set(taskId, task);
-
-    let didAcquire = false;
-    const startTime = Date.now();
-
-    try {
-      // Step 1: Cancelable acquire with dedicated acquire timeout
-      const { promise: acq, cancel: cancelAcq } = this.concurrency.acquireSync(concurrencyKey);
-      let acqTimer: ReturnType<typeof setTimeout> | undefined;
-      const acqTimeout = new Promise<"timeout">((r) => {
-        acqTimer = setTimeout(() => r("timeout"), acquireTimeoutMs);
-      });
-      const acqResult = await Promise.race([acq.then(() => "acquired" as const), acqTimeout]);
-      clearTimeout(acqTimer);
-
-      if (acqResult === "timeout") {
-        cancelAcq();
-        const err = JSON.stringify({
-          error: `Timed out waiting for a concurrency slot after ${acquireTimeoutMs}ms`,
-          phase: "acquire",
-          timeout_ms: acquireTimeoutMs,
-        });
-        throw new Error(err);
-      }
-      didAcquire = true;
-      metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
-      metrics.gauge("inflight_tasks").inc();
-
-      // Step 2: Session create or reuse existing session for continuation
-      if (existingSessionId) {
-        // Reuse existing session — no session.create(), no budget charge
-        task.sessionId = existingSessionId;
-        this.sessionToTask.set(existingSessionId, taskId);
-        debugLog("launch", taskId, `continuing session ${existingSessionId}`);
-      } else {
-        const createTimeoutMs = this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
-        let createResult: Awaited<ReturnType<typeof this.client.session.create>>;
-        try {
-          createResult = await withTimeout(
-            this.client.session.create({
-              body: { parentID: parentContext.sessionID },
-              query: { directory: parentContext.directory },
-            }),
-            createTimeoutMs,
-            "session.create",
-          );
-        } catch (e) {
-          if (e instanceof TimeoutError) {
-            const err = JSON.stringify({
-              error: `Session create timed out after ${createTimeoutMs}ms`,
-              phase: "session",
-              timeout_ms: createTimeoutMs,
-            });
-            throw new Error(err);
-          }
-          throw e;
-        }
-        const session = createResult.data;
-        if (!session) {
-          const err = JSON.stringify({
-            error: "Failed to create session: empty response",
-            phase: "session",
-            timeout_ms: promptTimeoutMs,
-          });
-          throw new Error(err);
-        }
-
-        task.sessionId = session.id;
-        this.sessionToTask.set(session.id, taskId);
-        this.completedSyncSessions.set(taskId, session.id);
-        if (isNewSession) this.incRequestSessions(root);
-      }
-
-      // Step 3: Prompt with abort + split timeout
-      const controller = new AbortController();
-      this._syncControllers.set(taskId, controller);
-      let promptTimer: ReturnType<typeof setTimeout> | undefined;
-      const promptTimeout = new Promise<never>((_, rej) => {
-        promptTimer = setTimeout(() => {
-          controller.abort();
-          void this.client.session.abort({ path: { id: task.sessionId } });
-          const err = JSON.stringify({
-            error: `Prompt timed out after ${promptTimeoutMs}ms`,
-            phase: "prompt",
-            timeout_ms: promptTimeoutMs,
-          });
-          rej(new Error(err));
-        }, promptTimeoutMs);
-      });
-
-      try {
-        const promptResult: { data?: { parts: Array<{ type: string; text?: string }> } } =
-          await Promise.race([
-            this.client.session.prompt({
-              path: { id: task.sessionId },
-              body: {
-                agent: input.subagent,
-                parts: [{ type: "text", text: input.prompt }],
-              },
-              signal: controller.signal,
-            }),
-            promptTimeout,
-          ]);
-
-        clearTimeout(promptTimer);
-
-        const response = promptResult.data;
-        const text = response
-          ? response.parts
-              .filter((p) => p.type === "text")
-              .map((p) => (p as { type: "text"; text: string }).text)
-              .join("")
-          : "";
-        metrics.counter("dispatch_completed_total", { mode: "sync" }).inc();
-        metrics.histogram("task_duration_ms", { mode: "sync" }).observe(Date.now() - startTime);
-        return text;
-      } finally {
-        clearTimeout(promptTimer);
-      }
-    } catch (err) {
-      metrics.counter("dispatch_error_total", { mode: "sync" }).inc();
-      throw err;
-    } finally {
-      metrics.gauge("inflight_tasks").dec();
-      this._syncControllers.delete(taskId);
-      this.sessionToTask.delete(task.sessionId);
-      this.tasks.delete(taskId);
-      if (didAcquire) {
-        this.concurrency.release(concurrencyKey, parentContext.sessionID);
-      }
-    }
+    return this.lifecycle.executeSync(input, parentContext);
   }
 
   async reopenForContinuation(
@@ -752,86 +219,79 @@ export class DispatchManager {
     input: DispatchInput,
     parentContext: { sessionID: string; agent: string; directory: string },
   ): Promise<DispatchTask> {
-    if (this.cleanedUpTasks.has(taskId)) throw new Error(`Task '${taskId}' was cleaned up`);
-    const task = this.tasks.get(taskId);
-    if (!task) throw new Error(`Task '${taskId}' not found`);
-    if (task.agent !== input.subagent) throw new Error(`Task '${taskId}' agent mismatch: expected ${task.agent}, got ${input.subagent}`);
-
-    const concurrencyKey = this.deriveKey(input.subagent);
-    const acqResult = this.concurrency.acquireBackground(concurrencyKey, {
-      parentId: task.parentSessionId,
-      maxActivePerParent: this.config.maxActivePerParent,
-    });
-
-    if (acqResult.outcome === "full" || acqResult.outcome === "queued") {
-      if (acqResult.outcome === "queued") {
-        acqResult.cancel();
-      }
-      metrics.counter("dispatch_rejected_total", { reason: "queue-full" }).inc();
-      task.status = "error";
-      task.error = JSON.stringify({
-        error: "Queue is full",
-        retry_after: acqResult.outcome === "full" ? acqResult.error.retryAfter : 30_000,
-        queue_depth: 0,
-        limit: 1,
-      });
-      task.completedAt = new Date();
-      debugLog("reopen", taskId, `REJECTED: no slot available`);
-      this.scheduleCleanup(taskId);
-      void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-      return task;
-    }
-
-    const msgResult = await withTimeout(
-      this.client.session.messages({ path: { id: task.sessionId } }),
-      this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
-      "reopen:session.messages",
-    );
-    const messageCountAtStart = (msgResult.data ?? []).length;
-
-    this.transition(taskId, ["completed", "error", "timeout", "running"], "running", { completedAt: undefined });
-    task.startedAt = new Date();
-    task.progress = { lastUpdate: new Date(), toolCalls: 0 };
-    task.error = undefined;
-    task.messageCountAtStart = messageCountAtStart;
-    if (input.timeout_ms !== undefined) {
-      task.timeoutMs = input.timeout_ms;
-    }
-    task.concurrencyKey = concurrencyKey;
-
-    debugLog("reopen", taskId, `continuing ${task.agent} on session ${task.sessionId} (msgCount=${messageCountAtStart})`);
-
-    await this.client.session.promptAsync({
-      path: { id: task.sessionId },
-      body: {
-        agent: input.subagent,
-        parts: [{ type: "text", text: input.prompt }],
-      },
-    });
-
-    this.watchdog.cancelDebounce(taskId);
-    this.watchdog.unregisterTask(taskId);
-    this.watchdog.registerTask(taskId); // edge-case #5
-
-    const es = this.eventState.get(taskId) ?? {
-      lastMessageCount: 0,
-      lastProgressUpdate: Date.now(),
-      hasProducedOutput: false,
-      messageCountAtStart: 0,
-      lastEventAt: Date.now(),
-    };
-    es.messageCountAtStart = messageCountAtStart;
-    es.lastProgressUpdate = Date.now();
-    es.hasProducedOutput = false;
-    es.lastEventAt = Date.now();
-    this.eventState.set(taskId, es);
-
-    this.sessionToTask.set(task.sessionId, taskId); // edge-case #5
-    metrics.gauge("inflight_tasks").inc();
-    this.persistState();
-
-    return task;
+    return this.lifecycle.reopenForContinuation(taskId, input, parentContext);
   }
+
+  async cancelTask(taskId: string): Promise<boolean> {
+    return this.lifecycle.cancelTask(taskId);
+  }
+
+  async getResult(
+    taskId: string,
+  ): Promise<{
+    kind: "ok" | "expired" | "not_found" | "fetch_error";
+    text: string;
+    resultText: string;
+    hadFence: boolean;
+    totalChars: number;
+    error?: string;
+  }> {
+    return this.lifecycle.getResult(taskId);
+  }
+
+  getInflightCount(parentSessionId: string): number {
+    return this.lifecycle.getInflightCount(parentSessionId);
+  }
+
+  // ── Delegated orchestrator methods (public API) ──────────────
+
+  cleanupTask(taskId: string): void {
+    this.orchestrator.cleanupTask(taskId);
+  }
+
+  async flushPersist(): Promise<void> {
+    await this.orchestrator.flushPersist();
+  }
+
+  flushPersistSync(): void {
+    this.orchestrator.flushPersistSync();
+  }
+
+  async recover(): Promise<void> {
+    await this.orchestrator.recover();
+  }
+
+  // ── Notification ──────────────────────────────────────────────
+
+  async notifyCompletion(task: DispatchTask, remainingTasks: number, resultText?: string): Promise<boolean> {
+    return notifyParent(this.client, task, remainingTasks, undefined, resultText);
+  }
+
+  // ── Delegated event handlers ──────────────────────────────────
+
+  async handleSessionIdle(sessionId: string): Promise<void> {
+    return this.lifecycle.handleSessionIdle(sessionId);
+  }
+
+  handleSessionStatus(sessionId: string, statusType: string): void {
+    return this.lifecycle.handleSessionStatus(sessionId, statusType);
+  }
+
+  handleMessageUpdated(sessionId: string): void {
+    return this.lifecycle.handleMessageUpdated(sessionId);
+  }
+
+  async handleSessionError(sessionId: string, error: unknown): Promise<void> {
+    return this.lifecycle.handleSessionError(sessionId, error);
+  }
+
+  async handleSessionDeleted(sessionId: string): Promise<void> {
+    this.budgetTracker.removeRequest(sessionId);
+    this.budgetTracker.removeSession(sessionId);
+    return this.lifecycle.handleSessionDeleted(sessionId);
+  }
+
+  // ── Query methods ────────────────────────────────────────────
 
   getTask(taskId: string): DispatchTask | undefined {
     return this.tasks.get(taskId);
@@ -847,20 +307,10 @@ export class DispatchManager {
     return result;
   }
 
-  /**
-   * Return a snapshot of ALL tasks currently in memory (active + completed-not-yet-cleaned-up).
-   * Used by search tools to query task history.
-   * Note: cleaned-up tasks are not included — they only exist in the persisted state file.
-   */
   getAllTasks(): DispatchTask[] {
     return [...this.tasks.values()];
   }
 
-  /**
-   * Returns a structured snapshot of the current concurrency state for all keys.
-   * Each key reports active, limit, available, reserved, and queueDepth.
-   * Includes a total aggregate across all keys.
-   */
   getConcurrencyStatus(): {
     keys: Array<{
       key: string;
@@ -897,1147 +347,125 @@ export class DispatchManager {
     return { keys, total };
   }
 
-  /** Return a snapshot of current dispatch metrics. */
   getMetricsSnapshot(): import("./metrics.ts").MetricsSnapshot {
     return metrics.snapshot();
   }
 
-  async cancelTask(taskId: string): Promise<boolean> {
+  isSyncSession(sessionId: string): boolean {
+    const taskId = this.sessionToTask.get(sessionId);
+    if (!taskId) return false;
     const task = this.tasks.get(taskId);
-    if (!task) return false;
-
-    // Don't cancel tasks that have already reached a terminal state
-    if (
-      task.status === "completed" ||
-      task.status === "error" ||
-      task.status === "timeout" ||
-      task.status === "cancelled"
-    ) {
-      debugLog("cancelTask", taskId, `already in terminal status ${task.status} — skipping`);
-      return false;
-    }
-
-    // Don't cancel tasks while a notification is in-flight
-    if (this.pendingNotifications.has(taskId)) {
-      debugLog("cancelTask", taskId, `has in-flight notification — skipping`);
-      return false;
-    }
-
-    // Handle pending (queued) task — no session created yet
-    if (task.status === "pending") {
-      const cancelHandle = this._cancelQueue.get(taskId);
-      if (cancelHandle) {
-        cancelHandle();
-        this._cancelQueue.delete(taskId);
-      }
-      if (!this.transition(taskId, ["pending"], "cancelled")) return false;
-      const t = this.tasks.get(taskId)!;
-      infoLog("lifecycle", taskId, `✕ cancelled (queued) agent=${t.agent}`);
-      metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
-      void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-      this.scheduleCleanup(taskId);
-      return true;
-    }
-
-    // Sync task — abort controller (executeSync's finally block handles teardown)
-    if (task.mode === "sync") {
-      const controller = this._syncControllers.get(taskId);
-      if (controller) {
-        if (task.sessionId) {
-          try {
-            await this.client.session.abort({ path: { id: task.sessionId } });
-          } catch (err) {
-            debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-        controller.abort();
-      }
-      if (!this.transition(taskId, ["pending"], "cancelled")) return false;
-      const t = this.tasks.get(taskId)!;
-      infoLog("lifecycle", taskId, `✕ cancelled (sync) agent=${t.agent}`);
-      metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
-      return true;
-    }
-
-    // Running task — transition to cancelled BEFORE aborting the session.
-    // This prevents a race where the watchdog/evaluateAndComplete detects
-    // the aborted session as "completed" and transitions to completed before
-    // we can set the correct cancelled status.
-    if (!this.transition(taskId, ["pending", "running"], "cancelled")) return false;
-
-    // Abort the session (best-effort — transition already happened)
-    try {
-      await this.client.session.abort({
-        path: { id: task.sessionId },
-      });
-    } catch (err) {
-      debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const t = this.tasks.get(taskId)!;
-    infoLog("lifecycle", taskId, `✕ cancelled agent=${t.agent}`);
-    metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
-    this.watchdog.unregisterTask(taskId);
-    this.watchdog.cancelDebounce(taskId);
-    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-    this.leaveRunning(taskId);
-    return true;
+    return task?.mode === "sync";
   }
 
-  async getResult(
-    taskId: string,
-  ): Promise<{
-    kind: "ok" | "expired" | "not_found" | "fetch_error";
-    text: string;
-    resultText: string;
-    hadFence: boolean;
-    totalChars: number;
-    error?: string;
-  }> {
-    const task = this.tasks.get(taskId);
-
-    // Step 1: Check task.result (cache hit — pure local read)
-    if (task?.result) {
-      if (task.result.fetchError) {
-        return {
-          kind: "fetch_error",
-          text: "",
-          resultText: "",
-          hadFence: false,
-          totalChars: 0,
-          error: task.result.fetchError,
-        };
-      }
-      const sidecarText = readResultSidecar(task.result.sidecarPath);
-      if (sidecarText !== null) {
-        const extracted = extractResultBlock(sidecarText);
-        return {
-          kind: "ok",
-          text: sidecarText,
-          resultText: extracted.result,
-          hadFence: extracted.hadFence,
-          totalChars: task.result.totalChars,
-        };
-      }
-      // Sidecar file missing (was cleaned up by GC) — fall through to lazy
-    }
-
-    // Step 2: Task completed but no result (lazy backward-compat fetch)
-    if (task && task.status === "completed" && !task.result) {
-      const ref = await this.materializeResult(taskId);
-      task.result = ref;
-      this.persistState();
-
-      if (ref.fetchError) {
-        return {
-          kind: "fetch_error",
-          text: "",
-          resultText: "",
-          hadFence: false,
-          totalChars: 0,
-          error: ref.fetchError,
-        };
-      }
-      const sidecarText = readResultSidecar(ref.sidecarPath);
-      if (sidecarText !== null) {
-        const extracted = extractResultBlock(sidecarText);
-        return {
-          kind: "ok",
-          text: sidecarText,
-          resultText: extracted.result,
-          hadFence: extracted.hadFence,
-          totalChars: ref.totalChars,
-        };
-      }
-    }
-
-    // Step 3: Task missing but sidecar exists (survives cleanup)
-    if (!task) {
-      const sidecarPath = resultSidecarPath(taskId, this._directory);
-      const sidecarText = readResultSidecar(sidecarPath);
-      if (sidecarText !== null) {
-        const extracted = extractResultBlock(sidecarText);
-        return {
-          kind: "ok",
-          text: sidecarText,
-          resultText: extracted.result,
-          hadFence: extracted.hadFence,
-          totalChars: sidecarText.length,
-        };
-      }
-    }
-
-    // Step 4: Expired / Not found
-    if (task) {
-      return {
-        kind: "expired",
-        text: "",
-        resultText: "",
-        hadFence: false,
-        totalChars: 0,
-        error: "Task status neither completed nor has materialized result",
-      };
-    }
-    if (this.cleanedUpTasks.has(taskId)) {
-      return {
-        kind: "expired",
-        text: "",
-        resultText: "",
-        hadFence: false,
-        totalChars: 0,
-        error: "Task result no longer available (was cleaned up)",
-      };
-    }
-    return {
-      kind: "not_found",
-      text: "",
-      resultText: "",
-      hadFence: false,
-      totalChars: 0,
-      error: "Task never existed",
-    };
+  getBudgetTracker(): BudgetTracker {
+    return this.budgetTracker;
   }
 
-  private async materializeResult(taskId: string): Promise<MaterializedResultRef> {
-    const task = this.tasks.get(taskId);
-    if (!task) {
-      return {
-        sidecarPath: "",
-        totalChars: 0,
-        hadFence: false,
-        fetchError: "task not found",
-        materializedAt: new Date().toISOString(),
-      };
-    }
-
-    const boundary = task.messageCountAtStart ?? 0;
-
-    try {
-      const messagesResult = await withTimeout(
-        this.client.session.messages({ path: { id: task.sessionId } }),
-        this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
-        "materializeResult:session.messages",
-      );
-
-      if (messagesResult.error !== undefined) {
-        return {
-          sidecarPath: "",
-          totalChars: 0,
-          hadFence: false,
-          fetchError: `Error retrieving task output: ${JSON.stringify(messagesResult.error)}`,
-          materializedAt: new Date().toISOString(),
-        };
-      }
-
-      const allMessages = (messagesResult.data ?? []) as SessionMessageSnapshot[];
-      const fullText = this.buildAssistantText(allMessages, boundary);
-      const extracted = extractResultBlock(fullText);
-      const path = writeResultSidecar(taskId, fullText, this._directory);
-
-      return {
-        sidecarPath: path,
-        totalChars: fullText.length,
-        hadFence: extracted.hadFence,
-        materializedAt: new Date().toISOString(),
-      };
-    } catch (err: unknown) {
-      if (err instanceof TimeoutError) {
-        return {
-          sidecarPath: "",
-          totalChars: 0,
-          hadFence: false,
-          fetchError: "timeout",
-          materializedAt: new Date().toISOString(),
-        };
-      }
-      return {
-        sidecarPath: "",
-        totalChars: 0,
-        hadFence: false,
-        fetchError: String(err),
-        materializedAt: new Date().toISOString(),
-      };
-    }
+  getBudgetStatus(parentSessionId: string): string {
+    return this.budgetTracker.getStatus(parentSessionId);
   }
 
-  private buildAssistantText(
-    messages: readonly SessionMessageSnapshot[],
-    boundary: number,
-  ): string {
-    const textParts: string[] = [];
-    for (let i = boundary; i < messages.length; i++) {
-      const msg = messages[i];
-      if (msg.info.role !== "assistant") continue;
-      for (const part of msg.parts) {
-        if (part.type === "text") {
-          textParts.push(
-            (part as { type: "text"; text: string }).text,
-          );
-        }
-      }
-    }
-    return textParts.join("");
+  getConfig(): Readonly<DispatchManagerConfig> {
+    return this.config;
   }
 
-  cleanupTask(taskId: string): void {
-    const t = this.tasks.get(taskId);
-    if (t?.sessionId) this.sessionToTask.delete(t.sessionId); // edge-case #4 index cleanup
-    this.eventState.delete(taskId);
-    this.tasks.delete(taskId);
+  // ── Bridge methods (accessed by tests via (manager as any)) ──
 
-    this.persistState();
-    this.cleanedUpTasks.set(taskId, Date.now());
-    if (this.cleanedUpTasks.size > 500) {
-      let oldestKey = "";
-      let oldestTime = Infinity;
-      for (const [key, ts] of this.cleanedUpTasks) {
-        if (ts < oldestTime) {
-          oldestTime = ts;
-          oldestKey = key;
-        }
-      }
-      if (oldestKey) this.cleanedUpTasks.delete(oldestKey);
-    }
-    const timer = this.cleanupTimers.get(taskId);
-    if (timer) {
-      clearTimeout(timer);
-      this.cleanupTimers.delete(taskId);
-    }
-  }
+  // ── Bridge properties ──
+  /** Bridge: tests read orchestrator's dirty flag. */
+  get _dirty(): boolean { return (this.orchestrator as any)._dirty; }
+  /** Bridge: tests read orchestrator's persist timer. */
+  get _persistTimer(): ReturnType<typeof setTimeout> | undefined { return (this.orchestrator as any)._persistTimer; }
+  /** Bridge: tests read orchestrator's sweeper timer. */
+  get sweeperTimer(): ReturnType<typeof setInterval> | undefined { return (this.orchestrator as any).sweeperTimer; }
 
-  private persistState(): void {
-    this._dirty = true;
-    if (this._persistTimer) return; // Already scheduled
-    this._persistTimer = setTimeout(async () => {
-      this._persistTimer = undefined;
-      if (!this._dirty) return;
-      this._dirty = false;
-      try {
-        await this.store.save(this.tasks, this.notifyOutbox);
-      } catch (err) {
-        debugLog("persist", "*", `async save failed: ${err}`);
-      }
-      try {
-        await this.metricsPersister.persist();
-      } catch (err) {
-        debugLog("persist", "*", `metrics persist failed: ${err}`);
-      }
-    }, 500);
-  }
+  // ── Bridge: lifecycle methods ──
 
-  /**
-   * Force synchronous flush of any pending persistState writes.
-   * Use before process exit or recover to ensure no terminal state is lost.
-   */
-  async flushPersist(): Promise<void> {
-    if (this._persistTimer) {
-      clearTimeout(this._persistTimer);
-      this._persistTimer = undefined;
-    }
-    if (this._dirty) {
-      this._dirty = false;
-      await this.store.save(this.tasks, this.notifyOutbox);
-    }
-    await this.metricsPersister.persist();
-  }
-
-  /**
-   * Synchronous version of flushPersist() for process-exit crash safety.
-   * Clears debounce timer, flushes dirty state using store.saveSync().
-   * Never throws — wrapped in try/catch logging a warning.
-   * On exit, this is last-writer-wins vs any in-flight async save.
-   */
-  flushPersistSync(): void {
-    if (this._persistTimer) {
-      clearTimeout(this._persistTimer);
-      this._persistTimer = undefined;
-    }
-    if (this._dirty) {
-      this._dirty = false;
-      try {
-        this.store.saveSync(this.tasks, this.notifyOutbox);
-      } catch (err) {
-        debugLog("persist", "*", `sync flush failed: ${err}`);
-      }
-      this.metricsPersister.flushSync();
-      this.metricsPersister.dispose();
-    }
-    if (this._budgetSamplerTimer) {
-      clearInterval(this._budgetSamplerTimer);
-      this._budgetSamplerTimer = undefined;
-    }
-    if (this.sweeperTimer) {
-      clearInterval(this.sweeperTimer);
-      this.sweeperTimer = undefined;
-    }
-    for (const timer of this.sidecarGCTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.sidecarGCTimers.clear();
-    for (const timer of this._deferredIdleTimers.values()) {
-      clearTimeout(timer);
-    }
-    this._deferredIdleTimers.clear();
-    for (const timer of this.cleanupTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.cleanupTimers.clear();
-    this.watchdog.dispose();
-  }
-
-  private restoreState(): void {
-    const loaded = this.store.load();
-    if (!loaded) return;
-    const { tasks: loadedTasks, outbox } = loaded;
-    for (const [taskId, task] of loadedTasks) {
-      this.tasks.set(taskId, task);
-    }
-    for (const id of outbox) {
-      this.notifyOutbox.add(id);
-    }
-  }
-
-  /**
-   * Set the workspace directory used for multi-instance state file isolation.
-   * Must be called before recover() if the default process.cwd() is wrong.
-   */
-  setStoreDirectory(directory: string): void {
-    this._directory = directory;
-    this.store = new TaskStateStore(directory);
-    this.metricsPersister = new MetricsPersister(directory);
-  }
-
-  /**
-   * Register a provider for recovery metrics snapshots.
-   * Delegates to MetricsPersister so recovery data is included in the
-   * persisted metrics file. No-op when the underlying persister has no
-   * provider registered (recovery data simply absent from the file).
-   *
-   * Wired from plugin-hooks.ts where both DispatchManager and RecoveryEngine
-   * are available.
-   */
-  setRecoverySnapshotProvider(
-    provider: (() => import("../recovery/types.ts").RecoveryMetricsSnapshot | null) | null,
-  ): void {
-    this.metricsPersister.setRecoverySnapshotProvider(provider);
-  }
-
-  async recover(): Promise<void> {
-    if (this._recovered) return;
-    this._recovered = true;
-
-    if (!this.store.tryLock()) {
-      debugLog("recover", "*", "Could not acquire state lock, operating in read-only recover mode");
-    }
-
-    this.restoreState();
-
-    const runningTasks: DispatchTask[] = [];
-    const toRemove: string[] = [];
-    const lostPendingByParent = new Map<string, DispatchTask[]>();
-
-    for (const [taskId, task] of this.tasks) {
-      switch (task.status) {
-        case "pending": {
-          toRemove.push(taskId);
-          const siblings = lostPendingByParent.get(task.parentSessionId) ?? [];
-          siblings.push(task);
-          lostPendingByParent.set(task.parentSessionId, siblings);
-          break;
-        }
-        case "running": {
-          if (task.mode === "sync") {
-            task.status = "error";
-            task.error = "Sync task interrupted by restart";
-            task.completedAt = new Date();
-            this.scheduleCleanupFromRecovery(taskId, task);
-            debugLog("recover", taskId, "sync task interrupted by restart — marked error, NOT notified");
-          } else {
-            runningTasks.push(task);
-          }
-          break;
-        }
-        case "completed":
-          // Do NOT eagerly fetch for completed tasks without result (v3 backward compat)
-          // T9's getResult handles lazy materialization on first access
-          if (!task.result) {
-            debugLog("recover", taskId, "completed task without result — lazy fetch on first read");
-          }
-          this.scheduleCleanupFromRecovery(taskId, task);
-          break;
-        case "error":
-        case "timeout":
-        case "cancelled":
-          this.scheduleCleanupFromRecovery(taskId, task);
-          break;
-      }
-    }
-
-    // Remove pending tasks
-    for (const id of toRemove) {
-      this.tasks.delete(id);
-    }
-
-    // Notify each parent about lost pending tasks (fire-and-forget)
-    for (const [parentSessionId, lostTasks] of lostPendingByParent) {
-      void this.notifyLostPendingTasks(parentSessionId, lostTasks);
-    }
-
-    // Verify each running task's session
-    for (const task of runningTasks) {
-      try {
-        const result = await this.client.session.get({
-          path: { id: task.sessionId },
-        });
-        if (result.data) {
-          const key = task.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY;
-          const occupied = this.concurrency.forceOccupyBackground(key, 1, task.parentSessionId);
-          if (occupied === 1) {
-            task.concurrencyKey = key;
-            this.watchdog.registerTask(task.id); // edge-case #6
-            this.sessionToTask.set(task.sessionId, task.id); // edge-case #6
-            this.eventState.set(task.id, {
-              lastMessageCount: 0,
-              lastProgressUpdate: Date.now(),
-              hasProducedOutput: false,
-              messageCountAtStart: task.messageCountAtStart ?? 0,
-              lastEventAt: Date.now(),
-            });
-            debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
-          } else {
-            // Would exceed concurrency limit — error the task out
-            this.transition(task.id, ["running"], "error", {
-              error: "Exceeded concurrency limit on recovery",
-            });
-            void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-            this.scheduleCleanup(task.id);
-            debugLog("recover", task.id, "dropped — concurrency limit exceeded on recovery");
-          }
-        } else {
-          task.status = "error";
-          task.error = "Session lost after process restart — You can re-dispatch with dispatch(...)";
-          task.completedAt = new Date();
-          void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-          this.scheduleCleanup(task.id);
-          debugLog("recover", task.id, "session gone after restart");
-        }
-      } catch {
-        task.status = "error";
-        task.error = "Session verification failed after restart — You can re-dispatch with dispatch(...)";
-        task.completedAt = new Date();
-        void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
-        this.scheduleCleanup(task.id);
-      }
-    }
-
-    if (toRemove.length > 0 || runningTasks.length > 0) {
-      this.persistState();
-    }
-  }
-
-  private async notifyLostPendingTasks(
-    parentSessionId: string,
-    lostTasks: DispatchTask[],
-  ): Promise<void> {
-    const taskList = lostTasks
-      .map((t) => `- ${t.description || t.id}`)
-      .join("\n");
-    const text = [
-      "<system-reminder>",
-      DISPATCH_RECOVERY_MARKER,
-      `**${lostTasks.length} pending task(s) were lost during process restart:**`,
-      taskList,
-      "",
-      "You can re-dispatch these tasks with dispatch(...).",
-      "</system-reminder>",
-    ].join("\n");
-
-    const parentAgent = lostTasks[0]?.parentAgent;
-    try {
-      await this.client.session.promptAsync({
-        path: { id: parentSessionId },
-        body: {
-          ...parentAgent ? { agent: parentAgent } : {},
-          parts: [{ type: "text", text }],
-          noReply: true,
-        },
-      });
-      metrics.counter("notify_sent_total").inc();
-    } catch (err) {
-      metrics.counter("notify_failed_total").inc();
-      debugLog("recover", "notify",
-        `Failed to notify parent ${parentSessionId} about lost pending tasks`);
-    }
-  }
-
-  private scheduleCleanupFromRecovery(taskId: string, task: DispatchTask): void {
-    if (!task.completedAt) {
-      this.scheduleCleanup(taskId);
-      return;
-    }
-    const elapsed = Date.now() - new Date(task.completedAt).getTime();
-    const remaining = Math.max(this.config.taskTtlMs - elapsed, 0);
-    if (remaining === 0) {
-      this.cleanupTask(taskId);
-      return;
-    }
-    const timer = setTimeout(() => {
-      this.cleanupTask(taskId);
-    }, remaining);
-    this.cleanupTimers.set(taskId, timer);
-  }
-
-  async notifyCompletion(task: DispatchTask, remainingTasks: number, resultText?: string): Promise<boolean> {
-    this.pendingNotifications.add(task.id);
-    try {
-      return await notifyParent(this.client, task, remainingTasks, undefined, resultText);
-    } finally {
-      this.pendingNotifications.delete(task.id);
-    }
-  }
-
-  private async evaluateAndComplete(
+  evaluateAndComplete(
     taskId: string,
     trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event",
     errorDetail?: string,
   ): Promise<void> {
-    const task = this.tasks.get(taskId);
-    if (!task || task.status !== "running") {
-      debugLog("evaluate", taskId, `no-op: task ${!task ? "not found" : `status=${task.status}`}`);
-      return;
-    }
-
-    if (trigger === "error-event") {
-      if (this.transition(taskId, ["running"], "error", { error: errorDetail ?? "Task error event received" })) {
-        this.watchdog.unregisterTask(taskId);
-        this.watchdog.cancelDebounce(taskId);
-        this.finalizeCompletion(taskId);
-      }
-      return;
-    }
-
-    if (trigger === "deleted-event") {
-      if (this.transition(taskId, ["running"], "error", { error: "Session deleted" })) {
-        this.watchdog.unregisterTask(taskId);
-        this.watchdog.cancelDebounce(taskId);
-        this.finalizeCompletion(taskId);
-      }
-      return;
-    }
-
-    try {
-      const fetchTimeoutMs = this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
-
-      let msgResult;
-      let statusResult;
-      try {
-        msgResult = await withTimeout(
-          this.client.session.messages({ path: { id: task.sessionId } }),
-          fetchTimeoutMs,
-          "session.messages",
-        );
-        statusResult = await withTimeout(
-          this.client.session.status(),
-          fetchTimeoutMs,
-          "session.status",
-        );
-      } catch (e) {
-        if (e instanceof TimeoutError) {
-          debugLog("evaluate", taskId, `fetch timed out after ${fetchTimeoutMs}ms`);
-          return;
-        }
-        throw e;
-      }
-
-      if (msgResult.error !== undefined) {
-        debugLog("evaluate", taskId, `messages fetch error: ${JSON.stringify(msgResult.error)}`);
-        return;
-      }
-
-      const allMessages = (msgResult.data ?? []) as SessionMessageSnapshot[];
-      const statusMap = (statusResult.data ?? {}) as Record<string, { type: string }>;
-      const sessionStatus = statusMap[task.sessionId];
-
-      const eventState = this.eventState.get(taskId);
-      if (!eventState) return;
-
-      const startIndex = eventState.messageCountAtStart ?? 0;
-      const scopedMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
-
-      // Gone-gate: a session absent from the (directory-scoped) status map is
-      // treated as idle by detectCompletion, so confirm it still exists first.
-      // A genuinely-gone session is errored here; an existing one falls through
-      // and its output drives completion — finished background tasks no longer
-      // hang waiting for an idle status the server never reports.
-      if (sessionStatus === undefined) {
-        const existence = await this.sessionMonitor.verifyExistence(this.client, task.sessionId);
-        if (existence === "missing") {
-          if (this.transition(taskId, ["running"], "error", { error: "Session no longer exists" })) {
-            this.watchdog.unregisterTask(taskId);
-            this.watchdog.cancelDebounce(taskId);
-            const t = this.tasks.get(taskId)!;
-            debugLog("evaluate", taskId, `session gone (verifyExistence=missing) — erroring task`);
-            void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-            this.leaveRunning(taskId);
-          }
-          return;
-        }
-        debugLog("evaluate", taskId, `sessionStatus undefined but verifyExistence=${existence} — treating as idle`);
-      }
-
-      const sig = detectCompletion(scopedMessages, sessionStatus, eventState, true);
-
-      switch (sig.type) {
-        case "completed": {
-          // ── One-shot re-confirmation for idle-debounce path ──────
-          // Prevents false-positive completion when a model pauses
-          // between steps. First debounce elapse records pendingConfirm
-          // and re-arms. Second elapse checks message count stability.
-          // Capped at exactly one re-check to avoid livelock.
-          if (trigger === "idle-debounce") {
-            const pc = eventState.pendingConfirm;
-            if (!pc) {
-              eventState.pendingConfirm = { messageCount: scopedMessages.length, at: Date.now() };
-              this.watchdog.startDebounce(taskId);
-              debugLog("evaluate", taskId, `idle-debounce pendingConfirm recorded (msgCount=${scopedMessages.length}) — re-armed`);
-              break;
-            }
-            if (scopedMessages.length !== pc.messageCount) {
-              delete eventState.pendingConfirm;
-              debugLog("evaluate", taskId, `pendingConfirm failed: msgCount ${pc.messageCount} → ${scopedMessages.length} — staying running`);
-              break;
-            }
-            delete eventState.pendingConfirm;
-            debugLog("evaluate", taskId, `pendingConfirm passed: msgCount stable at ${scopedMessages.length} — completing`);
-          }
-          if (this.transition(taskId, ["running"], "completed")) {
-            this.watchdog.unregisterTask(taskId);
-            this.watchdog.cancelDebounce(taskId);
-            const t = this.tasks.get(taskId)!;
-            const duration = Date.now() - t.startedAt.getTime();
-            infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
-            metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
-            metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
-            this.leaveRunning(taskId);
-            void this.materializeAndNotify(taskId);
-          }
-          break;
-        }
-        case "error": {
-          if (this.transition(taskId, ["running"], "error", { error: sig.message })) {
-            this.watchdog.unregisterTask(taskId);
-            this.watchdog.cancelDebounce(taskId);
-            this.finalizeCompletion(taskId);
-          }
-          break;
-        }
-        case "not_ready": {
-          // Existence is already confirmed by the gone-gate above, so not_ready
-          // here means "alive but no completion signal yet" — fall through to
-          // the stale-timeout safety-net.
-          const now = Date.now();
-          const elapsed = now - task.startedAt.getTime();
-          const staleMs = task.timeoutMs ?? this.config.backgroundStaleTimeoutMs ?? BACKGROUND_STALE_TIMEOUT_MS;
-          if (!eventState.hasProducedOutput && elapsed > staleMs) {
-            if (this.transition(taskId, ["running"], "timeout", { error: "Never produced output" })) {
-              this.watchdog.unregisterTask(taskId);
-              this.watchdog.cancelDebounce(taskId);
-              const t = this.tasks.get(taskId)!;
-              infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: Never produced output`);
-              metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-              void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-              this.leaveRunning(taskId);
-            }
-            break;
-          }
-          if (eventState.hasProducedOutput && now - eventState.lastProgressUpdate > staleMs) {
-            if (this.transition(taskId, ["running"], "timeout", { error: "Task stalled" })) {
-              this.watchdog.unregisterTask(taskId);
-              this.watchdog.cancelDebounce(taskId);
-              const t = this.tasks.get(taskId)!;
-              infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: Task stalled`);
-              metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-              void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-              this.leaveRunning(taskId);
-            }
-            break;
-          }
-          debugLog("evaluate", taskId, `not_ready — no stale timeout`);
-          break;
-        }
-        case "stabilizing": {
-          debugLog("evaluate", taskId, `stabilizing with skipStabilityGating=true — treating as completed`);
-          if (this.transition(taskId, ["running"], "completed")) {
-            this.watchdog.unregisterTask(taskId);
-            this.watchdog.cancelDebounce(taskId);
-            const t = this.tasks.get(taskId)!;
-            const duration = Date.now() - t.startedAt.getTime();
-            infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
-            metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
-            metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
-            this.leaveRunning(taskId);
-            void this.materializeAndNotify(taskId);
-          }
-          break;
-        }
-      }
-    } catch (err) {
-      debugLog("evaluate", taskId, `error fetching: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    return this.lifecycle.evaluateAndComplete(taskId, trigger, errorDetail);
   }
 
-  async handleSessionIdle(sessionId: string): Promise<void> {
-    const taskId = this.sessionToTask.get(sessionId);
-    if (!taskId) return; // edge-case #2
-
-    const task = this.tasks.get(taskId);
-    if (!task || task.status !== "running") return; // edge-case #1
-
-    const elapsed = Date.now() - task.startedAt.getTime();
-    if (elapsed < this.config.minRuntimeMs) {
-      if (!this._deferredIdleTimers.has(taskId)) {
-        const remaining = this.config.minRuntimeMs - elapsed;
-        debugLog("event", taskId, `session.idle too early (${elapsed}ms) — deferring by ${remaining}ms`);
-        const timer = setTimeout(() => {
-          this._deferredIdleTimers.delete(taskId);
-          const t = this.tasks.get(taskId);
-          if (t && t.status === "running") {
-            void this.handleSessionIdle(sessionId);
-          }
-        }, remaining);
-        this._deferredIdleTimers.set(taskId, timer);
-      }
-      this.watchdog.resetWatchdog(taskId);
-      return;
-    }
-
-    this.watchdog.resetWatchdog(taskId);
-
-    try {
-      const msgResult = await withTimeout(
-        this.client.session.messages({ path: { id: sessionId } }),
-        this.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
-        "handleSessionIdle:session.messages",
-      );
-      if (msgResult.error !== undefined) {
-        debugLog("event", taskId, `session.idle messages fetch error: ${JSON.stringify(msgResult.error)}`);
-        return;
-      }
-
-      const allMessages = (msgResult.data ?? []) as Array<{
-        info: { role: string; finish?: string; error?: unknown };
-        parts: Array<{ type: string; state?: string; text?: string }>;
-      }>;
-
-      const eventState = this.eventState.get(taskId);
-      const startIndex = eventState?.messageCountAtStart ?? 0;
-      const messages = allMessages.slice(startIndex);
-
-      let hasAssistantOutput = false;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (m.info.role === "assistant") {
-          const hasPendingTools = m.parts.some(
-            (p) => p.type === "tool" && (p.state === "pending" || p.state === "running"),
-          );
-          if (hasPendingTools) {
-            debugLog("event", taskId, "session.idle but tools still pending — skipping");
-            return;
-          }
-          if (m.info.finish === "tool-calls") {
-            debugLog("event", taskId, "session.idle but finish=tool-calls — skipping");
-            return;
-          }
-          const hasText = m.parts.some((p) => p.type === "text" && p.text && p.text.length > 0);
-          const hasToolResult = m.parts.some((p) => p.type === "tool");
-          if (hasText || hasToolResult) {
-            hasAssistantOutput = true;
-          }
-          break;
-        }
-      }
-
-      if (!hasAssistantOutput) {
-        debugLog("event", taskId, "session.idle but no assistant output — skipping");
-        return;
-      }
-
-      if (this.watchdog.isDebouncing(taskId)) {
-        debugLog("event", taskId, "already debouncing — ignoring duplicate idle");
-        return; // edge-case #10
-      }
-
-      debugLog("event", taskId, "session.idle validated — starting debounce");
-      this.watchdog.startDebounce(taskId);
-    } catch (err) {
-      debugLog("event", taskId, "handleSessionIdle error: " + (err instanceof Error ? err.message : String(err)));
-    }
+  handleTaskCompleted(taskId: string): void {
+    (this.lifecycle as any).handleTaskCompleted(taskId);
   }
 
-  handleSessionStatus(sessionId: string, statusType: string): void {
-    const taskId = this.sessionToTask.get(sessionId);
-    if (!taskId) return; // edge-case #2
-    const task = this.tasks.get(taskId);
-    if (!task || task.status !== "running") return; // edge-case #1
-
-    const eventState = this.eventState.get(taskId);
-    if (!eventState) return;
-
-    eventState.lastEventAt = Date.now();
-    this.watchdog.resetWatchdog(taskId);
-
-    if (statusType === "busy" || statusType === "retry") {
-      eventState.lastProgressUpdate = Date.now();
-      eventState.hasProducedOutput = true;
-      this.watchdog.cancelDebounce(taskId);
-      debugLog("event", taskId, `session.status=${statusType} — progress heartbeat, cancelled debounce`);
-    } else {
-      // Idle/other status is NOT progress: leave lastProgressUpdate untouched so the
-      // stale-timeout safety-net can still fire if completion detection fails.
-      debugLog("event", taskId, `session.status=${statusType} — idle heartbeat (stale clock preserved)`);
-    }
+  handleTaskError(taskId: string, error: string): void {
+    (this.lifecycle as any).handleTaskError(taskId, error);
   }
 
-  handleMessageUpdated(sessionId: string): void {
-    const taskId = this.sessionToTask.get(sessionId);
-    if (!taskId) return; // edge-case #2
-    const task = this.tasks.get(taskId);
-    if (!task || task.status !== "running") return; // edge-case #1
-
-    const eventState = this.eventState.get(taskId);
-    if (!eventState) return;
-
-    eventState.lastProgressUpdate = Date.now();
-    eventState.hasProducedOutput = true;
-    eventState.lastEventAt = Date.now();
-    this.watchdog.resetWatchdog(taskId);
-    this.watchdog.cancelDebounce(taskId);
-
-    debugLog("event", taskId, "message.updated — progress heartbeat, cancelled debounce");
+  handleTaskTimeout(taskId: string, reason: string): void {
+    (this.lifecycle as any).handleTaskTimeout(taskId, reason);
   }
 
-  async handleSessionError(sessionId: string, error: unknown): Promise<void> {
-    const taskId = this.sessionToTask.get(sessionId);
-    if (!taskId) return; // edge-case #2 + edge-case #11 (no sessionId)
-    const errorMsg = extractSessionErrorMessage(error);
-    debugLog("event", taskId, `session.error (${errorMsg}) — routing to evaluateAndComplete`);
-    await this.evaluateAndComplete(taskId, "error-event", errorMsg);
+  materializeResult(taskId: string): Promise<import("./types.ts").MaterializedResultRef> {
+    return (this.lifecycle as any).materializeResult(taskId);
   }
 
-  async handleSessionDeleted(sessionId: string): Promise<void> {
-    this.resetRequestSessions(sessionId);
-    this.budgetTracker.removeRequest(sessionId);
-    this.budgetTracker.removeSession(sessionId);
-    const taskId = this.sessionToTask.get(sessionId);
-    if (!taskId) return; // edge-case #2
-    debugLog("event", taskId, `session.deleted — routing to evaluateAndComplete`);
-    await this.evaluateAndComplete(taskId, "deleted-event");
+  materializeAndNotify(taskId: string): Promise<void> {
+    return (this.lifecycle as any).materializeAndNotify(taskId);
   }
 
-  private computeDepth(parentSessionId: string): number {
-    const parentTaskId = this.sessionToTask.get(parentSessionId);
-    if (!parentTaskId) return 0;
-    const parentTask = this.tasks.get(parentTaskId);
-    if (!parentTask) return 0;
-    return (parentTask.depth ?? 0) + 1;
+  computeDepth(parentSessionId: string): number {
+    return (this.lifecycle as any).computeDepth(parentSessionId);
   }
 
-  getInflightCount(parentSessionId: string): number {
-    let count = 0;
-    for (const task of this.tasks.values()) {
-      if (task.parentSessionId === parentSessionId &&
-          (task.status === "running" || task.status === "pending")) {
-        count++;
-      }
-    }
-    return count;
+  getRequestSessions(rootSession: string): number {
+    return (this.lifecycle as any).getRequestSessions(rootSession);
   }
 
-  private getRequestSessions(rootSession: string): number {
-    return this.sessionsByRequest.get(rootSession) ?? 0;
+  leaveRunning(taskId: string): void {
+    this.lifecycle.leaveRunning(taskId);
   }
 
-  private incRequestSessions(rootSession: string): void {
-    this.sessionsByRequest.set(rootSession, (this.sessionsByRequest.get(rootSession) ?? 0) + 1);
+  // ── Bridge: orchestrator methods ──
+
+  persistState(): void {
+    this.orchestrator.persistState();
   }
 
-  private resetRequestSessions(rootSession: string): void {
-    this.sessionsByRequest.delete(rootSession);
+  scheduleCleanup(taskId: string): void {
+    this.orchestrator.scheduleCleanup(taskId);
   }
-
-  /** Atomic compare-and-swap status transition. Returns true iff THIS call won the race. */
-  private transition(
-    taskId: string,
-    from: DispatchTaskStatus[],
-    to: DispatchTaskStatus,
-    fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>,
-  ): boolean {
-    const t = this.tasks.get(taskId);
-    if (!t) return false;
-    if (!from.includes(t.status)) return false;
-    t.status = to;
-    // Use 'in' check to allow explicit completedAt: undefined (for reopen)
-    t.completedAt = fields && "completedAt" in fields ? fields.completedAt : new Date();
-    if (fields?.error !== undefined) t.error = fields.error;
-    return true;
-
-  }
-
-  private handleTaskCompleted(taskId: string): void {
-    if (!this.transition(taskId, ["pending", "running"], "completed")) return;
-    const t = this.tasks.get(taskId)!;
-    const duration = Date.now() - t.startedAt.getTime();
-    infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
-    metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
-    metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
-    this.leaveRunning(taskId);
-    void this.materializeAndNotify(taskId);
-  }
-
-  private handleTaskError(taskId: string, error: string): void {
-    if (!this.transition(taskId, ["pending", "running"], "error", { error })) return;
-    const t = this.tasks.get(taskId)!;
-    infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
-    metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
-    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-    this.leaveRunning(taskId);
-  }
-
-  private handleTaskTimeout(taskId: string, reason: string): void {
-    if (!this.transition(taskId, ["pending", "running"], "timeout", { error: reason })) return;
-    const t = this.tasks.get(taskId)!;
-    infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
-    metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
-    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-    this.leaveRunning(taskId);
-  }
-
-  /** Side effects after a non-completed terminal transition (error). */
-  private finalizeCompletion(taskId: string): void {
-    const t = this.tasks.get(taskId)!;
-    const duration = Date.now() - t.startedAt.getTime();
-    const status = t.status === "error" ? "error" : "completed";
-    infoLog("lifecycle", taskId, `${status === "error" ? "✗ error" : "✓ completed"} agent=${t.agent} duration=${duration}ms`);
-    if (status === "error") {
-      metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
-    } else {
-      metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
-    }
-    metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
-    void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
-    this.leaveRunning(taskId);
-  }
-
-  /** Materialize result then notify parent for completed transitions.
-   *  Concurrency slot must be released BEFORE calling this (via leaveRunning). */
-  private async materializeAndNotify(taskId: string): Promise<void> {
-    const t = this.tasks.get(taskId);
-    if (!t || t.status !== "completed") return;
-
-    const ref = await this.materializeResult(taskId);
-    t.result = ref;
-    this.scheduleSidecarGC(taskId);
-    this.persistState();
-
-    // Extract result text for notification
-    let resultText: string | undefined;
-    if (ref.sidecarPath && !ref.fetchError) {
-      const sidecarText = readResultSidecar(ref.sidecarPath);
-      if (sidecarText !== null) {
-        resultText = extractResultBlock(sidecarText).result;
-      }
-    }
-
-    // Add to outbox before notify — sweeper re-sends if this fails
-    this.addToOutbox(taskId);
-    await this.notifyCompletion(t, this.getInflightCount(t.parentSessionId), resultText);
-    // Outbox entry is pruned by sweeper on next tick if notify succeeded
-  }
-
-  // ── Terminal-path notification coverage ──────────────────────────────
-  // Every code path that transitions a task to a terminal state (completed,
-  // error, cancelled, timeout) MUST call notifyCompletion so the parent
-  // session receives a <system-reminder>.  Task 5 hardened notifyParent with
-  // idempotency (sentFinalNotifies Set) + bounded retry as a safety net;
-  // double-notify is harmless but should not be relied upon.
-  //
-  // Terminal Path                                   | notifyCompletion    | Verified
-  // ------------------------------------------------|---------------------|---------
-  // launch() queue-full                               L118                 yes
-  // cancelTask() pending (queued)                     L448                 yes
-  // cancelTask() running                              L468                 yes
-  // handleTaskCompleted() -> materializeAndNotify       L1466                yes
-  // handleTaskError()                                  L1478                yes
-  // handleTaskTimeout()                                L1487                yes
-  // evaluateAndComplete() not_ready timeout            L1248, L1260        yes
-  // evaluateAndComplete() error-event -> finalize      L1133-L1139          yes
-  // evaluateAndComplete() deleted-event -> finalize    L1142-L1148          yes
-  // evaluateAndComplete() completed -> materialize     L1215-L1228          yes
-  // evaluateAndComplete() error -> finalize            L1228-L1234          yes
-  // evaluateAndComplete() stabilizing -> materialize   L1287-L1299          yes
-  // reopenForContinuation() queue-full                 L344                 yes
-  // recover() session-lost                             (Task 11)            yes
-  // recover() verification-failed                      (Task 11)            yes
-  // recover() concurrency-exceeded                     (Task 11)            yes
-  //
-  // Safety net: Task 5 notifyParent handles idempotency + retry.
 
   /**
-   * Centralized teardown for all terminal paths. Handles:
-   * - concurrency slot release (guarded: only if concurrencyKey set)
-   * - inflight_tasks gauge decrement
-   * - state persistence
-   * - delayed cleanup scheduling
-   *
-   * Must only be called after acquire/gauge.inc() have been performed.
-   * Pool-rejected and failed-before-running paths must NOT call this.
+   * Transition a task's status atomically. Delegates to the orchestrator.
+   * Accessed by tests via (manager as any).transition(...).
    */
-  private leaveRunning(taskId: string): void {
-    const t = this.tasks.get(taskId);
-    if (!t) return;
-    if (t.concurrencyKey) {
-      this.concurrency.release(t.concurrencyKey, t.parentSessionId);
-    } else {
-      debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
-    }
-    this._clearDeferredIdle(taskId);
-    metrics.gauge("inflight_tasks").dec();
-    this.persistState();
-    this.scheduleCleanup(taskId);
+  transition(
+    taskId: string,
+    from: import("./types.ts").DispatchTaskStatus[],
+    to: import("./types.ts").DispatchTaskStatus,
+    fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>,
+  ): boolean {
+    return (this.orchestrator as any).transition(taskId, from, to, fields);
   }
 
-  private _clearDeferredIdle(taskId: string): void {
-    const timer = this._deferredIdleTimers.get(taskId);
-    if (timer) {
-      clearTimeout(timer);
-      this._deferredIdleTimers.delete(taskId);
-    }
+  setConcurrencyManager(manager: IConcurrencyManager): void {
+    this.concurrency = manager;
+    (this.lifecycle as any).d.concurrency = manager;
   }
 
-  private scheduleCleanup(taskId: string): void {
-    const existing = this.cleanupTimers.get(taskId);
-    if (existing) clearTimeout(existing);
+  // ── Store directory & recovery setup ───────────────────────
 
-    const timer = setTimeout(() => {
-      if (this.pendingNotifications.has(taskId) || this.notifyOutbox.has(taskId)) {
-        this.scheduleCleanup(taskId);
-        return;
-      }
-      this.cleanupTask(taskId);
-    }, this.config.taskTtlMs);
-
-    this.cleanupTimers.set(taskId, timer);
+  setStoreDirectory(directory: string): void {
+    this._directory = directory;
+    this.store = new TaskStateStore(directory);
+    this.metricsPersister = new MetricsPersister(directory);
+    (this.lifecycle as any).d.directory = directory;
+    // Propagate store & metricsPersister to the orchestrator's deps
+    (this.orchestrator as any).d.store = this.store;
+    (this.orchestrator as any).d.metricsPersister = this.metricsPersister;
+    (this.orchestrator as any).d.directory = directory;
   }
 
-  private scheduleSidecarGC(taskId: string): void {
-    const t = this.tasks.get(taskId);
-    if (!t?.result) return;
-
-    const retention = this.config.resultRetentionMs ?? RESULT_RETENTION_MS;
-    const timer = setTimeout(() => {
-      const path = resultSidecarPath(taskId, this._directory);
-      try { unlinkSync(path); } catch {}
-      this.sidecarGCTimers.delete(taskId);
-    }, retention);
-    this.sidecarGCTimers.set(taskId, timer);
+  setRecoverySnapshotProvider(
+    provider: (() => import("../recovery/types.ts").RecoveryMetricsSnapshot | null) | null,
+  ): void {
+    this.metricsPersister.setRecoverySnapshotProvider(provider);
   }
 }
