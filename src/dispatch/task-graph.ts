@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
-import type { DispatchManager } from "../dispatch/manager.ts";
-import type { DispatchTask } from "../dispatch/types.ts";
+import type { DispatchManager } from "./manager.ts";
+import type { DispatchTask } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("search:task-graph");

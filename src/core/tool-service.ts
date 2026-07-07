@@ -10,13 +10,29 @@ import { createSubLogger } from "../logger.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 import type { LspService } from "./lsp-service.ts";
 import type { SessionService } from "./session-service.ts";
-import type { SearchService } from "./search-service.ts";
+import { createTaskConcurrencyTool } from "../dispatch/task-concurrency.ts";
+import { createTaskChronologyTool } from "../dispatch/task-chronology.ts";
+import { createTaskExportTool } from "../dispatch/task-export.ts";
+import { createSkillComposeTool } from "../asset/skill-compose.ts";
+import { createAssetHotReloadTool } from "../asset/hot-reload.ts";
+import { createContextAssembleTool } from "../dispatch/context-assemble.ts";
+import { createTaskSearchTool } from "../dispatch/task-search.ts";
+import { createAssetSearchTool } from "../asset/asset-search.ts";
+import { createReferenceSearchTool } from "../reference-search.ts";
+import { createAssetInspectTool } from "../asset/asset-inspect.ts";
+import { createAssetValidateTool } from "../asset/asset-validate.ts";
+import { createFunctionStateTool } from "../function/function-state.ts";
+import { createFunctionGraphTool } from "../function/function-graph.ts";
+import { createTaskBudgetTool } from "../dispatch/task-budget.ts";
+import { createTaskGraphTool } from "../dispatch/task-graph.ts";
+import { createTaskRetryTool } from "../dispatch/task-retry.ts";
+import type { HotReloadService } from "./hot-reload-service.ts";
 
 const log = createSubLogger("tool-service");
 
 export class ToolService implements PluginService {
   readonly name = "tool-service";
-  readonly dependencies = ["dispatch-service", "lsp-service", "session-service", "search-service"];
+  readonly dependencies = ["dispatch-service", "lsp-service", "session-service", "hot-reload-service"];
 
   private tools: Record<string, any> = {};
 
@@ -36,8 +52,10 @@ export class ToolService implements PluginService {
     const sessionService = ctx.core.getService<SessionService>("session-service");
     if (!sessionService) throw new Error("session-service not found");
 
-    // 3.5. Get search tools from SearchService
-    const searchService = ctx.core.getService<SearchService>("search-service");
+    // 3.6. Get HotReloadService for P2 tools
+    const hotReloadService = ctx.core.getService<HotReloadService>("hot-reload-service");
+    if (!hotReloadService) throw new Error("hot-reload-service not found");
+    const sessionClient = sessionService.getSessionClient();
 
 
     // 4. Assemble all tools
@@ -59,8 +77,29 @@ export class ToolService implements PluginService {
       memory_recall: createMemoryRecallTool(),
       memory_list: createMemoryListTool(),
       memory_update: createMemoryUpdateTool(),
-      // Search tools
-      ...(searchService ? searchService.getTools() : {}),
+      // Search tools (direct factory imports — SearchService dissolved)
+      task_search: createTaskSearchTool(dispatchManager, ctx.directory),
+      asset_search: createAssetSearchTool(ctx.resolvedRoles),
+      reference_search: createReferenceSearchTool(ctx.resolvedRoles),
+      asset_inspect: createAssetInspectTool(ctx.resolvedRoles),
+      asset_validate: createAssetValidateTool(ctx.resolvedRoles),
+      function_state: createFunctionStateTool(ctx.directory),
+      function_graph: createFunctionGraphTool(ctx.resolvedRoles),
+      task_budget: createTaskBudgetTool(dispatchManager),
+      task_graph: createTaskGraphTool(dispatchManager),
+      task_retry: createTaskRetryTool(dispatchManager),
+      // New P2 tools
+      task_concurrency: createTaskConcurrencyTool(dispatchManager),
+      task_chronology: createTaskChronologyTool(dispatchManager),
+      task_export: createTaskExportTool(dispatchManager, ctx.directory),
+      skill_compose: createSkillComposeTool(ctx.resolvedRoles),
+      asset_hot_reload: createAssetHotReloadTool(hotReloadService),
+      context_assemble: createContextAssembleTool({
+        dispatchManager,
+        sessionClient,
+        resolvedRoles: ctx.resolvedRoles,
+        directory: ctx.directory,
+      }),
     };
 
     // 5. Register tool schemas

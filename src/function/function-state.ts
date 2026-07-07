@@ -1,7 +1,7 @@
 import { tool, type ToolContext } from "@opencode-ai/plugin";
 import { z } from "zod";
-import { functionRuntime } from "../function/runtime-state.ts";
-import { ArtifactStore } from "../function/artifact-store.ts";
+import { functionRuntime } from "./runtime-state.ts";
+import { ArtifactStore } from "./artifact-store.ts";
 import { roleFunctionsMap } from "../index.ts";
 import type { ResolvedFunction } from "../types.ts";
 import { createSubLogger } from "../logger.ts";

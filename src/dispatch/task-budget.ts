@@ -1,6 +1,6 @@
 import { tool, type ToolContext } from "@opencode-ai/plugin";
 import { z } from "zod";
-import type { DispatchManager } from "../dispatch/manager.ts";
+import type { DispatchManager } from "./manager.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("search:task-budget");

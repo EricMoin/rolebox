@@ -17,7 +17,6 @@ import { ExtensionService } from "./core/extension-service.ts";
 import { ToolService } from "./core/tool-service.ts";
 import { HookService } from "./core/hook-service.ts";
 import { HealthMonitorService } from "./core/health-monitor-service.ts";
-import { SearchService } from "./core/search-service.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -67,7 +66,6 @@ export async function createPluginHooks(
   core.registerService(new ToolService());
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
-  core.registerService(new SearchService());
 
   await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
