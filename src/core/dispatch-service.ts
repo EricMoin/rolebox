@@ -28,6 +28,10 @@ export class DispatchService implements PluginService, ToolContributor {
   private subagentModelKey = new Map<string, string>();
 
   async init(ctx: PluginContext): Promise<void> {
+    // Clear stale entries from previous init (supports hot-reload of deleted roles)
+    this.resolvedSubagents.clear();
+    this.subagentModelKey.clear();
+
     // 1. Build subagent lineage maps (was registerSubagentLineage in plugin-hooks.ts)
     for (const role of ctx.resolvedRoles) {
       this.registerSubagentLineage(role.subagents, role.id, role.config.model);

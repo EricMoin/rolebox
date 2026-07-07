@@ -36,11 +36,11 @@ export function createAssetHotReloadTool(hotReloadService: HotReloadService) {
         process.env.ROLEBOX_HOT_RELOAD === "0";
 
       // Await trigger regardless — it's a no-op when disabled
-      await hotReloadService.triggerReload();
+      const result = await hotReloadService.triggerReload();
 
       const requestedLabel = assetName ? `${assetType} (${assetName})` : `${assetType} (all)`;
 
-      if (isDisabled) {
+      if (isDisabled || result.disabled) {
         log.info("Hot reload is disabled by env var");
         return (
           "## Asset Hot Reload\n" +
@@ -51,13 +51,31 @@ export function createAssetHotReloadTool(hotReloadService: HotReloadService) {
         );
       }
 
-      log.info("Hot reload completed", { type: assetType, name: assetName ?? "all" });
+      if (!result.success) {
+        log.warn("Hot reload failed", { type: assetType, name: assetName ?? "all", error: result.error });
+        return (
+          "## Asset Hot Reload\n" +
+          "\n" +
+          `**Requested:** ${requestedLabel}\n` +
+          `**Status:** failed\n` +
+          `**Details:** ${result.error ?? "Unknown error"}.\n`
+        );
+      }
+
+      log.info("Hot reload completed", {
+        type: assetType,
+        name: assetName ?? "all",
+        discovered: result.discovered,
+        resolved: result.resolved,
+        skipped: result.skipped,
+      });
       return (
         "## Asset Hot Reload\n" +
         "\n" +
         `**Requested:** ${requestedLabel}\n` +
         `**Status:** completed\n` +
-        `**Details:** Roles re-discovered and re-resolved.\n`
+        `**Details:** Roles re-discovered and re-resolved. ` +
+        `Discovered: ${result.discovered ?? 0}, Resolved: ${result.resolved ?? 0}, Skipped: ${result.skipped ?? 0}.\n`
       );
     },
   });

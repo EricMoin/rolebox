@@ -61,9 +61,19 @@ export class HookService implements PluginService {
     }
     graphSessionState.recover((_sessionID, agentId) => roleGraphMap.get(agentId));
     functionRuntime.recover();
+    // Refresh hookState auto-activate and locked maps (supports hot-reload)
+    hookState.roleAutoActivateMap.clear();
+    hookState.roleLockedMap.clear();
+    for (const resolved of resolvedRoles) {
+      if (resolved.config.auto_activate?.length) {
+        hookState.roleAutoActivateMap.set(resolved.id, resolved.config.auto_activate);
+      }
+      if (resolved.locked !== undefined) {
+        hookState.roleLockedMap.set(resolved.id, resolved.locked);
+      }
+    }
 
     // Set advance judge (original line 283)
-    setAdvanceJudge(this.createJudgeFn(client));
 
     // --- Custom Hook Registry (original lines 288-308) ---
     this.customHookRegistry = new CustomHookRegistry();
