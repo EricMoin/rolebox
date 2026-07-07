@@ -369,6 +369,86 @@ describe("readMonitorSnapshot", () => {
     expect(snapshot.tasks[0].resultTotalChars).toBe(100);
   });
 
+  it("resultPreview falls back to rebuilt path when sidecarPath is empty", async () => {
+    mkdirSync(stateDir(), { recursive: true });
+    const resultsDir = join(stateDir(), "results");
+    mkdirSync(resultsDir, { recursive: true });
+
+    const fullOutput = "Fallback content that should be found via rebuilt path.";
+    writeFileSync(join(resultsDir, "t1.txt"), fullOutput);
+
+    writeFileSync(
+      join(stateDir(), `dispatch-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 5,
+        tasks: [
+          {
+            id: "t1",
+            sessionId: "ses_1",
+            parentSessionId: "ses_p",
+            status: "completed",
+            agent: "researcher",
+            prompt: "research",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            progress: { lastUpdate: new Date().toISOString(), toolCalls: 3 },
+            depth: 0,
+            mode: "background",
+            result: {
+              sidecarPath: "",
+              totalChars: fullOutput.length,
+              hadFence: false,
+              materializedAt: new Date().toISOString(),
+            },
+          },
+        ],
+      }),
+    );
+
+    const { readMonitorSnapshot } = await importReader();
+    const snapshot = readMonitorSnapshot(tmpDir, 20);
+    const task = snapshot.tasks[0];
+    expect(task.resultPreview).toBe(fullOutput.slice(-20));
+    expect(task.resultTotalChars).toBe(fullOutput.length);
+  });
+
+  it("resultPreview falls back to rebuilt path when result field is missing", async () => {
+    mkdirSync(stateDir(), { recursive: true });
+    const resultsDir = join(stateDir(), "results");
+    mkdirSync(resultsDir, { recursive: true });
+
+    const fullOutput = "Output found via rebuilt path without result field.";
+    writeFileSync(join(resultsDir, "t1.txt"), fullOutput);
+
+    writeFileSync(
+      join(stateDir(), `dispatch-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 5,
+        tasks: [
+          {
+            id: "t1",
+            sessionId: "ses_1",
+            parentSessionId: "ses_p",
+            status: "completed",
+            agent: "researcher",
+            prompt: "research",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            progress: { lastUpdate: new Date().toISOString(), toolCalls: 3 },
+            depth: 0,
+            mode: "background",
+          },
+        ],
+      }),
+    );
+
+    const { readMonitorSnapshot } = await importReader();
+    const snapshot = readMonitorSnapshot(tmpDir, 20);
+    const task = snapshot.tasks[0];
+    expect(task.resultPreview).toBe(fullOutput.slice(-20));
+    expect(task.resultTotalChars).toBe(fullOutput.length);
+  });
+
   it("filters only complete-phase functions; gated and active are included", async () => {
     mkdirSync(stateDir(), { recursive: true });
 

@@ -379,13 +379,26 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
 
       let resultPreview: string | undefined;
       let resultTotalChars: number | undefined;
-      if (tailChars > 0 && st.result?.sidecarPath) {
-        resultTotalChars = st.result.totalChars;
-        const full = readResultSidecar(st.result.sidecarPath);
+      if (tailChars > 0) {
+        // Try the stored sidecarPath first; fall back to the rebuilt path
+        // (same approach as readTaskDetail). The stored path may be empty/stale
+        // when materialization hasn't completed, failed, or the project moved.
+        let full: string | null = null;
+        if (st.result?.sidecarPath) {
+          resultTotalChars = st.result.totalChars;
+          full = readResultSidecar(st.result.sidecarPath);
+        }
+        if (full === null) {
+          const rebuiltPath = resultSidecarPath(st.id, projectDir);
+          full = readResultSidecar(rebuiltPath);
+        }
         if (full !== null) {
           resultPreview = full.length > tailChars
             ? full.slice(-tailChars)
             : full;
+          if (resultTotalChars === undefined) {
+            resultTotalChars = full.length;
+          }
         }
       }
 
