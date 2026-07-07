@@ -100,7 +100,7 @@ export class DispatchService implements PluginService, ToolContributor {
 
   async dispose(): Promise<void> {
     try {
-      this.dispatchManager.flushPersistSync();
+      await this.dispatchManager.flushPersist();
     } catch (err) {
       log.warn("dispatch flush during dispose failed", {
         error: err instanceof Error ? err.message : String(err),
