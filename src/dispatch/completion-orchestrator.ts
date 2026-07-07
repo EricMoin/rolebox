@@ -224,6 +224,18 @@ export class CompletionOrchestrator {
           this.d.notifyOutbox.delete(taskId);
           continue;
         }
+
+        // Defensive guard: skip intermediate notifications (remaining > 0).
+        // The sweeper should only retry FINAL notifications. Intermediate notifications
+        // are fire-and-forget (noReply=true) and MUST NOT be resent — doing so would
+        // cause <system-reminder> to repeat indefinitely because sentFinalNotifies is
+        // never set for intermediate notifications. The primary fix in materializeAndNotify
+        // prevents intermediate tasks from entering the outbox; this is a secondary safeguard.
+        if (this.d.getInflightCount(task.parentSessionId) > 0) {
+          this.d.notifyOutbox.delete(taskId);
+          continue;
+        }
+
         let sweeperResultText: string | undefined;
         if (task.result?.sidecarPath && !task.result.fetchError) {
           const sidecarText = readResultSidecar(task.result.sidecarPath);
@@ -233,7 +245,7 @@ export class CompletionOrchestrator {
         }
         const sent = await this.d.sendNotification(
           task,
-          this.d.getInflightCount(task.parentSessionId),
+          0,
           sweeperResultText,
         );
         if (sent) {

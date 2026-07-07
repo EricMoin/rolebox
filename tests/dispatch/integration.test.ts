@@ -806,3 +806,142 @@ describe("integration: outbox resend", () => {
     { timeout: 15000 },
   );
 });
+
+describe("integration: intermediate notification does NOT enter outbox", () => {
+  it(
+    "materializeAndNotify with remainingTasks > 0 does not call addToOutbox",
+    async () => {
+      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { createMockClient, parentContext } = await import("./helpers");
+
+      let promptAsyncCallCount = 0;
+      let promptAsyncArgs: any[] = [];
+
+      const client = createMockClient({
+        sessionCreate: () =>
+          Promise.resolve({ data: { id: "ses_intermediate" }, error: undefined }),
+        sessionPromptAsync: (...args: any[]) => {
+          const opts = args[0] as any;
+          if (opts?.body && "noReply" in opts.body) {
+            promptAsyncCallCount++;
+            promptAsyncArgs.push(opts);
+          }
+          return Promise.resolve({ data: undefined, error: undefined });
+        },
+        sessionMessages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { role: "assistant" },
+                parts: [{ type: "text", text: "task output" }],
+              },
+            ],
+            error: undefined,
+          }),
+      });
+
+      const manager = new DispatchManager(client, {
+        maxConcurrent: 2,
+        taskTtlMs: 100,
+      });
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("running");
+
+      const mgr = manager as any;
+      mgr.transition(task.id, ["running"], "completed");
+      mgr.leaveRunning(task.id);
+
+      // Simulate remainingTasks > 0 by creating a second task for the same parent
+      const task2 = await manager.launch(
+        { subagent: "helper", prompt: "work2", run_in_background: true },
+        parentContext(),
+      );
+      expect(task2.status).toBe("running");
+
+      // Clear notifyOutbox before materialize
+      mgr.notifyOutbox.delete(task.id);
+
+      // materializeAndNotify should NOT add to outbox when remainingTasks > 0
+      await mgr.materializeAndNotify(task.id);
+
+      // Task should NOT be in outbox (intermediate notification)
+      expect(mgr.notifyOutbox.has(task.id)).toBe(false);
+      // Intermediate notification should have been sent once (noReply=true)
+      expect(promptAsyncCallCount).toBe(1);
+      const sentText: string = promptAsyncArgs[0]?.body?.parts?.[0]?.text ?? "";
+      expect(sentText).toContain("[BACKGROUND TASK COMPLETED]");
+      expect(sentText).not.toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    },
+    { timeout: 15000 },
+  );
+
+  it(
+    "intermediate notification not in outbox — sweeper does not resend",
+    async () => {
+      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { createMockClient, parentContext } = await import("./helpers");
+      const { clearSentFinalNotifies } = await import("../../src/dispatch/notification");
+
+      let promptAsyncCallCount = 0;
+
+      const client = createMockClient({
+        sessionCreate: () =>
+          Promise.resolve({ data: { id: "ses_sweep" }, error: undefined }),
+        sessionPromptAsync: () => {
+          promptAsyncCallCount++;
+          return Promise.resolve({ data: undefined, error: undefined });
+        },
+        sessionMessages: () =>
+          Promise.resolve({
+            data: [
+              {
+                info: { role: "assistant" },
+                parts: [{ type: "text", text: "output" }],
+              },
+            ],
+            error: undefined,
+          }),
+      });
+
+      const manager = new DispatchManager(client, {
+        maxConcurrent: 4,
+        taskTtlMs: 100,
+      });
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("running");
+
+      // Create a sibling task so remainingTasks > 0
+      const task2 = await manager.launch(
+        { subagent: "helper", prompt: "work2", run_in_background: true },
+        parentContext(),
+      );
+      expect(task2.status).toBe("running");
+
+      const mgr = manager as any;
+      mgr.transition(task.id, ["running"], "completed");
+      mgr.leaveRunning(task.id);
+
+      // Clear any state
+      mgr.notifyOutbox.delete(task.id);
+      mgr.notifyOutbox.delete(task2.id);
+      clearSentFinalNotifies();
+      const beforeCalls = promptAsyncCallCount;
+
+      // materializeAndNotify with remainingTasks > 0
+      await mgr.materializeAndNotify(task.id);
+
+      // Should have sent one notification but NOT added to outbox
+      expect(promptAsyncCallCount).toBe(beforeCalls + 1);
+      expect(mgr.notifyOutbox.has(task.id)).toBe(false);
+    },
+    { timeout: 15000 },
+  );
+});

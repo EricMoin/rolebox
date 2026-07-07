@@ -1398,12 +1398,18 @@ export class TaskLifecycleManager {
         resultText = extractResultBlock(sidecarText).result;
       }
     }
-
-    this.d.addToOutbox(taskId);
-    await this.notifyCompletion(t, this.getInflightCount(t.parentSessionId), resultText);
+    // Only add to notifyOutbox for FINAL notifications (remainingTasks === 0).
+    // Intermediate notifications (remainingTasks > 0) are fire-and-forget (noReply=true)
+    // and MUST NOT be added to the outbox — the sweeper would re-send them every sweep
+    // interval because sentFinalNotifies is never set for intermediate notifications,
+    // causing <system-reminder> to repeat indefinitely on the parent session.
+    const remaining = this.getInflightCount(t.parentSessionId);
+    if (remaining === 0) {
+      this.d.addToOutbox(taskId);
+    }
+    await this.notifyCompletion(t, remaining, resultText);
   }
 }
-
 /** Re-exported from manager.ts for use in event handlers. */
 function extractSessionErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message || error.name || "Error";
