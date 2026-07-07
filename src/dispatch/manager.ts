@@ -959,7 +959,13 @@ export class DispatchManager {
       return true;
     }
 
-    // Running task — abort the session
+    // Running task — transition to cancelled BEFORE aborting the session.
+    // This prevents a race where the watchdog/evaluateAndComplete detects
+    // the aborted session as "completed" and transitions to completed before
+    // we can set the correct cancelled status.
+    if (!this.transition(taskId, ["pending", "running"], "cancelled")) return false;
+
+    // Abort the session (best-effort — transition already happened)
     try {
       await this.client.session.abort({
         path: { id: task.sessionId },
@@ -967,8 +973,6 @@ export class DispatchManager {
     } catch (err) {
       debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
     }
-
-    if (!this.transition(taskId, ["pending", "running"], "cancelled")) return false;
     const t = this.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✕ cancelled agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
@@ -1907,12 +1911,17 @@ export class DispatchManager {
     this.leaveRunning(taskId);
   }
 
-  /** Side effects after a non-completed terminal transition (error/timeout). */
+  /** Side effects after a non-completed terminal transition (error). */
   private finalizeCompletion(taskId: string): void {
     const t = this.tasks.get(taskId)!;
     const duration = Date.now() - t.startedAt.getTime();
-    infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
-    metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
+    const status = t.status === "error" ? "error" : "completed";
+    infoLog("lifecycle", taskId, `${status === "error" ? "✗ error" : "✓ completed"} agent=${t.agent} duration=${duration}ms`);
+    if (status === "error") {
+      metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
+    } else {
+      metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
+    }
     metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
     void this.notifyCompletion(t, this.getInflightCount(t.parentSessionId));
     this.leaveRunning(taskId);

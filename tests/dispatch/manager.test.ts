@@ -699,6 +699,47 @@ describe("DispatchManager", () => {
     expect(client.session.abort).not.toHaveBeenCalled();
   });
 
+  it("cancelTask() remains cancelled despite concurrent evaluateAndComplete (race prevention)", async () => {
+    const client = createMockClient({
+      // Simulate a session that looks "completed" to evaluateAndComplete
+      sessionStatus: () =>
+        Promise.resolve({
+          data: { "test-session-1": { type: "idle" } },
+          error: undefined,
+        }),
+      sessionMessages: () =>
+        Promise.resolve({
+          data: [
+            {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: "I am done working" }],
+            },
+          ],
+          error: undefined,
+        }),
+    });
+    const manager = new DispatchManager(client, fastConfig);
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    // Cancel the task — with the fix, transition to "cancelled" happens
+    // before session.abort(), preventing the watchdog race.
+    const cancelResult = await manager.cancelTask(task.id);
+    expect(cancelResult).toBe(true);
+    expect(task.status).toBe("cancelled");
+
+    // Even if evaluateAndComplete fires after cancel (simulating a watchdog
+    // timer that raced with the cancel), it should be a no-op because the
+    // task status is no longer "running".
+    const mgr = manager as any;
+    await mgr.evaluateAndComplete(task.id, "global-sweep");
+    expect(task.status).toBe("cancelled"); // Still cancelled, NOT "completed"
+  });
+
   // ── 4. getResult() ───────────────────────────────────────────
 
   it("getResult() extracts text from assistant messages", async () => {
