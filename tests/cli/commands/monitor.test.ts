@@ -104,7 +104,7 @@ describe("monitor", () => {
     writeDispatch([makeTask()]);
     writeFnState([
       {
-        sessionId: "s1",
+        sessionId: "ses_1",
         fns: [{ name: "analyze", state: { phase: "active", continuationCount: 2 } }],
       },
     ]);

@@ -757,7 +757,7 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
   // (symlinked/worktree paths, legacy files), which is the whole point here.
   const taskById = new Map<string, TaskSnapshot>();
   const sessionAgentMap = new Map<string, string>();
-
+  const liveSessions = new Set<string>();
   for (const dispatchPath of listStateFiles(stateDir, "dispatch-")) {
     const dispatchRaw = tryReadJson(dispatchPath);
     if (!dispatchRaw || typeof dispatchRaw !== "object" || !("tasks" in dispatchRaw)) continue;
@@ -765,6 +765,9 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
     if (!Array.isArray(file.tasks)) continue;
     for (const st of file.tasks) {
       if (st.sessionId && st.agent) sessionAgentMap.set(st.sessionId, st.agent);
+      if (st.sessionId && (st.status === "running" || st.status === "pending")) {
+        liveSessions.add(st.sessionId);
+      }
 
       let resultPreview: string | undefined;
       let resultTotalChars: number | undefined;
@@ -796,7 +799,7 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
     }
   }
 
-  const activeFunctions: ActiveFunction[] = [];
+  let activeFunctions: ActiveFunction[] = [];
   const seenFn = new Set<string>();
   for (const fnstatePath of listStateFiles(stateDir, "fnstate-")) {
     const fnstateRaw = tryReadJson(fnstatePath);
@@ -837,7 +840,6 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
       if (gs.sessionId && gs.agentId) graphAgentMap.set(gs.sessionId, gs.agentId);
     }
   }
-
   for (const af of activeFunctions) {
     af.agentId =
       graphAgentMap.get(af.sessionId) ??
@@ -845,15 +847,25 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
       null;
   }
 
+  // Filter activeFunctions, loops, and graphSessions to only those with live dispatch tasks
+  activeFunctions = activeFunctions.filter((af) => liveSessions.has(af.sessionId));
+
   // Read optional metrics, notifications, and recovery state
   const metrics = readMetricsSnapshot(stateDir);
   const metricsRecentEvents = readMetricsRecentEvents(stateDir);
   const notifications = readNotificationState(stateDir);
   const recovery = readRecoveryMetrics(stateDir);
 
-  // Read loop and full graph session snapshots
   const loops = readLoopSnapshots(stateDir);
+
   const graphSessions = readGraphSessions(stateDir);
+  // Cross-filter loops and graphSessions by live sessions
+  const filteredLoops = loops.filter(
+    (l) =>
+      liveSessions.has(l.originSessionId) ||
+      (l.activeWorkerSessionId ? liveSessions.has(l.activeWorkerSessionId) : false),
+  );
+  const filteredGraphSessions = graphSessions.filter((gs) => liveSessions.has(gs.sessionId));
 
   // Compute dispatch summary from collected tasks
   const tasks = [...taskById.values()];
@@ -867,8 +879,8 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
     timestamp: new Date().toISOString(),
     tasks,
     activeFunctions,
-    loops,
-    graphSessions,
+    loops: filteredLoops,
+    graphSessions: filteredGraphSessions,
     dispatchSummary,
     concurrency,
     metrics: metrics ?? undefined,

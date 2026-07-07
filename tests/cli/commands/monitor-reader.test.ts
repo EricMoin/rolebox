@@ -187,7 +187,7 @@ describe("readMonitorSnapshot", () => {
     const { readMonitorSnapshot } = await importReader();
     const snapshot = readMonitorSnapshot(tmpDir);
 
-    expect(snapshot.activeFunctions.length).toBe(2);
+    expect(snapshot.activeFunctions.length).toBe(1);
 
     const graphFn = snapshot.activeFunctions.find((f) => f.sessionId === "ses_graph")!;
     expect(graphFn.agentId).toBe("researcher");
@@ -195,10 +195,8 @@ describe("readMonitorSnapshot", () => {
     expect(graphFn.phase).toBe("active");
     expect(graphFn.continuationCount).toBe(3);
 
-    const unknownFn = snapshot.activeFunctions.find((f) => f.sessionId === "ses_unknown")!;
-    expect(unknownFn.agentId).toBeNull();
-    expect(unknownFn.name).toBe("think");
-    expect(unknownFn.continuationCount).toBe(1);
+    // ses_unknown should NOT appear (no running dispatch task for it)
+    expect(snapshot.activeFunctions.find((f) => f.sessionId === "ses_unknown")).toBeUndefined();
 
     // ses_done should not appear (phase is "complete")
     expect(snapshot.activeFunctions.find((f) => f.sessionId === "ses_done")).toBeUndefined();
@@ -256,13 +254,13 @@ describe("readMonitorSnapshot", () => {
     const { readMonitorSnapshot } = await importReader();
     const snapshot = readMonitorSnapshot(tmpDir);
 
-    expect(snapshot.activeFunctions.length).toBe(2);
+    expect(snapshot.activeFunctions.length).toBe(1);
 
     const graphFn = snapshot.activeFunctions.find((f) => f.sessionId === "ses_graph")!;
     expect(graphFn.agentId).toBe("researcher"); // resolved from dispatch
 
-    const unknownFn = snapshot.activeFunctions.find((f) => f.sessionId === "ses_unknown")!;
-    expect(unknownFn.agentId).toBeNull(); // not in dispatch, not in graph
+    // ses_unknown should NOT appear (no running dispatch task for it)
+    expect(snapshot.activeFunctions.find((f) => f.sessionId === "ses_unknown")).toBeUndefined();
   });
 
   it("returns empty tasks on malformed dispatch JSON", async () => {
@@ -390,9 +388,20 @@ describe("readMonitorSnapshot", () => {
             startedAt: new Date().toISOString(),
             progress: { lastUpdate: new Date().toISOString(), toolCalls: 1 },
             depth: 0,
+          },
+          {
+            id: "t2",
+            sessionId: "ses_other",
+            parentSessionId: "ses_p",
+            status: "running",
+            agent: "researcher",
+            prompt: "more work",
+            startedAt: new Date().toISOString(),
+            progress: { lastUpdate: new Date().toISOString(), toolCalls: 1 },
+            depth: 0,
             mode: "background",
           },
-        ],
+        ]
       }),
     );
 
@@ -420,8 +429,8 @@ describe("readMonitorSnapshot", () => {
     const { readMonitorSnapshot } = await importReader();
     const snapshot = readMonitorSnapshot(tmpDir);
 
-    expect(snapshot.tasks.length).toBe(1);
-    expect(snapshot.tasks[0].id).toBe("t1");
+    expect(snapshot.tasks.length).toBe(2);
+    expect(snapshot.tasks.find((t) => t.id === "t1")).toBeDefined();
     // "complete" is filtered out; "gated" and "active" are included.
     expect(snapshot.activeFunctions.length).toBe(2);
     expect(snapshot.activeFunctions.map((f) => f.name).sort()).toEqual(["act", "think"]);
@@ -485,6 +494,152 @@ describe("readMonitorSnapshot", () => {
     expect(snapshot.notifications!.recentEvents[0].type).toBe("dispatch_complete");
     expect(snapshot.notifications!.throttleStats).toBeDefined();
     expect(snapshot.notifications!.throttleStats!.windowMs).toBe(3000);
+  });
+
+  it("filters out stale functions/graphs when all tasks are completed", async () => {
+    mkdirSync(stateDir(), { recursive: true });
+
+    // All tasks are completed — no live sessions
+    writeFileSync(
+      join(stateDir(), `dispatch-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 5,
+        tasks: [
+          {
+            id: "t1",
+            sessionId: "ses_done",
+            parentSessionId: "ses_p",
+            status: "completed",
+            agent: "researcher",
+            startedAt: new Date(Date.now() - 100000).toISOString(),
+            completedAt: new Date(Date.now() - 50000).toISOString(),
+            depth: 0,
+            mode: "background",
+          },
+        ],
+      }),
+    );
+
+    // Stale fnstate data with non-complete functions
+    writeFileSync(
+      join(stateDir(), `fnstate-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          {
+            sessionId: "ses_done",
+            fns: [{ name: "staleFn", state: { phase: "active", continuationCount: 1 } }],
+          },
+        ],
+      }),
+    );
+
+    // Stale graph data with "active" status
+    writeFileSync(
+      join(stateDir(), `graph-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          {
+            sessionId: "ses_done",
+            agentId: "researcher",
+            state: { frontier: [], completed: [], iterationCount: 1, status: "active" },
+          },
+        ],
+      }),
+    );
+
+    const { readMonitorSnapshot } = await importReader();
+    const snapshot = readMonitorSnapshot(tmpDir);
+
+    // Active functions should be empty (no live tasks)
+    expect(snapshot.activeFunctions).toEqual([]);
+    // Graph sessions should be filtered out (no live tasks)
+    expect(snapshot.graphSessions).toEqual([]);
+  });
+
+  it("filters functions/graphs by live dispatch task sessions", async () => {
+    mkdirSync(stateDir(), { recursive: true });
+
+    // One running task and one completed task
+    writeFileSync(
+      join(stateDir(), `dispatch-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 5,
+        tasks: [
+          {
+            id: "t_running",
+            sessionId: "ses_active",
+            parentSessionId: "ses_p",
+            status: "running",
+            agent: "researcher",
+            startedAt: new Date().toISOString(),
+            depth: 0,
+            mode: "background",
+          },
+          {
+            id: "t_completed",
+            sessionId: "ses_done",
+            parentSessionId: "ses_p",
+            status: "completed",
+            agent: "researcher",
+            startedAt: new Date(Date.now() - 100000).toISOString(),
+            completedAt: new Date(Date.now() - 50000).toISOString(),
+            depth: 0,
+            mode: "background",
+          },
+        ],
+      }),
+    );
+
+    writeFileSync(
+      join(stateDir(), `fnstate-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          {
+            sessionId: "ses_active",
+            fns: [{ name: "liveFn", state: { phase: "active", continuationCount: 2 } }],
+          },
+          {
+            sessionId: "ses_done",
+            fns: [{ name: "staleFn", state: { phase: "active", continuationCount: 1 } }],
+          },
+        ],
+      }),
+    );
+
+    writeFileSync(
+      join(stateDir(), `graph-${KNOWN_HASH}.json`),
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          {
+            sessionId: "ses_active",
+            agentId: "researcher",
+            state: { frontier: [], completed: [], iterationCount: 0, status: "active" },
+          },
+          {
+            sessionId: "ses_done",
+            agentId: "researcher",
+            state: { frontier: [], completed: [], iterationCount: 2, status: "active" },
+          },
+        ],
+      }),
+    );
+
+    const { readMonitorSnapshot } = await importReader();
+    const snapshot = readMonitorSnapshot(tmpDir);
+
+    // Only the function from ses_active should appear
+    expect(snapshot.activeFunctions.length).toBe(1);
+    expect(snapshot.activeFunctions[0].sessionId).toBe("ses_active");
+    expect(snapshot.activeFunctions[0].name).toBe("liveFn");
+
+    // Only the graph session from ses_active should appear
+    expect(snapshot.graphSessions.length).toBe(1);
+    expect(snapshot.graphSessions[0].sessionId).toBe("ses_active");
+    expect(snapshot.graphSessions[0].status).toBe("active");
   });
 });
 
