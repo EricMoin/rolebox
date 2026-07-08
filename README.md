@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="rolebox — Turn one AI coding assistant into a team of specialists — defined in YAML, no code." src="https://raw.githubusercontent.com/EricMoin/rolebox/main/assets/banner.png" width="640">
+  <img alt="rolebox — Turn one AI coding assistant into a team of specialists — defined in YAML, no code." src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/banner.png" width="640">
 </p>
 
 # rolebox
