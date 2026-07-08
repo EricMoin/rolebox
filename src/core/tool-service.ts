@@ -26,6 +26,7 @@ import { createFunctionGraphTool } from "../function/function-graph.ts";
 import { createTaskBudgetTool } from "../dispatch/task-budget.ts";
 import { createTaskGraphTool } from "../dispatch/task-graph.ts";
 import { createTaskRetryTool } from "../dispatch/task-retry.ts";
+import { createDispatchStatusTool } from "../dispatch/task-status.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 
 const log = createSubLogger("tool-service");
@@ -65,6 +66,7 @@ export class ToolService implements PluginService {
       dispatch_output: createDispatchOutputTool(dispatchManager),
       dispatch_cancel: createDispatchCancelTool(dispatchManager),
       dispatch_metrics: createDispatchMetricsTool(),
+      dispatch_status: createDispatchStatusTool(dispatchManager),
       // Session tools
       ...sessionService.getTools(),
       // LSP tools
