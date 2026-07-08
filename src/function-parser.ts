@@ -9,8 +9,8 @@ export interface FunctionCall {
 /**
  * Parse `|fn|` function activation syntax from user messages.
  *
- * Only matches `|fn|` patterns at the very start of the text.
- * Mid-sentence `|fn|` is NOT activation and is left untouched.
+ * Matches `|fn|` patterns at the start of any line (multiline).
+ * Mid-line `|fn|` is NOT activation and is left untouched.
  *
  * Supports parameterized activation:
  *   - Positional: |review:security,strict|  → mapped to param order in frontmatter
@@ -22,11 +22,12 @@ export function parseFunctionActivation(text: string): {
   calls: FunctionCall[];
   cleanedText: string;
 } {
-  // Matches consecutive |fn| or |fn:args| or |fn key=val| patterns at the start.
+  // Matches consecutive |fn| or |fn:args| or |fn key=val| patterns at the start of any line.
   // The inner content between pipes can contain: letters, digits, hyphens, colons,
   // equals, commas, spaces (for key=val pairs), underscores, dots, slashes.
+  // Multiline flag allows matching at the start of any line, not just start of text.
   const fullPattern =
-    /^\|[a-z][a-z0-9-]*(?:[: ][^|]*)?\|(?:\|?[a-z][a-z0-9-]*(?:[: ][^|]*)?\|)*/;
+    /^\|[a-z][a-z0-9-]*(?:[: ][^|]*)?\|(?:\|?[a-z][a-z0-9-]*(?:[: ][^|]*)?\|)*/m;
   const match = text.match(fullPattern);
 
   if (!match) {
@@ -34,7 +35,10 @@ export function parseFunctionActivation(text: string): {
   }
 
   const matched = match[0];
-  const cleanedText = text.slice(matched.length).trimStart();
+  // Handle both start-of-text and mid-text matches
+  const idx = match.index ?? 0;
+  const cleanedText = (idx > 0 ? text.slice(0, idx) : "") +
+    text.slice(idx + matched.length).trimStart();
 
   // Split into individual function segments.
   // Each segment is between pipes: |segment1|segment2| or |segment1||segment2|
