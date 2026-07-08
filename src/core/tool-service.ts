@@ -28,6 +28,8 @@ import { createTaskGraphTool } from "../dispatch/task-graph.ts";
 import { createTaskRetryTool } from "../dispatch/task-retry.ts";
 import { createDispatchStatusTool } from "../dispatch/task-status.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
+import { createWebSearchTool } from "../web/web-search.ts";
+import { createPageReadTool } from "../web/page-read.ts";
 
 const log = createSubLogger("tool-service");
 
@@ -102,6 +104,9 @@ export class ToolService implements PluginService {
         resolvedRoles: ctx.resolvedRoles,
         directory: ctx.directory,
       }),
+      // Web tools
+      web_search: createWebSearchTool(),
+      web_read: createPageReadTool(),
     };
 
     // 5. Register tool schemas
