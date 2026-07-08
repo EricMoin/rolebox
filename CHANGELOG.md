@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.21.0
+
+### Features
+
+- **Crash recovery architecture** — New supervisor module with init resilience and startup health checks. Integrates with the health monitor to provide degraded startup defense — the plugin starts in reduced-capability mode rather than crashing outright. New `src/core/supervisor.ts`.
+- **`rolebox config` CLI command** — Interactive model selection for roles without manually editing YAML. Lets you pick models from available providers in a guided flow.
+- **`dispatch_status` tool** — Proactive liveness checks for running background tasks. Returns status, duration, last activity, tool call count, and output availability without blocking.
+- **Dispatch failure escalation** — Running tasks with consecutive fetch failures are now escalated to error state automatically. Configurable via `consecutiveFetchFailures` in `TaskEventState`.
+- **Dispatch eventState persistence** — `TaskEventState` (including fetch failure counts) now persists across save/load cycles, surviving plugin restarts.
+- **TUI task liveness indicators** — `rolebox monitor` surfaces stalled tasks with warning badges and activity indicators. Session-scoped refresh wired into the refresh cycle.
+- **P2 dispatch and asset tools** — New tools for deeper introspection:
+  - `task_concurrency` — Real-time concurrency slot status per key
+  - `task_chronology` — Time-bucketed task activity by hour/day/agent
+  - `task_export` — Export completed task results to file
+  - `skill_compose` — Analyze skill combinations for conflicts
+  - `asset_hot_reload` — Trigger hot-reload without restart
+  - `context_assemble` — Cross-domain search across memory/assets/tasks/sessions
+- **Search and introspection tools** — Full suite of search and query tools:
+  - `task_search` — Search dispatch task history by query/status/agent/date
+  - `task_budget` — Query token/cost consumption and remaining quota
+  - `task_graph` — Visualize dispatch task dependency trees
+  - `task_retry` — Retry failed tasks with context preservation
+  - `asset_search` — Search skills/functions/references by keyword
+  - `asset_inspect` — View complete frontmatter for any asset
+  - `asset_validate` — Check dependency integrity across all roles
+  - `reference_search` — Full-text search across reference documents
+  - `function_state` — Query function state machine (phases, gates, evidence)
+  - `function_graph` — Visualize function dependency and state-machine graphs
+- **Logo rebrand** — New isometric cube logo with Space Grotesk font and sky-blue accent, conveying the "box" metaphor visually.
+
+### Bug Fixes
+
+- **Function parser** — Support function activation (`|name|`) at start of any line, not just after whitespace.
+- **Stale lock recovery** — Reclaim stale state locks instead of blocking indefinitely; stop swallowing silent errors during lock acquisition.
+- **Dispatch notification deduplication** — Prevent duplicate `system-reminder` notifications from intermediate tasks in multi-level dispatch chains.
+- **Dispatch cancel-before-abort** — Cancel tasks before abort signal to prevent completed-status race conditions.
+- **Dispatch retry on inflight siblings** — Retry final notifications even when sibling tasks are still inflight, preventing notification loss.
+- **Monitor sidecar path** — Fall back to rebuilt sidecar path in `--tail` mode when stored path is empty.
+- **Monitor stale filtering** — Filter stale functions/graphs by live dispatch sessions only, preventing phantom entries.
+- **Hot-reload failure resilience** — Preserve existing state on reload failure and return structured error results instead of crashing.
+- **TUI session scope** — Wire `buildSessionScope` to refresh cycle so session-scoped activity updates in real time.
+
+### Refactors
+
+- **Module decomposition** — Decompose oversized source files into focused single-responsibility modules across dispatch, session, and core packages.
+- **SearchService dissolution** — Dissolve the monolithic SearchService and colocate tools directly by domain (dispatch tools live in `src/dispatch/`, asset tools in `src/asset/`, etc.).
+
+### Documentation
+
+- **README rewrite** — Complete README overhaul showcasing all major features (Memory, LSP, Hashline, Notifications, Session Management, Dispatch, Function State Machine, Context Assembly, Asset Management) with comparison table against raw opencode.
+
+### Tests
+
+- **Crash recovery integration tests** — New test suite covering supervisor startup, degraded mode entry, and health monitor integration.
+
+---
+
 ## 0.20.0
 
 ### Features
