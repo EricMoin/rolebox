@@ -14,8 +14,14 @@ import type { PluginContext } from "./context.ts";
 export interface PluginService {
   /** Unique service name (e.g. "dispatch-service"). */
   name: string;
-  /** Names of services that must init before this one. */
   dependencies: string[];
+  /** Whether this service is critical for plugin operation.
+   * When true and init() fails, PluginCore.init() rejects fatally.
+   * When false/undefined and init() fails, the service is marked
+   * permanently_degraded and its dependents are skipped.
+   * Default: false (optional).
+   */
+  critical?: boolean;
   /** Called after dependencies are initialized. */
   init(ctx: PluginContext): Promise<void>;
   /** Called on shutdown or hot-reload. Must be safe to call even if init failed. */
@@ -31,6 +37,7 @@ export interface PluginService {
 export interface PluginCoreLike {
   getService<T>(name: string): T | undefined;
   getServices(): Map<string, PluginService>;
-  /** Restart a service and all its transitive dependents. */
   restartService(name: string): Promise<void>;
+  /** Whether a service has been permanently degraded after init failure. */
+  isDegraded(name: string): boolean;
 }

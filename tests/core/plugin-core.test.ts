@@ -166,4 +166,76 @@ describe("PluginCore", () => {
       expect(core.restartService("a")).rejects.toThrow("init boom");
     });
   });
+
+  describe("init resilience", () => {
+    it("rejects when a critical service fails to init", async () => {
+      const core = new PluginCore();
+      const svcA = makeService("a");
+      svcA.critical = true;
+      svcA.init = mock(() => Promise.reject(new Error("critical boom")));
+      core.registerService(svcA);
+
+      await expect(core.init(makeContext(core))).rejects.toThrow("critical boom");
+    });
+
+    it("resolves when an optional (non-critical) service fails to init, marking it degraded", async () => {
+      const core = new PluginCore();
+      const svcA = makeService("a");
+      svcA.init = mock(() => Promise.reject(new Error("optional boom")));
+      core.registerService(svcA);
+
+      await expect(core.init(makeContext(core))).resolves.toBeUndefined();
+      expect(core.isDegraded("a")).toBe(true);
+    });
+
+    it("skips downstream services when their dependency is degraded", async () => {
+      const core = new PluginCore();
+      const svcA = makeService("a");
+      svcA.init = mock(() => Promise.reject(new Error("optional boom")));
+      const svcB = makeService("b", ["a"]);
+      const bInit = mock(() => Promise.resolve());
+      svcB.init = bInit;
+      core.registerService(svcA);
+      core.registerService(svcB);
+
+      await expect(core.init(makeContext(core))).resolves.toBeUndefined();
+      expect(core.isDegraded("a")).toBe(true);
+      expect(core.isDegraded("b")).toBe(true);
+      expect(bInit).not.toHaveBeenCalled();
+    });
+
+    it("does not skip independent services when an unrelated service degrades", async () => {
+      const core = new PluginCore();
+      const svcA = makeService("a");
+      svcA.init = mock(() => Promise.reject(new Error("optional boom")));
+      const svcC = makeService("c"); // independent
+      const cInit = mock(() => Promise.resolve());
+      svcC.init = cInit;
+      core.registerService(svcA);
+      core.registerService(svcC);
+
+      await expect(core.init(makeContext(core))).resolves.toBeUndefined();
+      expect(core.isDegraded("a")).toBe(true);
+      expect(core.isDegraded("c")).toBe(false);
+      expect(cInit).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects critical service even when optional services also degrade", async () => {
+      const core = new PluginCore();
+      const svcA = makeService("a");
+      svcA.critical = true;
+      svcA.init = mock(() => Promise.reject(new Error("critical boom")));
+      const svcB = makeService("b"); // optional, will never init
+      const bInit = mock(() => Promise.resolve());
+      svcB.init = bInit;
+      core.registerService(svcB);
+      core.registerService(svcA);
+
+      await expect(core.init(makeContext(core))).rejects.toThrow("critical boom");
+      // B's init was never called because topoSort might order A first
+      // (no dependency between A and B, order depends on insertion order)
+      // Just verify the rejection propagates
+    });
+  });
+
 });

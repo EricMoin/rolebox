@@ -2,6 +2,9 @@ import type { PluginService, PluginCoreLike } from "./service.ts";
 import type { PluginContext } from "./context.ts";
 import { EventBus } from "./event-bus.ts";
 import { createSubLogger } from "../logger.ts";
+import { StartupChecker } from "../recovery/startup-check.ts";
+import { stateDirFor } from "../state-paths.ts";
+import { ServiceSupervisor } from "./service-supervisor.ts";
 
 const log = createSubLogger("plugin-core");
 
@@ -10,6 +13,13 @@ export class PluginCore implements PluginCoreLike {
   private ctx!: PluginContext;
   private disposed = false;
   private bus = new EventBus();
+  private degraded = new Set<string>();
+
+  private supervisor: ServiceSupervisor;
+
+  constructor() {
+    this.supervisor = new ServiceSupervisor(this);
+  }
 
   registerService(svc: PluginService): void {
     if (this.services.has(svc.name)) {
@@ -30,16 +40,61 @@ export class PluginCore implements PluginCoreLike {
     return this.bus;
   }
 
+  isDegraded(name: string): boolean {
+    return this.degraded.has(name);
+  }
+
+  getSupervisor(): ServiceSupervisor {
+    return this.supervisor;
+  }
+
+
   async init(ctx: PluginContext): Promise<void> {
     this.ctx = { ...ctx, bus: this.bus };
+    // Run startup consistency check before initializing services
+    const health = StartupChecker.checkAll(ctx.directory, stateDirFor(ctx.directory));
+    if (health.warnings.length > 0) {
+      log.info(`Startup check completed: ${health.warnings.length} warning(s)`, {
+        quarantined: health.quarantined.length,
+        staleLocksBroken: health.staleLocksBroken,
+        orphanTmpsRemoved: health.orphanTmpsRemoved,
+      });
+    }
+
     // Topological sort by dependencies
     const ordered = this.topoSort();
-    log.info("Initializing services", { count: ordered.length, order: ordered.map(s => s.name) });
     for (const svc of ordered) {
+      // If any dependency is degraded, skip this service entirely
+      const degradedDeps = svc.dependencies.filter(d => this.degraded.has(d));
+      if (degradedDeps.length > 0) {
+        log.warn("Skipping init due to degraded dependency", {
+          name: svc.name,
+          degradedDeps,
+        });
+        this.degraded.add(svc.name);
+        continue;
+      }
+
       log.debug("Initializing service", { name: svc.name, deps: svc.dependencies });
-      await svc.init(this.ctx);
+      try {
+        await svc.init(this.ctx);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const errStack = err instanceof Error ? err.stack : undefined;
+        if (svc.critical) {
+          log.fatal("Critical service init failed, aborting", { name: svc.name, error: errMsg });
+          throw err;
+        }
+        log.error("Optional service init failed, marking as permanently degraded", {
+          name: svc.name,
+          error: errMsg,
+          stack: errStack,
+        });
+        this.degraded.add(svc.name);
+      }
     }
   }
+
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
