@@ -3,6 +3,7 @@ import { PluginCore } from "../../src/core/plugin-core.ts";
 import type { PluginService, PluginCoreLike, ServiceHealth } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { HealthMonitorService } from "../../src/core/health-monitor-service.ts";
+import type { ServiceRestartState } from "../../src/core/service-supervisor.ts";
 import { __resetForTest } from "../../src/logger.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -290,6 +291,143 @@ describe("HealthMonitorService", () => {
     // The service should have been restarted since throwing is treated as unhealthy
     expect(throwingSvc.dispose).toHaveBeenCalled();
     expect(throwingSvc.init).toHaveBeenCalled();
+
+    await core.dispose();
+  });
+
+  // ── supervisor delegation ─────────────────────────────────────
+
+  it("skips restart when supervisor is in backoff", async () => {
+    const core = new PluginCore();
+    const monitor = new HealthMonitorService();
+
+    // Arrange: mock supervisor that simulates backoff state
+    const backoffState: ServiceRestartState = {
+      attempts: 1,
+      status: "backoff",
+      firstAttemptTime: Date.now() - 5_000,
+      lastAttemptTime: Date.now() - 5_000,
+      backoffUntil: Date.now() + 60_000,
+    };
+    const mockTryRestart = mock(() => Promise.resolve());
+    const mockGetStatus = mock((): ServiceRestartState => backoffState);
+    core.getSupervisor = mock(() => ({
+      tryRestart: mockTryRestart,
+      getStatus: mockGetStatus,
+    }));
+
+    const unhealthySvc = makeService("unhealthy-svc", [], () => ({ status: "unhealthy" as const, detail: "down" }));
+
+    core.registerService(unhealthySvc);
+    core.registerService(monitor);
+    await core.init(makeContext(core));
+
+    // Clear init call counts from init phase
+    (unhealthySvc.init as ReturnType<typeof mock>).mockClear();
+    (unhealthySvc.dispose as ReturnType<typeof mock>).mockClear();
+
+    // Give the timer a chance to fire
+    await new Promise((r) => setTimeout(r, 250));
+
+    // Supervisor was consulted
+    expect(mockTryRestart).toHaveBeenCalledWith("unhealthy-svc");
+
+    // But since supervisor is in backoff, core.restartService is NOT called,
+    // so dispose/init should NOT have been called
+    expect(unhealthySvc.dispose).not.toHaveBeenCalled();
+    expect(unhealthySvc.init).not.toHaveBeenCalled();
+
+    await core.dispose();
+  });
+
+  it("emits permanently_degraded event when supervisor budget exhausted", async () => {
+    const core = new PluginCore();
+    const monitor = new HealthMonitorService();
+
+    // Arrange: mock supervisor that reports permanently_degraded after tryRestart
+    const mutableState: ServiceRestartState = {
+      attempts: 0,
+      status: "ok",
+      firstAttemptTime: 0,
+      lastAttemptTime: 0,
+      backoffUntil: 0,
+    };
+    const mockTryRestart = mock(async () => {
+      mutableState.status = "permanently_degraded";
+      mutableState.attempts = 3;
+    });
+    const mockGetStatus = mock((): ServiceRestartState => mutableState);
+    core.getSupervisor = mock(() => ({
+      tryRestart: mockTryRestart,
+      getStatus: mockGetStatus,
+    }));
+
+    // Listen for the degraded event
+    const degradedEvents: Array<{ name: string; diagnostics?: string }> = [];
+    core.getBus().on("service.permanently_degraded", (payload: any) => {
+      degradedEvents.push(payload);
+    });
+
+    const unhealthySvc = makeService("unhealthy-svc", [], () => ({ status: "unhealthy" as const, detail: "crashed" }));
+
+    core.registerService(unhealthySvc);
+    core.registerService(monitor);
+    await core.init(makeContext(core));
+
+    // Give the timer a chance to fire
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(mockTryRestart).toHaveBeenCalledWith("unhealthy-svc");
+    expect(degradedEvents.length).toBeGreaterThanOrEqual(1);
+    const ev = degradedEvents[0];
+    expect(ev.name).toBe("unhealthy-svc");
+    expect(ev.diagnostics).toBe("crashed");
+
+    await core.dispose();
+  });
+
+  it("catches supervisor errors and continues polling", async () => {
+    const core = new PluginCore();
+    const monitor = new HealthMonitorService();
+
+    // Arrange: mock supervisor that throws on tryRestart
+    const mockTryRestart = mock(() => Promise.reject(new Error("supervisor panic")));
+    const mockGetStatus = mock((): ServiceRestartState => ({
+      attempts: 0,
+      status: "ok",
+      firstAttemptTime: 0,
+      lastAttemptTime: 0,
+      backoffUntil: 0,
+    }));
+    core.getSupervisor = mock(() => ({
+      tryRestart: mockTryRestart,
+      getStatus: mockGetStatus,
+    }));
+
+    // Track health check calls via a counter on a second service
+    let healthyCallCount = 0;
+    const healthySvc = makeService("healthy-svc", [], () => {
+      healthyCallCount++;
+      return { status: "healthy" as const };
+    });
+    const unhealthySvc = makeService("unhealthy-svc", [], () => ({ status: "unhealthy" as const, detail: "down" }));
+
+    core.registerService(healthySvc);
+    core.registerService(unhealthySvc);
+    core.registerService(monitor);
+    await core.init(makeContext(core));
+
+    // Clear init call counts
+    (unhealthySvc.init as ReturnType<typeof mock>).mockClear();
+    (unhealthySvc.dispose as ReturnType<typeof mock>).mockClear();
+
+    // Give the timer a chance to fire
+    await new Promise((r) => setTimeout(r, 250));
+
+    // The supervisor throw should not crash the monitor -
+    // healthy service continues to be checked, and supervisor was consulted
+    expect(healthyCallCount).toBeGreaterThanOrEqual(1);
+    expect(mockTryRestart).toHaveBeenCalledWith("unhealthy-svc");
 
     await core.dispose();
   });

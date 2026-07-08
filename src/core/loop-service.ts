@@ -4,6 +4,7 @@ import type { DispatchService } from "./dispatch-service.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { DispatchAdapter } from "../loop/dispatch-adapter.ts";
 import { LoopStore } from "../loop/loop-store.ts";
+import type { LoopState } from "../loop/types.ts";
 import { INTER_ROUND_DELAY_MS } from "../loop/constants.ts";
 import { hookState } from "../hooks/state.ts";
 import { createSubLogger } from "../logger.ts";
@@ -13,9 +14,12 @@ const log = createSubLogger("loop-service");
 export class LoopService implements PluginService {
   readonly name = "loop-service";
   readonly dependencies = ["dispatch-service"];
+  readonly critical = true;
 
   private loopManager!: LoopCoordinator;
   private loopStore!: LoopStore;
+  private stateDegraded = false;
+  private degradedDetail = "";
 
   async init(ctx: PluginContext): Promise<void> {
     // Get DispatchManager from DispatchService via core lookup
@@ -45,19 +49,36 @@ export class LoopService implements PluginService {
     });
 
     // Recovery: reconcile persisted loops with dispatch state
-    const loaded = store.load();
-    if (loaded) {
-      const reconciled = await store.reconcile(loaded, async (taskId) => {
-        try {
-          const task = dispatchManager.getTask(taskId);
-          if (task) return { status: task.status, exists: true };
-        } catch {
-          // Fall through to unknown
-        }
-        return { status: "unknown", exists: false };
+    let loaded: Map<string, LoopState> | null = null;
+    try {
+      loaded = store.load();
+    } catch (err) {
+      this.stateDegraded = true;
+      this.degradedDetail = "LoopStore.load() failed — starting with empty coordinator";
+      log.error(this.degradedDetail, {
+        error: err instanceof Error ? err.message : String(err),
       });
-      for (const [, state] of reconciled) {
-        coordinator.restoreState(state);
+    }
+    if (loaded) {
+      try {
+        const reconciled = await store.reconcile(loaded, async (taskId) => {
+          try {
+            const task = dispatchManager.getTask(taskId);
+            if (task) return { status: task.status, exists: true };
+          } catch {
+            // Fall through to unknown
+          }
+          return { status: "unknown", exists: false };
+        });
+        for (const [, state] of reconciled) {
+          coordinator.restoreState(state);
+        }
+      } catch (err) {
+        this.stateDegraded = true;
+        this.degradedDetail = "LoopStore.reconcile() failed — using empty coordinator";
+        log.error(this.degradedDetail, {
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -91,11 +112,12 @@ export class LoopService implements PluginService {
     return this.loopStore;
   }
 
-  // ── Health ───────────────────────────────────────────────────
-
   health(): import("./service.ts").ServiceHealth {
     if (!this.loopManager) {
       return { status: "unhealthy", detail: "LoopCoordinator not initialized" };
+    }
+    if (this.stateDegraded) {
+      return { status: "degraded", detail: this.degradedDetail };
     }
     return { status: "healthy" };
   }

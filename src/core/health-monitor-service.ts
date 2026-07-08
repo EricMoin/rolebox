@@ -2,6 +2,12 @@ import type { PluginService } from "./service.ts";
 import type { PluginContext } from "./context.ts";
 import type { ServiceHealth } from "./service.ts";
 import { createSubLogger } from "../logger.ts";
+import type { ServiceSupervisor } from "./service-supervisor.ts";
+
+/** Minimal interface for accessing the supervisor through PluginCore. */
+interface CoreWithSupervisor {
+  getSupervisor(): ServiceSupervisor;
+}
 
 const log = createSubLogger("health-monitor");
 
@@ -79,13 +85,39 @@ export class HealthMonitorService implements PluginService {
         ...(result.detail ? { detail: result.detail } : {}),
       });
 
+      // Degraded: log detail, do not trigger restart
+      if (result.status === "degraded") {
+        log.info("Service is degraded (no restart triggered)", {
+          service: name,
+          detail: result.detail,
+        });
+        continue;
+      }
+
+      // Unhealthy: delegate restart decision to ServiceSupervisor
       if (result.status === "unhealthy") {
-        log.warn("Service unhealthy, attempting restart", { service: name, detail: result.detail });
+        log.warn("Service unhealthy, attempting supervised restart", {
+          service: name,
+          detail: result.detail,
+        });
+
         try {
-          await this.ctx.core.restartService(name);
-          log.info("Service restarted after unhealthy check", { service: name });
+          const supervisor = (this.ctx.core as unknown as CoreWithSupervisor).getSupervisor();
+          await supervisor.tryRestart(name);
+
+          const state = supervisor.getStatus(name);
+          if (state.status === "permanently_degraded") {
+            log.error("Service permanently degraded after restart attempts", {
+              service: name,
+              detail: result.detail,
+            });
+            await this.ctx.bus.emit("service.permanently_degraded", {
+              name,
+              diagnostics: result.detail,
+            });
+          }
         } catch (err) {
-          log.error("Failed to restart unhealthy service", {
+          log.error("Health monitor supervisor error (continuing check cycle)", {
             service: name,
             error: err instanceof Error ? err.message : String(err),
           });

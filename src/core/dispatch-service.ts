@@ -22,10 +22,12 @@ const log = createSubLogger("dispatch-service");
 export class DispatchService implements PluginService, ToolContributor {
   readonly name = "dispatch-service";
   readonly dependencies: string[] = [];
+  readonly critical = true;
 
   private dispatchManager!: DispatchManager;
   private resolvedSubagents = new Map<string, { parentFullId: string }>();
   private subagentModelKey = new Map<string, string>();
+  private recoverFailed = false;
 
   async init(ctx: PluginContext): Promise<void> {
     // Clear stale entries from previous init (supports hot-reload of deleted roles)
@@ -70,7 +72,16 @@ export class DispatchService implements PluginService, ToolContributor {
       );
       dispatchManager.setStoreDirectory(storeDir);
       hookState.managerMap.set(mapDir, dispatchManager);
-      await dispatchManager.recover();
+
+      // Graceful degradation: recover() failure → log error + use empty state
+      try {
+        await dispatchManager.recover();
+      } catch (err) {
+        this.recoverFailed = true;
+        log.error("DispatchManager.recover() failed, continuing with empty state", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     this.dispatchManager = dispatchManager;
@@ -141,6 +152,9 @@ export class DispatchService implements PluginService, ToolContributor {
   health(): import("./service.ts").ServiceHealth {
     if (!this.dispatchManager) {
       return { status: "unhealthy", detail: "DispatchManager not initialized" };
+    }
+    if (this.recoverFailed) {
+      return { status: "degraded", detail: "DispatchManager.recover() failed — running with empty state" };
     }
     return { status: "healthy" };
   }
