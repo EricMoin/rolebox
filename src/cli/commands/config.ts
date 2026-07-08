@@ -46,6 +46,7 @@ function buildModelOptions(
   available: ModelOption[],
   currentModel: string,
 ): Array<{ value: string; label: string; hint?: string }> {
+  const options: Array<{ value: string; label: string; hint?: string }> = [];
 
   // Keep current — first option for quick skip
   if (currentModel && currentModel.trim().length > 0) {
@@ -67,6 +68,7 @@ function buildModelOptions(
   });
 
   return options;
+}
 
 // ── Interactive Flow ──────────────────────────────────────────────
 
