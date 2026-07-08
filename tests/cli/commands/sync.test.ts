@@ -43,6 +43,12 @@ beforeEach(() => {
     },
   }));
 
+  // Mock model-utils to suppress placeholder detection (no real opencode config in tests)
+  mock.module("../../../src/cli/model-utils", () => ({
+    scanAvailableModels: () => [],
+    findPlaceholderRoles: () => [],
+  }));
+
   logs = [];
   warns = [];
   errors = [];

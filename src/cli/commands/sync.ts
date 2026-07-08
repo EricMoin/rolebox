@@ -3,6 +3,11 @@ import { loadLock } from "../config.ts";
 import { getSyncTarget, getRolePath } from "../paths.ts";
 import { SyncTarget } from "../../constants.ts";
 import {
+  scanAvailableModels,
+  findPlaceholderRoles,
+} from "../model-utils.ts";
+import type { RoleModelEntry } from "../model-utils.ts";
+import {
   existsSync,
   mkdirSync,
   lstatSync,
@@ -91,6 +96,34 @@ export async function sync(target: string): Promise<void> {
   if (skipped > 0) parts.push(`${skipped} skipped`);
   if (cleaned > 0) parts.push(`${cleaned} cleaned`);
   console.log(parts.join(", "));
+
+  // ── Placeholder detection ───────────────────────────────────────────
+  const availableModels = scanAvailableModels();
+  const knownModelIds = availableModels.map((m) => m.id);
+
+  // Scan each synced role for placeholder models
+  const rolesWithPlaceholders: { role: string; entries: RoleModelEntry[] }[] = [];
+
+  for (const entry of lock.roles) {
+    const roleTargetPath = join(syncTarget, entry.role);
+    if (!existsSync(roleTargetPath)) continue;
+
+    const placeholders = findPlaceholderRoles(roleTargetPath, knownModelIds);
+    if (placeholders.length > 0) {
+      rolesWithPlaceholders.push({ role: entry.role, entries: placeholders });
+    }
+  }
+
+  if (rolesWithPlaceholders.length > 0) {
+    console.log("");
+    console.warn("⚠  Roles with unconfigured models detected:");
+    for (const { role, entries } of rolesWithPlaceholders) {
+      const models = [...new Set(entries.map((e) => e.model))].join(", ");
+      console.warn(`   ${role}: ${models}`);
+    }
+    console.log("");
+    console.log("   Run `rolebox config <role-name>` to configure models interactively.");
+  }
 }
 
 export default defineCommand({
