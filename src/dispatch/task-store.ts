@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createSubLogger } from "../logger.ts";
 import { shortHash } from "../state-paths.ts";
 import { acquireStateLock } from "./state-lock.ts";
-import type { DispatchTask, DispatchTaskStatus } from "./types.ts";
+import type { DispatchTask, DispatchTaskStatus, TaskEventState } from "./types.ts";
 
 // ─── Serialization Interfaces ──────────────────────────────────────────────
 
@@ -57,6 +57,20 @@ export interface SerializedDispatchTask {
 }
 
 /**
+ * JSON-serializable mirror of TaskEventState.
+ * All fields are already JSON-safe primitives.
+ */
+interface SerializedTaskEventState {
+  lastMessageCount: number;
+  lastProgressUpdate: number;
+  hasProducedOutput: boolean;
+  messageCountAtStart: number;
+  lastEventAt: number;
+  pendingConfirm?: { messageCount: number; at: number };
+  consecutiveFetchFailures: number;
+}
+
+/**
  * On-disk state file schema.
  * Version field enables future schema migrations.
  */
@@ -64,6 +78,8 @@ interface DispatchStateFile {
   version: 1 | 2 | 3 | 4 | 5;
   tasks: SerializedDispatchTask[];
   outbox?: string[];
+  /** Per-task event-tracking state keyed by task ID. Optional — v5+ only. */
+  eventState?: Record<string, SerializedTaskEventState>;
 }
 
 // ─── TaskStateStore ─────────────────────────────────────────────────────────
@@ -125,16 +141,27 @@ export class TaskStateStore {
    * Serialization lock ensures only one write is in-flight at a time;
    * concurrent callers queue up behind the previous save.
    */
-  async save(tasks: Map<string, DispatchTask>, outbox?: Set<string>): Promise<void> {
+  async save(
+    tasks: Map<string, DispatchTask>,
+    outbox?: Set<string>,
+    eventState?: Map<string, TaskEventState>,
+  ): Promise<void> {
     if (this._readOnly) return;
     // Chain onto the previous save to serialize writes
-    this._saveLock = this._saveLock.then(() => this._doSave(tasks, outbox), () => this._doSave(tasks, outbox));
+    this._saveLock = this._saveLock.then(
+      () => this._doSave(tasks, outbox, eventState),
+      () => this._doSave(tasks, outbox, eventState),
+    );
     return this._saveLock;
   }
 
-  private async _doSave(tasks: Map<string, DispatchTask>, outbox?: Set<string>): Promise<void> {
+  private async _doSave(
+    tasks: Map<string, DispatchTask>,
+    outbox?: Set<string>,
+    eventState?: Map<string, TaskEventState>,
+  ): Promise<void> {
     try {
-      const json = this.serialize(tasks, outbox);
+      const json = this.serialize(tasks, outbox, eventState);
       const statePath = this.getStatePath();
       const stateDir = join(statePath, "..");
 
@@ -162,7 +189,7 @@ export class TaskStateStore {
    * On success, returns tasks map with ISO strings deserialized to Dates,
    * plus the outbox string array (empty for v1-v3 or when absent).
    */
-  load(): { tasks: Map<string, DispatchTask>; outbox: string[] } | null {
+  load(): { tasks: Map<string, DispatchTask>; outbox: string[]; eventState: Map<string, TaskEventState> } | null {
     let raw: string;
     try {
       raw = readFileSync(this.getStatePath(), "utf-8");
@@ -187,6 +214,22 @@ export class TaskStateStore {
     const outbox: string[] = ((version === 4 || version === 5) && Array.isArray(parsed.outbox))
       ? parsed.outbox.filter((x): x is string => typeof x === "string")
       : [];
+
+    // Collect eventState (v5+ optional) — defaults to empty Map for backward compat
+    const eventState = new Map<string, TaskEventState>();
+    if (version === 5 && parsed.eventState && typeof parsed.eventState === "object") {
+      for (const [taskId, es] of Object.entries(parsed.eventState)) {
+        eventState.set(taskId, {
+          lastMessageCount: es.lastMessageCount,
+          lastProgressUpdate: es.lastProgressUpdate,
+          hasProducedOutput: es.hasProducedOutput,
+          messageCountAtStart: es.messageCountAtStart,
+          lastEventAt: es.lastEventAt,
+          pendingConfirm: es.pendingConfirm,
+          consecutiveFetchFailures: es.consecutiveFetchFailures ?? 0,
+        });
+      }
+    }
 
     // Build the task map, applying v1→v2/v2→v3 defaults when migrating
     const map = new Map<string, DispatchTask>();
@@ -231,7 +274,7 @@ export class TaskStateStore {
       void this.save(map);
     }
 
-    return { tasks: map, outbox };
+    return { tasks: map, outbox, eventState };
   }
 
   /**
@@ -252,10 +295,14 @@ export class TaskStateStore {
    * which is the desired behavior (exit state is authoritative).
    * Never throws — wraps errors in try/catch and logs a warning.
    */
-  saveSync(tasks: Map<string, DispatchTask>, outbox?: Set<string>): void {
+  saveSync(
+    tasks: Map<string, DispatchTask>,
+    outbox?: Set<string>,
+    eventState?: Map<string, TaskEventState>,
+  ): void {
     if (this._readOnly) return;
     try {
-      const json = this.serialize(tasks, outbox);
+      const json = this.serialize(tasks, outbox, eventState);
       const statePath = this.getStatePath();
       const stateDir = join(statePath, "..");
 
@@ -279,7 +326,11 @@ export class TaskStateStore {
   }
 
   /** Convert a live task map to a JSON string. */
-  private serialize(tasks: Map<string, DispatchTask>, outbox?: Set<string>): string {
+  private serialize(
+    tasks: Map<string, DispatchTask>,
+    outbox?: Set<string>,
+    eventState?: Map<string, TaskEventState>,
+  ): string {
     const serialized: SerializedDispatchTask[] = [];
 
     for (const task of tasks.values()) {
@@ -329,7 +380,39 @@ export class TaskStateStore {
       file.outbox = [...outbox];
     }
 
+    if (eventState && eventState.size > 0) {
+      const record: Record<string, SerializedTaskEventState> = {};
+      for (const [taskId, es] of eventState) {
+        record[taskId] = {
+          lastMessageCount: es.lastMessageCount,
+          lastProgressUpdate: es.lastProgressUpdate,
+          hasProducedOutput: es.hasProducedOutput,
+          messageCountAtStart: es.messageCountAtStart,
+          lastEventAt: es.lastEventAt,
+          pendingConfirm: es.pendingConfirm,
+          consecutiveFetchFailures: es.consecutiveFetchFailures,
+        };
+      }
+      file.eventState = record;
+    }
+
     return JSON.stringify(file, null, 2);
+  }
+
+  /**
+   * Check whether the persisted state file contains eventState data.
+   * Returns true when the on-disk file has a non-empty `eventState` key.
+   * Safe to call even when no file exists (returns false).
+   */
+  hasEventState(): boolean {
+    try {
+      const raw = readFileSync(this.getStatePath(), "utf-8");
+      const parsed = this.deserialize(raw);
+      if (!parsed) return false;
+      return !!parsed.eventState && Object.keys(parsed.eventState).length > 0;
+    } catch {
+      return false;
+    }
   }
 
   /** Parse a JSON string back into a DispatchStateFile. Returns null on parse error. */

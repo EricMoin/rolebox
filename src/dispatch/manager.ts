@@ -370,6 +370,10 @@ export class DispatchManager {
     return this.config;
   }
 
+  getEventState(): Map<string, import("./types.ts").TaskEventState> {
+    return this.eventState;
+  }
+
   // ── Bridge methods (accessed by tests via (manager as any)) ──
 
   // ── Bridge properties ──

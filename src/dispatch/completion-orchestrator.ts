@@ -137,7 +137,7 @@ export class CompletionOrchestrator {
       if (!this._dirty) return;
       this._dirty = false;
       try {
-        await this.d.store.save(this.d.tasks, this.d.notifyOutbox);
+        await this.d.store.save(this.d.tasks, this.d.notifyOutbox, this.d.eventState);
       } catch (err) {
         debugLog("persist", "*", `async save failed: ${err}`);
       }
@@ -167,7 +167,7 @@ export class CompletionOrchestrator {
     }
     if (this._dirty) {
       this._dirty = false;
-      await this.d.store.save(this.d.tasks, this.d.notifyOutbox);
+      await this.d.store.save(this.d.tasks, this.d.notifyOutbox, this.d.eventState);
     }
     await this.d.metricsPersister.persist();
   }
@@ -183,7 +183,7 @@ export class CompletionOrchestrator {
     if (this._dirty) {
       this._dirty = false;
       try {
-        this.d.store.saveSync(this.d.tasks, this.d.notifyOutbox);
+        this.d.store.saveSync(this.d.tasks, this.d.notifyOutbox, this.d.eventState);
       } catch (err) {
         debugLog("persist", "*", `sync flush failed: ${err}`);
       }
@@ -402,10 +402,10 @@ export class CompletionOrchestrator {
               lastMessageCount: 0,
               lastProgressUpdate: Date.now(),
               hasProducedOutput: false,
-              messageCountAtStart: task.messageCountAtStart ?? 0,
               lastEventAt: Date.now(),
+              messageCountAtStart: task.messageCountAtStart ?? 0,
+              consecutiveFetchFailures: 0,
             });
-            debugLog("recover", task.id, `session ${task.sessionId} alive — re-registered`);
           } else {
             this.transition(task.id, ["running"], "error", {
               error: "Exceeded concurrency limit on recovery",
@@ -439,12 +439,15 @@ export class CompletionOrchestrator {
   private restoreState(): void {
     const loaded = this.d.store.load();
     if (!loaded) return;
-    const { tasks: loadedTasks, outbox } = loaded;
+    const { tasks: loadedTasks, outbox, eventState: loadedEventState } = loaded;
     for (const [taskId, task] of loadedTasks) {
       this.d.tasks.set(taskId, task);
     }
     for (const id of outbox) {
       this.d.notifyOutbox.add(id);
+    }
+    for (const [taskId, es] of loadedEventState) {
+      this.d.eventState.set(taskId, es);
     }
   }
 
