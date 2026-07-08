@@ -1,9 +1,16 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("state-lock");
 
 interface LockData {
   pid: number;
   startedAt: number;
+  lastHeartbeat: number;
 }
+
+/** Default stale lock timeout: 5 minutes (300,000 ms). */
+export const StaleLockTimeoutMs = 300_000;
 
 interface LockResult {
   ok: boolean;
@@ -50,7 +57,7 @@ function pidAlive(pid: number): boolean {
 }
 
 function writeNewLock(path: string): LockData {
-  const data: LockData = { pid: process.pid, startedAt: Date.now() };
+  const data: LockData = { pid: process.pid, startedAt: Date.now(), lastHeartbeat: Date.now() };
   writeFileSync(path, JSON.stringify(data), "utf-8");
   return data;
 }
@@ -96,6 +103,17 @@ export function acquireStateLock(statePath: string): LockResult {
     };
   }
 
+  // Stale lock recovery: pid alive but lock age exceeds timeout
+  if (Date.now() - existing.startedAt > StaleLockTimeoutMs) {
+    log.warn(`Stale lock reclaimed: "${statePath}" held by pid ${existing.pid} for >${StaleLockTimeoutMs}ms`);
+    const data = writeNewLock(lp);
+    return {
+      ok: true,
+      release: () => releaseLock(lp, data.pid, data.startedAt),
+    };
+  }
+
+  log.warn(`Lock contention: "${statePath}" held by pid ${existing.pid} since ${new Date(existing.startedAt).toISOString()}`);
   return {
     ok: false,
     heldByPid: existing.pid,

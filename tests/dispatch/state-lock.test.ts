@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { acquireStateLock } from "../../src/dispatch/state-lock";
+import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/state-lock";
 
 const dirs: string[] = [];
 
@@ -104,5 +104,55 @@ describe("acquireStateLock", () => {
     expect(parsed.pid).toBe(process.pid);
 
     lock.release();
+  });
+
+  it("live pid with fresh lock is not reclaimed — ok:false", () => {
+    const path = makePath();
+    // Write lock as current process (alive) with recent timestamp
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+      "utf-8",
+    );
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(false);
+    expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  it("live pid with stale lock (>5min old) is reclaimed", () => {
+    const path = makePath();
+    // Write lock as current process (alive) with startedAt beyond timeout
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now() - StaleLockTimeoutMs - 10_000, lastHeartbeat: Date.now() - StaleLockTimeoutMs - 10_000 }),
+      "utf-8",
+    );
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+
+    // Verify new lock file has our pid
+    const raw = readFileSync(path + ".lock", "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+    expect(typeof parsed.lastHeartbeat).toBe("number");
+
+    lock.release();
+    expect(existsSync(path + ".lock")).toBe(false);
+  });
+
+  it("live pid with lock just under timeout boundary is not reclaimed", () => {
+    const path = makePath();
+    // startedAt just within the timeout window (5s slack)
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now() - StaleLockTimeoutMs + 5_000, lastHeartbeat: Date.now() - StaleLockTimeoutMs + 5_000 }),
+      "utf-8",
+    );
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(false);
+    expect(lock.heldByPid).toBe(process.pid);
   });
 });

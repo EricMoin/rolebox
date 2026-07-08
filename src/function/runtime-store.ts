@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { atomicWrite, atomicWriteSync } from "./fs-util.ts";
 import { shortHash } from "../state-paths.ts";
 import type { FnState } from "./runtime-state.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("runtime-store");
 
 interface FileShape {
   version: 1;
@@ -42,13 +45,13 @@ export class FunctionRuntimeStore {
   private async _doSave(states: Map<string, Map<string, FnState>>): Promise<void> {
     try {
       await atomicWrite(this.statePath(), this.toFile(states));
-    } catch {}
+    } catch (err) { log.warn("FunctionRuntimeStore._doSave failed", err); }
   }
 
   saveSync(states: Map<string, Map<string, FnState>>): void {
     try {
       atomicWriteSync(this.statePath(), this.toFile(states));
-    } catch {}
+    } catch (err) { log.warn("FunctionRuntimeStore.saveSync failed", err); }
   }
 
   load(): Map<string, Map<string, FnState>> | null {

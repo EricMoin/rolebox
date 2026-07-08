@@ -12,6 +12,7 @@ export function atomicWriteSync(target: string, content: string): void {
   mkdirSync(dirname(target), { recursive: true });
   const tmp = target + ".tmp";
   writeFileSync(tmp, content, "utf-8");
+  // target may not exist (first write or previous crash left no file) — ENOENT is expected and safe to ignore
   try { unlinkSync(target); } catch {}
   renameSync(tmp, target);
 }
@@ -21,6 +22,7 @@ export async function atomicWrite(target: string, content: string): Promise<void
   mkdirSync(dirname(target), { recursive: true });
   const tmp = target + ".tmp";
   await writeFile(tmp, content, "utf-8");
+  // target may not exist (first write or previous crash left no file) — ENOENT is expected and safe to ignore
   try { unlinkSync(target); } catch {}
   renameSync(tmp, target);
 }

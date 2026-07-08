@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { atomicWrite, atomicWriteSync } from "../function/fs-util.ts";
 import { shortHash } from "../state-paths.ts";
 import type { LoopPhase, LoopState } from "./types.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("loop-store");
 
 interface FileShape {
   version: 1;
@@ -57,13 +60,13 @@ export class LoopStore {
   private async _doSave(loops: Map<string, LoopState>): Promise<void> {
     try {
       await atomicWrite(this.statePath(), this.toFile(loops));
-    } catch {}
+    } catch (err) { log.warn("LoopStore._doSave failed", err); }
   }
 
   saveSync(loops: Map<string, LoopState>): void {
     try {
       atomicWriteSync(this.statePath(), this.toFile(loops));
-    } catch {}
+    } catch (err) { log.warn("LoopStore.saveSync failed", err); }
   }
 
   load(): Map<string, LoopState> | null {

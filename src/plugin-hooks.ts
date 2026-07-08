@@ -74,7 +74,7 @@ export async function createPluginHooks(
     hookState.shutdownRegistered = true;
     const flushAllSync = () => {
       for (const [d, mgr] of hookState.loopManagerMap) {
-        try { hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates()); } catch {}
+        try { hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates()); } catch (err) { log.warn("flushAllSync saveSync failed for directory", d, err); }
         mgr.dispose();
       }
       core.getService<DispatchService>("dispatch-service")?.getDispatchManager().flushPersistSync();
