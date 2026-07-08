@@ -22,7 +22,7 @@ describe("BUG-2: session-idle-first completion (model-agnostic)", () => {
     const status = { type: "idle" };
     const es: TaskEventState = {
       lastMessageCount: 0, lastProgressUpdate: Date.now(),
-      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(),
+      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(), consecutiveFetchFailures: 0,
     };
 
     const result = detectCompletion(msgs, status, es, true);
@@ -37,7 +37,7 @@ describe("BUG-2: session-idle-first completion (model-agnostic)", () => {
     const status = { type: "idle" };
     const es: TaskEventState = {
       lastMessageCount: 0, lastProgressUpdate: Date.now(),
-      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(),
+      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(), consecutiveFetchFailures: 0,
     };
 
     const result = detectCompletion(msgs, status, es, true);
@@ -51,7 +51,7 @@ describe("BUG-2: session-idle-first completion (model-agnostic)", () => {
     const status = { type: "idle" };
     const es: TaskEventState = {
       lastMessageCount: 0, lastProgressUpdate: Date.now(),
-      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(),
+      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(), consecutiveFetchFailures: 0,
     };
 
     const result = detectCompletion(msgs, status, es, true);
@@ -65,7 +65,7 @@ describe("BUG-2: session-idle-first completion (model-agnostic)", () => {
     const status = { type: "idle" };
     const es: TaskEventState = {
       lastMessageCount: 0, lastProgressUpdate: Date.now(),
-      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(),
+      hasProducedOutput: true, messageCountAtStart: 0, lastEventAt: Date.now(), consecutiveFetchFailures: 0,
     };
 
     const result = detectCompletion(msgs, status, es);

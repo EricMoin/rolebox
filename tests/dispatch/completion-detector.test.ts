@@ -22,7 +22,7 @@ function eventState(overrides: Partial<TaskEventState> = {}): TaskEventState {
     hasProducedOutput: true,
     messageCountAtStart: 0,
     lastEventAt: Date.now(),
-    ...overrides,
+    consecutiveFetchFailures: 0,
   };
 }
 

@@ -65,6 +65,11 @@ export const DEFAULT_RETRY_AFTER_MS = 30_000;
  *  LIVE — consumed by manager.ts (Task 12) */
 export const DEFAULT_BACKPRESSURE_MAX_RETRIES = 5;
 
+/** Max consecutive SDK fetch failures before escalating a running task to error.
+ *  Prevents silent death: if evaluateAndComplete cannot fetch session state,
+ *  the task transitions to error instead of cycling through the watchdog forever. */
+export const MAX_CONSECUTIVE_FETCH_FAILURES = 3;
+
 /** Default max backpressure delay (ms) before giving up.
  *  LIVE — consumed by manager.ts (Task 12) */
 export const DEFAULT_BACKPRESSURE_MAX_DELAY_MS = 60_000;

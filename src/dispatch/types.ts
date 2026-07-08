@@ -184,4 +184,8 @@ export interface TaskEventState {
    *  Cleared on re-check if message count changed (model continued).
    *  Capped at exactly one re-check — no livelock. */
   pendingConfirm?: { messageCount: number; at: number };
+  /** Consecutive fetch failures since last successful progress update.
+   *  Reset to 0 on each successful fetch.  Used by the stale-detection
+   *  subsystem to distinguish transient blips from genuine hangs. */
+  consecutiveFetchFailures: number;
 }
