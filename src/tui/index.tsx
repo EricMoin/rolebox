@@ -275,7 +275,10 @@ function createSidebarRenderer(workspaceDir: string) {
           setStateDirPresent(present);
           const snap = readMonitorSnapshot(workspaceDir);
           if (canceled) return;
-          if (present) lastGood = snap;
+          if (present) {
+            lastGood = snap;
+            setSessionScope(buildSessionScope(stateDirFor(workspaceDir), currentSessionId));
+          }
           setSnapshot(present ? snap : (lastGood ?? snap));
           setConsecutiveFailures(0);
           setPhase("ready");
