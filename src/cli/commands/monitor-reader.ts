@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { normalizeWorkspaceDir, stateDirFor } from "../../state-paths.ts";
 import { readResultSidecar, resultSidecarPath } from "../../dispatch/result-extractor.ts";
+import { BACKGROUND_STALE_TIMEOUT_MS } from "../../dispatch/config.ts";
 import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
 import type {
   TaskSnapshot,
@@ -50,9 +51,20 @@ interface RawDispatchTask {
   result?: { sidecarPath: string; totalChars: number };
 }
 
+interface RawTaskEventState {
+  lastMessageCount: number;
+  lastProgressUpdate: number;
+  hasProducedOutput: boolean;
+  messageCountAtStart: number;
+  lastEventAt: number;
+  pendingConfirm?: { messageCount: number; at: number };
+  consecutiveFetchFailures: number;
+}
+
 interface RawDispatchFile {
   version: number;
   tasks: RawDispatchTask[];
+  eventState?: Record<string, RawTaskEventState>;
 }
 
 interface RawFnEntry {
@@ -366,11 +378,20 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
   const taskById = new Map<string, TaskSnapshot>();
   const sessionAgentMap = new Map<string, string>();
   const liveSessions = new Set<string>();
+  const eventStateById = new Map<string, RawTaskEventState>();
   for (const dispatchPath of listStateFiles(stateDir, "dispatch-")) {
     const dispatchRaw = tryReadJson(dispatchPath);
     if (!dispatchRaw || typeof dispatchRaw !== "object" || !("tasks" in dispatchRaw)) continue;
     const file = dispatchRaw as RawDispatchFile;
     if (!Array.isArray(file.tasks)) continue;
+
+    // Collect eventState if present
+    if (file.eventState && typeof file.eventState === "object") {
+      for (const [taskId, es] of Object.entries(file.eventState)) {
+        eventStateById.set(taskId, es);
+      }
+    }
+
     for (const st of file.tasks) {
       if (st.sessionId && st.agent) sessionAgentMap.set(st.sessionId, st.agent);
       if (st.sessionId && (st.status === "running" || st.status === "pending")) {
@@ -402,6 +423,19 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
         }
       }
 
+      const es = eventStateById.get(st.id);
+
+      // Compute lastActivityAgoMs: the gap between now and the most recent
+      // signal of life (progress update, event timestamp, or creation time).
+      let lastActivityAgoMs: number | undefined;
+      if (es) {
+        const progressTime = es.lastProgressUpdate;
+        const eventTime = es.lastEventAt;
+        const createTime = new Date(st.startedAt).getTime();
+        const latest = Math.max(progressTime, eventTime, createTime);
+        lastActivityAgoMs = Date.now() - latest;
+      }
+
       taskById.set(st.id, {
         id: st.id,
         status: st.status as TaskSnapshot["status"],
@@ -416,7 +450,25 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
         sessionId: st.sessionId,
         resultPreview,
         resultTotalChars,
+
+        // Liveness / event-tracking fields
+        lastEventAt: es ? new Date(es.lastEventAt).toISOString() : undefined,
+        lastProgressUpdate: es ? new Date(es.lastProgressUpdate).toISOString() : undefined,
+        hasProducedOutput: es ? es.hasProducedOutput : undefined,
+        toolCalls: es ? es.lastMessageCount : undefined,
+        consecutiveFetchFailures: es ? es.consecutiveFetchFailures : undefined,
+        staleTimeoutMs: undefined, // computed below in a second pass
+        lastActivityAgoMs,
       });
+    }
+  }
+
+  // Second pass: populate staleTimeoutMs for running/pending tasks.
+  // All tasks share the same configured background default since per-task
+  // overrides are not persisted in the dispatch file.
+  for (const task of taskById.values()) {
+    if (task.status === "running" || task.status === "pending") {
+      task.staleTimeoutMs = BACKGROUND_STALE_TIMEOUT_MS;
     }
   }
 

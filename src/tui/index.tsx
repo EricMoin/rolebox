@@ -52,7 +52,7 @@ const MAX_LOOP_ROWS = 3;
 const MAX_FN_ROWS = 4;
 const BAR_WIDTH = 6;
 const RULE_WIDTH = 36;
-const STUCK_THRESHOLD_MS = 300_000;
+
 
 const BOLD = TextAttributes.BOLD;
 const DIM = TextAttributes.DIM;
@@ -73,6 +73,7 @@ const G_BAR_ON   = "\u25a0"; // ■
 const G_BAR_OFF  = "\u25a1"; // □
 const G_SUB      = "\u2514\u2500"; // └─
 const G_RULE     = "\u2500"; // ─
+const G_STALLED = "⚠"; // ⚠
 
 // ── Truncation / wrapping ───────────────────────────────────────────────
 //
@@ -185,6 +186,15 @@ function formatDuration(ms: number): string {
   const mins = Math.floor(ms / 60000);
   const secs = Math.floor((ms % 60000) / 1000);
   return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+}
+
+/** Format a time duration as a human-readable relative time like "3s ago", "2m ago", or "1h ago". */
+function formatTimeAgo(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "?";
+  if (ms < 1000) return "now";
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
+  if (ms < 3600000) return `${Math.floor(ms / 60000)}m`;
+  return `${Math.floor(ms / 3600000)}h`;
 }
 
 function barSegments(current: number, total: number, width = BAR_WIDTH): { filled: number; empty: number } {
@@ -495,16 +505,36 @@ function createSidebarRenderer(workspaceDir: string) {
           const snapTime = snap?.timestamp ? new Date(snap.timestamp).getTime() : Date.now();
           const elapsed = snapTime - new Date(task.startedAt ?? 0).getTime();
           const dur = formatDuration(elapsed);
-          const stuck = elapsed > STUCK_THRESHOLD_MS;
           const desc = task.description ?? null;
+          const staleTimeout = task.staleTimeoutMs ?? 300_000;
+
+          // Liveness indicator — activity recency or stalled warning
+          let activitySuffix: string | null = null;
+          let isStalled = false;
+          if (task.lastActivityAgoMs !== undefined && task.lastActivityAgoMs !== null) {
+            if (task.lastActivityAgoMs > staleTimeout) {
+              isStalled = true;
+              activitySuffix = " " + G_STALLED + " stalled \u00b7 " + formatTimeAgo(task.lastActivityAgoMs) + " ago";
+            } else {
+              activitySuffix = " \u00b7 " + formatTimeAgo(task.lastActivityAgoMs) + " ago";
+            }
+          }
+
+          const noOutputYet = task.hasProducedOutput === false && elapsed > 10_000;
+
           return (
             <>
               <text>
                 <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
                 <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
                 <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
-                <span fg={rgbaToCSS(stuck ? c.warning : c.textMuted)} attributes={stuck ? 0 : DIM}>{dur}</span>
+                {isStalled ? (
+                  <span fg={rgbaToCSS(c.warning)} attributes={BOLD}>{dur + activitySuffix}</span>
+                ) : (
+                  <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{dur + (activitySuffix ?? "")}</span>
+                )}
                 {desc && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + desc}</span>}
+                {noOutputYet && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{" (no output yet)"}</span>}
               </text>
             </>
           );

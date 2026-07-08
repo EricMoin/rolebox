@@ -21,6 +21,23 @@ export interface TaskSnapshot {
   resultTotalChars?: number;
   /** Full result text (lazy-loaded, only populated by readTaskDetail) */
   resultFullText?: string;
+
+  // ── Liveness / event-tracking fields ────────────────────────────
+  /** ISO timestamp of the most recent event routed for this task */
+  lastEventAt?: string;
+  /** ISO timestamp of the most recent progress update */
+  lastProgressUpdate?: string;
+  /** Whether the sub-agent has produced any output so far */
+  hasProducedOutput?: boolean;
+  /** Total number of tool calls observed */
+  toolCalls?: number;
+  /** Consecutive fetch failures since last successful progress update */
+  consecutiveFetchFailures?: number;
+  /** Configured stale timeout in ms for this task */
+  staleTimeoutMs?: number;
+  /** Milliseconds since the last activity (progress update or event).
+   *  Computed as Date.now() - max(lastProgressUpdate, lastEventAt, createdAt). */
+  lastActivityAgoMs?: number;
 }
 
 export interface ActiveFunction {
