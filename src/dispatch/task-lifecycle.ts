@@ -20,6 +20,7 @@ import {
   BACKGROUND_STALE_TIMEOUT_MS,
   MATERIALIZE_TIMEOUT_MS,
   RESULT_RETENTION_MS,
+  MAX_CONSECUTIVE_FETCH_FAILURES,
 } from "./config.ts";
 import { unlinkSync } from "node:fs";
 import type { IConcurrencyManager } from "./concurrency.ts";
@@ -268,6 +269,7 @@ export class TaskLifecycleManager {
         hasProducedOutput: false,
         messageCountAtStart: 0,
         lastEventAt: Date.now(),
+        consecutiveFetchFailures: 0,
       });
       task.status = "running";
       didMarkRunning = true;
@@ -655,6 +657,7 @@ export class TaskLifecycleManager {
       hasProducedOutput: false,
       messageCountAtStart: 0,
       lastEventAt: Date.now(),
+      consecutiveFetchFailures: 0,
     };
     es.messageCountAtStart = messageCountAtStart;
     es.lastProgressUpdate = Date.now();
@@ -1060,14 +1063,14 @@ export class TaskLifecycleManager {
         );
       } catch (e) {
         if (e instanceof TimeoutError) {
-          debugLog("evaluate", taskId, `fetch timed out after ${fetchTimeoutMs}ms`);
+          this._handleEvaluateFetchFailure(taskId, `fetch timed out after ${fetchTimeoutMs}ms`, fetchTimeoutMs);
           return;
         }
         throw e;
       }
 
       if (msgResult.error !== undefined) {
-        debugLog("evaluate", taskId, `messages fetch error: ${JSON.stringify(msgResult.error)}`);
+        this._handleEvaluateFetchFailure(taskId, `messages fetch error: ${JSON.stringify(msgResult.error)}`, fetchTimeoutMs);
         return;
       }
 
@@ -1077,6 +1080,7 @@ export class TaskLifecycleManager {
 
       const eventState = this.d.eventState.get(taskId);
       if (!eventState) return;
+      eventState.consecutiveFetchFailures = 0;
 
       const startIndex = eventState.messageCountAtStart ?? 0;
       const scopedMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
@@ -1186,8 +1190,33 @@ export class TaskLifecycleManager {
         }
       }
     } catch (err) {
-      debugLog("evaluate", taskId, `error fetching: ${err instanceof Error ? err.message : String(err)}`);
+      this._handleEvaluateFetchFailure(taskId, `error fetching: ${err instanceof Error ? err.message : String(err)}`, 0);
     }
+  }
+
+  /**
+   * Handle a consecutive fetch failure in evaluateAndComplete.
+   * Increments the counter, logs at infoLog, and escalates to error
+   * when the threshold is reached.  Returns true iff escalation occurred.
+   */
+  private _handleEvaluateFetchFailure(taskId: string, failureLabel: string, fetchTimeoutMs: number): boolean {
+    const es = this.d.eventState.get(taskId);
+    if (!es) return false;
+    es.consecutiveFetchFailures++;
+    infoLog("evaluate", taskId, `${failureLabel} (failure #${es.consecutiveFetchFailures})`);
+    if (es.consecutiveFetchFailures >= MAX_CONSECUTIVE_FETCH_FAILURES) {
+      if (this.transition(taskId, ["running"], "error", {
+        error: `Cannot verify task liveness — SDK fetch failed ${es.consecutiveFetchFailures} consecutive times`,
+      })) {
+        this.d.watchdog.unregisterTask(taskId);
+        this.d.watchdog.cancelDebounce(taskId);
+        this.finalizeCompletion(taskId);
+      }
+      this.d.persistState();
+      return true;
+    }
+    this.d.persistState();
+    return false;
   }
 
   // ── Event handlers ────────────────────────────────────────────

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { createMockClient, parentContext } from "./helpers";
 import { metrics } from "../../src/dispatch/metrics";
 import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/result-extractor";
+import { MAX_CONSECUTIVE_FETCH_FAILURES } from "../../src/dispatch/config";
 
 const fastConfig = {
   staleTimeoutMs: 500,
@@ -5070,5 +5071,116 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.notifyCompletion = origNotify;
     // Clean up sidecar file
     try { rmSync(taskRef.result!.sidecarPath); } catch {}
+  });
+
+  // ── 20. evaluateAndComplete consecutive-fetch-failure escalation ──
+
+  describe("evaluateAndComplete consecutive fetch failures", () => {
+    it("single fetch failure increments counter but does NOT escalate to error", async () => {
+      // Mock session.messages() with a never-resolving promise to trigger TimeoutError
+      const client = createMockClient({
+        sessionMessages: () => new Promise<never>(() => {}),
+      });
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        materializeTimeoutMs: 20,
+      });
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("running");
+
+      const mgr = manager as any;
+
+      // First evaluateAndComplete — single failure
+      await mgr.evaluateAndComplete(task.id, "watchdog-reconcile");
+
+      // Task should still be running (single failure, no escalation)
+      expect(task.status).toBe("running");
+      const es = mgr.eventState.get(task.id);
+      expect(es).toBeDefined();
+      expect(es.consecutiveFetchFailures).toBe(1);
+    });
+
+    it(`${MAX_CONSECUTIVE_FETCH_FAILURES} consecutive failures escalate to error`, async () => {
+      const client = createMockClient({
+        sessionMessages: () => new Promise<never>(() => {}),
+      });
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        materializeTimeoutMs: 20,
+      });
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("running");
+
+      const mgr = manager as any;
+
+      // Fail N-1 times — task should still be running
+      for (let i = 1; i < MAX_CONSECUTIVE_FETCH_FAILURES; i++) {
+        await mgr.evaluateAndComplete(task.id, "watchdog-reconcile");
+        expect(task.status).toBe("running");
+      }
+
+      // Nth failure triggers escalation
+      await mgr.evaluateAndComplete(task.id, "watchdog-reconcile");
+      expect(task.status).toBe("error");
+      expect(task.error).toContain("Cannot verify task liveness");
+      expect(task.error).toContain(`${MAX_CONSECUTIVE_FETCH_FAILURES} consecutive`);
+    });
+
+    it("successful fetch after failures resets counter to 0", async () => {
+      // Track calls: start with failing promise, switch to success after N failures
+      let callCount = 0;
+      const failuresBeforeSuccess = 2;
+
+      const client = createMockClient({
+        sessionMessages: () => {
+          callCount++;
+          if (callCount <= failuresBeforeSuccess) {
+            return new Promise<never>(() => {}); // never resolves → TimeoutError
+          }
+          // Successful response
+          return Promise.resolve({
+            data: [],
+            error: undefined,
+          });
+        },
+      });
+      const manager = new DispatchManager(client, {
+        ...fastConfig,
+        materializeTimeoutMs: 20,
+      });
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+      expect(task.status).toBe("running");
+
+      const mgr = manager as any;
+
+      // Fail N times
+      for (let i = 0; i < failuresBeforeSuccess; i++) {
+        await mgr.evaluateAndComplete(task.id, "watchdog-reconcile");
+      }
+
+      // Counter should be at N, task still running
+      let es = mgr.eventState.get(task.id);
+      expect(es.consecutiveFetchFailures).toBe(failuresBeforeSuccess);
+      expect(task.status).toBe("running");
+
+      // Now call with successful fetch — counter resets
+      await mgr.evaluateAndComplete(task.id, "watchdog-reconcile");
+
+      es = mgr.eventState.get(task.id);
+      expect(es.consecutiveFetchFailures).toBe(0);
+      expect(task.status).toBe("running");
+    });
   });
 });
