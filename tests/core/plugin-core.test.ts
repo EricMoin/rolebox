@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
-import { PluginCore } from "../../src/core/plugin-core.ts";
+import { PluginCore, DescriptiveCycleError } from "../../src/core/plugin-core.ts";
 import type { PluginService, PluginCoreLike } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 
@@ -238,4 +238,69 @@ describe("PluginCore", () => {
     });
   });
 
+  describe("topoSort", () => {
+    it("throws a descriptive error on circular dependencies", async () => {
+      const core = new PluginCore();
+      // A depends on B, B depends on A — direct cycle
+      const svcA = makeService("a", ["b"]);
+      const svcB = makeService("b", ["a"]);
+      core.registerService(svcA);
+      core.registerService(svcB);
+
+      try {
+        await core.init(makeContext(core));
+        // If we reach here, no error was thrown
+        expect.unreachable("Expected topoSort to throw on circular dependency");
+      } catch (err) {
+        expect(err).toBeInstanceOf(DescriptiveCycleError);
+        expect((err as DescriptiveCycleError).cycleMembers).toEqual(expect.arrayContaining(["a", "b"]));
+        const msg = (err as Error).message;
+        expect(msg).toContain("Circular dependency detected among services");
+        expect(msg).toContain("a");
+        expect(msg).toContain("b");
+      }
+    });
+
+    it("throws on indirect circular dependency (A->B->C->A)", async () => {
+      const core = new PluginCore();
+      const svcA = makeService("a", ["b"]);
+      const svcB = makeService("b", ["c"]);
+      const svcC = makeService("c", ["a"]);
+      core.registerService(svcA);
+      core.registerService(svcB);
+      core.registerService(svcC);
+
+      try {
+        await core.init(makeContext(core));
+        expect.unreachable("Expected topoSort to throw on circular dependency");
+      } catch (err) {
+        expect(err).toBeInstanceOf(DescriptiveCycleError);
+        expect((err as DescriptiveCycleError).cycleMembers).toEqual(expect.arrayContaining(["a", "b", "c"]));
+        const msg = (err as Error).message;
+        expect(msg).toContain("Circular dependency detected among services");
+        expect(msg).toContain("a");
+        expect(msg).toContain("b");
+        expect(msg).toContain("c");
+      }
+    });
+
+    it("does not break on a diamond dependency (non-circular)", async () => {
+      const core = new PluginCore();
+      // D depends on B and C; B and C depend on A — diamond, no cycle
+      const svcA = makeService("a");
+      const svcB = makeService("b", ["a"]);
+      const svcC = makeService("c", ["a"]);
+      const svcD = makeService("d", ["b", "c"]);
+      core.registerService(svcA);
+      core.registerService(svcB);
+      core.registerService(svcC);
+      core.registerService(svcD);
+
+      await expect(core.init(makeContext(core))).resolves.toBeUndefined();
+      expect(core.isDegraded("a")).toBe(false);
+      expect(core.isDegraded("b")).toBe(false);
+      expect(core.isDegraded("c")).toBe(false);
+      expect(core.isDegraded("d")).toBe(false);
+    });
+  });
 });

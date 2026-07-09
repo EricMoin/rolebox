@@ -6,6 +6,17 @@ import { StartupChecker } from "../recovery/startup-check.ts";
 import { stateDirFor } from "../state-paths.ts";
 import { ServiceSupervisor } from "./service-supervisor.ts";
 
+export class DescriptiveCycleError extends Error {
+  public readonly cycleMembers: string[];
+
+  constructor(cycleMembers: string[]) {
+    const message = `Circular dependency detected among services: [${cycleMembers.join(", ")}]`;
+    super(message);
+    this.name = "DescriptiveCycleError";
+    this.cycleMembers = cycleMembers;
+  }
+}
+
 const log = createSubLogger("plugin-core");
 
 export class PluginCore implements PluginCoreLike {
@@ -177,14 +188,18 @@ export class PluginCore implements PluginCoreLike {
     const visited = new Set<string>();
     const result: PluginService[] = [];
     const visiting = new Set<string>();
+    const path: string[] = [];
 
     const visit = (name: string) => {
       if (visited.has(name)) return;
       if (visiting.has(name)) {
-        log.error("Circular dependency detected", { name });
-        return;
+        // Recover the cycle members from the current DFS path
+        const cycleStart = path.indexOf(name);
+        const cycleMembers = path.slice(cycleStart);
+        throw new DescriptiveCycleError(cycleMembers);
       }
       visiting.add(name);
+      path.push(name);
       const svc = this.services.get(name);
       if (svc) {
         for (const dep of svc.dependencies) {
@@ -192,6 +207,7 @@ export class PluginCore implements PluginCoreLike {
         }
         result.push(svc);
       }
+      path.pop();
       visiting.delete(name);
       visited.add(name);
     };
