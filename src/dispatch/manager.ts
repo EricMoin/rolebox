@@ -22,35 +22,7 @@ import { debugLog } from "./debug-log.ts";
 import { metrics } from "./metrics.ts";
 import { TaskLifecycleManager } from "./task-lifecycle.ts";
 import { CompletionOrchestrator, type CompletionOrchestratorDeps } from "./completion-orchestrator.ts";
-
-/**
- * Extract a human-readable error message from various session.error shapes.
- * Re-exported from the original manager.ts for test backward compatibility.
- *
- * Opencode session.error payloads vary (Error | string | { name, data: { message } }).
- * String(obj) would yield "[object Object]" and hide the real cause, so dig out a message.
- */
-export function extractSessionErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message || error.name || "Error";
-  if (typeof error === "string") return error.trim() || "Unknown session error";
-  if (error && typeof error === "object") {
-    const o = error as Record<string, unknown>;
-    const data = (o.data && typeof o.data === "object" ? o.data : {}) as Record<string, unknown>;
-    const msg = data.message ?? o.message;
-    const name = typeof o.name === "string" ? o.name : undefined;
-    if (typeof msg === "string" && msg.trim()) {
-      return name && name !== msg ? `${name}: ${msg}` : msg;
-    }
-    if (name && name.trim()) return name;
-    try {
-      const json = JSON.stringify(error);
-      if (json && json !== "{}") return json;
-    } catch {
-      return String(error);
-    }
-  }
-  return error !== undefined ? String(error) : "Unknown session error";
-}
+export { extractSessionErrorMessage } from "./error-utils.ts";
 
 export class DispatchManager {
   // ── Shared mutable state (owned here, shared with lifecycle & orchestrator) ─
@@ -375,93 +347,36 @@ export class DispatchManager {
   }
 
   // ── Bridge methods (accessed by tests via (manager as any)) ──
+  // See manager-bridge.ts for documentation. These one-liners delegate
+  // to lifecycle/orchestrator internals for test access.
 
-  // ── Bridge properties ──
-  /** Bridge: tests read orchestrator's dirty flag. */
   get _dirty(): boolean { return this.orchestrator._dirty; }
-  /** Bridge: tests read orchestrator's persist timer. */
   get _persistTimer(): ReturnType<typeof setTimeout> | undefined { return this.orchestrator._persistTimer; }
-  /** Bridge: tests read orchestrator's sweeper timer. */
   get sweeperTimer(): ReturnType<typeof setInterval> | undefined { return this.orchestrator.sweeperTimer; }
 
-  // ── Bridge: lifecycle methods ──
-
-  evaluateAndComplete(
-    taskId: string,
-    trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event",
-    errorDetail?: string,
-  ): Promise<void> {
-    return this.lifecycle.evaluateAndComplete(taskId, trigger, errorDetail);
-  }
-
-  handleTaskCompleted(taskId: string): void {
-    this.lifecycle.handleTaskCompleted(taskId);
-  }
-
-  handleTaskError(taskId: string, error: string): void {
-    this.lifecycle.handleTaskError(taskId, error);
-  }
-
-  handleTaskTimeout(taskId: string, reason: string): void {
-    this.lifecycle.handleTaskTimeout(taskId, reason);
-  }
-
-  materializeResult(taskId: string): Promise<import("./types.ts").MaterializedResultRef> {
-    return this.lifecycle.materializeResult(taskId);
-  }
-
-  materializeAndNotify(taskId: string): Promise<void> {
-    return this.lifecycle.materializeAndNotify(taskId);
-  }
-
-  computeDepth(parentSessionId: string): number {
-    return this.lifecycle.computeDepth(parentSessionId);
-  }
-
-  getRequestSessions(rootSession: string): number {
-    return this.lifecycle.getRequestSessions(rootSession);
-  }
-
-  leaveRunning(taskId: string): void {
-    this.lifecycle.leaveRunning(taskId);
-  }
-
-  // ── Bridge: orchestrator methods ──
-
-  persistState(): void {
-    this.orchestrator.persistState();
-  }
-
-  scheduleCleanup(taskId: string): void {
-    this.orchestrator.scheduleCleanup(taskId);
-  }
-
-  /**
-   * Transition a task's status atomically. Delegates to the orchestrator.
-   * Accessed by tests via (manager as any).transition(...).
-   */
-  transition(
-    taskId: string,
-    from: import("./types.ts").DispatchTaskStatus[],
-    to: import("./types.ts").DispatchTaskStatus,
-    fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>,
-  ): boolean {
-    return this.orchestrator.transition(taskId, from, to, fields);
-  }
+  evaluateAndComplete(taskId: string, trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event", errorDetail?: string): Promise<void> { return this.lifecycle.evaluateAndComplete(taskId, trigger, errorDetail); }
+  handleTaskCompleted(taskId: string): void { this.lifecycle.handleTaskCompleted(taskId); }
+  handleTaskError(taskId: string, error: string): void { this.lifecycle.handleTaskError(taskId, error); }
+  handleTaskTimeout(taskId: string, reason: string): void { this.lifecycle.handleTaskTimeout(taskId, reason); }
+  materializeResult(taskId: string): Promise<import("./types.ts").MaterializedResultRef> { return this.lifecycle.materializeResult(taskId); }
+  materializeAndNotify(taskId: string): Promise<void> { return this.lifecycle.materializeAndNotify(taskId); }
+  computeDepth(parentSessionId: string): number { return this.lifecycle.computeDepth(parentSessionId); }
+  getRequestSessions(rootSession: string): number { return this.lifecycle.getRequestSessions(rootSession); }
+  leaveRunning(taskId: string): void { this.lifecycle.leaveRunning(taskId); }
+  persistState(): void { this.orchestrator.persistState(); }
+  scheduleCleanup(taskId: string): void { this.orchestrator.scheduleCleanup(taskId); }
+  transition(taskId: string, from: import("./types.ts").DispatchTaskStatus[], to: import("./types.ts").DispatchTaskStatus, fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>): boolean { return this.orchestrator.transition(taskId, from, to, fields); }
 
   setConcurrencyManager(manager: IConcurrencyManager): void {
     this.concurrency = manager;
     this.lifecycle.setConcurrencyManager(manager);
   }
 
-  // ── Store directory & recovery setup ───────────────────────
-
   setStoreDirectory(directory: string): void {
     this._directory = directory;
     this.store = new TaskStateStore(directory);
     this.metricsPersister = new MetricsPersister(directory);
     this.lifecycle.setDirectory(directory);
-    // Propagate store & metricsPersister to the orchestrator's deps
     this.orchestrator.setStore(this.store);
     this.orchestrator.setMetricsPersister(this.metricsPersister);
     this.orchestrator.setDirectory(directory);
