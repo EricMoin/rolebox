@@ -11,6 +11,11 @@ export const NOTIFICATION_EVENT_TYPES = {
   Custom: "custom",
 } as const;
 
+/** Set of all valid notification event type values, for runtime validation. */
+export const VALID_NOTIFICATION_EVENT_TYPES: ReadonlySet<string> = new Set(
+  Object.values(NOTIFICATION_EVENT_TYPES),
+);
+
 /**
  * Notification event type — open string type.
  * Built-in values are in NOTIFICATION_EVENT_TYPES; custom values can be any string.
