@@ -17,6 +17,12 @@ import type {
 } from "./types.graph.ts";
 import type { DispatchRoleConfig } from "./types.dispatch.ts";
 
+// Re-export domain-specific types for barrel compatibility
+export type { MemoryConfig, MemoryEntry, MemorySummary } from "./memory/types.ts";
+export type { SkillMetadata, FunctionMetadata } from "./loader/types.ts";
+
+import type { MemoryConfig } from "./memory/types.ts";
+
 /**
  * Permission configuration, mirroring opencode's PermissionConfig structure.
  * Controls which tools a role is allowed or denied from using.
@@ -258,97 +264,4 @@ export interface ResolvedRole {
   auto_activate?: string[];
   /** When true, auto-activated functions cannot be deactivated by transition or user (passthrough from config). */
   locked?: boolean;
-}
-
-/**
- * YAML frontmatter metadata parsed from SKILL.md files.
- * Fields follow the standard opencode skill frontmatter schema.
- */
-export interface SkillMetadata {
-  /** Skill name */
-  name?: string;
-  /** Human-readable description */
-  description?: string;
-  /** Recommended model for this skill */
-  model?: string;
-  /** Software license identifier */
-  license?: string;
-  /** Tool compatibility declaration (e.g., "claude-code opencode") */
-  compatibility?: string;
-  /** Allowed tools, either as a comma-separated string or an array */
-  "allowed-tools"?: string | string[];
-  /** Explicit reference declarations for the skill */
-  references?: Record<string, string | ReferenceEntry>;
-}
-
-/**
- * YAML frontmatter metadata parsed from function files.
- * Fields follow a simpler subset of the skill frontmatter schema.
- */
-export interface FunctionMetadata {
-  /** Function name */
-  name?: string;
-  /** Human-readable description */
-  description?: string;
-  /** Parameter declarations: name → default value or description */
-  params?: Record<string, string>;
-  phase?: string;
-  priority?: number;
-  requires?: string[];
-  produces?: string;
-  consumes?: string;
-  gate?: Condition;
-  continue_until?: Condition;
-  requires_evidence?: string[];
-  observe?: ObserveSpec[];
-  transitions?: TransitionSpec[];
-  state_schema_version?: number;
-  continue_max?: number;
-  handlers?: string;
-}
-
-/**
- * Memory configuration in role.yaml.
- * Controls how memories are injected into the system prompt.
- */
-export interface MemoryConfig {
-  /** Whether to auto-inject <available_memory> block at session start (default: true) */
-  inject?: boolean;
-  /** Max memory summaries to inject into system prompt (default: 10) */
-  max_inject?: number;
-  /** Minimum relevance level to inject: "high" | "medium" | "low" (default: "medium") */
-  min_relevance?: string;
-  /** Which scope to inject: "role" | "workspace" | "both" (default: "both") */
-  scope?: string;
-}
-
-/**
- * A memory entry returned by list/search/store.read.
- */
-export interface MemoryEntry {
-  id: string;
-  scope: string;
-  role_id: string;
-  category: string;
-  title: string;
-  content: string;
-  tags: string[];
-  relevance: string;
-  created_at: string;
-  updated_at: string;
-  accessed_at: string | null;
-  access_count: number;
-  session_id: string | null;
-  source_sessions: string[];
-}
-
-/**
- * A memory summary for injection (lighter weight — no full content).
- */
-export interface MemorySummary {
-  id: string;
-  title: string;
-  category: string;
-  relevance: string;
-  updated_at: string;
 }
