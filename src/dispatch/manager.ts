@@ -378,11 +378,11 @@ export class DispatchManager {
 
   // ── Bridge properties ──
   /** Bridge: tests read orchestrator's dirty flag. */
-  get _dirty(): boolean { return (this.orchestrator as any)._dirty; }
+  get _dirty(): boolean { return this.orchestrator._dirty; }
   /** Bridge: tests read orchestrator's persist timer. */
-  get _persistTimer(): ReturnType<typeof setTimeout> | undefined { return (this.orchestrator as any)._persistTimer; }
+  get _persistTimer(): ReturnType<typeof setTimeout> | undefined { return this.orchestrator._persistTimer; }
   /** Bridge: tests read orchestrator's sweeper timer. */
-  get sweeperTimer(): ReturnType<typeof setInterval> | undefined { return (this.orchestrator as any).sweeperTimer; }
+  get sweeperTimer(): ReturnType<typeof setInterval> | undefined { return this.orchestrator.sweeperTimer; }
 
   // ── Bridge: lifecycle methods ──
 
@@ -395,31 +395,31 @@ export class DispatchManager {
   }
 
   handleTaskCompleted(taskId: string): void {
-    (this.lifecycle as any).handleTaskCompleted(taskId);
+    this.lifecycle.handleTaskCompleted(taskId);
   }
 
   handleTaskError(taskId: string, error: string): void {
-    (this.lifecycle as any).handleTaskError(taskId, error);
+    this.lifecycle.handleTaskError(taskId, error);
   }
 
   handleTaskTimeout(taskId: string, reason: string): void {
-    (this.lifecycle as any).handleTaskTimeout(taskId, reason);
+    this.lifecycle.handleTaskTimeout(taskId, reason);
   }
 
   materializeResult(taskId: string): Promise<import("./types.ts").MaterializedResultRef> {
-    return (this.lifecycle as any).materializeResult(taskId);
+    return this.lifecycle.materializeResult(taskId);
   }
 
   materializeAndNotify(taskId: string): Promise<void> {
-    return (this.lifecycle as any).materializeAndNotify(taskId);
+    return this.lifecycle.materializeAndNotify(taskId);
   }
 
   computeDepth(parentSessionId: string): number {
-    return (this.lifecycle as any).computeDepth(parentSessionId);
+    return this.lifecycle.computeDepth(parentSessionId);
   }
 
   getRequestSessions(rootSession: string): number {
-    return (this.lifecycle as any).getRequestSessions(rootSession);
+    return this.lifecycle.getRequestSessions(rootSession);
   }
 
   leaveRunning(taskId: string): void {
@@ -446,12 +446,12 @@ export class DispatchManager {
     to: import("./types.ts").DispatchTaskStatus,
     fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>,
   ): boolean {
-    return (this.orchestrator as any).transition(taskId, from, to, fields);
+    return this.orchestrator.transition(taskId, from, to, fields);
   }
 
   setConcurrencyManager(manager: IConcurrencyManager): void {
     this.concurrency = manager;
-    (this.lifecycle as any).d.concurrency = manager;
+    this.lifecycle.setConcurrencyManager(manager);
   }
 
   // ── Store directory & recovery setup ───────────────────────
@@ -460,11 +460,11 @@ export class DispatchManager {
     this._directory = directory;
     this.store = new TaskStateStore(directory);
     this.metricsPersister = new MetricsPersister(directory);
-    (this.lifecycle as any).d.directory = directory;
+    this.lifecycle.setDirectory(directory);
     // Propagate store & metricsPersister to the orchestrator's deps
-    (this.orchestrator as any).d.store = this.store;
-    (this.orchestrator as any).d.metricsPersister = this.metricsPersister;
-    (this.orchestrator as any).d.directory = directory;
+    this.orchestrator.setStore(this.store);
+    this.orchestrator.setMetricsPersister(this.metricsPersister);
+    this.orchestrator.setDirectory(directory);
   }
 
   setRecoverySnapshotProvider(

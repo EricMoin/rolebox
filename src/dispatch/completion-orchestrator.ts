@@ -62,12 +62,34 @@ export interface CompletionOrchestratorDeps {
  * All Map/Set references are shared with the owning DispatchManager and
  * TaskLifecycleManager — mutations are visible across all three.
  */
-export class CompletionOrchestrator {
+/**
+ * Bridge interface for private methods/fields accessed by DispatchManager via `(this.orchestrator as any)`.
+ * Provides type-safe access without exposing the full internal API.
+ */
+export interface OrchestratorBridge {
+  readonly _dirty: boolean;
+  readonly _persistTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly sweeperTimer: ReturnType<typeof setInterval> | undefined;
+  transition(
+    taskId: string,
+    from: DispatchTaskStatus[],
+    to: DispatchTaskStatus,
+    fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>,
+  ): boolean;
+  setStore(store: TaskStateStore): void;
+  setMetricsPersister(persister: MetricsPersister): void;
+  setDirectory(directory: string): void;
+}
+
+export class CompletionOrchestrator implements OrchestratorBridge {
   private d: CompletionOrchestratorDeps;
   private _recovered = false;
-  private _dirty = false;
-  private _persistTimer: ReturnType<typeof setTimeout> | undefined;
-  private sweeperTimer: ReturnType<typeof setInterval> | undefined;
+  get _dirty(): boolean { return this._dirtyInternal; }
+  private _dirtyInternal = false;
+  get _persistTimer(): ReturnType<typeof setTimeout> | undefined { return this._persistTimerInternal; }
+  private _persistTimerInternal: ReturnType<typeof setTimeout> | undefined;
+  get sweeperTimer(): ReturnType<typeof setInterval> | undefined { return this._sweeperTimerInternal; }
+  private _sweeperTimerInternal: ReturnType<typeof setInterval> | undefined;
   private _budgetSamplerTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(deps: CompletionOrchestratorDeps) {
@@ -130,12 +152,12 @@ export class CompletionOrchestrator {
    * Debounced asynchronous state persistence. Safe to call frequently.
    */
   persistState(): void {
-    this._dirty = true;
-    if (this._persistTimer) return;
-    this._persistTimer = setTimeout(async () => {
-      this._persistTimer = undefined;
-      if (!this._dirty) return;
-      this._dirty = false;
+    this._dirtyInternal = true;
+    if (this._persistTimerInternal) return;
+    this._persistTimerInternal = setTimeout(async () => {
+      this._persistTimerInternal = undefined;
+      if (!this._dirtyInternal) return;
+      this._dirtyInternal = false;
       try {
         await this.d.store.save(this.d.tasks, this.d.notifyOutbox, this.d.eventState);
       } catch (err) {
@@ -161,12 +183,12 @@ export class CompletionOrchestrator {
    * Force synchronous flush of any pending persistState writes.
    */
   async flushPersist(): Promise<void> {
-    if (this._persistTimer) {
-      clearTimeout(this._persistTimer);
-      this._persistTimer = undefined;
+    if (this._persistTimerInternal) {
+      clearTimeout(this._persistTimerInternal);
+      this._persistTimerInternal = undefined;
     }
-    if (this._dirty) {
-      this._dirty = false;
+    if (this._dirtyInternal) {
+      this._dirtyInternal = false;
       await this.d.store.save(this.d.tasks, this.d.notifyOutbox, this.d.eventState);
     }
     await this.d.metricsPersister.persist();
@@ -176,12 +198,12 @@ export class CompletionOrchestrator {
    * Synchronous version of flushPersist() for process-exit crash safety.
    */
   flushPersistSync(): void {
-    if (this._persistTimer) {
-      clearTimeout(this._persistTimer);
-      this._persistTimer = undefined;
+    if (this._persistTimerInternal) {
+      clearTimeout(this._persistTimerInternal);
+      this._persistTimerInternal = undefined;
     }
-    if (this._dirty) {
-      this._dirty = false;
+    if (this._dirtyInternal) {
+      this._dirtyInternal = false;
       try {
         this.d.store.saveSync(this.d.tasks, this.d.notifyOutbox, this.d.eventState);
       } catch (err) {
@@ -194,9 +216,9 @@ export class CompletionOrchestrator {
       clearInterval(this._budgetSamplerTimer);
       this._budgetSamplerTimer = undefined;
     }
-    if (this.sweeperTimer) {
-      clearInterval(this.sweeperTimer);
-      this.sweeperTimer = undefined;
+    if (this._sweeperTimerInternal) {
+      clearInterval(this._sweeperTimerInternal);
+      this._sweeperTimerInternal = undefined;
     }
     for (const timer of this.d.sidecarGCTimers.values()) {
       clearTimeout(timer);
@@ -217,7 +239,7 @@ export class CompletionOrchestrator {
 
   startSweeper(): void {
     const interval = this.d.config.outboxSweepIntervalMs ?? OUTBOX_SWEEP_INTERVAL_MS;
-    this.sweeperTimer = setInterval(async () => {
+    this._sweeperTimerInternal = setInterval(async () => {
       for (const taskId of this.d.notifyOutbox) {
         const task = this.d.tasks.get(taskId);
         if (!task || hasFinalNotifyBeenSent(taskId)) {
@@ -507,7 +529,7 @@ export class CompletionOrchestrator {
    * Atomic compare-and-swap status transition. Returns true iff THIS call won the race.
    * Used in recovery paths that need direct access.
    */
-  private transition(
+  transition(
     taskId: string,
     from: DispatchTaskStatus[],
     to: DispatchTaskStatus,
@@ -520,5 +542,19 @@ export class CompletionOrchestrator {
     t.completedAt = fields && "completedAt" in fields ? fields.completedAt : new Date();
     if (fields?.error !== undefined) t.error = fields.error;
     return true;
+  }
+
+  // ── Bridge setter methods (mutate deps from DispatchManager) ──
+
+  setStore(store: TaskStateStore): void {
+    this.d.store = store;
+  }
+
+  setMetricsPersister(persister: MetricsPersister): void {
+    this.d.metricsPersister = persister;
+  }
+
+  setDirectory(directory: string): void {
+    this.d.directory = directory;
   }
 }

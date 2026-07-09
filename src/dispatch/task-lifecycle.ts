@@ -77,7 +77,24 @@ export interface TaskLifecycleDeps {
   sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) => Promise<boolean>;
 }
 
-export class TaskLifecycleManager {
+/**
+ * Bridge interface for methods accessed by DispatchManager via `(this.lifecycle as any)`.
+ * These were previously private; making them part of this interface provides
+ * type-safe access without exposing the full internal API.
+ */
+export interface LifecycleBridge {
+  handleTaskCompleted(taskId: string): void;
+  handleTaskError(taskId: string, error: string): void;
+  handleTaskTimeout(taskId: string, reason: string): void;
+  materializeResult(taskId: string): Promise<MaterializedResultRef>;
+  materializeAndNotify(taskId: string): Promise<void>;
+  computeDepth(parentSessionId: string): number;
+  getRequestSessions(rootSession: string): number;
+  setConcurrencyManager(manager: IConcurrencyManager): void;
+  setDirectory(directory: string): void;
+}
+
+export class TaskLifecycleManager implements LifecycleBridge {
   private d: TaskLifecycleDeps;
 
   constructor(deps: TaskLifecycleDeps) {
@@ -90,7 +107,7 @@ export class TaskLifecycleManager {
     return this.d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
   }
 
-  private computeDepth(parentSessionId: string): number {
+  computeDepth(parentSessionId: string): number {
     const parentTaskId = this.d.sessionToTask.get(parentSessionId);
     if (!parentTaskId) return 0;
     const parentTask = this.d.tasks.get(parentTaskId);
@@ -98,7 +115,7 @@ export class TaskLifecycleManager {
     return (parentTask.depth ?? 0) + 1;
   }
 
-  private getRequestSessions(rootSession: string): number {
+  getRequestSessions(rootSession: string): number {
     return this.d.sessionsByRequest.get(rootSession) ?? 0;
   }
 
@@ -866,7 +883,7 @@ export class TaskLifecycleManager {
 
   // ── materializeResult() ───────────────────────────────────────
 
-  private async materializeResult(taskId: string): Promise<MaterializedResultRef> {
+  async materializeResult(taskId: string): Promise<MaterializedResultRef> {
     const task = this.d.tasks.get(taskId);
     if (!task) {
       return {
@@ -1367,7 +1384,7 @@ export class TaskLifecycleManager {
 
   // ── Completion helpers ────────────────────────────────────────
 
-  private handleTaskCompleted(taskId: string): void {
+  handleTaskCompleted(taskId: string): void {
     if (!this.transition(taskId, ["pending", "running"], "completed")) return;
     const t = this.d.tasks.get(taskId)!;
     const duration = Date.now() - t.startedAt.getTime();
@@ -1378,7 +1395,7 @@ export class TaskLifecycleManager {
     void this.materializeAndNotify(taskId);
   }
 
-  private handleTaskError(taskId: string, error: string): void {
+  handleTaskError(taskId: string, error: string): void {
     if (!this.transition(taskId, ["pending", "running"], "error", { error })) return;
     const t = this.d.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
@@ -1387,7 +1404,7 @@ export class TaskLifecycleManager {
     this.leaveRunning(taskId);
   }
 
-  private handleTaskTimeout(taskId: string, reason: string): void {
+  handleTaskTimeout(taskId: string, reason: string): void {
     if (!this.transition(taskId, ["pending", "running"], "timeout", { error: reason })) return;
     const t = this.d.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
@@ -1411,7 +1428,7 @@ export class TaskLifecycleManager {
     this.leaveRunning(taskId);
   }
 
-  private async materializeAndNotify(taskId: string): Promise<void> {
+  async materializeAndNotify(taskId: string): Promise<void> {
     const t = this.d.tasks.get(taskId);
     if (!t || t.status !== "completed") return;
 
@@ -1437,6 +1454,16 @@ export class TaskLifecycleManager {
       this.d.addToOutbox(taskId);
     }
     await this.notifyCompletion(t, remaining, resultText);
+  }
+
+  // ── Bridge setter methods (mutate deps from DispatchManager) ──
+
+  setConcurrencyManager(manager: IConcurrencyManager): void {
+    this.d.concurrency = manager;
+  }
+
+  setDirectory(directory: string): void {
+    this.d.directory = directory;
   }
 }
 /** Re-exported from manager.ts for use in event handlers. */
