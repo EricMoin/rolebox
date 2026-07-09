@@ -1,8 +1,8 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import type { ServiceHealth } from "./service.ts";
-import { createSubLogger } from "../logger.ts";
-import type { ServiceSupervisor } from "./service-supervisor.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import type { ServiceHealth } from "../service.ts";
+import { createSubLogger } from "../../logger.ts";
+import type { ServiceSupervisor } from "../service-supervisor.ts";
 
 /** Minimal interface for accessing the supervisor through PluginCore. */
 interface CoreWithSupervisor {

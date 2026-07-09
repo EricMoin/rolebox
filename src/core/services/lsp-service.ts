@@ -1,9 +1,9 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import type { ToolContributor } from "./tool-registry.ts";
-import { LspClientManager } from "../lsp/client-manager.ts";
-import { LspDocumentManager } from "../lsp/document-manager.ts";
-import { createAllLspTools } from "../lsp/index.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import type { ToolContributor } from "../tool-registry.ts";
+import { LspClientManager } from "../../lsp/client-manager.ts";
+import { LspDocumentManager } from "../../lsp/document-manager.ts";
+import { createAllLspTools } from "../../lsp/index.ts";
 
 export class LspService implements PluginService, ToolContributor {
   readonly name = "lsp-service";
@@ -36,7 +36,7 @@ export class LspService implements PluginService, ToolContributor {
 
   // ── Health ───────────────────────────────────────────────────
 
-  health(): import("./service.ts").ServiceHealth {
+  health(): import("../service.ts").ServiceHealth {
     if (!this.lspClientManager) {
       return { status: "degraded", detail: "LSP client manager not initialized" };
     }

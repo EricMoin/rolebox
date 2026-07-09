@@ -1,13 +1,15 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import type { ToolContributor } from "./tool-registry.ts";
-import { DispatchManager } from "../dispatch/manager.ts";
-import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS } from "../dispatch/config.ts";
-import type { IConcurrencyManager } from "../dispatch/concurrency.ts";
-import { RoleMode } from "../constants.ts";
-import { hookState } from "../hooks/state.ts";
-import type { ResolvedSubAgent } from "../types.ts";
-import { createSubLogger } from "../logger.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import type { ToolContributor } from "../tool-registry.ts";
+import { DispatchManager } from "../../dispatch/core/manager.ts";
+import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS } from "../../dispatch/config.ts";
+import type { IConcurrencyManager } from "../../dispatch/concurrency/concurrency.ts";
+import { cleanExpiredState } from "../../dispatch/persistence/state-gc.ts";
+import { stateDirFor } from "../../utils/state-paths.ts";
+import { RoleMode } from "../../constants.ts";
+import { hookState } from "../../hooks/state.ts";
+import type { ResolvedSubAgent } from "../../types.ts";
+import { createSubLogger } from "../../logger.ts";
 
 const log = createSubLogger("dispatch-service");
 
@@ -85,6 +87,9 @@ export class DispatchService implements PluginService, ToolContributor {
     }
 
     this.dispatchManager = dispatchManager;
+
+    // Fire-and-forget: clean expired state files from disk (7-day default retention)
+    cleanExpiredState(stateDirFor(storeDir)).catch(() => {});
   }
 
   /**
@@ -149,7 +154,7 @@ export class DispatchService implements PluginService, ToolContributor {
 
   // ── Health ───────────────────────────────────────────────────
 
-  health(): import("./service.ts").ServiceHealth {
+  health(): import("../service.ts").ServiceHealth {
     if (!this.dispatchManager) {
       return { status: "unhealthy", detail: "DispatchManager not initialized" };
     }

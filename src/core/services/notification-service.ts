@@ -1,12 +1,12 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import type { EventBus } from "./event-bus.ts";
-import { NotificationManager } from "../notifications/manager.ts";
-import type { NotificationConfig } from "../notifications/types.ts";
-import { parseNotificationConfig, resolveEnvVarsInConfig, DEFAULT_NOTIFICATION_CONFIG } from "../notifications/config.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import type { EventBus } from "../event-bus.ts";
+import { NotificationManager } from "../../notifications/manager.ts";
+import type { NotificationConfig } from "../../notifications/types.ts";
+import { parseNotificationConfig, resolveEnvVarsInConfig, DEFAULT_NOTIFICATION_CONFIG } from "../../notifications/config.ts";
 import { readFileSync, existsSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
-import { createSubLogger } from "../logger.ts";
+import { createSubLogger } from "../../logger.ts";
 
 const log = createSubLogger("notification-service");
 

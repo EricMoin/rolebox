@@ -1,7 +1,7 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import type { ToolContributor } from "./tool-registry.ts";
-import { SessionClientWrapper } from "../session/client.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import type { ToolContributor } from "../tool-registry.ts";
+import { SessionClientWrapper } from "../../session/client.ts";
 import {
   createSessionListTool,
   createSessionReadTool,
@@ -9,7 +9,7 @@ import {
   createSessionInfoTool,
   createSessionDiffTool,
   createSessionForkTool,
-} from "../session/tools.ts";
+} from "../../session/tools.ts";
 
 export class SessionService implements PluginService, ToolContributor {
   readonly name = "session-service";

@@ -1,6 +1,6 @@
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
-import type { HotReloadService } from "../core/hot-reload-service.ts";
+import type { HotReloadService } from "../core/services/hot-reload-service.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("asset-hot-reload");

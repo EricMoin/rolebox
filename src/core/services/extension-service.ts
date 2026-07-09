@@ -1,9 +1,9 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import { ExtensionRegistry } from "../extensions/index.ts";
-import type { ConcurrencyPolicyModule } from "../extensions/types.ts";
-import { createSubLogger } from "../logger.ts";
-import type { RecoveryStrategy, ErrorPattern } from "../recovery/types.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import { ExtensionRegistry } from "../../extensions/index.ts";
+import type { ConcurrencyPolicyModule } from "../../extensions/types.ts";
+import { createSubLogger } from "../../logger.ts";
+import type { RecoveryStrategy, ErrorPattern } from "../../recovery/types.ts";
 
 const log = createSubLogger("extension-service");
 

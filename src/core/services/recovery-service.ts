@@ -1,15 +1,15 @@
-import type { PluginService } from "./service.ts";
-import type { PluginContext } from "./context.ts";
-import { RecoveryEngine } from "../recovery/engine.ts";
-import { RecoveryStateStore } from "../recovery/state.ts";
-import { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
-import { registerBuiltinHooks } from "../recovery/builtin/index.ts";
-import { parseRecoveryConfig, mergeBuiltinFlags, DEFAULT_RECOVERY_CONFIG } from "../recovery/config.ts";
-import { hookState } from "../hooks/state.ts";
-import { createSubLogger } from "../logger.ts";
-import { StartupChecker } from "../recovery/startup-check.ts";
-import type { StartupHealth } from "../recovery/startup-check.ts";
-import { stateDirFor } from "../utils/state-paths.ts";
+import type { PluginService } from "../service.ts";
+import type { PluginContext } from "../context.ts";
+import { RecoveryEngine } from "../../recovery/engine.ts";
+import { RecoveryStateStore } from "../../recovery/state.ts";
+import { BuiltInHookRegistry } from "../../recovery/builtin/registry.ts";
+import { registerBuiltinHooks } from "../../recovery/builtin/index.ts";
+import { parseRecoveryConfig, mergeBuiltinFlags, DEFAULT_RECOVERY_CONFIG } from "../../recovery/config.ts";
+import { hookState } from "../../hooks/state.ts";
+import { createSubLogger } from "../../logger.ts";
+import { StartupChecker } from "../../recovery/startup-check.ts";
+import type { StartupHealth } from "../../recovery/startup-check.ts";
+import { stateDirFor } from "../../utils/state-paths.ts";
 
 const log = createSubLogger("recovery-service");
 
@@ -124,7 +124,7 @@ export class RecoveryService implements PluginService {
   getBuiltinConfig(): Record<string, boolean> | undefined { return this.builtinConfig; }
   getStartupHealth(): StartupHealth | undefined { return this.startupHealth; }
 
-  health(): import("./service.ts").ServiceHealth {
+  health(): import("../service.ts").ServiceHealth {
     if (this.startupHealth && this.startupHealth.quarantined.length > 0) {
       return {
         status: "degraded",

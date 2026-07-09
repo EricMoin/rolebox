@@ -10,7 +10,7 @@ import {
   userMessagedSessions,
   loopManagerMap,
   managerMap,
-} from "../../src/plugin-hooks";
+} from "../../src/core/composition";
 import { STOP_LOOP_SIGNAL } from "../../src/loop/constants";
 
 function pluginMockClient(): OpencodeClient {

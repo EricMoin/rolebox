@@ -20,7 +20,7 @@ import {
   loopManagerMap,
   managerMap,
   createPluginHooks,
-} from "../../src/plugin-hooks";
+} from "../../src/core/composition";
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 

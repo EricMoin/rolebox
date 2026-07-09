@@ -85,7 +85,7 @@ describe("DispatchAdapter", () => {
     dispatchManager = createFakeDispatchManager();
     client = createFakeClient(clientOverrides);
     adapter = new DispatchAdapter(
-      dispatchManager as unknown as import("../../src/dispatch/manager").DispatchManager,
+      dispatchManager as unknown as import("../../src/dispatch/core/manager").DispatchManager,
       client,
     );
   }

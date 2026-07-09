@@ -1,13 +1,13 @@
-import type { PluginService, PluginCoreLike } from "./service.ts";
-import type { PluginContext } from "./context.ts";
+import type { PluginService, PluginCoreLike } from "../service.ts";
+import type { PluginContext } from "../context.ts";
 import type { DispatchService } from "./dispatch-service.ts";
-import { LoopCoordinator } from "../loop/coordinator.ts";
-import { DispatchAdapter } from "../loop/dispatch-adapter.ts";
-import { LoopStore } from "../loop/loop-store.ts";
-import type { LoopState } from "../loop/types.ts";
-import { INTER_ROUND_DELAY_MS } from "../loop/constants.ts";
-import { hookState } from "../hooks/state.ts";
-import { createSubLogger } from "../logger.ts";
+import { LoopCoordinator } from "../../loop/coordinator.ts";
+import { DispatchAdapter } from "../../loop/dispatch-adapter.ts";
+import { LoopStore } from "../../loop/loop-store.ts";
+import type { LoopState } from "../../loop/types.ts";
+import { INTER_ROUND_DELAY_MS } from "../../loop/constants.ts";
+import { hookState } from "../../hooks/state.ts";
+import { createSubLogger } from "../../logger.ts";
 
 const log = createSubLogger("loop-service");
 
@@ -112,7 +112,7 @@ export class LoopService implements PluginService {
     return this.loopStore;
   }
 
-  health(): import("./service.ts").ServiceHealth {
+  health(): import("../service.ts").ServiceHealth {
     if (!this.loopManager) {
       return { status: "unhealthy", detail: "LoopCoordinator not initialized" };
     }
