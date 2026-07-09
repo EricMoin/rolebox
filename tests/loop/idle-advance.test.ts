@@ -9,7 +9,7 @@ import {
   pendingCorrections,
   loopManagerMap,
   managerMap,
-} from "../../src/plugin-hooks";
+} from "../../src/core/composition";
 import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
 
 function createMockClient(): OpencodeClient {
