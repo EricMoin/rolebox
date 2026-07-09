@@ -33,7 +33,8 @@
     "build:tui": "bun run scripts/build-tui.ts",
     "prepublishOnly": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "postinstall": "node dist/cli/postinstall.js"
   },
   "keywords": [
     "opencode",
