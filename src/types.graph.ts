@@ -169,6 +169,8 @@ export interface ObserveSpec {
   set_evidence?: string;
   /** Extract the ```{name} fenced block from the assistant message into artifact {name}. */
   capture_artifact?: string;
+  /** Store the tool's args payload (JSON-serialized) as an artifact under this name. */
+  capture_payload_as?: string;
   /** Mirror the latest todowrite state into function STATE under key "__todos". */
   sync_todos?: boolean;
   /** Only fire when the tool output matches these content conditions. */
@@ -177,6 +179,13 @@ export interface ObserveSpec {
     contains?: string;
     /** Output must NOT contain this string (case-sensitive). */
     not_contains?: string;
+  };
+  /** Only fire when the tool arguments match these conditions. */
+  when_args?: {
+    /** Every key-value pair here must equal the corresponding key in toolArgs. */
+    match?: Record<string, unknown>;
+    /** No key-value pair here may match the corresponding key in toolArgs. */
+    not_match?: Record<string, unknown>;
   };
 }
 

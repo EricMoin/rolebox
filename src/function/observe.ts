@@ -37,6 +37,26 @@ export function runToolObserve(opts: {
     const st = functionRuntime.get(opts.sessionID, fn.name);
     if (!st) continue;
     if (!st.toolsObserved.includes(opts.tool)) st.toolsObserved.push(opts.tool);
+    // Track signal type for signal_observed(type) condition
+    if (opts.tool === "signal" && opts.toolArgs && typeof opts.toolArgs === "object") {
+      const signalType = (opts.toolArgs as Record<string, unknown>).type;
+      if (typeof signalType === "string") {
+        st.kv["__signal_type"] = signalType;
+        // Also track in a set for multi-signal scenarios
+        const observed = (st.kv["__signals_observed"] as string[] | undefined) ?? [];
+        if (!observed.includes(signalType)) {
+          observed.push(signalType);
+          st.kv["__signals_observed"] = observed;
+        }
+      }
+    }
+    // Auto-capture signal payload as artifact when present
+    if (opts.tool === "signal" && opts.toolArgs && typeof opts.toolArgs === "object") {
+      const payload = (opts.toolArgs as Record<string, unknown>).payload;
+      if (payload !== undefined) {
+        opts.artifacts.write(opts.sessionID, "__signal_payload", JSON.stringify(payload));
+      }
+    }
     // requires_evidence auto-mark (skip when output-gated observe covers same pair)
     for (const tag of fn.requires_evidence ?? []) {
       const hasOutputGate = (fn.observe ?? []).some(
@@ -61,10 +81,39 @@ export function runToolObserve(opts: {
         if (spec.when_output.contains && !outputStr.includes(spec.when_output.contains)) continue;
         if (spec.when_output.not_contains && outputStr.includes(spec.when_output.not_contains)) continue;
       }
+      // when_args gate: skip spec if tool args don't meet conditions
+      if (spec.when_args && opts.toolArgs !== undefined) {
+        const args = typeof opts.toolArgs === "object" && opts.toolArgs !== null
+          ? (opts.toolArgs as Record<string, unknown>)
+          : {};
+        if (spec.when_args.match) {
+          const allMatch = Object.entries(spec.when_args.match).every(
+            ([key, val]) => JSON.stringify(args[key]) === JSON.stringify(val),
+          );
+          if (!allMatch) continue;
+        }
+        if (spec.when_args.not_match) {
+          const anyMatch = Object.entries(spec.when_args.not_match).some(
+            ([key, val]) => JSON.stringify(args[key]) === JSON.stringify(val),
+          );
+          if (anyMatch) continue;
+        }
+      } else if (spec.when_args) {
+        // when_args declared but no args available — skip
+        continue;
+      }
       if (spec.set_evidence) st.evidenceObserved[spec.set_evidence] = true;
       if (spec.capture_artifact && opts.lastAssistantText) {
         const block = extractResultBlockNamed(opts.lastAssistantText, spec.capture_artifact);
         if (block !== null) opts.artifacts.write(opts.sessionID, spec.capture_artifact, block);
+      }
+      // capture_payload_as: store tool args payload as artifact
+      if (spec.capture_payload_as && opts.toolArgs !== undefined) {
+        const args = opts.toolArgs as Record<string, unknown> | null;
+        const payload = args?.payload;
+        if (payload !== undefined) {
+          opts.artifacts.write(opts.sessionID, spec.capture_payload_as, JSON.stringify(payload));
+        }
       }
       if (spec.sync_todos && opts.tool === "todowrite") {
         const rendered = renderTodosFromArgs(opts.toolArgs);

@@ -185,6 +185,7 @@ function formatFunction(fn: ResolvedFunction, ownerId: string): string {
       if (obs.inject) lines.push(`  - inject: \`${obs.inject}\``);
       if (obs.set_evidence) lines.push(`  - set_evidence: \`${obs.set_evidence}\``);
       if (obs.capture_artifact) lines.push(`  - capture_artifact: \`${obs.capture_artifact}\``);
+      if (obs.capture_payload_as) lines.push(`  - capture_payload_as: \`${obs.capture_payload_as}\``);
       if (obs.sync_todos) lines.push("  - sync_todos: true");
       if (obs.when_output) {
         lines.push("  - when_output:");

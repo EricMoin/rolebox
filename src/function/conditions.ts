@@ -33,6 +33,16 @@ function stateEquals(arg: string, env: CondEnv): boolean {
  * the evaluation environment to a boolean. This object is the single source of
  * truth — {@link KNOWN_CONDITIONS} is derived from its keys so the validator
  * can never drift from the implementations.
+ *
+ * Built-in conditions:
+ * - `user_approval()` — true when the user messaged this turn
+ * - `artifact_exists(name)` — true when the named artifact file exists
+ * - `plan_todos_complete()` — true when all todo items are checked
+ * - `evidence_met()` — true when all required evidence is observed
+ * - `tool_observed(name)` — true when the named tool has been called
+ * - `signal_observed(type)` — true when the `signal` tool was called with the given type
+ * - `turn_count(n)` — true when N or more turns have passed since activation
+ * - `state_eq(key=val)` — true when kv[key] strictly equals val
  */
 const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> = {
   user_approval:       (_arg, env) => env.userMessagedThisTurn,
@@ -40,6 +50,10 @@ const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> =
   plan_todos_complete: (_arg, env) => uncheckedTodos(env) === 0,
   evidence_met:        (_arg, env) => env.requiredEvidence.every((t) => env.state.evidenceObserved[t] === true),
   tool_observed:       (arg, env) => env.state.toolsObserved.includes(arg),
+  signal_observed:    (arg, env) => {
+    const observed = (env.state.kv["__signals_observed"] as string[] | undefined) ?? [];
+    return observed.includes(arg);
+  },
   turn_count:          (arg, env) => (env.state.currentTurn - env.state.activatedAtTurn) >= Number(arg || "0"),
   state_eq:            stateEquals,
 };

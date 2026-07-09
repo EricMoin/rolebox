@@ -240,16 +240,67 @@ describe("evaluateCondition", () => {
     });
     expect(evaluateCondition("tool_observed(Bash)", env)).toBe(true);
   });
+
+  it("signal_observed(answer) → false when kv.__signals_observed is undefined", () => {
+    const env = mockEnv({
+      state: {
+        ...mockEnv().state,
+        kv: {},
+      },
+    });
+    expect(evaluateCondition("signal_observed(answer)", env)).toBe(false);
+  });
+
+  it("signal_observed(answer) → false when no matching signal type", () => {
+    const env = mockEnv({
+      state: {
+        ...mockEnv().state,
+        kv: { __signals_observed: ["progress"] },
+      },
+    });
+    expect(evaluateCondition("signal_observed(answer)", env)).toBe(false);
+  });
+
+  it("signal_observed(answer) → true when matching signal type observed", () => {
+    const env = mockEnv({
+      state: {
+        ...mockEnv().state,
+        kv: { __signals_observed: ["answer"] },
+      },
+    });
+    expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
+  });
+
+  it("signal_observed(answer) → true among multiple observed signals", () => {
+    const env = mockEnv({
+      state: {
+        ...mockEnv().state,
+        kv: { __signals_observed: ["progress", "answer", "need_approval"] },
+      },
+    });
+    expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
+  });
+
+  it("signal_observed(need_approval) → false when only answer was observed", () => {
+    const env = mockEnv({
+      state: {
+        ...mockEnv().state,
+        kv: { __signals_observed: ["answer"] },
+      },
+    });
+    expect(evaluateCondition("signal_observed(need_approval)", env)).toBe(false);
+  });
 });
 
 describe("KNOWN_CONDITIONS", () => {
-  it("contains exactly the 7 closed vocabulary entries", () => {
-    expect(KNOWN_CONDITIONS.size).toBe(7);
+  it("contains exactly the 8 closed vocabulary entries", () => {
+    expect(KNOWN_CONDITIONS.size).toBe(8);
     expect(KNOWN_CONDITIONS.has("user_approval")).toBe(true);
     expect(KNOWN_CONDITIONS.has("artifact_exists")).toBe(true);
     expect(KNOWN_CONDITIONS.has("plan_todos_complete")).toBe(true);
     expect(KNOWN_CONDITIONS.has("evidence_met")).toBe(true);
     expect(KNOWN_CONDITIONS.has("tool_observed")).toBe(true);
+    expect(KNOWN_CONDITIONS.has("signal_observed")).toBe(true);
     expect(KNOWN_CONDITIONS.has("turn_count")).toBe(true);
     expect(KNOWN_CONDITIONS.has("state_eq")).toBe(true);
   });

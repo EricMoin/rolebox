@@ -30,6 +30,7 @@ import { createDispatchStatusTool } from "../dispatch/task-status.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 import { createWebSearchTool } from "../web/web-search.ts";
 import { createPageReadTool } from "../web/page-read.ts";
+import { createSignalTool } from "../signal/signal-tool.ts";
 
 const log = createSubLogger("tool-service");
 
@@ -107,6 +108,8 @@ export class ToolService implements PluginService {
       // Web tools
       web_search: createWebSearchTool(),
       web_read: createPageReadTool(),
+      // Signal tool
+      signal: createSignalTool(),
     };
 
     // 5. Register tool schemas
