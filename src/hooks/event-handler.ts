@@ -254,7 +254,9 @@ export async function handleEvent(
               ...sessionAgent ? { agent: sessionAgent } : {},
               parts: [{ type: "text", text: decision.reminder }],
             },
-          }).catch(() => {});
+          }).catch((err) => {
+            log.warn("Failed to send continuation prompt", { sessionID: sid, err });
+          });
           sentContinuation = true;
           break; // ONE continuation per idle event
         }

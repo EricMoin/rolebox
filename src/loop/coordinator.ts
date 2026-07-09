@@ -13,6 +13,9 @@ import {
   DISPATCH_RECOVERY_MARKER,
   isDispatchNotification,
 } from "../dispatch/notification.js";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("loop/coordinator");
 
 // ── Phase-aware cancellation ───────────────────────────────────────
 
@@ -180,7 +183,9 @@ export class LoopCoordinator {
             loop.originSessionId,
             `${LOOP_PROGRESS_MARKER} round ${lastRound.round}/${loop.total} ${lastRound.status}, session=${lastRound.workerSessionId}, duration=${dur}]`,
           )
-          .catch(() => {});
+            .catch((err) => {
+              log.warn("Failed to inject loop progress note", { err });
+            });
       }
 
       const lastMsgId = await this.adapter.getLastMessageId(originSessionId);
@@ -356,7 +361,9 @@ export class LoopCoordinator {
           loop.originSessionId,
           `${LOOP_PROGRESS_MARKER} loop started: ${loop.total} rounds, ${loop.mode} mode]`,
         )
-        .catch(() => {});
+        .catch((err) => {
+          log.warn("Failed to inject loop-started note", { err });
+        });
     }
   }
 
@@ -399,7 +406,9 @@ export class LoopCoordinator {
     terminalPhase: "complete" | "cancelled",
   ): Promise<void> {
     if (loop.activeWorkerTaskId) {
-      await this.adapter.cancelRound(loop.activeWorkerTaskId).catch(() => {});
+      await this.adapter.cancelRound(loop.activeWorkerTaskId).catch((err) => {
+        log.warn("Failed to cancel active round during finalize", { err });
+      });
       this._workerToOrigin.delete(loop.activeWorkerTaskId);
       loop.activeWorkerTaskId = undefined;
       loop.activeWorkerSessionId = undefined;
@@ -434,7 +443,9 @@ export class LoopCoordinator {
 
   private async _failLoop(loop: LoopState, reason: string): Promise<void> {
     if (loop.activeWorkerTaskId) {
-      await this.adapter.cancelRound(loop.activeWorkerTaskId).catch(() => {});
+      await this.adapter.cancelRound(loop.activeWorkerTaskId).catch((err) => {
+        log.warn("Failed to cancel active round during failLoop", { err });
+      });
       this._workerToOrigin.delete(loop.activeWorkerTaskId);
       loop.activeWorkerTaskId = undefined;
       loop.activeWorkerSessionId = undefined;
@@ -453,6 +464,8 @@ export class LoopCoordinator {
 
     await this.adapter
       .injectNote(loop.originSessionId, `${LOOP_PROGRESS_MARKER} error: ${reason}]`)
-      .catch(() => {});
+      .catch((err) => {
+        log.warn("Failed to inject loop error note", { err });
+      });
   }
 }

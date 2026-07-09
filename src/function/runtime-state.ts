@@ -1,4 +1,7 @@
 import { FunctionRuntimeStore } from "./runtime-store.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("runtime-state");
 
 export interface FnState {
   phase: "active" | "gated" | "complete";
@@ -76,7 +79,9 @@ export class FunctionRuntimeManager {
       this._timer = undefined;
       if (!this._dirty) return;
       this._dirty = false;
-      this.store!.save(this.states).catch(() => {});
+      this.store!.save(this.states).catch((err) => {
+        log.warn("Failed to persist function runtime state", { err });
+      });
     }, 500);
   }
 

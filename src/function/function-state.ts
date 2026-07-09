@@ -26,7 +26,7 @@ function buildFnSpecMap(): Map<string, ResolvedFunction> {
 
 export function createFunctionStateTool(directory: string) {
   const artifactStore = new ArtifactStore(directory);
-  const fnSpecMap = buildFnSpecMap();
+
 
   return tool({
     description:
@@ -50,6 +50,7 @@ export function createFunctionStateTool(directory: string) {
     async execute(input, context: ToolContext) {
       const sessionID = input.session_id ?? context.sessionID;
       const states = functionRuntime.all(sessionID);
+      const fnSpecMap = buildFnSpecMap();
 
       if (states.size === 0) {
         return `## Function State: \`${sessionID}\`\n\nNo active functions in this session.`;
