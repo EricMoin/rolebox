@@ -27,6 +27,7 @@ import type { NotificationService } from "./notification-service.ts";
 import type { RecoveryService } from "./recovery-service.ts";
 import type { ExtensionService } from "./extension-service.ts";
 import type { ToolService } from "./tool-service.ts";
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "../utils/timeout.ts";
 
 const log = createSubLogger("hook-service");
 
@@ -246,23 +247,35 @@ export class HookService implements PluginService {
   private createJudgeFn(client: any): JudgeFn {
     return async (nlCondition: string, context: string): Promise<boolean> => {
       try {
-        const createResult = await client.session.create({});
+        const createResult = await withTimeout(
+          client.session.create({}),
+          DEFAULT_TIMEOUT_MS,
+          "judge.session.create",
+          log,
+        );
+        if (createResult === null) return false;
         if ((createResult as { error?: unknown }).error) return false;
 
         const sessionId = ((createResult as { data?: { id?: string } }).data)?.id;
         if (!sessionId) return false;
 
         try {
-          const promptResult = await client.session.prompt({
-            path: { id: sessionId },
-            body: {
-              parts: [{
-                type: "text",
-                text: `Judge: "${nlCondition}"\n\nContext:\n${context}\n\nAnswer "YES" or "NO".`,
-              }],
-            },
-          });
+          const promptResult = await withTimeout(
+            client.session.prompt({
+              path: { id: sessionId },
+              body: {
+                parts: [{
+                  type: "text",
+                  text: `Judge: "${nlCondition}"\n\nContext:\n${context}\n\nAnswer "YES" or "NO".`,
+                }],
+              },
+            }),
+            DEFAULT_TIMEOUT_MS,
+            "judge.session.prompt",
+            log,
+          );
 
+          if (promptResult === null) return false;
           if ((promptResult as { error?: unknown }).error) return false;
 
           const data = (promptResult as {
@@ -275,7 +288,9 @@ export class HookService implements PluginService {
 
           return /^\s*YES\b/mi.test(text);
         } finally {
-          client.session.delete({ path: { id: sessionId } }).catch(() => {});
+          client.session.delete({ path: { id: sessionId } }).catch((err: unknown) => {
+            log.warn("Failed to delete judge session", { err });
+          });
         }
       } catch {
         return false;

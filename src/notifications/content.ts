@@ -3,6 +3,7 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import { createSubLogger } from "../logger.ts";
 import { truncate } from "./formatting.ts";
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "../utils/timeout.ts";
 import type {
   NotificationMessage,
   NotificationEventType,
@@ -135,16 +136,25 @@ export async function readSessionInfo(
   // 1. Get session title
   let title: string | undefined;
   try {
-    const sessionResult = await client.session.get({
-      path: { id: sessionID },
-      query,
-    });
-    const sessionResp = sessionResult as {
-      data?: { title?: string };
-      error?: unknown;
-    };
-    if (!sessionResp.error && sessionResp.data?.title) {
-      title = sessionResp.data.title;
+    const sessionResult = await withTimeout(
+      client.session.get({
+        path: { id: sessionID },
+        query,
+      }),
+      DEFAULT_TIMEOUT_MS,
+      `readSessionInfo.session.get:${sessionID}`,
+      log,
+    );
+    if (sessionResult === null) {
+      // timeout — leave title as undefined
+    } else {
+      const sessionResp = sessionResult as {
+        data?: { title?: string };
+        error?: unknown;
+      };
+      if (!sessionResp.error && sessionResp.data?.title) {
+        title = sessionResp.data.title;
+      }
     }
   } catch (err) {
     log.warn(`Failed to get session ${sessionID}`, err);
@@ -154,10 +164,19 @@ export async function readSessionInfo(
   let lastUserMessage: string | undefined;
   let lastAssistantMessage: string | undefined;
   try {
-    const messagesResult = await client.session.messages({
-      path: { id: sessionID },
-      query,
-    });
+    const messagesResult = await withTimeout(
+      client.session.messages({
+        path: { id: sessionID },
+        query,
+      }),
+      DEFAULT_TIMEOUT_MS,
+      `readSessionInfo.session.messages:${sessionID}`,
+      log,
+    );
+    if (messagesResult === null) {
+      // timeout — return title only
+      return { title };
+    }
     const messagesResp = messagesResult as {
       data?: Array<{
         info: { role: string };

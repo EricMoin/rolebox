@@ -1,5 +1,9 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ResolvedFunction } from "../types.ts";
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "../utils/timeout.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("hooks-context");
 
 export function appendCorrection(
   corrections: Map<string, string>,
@@ -23,7 +27,13 @@ export async function fetchLastAssistantText(
   sessionID: string,
 ): Promise<string | null> {
   try {
-    const res = await client.session.messages({ path: { id: sessionID } });
+    const res = await withTimeout(
+      client.session.messages({ path: { id: sessionID } }),
+      DEFAULT_TIMEOUT_MS,
+      `fetchLastAssistantText:${sessionID}`,
+      log,
+    );
+    if (res === null) return null;
     if ((res as { error?: unknown }).error !== undefined) return null;
     const msgs = ((res as { data?: unknown }).data ?? []) as Array<{
       info: { role: string };
