@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { discoverRoles, applyInheritance, __setLoggerForTest } from "../src/role-loader";
+import { discoverRoles, applyInheritance, __setLoggerForTest } from "../src/loader/role-loader";
 import type { RoleConfig, SubAgentConfig } from "../src/types.ts";
 
 const capturedLogs: unknown[][] = [];

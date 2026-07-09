@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWrite, atomicWriteSync } from "./fs-util.ts";
-import { shortHash } from "../state-paths.ts";
+import { shortHash } from "../utils/state-paths.ts";
 import type { FnState } from "./runtime-state.ts";
 import { createSubLogger } from "../logger.ts";
 

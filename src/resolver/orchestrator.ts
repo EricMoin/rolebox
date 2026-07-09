@@ -1,11 +1,11 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { resolveSkills } from "../skill-resolver.ts";
-import { resolveAllReferences } from "../reference-resolver.ts";
-import { resolveFunctions } from "../function-resolver.ts";
+import { resolveSkills } from "./skill-resolver.ts";
+import { resolveAllReferences } from "./reference-resolver.ts";
+import { resolveFunctions } from "../function/file-resolver.ts";
 import { buildSubagentRoleBlock, SUBAGENT_RESULT_CONTRACT, parseCollaboration } from "../graph/index.ts";
-import { buildAgentPrompt } from "../prompt-builder.ts";
-import { subagentDir, globalFunctionsPath } from "../paths.ts";
+import { buildAgentPrompt } from "../prompt/builder.ts";
+import { subagentDir, globalFunctionsPath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole, SubAgentConfig } from "../types.ts";
 import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.ts";

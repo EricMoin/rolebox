@@ -6,7 +6,7 @@
  * is preserved and a warning is logged.
  */
 
-import { createSubLogger } from "./logger.ts";
+import { createSubLogger } from "../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 

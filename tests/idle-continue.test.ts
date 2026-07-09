@@ -6,7 +6,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap } from "../src/plugin-hooks";
 import { buildNotificationText, isDispatchNotification } from "../src/dispatch/notification";
 import { roleFunctionsMap } from "../src/index";
-import { functionSessionState } from "../src/session-state";
+import { functionSessionState } from "../src/function/session-state";
 import { functionRuntime } from "../src/function/runtime-state";
 import type { ResolvedRole, ResolvedFunction } from "../src/types";
 import { RoleMode } from "../src/constants";

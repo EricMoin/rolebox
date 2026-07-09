@@ -1,5 +1,5 @@
 import type { Event } from "@opencode-ai/sdk";
-import { functionSessionState } from "../session-state.ts";
+import { functionSessionState } from "../function/session-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { loadHandlers, safeCall } from "../function/handlers-loader.ts";

@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveSkills, loadSkillContent, parseFrontmatter } from "../src/skill-resolver";
+import { resolveSkills, loadSkillContent } from "../src/resolver/skill-resolver";
+import { parseFrontmatter } from "../src/resolver/frontmatter";
 
 let tmpRoots: string[] = [];
 

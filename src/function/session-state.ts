@@ -1,4 +1,4 @@
-import type { FunctionCall } from "./function-parser.ts";
+import type { FunctionCall } from "./parser.ts";
 
 export class FunctionSessionState {
   private sessions: Map<string, Set<string>> = new Map();

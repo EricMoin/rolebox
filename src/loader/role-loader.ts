@@ -13,10 +13,10 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
-import { resolveEnvVarsDeep, resolveEnvVars } from "./env-resolver.ts";
-import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "./types.ts";
-import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "./constants.ts";
-import { createSubLogger, formatError } from "./logger.ts";
+import { resolveEnvVarsDeep, resolveEnvVars } from "../resolver/env-resolver.ts";
+import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "../types.ts";
+import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "../constants.ts";
+import { createSubLogger, formatError } from "../logger.ts";
 import type { Logger, ILogObj } from "tslog";
 import {
   resolveSubagentEntry,
@@ -25,7 +25,7 @@ import {
   parseInlineSubagents,
   discoverFileBasedSubagents,
   setSubagentLogger,
-} from "./role-loader-subagents.ts";
+} from "./subagents.ts";
 
 let log: Logger<ILogObj> = createSubLogger("role-loader");
 
@@ -378,5 +378,3 @@ async function loadOneRole(
 
   return config;
 }
-
-

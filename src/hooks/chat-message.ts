@@ -1,5 +1,5 @@
-import { parseFunctionActivation } from "../function-parser.ts";
-import { functionSessionState } from "../session-state.ts";
+import { parseFunctionActivation } from "../function/parser.ts";
+import { functionSessionState } from "../function/session-state.ts";
 import { graphSessionState } from "../graph/index.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { runActivateObserve, runMessageObserve } from "../function/observe.ts";

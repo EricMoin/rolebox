@@ -3,7 +3,7 @@ import { describe, it, expect } from "bun:test";
 describe("plan.md kernel function", () => {
   it("resolves with kernel frontmatter fields", async () => {
     const content = await Bun.file("functions/plan.md").text();
-    const { metadata } = await import("../src/skill-resolver").then(m =>
+    const { metadata } = await import("../src/resolver/frontmatter").then(m =>
       m.parseFrontmatter(content),
     );
 

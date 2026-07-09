@@ -4,7 +4,7 @@ import { createSubLogger } from "../logger.ts";
 import { clearExtensionModuleCache } from "../extensions/loader.ts";
 import { watch, type FSWatcher } from "node:fs";
 import { join, dirname } from "node:path";
-import { discoverRoles } from "../role-loader.ts";
+import { discoverRoles } from "../loader/role-loader.ts";
 import { resolveAllRoles, type ResolveContext } from "../resolver/orchestrator.ts";
 import { syncAgentFiles } from "../sync/agent-files.ts";
 import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";

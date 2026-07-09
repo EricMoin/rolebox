@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteSync } from "./fs-util.ts";
-import { shortHash } from "../state-paths.ts";
+import { shortHash } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("function:artifacts");

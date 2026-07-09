@@ -2,7 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "@opencode-ai/plugin";
-import { discoverRoles } from "./role-loader.ts";
+import { discoverRoles } from "./loader/role-loader.ts";
 import { resolveAllRoles } from "./resolver/orchestrator.ts";
 import { syncAgentFiles } from "./sync/agent-files.ts";
 import { syncSkillSymlinks } from "./sync/skill-symlinks.ts";

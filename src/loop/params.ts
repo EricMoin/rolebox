@@ -1,4 +1,4 @@
-import type { FunctionCall } from "../function-parser.js";
+import type { FunctionCall } from "../function/parser.js";
 import type { LoopMode } from "./types.js";
 import { DEFAULT_ITERATIONS, MAX_ITERATIONS_HARD_CAP } from "./constants.js";
 

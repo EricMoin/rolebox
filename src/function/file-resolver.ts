@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import type { FunctionMetadata, ResolvedFunction } from "./types.ts";
-import { FunctionSource } from "./constants.ts";
-import { parseFrontmatter } from "./skill-resolver.ts";
-import { functionPath } from "./paths.ts";
-import type { FunctionCall } from "./function-parser.ts";
-import { createSubLogger } from "./logger.ts";
+import type { FunctionMetadata, ResolvedFunction } from "../types.ts";
+import { FunctionSource } from "../constants.ts";
+import { parseFrontmatter } from "../resolver/frontmatter.ts";
+import { functionPath } from "../utils/paths.ts";
+import type { FunctionCall } from "./parser.ts";
+import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("function-resolver");
 

@@ -1,9 +1,9 @@
 import { resolve as pathResolve, relative, dirname, basename, extname } from "node:path";
 import fg from "fast-glob";
 import yaml from "js-yaml";
-import type { ReferenceEntry, ResolvedReference } from "./types.ts";
-import type { ReferenceScope } from "./constants.ts";
-import { createSubLogger, formatError } from "./logger.ts";
+import type { ReferenceEntry, ResolvedReference } from "../types.ts";
+import type { ReferenceScope } from "../constants.ts";
+import { createSubLogger, formatError } from "../logger.ts";
 
 const log = createSubLogger("reference-resolver");
 

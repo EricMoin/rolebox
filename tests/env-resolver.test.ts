@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/env-resolver";
+import { __setLoggerForTest, resolveEnvVars, resolveEnvVarsDeep } from "../src/resolver/env-resolver";
 import { createSubLogger } from "../src/logger";
 
 const capturedWarnings: unknown[][] = [];

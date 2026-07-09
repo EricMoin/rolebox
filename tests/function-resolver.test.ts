@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveFunctions, loadFunctionContent, applyParams } from "../src/function-resolver";
+import { resolveFunctions, loadFunctionContent, applyParams } from "../src/function/file-resolver";
 import type { ResolvedFunction } from "../src/types";
-import type { FunctionCall } from "../src/function-parser";
+import type { FunctionCall } from "../src/function/parser";
 
 let tmpRoots: string[] = [];
 

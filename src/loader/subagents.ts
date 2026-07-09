@@ -11,10 +11,10 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
-import { resolveEnvVars } from "./env-resolver.ts";
-import type { SubAgentConfig } from "./types.ts";
-import { ROLE_YAML } from "./constants.ts";
-import { createSubLogger, formatError } from "./logger.ts";
+import { resolveEnvVars } from "../resolver/env-resolver.ts";
+import type { SubAgentConfig } from "../types.ts";
+import { ROLE_YAML } from "../constants.ts";
+import { createSubLogger, formatError } from "../logger.ts";
 import type { Logger, ILogObj } from "tslog";
 import { validateRoleId } from "./role-loader.ts";
 

@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { FunctionSessionState } from "../src/session-state";
-import { parseFunctionActivation } from "../src/function-parser";
-import { buildFunctionBlock } from "../src/prompt-builder";
+import { FunctionSessionState } from "../src/function/session-state";
+import { parseFunctionActivation } from "../src/function/parser";
+import { buildFunctionBlock } from "../src/prompt/builder";
 import type { ResolvedFunction } from "../src/types";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveFunctions } from "../src/function-resolver";
+import { resolveFunctions } from "../src/function/file-resolver";
 
 let tmpRoots: string[] = [];
 let state: FunctionSessionState;
