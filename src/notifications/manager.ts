@@ -24,6 +24,7 @@ import {
 } from "./platform.ts";
 import { createChannels } from "./channels.ts";
 import type { NotificationChannel } from "./channels.ts";
+import { resolveChannels as resolveChannelsFn } from "./channel-resolver.ts";
 import { buildNotificationContent } from "./content.ts";
 import { NotificationThrottle } from "./throttle.ts";
 import { QuietHours } from "./quiet-hours.ts";
@@ -193,25 +194,7 @@ export class NotificationManager {
     cacheKey: string,
     configs: NotificationChannelConfig[],
   ): Promise<NotificationChannel[]> {
-    const cached = this.channelCache.get(cacheKey);
-
-    if (cached !== undefined) {
-      if (Array.isArray(cached)) return cached;
-      return cached;
-    }
-
-    const creationPromise = createChannels(configs);
-    this.channelCache.set(cacheKey, creationPromise);
-
-    try {
-      const channels = await creationPromise;
-      this.channelCache.set(cacheKey, channels);
-      return channels;
-    } catch (err) {
-      this.channelCache.delete(cacheKey);
-      log.warn("Failed to create notification channels", { err });
-      return [];
-    }
+    return resolveChannelsFn(this.channelCache, cacheKey, configs);
   }
 
   // ── Activity Marking ─────────────────────────────────────────────────

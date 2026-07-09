@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { normalizeWorkspaceDir, stateDirFor } from "../../state-paths.ts";
+import { normalizeWorkspaceDir, stateDirFor } from "../../utils/state-paths.ts";
 import { readResultSidecar, resultSidecarPath } from "../../dispatch/result-extractor.ts";
 import { BACKGROUND_STALE_TIMEOUT_MS } from "../../dispatch/config.ts";
 import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
@@ -20,6 +20,8 @@ import type {
 import { readMetricsSnapshot, readMetricsRecentEvents } from "./monitor-reader-metrics.ts";
 import { readLoopSnapshots, readGraphSessions } from "./monitor-reader-graph.ts";
 import { tryReadJson, listStateFiles } from "./monitor-reader-utils.ts";
+import { readNotificationState, readRecoveryMetrics } from "./monitor-reader-state.ts";
+import { computeDurationMs, computeDispatchSummary, computeConcurrencyStatus } from "./monitor-reader-compute.ts";
 
 export type {
   TaskSnapshot,
@@ -36,6 +38,10 @@ export type {
 } from "./monitor-reader-types.ts";
 export { readMetricsSnapshot, readMetricsRecentEvents } from "./monitor-reader-metrics.ts";
 export { readLoopSnapshots, readGraphSessions } from "./monitor-reader-graph.ts";
+export { readNotificationState, readRecoveryMetrics } from "./monitor-reader-state.ts";
+export { computeDurationMs, computeDispatchSummary, computeConcurrencyStatus } from "./monitor-reader-compute.ts";
+
+// ── Raw JSON types (internal to readMonitorSnapshot) ──────────────
 
 interface RawDispatchTask {
   id: string;
@@ -102,197 +108,7 @@ interface RawGraphFile {
   sessions: RawGraphSession[];
 }
 
-
-
-
-
-
-
-function computeDurationMs(startedAt: string | undefined, completedAt?: string): number {
-  try {
-    const start = startedAt ? new Date(startedAt).getTime() : NaN;
-    if (isNaN(start)) return 0;
-    const end = completedAt ? new Date(completedAt).getTime() : Date.now();
-    return Math.max(0, end - start);
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Scan the state directory for notification sidecar files (notifications-*.json)
- * and return a best-effort NotificationState. Returns null when no notification
- * state file exists (notifications subsystem may be disabled).
- *
- * The notification subsystem does not persist runtime state to disk by default,
- * so this reader returns null gracefully when no data is found.
- */
-export function readNotificationState(stateDir: string): NotificationState | null {
-  const notifFiles = listStateFiles(stateDir, "notifications-");
-  if (notifFiles.length === 0) return null;
-
-  for (const filePath of notifFiles) {
-    const raw = tryReadJson(filePath);
-    if (!raw || typeof raw !== "object") continue;
-    const obj = raw as Record<string, unknown>;
-
-    const enabled = typeof obj.enabled === "boolean" ? obj.enabled : true;
-    let quietHoursActive = false;
-
-    // Compute quietHoursActive from quietHours config if present
-    if (typeof obj.quietHours === "object" && obj.quietHours !== null) {
-      const qh = obj.quietHours as Record<string, unknown>;
-      if (qh.enabled === true) {
-        // Best-effort: if quiet hours are configured as enabled, report active
-        // A full evaluation would require time-of-day checking
-        quietHoursActive = true;
-      }
-    }
-
-    // Throttle stats if available
-    let throttleStats: { recentCount: number; windowMs: number } | undefined;
-    if (typeof obj.throttle === "object" && obj.throttle !== null) {
-      const th = obj.throttle as Record<string, unknown>;
-      if (typeof th.windowMs === "number" && typeof th.maxPerWindow === "number") {
-        throttleStats = {
-          recentCount: th.maxPerWindow as number,
-          windowMs: th.windowMs as number,
-        };
-      }
-    }
-
-    // Recent notification events if stored
-    const recentEvents: Array<{ ts: string; type: string }> = [];
-    if (Array.isArray(obj.recentEvents)) {
-      for (const evt of obj.recentEvents) {
-        if (
-          evt &&
-          typeof evt === "object" &&
-          typeof (evt as Record<string, unknown>).ts === "string" &&
-          typeof (evt as Record<string, unknown>).type === "string"
-        ) {
-          recentEvents.push({
-            ts: (evt as Record<string, unknown>).ts as string,
-            type: (evt as Record<string, unknown>).type as string,
-          });
-        }
-      }
-    }
-
-    return { enabled, quietHoursActive, recentEvents, throttleStats };
-  }
-
-  return null;
-}
-
-/**
- * Parse the `recovery` key from the metrics-*.json sidecar file.
- * Returns a RecoveryMetrics object when the key is present and valid,
- * or null when absent, malformed, or the metrics file doesn't exist.
- *
- * The `recovery` key is optional in the persisted file — absent when no
- * recovery engine is wired or when ROLEBOX_METRICS is disabled.
- */
-export function readRecoveryMetrics(stateDir: string): RecoveryMetrics | null {
-  const metricsFiles = listStateFiles(stateDir, "metrics-");
-  if (metricsFiles.length === 0) return null;
-
-  for (const filePath of metricsFiles) {
-    const raw = tryReadJson(filePath);
-    if (!raw || typeof raw !== "object") continue;
-    const obj = raw as Record<string, unknown>;
-    const recovery = obj.recovery;
-    if (!recovery || typeof recovery !== "object") continue;
-    const r = recovery as Record<string, unknown>;
-    if (
-      typeof r.totalAttempts === "number" &&
-      typeof r.successfulRecoveries === "number" &&
-      typeof r.abortedChains === "number" &&
-      typeof r.exhaustedChains === "number"
-    ) {
-      return r as unknown as RecoveryMetrics;
-    }
-  }
-
-  return null;
-}
-
-
-
-const CONCURRENCY_GAUGE_ACTIVE = "concurrency_active";
-const CONCURRENCY_GAUGE_QUEUED = "concurrency_queued";
-const CONCURRENCY_GAUGE_LIMIT = "concurrency_limit";
-
-
-
-/**
- * Compute a DispatchSummary from an array of TaskSnapshot objects.
- * Counts tasks by their status field.
- */
-export function computeDispatchSummary(tasks: TaskSnapshot[]): DispatchSummary {
-  let pending = 0;
-  let running = 0;
-  let completed = 0;
-  let error = 0;
-  let cancelled = 0;
-
-  for (const t of tasks) {
-    switch (t.status) {
-      case "pending":
-        pending++;
-        break;
-      case "running":
-        running++;
-        break;
-      case "completed":
-        completed++;
-        break;
-      case "error":
-        error++;
-        break;
-      case "cancelled":
-        cancelled++;
-        break;
-      // "timeout" is counted as error for summary purposes
-      default:
-        break;
-    }
-  }
-
-  return { pending, running, completed, error, cancelled };
-}
-
-/**
- * Compute an aggregate ConcurrencyStatus from a MetricsSnapshot.
- *
- * Scans the metrics gauges for keys matching known concurrency gauge
- * patterns (concurrency_active, concurrency_queued, concurrency_limit)
- * and aggregates their values across all model keys.
- *
- * Returns a zeroed ConcurrencyStatus when no metrics or no concurrency
- * gauges are present.
- */
-export function computeConcurrencyStatus(
-  metrics: MetricsSnapshot | null | undefined,
-): ConcurrencyStatus {
-  const result: ConcurrencyStatus = { active: 0, limit: 0, queued: 0 };
-
-  if (!metrics) return result;
-
-  // Aggregate across all model keys by matching gauge name prefix
-  for (const [key, gs] of Object.entries(metrics.gauges)) {
-    if (key.startsWith(CONCURRENCY_GAUGE_ACTIVE + "{") || key === CONCURRENCY_GAUGE_ACTIVE) {
-      result.active += gs.value;
-    } else if (key.startsWith(CONCURRENCY_GAUGE_QUEUED + "{") || key === CONCURRENCY_GAUGE_QUEUED) {
-      result.queued += gs.value;
-    } else if (key.startsWith(CONCURRENCY_GAUGE_LIMIT + "{") || key === CONCURRENCY_GAUGE_LIMIT) {
-      result.limit += gs.value;
-    }
-  }
-
-  return result;
-}
-
+// ── Task detail reader ────────────────────────────────────────────
 
 /**
  * Read the full result sidecar for a specific task.
@@ -351,6 +167,8 @@ export function readTaskDetail(
   };
 }
 
+// ── Project root resolution ───────────────────────────────────────
+
 /**
  * Walk up from `start` to the nearest ancestor that already has a
  * `.rolebox/state` directory, so `monitor` works from any sub-directory of the
@@ -368,6 +186,8 @@ export function resolveProjectRoot(start: string): string {
   }
   return normalizedStart;
 }
+
+// ── Main snapshot reader ──────────────────────────────────────────
 
 export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorSnapshot {
   const stateDir = stateDirFor(projectDir);

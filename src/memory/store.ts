@@ -1,9 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { memoryDbPath, shortHash } from "../state-paths.ts";
+import { memoryDbPath, shortHash } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 import type { MemoryEntry, MemorySummary } from "../types.ts";
+import { ensureMemorySchema } from "./schema.ts";
+import { searchMemories, type MemorySearchOptions } from "./search.ts";
 
 const log = createSubLogger("memory:store");
 
@@ -15,12 +17,7 @@ export interface MemoryListOptions {
   minRelevance?: string;
 }
 
-export interface MemorySearchOptions {
-  query: string;
-  scope?: string;
-  category?: string;
-  limit?: number;
-}
+export type { MemorySearchOptions } from "./search.ts";
 
 export class MemoryStore {
   private db: Database;
@@ -37,71 +34,7 @@ export class MemoryStore {
   // ── Schema ──────────────────────────────────────────────────────────────
 
   private ensureSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS memories (
-        id              TEXT PRIMARY KEY,
-        scope           TEXT NOT NULL,
-        role_id         TEXT,
-        category        TEXT,
-        title           TEXT NOT NULL,
-        content         TEXT NOT NULL,
-        tags            TEXT,
-        relevance       TEXT DEFAULT 'medium',
-        created_at      TEXT NOT NULL,
-        updated_at      TEXT NOT NULL,
-        accessed_at     TEXT,
-        access_count    INTEGER DEFAULT 0,
-        session_id      TEXT,
-        source_sessions TEXT
-      )
-    `);
-
-    this.db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-        title, content, tags,
-        content='memories',
-        content_rowid='rowid'
-      )
-    `);
-
-    // INSERT trigger — keeps FTS in sync
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-        INSERT INTO memories_fts(rowid, title, content, tags)
-        VALUES (new.rowid, new.title, new.content, new.tags);
-      END
-    `);
-
-    // DELETE trigger — removes entry from FTS
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
-        VALUES ('delete', old.rowid, old.title, old.content, old.tags);
-      END
-    `);
-
-    // UPDATE trigger — re-indexes in FTS
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-        INSERT INTO memories_fts(memories_fts, rowid, title, content, tags)
-        VALUES ('delete', old.rowid, old.title, old.content, old.tags);
-        INSERT INTO memories_fts(rowid, title, content, tags)
-        VALUES (new.rowid, new.title, new.content, new.tags);
-      END
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_scope_role ON memories(scope, role_id)
-    `);
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_category ON memories(category)
-    `);
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_accessed ON memories(accessed_at)
-    `);
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_relevance ON memories(relevance)
-    `);
+    ensureMemorySchema(this.db);
   }
 
   // ── CRUD ────────────────────────────────────────────────────────────────
@@ -297,45 +230,7 @@ export class MemoryStore {
    * Supports optional scope and category filtering.
    */
   search(options: MemorySearchOptions): MemoryEntry[] {
-    const conditions: string[] = [];
-    const params: SQLQueryBindings[] = [];
-
-    // Escape double quotes in the query to prevent FTS syntax errors
-    const ftsQuery = options.query.replace(/"/g, "\"\"");
-    params.push(ftsQuery);
-
-    // Use a JOIN with the FTS table to access the `rank` column for ordering
-    conditions.push("memories_fts MATCH ?");
-
-    // Scope filtering
-    if (options?.scope && options.scope !== "both") {
-      conditions.push("m.scope = ?");
-      params.push(options.scope);
-    }
-
-    // Category filtering
-    if (options?.category) {
-      conditions.push("m.category = ?");
-      params.push(options.category);
-    }
-
-    const limit = options?.limit ?? 10;
-    const where = conditions.join(" AND ");
-    const sql = `SELECT m.* FROM memories m INNER JOIN memories_fts ON m.rowid = memories_fts.rowid WHERE ${where} ORDER BY rank LIMIT ?`;
-    params.push(limit);
-
-    try {
-      const rows = this.db.query(sql).all(...params) as Record<string, unknown>[];
-      return rows.map((row) => ({
-        ...row,
-        tags: parseJsonArray(row.tags),
-        source_sessions: parseJsonArray(row.source_sessions),
-        access_count: Number(row.access_count),
-      })) as MemoryEntry[];
-    } catch (err) {
-      log.warn("memory search query failed", { query: options.query, error: String(err) });
-      return [];
-    }
+    return searchMemories(this.db, options);
   }
 
   /**
