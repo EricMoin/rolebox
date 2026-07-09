@@ -10,23 +10,23 @@
 /** @jsxImportSource @opentui/solid */
 import { createSignal, createMemo, onCleanup, createRoot, Show, ErrorBoundary } from "solid-js";
 import { existsSync } from "node:fs";
-import { stateDirFor } from "../../utils/state-paths.ts";
-import { readMonitorSnapshot } from "../../cli/commands/monitor-reader.ts";
+import { stateDirFor } from "../utils/state-paths";
+import { readMonitorSnapshot } from "../cli/commands/monitor-reader";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
   ActiveFunction,
-} from "../../cli/commands/monitor-reader.ts";
+} from "../cli/commands/monitor-reader";
 import {
   type ThemeColors, type HealthState,
   rgbaToCSS, BOLD, DIM, DIM_ITALIC, REFRESH_MS,
   readPackageVersion, buildSessionScope, agentLeaf, agentRoot,
-} from "../helpers.ts";
+} from "./helpers";
 import {
   renderHeader, renderRule,
   renderPulse, healthDisplay, renderStaleHint, renderNoStateBody,
   renderActivity,
-} from "../components/index.ts";
+} from "./components/index";
 
 const PACKAGE_VERSION = readPackageVersion();
 

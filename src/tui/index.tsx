@@ -21,7 +21,7 @@
  */
 
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui";
-import { createSidebarRenderer } from "./state.ts";
+import { createSidebarRenderer } from "./state";
 
 // ── TUI Plugin ──────────────────────────────────────────────────────────
 

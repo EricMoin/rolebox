@@ -360,8 +360,103 @@ describe("downloadRole", () => {
       "1.0.0"
     );
 
+    // Verify extraction output exists at the correct path
     expect(existsSync(resultDir)).toBe(true);
     expect(existsSync(join(resultDir, "role.yaml"))).toBe(true);
+
+    // Verify the result uses the stable output directory pattern
+    expect(resultDir).toMatch(/rolebox-out-/);
+
+    // Clean up all test artifacts
+    rmSync(resultDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("invokes tar without --include flag during extraction", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-args-test-"));
+    const fixtureDir = join(tmpDir, "fixture");
+    const topDir = join(fixtureDir, "example-myrepo-a1b2c3d");
+    const roleDir = join(topDir, "roles", "code-reviewer");
+    mkdirSync(roleDir, { recursive: true });
+    writeFileSync(join(roleDir, "role.yaml"), "name: code-reviewer\ndescription: Reviews code\n");
+    writeFileSync(join(topDir, "registry.yaml"), validYaml);
+
+    const archivePath = join(tmpDir, "test.tar.gz");
+    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+    const tarExit = await tarProc.exited;
+    expect(tarExit).toBe(0);
+
+    const archiveBytes = require("node:fs").readFileSync(archivePath);
+    const mockResponse = new Response(archiveBytes, { status: 200 });
+    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+
+    // Install a spy on Bun.spawn to capture extraction args
+    // while still delegating to the real implementation
+    const originalSpawn = Bun.spawn;
+    const extractionArgs: string[] = [];
+    Bun.spawn = mock((cmd: string[], opts?: any) => {
+      if (cmd[0] === "tar" && cmd.includes("xzf")) {
+        extractionArgs.push(...cmd);
+      }
+      return originalSpawn(cmd, opts);
+    });
+
+    const resultDir = await downloadRole(
+      { name: "community", url: "https://github.com/example/myrepo" },
+      "code-reviewer",
+      "1.0.0"
+    );
+
+    // Restore original spawn
+    Bun.spawn = originalSpawn;
+
+    // Verify tar is invoked WITHOUT --include flag
+    expect(extractionArgs.length).toBeGreaterThan(0);
+    expect(extractionArgs).not.toContain("--include");
+
+    // Verify expected flags are still present
+    expect(extractionArgs).toContain("xzf");
+    expect(extractionArgs).toContain("--strip-components=1");
+
+    // Verify extraction still works
+    expect(existsSync(resultDir)).toBe(true);
+    expect(existsSync(join(resultDir, "role.yaml"))).toBe(true);
+
+    rmSync(resultDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("throws when tar binary is not found", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-notar-test-"));
+    const fixtureDir = join(tmpDir, "fixture");
+    const topDir = join(fixtureDir, "example-myrepo-a1b2c3d");
+    const roleDir = join(topDir, "roles", "code-reviewer");
+    mkdirSync(roleDir, { recursive: true });
+    writeFileSync(join(roleDir, "role.yaml"), "name: code-reviewer\ndescription: Reviews code\n");
+    writeFileSync(join(topDir, "registry.yaml"), validYaml);
+
+    const archivePath = join(tmpDir, "test.tar.gz");
+    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "example-myrepo-a1b2c3d"]);
+    const tarExit = await tarProc.exited;
+    expect(tarExit).toBe(0);
+
+    const archiveBytes = require("node:fs").readFileSync(archivePath);
+    const mockResponse = new Response(archiveBytes, { status: 200 });
+    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+
+    // Mock Bun.which to return null for tar
+    const originalWhich = Bun.which;
+    Bun.which = mock(() => null) as unknown as typeof Bun.which;
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/myrepo" },
+        "code-reviewer",
+        "1.0.0"
+      )
+    ).rejects.toThrow("tar binary not found");
+
+    Bun.which = originalWhich;
 
     rmSync(tmpDir, { recursive: true, force: true });
   });
