@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createSubLogger } from "../logger.ts";
-import { shortHash } from "../state-paths.ts";
+import { shortHash } from "../utils/state-paths.ts";
 import type { GraphExecutionState } from "./state.ts";
 import { truncateResult } from "./result-capture.ts";
 

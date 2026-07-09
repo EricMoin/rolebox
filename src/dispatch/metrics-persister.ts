@@ -28,7 +28,7 @@ import { writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 import { createSubLogger } from "../logger.ts";
-import { shortHash } from "../state-paths.ts";
+import { shortHash } from "../utils/state-paths.ts";
 import { metrics, type MetricsSnapshot } from "./metrics.ts";
 import {
   METRICS_PERSIST_INTERVAL_MS,

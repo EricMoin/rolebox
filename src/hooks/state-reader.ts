@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { stateDirFor } from "../state-paths.ts";
+import { stateDirFor } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("hook:state-reader");

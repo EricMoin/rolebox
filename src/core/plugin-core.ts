@@ -3,7 +3,7 @@ import type { PluginContext } from "./context.ts";
 import { EventBus } from "./event-bus.ts";
 import { createSubLogger } from "../logger.ts";
 import { StartupChecker } from "../recovery/startup-check.ts";
-import { stateDirFor } from "../state-paths.ts";
+import { stateDirFor } from "../utils/state-paths.ts";
 import { ServiceSupervisor } from "./service-supervisor.ts";
 
 export class DescriptiveCycleError extends Error {

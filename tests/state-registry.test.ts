@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { stateRegistry } from "../src/state-registry";
+import { stateRegistry } from "../src/core/state-registry";
 import { FunctionRuntimeManager } from "../src/function/runtime-state";
 
 describe("stateRegistry", () => {

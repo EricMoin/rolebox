@@ -9,7 +9,7 @@ import { hookState } from "../hooks/state.ts";
 import { createSubLogger } from "../logger.ts";
 import { StartupChecker } from "../recovery/startup-check.ts";
 import type { StartupHealth } from "../recovery/startup-check.ts";
-import { stateDirFor } from "../state-paths.ts";
+import { stateDirFor } from "../utils/state-paths.ts";
 
 const log = createSubLogger("recovery-service");
 

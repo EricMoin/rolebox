@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { RoleConfig, ResolvedSkill, ResolvedFunction } from "../src/types";
-import { buildAgentPrompt, buildFunctionBlock, buildSkillBlock, buildSubagentBlock, escapeXml } from "../src/prompt-builder";
+import { buildAgentPrompt, buildFunctionBlock, buildSkillBlock, buildSubagentBlock, escapeXml } from "../src/prompt/builder";
 
 // ---------------------------------------------------------------------------
 // Helpers

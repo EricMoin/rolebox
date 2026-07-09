@@ -1,7 +1,7 @@
-import type { MemorySummary, ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "./types.ts";
-import type { FnState } from "./function/runtime-state.ts";
-import { buildCollaborationBlock } from "./graph/index.ts";
-import { createSubLogger } from "./logger.ts";
+import type { MemorySummary, ResolvedFunction, ResolvedReference, ResolvedSkill, ResolvedGraph } from "../types.ts";
+import type { FnState } from "../function/runtime-state.ts";
+import { buildCollaborationBlock } from "../graph/index.ts";
+import { createSubLogger } from "../logger.ts";
 
 const PROMPT_SIZE_WARN_THRESHOLD = 400000;
 

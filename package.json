@@ -7,7 +7,7 @@
   },
   "type": "module",
   "bin": {
-    "rolebox": "./dist/cli.js"
+    "rolebox": "./dist/cli/main.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

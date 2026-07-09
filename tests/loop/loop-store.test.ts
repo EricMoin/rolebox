@@ -47,7 +47,7 @@ describe("LoopStore persistence", () => {
 
   beforeEach(() => {
     store = new LoopStore(tempDir);
-    const { shortHash } = require("../../src/state-paths.ts");
+    const { shortHash } = require("../../src/utils/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -137,7 +137,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("corrupt JSON → load() returns null", () => {
-    const { shortHash } = require("../../src/state-paths.ts");
+    const { shortHash } = require("../../src/utils/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -148,7 +148,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("version mismatch → load() returns null", () => {
-    const { shortHash } = require("../../src/state-paths.ts");
+    const { shortHash } = require("../../src/utils/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
@@ -159,7 +159,7 @@ describe("LoopStore persistence", () => {
   });
 
   it("empty file → load() returns null", () => {
-    const { shortHash } = require("../../src/state-paths.ts");
+    const { shortHash } = require("../../src/utils/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);

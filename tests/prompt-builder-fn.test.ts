@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { buildFunctionStateBlock, buildActiveArtifactBlock } from "../src/prompt-builder";
+import { buildFunctionStateBlock, buildActiveArtifactBlock } from "../src/prompt/builder";
 import type { FnState } from "../src/function/runtime-state";
 
 describe("prompt builder function blocks", () => {

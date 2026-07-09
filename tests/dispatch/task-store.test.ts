@@ -2,7 +2,7 @@ import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { shortHash } from "../../src/state-paths";
+import { shortHash } from "../../src/utils/state-paths";
 import type { DispatchTask } from "../../src/dispatch/types";
 
 let currentDataDir = "";

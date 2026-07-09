@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import os from "node:os";
-import { SKILL_MD } from "./constants.ts";
+import { SKILL_MD } from "../constants.ts";
 
 /** `{baseDir}/{name}.md` */
 export function functionPath(baseDir: string, name: string): string {

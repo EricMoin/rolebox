@@ -2,7 +2,7 @@ import path from "node:path";
 import { writeFileSync, readFileSync, mkdirSync, readdirSync, unlinkSync, existsSync } from "node:fs";
 import type { ResolvedRole, ResolvedSubAgent } from "../types.ts";
 import { RoleMode, ROLEBOX_AGENT_MARKER } from "../constants.ts";
-import { agentsDir, agentFilePath } from "../paths.ts";
+import { agentsDir, agentFilePath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 
 const log = createSubLogger("sync");

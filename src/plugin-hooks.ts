@@ -1,7 +1,7 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "./types.ts";
 import { hookState } from "./hooks/state.ts";
-import { normalizeWorkspaceDir } from "./state-paths.ts";
+import { normalizeWorkspaceDir } from "./utils/state-paths.ts";
 import { graphSessionState } from "./graph/index.ts";
 import { functionRuntime } from "./function/runtime-state.ts";
 import { createSubLogger } from "./logger.ts";

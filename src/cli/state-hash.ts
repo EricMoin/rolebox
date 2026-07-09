@@ -1,1 +1,1 @@
-export { workspaceHash as stateFileHash } from "../state-paths.ts";
+export { workspaceHash as stateFileHash } from "../utils/state-paths.ts";

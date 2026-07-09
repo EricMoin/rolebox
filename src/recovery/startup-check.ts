@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } 
 import { join, dirname } from "node:path";
 import { createSubLogger } from "../logger.ts";
 import { acquireStateLock } from "../dispatch/state-lock.ts";
-import { stateDirFor } from "../state-paths.ts";
+import { stateDirFor } from "../utils/state-paths.ts";
 
 const log = createSubLogger("recovery:startup-check");
 

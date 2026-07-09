@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { buildMemoryBlock } from "../../src/prompt-builder.ts";
+import { buildMemoryBlock } from "../../src/prompt/builder.ts";
 import type { MemorySummary } from "../../src/types.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────

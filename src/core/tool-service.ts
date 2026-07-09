@@ -18,7 +18,7 @@ import { createAssetHotReloadTool } from "../asset/hot-reload.ts";
 import { createContextAssembleTool } from "../dispatch/context-assemble.ts";
 import { createTaskSearchTool } from "../dispatch/task-search.ts";
 import { createAssetSearchTool } from "../asset/asset-search.ts";
-import { createReferenceSearchTool } from "../reference-search.ts";
+import { createReferenceSearchTool } from "../utils/reference-search.ts";
 import { createAssetInspectTool } from "../asset/asset-inspect.ts";
 import { createAssetValidateTool } from "../asset/asset-validate.ts";
 import { createFunctionStateTool } from "../function/function-state.ts";
