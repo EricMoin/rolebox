@@ -1,7 +1,7 @@
 import { bold, dim, red, green, cyan, yellow, soft, border, stripAnsi, shortenPath } from "../../format.ts";
-import { readTaskDetail } from "../monitor-reader.ts";
-import type { MonitorSnapshot, TaskSnapshot, DispatchSummary } from "../monitor-reader.ts";
-import { formatDuration, truncate, statusGlyph, statusColor, statusCell, shortSessionId, contentWidth, isNarrow, parseMetricKey, formatPromLabels, histogramPercentile } from "../monitor-helpers.ts";
+import { readTaskDetail } from "../monitor/monitor-reader.ts";
+import type { MonitorSnapshot, TaskSnapshot, DispatchSummary } from "../monitor/monitor-reader.ts";
+import { formatDuration, truncate, statusGlyph, statusColor, statusCell, shortSessionId, contentWidth, isNarrow, parseMetricKey, formatPromLabels, histogramPercentile } from "../monitor/monitor-helpers.ts";
 import { renderTasks } from "./table-helpers.ts";
 import { renderSystemPulse, renderOrchestration, renderActiveFunctions, renderRecovery, renderMetrics, renderNotifications } from "./status-format.ts";
 

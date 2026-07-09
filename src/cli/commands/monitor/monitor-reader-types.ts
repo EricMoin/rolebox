@@ -1,4 +1,4 @@
-import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
+import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
 
 // ── Public types ────────────────────────────────────────────────────
 

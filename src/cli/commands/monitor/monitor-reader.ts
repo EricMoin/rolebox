@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { normalizeWorkspaceDir, stateDirFor } from "../../utils/state-paths.ts";
-import { readResultSidecar, resultSidecarPath } from "../../dispatch/result-extractor.ts";
-import { BACKGROUND_STALE_TIMEOUT_MS } from "../../dispatch/config.ts";
-import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
+import { normalizeWorkspaceDir, stateDirFor } from "../../../utils/state-paths.ts";
+import { readResultSidecar, resultSidecarPath } from "../../../dispatch/completion/result-extractor.ts";
+import { BACKGROUND_STALE_TIMEOUT_MS } from "../../../dispatch/config.ts";
+import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
 import type {
   TaskSnapshot,
   ActiveFunction,

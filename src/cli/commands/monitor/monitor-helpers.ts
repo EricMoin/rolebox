@@ -1,4 +1,4 @@
-import { dim, red, green, cyan, yellow, magenta, gray } from "../format.ts";
+import { dim, red, green, cyan, yellow, magenta, gray } from "../../format.ts";
 
 // ── Layout helpers ──────────────────────────────────────────────
 

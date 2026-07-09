@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { stripAnsi } from "../../src/cli/format";
 import type {
   MonitorSnapshot,
-} from "../../src/cli/commands/monitor-reader";
+} from "../../src/cli/commands/monitor/monitor-reader";
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -51,7 +51,9 @@ function makeMonitorSnapshot(
 }
 
 async function importMonitor() {
-  return await import("../../src/cli/commands/monitor");
+  const renderer = await import("../../src/cli/commands/monitor/monitor-renderer");
+  const helpers = await import("../../src/cli/commands/monitor/monitor-helpers");
+  return { ...renderer, ...helpers };
 }
 
 // ── renderSystemPulse ────────────────────────────────────────

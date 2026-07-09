@@ -19,6 +19,6 @@ export {
   renderJson,
   renderPrometheus,
   DiffRenderer,
-} from "./renderer/index.ts";
+} from "../renderer/index.ts";
 
-export type { HumanRenderOptions } from "./renderer/index.ts";
+export type { HumanRenderOptions } from "../renderer/index.ts";

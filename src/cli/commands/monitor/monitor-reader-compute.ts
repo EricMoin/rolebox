@@ -7,7 +7,7 @@
  * @module
  */
 
-import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
+import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
 import type { TaskSnapshot, DispatchSummary, ConcurrencyStatus } from "./monitor-reader-types.ts";
 
 // ── Concurrency gauge name constants ──────────────────────────────

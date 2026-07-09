@@ -6,7 +6,7 @@
 
 import { defineCommand } from "citty";
 import { writeFileSync } from "node:fs";
-import { MemoryStore } from "../../memory/store.ts";
+import { MemoryStore } from "../../../memory/store.ts";
 import { resolveProjectRoot } from "./memory-helpers.ts";
 
 export const exportCommand = defineCommand({

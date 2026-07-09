@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
-import { ROLE_YAML } from "../../constants.ts";
+import { ROLE_YAML } from "../../../constants.ts";
 
 /**
  * Validates a role ID string against naming rules.

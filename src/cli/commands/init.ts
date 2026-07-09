@@ -1,9 +1,9 @@
 import { defineCommand } from "citty";
 import { basename } from "node:path";
 import { join } from "node:path";
-import { checkTargetDir, deriveRoleId, validateInitRoleId } from "./init-utils.ts";
-import { scaffoldRole } from "./init-scaffold.ts";
-import { runInteractiveWizard } from "./init-prompts.ts";
+import { checkTargetDir, deriveRoleId, validateInitRoleId } from "./init/init-utils.ts";
+import { scaffoldRole } from "./init/init-scaffold.ts";
+import { runInteractiveWizard } from "./init/init-prompts.ts";
 import type { InitConfig, TemplateType } from "../templates/index.ts";
 import { ROLE_YAML } from "../../constants.ts";
 

@@ -1,6 +1,6 @@
 import { bold, dim, red, green, cyan, yellow, gray, soft, border, sub, bright, bar } from "../../format.ts";
-import type { MonitorSnapshot, GraphSessionSnapshot } from "../monitor-reader.ts";
-import { formatDuration, truncate, shortSessionId, contentWidth, isNarrow, parseMetricKey, histogramPercentile } from "../monitor-helpers.ts";
+import type { MonitorSnapshot, GraphSessionSnapshot } from "../monitor/monitor-reader.ts";
+import { formatDuration, truncate, shortSessionId, contentWidth, isNarrow, parseMetricKey, histogramPercentile } from "../monitor/monitor-helpers.ts";
 import { panel, computeHealthState } from "./table-helpers.ts";
 
 // ── Render: System Pulse ──────────────────────────────────────────

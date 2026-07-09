@@ -1,8 +1,8 @@
 import { defineCommand } from "citty";
 import { bold, dim, red, soft } from "../format.ts";
-import { readMonitorSnapshot, resolveProjectRoot } from "./monitor-reader.ts";
-import { sleep } from "./monitor-helpers.ts";
-import { DiffRenderer, renderHuman, renderJson, renderPrometheus, renderTaskDetail } from "./monitor-renderer.ts";
+import { readMonitorSnapshot, resolveProjectRoot } from "./monitor/monitor-reader.ts";
+import { sleep } from "./monitor/monitor-helpers.ts";
+import { DiffRenderer, renderHuman, renderJson, renderPrometheus, renderTaskDetail } from "./monitor/monitor-renderer.ts";
 
 // ── Monitor options interface ──────────────────────────────────────
 

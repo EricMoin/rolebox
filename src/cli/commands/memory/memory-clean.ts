@@ -5,9 +5,9 @@
  */
 
 import { defineCommand } from "citty";
-import { MemoryStore } from "../../memory/store.ts";
-import { memoryDbPath } from "../../utils/state-paths.ts";
-import { bold, dim } from "../format.ts";
+import { MemoryStore } from "../../../memory/store.ts";
+import { memoryDbPath } from "../../../utils/state-paths.ts";
+import { bold, dim } from "../../format.ts";
 import { resolveProjectRoot, truncate, relevanceLevels } from "./memory-helpers.ts";
 
 export const cleanCommand = defineCommand({

@@ -5,7 +5,7 @@
  */
 
 import { defineCommand } from "citty";
-import { MemoryStore } from "../../memory/store.ts";
+import { MemoryStore } from "../../../memory/store.ts";
 import { resolveProjectRoot } from "./memory-helpers.ts";
 
 export const deleteCommand = defineCommand({

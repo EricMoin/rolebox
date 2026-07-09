@@ -1,5 +1,5 @@
 import * as clack from '@clack/prompts';
-import type { InitConfig, TemplateType } from '../templates/index.ts';
+import type { InitConfig, TemplateType } from '../../templates/index.ts';
 import { validateInitRoleId } from './init-utils.ts';
 
 /**

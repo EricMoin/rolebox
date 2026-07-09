@@ -1,6 +1,6 @@
 import { bold, dim, red, green, cyan, yellow, border, white, stripAnsi } from "../../format.ts";
-import type { MonitorSnapshot, TaskSnapshot } from "../monitor-reader.ts";
-import { formatDuration, truncate, statusGlyph, statusColor, statusCell, contentWidth, isNarrow } from "../monitor-helpers.ts";
+import type { MonitorSnapshot, TaskSnapshot } from "../monitor/monitor-reader.ts";
+import { formatDuration, truncate, statusGlyph, statusColor, statusCell, contentWidth, isNarrow } from "../monitor/monitor-helpers.ts";
 
 // ── Layout helper ──────────────────────────────────────────────────
 

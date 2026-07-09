@@ -11,8 +11,8 @@
 import { dump } from "js-yaml";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { templates, type InitConfig, type TemplateType } from "../templates/index.ts";
-import { DEFAULT_FUNCTIONS, GraphTemplate } from "../../constants.ts";
+import { templates, type InitConfig, type TemplateType } from "../../templates/index.ts";
+import { DEFAULT_FUNCTIONS, GraphTemplate } from "../../../constants.ts";
 
 // ---------------------------------------------------------------------------
 // YAML helpers

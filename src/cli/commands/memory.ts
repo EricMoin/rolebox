@@ -8,13 +8,13 @@
  */
 
 import { defineCommand } from "citty";
-import { listCommand } from "./memory-list.ts";
-import { showCommand } from "./memory-show.ts";
-import { searchCommand } from "./memory-search.ts";
-import { deleteCommand } from "./memory-delete.ts";
-import { exportCommand } from "./memory-export.ts";
-import { cleanCommand } from "./memory-clean.ts";
-import { statsCommand } from "./memory-stats.ts";
+import { listCommand } from "./memory/memory-list.ts";
+import { showCommand } from "./memory/memory-show.ts";
+import { searchCommand } from "./memory/memory-search.ts";
+import { deleteCommand } from "./memory/memory-delete.ts";
+import { exportCommand } from "./memory/memory-export.ts";
+import { cleanCommand } from "./memory/memory-clean.ts";
+import { statsCommand } from "./memory/memory-stats.ts";
 
 export default defineCommand({
   meta: {

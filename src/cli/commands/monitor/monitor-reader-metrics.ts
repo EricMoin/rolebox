@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { tryReadJson, listStateFiles, listNDJSONFiles } from "./monitor-reader-utils.ts";
-import type { MetricsSnapshot } from "../../dispatch/metrics.ts";
+import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
 import type { NDJSONEvent } from "./monitor-reader-types.ts";
 
 /**

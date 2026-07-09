@@ -159,7 +159,7 @@ describe("readLoopSnapshots", () => {
     );
 
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
 
@@ -249,7 +249,7 @@ describe("readLoopSnapshots", () => {
     );
 
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
 
@@ -262,7 +262,7 @@ describe("readLoopSnapshots", () => {
     // stateDir exists but no loop files
     ensureStateDir();
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
     expect(result).toEqual([]);
@@ -271,7 +271,7 @@ describe("readLoopSnapshots", () => {
   it("returns empty array when state directory does not exist", async () => {
     // stateDir() path does not exist at all
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
     expect(result).toEqual([]);
@@ -281,7 +281,7 @@ describe("readLoopSnapshots", () => {
     ensureStateDir();
     await writeFile(join(stateDir(), "loops-malformed.json"), "not valid json{{{");
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
     expect(result).toEqual([]);
@@ -291,7 +291,7 @@ describe("readLoopSnapshots", () => {
     ensureStateDir();
     await writeStateFile("loops-bad.json", { version: 1, notLoops: [] });
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
     expect(result).toEqual([]);
@@ -319,7 +319,7 @@ describe("readLoopSnapshots", () => {
     );
 
     const { readLoopSnapshots } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readLoopSnapshots(stateDir());
 
@@ -359,7 +359,7 @@ describe("readGraphSessions", () => {
     );
 
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
 
@@ -399,7 +399,7 @@ describe("readGraphSessions", () => {
     );
 
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
 
@@ -411,7 +411,7 @@ describe("readGraphSessions", () => {
   it("returns empty array when no graph files exist", async () => {
     ensureStateDir();
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
     expect(result).toEqual([]);
@@ -419,7 +419,7 @@ describe("readGraphSessions", () => {
 
   it("returns empty array when state directory does not exist", async () => {
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
     expect(result).toEqual([]);
@@ -429,7 +429,7 @@ describe("readGraphSessions", () => {
     ensureStateDir();
     await writeFile(join(stateDir(), "graph-bad.json"), "{invalid}");
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
     expect(result).toEqual([]);
@@ -439,7 +439,7 @@ describe("readGraphSessions", () => {
     ensureStateDir();
     await writeStateFile("graph-bad.json", { version: 2, noSessions: [] });
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
     expect(result).toEqual([]);
@@ -472,7 +472,7 @@ describe("readGraphSessions", () => {
     });
 
     const { readGraphSessions } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const result = readGraphSessions(stateDir());
 
@@ -488,7 +488,7 @@ describe("readGraphSessions", () => {
 describe("computeDispatchSummary", () => {
   it("correctly counts tasks by status", async () => {
     const { computeDispatchSummary } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const tasks = [
       { id: "1", status: "pending" as const, agent: "a", startedAt: "", durationMs: 0, depth: 0, mode: "sync" as const },
@@ -514,7 +514,7 @@ describe("computeDispatchSummary", () => {
 
   it("returns zeroed summary for empty task array", async () => {
     const { computeDispatchSummary } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const summary = computeDispatchSummary([]);
 
@@ -529,7 +529,7 @@ describe("computeDispatchSummary", () => {
 
   it("counts timeout status tasks as neither pending/running/completed/error/cancelled (falls into default)", async () => {
     const { computeDispatchSummary } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const tasks = [
       { id: "t1", status: "timeout" as const, agent: "a", startedAt: "", durationMs: 0, depth: 0, mode: "sync" as const },
@@ -555,7 +555,7 @@ describe("computeDispatchSummary", () => {
 describe("computeConcurrencyStatus", () => {
   it("aggregates concurrency gauges from metrics", async () => {
     const { computeConcurrencyStatus } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
 
     const metrics = {
@@ -580,7 +580,7 @@ describe("computeConcurrencyStatus", () => {
 
   it("handles bare (unlabeled) concurrency gauge names", async () => {
     const { computeConcurrencyStatus } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
 
     const metrics = {
@@ -602,7 +602,7 @@ describe("computeConcurrencyStatus", () => {
 
   it("returns zeroed status when metrics is null", async () => {
     const { computeConcurrencyStatus } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
 
     const status = computeConcurrencyStatus(null);
@@ -612,7 +612,7 @@ describe("computeConcurrencyStatus", () => {
 
   it("returns zeroed status when metrics is undefined", async () => {
     const { computeConcurrencyStatus } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
 
     const status = computeConcurrencyStatus(undefined);
@@ -622,7 +622,7 @@ describe("computeConcurrencyStatus", () => {
 
   it("returns zeroed status when no concurrency gauges exist", async () => {
     const { computeConcurrencyStatus } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
 
     const metrics = {
@@ -699,6 +699,8 @@ describe("readMonitorSnapshot", () => {
           mode: "inherit",
           startedAt: 1000,
           updatedAt: 2000,
+          activeWorkerSessionId: "sess-b",
+          activeWorkerTaskId: "task-2",
         },
       ]),
     );
@@ -708,7 +710,7 @@ describe("readMonitorSnapshot", () => {
       "graph-abc.json",
       makeGraphFilePayload([
         {
-          sessionId: "graph-1",
+          sessionId: "sess-b",
           agentId: "graph-agent",
           frontier: ["node-b"],
           completed: ["node-a"],
@@ -719,7 +721,7 @@ describe("readMonitorSnapshot", () => {
     );
 
     const { readMonitorSnapshot } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const snapshot = readMonitorSnapshot(tmpDir);
 
@@ -747,7 +749,7 @@ describe("readMonitorSnapshot", () => {
 
     // — Graph sessions —
     expect(snapshot.graphSessions).toHaveLength(1);
-    expect(snapshot.graphSessions[0].sessionId).toBe("graph-1");
+    expect(snapshot.graphSessions[0].sessionId).toBe("sess-b");
 
     // — Concurrency (no metrics file → zeroed) —
     expect(snapshot.concurrency).toEqual({ active: 0, limit: 0, queued: 0 });
@@ -758,7 +760,7 @@ describe("readMonitorSnapshot", () => {
     ensureStateDir();
 
     const { readMonitorSnapshot } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const snapshot = readMonitorSnapshot(tmpDir);
 
@@ -779,7 +781,7 @@ describe("readMonitorSnapshot", () => {
   it("handles state directory that does not exist", async () => {
     // tmpDir itself exists but .rolebox/state/ does not
     const { readMonitorSnapshot } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const snapshot = readMonitorSnapshot(tmpDir);
 
@@ -797,7 +799,7 @@ describe("readMonitorSnapshot", () => {
     await writeFile(join(stateDir(), "dispatch-bad.json"), "{{{bad json}}}");
 
     const { readMonitorSnapshot } = await import(
-      "../../src/cli/commands/monitor-reader.ts"
+      "../../src/cli/commands/monitor/monitor-reader.ts"
     );
     const snapshot = readMonitorSnapshot(tmpDir);
 
