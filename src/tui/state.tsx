@@ -11,12 +11,12 @@
 import { createSignal, createMemo, onCleanup, createRoot, Show, ErrorBoundary } from "solid-js";
 import { existsSync } from "node:fs";
 import { stateDirFor } from "../utils/state-paths";
-import { readMonitorSnapshot } from "../cli/commands/monitor-reader";
+import { readMonitorSnapshot } from "../cli/commands/monitor/monitor-reader";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
   ActiveFunction,
-} from "../cli/commands/monitor-reader";
+} from "../cli/commands/monitor/monitor-reader";
 import {
   type ThemeColors, type HealthState,
   rgbaToCSS, BOLD, DIM, DIM_ITALIC, REFRESH_MS,

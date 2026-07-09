@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { ConcurrencyManager, type IConcurrencyManager } from "../../src/dispatch/concurrency.ts";
+import { ConcurrencyManager, type IConcurrencyManager } from "../../src/dispatch/concurrency/concurrency.ts";
 
 describe("ConcurrencyManager", () => {
   it("implements IConcurrencyManager interface", () => {

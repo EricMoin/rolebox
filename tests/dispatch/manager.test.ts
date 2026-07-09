@@ -1,14 +1,14 @@
 import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/manager";
+import { DispatchManager } from "../../src/dispatch/core/manager";
 import type { DispatchTask } from "../../src/dispatch/types";
-import { TaskStateStore } from "../../src/dispatch/task-store.ts";
+import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMockClient, parentContext } from "./helpers";
-import { metrics } from "../../src/dispatch/metrics";
-import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/result-extractor";
+import { metrics } from "../../src/dispatch/persistence/metrics";
+import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/completion/result-extractor";
 import { MAX_CONSECUTIVE_FETCH_FAILURES } from "../../src/dispatch/config";
 
 const fastConfig = {
@@ -3699,7 +3699,7 @@ describe("flushPersistSync", () => {
 
     // Immediately create a new store and load — state should NOT be durable yet
     // because leaveRunning no longer calls flushPersistSync (debounced async only)
-    const { TaskStateStore } = await import("../../src/dispatch/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
     const freshStore = new TaskStateStore(dir);
     const loaded = freshStore.load();
     expect(loaded).toBeNull();

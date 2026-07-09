@@ -1,6 +1,6 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { SessionMonitor } from "../../src/dispatch/session-monitor";
+import { SessionMonitor } from "../../src/dispatch/completion/session-monitor";
 
 const SESSION_ID = "session-abc";
 

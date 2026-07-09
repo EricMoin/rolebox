@@ -9,7 +9,7 @@ import {
   readResultSidecar,
   RESULT_FENCE,
   DEFAULT_MAX_RESULT_CHARS,
-} from "../../src/dispatch/result-extractor.ts";
+} from "../../src/dispatch/completion/result-extractor.ts";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

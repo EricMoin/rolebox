@@ -1,7 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import type { DispatchTask, NotificationPayload } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
-import { metrics } from "./metrics.ts";
+import { metrics } from "./persistence/metrics.ts";
 
 const log = createSubLogger("dispatch:notify");
 

@@ -1,5 +1,5 @@
 import type { DispatchTask } from "./types.ts";
-import { applyWindow, spillToFile, formatResultEnvelope, DEFAULT_MAX_RESULT_CHARS } from "./result-extractor.ts";
+import { applyWindow, spillToFile, formatResultEnvelope, DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
 
 export function formatDuration(task: DispatchTask): string {

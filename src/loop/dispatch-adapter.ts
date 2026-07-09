@@ -1,5 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import type { DispatchManager } from "../dispatch/manager.ts";
+import type { DispatchManager } from "../dispatch/core/manager.ts";
 import type { DispatchInput } from "../dispatch/types.ts";
 import { SUMMARY_INPUT_CHAR_CAP } from "./constants.js";
 

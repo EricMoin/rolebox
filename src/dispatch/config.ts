@@ -1,4 +1,4 @@
-import type { IConcurrencyManager } from "./concurrency.ts";
+import type { IConcurrencyManager } from "./concurrency/concurrency.ts";
 
 /**
  * Centralized configuration constants for the dispatch subsystem.

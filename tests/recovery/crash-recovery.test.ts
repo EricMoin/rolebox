@@ -34,7 +34,7 @@ import {
   quarantineCorruptFile,
   StartupChecker,
 } from "../../src/recovery/startup-check.ts";
-import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/state-lock.ts";
+import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/concurrency/state-lock.ts";
 import { __resetForTest } from "../../src/logger.ts";
 
 // ── Test lifecycle ──────────────────────────────────────────────────

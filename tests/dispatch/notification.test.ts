@@ -9,7 +9,7 @@ import {
   clearSentFinalNotifies,
   clearParentQueues,
 } from "../../src/dispatch/notification";
-import { metrics } from "../../src/dispatch/metrics";
+import { metrics } from "../../src/dispatch/persistence/metrics";
 
 // ── helpers ──────────────────────────────────────────────────────
 

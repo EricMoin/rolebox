@@ -1,7 +1,7 @@
 import type { CondEnv } from "../function/conditions.ts";
 import type { FlowEdge } from "../types.ts";
 import type { ConditionCapability, ObserveCapability } from "./capabilities.ts";
-import type { IConcurrencyManager } from "../dispatch/concurrency.ts";
+import type { IConcurrencyManager } from "../dispatch/concurrency/concurrency.ts";
 
 /** All supported extension scopes. */
 export type ExtensionScope =

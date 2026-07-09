@@ -1,10 +1,10 @@
 import { writeFileSync, renameSync } from "node:fs";
 import { tool } from "@opencode-ai/plugin";
 import { z } from "zod";
-import type { DispatchManager } from "./manager.ts";
+import type { DispatchManager } from "./core/manager.ts";
 import type { DispatchInput, DispatchTask } from "./types.ts";
-import { metrics } from "./metrics.ts";
-import { DEFAULT_MAX_RESULT_CHARS } from "./result-extractor.ts";
+import { metrics } from "./persistence/metrics.ts";
+import { DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { parentContextFromTool, buildCompletedOutput } from "./tool-helpers.ts";
 

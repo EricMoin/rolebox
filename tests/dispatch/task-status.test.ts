@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 import { describe, it, expect } from "bun:test";
-import { createDispatchStatusTool } from "../../src/dispatch/task-status.ts";
-import type { DispatchManager } from "../../src/dispatch/manager.ts";
+import { createDispatchStatusTool } from "../../src/dispatch/query/task-status.ts";
+import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask, TaskEventState } from "../../src/dispatch/types.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────

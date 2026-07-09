@@ -1,7 +1,7 @@
 import type { ResolvedGraph, GraphNodeRole, LoopCondition, ResolvedTermination } from "../types.ts";
 import { GraphTemplate as GT, PARENT_NODE } from "../constants.ts";
 import { isExitEdge } from "./graph-utils.ts";
-import { RESULT_FENCE } from "../dispatch/result-extractor.ts";
+import { RESULT_FENCE } from "../dispatch/completion/result-extractor.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

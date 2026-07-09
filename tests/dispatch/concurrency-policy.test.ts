@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/manager.ts";
-import { ConcurrencyManager, type IConcurrencyManager } from "../../src/dispatch/concurrency.ts";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import { ConcurrencyManager, type IConcurrencyManager } from "../../src/dispatch/concurrency/concurrency.ts";
 import type { DispatchManagerConfig } from "../../src/dispatch/config.ts";
 
 /**

@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { detectCompletion } from "../../src/dispatch/completion-detector";
+import { detectCompletion } from "../../src/dispatch/completion/completion-detector";
 import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types";
 import { TASK_TTL_MS } from "../../src/dispatch/config";
 import { clearSentFinalNotifies, clearParentQueues, hasFinalNotifyBeenSent } from "../../src/dispatch/notification";
@@ -89,7 +89,7 @@ describe("BUG-6: TTL=30 min", () => {
 
 describe("integration: event-driven completion flow", () => {
   it("launch → event sequence (busy→message.updated→idle) → debounce → complete → notify", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -150,7 +150,7 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("session error event transitions task to error", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -172,7 +172,7 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("session deleted event transitions task to error", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -198,7 +198,7 @@ describe("integration: event-driven completion flow", () => {
 
 describe("integration: per-parent fairness gate", () => {
   it("second task from same parent is queued when parent hits maxActivePerParent, even if global slots remain", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -241,7 +241,7 @@ describe("integration: per-parent fairness gate", () => {
   });
 
   it("backpressure retry fires on queue-full scenario", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -282,7 +282,7 @@ describe("integration: per-parent fairness gate", () => {
 
 describe("integration: getResult truncation + spill", () => {
   it("getResult returns full text even when large", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const longText = "x".repeat(50000);
@@ -323,7 +323,7 @@ describe("integration: getResult truncation + spill", () => {
   });
 
   it("getResult extracts fenced result block", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -364,7 +364,7 @@ describe("integration: getResult truncation + spill", () => {
 
 describe("integration: FINAL notification idempotency", () => {
   it("completing last task sends FINAL notification with noReply:false", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let finalNotifyCount = 0;
@@ -421,7 +421,7 @@ describe("integration: FINAL notification idempotency", () => {
 
 describe("integration: session-gone handling", () => {
   it("handleSessionError transitions task to error and notifies parent", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let notifyCalls = 0;
@@ -458,7 +458,7 @@ describe("integration: session-gone handling", () => {
 
 describe("integration: no-hang on never-resolving messages", () => {
   it("materialization times out quickly, no hang, getResult responds promptly", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -501,7 +501,7 @@ describe("integration: no-hang on never-resolving messages", () => {
 
 describe("integration: notify-after-materialize ordering", () => {
   it("session.messages is called before promptAsync during completion flow", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const callOrder: string[] = [];
@@ -578,7 +578,7 @@ describe("integration: notify-after-materialize ordering", () => {
 
 describe("integration: reap survival", () => {
   it("getResult returns ok after cleanupTask, reading from persistent sidecar", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -631,7 +631,7 @@ describe("integration: reap survival", () => {
 
 describe("integration: backward-compat lazy fetch", () => {
   it("first getResult triggers messages fetch, second uses cache only", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let messagesCallCount = 0;
@@ -686,7 +686,7 @@ describe("integration: backward-compat lazy fetch", () => {
 
 describe("integration: concurrent evaluateAndComplete no-op", () => {
   it("calling evaluateAndComplete on already-completed task is a no-op", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let messagesCallCount = 0;
@@ -744,7 +744,7 @@ describe("integration: outbox resend", () => {
   it(
     "failed final notify populates outbox, sweeper retries successfully",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
 
       let notifyAttemptCount = 0;
@@ -811,7 +811,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
   it(
     "materializeAndNotify with remainingTasks > 0 does not call addToOutbox",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
 
       let promptAsyncCallCount = 0;
@@ -882,7 +882,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
   it(
     "intermediate notification not in outbox — sweeper does not resend",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
       const { clearSentFinalNotifies } = await import("../../src/dispatch/notification");
 

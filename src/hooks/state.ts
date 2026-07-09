@@ -1,4 +1,4 @@
-import type { DispatchManager } from "../dispatch/manager.ts";
+import type { DispatchManager } from "../dispatch/core/manager.ts";
 import type { LoopCoordinator } from "../loop/coordinator.ts";
 import type { LoopStore } from "../loop/loop-store.ts";
 

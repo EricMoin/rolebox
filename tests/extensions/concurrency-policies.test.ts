@@ -20,7 +20,7 @@ describe("ConcurrencyPolicyExtensionPoint", () => {
 
     const modPath = join(tmpDir, "test-policy.ts");
     writeFileSync(modPath, `
-      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency.ts";
+      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency/concurrency.ts";
 
       class TestPolicy implements IConcurrencyManager {
         acquireBackground() { return { outcome: "acquired" as const, cancel: () => {} }; }
@@ -75,7 +75,7 @@ describe("ConcurrencyPolicyExtensionPoint", () => {
 
     const modPath = join(tmpDir, "multi-policy.ts");
     writeFileSync(modPath, `
-      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency.ts";
+      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency/concurrency.ts";
 
       class PolicyA implements IConcurrencyManager {
         acquireBackground() { return { outcome: "acquired" as const, cancel: () => {} }; }
@@ -125,7 +125,7 @@ describe("ConcurrencyPolicyExtensionPoint", () => {
 
     const modPath = join(tmpDir, "first-policy.ts");
     writeFileSync(modPath, `
-      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency.ts";
+      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency/concurrency.ts";
 
       class FirstPolicy implements IConcurrencyManager {
         acquireBackground() { return { outcome: "acquired" as const, cancel: () => {} }; }
@@ -159,7 +159,7 @@ describe("ConcurrencyPolicyExtensionPoint", () => {
 
     const modPath = join(tmpDir, "named-policy.ts");
     writeFileSync(modPath, `
-      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency.ts";
+      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency/concurrency.ts";
 
       class NamedPolicy implements IConcurrencyManager {
         acquireBackground() { return { outcome: "acquired" as const, cancel: () => {} }; }
@@ -196,7 +196,7 @@ describe("ConcurrencyPolicyExtensionPoint", () => {
 
     const modPath = join(tmpDir, "opts-policy.ts");
     writeFileSync(modPath, `
-      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency.ts";
+      import type { IConcurrencyManager } from "../../../../src/dispatch/concurrency/concurrency.ts";
 
       let captured: any;
       export function getCaptured() { return captured; }

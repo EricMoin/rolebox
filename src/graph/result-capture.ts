@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   extractResultBlock as extractBlock,
-} from "../dispatch/result-extractor.ts";
+} from "../dispatch/completion/result-extractor.ts";
 
 /**
  * Extract the result text from an assistant message.

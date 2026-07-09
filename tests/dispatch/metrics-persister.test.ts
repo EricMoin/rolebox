@@ -9,8 +9,8 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { MetricsPersister } from "../../src/dispatch/metrics-persister.ts";
-import { metrics, MetricsRegistry } from "../../src/dispatch/metrics.ts";
+import { MetricsPersister } from "../../src/dispatch/persistence/metrics-persister.ts";
+import { metrics, MetricsRegistry } from "../../src/dispatch/persistence/metrics.ts";
 import { shortHash } from "../../src/utils/state-paths.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────

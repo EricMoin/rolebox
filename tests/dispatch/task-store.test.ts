@@ -11,7 +11,7 @@ mock.module("../../src/cli/paths", () => ({
   getDataDir: () => currentDataDir,
 }));
 
-import { TaskStateStore } from "../../src/dispatch/task-store";
+import { TaskStateStore } from "../../src/dispatch/persistence/task-store";
 
 function makeTask(overrides?: Partial<DispatchTask>): DispatchTask {
   const now = new Date();
