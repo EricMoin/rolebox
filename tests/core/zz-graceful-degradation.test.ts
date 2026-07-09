@@ -1,8 +1,8 @@
 import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
 import { PluginCore } from "../../src/core/plugin-core.ts";
-import { DispatchService } from "../../src/core/dispatch-service.ts";
-import { LoopService } from "../../src/core/loop-service.ts";
-import { RecoveryService } from "../../src/core/recovery-service.ts";
+import { DispatchService } from "../../src/core/services/dispatch-service.ts";
+import { LoopService } from "../../src/core/services/loop-service.ts";
+import { RecoveryService } from "../../src/core/services/recovery-service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import type { PluginCoreLike } from "../../src/core/service.ts";
 import type { StartupHealth } from "../../src/recovery/startup-check.ts";
@@ -35,7 +35,7 @@ describe("DispatchService graceful degradation", () => {
 
   it("inits successfully when recover() fails — health reports degraded", async () => {
     // Mock DispatchManager so recover() throws
-    mock.module(`${ROOT}/src/dispatch/manager.ts`, () => ({
+    mock.module(`${ROOT}/src/dispatch/core/manager.ts`, () => ({
       DispatchManager: mock(() => ({
         setStoreDirectory: mock(() => {}),
         recover: mock(() => Promise.reject(new Error("recover failed - simulated"))),
@@ -85,7 +85,7 @@ describe("LoopService graceful degradation", () => {
     }));
 
     // Also need to mock DispatchManager for the dependency chain
-    mock.module(`${ROOT}/src/dispatch/manager.ts`, () => ({
+    mock.module(`${ROOT}/src/dispatch/core/manager.ts`, () => ({
       DispatchManager: mock(() => ({
         setStoreDirectory: mock(() => {}),
         recover: mock(() => Promise.resolve()),

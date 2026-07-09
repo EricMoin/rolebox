@@ -35,7 +35,17 @@ mock.module("../../../src/cli/paths", () => {
     }
     throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
   }
-  return { getDataDir, getConfigDir, getRolesDir, getRolePath, getSyncTarget };
+  function getOpencodeConfigPath(): string {
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg) return join(xdg, "opencode", "opencode.jsonc");
+    return join(homedir(), ".config", "opencode", "opencode.jsonc");
+  }
+  function getOpencodeSkillsDir(): string {
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg) return join(xdg, "opencode", "skills");
+    return join(homedir(), ".config", "opencode", "skills");
+  }
+  return { getDataDir, getConfigDir, getRolesDir, getRolePath, getSyncTarget, getOpencodeConfigPath, getOpencodeSkillsDir };
 });
 
 afterAll(() => {
