@@ -1,5 +1,5 @@
 import { mock } from "bun:test";
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../../src/platform/ports/session-client";
 import type { DispatchTask } from "../../src/dispatch/types";
 
 /**
@@ -25,91 +25,91 @@ export function makeTask(
 }
 
 /**
- * Creates an OpencodeClient with all session methods mocked.
+ * Creates an ISessionClient mock with all methods mocked.
  * Each method returns a sensible default success value unless overridden.
  */
 export function createMockClient(overrides?: {
   sessionCreate?: () => unknown;
+  /** Override for synchronous prompt (waits for response) */
   sessionPrompt?: () => unknown;
+  /** Override for fire-and-forget prompt (notification injection) */
   sessionPromptAsync?: () => unknown;
+  sessionPromptSync?: () => unknown;
   sessionMessages?: () => unknown;
   sessionStatus?: () => unknown;
   sessionAbort?: () => unknown;
   sessionGet?: () => unknown;
-  sessionDelete?: () => unknown;
-}): OpencodeClient {
+  sessionList?: () => unknown;
+  sessionChildren?: () => unknown;
+  sessionTodo?: () => unknown;
+  sessionDiff?: () => unknown;
+  sessionFork?: () => unknown;
+}): ISessionClient {
   return {
-    session: {
-      create: mock(
-        overrides?.sessionCreate ??
-          (() =>
-            Promise.resolve({
-              data: { id: "test-session-1" },
-              error: undefined,
-            })),
-      ),
-      prompt: mock(
-        overrides?.sessionPrompt ??
-          (() =>
-            Promise.resolve({
-              data: {
-                parts: [
-                  { type: "text" as const, text: "Hello from subagent" },
-                ],
-              },
-              error: undefined,
-            })),
-      ),
-      promptAsync: mock(
-        overrides?.sessionPromptAsync ??
-          (() =>
-            Promise.resolve({
-              data: undefined,
-              error: undefined,
-            })),
-      ),
-      messages: mock(
-        overrides?.sessionMessages ??
-          (() =>
-            Promise.resolve({
-              data: [],
-              error: undefined,
-            })),
-      ),
-      status: mock(
-        overrides?.sessionStatus ??
-          (() =>
-            Promise.resolve({
-              data: {},
-              error: undefined,
-            })),
-      ),
-      abort: mock(
-        overrides?.sessionAbort ??
-          (() =>
-            Promise.resolve({
-              data: undefined,
-              error: undefined,
-            })),
-      ),
-      get: mock(
-        overrides?.sessionGet ??
-          (() =>
-            Promise.resolve({
-              data: { id: "test-session-1" },
-              error: undefined,
-            })),
-      ),
-      delete: mock(
-        overrides?.sessionDelete ??
-          (() =>
-            Promise.resolve({
-              data: true,
-              error: undefined,
-            })),
-      ),
-    },
-  } as unknown as OpencodeClient;
+    create: mock(
+      overrides?.sessionCreate ??
+        (() => Promise.resolve({ id: "test-session-1" })),
+    ),
+    prompt: mock(
+      overrides?.sessionPromptAsync
+        ? (id: string, opts: any) => {
+            // Convert ISessionClient prompt(id, opts) to the SDK format
+            // { path: { id }, body: opts } so test assertions targeting
+            // c[0].path.id and c[0].body keep working.
+            const sdkCall = { path: { id }, body: opts || {} };
+            // Forward to the test override as a single SDK-format argument
+            return overrides!.sessionPromptAsync!(sdkCall);
+          }
+        : ((id: string, opts: any) => {
+            // Default: capture call in SDK format for test assertions
+            // This ensures tests checking c[0]?.path?.id / c[0]?.body work
+            return Promise.resolve({ id: "prompt-1" });
+          }),
+    ),
+    promptSync: mock(
+      overrides?.sessionPromptSync ?? overrides?.sessionPrompt ??
+        (() =>
+          Promise.resolve({
+            parts: [{ type: "text" as const, text: "Hello from subagent" }],
+          })),
+    ),
+    messages: mock(
+      overrides?.sessionMessages ??
+        (() => Promise.resolve([])),
+    ),
+    status: mock(
+      overrides?.sessionStatus ??
+        (() => Promise.resolve(null)),
+    ),
+    abort: mock(
+      overrides?.sessionAbort ??
+        (() => Promise.resolve(true)),
+    ),
+    get: mock(
+      overrides?.sessionGet ??
+        (() => Promise.resolve({ id: "test-session-1" })),
+    ),
+    list: mock(
+      overrides?.sessionList ??
+        (() => Promise.resolve([])),
+    ),
+    children: mock(
+      overrides?.sessionChildren ??
+        (() => Promise.resolve([])),
+    ),
+    todo: mock(
+      overrides?.sessionTodo ??
+        (() => Promise.resolve([])),
+    ),
+    diff: mock(
+      overrides?.sessionDiff ??
+        (() => Promise.resolve([])),
+    ),
+    fork: mock(
+      overrides?.sessionFork ??
+        (() => Promise.resolve(null)),
+    ),
+  } as unknown as ISessionClient;
 }
 
 /**

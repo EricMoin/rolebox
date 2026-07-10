@@ -89,29 +89,23 @@ function tempDir(): string {
 
 function createMockClient() {
   return {
-    session: {
-      get: mock(() =>
-        Promise.resolve({
-          data: { title: "Test Session" },
-          error: undefined,
-        }),
-      ),
-      messages: mock(() =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" },
-              parts: [{ type: "text", text: "Hello from user" }],
-            },
-            {
-              info: { role: "assistant" },
-              parts: [{ type: "text", text: "Response from assistant" }],
-            },
-          ],
-          error: undefined,
-        }),
-      ),
-    },
+    get: mock(() =>
+      Promise.resolve({
+        title: "Test Session",
+      }),
+    ),
+    messages: mock(() =>
+      Promise.resolve([
+        {
+          info: { role: "user" },
+          parts: [{ type: "text", text: "Hello from user" }],
+        },
+        {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: "Response from assistant" }],
+        },
+      ]),
+    ),
   } as any;
 }
 

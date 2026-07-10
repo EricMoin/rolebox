@@ -94,21 +94,15 @@ describe("integration: event-driven completion flow", () => {
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_event" }, error: undefined }),
+        Promise.resolve({ id: "ses_event" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             { info: { role: "assistant" }, parts: [{ type: "text", text: "task done" }] },
-          ],
-          error: undefined,
-        }),
+          ]),
       sessionStatus: () =>
-        Promise.resolve({
-          data: { ses_event: { type: "idle" } },
-          error: undefined,
-        }),
+        Promise.resolve({ type: "idle" }),
     });
 
     const manager = new DispatchManager(client, {
@@ -288,17 +282,14 @@ describe("integration: getResult truncation + spill", () => {
     const longText = "x".repeat(50000);
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_large" }, error: undefined }),
+        Promise.resolve({ id: "ses_large" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             { info: { role: "user", id: "u1" }, parts: [{ type: "text", text: "hi" }] },
             { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: longText }] },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, {
       maxConcurrent: 2,
@@ -328,16 +319,13 @@ describe("integration: getResult truncation + spill", () => {
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_fence" }, error: undefined }),
+        Promise.resolve({ id: "ses_fence" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: "preamble\n```result\nfenced content here\n```\nsuffix" }] },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, {
       maxConcurrent: 2,
@@ -371,15 +359,13 @@ describe("integration: FINAL notification idempotency", () => {
     let allNotifyCalls: Array<{ noReply: boolean }> = [];
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_xxx" }, error: undefined }),
-      sessionPromptAsync: (...args: any[]) => {
-        const opts = args[0] as any;
-        const body = opts?.body;
-        allNotifyCalls.push({ noReply: body?.noReply ?? false });
-        if (body && body.noReply === false) {
+        Promise.resolve({ id: "ses_xxx" }),
+      sessionPromptAsync: (id: string, opts: any) => {
+        allNotifyCalls.push({ noReply: opts?.noReply ?? false });
+        if (opts?.noReply === false) {
           finalNotifyCount++;
         }
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
     });
     const manager = new DispatchManager(client, {
@@ -427,10 +413,10 @@ describe("integration: session-gone handling", () => {
     let notifyCalls = 0;
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_err" }, error: undefined }),
+        Promise.resolve({ id: "ses_err" }),
       sessionPromptAsync: () => {
         notifyCalls++;
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
     });
     const manager = new DispatchManager(client, {
@@ -463,9 +449,9 @@ describe("integration: no-hang on never-resolving messages", () => {
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_hang" }, error: undefined }),
+        Promise.resolve({ id: "ses_hang" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () => new Promise(() => {}),
     });
 
@@ -508,31 +494,25 @@ describe("integration: notify-after-materialize ordering", () => {
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_order" }, error: undefined }),
+        Promise.resolve({ id: "ses_order" }),
       sessionPromptAsync: () => {
         callOrder.push("promptAsync");
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
       sessionMessages: () => {
         callOrder.push("messages");
         return new Promise((r) =>
           setTimeout(
             () =>
-              r({
-                data: [
-                  { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-                ],
-                error: undefined,
-              }),
+              r([
+                { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+              ]),
             50,
           ),
         );
       },
       sessionStatus: () =>
-        Promise.resolve({
-          data: { ses_order: { type: "idle" } },
-          error: undefined,
-        }),
+        Promise.resolve({ type: "idle" }),
     });
 
     const manager = new DispatchManager(client, {
@@ -583,19 +563,16 @@ describe("integration: reap survival", () => {
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_reap" }, error: undefined }),
+        Promise.resolve({ id: "ses_reap" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "survived reaping" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
 
     const manager = new DispatchManager(client, {
@@ -637,20 +614,17 @@ describe("integration: backward-compat lazy fetch", () => {
     let messagesCallCount = 0;
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_v3" }, error: undefined }),
+        Promise.resolve({ id: "ses_v3" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () => {
         messagesCallCount++;
-        return Promise.resolve({
-          data: [
+        return Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "v3 compat text" }],
             },
-          ],
-          error: undefined,
-        });
+          ]);
       },
     });
 
@@ -693,22 +667,19 @@ describe("integration: concurrent evaluateAndComplete no-op", () => {
     let promptAsyncCallCount = 0;
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_noop" }, error: undefined }),
+        Promise.resolve({ id: "ses_noop" }),
       sessionPromptAsync: () => {
         promptAsyncCallCount++;
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
       sessionMessages: () => {
         messagesCallCount++;
-        return Promise.resolve({
-          data: [
+        return Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "done" }],
             },
-          ],
-          error: undefined,
-        });
+          ]);
       },
     });
 
@@ -752,10 +723,9 @@ describe("integration: outbox resend", () => {
 
       const client = createMockClient({
         sessionCreate: () =>
-          Promise.resolve({ data: { id: "ses_outbox" }, error: undefined }),
-        sessionPromptAsync: (...args: any[]) => {
-          const opts = args[0] as any;
-          if (opts?.body && "noReply" in opts.body) {
+          Promise.resolve({ id: "ses_outbox" }),
+        sessionPromptAsync: (id: string, opts: any) => {
+          if (opts && "noReply" in opts) {
             notifyAttemptCount++;
             if (notifyAttemptCount <= 4) {
               return Promise.reject(new Error("notify failed"));
@@ -763,18 +733,15 @@ describe("integration: outbox resend", () => {
           } else {
             launchPromptAsyncResolved = true;
           }
-          return Promise.resolve({ data: undefined, error: undefined });
+          return Promise.resolve({ id: "prompt-1" });
         },
         sessionMessages: () =>
-          Promise.resolve({
-            data: [
+          Promise.resolve([
               {
                 info: { role: "assistant" },
                 parts: [{ type: "text", text: "outbox content" }],
               },
-            ],
-            error: undefined,
-          }),
+            ]),
       });
 
       const manager = new DispatchManager(client, {
@@ -819,25 +786,22 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
 
       const client = createMockClient({
         sessionCreate: () =>
-          Promise.resolve({ data: { id: "ses_intermediate" }, error: undefined }),
+          Promise.resolve({ id: "ses_intermediate" }),
         sessionPromptAsync: (...args: any[]) => {
-          const opts = args[0] as any;
-          if (opts?.body && "noReply" in opts.body) {
+          const opts = args[1] as any;
+          if (opts && "noReply" in opts) {
             promptAsyncCallCount++;
             promptAsyncArgs.push(opts);
           }
-          return Promise.resolve({ data: undefined, error: undefined });
+          return Promise.resolve({ id: "prompt-1" });
         },
         sessionMessages: () =>
-          Promise.resolve({
-            data: [
+          Promise.resolve([
               {
                 info: { role: "assistant" },
                 parts: [{ type: "text", text: "task output" }],
               },
-            ],
-            error: undefined,
-          }),
+            ]),
       });
 
       const manager = new DispatchManager(client, {
@@ -872,7 +836,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
       expect(mgr.notifyOutbox.has(task.id)).toBe(false);
       // Intermediate notification should have been sent once (noReply=true)
       expect(promptAsyncCallCount).toBe(1);
-      const sentText: string = promptAsyncArgs[0]?.body?.parts?.[0]?.text ?? "";
+      const sentText: string = promptAsyncArgs[0]?.parts?.[0]?.text ?? "";
       expect(sentText).toContain("[BACKGROUND TASK COMPLETED]");
       expect(sentText).not.toContain("[ALL BACKGROUND TASKS COMPLETE]");
     },
@@ -890,21 +854,18 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
 
       const client = createMockClient({
         sessionCreate: () =>
-          Promise.resolve({ data: { id: "ses_sweep" }, error: undefined }),
+          Promise.resolve({ id: "ses_sweep" }),
         sessionPromptAsync: () => {
           promptAsyncCallCount++;
-          return Promise.resolve({ data: undefined, error: undefined });
+          return Promise.resolve({ id: "prompt-1" });
         },
         sessionMessages: () =>
-          Promise.resolve({
-            data: [
+          Promise.resolve([
               {
                 info: { role: "assistant" },
                 parts: [{ type: "text", text: "output" }],
               },
-            ],
-            error: undefined,
-          }),
+            ]),
       });
 
       const manager = new DispatchManager(client, {

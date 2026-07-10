@@ -1,15 +1,13 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../../src/platform/ports/session-client";
 import { SessionMonitor } from "../../src/dispatch/completion/session-monitor";
 
 const SESSION_ID = "session-abc";
 
-function createMockClient(getImpl: () => unknown): OpencodeClient {
+function createMockClient(getImpl: () => unknown): ISessionClient {
   return {
-    session: {
-      get: mock(getImpl),
-    },
-  } as unknown as OpencodeClient;
+    get: mock(getImpl),
+  } as unknown as ISessionClient;
 }
 
 describe("SessionMonitor", () => {
@@ -39,10 +37,9 @@ describe("SessionMonitor", () => {
       expect(result).toBe("missing");
     });
 
-    it("returns missing on 404 error in result.error (not thrown)", async () => {
-      const client = createMockClient(() =>
-        Promise.resolve({ data: undefined, error: { status: 404, message: "Not found" } }),
-      );
+    it("returns missing when session.get returns null (not found via adapter)", async () => {
+      // ISessionClient.get() returns null when the session is not found
+      const client = createMockClient(() => Promise.resolve(null));
 
       const result = await monitor.verifyExistence(client, SESSION_ID);
       expect(result).toBe("missing");
@@ -56,22 +53,20 @@ describe("SessionMonitor", () => {
       expect(result).toBe("unknown");
     });
 
-    it("returns unknown when session.get returns neither data nor error", async () => {
-      const client = createMockClient(() =>
-        Promise.resolve({ data: undefined, error: undefined }),
-      );
+    it("returns missing when session.get returns null (no data, handled by adapter)", async () => {
+      // ISessionClient.get() returns null when no session is found
+      const client = createMockClient(() => Promise.resolve(null));
 
       const result = await monitor.verifyExistence(client, SESSION_ID);
-      expect(result).toBe("unknown");
+      expect(result).toBe("missing");
     });
 
-    it("returns unknown when session.get returns null data", async () => {
-      const client = createMockClient(() =>
-        Promise.resolve({ data: null, error: undefined }),
-      );
+    it("returns missing when session.get returns null data (handled by adapter)", async () => {
+      // ISessionClient.get() returns null when no session data is available
+      const client = createMockClient(() => Promise.resolve(null));
 
       const result = await monitor.verifyExistence(client, SESSION_ID);
-      expect(result).toBe("unknown");
+      expect(result).toBe("missing");
     });
   });
 });

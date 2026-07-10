@@ -29,23 +29,16 @@ describe("makeTask", () => {
 describe("createMockClient", () => {
   it("returns a client with default mocked session.create", async () => {
     const client = createMockClient();
-    const result = await client.session.create({} as any);
-    expect(result).toEqual({
-      data: { id: "test-session-1" },
-      error: undefined,
-    });
+    const result = await client.create({ directory: "/tmp" });
+    expect(result).toEqual({ id: "test-session-1" });
   });
 
   it("accepts overrides for session methods", async () => {
     const client = createMockClient({
-      sessionCreate: () =>
-        Promise.resolve({ data: { id: "custom-id" }, error: undefined }),
+      sessionCreate: () => Promise.resolve({ id: "custom-id" }),
     });
-    const result = await client.session.create({} as any);
-    expect(result).toEqual({
-      data: { id: "custom-id" },
-      error: undefined,
-    });
+    const result = await client.create({ directory: "/tmp" });
+    expect(result).toEqual({ id: "custom-id" });
   });
 });
 
