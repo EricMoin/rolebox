@@ -47,6 +47,7 @@ export class HotReloadService implements PluginService {
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   private ctx!: PluginContext;
   private disabled = false;
+  private initTimer: ReturnType<typeof setTimeout> | undefined;
 
   async init(ctx: PluginContext): Promise<void> {
     this.ctx = ctx;
@@ -58,30 +59,43 @@ export class HotReloadService implements PluginService {
       return;
     }
 
+    // Defer watcher creation to avoid:
+    // 1. Blocking plugin-service init on macOS where recursive FSEvents setup
+    //    can be slow on certain directory trees
+    // 2. Triggering a hot-reload from the initial FSEvents event flood during
+    //    test execution, which caused test timeouts as the reload re-resolves
+    //    all roles and restarts services in the background
+    this.initTimer = setTimeout(() => {
+      this.initTimer = undefined;
+      void this.startWatchers();
+    }, 0);
+  }
+
+  private startWatchers(): void {
     // Collect directories to watch: workspace + config dirs from resolved roles
     const dirsToWatch = new Set<string>();
 
     // Watch the raw directory (workspace root)
-    dirsToWatch.add(ctx.rawDirectory);
+    dirsToWatch.add(this.ctx.rawDirectory);
 
     // Watch the normalized directory (may differ if symlinked)
-    if (ctx.directory) {
-      dirsToWatch.add(ctx.directory);
+    if (this.ctx.directory) {
+      dirsToWatch.add(this.ctx.directory);
     }
 
     // Watch the rolebox role directory explicitly if available
-    if (ctx.roleboxDir) {
-      dirsToWatch.add(ctx.roleboxDir);
+    if (this.ctx.roleboxDir) {
+      dirsToWatch.add(this.ctx.roleboxDir);
     }
 
     // Watch the opencode config directory (global skills + functions live here)
-    if (ctx.configDir) {
-      dirsToWatch.add(ctx.configDir);
+    if (this.ctx.configDir) {
+      dirsToWatch.add(this.ctx.configDir);
     }
 
     // Watch the global skills directory explicitly (may differ from configDir)
-    if (ctx.globalSkillsDir) {
-      dirsToWatch.add(ctx.globalSkillsDir);
+    if (this.ctx.globalSkillsDir) {
+      dirsToWatch.add(this.ctx.globalSkillsDir);
     }
 
     for (const dir of dirsToWatch) {
@@ -215,6 +229,10 @@ export class HotReloadService implements PluginService {
   }
 
   async dispose(): Promise<void> {
+    if (this.initTimer) {
+      clearTimeout(this.initTimer);
+      this.initTimer = undefined;
+    }
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;

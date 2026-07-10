@@ -360,7 +360,8 @@ describe("integration: FINAL notification idempotency", () => {
     const client = createMockClient({
       sessionCreate: () =>
         Promise.resolve({ id: "ses_xxx" }),
-      sessionPromptAsync: (id: string, opts: any) => {
+      sessionPromptAsync: (sdkCall: any) => {
+        const opts = sdkCall?.body ?? {};
         allNotifyCalls.push({ noReply: opts?.noReply ?? false });
         if (opts?.noReply === false) {
           finalNotifyCount++;
@@ -724,7 +725,8 @@ describe("integration: outbox resend", () => {
       const client = createMockClient({
         sessionCreate: () =>
           Promise.resolve({ id: "ses_outbox" }),
-        sessionPromptAsync: (id: string, opts: any) => {
+        sessionPromptAsync: (sdkCall: any) => {
+          const opts = sdkCall?.body ?? {};
           if (opts && "noReply" in opts) {
             notifyAttemptCount++;
             if (notifyAttemptCount <= 4) {
@@ -788,7 +790,8 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
         sessionCreate: () =>
           Promise.resolve({ id: "ses_intermediate" }),
         sessionPromptAsync: (...args: any[]) => {
-          const opts = args[1] as any;
+          const sdkCall = args[0] as any;
+          const opts = sdkCall?.body ?? {};
           if (opts && "noReply" in opts) {
             promptAsyncCallCount++;
             promptAsyncArgs.push(opts);
