@@ -1,6 +1,6 @@
 import { writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -8,7 +8,7 @@ import { createSubLogger } from "../../logger.ts";
 const log = createSubLogger("task-concurrency");
 
 export function createTaskConcurrencyTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve real-time concurrency slot status per concurrency key. " +
       "Shows active slots, limits, available capacity, reserved slots, and queue depth. " +
