@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { SessionClientWrapper } from "./client.ts";
 import type { ToolContext } from "./types.ts";
@@ -14,7 +14,7 @@ import {
 } from "./formatters.ts";
 
 export function createSessionReadTool(client: SessionClientWrapper) {
-  return tool({
+  return defineTool({
     description:
       "Read the full transcript of a session with optional filtering by role, tool, or message range. Includes metadata like model info and cost per message.",
     args: {
@@ -71,7 +71,7 @@ export function createSessionReadTool(client: SessionClientWrapper) {
 }
 
 export function createSessionInfoTool(client: SessionClientWrapper) {
-  return tool({
+  return defineTool({
     description:
       "Get comprehensive session information including token usage breakdown, cost, tool call frequencies, model distribution, file modifications, and todo progress.",
     args: { session_id: z.string().describe("Session ID") },
@@ -120,7 +120,7 @@ export function createSessionInfoTool(client: SessionClientWrapper) {
 }
 
 export function createSessionDiffTool(client: SessionClientWrapper) {
-  return tool({
+  return defineTool({
     description:
       "Get all file changes made in a session. Shows a unified diff of every file modified, added, or deleted. Optionally filter to a specific message.",
     args: {
@@ -140,7 +140,7 @@ export function createSessionDiffTool(client: SessionClientWrapper) {
 }
 
 export function createSessionForkTool(client: SessionClientWrapper) {
-  return tool({
+  return defineTool({
     description:
       "Fork (branch) a session at a specific message. Creates a new session diverging from the original at the given point. If no message ID provided, forks at the latest message.",
     args: {

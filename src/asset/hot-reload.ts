@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { HotReloadService } from "../core/services/hot-reload-service.ts";
 import { createSubLogger } from "../logger.ts";
@@ -8,7 +8,7 @@ const log = createSubLogger("asset-hot-reload");
 // ── Public factory ───────────────────────────────────────────────────────────
 
 export function createAssetHotReloadTool(hotReloadService: HotReloadService) {
-  return tool({
+  return defineTool({
     description:
       "Trigger hot-reload of rolebox assets (roles, skills, references, functions). " +
       "Currently triggers a full re-discovery and re-resolution of all roles regardless of type/name filters. " +

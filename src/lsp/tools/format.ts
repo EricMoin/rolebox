@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { LspClientManager } from "../client-manager.ts";
@@ -34,7 +34,7 @@ export function createLspFormatDocumentTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Format an entire document using the language server. " +
       "Returns a summary of changes (lines changed) or the full formatted content.",
@@ -114,7 +114,7 @@ export function createLspFormatRangeTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Format a specific range within a document using the language server. " +
       "Returns the formatted range content.",

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -70,7 +70,7 @@ function createNavigationTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description,
     args: {
       filePath: z.string().describe("Absolute path to the file"),
@@ -173,7 +173,7 @@ export function createLspFindReferencesTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Find all references to the symbol at the given position. Returns locations with surrounding context snippets.",
     args: {
@@ -248,7 +248,7 @@ export function createLspDocumentHighlightsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Highlight all occurrences of the symbol at the given position in the same document. " +
       "Returns ranges with their highlight kind (Text/Read/Write).",

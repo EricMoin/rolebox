@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedFunction, ResolvedSkill, ResolvedReference } from "../types.ts";
 
@@ -126,7 +126,7 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
   // Pre-collect assets at tool creation time
   const allAssets = collectAssets(roles);
 
-  return tool({
+  return defineTool({
     description:
       "Search rolebox assets (skills, functions, references) by keyword. Searches asset names and descriptions across all resolved roles and sub-agents. Returns matching assets sorted by relevance. Use this to discover which skill, function, or reference to load for a given task.",
     args: {

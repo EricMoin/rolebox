@@ -1,4 +1,4 @@
-import { tool, type ToolContext } from "@opencode-ai/plugin";
+import { defineTool, type CanonicalToolContext } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -32,7 +32,7 @@ function fmtRemaining(value: number, limit: number | undefined): string {
 }
 
 export function createTaskBudgetTool(dispatchManager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Query budget usage — token/cost consumption, remaining quota, and trigger limits for the current request. Rolebox-specific: the opencode platform has no native concept of dispatch budget tracking.",
     args: {
@@ -46,7 +46,7 @@ export function createTaskBudgetTool(dispatchManager: DispatchManager) {
         .default(false)
         .describe("When true, include per-task usage breakdown for all child tasks dispatched from this session"),
     },
-    async execute(input, context: ToolContext) {
+    async execute(input, context: CanonicalToolContext) {
       const sessionID = input.session_id ?? context.sessionID;
       const budgetTracker = dispatchManager.getBudgetTracker();
       const config = dispatchManager.getConfig();

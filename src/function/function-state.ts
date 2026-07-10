@@ -1,4 +1,4 @@
-import { tool, type ToolContext } from "@opencode-ai/plugin";
+import { defineTool, type CanonicalToolContext } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { functionRuntime } from "./runtime-state.ts";
 import { ArtifactStore } from "./artifact-store.ts";
@@ -28,7 +28,7 @@ export function createFunctionStateTool(directory: string) {
   const artifactStore = new ArtifactStore(directory);
 
 
-  return tool({
+  return defineTool({
     description:
       "Query the current session's function state machine — lists active functions, their phase, gate status, evidence tags, artifact status (produced/consumed), continuation count, and pending transitions. Rolebox-specific: opencode has no native concept of function state machines.",
     args: {
@@ -47,7 +47,7 @@ export function createFunctionStateTool(directory: string) {
         .default(true)
         .describe("Include evidence observation tags (default true)"),
     },
-    async execute(input, context: ToolContext) {
+    async execute(input, context: CanonicalToolContext) {
       const sessionID = input.session_id ?? context.sessionID;
       const states = functionRuntime.all(sessionID);
       const fnSpecMap = buildFnSpecMap();

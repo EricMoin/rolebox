@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -34,7 +34,7 @@ export function createLspPrepareCallHierarchyTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Prepare call hierarchy for a symbol at the given position. " +
       "Returns CallHierarchyItem(s) with name, kind, uri, and range. " +
@@ -88,7 +88,7 @@ export function createLspIncomingCallsTool(
   clientManager: LspClientManager,
   _docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve incoming calls (callers) for a call hierarchy item. " +
       "Pass an item returned from lsp_prepare_call_hierarchy.",
@@ -135,7 +135,7 @@ export function createLspOutgoingCallsTool(
   clientManager: LspClientManager,
   _docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve outgoing calls (callees) for a call hierarchy item. " +
       "Pass an item returned from lsp_prepare_call_hierarchy.",
@@ -182,7 +182,7 @@ export function createLspTypeHierarchySupertypesTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve supertypes (parent types) for a symbol at the given position. " +
       "Returns parent type hierarchy items.",
@@ -247,7 +247,7 @@ export function createLspTypeHierarchySubtypesTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve subtypes (child types) for a symbol at the given position. " +
       "Returns child type hierarchy items.",

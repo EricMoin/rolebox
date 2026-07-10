@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -18,7 +18,7 @@ export function createLspHoverTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Get hover information (type signature, documentation, etc.) for the symbol at the given position.",
     args: {
@@ -116,7 +116,7 @@ export function createLspSignatureHelpTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Get signature help (function/method signature, parameter info) at the given position. " +
       "Useful when inside a function call's parentheses.",

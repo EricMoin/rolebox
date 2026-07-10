@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { SessionClientWrapper } from "../../session/client.ts";
@@ -16,7 +16,7 @@ interface ContextAssembleDeps {
 }
 
 export function createContextAssembleTool(deps: ContextAssembleDeps) {
-  return tool({
+  return defineTool({
     description:
       "Orchestrates cross-domain search across task/memory/asset/session and assembles a token-bounded context block. Searches memory, dispatch tasks, role assets (skills/functions/references), and recent session messages, then combines results into a single markdown context block truncated to fit a token budget.",
     args: {

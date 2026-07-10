@@ -1,4 +1,4 @@
-import { tool, type ToolContext } from "@opencode-ai/plugin";
+import { defineTool, type CanonicalToolContext } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchInput } from "../types.ts";
@@ -10,7 +10,7 @@ const log = createSubLogger("search:task-retry");
 const TERMINAL_STATUSES = new Set(["completed", "error", "cancelled", "timeout"]);
 
 export function createTaskRetryTool(dispatchManager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Retry a failed dispatch task — reopens the original session for continuation via DispatchManager.reopenForContinuation(). Only tasks in a terminal state (completed, error, cancelled, timeout) can be retried. The original session is reused so all prior context is preserved. Rolebox-specific: opencode has no native retry mechanism for dispatched sub-agent tasks.",
     args: {
@@ -31,7 +31,7 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
           "When true, the retry does not count toward the parent session's dispatch budget limit.",
         ),
     },
-    async execute(input, context: ToolContext) {
+    async execute(input, context: CanonicalToolContext) {
       const { task_id, modify_prompt } = input;
 
       // Step 1: Look up the original task

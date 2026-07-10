@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { KNOWN_CONDITIONS } from "../function/conditions.ts";
 import type {
@@ -270,7 +270,7 @@ export function createAssetValidateTool(resolvedRoles: ResolvedRole[]) {
   const functionMap = collectAllFunctions(resolvedRoles);
   const knownFunctionNames = new Set(functionMap.keys());
 
-  return tool({
+  return defineTool({
     description:
       "Validate asset integrity across all resolved roles and sub-agents. Checks three categories: (1) missing dependencies — function.requires references a function that does not exist; (2) broken reference paths — reference.filePath points to a file that does not exist on disk; (3) unknown transition conditions — transition.when references a condition name not in the registered condition vocabulary. Results are sorted by severity (errors first).",
     args: {

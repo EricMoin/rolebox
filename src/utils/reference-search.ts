@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedReference } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
@@ -113,7 +113,7 @@ async function searchInFile(
 export function createReferenceSearchTool(roles: ResolvedRole[]) {
   const allRefs = collectReferences(roles);
 
-  return tool({
+  return defineTool({
     description:
       "Full-text search across all reference documents (markdown files) loaded by resolved roles and sub-agents. Searches file contents, not just metadata. Returns matched lines with surrounding context. Use this to find specific knowledge within reference documents.",
     args: {

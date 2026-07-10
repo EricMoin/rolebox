@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedSkill, ResolvedReference, ResolvedSubAgent } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
@@ -195,7 +195,7 @@ export function createSkillComposeTool(resolvedRoles: ResolvedRole[]) {
   // Pre-collect all skills at tool creation time
   const allSkills = resolvedRoles.flatMap(collectSkills);
 
-  return tool({
+  return defineTool({
     description:
       "Analyze skill combinations for conflicts and reference deduplication. Given a list of skill names, scans all loaded roles and their sub-agents to find matching skills, deduplicates their references by file path, and detects reference-path conflicts where two skills reference the same document name at different file paths.",
     args: {

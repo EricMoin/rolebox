@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask } from "../types.ts";
@@ -17,7 +17,7 @@ interface TaskNode {
 // ── Factory function ─────────────────────────────────────────────────────────
 
 export function createTaskGraphTool(dispatchManager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Visualise the dispatch task dependency tree starting from a root session. Builds a parent-child tree from DispatchTask parentSessionId/sessionId relations. Shows indented tree with status, agent, nesting depth, and optional result summaries. Rolebox-specific: opencode session_list only shows flat task lists.",
     args: {

@@ -1,5 +1,5 @@
 import { writeFileSync, renameSync } from "node:fs";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "./core/manager.ts";
 import type { DispatchInput, DispatchTask } from "./types.ts";
@@ -15,7 +15,7 @@ export function createDispatchTool(
   resolvedSubagents: Map<string, { parentFullId: string }>,
   _subagentModelKey?: Map<string, string>,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Dispatch work to a subagent. Run synchronously or in the background.",
     args: {
@@ -105,7 +105,7 @@ export function createDispatchTool(
 
 
 export function createDispatchOutputTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve output from a completed background task. Call ONLY after receiving the task's <system-reminder> completion notification. There is no blocking mode — never poll this tool to wait for a task to finish.",
     args: {
@@ -227,7 +227,7 @@ export function createDispatchOutputTool(manager: DispatchManager) {
 }
 
 export function createDispatchCancelTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description: "Cancel a running background task.",
     args: {
       task_id: z
@@ -245,7 +245,7 @@ export function createDispatchCancelTool(manager: DispatchManager) {
 }
 
 export function createDispatchMetricsTool() {
-  return tool({
+  return defineTool({
     description:
       "Retrieve runtime metrics snapshot for the dispatch subsystem — counters, gauges, and histograms. Returns a human-readable summary or JSON. Optionally exports the snapshot JSON to a file.",
     args: {
@@ -327,7 +327,7 @@ export function createDispatchMetricsTool() {
 }
 
 export function createDispatchBudgetTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve token/cost budget status for the current dispatch request. " +
       "Shows configured limits, current usage, remaining budget, and percentage used. " +

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { createSubLogger } from "../logger.ts";
 import { TokenBucket, fetchWithRetry, fetchWithTimeout, BROWSER_USER_AGENT } from "./http-utils.ts";
 import { convertHtmlToMarkdown } from "./html-to-markdown.ts";
@@ -21,7 +21,7 @@ const jinaBucket = new TokenBucket(15);
  * Fallback: Local fetch + Cheerio + Turndown.
  */
 export function createPageReadTool() {
-  return tool({
+  return defineTool({
     description:
       "Fetch a URL and convert its content to clean, LLM-friendly Markdown. " +
       "No API key required. Supports JS-rendered pages via 'browser' engine. " +

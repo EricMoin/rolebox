@@ -1,11 +1,11 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 
 export function createLspServersTool(
   clientManager: LspClientManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "List all detected and running language servers with status, PID, capabilities summary, and uptime.",
     args: {},
@@ -72,7 +72,7 @@ export function createLspServersTool(
 export function createLspRestartServerTool(
   clientManager: LspClientManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Restart a language server by language ID. " +
       "This shuts down the current server process and starts a fresh one. " +

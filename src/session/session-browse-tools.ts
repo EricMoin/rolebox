@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { SessionClientWrapper } from "./client.ts";
 import type { SearchMatch, ToolContext, TextPart, ToolPart, ToolStateCompleted } from "./types.ts";
@@ -9,7 +9,7 @@ import {
 } from "./formatters.ts";
 
 export function createSessionListTool(client: SessionClientWrapper) {
-  return tool({
+  return defineTool({
     description:
       "List all sessions with optional date range filtering. Returns a markdown table with session IDs, titles, message counts, date ranges, and durations.",
     args: {
@@ -56,7 +56,7 @@ export function createSessionListTool(client: SessionClientWrapper) {
 }
 
 export function createSessionSearchTool(client: SessionClientWrapper) {
-  return tool({
+  return defineTool({
     description:
       "Full-text search across all session messages. Returns ranked results with context excerpts and bold match highlights.",
     args: {

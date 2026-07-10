@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask } from "../types.ts";
@@ -11,7 +11,7 @@ export function createTaskSearchTool(
   dispatchManager: DispatchManager,
   directory: string,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Search dispatch task history by query text, status, agent, or date range. Searches task prompt, description, and agent name. Returns a markdown table of matching tasks with status, duration, and optional result preview.",
     args: {

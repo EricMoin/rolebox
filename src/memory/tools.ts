@@ -1,11 +1,11 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { MemoryStore } from "./store.ts";
 
 // ── memory_write ─────────────────────────────────────────────────────────
 
 export function createMemoryWriteTool() {
-  return tool({
+  return defineTool({
     description:
       "Write a new memory entry to persistent storage. Memories persist across sessions for future recall.",
     args: {
@@ -59,7 +59,7 @@ export function createMemoryWriteTool() {
 // ── memory_recall ─────────────────────────────────────────────────────────
 
 export function createMemoryRecallTool() {
-  return tool({
+  return defineTool({
     description:
       "Search memories by full-text query with optional filters. Returns ranked results.",
     args: {
@@ -108,7 +108,7 @@ export function createMemoryRecallTool() {
 // ── memory_list ───────────────────────────────────────────────────────────
 
 export function createMemoryListTool() {
-  return tool({
+  return defineTool({
     description:
       "List memory summaries for browsing or system prompt injection.",
     args: {
@@ -151,7 +151,7 @@ export function createMemoryListTool() {
 // ── memory_update ─────────────────────────────────────────────────────────
 
 export function createMemoryUpdateTool() {
-  return tool({
+  return defineTool({
     description:
       "Update an existing memory entry. Only provided fields are changed.",
     args: {

@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTaskStatus } from "../types.ts";
@@ -75,7 +75,7 @@ function buildTable(
 }
 
 export function createTaskChronologyTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Show time-bucketed task activity. Returns a markdown table grouped by hour, day, or agent with status distribution counts.",
     args: {

@@ -1,6 +1,6 @@
 import { writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask } from "../types.ts";
@@ -12,7 +12,7 @@ export function createTaskExportTool(
   manager: DispatchManager,
   directory: string,
 ) {
-  return tool({
+  return defineTool({
     description: "Export a completed task's full result to a file.",
     args: {
       task_id: z.string().describe("Task ID to export"),

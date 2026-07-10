@@ -1,4 +1,4 @@
-import { tool, type ToolContext } from "@opencode-ai/plugin";
+import { defineTool, type CanonicalToolContext } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask, TaskEventState } from "../types.ts";
@@ -47,7 +47,7 @@ function formatAge(ms: number): string {
 // ─── Tool factory ──────────────────────────────────────────────────────────
 
 export function createDispatchStatusTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Proactively check task liveness on demand. Returns status and liveness " +
       "information for a specific task or all tasks dispatched by the calling " +
@@ -61,7 +61,7 @@ export function createDispatchStatusTool(manager: DispatchManager) {
           "for the calling session. When specified, returns detailed liveness info.",
         ),
     },
-    async execute(input, context: ToolContext) {
+    async execute(input, context: CanonicalToolContext) {
       const sessionID = context.sessionID;
 
       if (input.task_id) {

@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import { z } from "zod";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { createSubLogger } from "../logger.ts";
 import { TokenBucket, fetchWithRetry, BROWSER_USER_AGENT } from "./http-utils.ts";
 import { detectBrowserCapabilities } from "./browser-detect.ts";
@@ -20,7 +20,7 @@ const jinaBucket = new TokenBucket(15); // 15 RPM for Jina (shared anonymous lim
 const ddgBucket = new TokenBucket(25); // 25 RPM for DuckDuckGo
 
 export function createWebSearchTool() {
-  return tool({
+  return defineTool({
     description:
       "Search the web for information. No API key required. " +
       "Supports multiple sources: general web search (Jina/DuckDuckGo), " +

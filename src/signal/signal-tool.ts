@@ -1,8 +1,8 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 
 export function createSignalTool() {
-  return tool({
+  return defineTool({
     description:
       "Emit an out-of-band control signal. Use this to indicate state transitions " +
       "(completion, approval requests, handoffs, etc.) without embedding signals in text content. " +
