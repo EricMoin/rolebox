@@ -165,6 +165,7 @@ export function runMessageObserve(opts: {
   activeFns: ResolvedFunction[];
   artifacts?: ArtifactStore;
   userMessagedThisTurn?: boolean;
+  workspaceDir: string;
 }): string[] {
   const injects: string[] = [];
   forEachObserveSpec(opts.sessionID, opts.activeFns, "message", (fn, st, spec) => {
@@ -176,6 +177,7 @@ export function runMessageObserve(opts: {
         artifacts: opts.artifacts ?? ({} as ArtifactStore),
         requiredEvidence: fn.requires_evidence ?? [],
         userMessagedThisTurn: opts.userMessagedThisTurn ?? false,
+        workspaceDir: opts.workspaceDir,
       });
       if (!condResult) return;
     }

@@ -187,6 +187,7 @@ export async function handleSystemTransform(
       artifacts,
       requiredEvidence: fn.requires_evidence ?? [],
       userMessagedThisTurn,
+      workspaceDir: deps.dir,
     };
     const tr = evaluateGateAndTransitions(fn, env);
     // Collect transitions (applied atomically after loop)

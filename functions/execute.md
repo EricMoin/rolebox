@@ -4,16 +4,52 @@ description: Execute the approved plan with per-step verification, continue unti
 phase: execute
 priority: 20
 consumes: plan
+params:
+  plan: ""
 requires_evidence: [lsp_diagnostics, test]
+continue_max: 30
 observe:
   - on: tool_after
     tool: todowrite
     sync_todos: true
+  - on: activate
+    inject: "If {plan} param is set, read .rolebox/plans/{plan}.md to find your resume point. If no plan artifact was injected via consumes, the plan file IS your source of truth."
 continue_until:
   all: [plan_todos_complete, evidence_met]
 ---
 
 You are now in EXECUTION mode. You have a plan (explicit or implied). Implement it systematically.
+
+## Cross-Session Resume
+
+When activated in a fresh session (no plan artifact injected via `consumes`), follow this resume protocol:
+
+### 1. Locate the Plan
+
+- If `{plan}` param is set: read `.rolebox/plans/{plan}.md`
+- If `{plan}` is empty: glob `.rolebox/plans/*.md`, filter for files containing `- [ ]` (unchecked steps)
+  - Single match → auto-select it
+  - Multiple matches → list them and ask the user which to resume
+  - No matches → tell the user "No incomplete plans found. Use |plan| to create one."
+
+### 2. Determine Resume Point
+
+Parse the plan file:
+- Lines matching `- [x]` → already completed, skip
+- First line matching `- [ ]` → this is your starting point
+- Report to the user: "Resuming plan '{name}' from step N (steps 1–M already complete)"
+
+### 3. Execute with Checkpoint
+
+For each step you complete:
+1. Do the work (same as normal execution below)
+2. Verify it passed
+3. **Flip the checkbox**: use the Edit tool to change that step's `- [ ]` to `- [x]` in `.rolebox/plans/{plan}.md`
+4. This edit IS the persistent progress — it survives session restarts
+
+### 4. Single-Session Mode (backward compat)
+
+If a plan artifact WAS injected (normal `plan` → transition → `execute` flow within one session), work from the artifact as before. Still flip checkboxes in the plan file if one exists at `.rolebox/plans/`.
 
 ## Process
 
@@ -72,5 +108,41 @@ When done:
 - Minimal changes. Don't refactor while implementing. Don't "improve" adjacent code.
 - Be direct about failure. "X broke because Y" > hedging.
 
+## Edge Cases
+
+### Plan Modified Externally
+
+On activation, note the plan file's content. Before starting each step, re-read the plan file. If the content has changed (steps added, removed, or reworded since you started):
+- STOP execution
+- Show the user what changed (briefly)
+- Ask: "The plan was modified. Continue from current position, or restart?"
+
+### Step Failed
+
+When a step fails verification after two attempts:
+- Mark it in the plan file as `- [!] step N — FAILED: <one-line reason>`
+- Do NOT skip to the next step automatically
+- Report the failure and ask the user: fix and retry, skip, or abort
+
+### Evidence Gate on Fresh Session
+
+On resume in a fresh session, `requires_evidence: [lsp_diagnostics, test]` has no prior observations. This is correct — you will satisfy it naturally by running diagnostics and tests as you work through steps. Do not treat an empty evidence slate as an error.
+
+### Multiple Incomplete Plans
+
+When `{plan}` param is empty and multiple `.rolebox/plans/*.md` files have unchecked steps:
+- List each file with its name and how many steps remain (e.g. "my-feature: 3/7 steps remaining")
+- Ask the user to pick one: `|execute plan=<name>|`
+- Do NOT auto-pick or merge them
+
+### No Plans Found
+
+If `.rolebox/plans/` is empty or all plans are fully checked:
+- Report: "No incomplete plans found in .rolebox/plans/."
+- Suggest: "Use |plan| to create a new plan, or specify a plan name with |execute plan=<name>|."
+
 ## Tool Use
 Use the `todowrite` tool to track the plan's steps so progress is synced. After each file change, run `lsp_diagnostics` and the test command to satisfy evidence requirements.
+
+
+After completing each plan step, use the `edit` tool to flip `- [ ]` → `- [x]` in the plan file at `.rolebox/plans/`. This checkpoint is what enables cross-session resume.

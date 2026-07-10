@@ -211,7 +211,7 @@ export async function handleEvent(
         // Declarative: continue_until
         if (fn.continue_until) {
           const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
-            requiredEvidence, userMessagedThisTurn: false };
+            requiredEvidence, userMessagedThisTurn: false, workspaceDir: deps.dir };
           if (evaluateCondition(fn.continue_until, env)) {
             st.phase = "complete"; functionRuntime.markDirty(); continue;
           }

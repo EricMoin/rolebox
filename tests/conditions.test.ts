@@ -26,6 +26,7 @@ function mockEnv(overrides: Partial<CondEnv> = {}): CondEnv {
     artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "cond-test-"))),
     requiredEvidence: [],
     userMessagedThisTurn: false,
+    workspaceDir: mkdtempSync(join(tmpdir(), "cond-test-")),
   };
   return { ...base, ...overrides };
 }
@@ -293,8 +294,8 @@ describe("evaluateCondition", () => {
 });
 
 describe("KNOWN_CONDITIONS", () => {
-  it("contains exactly the 8 closed vocabulary entries", () => {
-    expect(KNOWN_CONDITIONS.size).toBe(8);
+  it("contains exactly the 9 closed vocabulary entries", () => {
+    expect(KNOWN_CONDITIONS.size).toBe(9);
     expect(KNOWN_CONDITIONS.has("user_approval")).toBe(true);
     expect(KNOWN_CONDITIONS.has("artifact_exists")).toBe(true);
     expect(KNOWN_CONDITIONS.has("plan_todos_complete")).toBe(true);
@@ -303,5 +304,6 @@ describe("KNOWN_CONDITIONS", () => {
     expect(KNOWN_CONDITIONS.has("signal_observed")).toBe(true);
     expect(KNOWN_CONDITIONS.has("turn_count")).toBe(true);
     expect(KNOWN_CONDITIONS.has("state_eq")).toBe(true);
+    expect(KNOWN_CONDITIONS.has("plan_incomplete")).toBe(true);
   });
 });

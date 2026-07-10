@@ -79,11 +79,14 @@ Fold the user's answers into your understanding. If a minor point is still ambig
 
 Write the full, enriched plan to `.rolebox/plans/{name}.md` (reuse the draft's `{name}`) using the structure in **Output Format** below. This file is the source of truth the `execute` phase works from. Remove the now-superseded `.rolebox/drafts/{name}.md` if you can.
 
+Note: the plan file's `- [ ]` checkboxes will be flipped to `- [x]` by the executor as steps complete — this is the cross-session progress mechanism.
+
 ### 3. Present Concisely + Emit the Artifact
 
 In chat:
 - A **short** summary only: key decisions made, scope **IN / OUT**, any defaults applied, and the plan file path. Do **not** re-paste the whole plan as prose.
 - Then emit the executable plan inside a ` ```plan ` fenced block — the machine-readable handoff for `execute`. Its `- [ ]` steps become tracked todos.
+- Tell the user: "To resume this plan in a future session, use `|execute plan={name}|`." Remind them that the plan file's checkboxes (`- [ ]` / `- [x]`) serve as persistent progress state.
 
 ### 4. Wait for Approval
 

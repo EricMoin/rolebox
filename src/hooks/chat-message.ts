@@ -208,6 +208,7 @@ export async function handleChatMessage(
           const messageInjects = runMessageObserve({
             sessionID: input.sessionID,
             activeFns,
+            workspaceDir: deps.dir,
           });
           for (const inj of messageInjects) {
             appendCorrection(state.pendingCorrections, input.sessionID, inj);

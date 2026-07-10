@@ -2,6 +2,9 @@ import type { Condition } from "../types.ts";
 import type { FnState } from "./runtime-state.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import { createSubLogger } from "../logger.ts";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
 
 const log = createSubLogger("conditions");
 
@@ -12,6 +15,7 @@ export interface CondEnv {
   artifacts: ArtifactStore;
   requiredEvidence: string[];
   userMessagedThisTurn: boolean;
+  workspaceDir: string;
 }
 
 /** Count unchecked "- [ ]" boxes in the synced todo blob (kv.__todos) or an artifact. */
@@ -42,7 +46,7 @@ function stateEquals(arg: string, env: CondEnv): boolean {
  * - `tool_observed(name)` — true when the named tool has been called
  * - `signal_observed(type)` — true when the `signal` tool was called with the given type
  * - `turn_count(n)` — true when N or more turns have passed since activation
- * - `state_eq(key=val)` — true when kv[key] strictly equals val
+ * - `plan_incomplete(name)` — true when plan file has unchecked `- [ ]` checkboxes
  */
 const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> = {
   user_approval:       (_arg, env) => env.userMessagedThisTurn,
@@ -108,3 +112,27 @@ export function registerCondition(
   NAMED_CONDITIONS[name] = handler;
   refreshKnownConditions();
 }
+
+registerCondition("plan_incomplete", (arg, env) => {
+  const plansDir = join(env.workspaceDir, ".rolebox", "plans");
+  const names: string[] = arg
+    ? [arg]
+    : (() => {
+        try {
+          return readdirSync(plansDir)
+            .filter((f) => f.endsWith(".md"))
+            .map((f) => f.slice(0, -3));
+        } catch {
+          return [];
+        }
+      })();
+  for (const name of names) {
+    try {
+      const content = readFileSync(join(plansDir, `${name}.md`), "utf-8");
+      if (/\- \[ \]/.test(content)) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+});
