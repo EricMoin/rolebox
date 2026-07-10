@@ -141,12 +141,11 @@ export async function startBackgroundTask(
   let didMarkRunning = false;
 
   try {
-    const createResult = await d.client.session.create({
-      body: input.noParentInherit ? {} : { parentID: parentContext.sessionID },
-      query: { directory: parentContext.directory },
+    const session = await d.client.create({
+      directory: parentContext.directory,
+      ...(input.noParentInherit ? {} : { parentID: parentContext.sessionID }),
     });
 
-    const session = createResult.data;
     if (!session) throw new Error("Failed to create session: empty response");
 
     task.sessionId = session.id;
@@ -170,12 +169,9 @@ export async function startBackgroundTask(
     debugLog("launch", taskId, `session created: ${session.id}`);
 
     if (input.run_in_background) {
-      await d.client.session.promptAsync({
-        path: { id: session.id },
-        body: {
-          agent: input.subagent,
-          parts: [{ type: "text", text: input.prompt }],
-        },
+      await d.client.prompt(session.id, {
+        agent: input.subagent,
+        parts: [{ type: "text", text: input.prompt }],
       });
 
       debugLog("launch", taskId, "promptAsync sent — registering with watchdog");
@@ -325,12 +321,12 @@ export async function reopenForContinuation(
     return task;
   }
 
-  const msgResult = await withTimeout(
-    d.client.session.messages({ path: { id: task.sessionId } }),
+  const msgs = await withTimeout(
+    d.client.messages(task.sessionId),
     d.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
     "reopen:session.messages",
   );
-  const messageCountAtStart = (msgResult.data ?? []).length;
+  const messageCountAtStart = (msgs ?? []).length;
 
   transition(d, taskId, ["completed", "error", "timeout", "running"], "running", { completedAt: undefined });
   task.startedAt = new Date();
@@ -344,12 +340,9 @@ export async function reopenForContinuation(
 
   debugLog("reopen", taskId, `continuing ${task.agent} on session ${task.sessionId} (msgCount=${messageCountAtStart})`);
 
-  await d.client.session.promptAsync({
-    path: { id: task.sessionId },
-    body: {
-      agent: input.subagent,
-      parts: [{ type: "text", text: input.prompt }],
-    },
+  await d.client.prompt(task.sessionId, {
+    agent: input.subagent,
+    parts: [{ type: "text", text: input.prompt }],
   });
 
   d.watchdog.cancelDebounce(taskId);

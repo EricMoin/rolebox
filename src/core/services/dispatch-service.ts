@@ -10,6 +10,7 @@ import { RoleMode } from "../../constants.ts";
 import { hookState } from "../../hooks/state.ts";
 import type { ResolvedSubAgent } from "../../types.ts";
 import { createSubLogger } from "../../logger.ts";
+import { OpencodeSessionAdapter } from "../../platform/adapters/opencode-session.ts";
 
 const log = createSubLogger("dispatch-service");
 
@@ -67,7 +68,7 @@ export class DispatchService implements PluginService, ToolContributor {
       }
 
       dispatchManager = new DispatchManager(
-        ctx.client,
+        new OpencodeSessionAdapter(ctx.client),
         mergedConfig,
         this.subagentModelKey,
         customConcurrency,

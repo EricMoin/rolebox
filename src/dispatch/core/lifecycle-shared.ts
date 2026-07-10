@@ -8,7 +8,7 @@ import { resultSidecarPath } from "../completion/result-extractor.ts";
 export interface TaskLifecycleDeps {
   tasks: Map<string, DispatchTask>;
   eventState: Map<string, import("../types.ts").TaskEventState>;
-  client: import("@opencode-ai/sdk").OpencodeClient;
+  client: import("../../platform/ports/session-client.ts").ISessionClient;
   concurrency: import("../concurrency/concurrency.ts").IConcurrencyManager;
   watchdog: import("./watchdog.ts").TaskWatchdogManager;
   config: import("../config.ts").DispatchManagerConfig;
@@ -26,7 +26,7 @@ export interface TaskLifecycleDeps {
   subagentModelKey: Map<string, string>;
   directory: string;
   sessionMonitor: {
-    verifyExistence: (client: import("@opencode-ai/sdk").OpencodeClient, sessionId: string) => Promise<"exists" | "missing" | "unknown">;
+    verifyExistence: (client: import("../../platform/ports/session-client.ts").ISessionClient, sessionId: string) => Promise<"exists" | "missing" | "unknown">;
   };
   cleanupTask: (taskId: string) => void;
   persistState: () => void;

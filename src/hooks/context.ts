@@ -1,4 +1,4 @@
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { ResolvedFunction } from "../types.ts";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "../utils/timeout.ts";
 import { createSubLogger } from "../logger.ts";
@@ -23,27 +23,22 @@ export function collectAllFunctions(
 }
 
 export async function fetchLastAssistantText(
-  client: PluginInput["client"],
+  client: ISessionClient,
   sessionID: string,
 ): Promise<string | null> {
   try {
-    const res = await withTimeout(
-      client.session.messages({ path: { id: sessionID } }),
+    const msgs = await withTimeout(
+      client.messages(sessionID),
       DEFAULT_TIMEOUT_MS,
       `fetchLastAssistantText:${sessionID}`,
       log,
     );
-    if (res === null) return null;
-    if ((res as { error?: unknown }).error !== undefined) return null;
-    const msgs = ((res as { data?: unknown }).data ?? []) as Array<{
-      info: { role: string };
-      parts: Array<{ type: string; text?: string }>;
-    }>;
+    if (msgs === null) return null;
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].info.role !== "assistant") continue;
       const text = msgs[i].parts
-        .filter((p) => p.type === "text" && typeof p.text === "string")
-        .map((p) => p.text as string)
+        .filter((p) => p.type === "text" && "text" in p && typeof (p as { text?: string }).text === "string")
+        .map((p) => (p as { text: string }).text)
         .join("");
       return text.length > 0 ? text : null;
     }

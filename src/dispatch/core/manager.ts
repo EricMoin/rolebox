@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import type {
   DispatchInput,
   DispatchTask,
@@ -33,7 +33,7 @@ export class DispatchManager {
   private cleanedUpTasks = new Map<string, number>();
   private concurrency: IConcurrencyManager;
   private config: DispatchManagerConfig;
-  private client: OpencodeClient;
+  private client: ISessionClient;
   private watchdog: TaskWatchdogManager;
   private sessionToTask: Map<string, string> = new Map();
   private eventState: Map<string, import("../types.ts").TaskEventState> = new Map();
@@ -58,7 +58,7 @@ export class DispatchManager {
   private orchestrator: CompletionOrchestrator;
 
   constructor(
-    client: OpencodeClient,
+    client: ISessionClient,
     config?: Partial<DispatchManagerConfig>,
     subagentModelKey?: Map<string, string>,
     customConcurrency?: IConcurrencyManager,

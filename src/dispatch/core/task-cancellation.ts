@@ -58,7 +58,7 @@ export async function cancelTask(
     if (controller) {
       if (task.sessionId) {
         try {
-          await d.client.session.abort({ path: { id: task.sessionId } });
+          await d.client.abort(task.sessionId);
         } catch (err) {
           debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -76,9 +76,7 @@ export async function cancelTask(
   if (!transition(d, taskId, ["pending", "running"], "cancelled")) return false;
 
   try {
-    await d.client.session.abort({
-      path: { id: task.sessionId },
-    });
+    await d.client.abort(task.sessionId);
   } catch (err) {
     debugLog("cancelTask", taskId, `Session cancel failed (may already be gone): ${err instanceof Error ? err.message : String(err)}`);
   }

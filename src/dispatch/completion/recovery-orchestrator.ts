@@ -72,10 +72,8 @@ export async function recoverOrchestrator(
 
   for (const task of runningTasks) {
     try {
-      const result = await deps.client.session.get({
-        path: { id: task.sessionId },
-      });
-      if (result.data) {
+      const result = await deps.client.get(task.sessionId);
+      if (result) {
         const key = task.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY;
         const occupied = deps.concurrency.forceOccupyBackground(key, 1, task.parentSessionId);
         if (occupied === 1) {
@@ -155,13 +153,10 @@ async function notifyLostPendingTasks(
 
   const parentAgent = lostTasks[0]?.parentAgent;
   try {
-    await deps.client.session.promptAsync({
-      path: { id: parentSessionId },
-      body: {
-        ...parentAgent ? { agent: parentAgent } : {},
-        parts: [{ type: "text", text }],
-        noReply: true,
-      },
+    await deps.client.prompt(parentSessionId, {
+      ...(parentAgent ? { agent: parentAgent } : {}),
+      parts: [{ type: "text", text }],
+      noReply: true,
     });
     metrics.counter("notify_sent_total").inc();
   } catch (err) {

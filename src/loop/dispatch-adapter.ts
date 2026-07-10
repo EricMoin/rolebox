@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { DispatchManager } from "../dispatch/core/manager.ts";
 import type { DispatchInput } from "../dispatch/types.ts";
 import { SUMMARY_INPUT_CHAR_CAP } from "./constants.js";
@@ -52,7 +52,7 @@ export interface IDispatchAdapter {
 export class DispatchAdapter implements IDispatchAdapter {
   constructor(
     private readonly dispatchManager: DispatchManager,
-    private readonly client: OpencodeClient,
+    private readonly client: ISessionClient,
   ) {}
 
   async dispatchRound(input: {
@@ -106,16 +106,7 @@ export class DispatchAdapter implements IDispatchAdapter {
     originSessionId: string,
     sinceMessageId?: string,
   ): Promise<string> {
-    const messagesResult = await this.client.session.messages({
-      path: { id: originSessionId },
-    });
-
-    const messages = (messagesResult as {
-      data?: Array<{
-        info?: { role?: string; id?: string };
-        parts?: Array<{ type: string; text?: string }>;
-      }>;
-    }).data;
+    const messages = await this.client.messages(originSessionId);
 
     if (!messages || messages.length === 0) return "";
 
@@ -135,7 +126,7 @@ export class DispatchAdapter implements IDispatchAdapter {
 
       if (msg.info?.role === "assistant" && msg.parts) {
         for (const part of msg.parts) {
-          if (part.type === "text" && typeof part.text === "string") {
+          if (part.type === "text" && "text" in part && typeof part.text === "string") {
             textParts.push(part.text);
           }
         }
@@ -152,23 +143,15 @@ export class DispatchAdapter implements IDispatchAdapter {
   }
 
   async getLastMessageId(originSessionId: string): Promise<string | undefined> {
-    const messagesResult = await this.client.session.messages({
-      path: { id: originSessionId },
-    });
-    const messages = (
-      messagesResult as { data?: Array<{ info?: { id?: string } }> }
-    ).data;
+    const messages = await this.client.messages(originSessionId);
     if (!messages || messages.length === 0) return undefined;
     return messages[messages.length - 1]?.info?.id;
   }
 
   async injectNote(sessionId: string, text: string): Promise<void> {
-    await this.client.session.promptAsync({
-      path: { id: sessionId },
-      body: {
-        noReply: true,
-        parts: [{ type: "text", text }],
-      },
+    await this.client.prompt(sessionId, {
+      noReply: true,
+      parts: [{ type: "text", text }],
     });
   }
 }

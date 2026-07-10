@@ -10,7 +10,7 @@
  * abort sessions, or interact with the manager/poller directly.
  */
 
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 
 // ── Public Types ───────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ export class SessionMonitor {
    * disappeared. Uses the SDK directly to confirm whether the session
    * truly no longer exists.
    *
-   * @param client     The opencode SDK client
+   * @param client     The session client (ISessionClient)
    * @param sessionId  The session ID to verify
    * @returns
    *   - `"exists"`:  session.get returned data (session still alive)
@@ -45,24 +45,18 @@ export class SessionMonitor {
    *   - `"unknown"`: network error, unexpected response, can't determine
    */
   async verifyExistence(
-    client: OpencodeClient,
+    client: ISessionClient,
     sessionId: string,
   ): Promise<"exists" | "missing" | "unknown"> {
     try {
-      const result = await client.session.get({ path: { id: sessionId } });
+      const result = await client.get(sessionId);
 
-      if (result.data !== undefined && result.data !== null) {
+      if (result !== null) {
         return "exists";
       }
 
-      if (result.error !== undefined) {
-        if (_isNotFoundError(result.error)) {
-          return "missing";
-        }
-        return "unknown";
-      }
-
-      return "unknown";
+      // client.get() returns null for both not-found and errors
+      return "missing";
     } catch (err: unknown) {
       if (_isNotFoundError(err)) {
         return "missing";

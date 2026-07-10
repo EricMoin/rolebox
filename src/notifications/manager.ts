@@ -4,7 +4,7 @@
 // throttling, content building, channel dispatch, and idle scheduling.
 // All external entry points are safe (never throw).
 
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { createSubLogger } from "../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
@@ -38,7 +38,7 @@ const GLOBAL_CHANNEL_KEY = "__global__";
 export class NotificationManager {
   private globalConfig: NotificationConfig;
   private roleConfigs: Map<string, NotificationConfig>;
-  private client: PluginInput["client"];
+  private client: ISessionClient;
   private dir: string;
   private scheduler: NotificationScheduler;
   private throttle: NotificationThrottle;
@@ -51,7 +51,7 @@ export class NotificationManager {
   constructor(opts: {
     globalConfig: NotificationConfig;
     roleConfigs: Map<string, NotificationConfig>;
-    client: PluginInput["client"];
+    client: ISessionClient;
     dir: string;
   }) {
     this.globalConfig = opts.globalConfig;

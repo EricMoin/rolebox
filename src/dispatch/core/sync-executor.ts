@@ -117,12 +117,12 @@ export async function executeSync(
       debugLog("launch", taskId, `continuing session ${existingSessionId}`);
     } else {
       const createTimeoutMs = d.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
-      let createResult: Awaited<ReturnType<typeof d.client.session.create>>;
+      let session: Awaited<ReturnType<typeof d.client.create>>;
       try {
-        createResult = await withTimeout(
-          d.client.session.create({
-            body: { parentID: parentContext.sessionID },
-            query: { directory: parentContext.directory },
+        session = await withTimeout(
+          d.client.create({
+            directory: parentContext.directory,
+            parentID: parentContext.sessionID,
           }),
           createTimeoutMs,
           "session.create",
@@ -138,7 +138,6 @@ export async function executeSync(
         }
         throw e;
       }
-      const session = createResult.data;
       if (!session) {
         const err = JSON.stringify({
           error: "Failed to create session: empty response",
@@ -160,7 +159,7 @@ export async function executeSync(
     const promptTimeout = new Promise<never>((_, rej) => {
       promptTimer = setTimeout(() => {
         controller.abort();
-        void d.client.session.abort({ path: { id: task.sessionId } });
+        void d.client.abort(task.sessionId);
         const err = JSON.stringify({
           error: `Prompt timed out after ${promptTimeoutMs}ms`,
           phase: "prompt",
@@ -171,14 +170,11 @@ export async function executeSync(
     });
 
     try {
-      const promptResult: { data?: { parts: Array<{ type: string; text?: string }> } } =
+      const promptResult =
         await Promise.race([
-          d.client.session.prompt({
-            path: { id: task.sessionId },
-            body: {
-              agent: input.subagent,
-              parts: [{ type: "text", text: input.prompt }],
-            },
+          d.client.promptSync(task.sessionId, {
+            agent: input.subagent,
+            parts: [{ type: "text", text: input.prompt }],
             signal: controller.signal,
           }),
           promptTimeout,
@@ -186,9 +182,8 @@ export async function executeSync(
 
       clearTimeout(promptTimer);
 
-      const response = promptResult.data;
-      const text = response
-        ? response.parts
+      const text = promptResult
+        ? promptResult.parts
             .filter((p) => p.type === "text")
             .map((p) => (p as { type: "text"; text: string }).text)
             .join("")

@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import type {
   DispatchTask,
   DispatchTaskStatus,
@@ -29,7 +29,7 @@ import { recoverOrchestrator } from "./recovery-orchestrator.ts";
 export interface CompletionOrchestratorDeps {
   tasks: Map<string, DispatchTask>;
   eventState: Map<string, TaskEventState>;
-  client: OpencodeClient;
+  client: ISessionClient;
   concurrency: IConcurrencyManager;
   watchdog: TaskWatchdogManager;
   config: DispatchManagerConfig;

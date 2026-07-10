@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { DispatchTask, NotificationPayload } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
 import { metrics } from "./persistence/metrics.ts";
@@ -131,7 +131,7 @@ export function buildNotificationText(payload: NotificationPayload): string {
  * `noReply: true` for intermediate; `noReply: false` for final.
  */
 export async function notifyParent(
-  client: OpencodeClient,
+  client: ISessionClient,
   task: DispatchTask,
   remainingProvider: (() => number) | number,
   opts?: NotifyOpts,
@@ -169,13 +169,10 @@ export async function notifyParent(
       let lastError: unknown;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          await client.session.promptAsync({
-            path: { id: task.parentSessionId },
-            body: {
-              ...task.parentAgent ? { agent: task.parentAgent } : {},
-              parts: [{ type: "text", text }],
-              noReply: false,
-            },
+          await client.prompt(task.parentSessionId, {
+            ...(task.parentAgent ? { agent: task.parentAgent } : {}),
+            parts: [{ type: "text", text }],
+            noReply: false,
           });
           metrics.counter("notify_sent_total").inc();
           sentFinalNotifies.add(task.id);
@@ -201,13 +198,10 @@ export async function notifyParent(
       return false;
     } else {
       try {
-        await client.session.promptAsync({
-          path: { id: task.parentSessionId },
-          body: {
-            ...task.parentAgent ? { agent: task.parentAgent } : {},
-            parts: [{ type: "text", text }],
-            noReply: true,
-          },
+        await client.prompt(task.parentSessionId, {
+          ...(task.parentAgent ? { agent: task.parentAgent } : {}),
+          parts: [{ type: "text", text }],
+          noReply: true,
         });
         metrics.counter("notify_sent_total").inc();
         return false;

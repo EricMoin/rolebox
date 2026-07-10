@@ -162,7 +162,7 @@ export async function handleEvent(
       );
       const hasHandlers = activeFns.some((f) => !!f.handlers);
       const lastText = (hasCapture || hasHandlers)
-        ? await fetchLastAssistantText(deps.client, sid)
+        ? await fetchLastAssistantText(deps.session, sid)
         : null;
       if (hasCapture && lastText) {
         runTextCapture({ sessionID: sid, activeFns, artifacts, assistantText: lastText });

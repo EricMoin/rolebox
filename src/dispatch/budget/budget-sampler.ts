@@ -27,30 +27,26 @@ export async function sampleBudgetUsage(deps: CompletionOrchestratorDeps): Promi
     if (!task || task.status !== "running") continue;
 
     try {
-      const msgResult = await withTimeout(
-        deps.client.session.messages({ path: { id: sessionId } }),
+      const messages = await withTimeout(
+        deps.client.messages(sessionId),
         deps.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
         "budgetSampler:session.messages",
       );
 
-      if (msgResult.error !== undefined || !msgResult.data) continue;
-
-      const messages = msgResult.data as Array<{
-        cost?: number;
-        tokens?: { input?: number; output?: number; reasoning?: number; cache?: number };
-      }>;
+      if (!messages || messages.length === 0) continue;
 
       let inputTokens = 0;
       let outputTokens = 0;
       let cost = 0;
 
       for (const msg of messages) {
-        if (msg.tokens) {
-          inputTokens += msg.tokens.input ?? 0;
-          outputTokens += msg.tokens.output ?? 0;
+        const info = msg.info as { cost?: number; tokens?: { input?: number; output?: number; reasoning?: number; cache?: number } };
+        if (info.tokens) {
+          inputTokens += info.tokens.input ?? 0;
+          outputTokens += info.tokens.output ?? 0;
         }
-        if (msg.cost !== undefined) {
-          cost += msg.cost;
+        if (info.cost !== undefined) {
+          cost += info.cost;
         }
       }
 

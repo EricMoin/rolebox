@@ -8,6 +8,7 @@ import type { LoopState } from "../../loop/types.ts";
 import { INTER_ROUND_DELAY_MS } from "../../loop/constants.ts";
 import { hookState } from "../../hooks/state.ts";
 import { createSubLogger } from "../../logger.ts";
+import { OpencodeSessionAdapter } from "../../platform/adapters/opencode-session.ts";
 
 const log = createSubLogger("loop-service");
 
@@ -39,7 +40,7 @@ export class LoopService implements PluginService {
       return;
     }
 
-    const adapter = new DispatchAdapter(dispatchManager, ctx.client);
+    const adapter = new DispatchAdapter(dispatchManager, new OpencodeSessionAdapter(ctx.client));
     const store = new LoopStore(dir);
     const coordinator = new LoopCoordinator(adapter, {
       delayMs: INTER_ROUND_DELAY_MS,

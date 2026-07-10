@@ -148,23 +148,13 @@ export async function materializeResult(
   const boundary = task.messageCountAtStart ?? 0;
 
   try {
-    const messagesResult = await withTimeout(
-      d.client.session.messages({ path: { id: task.sessionId } }),
+    const msgs = await withTimeout(
+      d.client.messages(task.sessionId),
       d.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
       "materializeResult:session.messages",
     );
 
-    if (messagesResult.error !== undefined) {
-      return {
-        sidecarPath: "",
-        totalChars: 0,
-        hadFence: false,
-        fetchError: `Error retrieving task output: ${JSON.stringify(messagesResult.error)}`,
-        materializedAt: new Date().toISOString(),
-      };
-    }
-
-    const allMessages = (messagesResult.data ?? []) as SessionMessageSnapshot[];
+    const allMessages = (msgs ?? []) as SessionMessageSnapshot[];
     const fullText = buildAssistantText(allMessages, boundary);
     const extracted = extractResultBlock(fullText);
     const path = writeResultSidecar(taskId, fullText, d.directory);

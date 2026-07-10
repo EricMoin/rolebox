@@ -100,11 +100,12 @@ export async function evaluateAndComplete(
   try {
     const fetchTimeoutMs = d.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS;
 
-    let msgResult;
-    let statusResult;
+    let allMessages: SessionMessageSnapshot[];
+    let statusResult: import("../../session/types.ts").SessionStatus | null;
     try {
-      msgResult = await withTimeout(d.client.session.messages({ path: { id: task.sessionId } }), fetchTimeoutMs, "session.messages");
-      statusResult = await withTimeout(d.client.session.status(), fetchTimeoutMs, "session.status");
+      const msgs = await withTimeout(d.client.messages(task.sessionId), fetchTimeoutMs, "session.messages");
+      allMessages = (msgs ?? []) as SessionMessageSnapshot[];
+      statusResult = await withTimeout(d.client.status(task.sessionId), fetchTimeoutMs, "session.status");
     } catch (e) {
       if (e instanceof TimeoutError) {
         handleEvaluateFetchFailure(d, taskId, `fetch timed out after ${fetchTimeoutMs}ms`, fetchTimeoutMs);
@@ -113,14 +114,7 @@ export async function evaluateAndComplete(
       throw e;
     }
 
-    if (msgResult.error !== undefined) {
-      handleEvaluateFetchFailure(d, taskId, `messages fetch error: ${JSON.stringify(msgResult.error)}`, fetchTimeoutMs);
-      return;
-    }
-
-    const allMessages = (msgResult.data ?? []) as SessionMessageSnapshot[];
-    const statusMap = (statusResult.data ?? {}) as Record<string, { type: string }>;
-    const sessionStatus = statusMap[task.sessionId];
+    const sessionStatus = statusResult as { type: string } | null;
 
     const eventState = d.eventState.get(taskId);
     if (!eventState) return;
@@ -129,7 +123,7 @@ export async function evaluateAndComplete(
     const startIndex = eventState.messageCountAtStart ?? 0;
     const scopedMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
 
-    if (sessionStatus === undefined) {
+    if (sessionStatus === null || sessionStatus === undefined) {
       const existence = await d.sessionMonitor.verifyExistence(d.client, task.sessionId);
       if (existence === "missing") {
         if (transition(d, taskId, ["running"], "error", { error: "Session no longer exists" })) {
@@ -145,7 +139,7 @@ export async function evaluateAndComplete(
       debugLog("evaluate", taskId, `sessionStatus undefined but verifyExistence=${existence} — treating as idle`);
     }
 
-    const sig = detectCompletion(scopedMessages, sessionStatus, eventState, true);
+    const sig = detectCompletion(scopedMessages, sessionStatus ?? undefined, eventState, true);
 
     switch (sig.type) {
       case "completed": {
@@ -245,17 +239,13 @@ export async function handleSessionIdle(d: TaskLifecycleDeps, sessionId: string)
   d.watchdog.resetWatchdog(taskId);
 
   try {
-    const msgResult = await withTimeout(
-      d.client.session.messages({ path: { id: sessionId } }),
+    const msgs = await withTimeout(
+      d.client.messages(sessionId),
       d.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
       "handleSessionIdle:session.messages",
     );
-    if (msgResult.error !== undefined) {
-      debugLog("event", taskId, `session.idle messages fetch error: ${JSON.stringify(msgResult.error)}`);
-      return;
-    }
 
-    const allMessages = (msgResult.data ?? []) as Array<{
+    const allMessages = (msgs ?? []) as Array<{
       info: { role: string; finish?: string; error?: unknown };
       parts: Array<{ type: string; state?: string; text?: string }>;
     }>;
