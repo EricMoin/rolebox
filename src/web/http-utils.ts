@@ -96,4 +96,44 @@ export async function fetchWithRetry(
   throw lastError ?? new Error(`Failed to fetch ${url} after ${maxRetries} retries`);
 }
 
+/**
+ * Fetch a URL with Cloudflare bot-detection retry.
+ * 
+ * First attempt uses browser-like headers. If the response is HTTP 403
+ * with Cloudflare challenge indicators (cf-mitigated header or challenge page),
+ * retries once with a simplified User-Agent.
+ */
+export async function fetchWithCloudflareRetry(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 30000,
+): Promise<Response> {
+  // First attempt with browser UA
+  const response = await fetchWithTimeout(url, {
+    ...options,
+    headers: {
+      "User-Agent": BROWSER_USER_AGENT,
+      ...options.headers,
+    },
+  }, timeoutMs);
+
+  // Check for Cloudflare challenge
+  if (response.status === 403) {
+    const cfMitigated = response.headers.get("cf-mitigated");
+    if (cfMitigated === "challenge" || cfMitigated?.includes("challenge")) {
+      log.debug(`Cloudflare challenge detected for ${url}, retrying with simple UA`);
+      // Retry with a simple, honest User-Agent (Cloudflare sometimes allows non-browser UAs)
+      return fetchWithTimeout(url, {
+        ...options,
+        headers: {
+          "User-Agent": "rolebox-web-fetch/1.0",
+          ...(options.headers || {}),
+        },
+      }, timeoutMs);
+    }
+  }
+
+  return response;
+}
+
 export { DEFAULT_USER_AGENT, BROWSER_USER_AGENT };

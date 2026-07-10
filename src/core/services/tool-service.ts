@@ -30,6 +30,7 @@ import { createDispatchStatusTool } from "../../dispatch/query/task-status.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 import { createWebSearchTool } from "../../web/web-search.ts";
 import { createPageReadTool } from "../../web/page-read.ts";
+import { createWebFetchTool } from "../../web/web-fetch.ts";
 import { createSignalTool } from "../../signal/signal-tool.ts";
 
 const log = createSubLogger("tool-service");
@@ -108,6 +109,7 @@ export class ToolService implements PluginService {
       // Web tools
       web_search: createWebSearchTool(),
       web_read: createPageReadTool(),
+      web_fetch: createWebFetchTool(),
       // Signal tool
       signal: createSignalTool(),
     };
