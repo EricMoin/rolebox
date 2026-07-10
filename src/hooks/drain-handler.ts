@@ -1,5 +1,5 @@
 import type { ResolvedFunction } from "../types.ts";
-import type { FunctionSessionState } from "../session-state.ts";
+import type { FunctionSessionState } from "../function/session-state.ts";
 import type { FunctionRuntimeManager } from "../function/runtime-state.ts";
 import type { FunctionContext } from "../function/context.ts";
 import { appendCorrection } from "./context.ts";

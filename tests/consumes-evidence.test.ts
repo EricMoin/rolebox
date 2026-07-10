@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildActiveArtifactBlock } from "../src/prompt-builder.ts";
+import { buildActiveArtifactBlock } from "../src/prompt/builder.ts";
 import { ArtifactStore } from "../src/function/artifact-store.ts";
 import { evaluateCondition } from "../src/function/conditions.ts";
 import type { CondEnv } from "../src/function/conditions.ts";

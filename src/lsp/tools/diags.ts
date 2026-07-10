@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -9,7 +9,7 @@ export function createLspDiagnosticsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Get diagnostics (errors, warnings, hints) for a file or across all open documents. " +
       "Optionally filter by severity level.",

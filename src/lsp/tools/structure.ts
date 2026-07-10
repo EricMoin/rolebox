@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -14,7 +14,7 @@ export function createLspFoldingRangesTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve folding ranges for a document. " +
       "Returns ranges sorted by start line with collapsible section markers.",
@@ -89,7 +89,7 @@ export function createLspSelectionRangesTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve hierarchical selection ranges (parent scopes) for one or more positions. " +
       "Each position returns a nested chain from innermost to outermost scope.",
@@ -171,7 +171,7 @@ export function createLspSemanticTokensTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve semantic tokens for a document. " +
       "Decodes the delta-encoded integer array into a human-readable table of tokens with type and modifiers.",

@@ -4,12 +4,13 @@
 // throttling, content building, channel dispatch, and idle scheduling.
 // All external entry points are safe (never throw).
 
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { createSubLogger } from "../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import {
   NOTIFICATION_EVENT_TYPES,
+  VALID_NOTIFICATION_EVENT_TYPES,
 } from "./types.ts";
 import type {
   NotificationConfig,
@@ -23,6 +24,7 @@ import {
 } from "./platform.ts";
 import { createChannels } from "./channels.ts";
 import type { NotificationChannel } from "./channels.ts";
+import { resolveChannels as resolveChannelsFn } from "./channel-resolver.ts";
 import { buildNotificationContent } from "./content.ts";
 import { NotificationThrottle } from "./throttle.ts";
 import { QuietHours } from "./quiet-hours.ts";
@@ -36,7 +38,7 @@ const GLOBAL_CHANNEL_KEY = "__global__";
 export class NotificationManager {
   private globalConfig: NotificationConfig;
   private roleConfigs: Map<string, NotificationConfig>;
-  private client: PluginInput["client"];
+  private client: ISessionClient;
   private dir: string;
   private scheduler: NotificationScheduler;
   private throttle: NotificationThrottle;
@@ -49,7 +51,7 @@ export class NotificationManager {
   constructor(opts: {
     globalConfig: NotificationConfig;
     roleConfigs: Map<string, NotificationConfig>;
-    client: PluginInput["client"];
+    client: ISessionClient;
     dir: string;
   }) {
     this.globalConfig = opts.globalConfig;
@@ -73,7 +75,9 @@ export class NotificationManager {
       "paplay",
       "aplay",
       "powershell",
-    ]).catch(() => {});
+    ]).catch((err) => {
+      log.warn("Failed to pre-warm command cache", { err });
+    });
   }
 
   // ── Config Resolution ────────────────────────────────────────────────
@@ -112,6 +116,11 @@ export class NotificationManager {
     questionText?: string;
   }): Promise<void> {
     const { sessionID, eventType, agent, roleName, questionText } = opts;
+
+    if (!VALID_NOTIFICATION_EVENT_TYPES.has(eventType)) {
+      log.warn(`Unknown notification event type: "${eventType}"`);
+      return;
+    }
 
     try {
       const config = this.getConfigForSession(sessionID, agent);
@@ -185,25 +194,7 @@ export class NotificationManager {
     cacheKey: string,
     configs: NotificationChannelConfig[],
   ): Promise<NotificationChannel[]> {
-    const cached = this.channelCache.get(cacheKey);
-
-    if (cached !== undefined) {
-      if (Array.isArray(cached)) return cached;
-      return cached;
-    }
-
-    const creationPromise = createChannels(configs);
-    this.channelCache.set(cacheKey, creationPromise);
-
-    try {
-      const channels = await creationPromise;
-      this.channelCache.set(cacheKey, channels);
-      return channels;
-    } catch (err) {
-      this.channelCache.delete(cacheKey);
-      log.warn("Failed to create notification channels", { err });
-      return [];
-    }
+    return resolveChannelsFn(this.channelCache, cacheKey, configs);
   }
 
   // ── Activity Marking ─────────────────────────────────────────────────
@@ -225,15 +216,18 @@ export class NotificationManager {
         sessionID,
         eventType: NOTIFICATION_EVENT_TYPES.Idle,
         agent,
-      }).catch(() => {});
+      }).catch((err) => {
+        log.warn("Scheduled idle notification failed", { sessionID, err });
+      });
     });
   }
 
   // ── Session Lifecycle Handlers ───────────────────────────────────────
 
-  /** Handle session deletion (clean up scheduler state). */
+  /** Handle session deletion (clean up scheduler + throttle state). */
   handleSessionDeleted(sessionID: string): void {
     this.scheduler.deleteSession(sessionID);
+    this.throttle.removeSession(sessionID);
   }
 
   /** Handle session errors by firing an Error notification. */
@@ -242,7 +236,9 @@ export class NotificationManager {
       sessionID,
       eventType: NOTIFICATION_EVENT_TYPES.Error,
       agent,
-    }).catch(() => {});
+    }).catch((err) => {
+      log.warn("Session-error notification failed", { sessionID, err });
+    });
   }
 
   /** Handle message update by marking session activity. */
@@ -298,7 +294,9 @@ export class NotificationManager {
         eventType: NOTIFICATION_EVENT_TYPES.Question,
         agent,
         questionText,
-      }).catch(() => {});
+      }).catch((err) => {
+        log.warn("Question notification failed", { sessionID, err });
+      });
     } catch (err) {
       log.warn("Error in handleToolBefore", { err });
     }
@@ -312,7 +310,9 @@ export class NotificationManager {
       sessionID,
       eventType: NOTIFICATION_EVENT_TYPES.DispatchComplete,
       agent,
-    }).catch(() => {});
+    }).catch((err) => {
+      log.warn("Dispatch-complete notification failed", { sessionID, err });
+    });
   }
 
   /** Handle loop completion by firing a LoopComplete notification. */
@@ -321,7 +321,9 @@ export class NotificationManager {
       sessionID,
       eventType: NOTIFICATION_EVENT_TYPES.LoopComplete,
       agent,
-    }).catch(() => {});
+    }).catch((err) => {
+      log.warn("Loop-complete notification failed", { sessionID, err });
+    });
   }
 
   // ── Hot Reload ───────────────────────────────────────────────────────
@@ -340,6 +342,7 @@ export class NotificationManager {
     this.globalConfig = global;
     this.roleConfigs = roleConfigs;
 
+    this.throttle.dispose();
     this.throttle = new NotificationThrottle(global.throttle);
     this.quietHours = new QuietHours(global.quietHours);
 
@@ -355,18 +358,21 @@ export class NotificationManager {
   // ── Dispose ──────────────────────────────────────────────────────────
 
   /**
-   * Dispose all resources: scheduler, and all cached channels.
+   * Dispose all resources: scheduler, throttle, and all cached channels.
    * Safe to call multiple times.
    */
   async dispose(): Promise<void> {
     this.scheduler.dispose();
+    this.throttle.dispose();
 
     const pending: Promise<void>[] = [];
     for (const entry of this.channelCache.values()) {
       const channels = Array.isArray(entry) ? entry : [];
       for (const ch of channels) {
         pending.push(
-          ch.dispose().catch(() => {}),
+          ch.dispose().catch((err) => {
+            log.warn("Failed to dispose notification channel", { err });
+          }),
         );
       }
     }

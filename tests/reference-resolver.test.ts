@@ -7,7 +7,7 @@ import {
   discoverReferences,
   resolveExplicitReferences,
   resolveAllReferences,
-} from "../src/reference-resolver";
+} from "../src/resolver/reference-resolver";
 
 let tmpDir: string;
 

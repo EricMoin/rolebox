@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -20,7 +20,7 @@ export function createLspPrepareRenameTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Prepare to rename the symbol at the given position. " +
       "Returns the range of the symbol and its current text (placeholder). " +
@@ -88,7 +88,7 @@ export function createLspRenameTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Rename the symbol at the given position across the entire workspace. " +
       "Returns a summary of changes: number of files modified and the list of edited locations.",

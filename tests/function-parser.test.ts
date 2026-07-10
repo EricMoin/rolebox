@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { parseFunctionActivation } from "../src/function-parser";
-import type { FunctionCall } from "../src/function-parser";
+import { parseFunctionActivation } from "../src/function/parser";
+import type { FunctionCall } from "../src/function/parser";
 
 describe("parseFunctionActivation", () => {
   it("extracts single function from start", () => {

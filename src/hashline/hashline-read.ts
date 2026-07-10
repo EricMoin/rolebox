@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, formatHashLine } from "./hash.ts";
 
 export function createHashlineReadTool() {
-  return tool({
+  return defineTool({
     description:
       "Read a file and return each line annotated with a content-based hash anchor (LINE#HASH|content).\n" +
       "Always use this tool before editing with hashline edit tools:\n" +

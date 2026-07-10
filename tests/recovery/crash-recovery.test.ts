@@ -34,7 +34,7 @@ import {
   quarantineCorruptFile,
   StartupChecker,
 } from "../../src/recovery/startup-check.ts";
-import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/state-lock.ts";
+import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/concurrency/state-lock.ts";
 import { __resetForTest } from "../../src/logger.ts";
 
 // ── Test lifecycle ──────────────────────────────────────────────────
@@ -271,28 +271,28 @@ describe("(c) Combined corruption + stale lock", () => {
     lock.release();
   });
 
-  it("PluginCore init succeeds even when state files are corrupt (using mocked StartupChecker)", async () => {
-    // Mock StartupChecker to indicate quarantined files
-    mock.module("../../src/recovery/startup-check.ts", () => ({
-      StartupChecker: {
-        checkAll: mock(() => ({
-          healthy: false,
-          quarantined: ["loops-bad.json"],
-          staleLocksBroken: 0,
-          orphanTmpsRemoved: 0,
-          warnings: ["Quarantined corrupt state file: loops-bad.json"],
-        })),
-      },
-      quarantineCorruptFile: mock(() => null),
-      orphanTmpCleanup: mock(() => 0),
-      breakStaleLocks: mock(() => 0),
-    }));
+  it("PluginCore init succeeds even when state files are corrupt (using real StartupChecker)", async () => {
+    // Create a temp directory with corrupt state files to exercise the real StartupChecker
+    const dir = tmpDir();
+    const stateDir = join(dir, ".rolebox", "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeRawFile(stateDir, "loops-bad.json", "not-json{{{corrupt}}");
 
     const core = new PluginCore();
     const svcA = makeService("a");
     core.registerService(svcA);
 
-    await expect(core.init(makeContext(core))).resolves.toBeUndefined();
+    const ctx: PluginContext = {
+      client: {} as any,
+      resolvedRoles: [],
+      roleFunctionsMap: new Map(),
+      roleGraphMap: new Map(),
+      rawDirectory: dir,
+      directory: dir,
+      core: core as any,
+      bus: core.getBus(),
+    };
+    await expect(core.init(ctx)).resolves.toBeUndefined();
   });
 });
 

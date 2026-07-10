@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -35,7 +35,7 @@ export function createLspCodeLensTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve code lenses (run/test/debug actions above functions, references, etc.) for a document.",
     args: {
@@ -89,7 +89,7 @@ export function createLspInlayHintsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve inlay hints (type hints, parameter name hints) for a document. " +
       "Optionally restrict to a specific range.",
@@ -166,7 +166,7 @@ export function createLspDocumentLinksTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve document links (clickable URLs/references) from a document.",
     args: {
@@ -220,7 +220,7 @@ export function createLspDocumentColorsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve color information (color references) from a document. " +
       "Returns colors as hex values with their ranges.",

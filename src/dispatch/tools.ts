@@ -1,46 +1,21 @@
 import { writeFileSync, renameSync } from "node:fs";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import type { DispatchManager } from "./manager.ts";
+import type { DispatchManager } from "./core/manager.ts";
 import type { DispatchInput, DispatchTask } from "./types.ts";
-import { metrics } from "./metrics.ts";
-import {
-  applyWindow,
-  spillToFile,
-  formatResultEnvelope,
-  DEFAULT_MAX_RESULT_CHARS,
-} from "./result-extractor.ts";
+import { metrics } from "./persistence/metrics.ts";
+import { DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
+import { parentContextFromTool, buildCompletedOutput } from "./tool-helpers.ts";
 
-function formatDuration(task: DispatchTask): string {
-  const end = task.completedAt ?? new Date();
-  const ms = end.getTime() - task.startedAt.getTime();
-  if (ms < 0) return "0s";
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return `${minutes}m ${remain}s`;
-}
 
-function parentContextFromTool(context: {
-  sessionID: string;
-  agent: string;
-  directory: string;
-}) {
-  return {
-    sessionID: context.sessionID,
-    agent: context.agent,
-    directory: context.directory,
-  };
-}
 
 export function createDispatchTool(
   manager: DispatchManager,
   resolvedSubagents: Map<string, { parentFullId: string }>,
   _subagentModelKey?: Map<string, string>,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Dispatch work to a subagent. Run synchronously or in the background.",
     args: {
@@ -127,42 +102,10 @@ export function createDispatchTool(
   });
 }
 
-function buildCompletedOutput(
-  task: DispatchTask,
-  result: { text: string; resultText: string; totalChars: number },
-  opts: { maxChars: number; offset?: number; limit?: number; tail?: boolean },
-  dir: string,
-): string {
-  const header = [
-    "Task Result\n",
-    `Task ID: ${task.id}`,
-    `Description: ${task.description || "N/A"}`,
-    `Duration: ${formatDuration(task)}`,
-    `Session ID: ${task.sessionId}`,
-    "",
-    "---\n",
-  ].join("\n");
 
-  const windowed = applyWindow(result.resultText, opts);
-
-  let spillPath: string | undefined;
-  if (result.totalChars > opts.maxChars) {
-    spillPath = spillToFile(task.id, result.text, dir);
-  }
-
-  const envelope = formatResultEnvelope({
-    truncated: windowed.truncated,
-    returnedChars: windowed.returnedChars,
-    totalChars: windowed.totalChars,
-    nextOffset: windowed.nextOffset,
-    spilledFile: spillPath,
-  });
-
-  return header + windowed.text + "\n" + envelope;
-}
 
 export function createDispatchOutputTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve output from a completed background task. Call ONLY after receiving the task's <system-reminder> completion notification. There is no blocking mode — never poll this tool to wait for a task to finish.",
     args: {
@@ -284,7 +227,7 @@ export function createDispatchOutputTool(manager: DispatchManager) {
 }
 
 export function createDispatchCancelTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description: "Cancel a running background task.",
     args: {
       task_id: z
@@ -302,7 +245,7 @@ export function createDispatchCancelTool(manager: DispatchManager) {
 }
 
 export function createDispatchMetricsTool() {
-  return tool({
+  return defineTool({
     description:
       "Retrieve runtime metrics snapshot for the dispatch subsystem — counters, gauges, and histograms. Returns a human-readable summary or JSON. Optionally exports the snapshot JSON to a file.",
     args: {
@@ -384,7 +327,7 @@ export function createDispatchMetricsTool() {
 }
 
 export function createDispatchBudgetTool(manager: DispatchManager) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve token/cost budget status for the current dispatch request. " +
       "Shows configured limits, current usage, remaining budget, and percentage used. " +

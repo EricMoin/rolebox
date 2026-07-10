@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText } from "./hash.ts";
 import { normalizeEdits, applyEditsWithReport } from "./edit-primitives.ts";
@@ -184,7 +184,7 @@ async function processSingleFile(
 }
 
 export function createHashlineEditTool() {
-  return tool({
+  return defineTool({
     description:
       "Edit a file using LINE#HASH anchors obtained from hashline_read.\n" +
       "\n" +

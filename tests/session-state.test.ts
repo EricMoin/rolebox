@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { FunctionSessionState } from "../src/session-state";
+import { FunctionSessionState } from "../src/function/session-state";
 
 describe("FunctionSessionState", () => {
   it("activates and retrieves functions for a session", () => {

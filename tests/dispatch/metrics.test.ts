@@ -4,7 +4,7 @@ import {
   Counter,
   Gauge,
   Histogram,
-} from "../../src/dispatch/metrics.ts";
+} from "../../src/dispatch/persistence/metrics.ts";
 
 // ── Counter ──────────────────────────────────────────────────────────
 

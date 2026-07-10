@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.22.0
+
+### Features
+
+- **`web_fetch` tool** — New content-fetching tool with multiple rendering backends: browser (Playwright), crawlee, Jina Reader, and Mozilla Readability article extraction. Includes built-in SSRF protection, MIME detection, metadata extraction, and Cloudflare challenge retry. New `src/web/web-fetch.ts` and supporting modules.
+- **Platform abstraction layer** — New ports-and-adapters architecture decoupling core logic from opencode platform dependencies. `ISessionClient` interface enables testable, swappable session backends. New `src/platform/` module.
+- **`plan_incomplete` condition** — New function state machine condition supporting cross-session resume. Detects unchecked plan steps and gates execution flow accordingly.
+- **Signal tool and observation infrastructure** — Universal out-of-band signal tool (`|signal|`) for state transitions (completion, approval, handoff, escalation) without embedding signals in text content. New `src/signal/` module.
+- **Postinstall welcome banner** — ASCII wordmark displayed after `npm install` for a polished first-run experience.
+
+### Bug Fixes
+
+- **Test mock pollution** — Resolve 20 test failures caused by mock state leaking between test cases and incorrect parameter access patterns.
+- **Import path resolution** — Fix remaining stale import paths after module restructuring to prevent runtime resolution failures.
+- **Function spec caching** — Rebuild `fnSpecMap` per invocation to avoid stale function specification references across sessions.
+- **Cyclic dependency detection** — Throw `DescriptiveCycleError` on circular service dependencies with clear diagnostic output instead of silent hang.
+
+### Refactors
+
+- **Session migration** — Migrate from `OpencodeClient` to `ISessionClient` interface, enabling platform-agnostic session management.
+- **Tool migration** — Migrate all tools from legacy `tool()` to `defineTool()` for consistent tool definition patterns.
+- **Module decomposition** — Split oversized modules into focused subdirectories across dispatch, core, CLI, and types packages:
+  - Dispatch: split `task-lifecycle.ts` god file into focused modules
+  - Core: consolidate service files into `core/services` with composition module
+  - CLI: consolidate CLI commands into subdirectories
+  - Types: extract domain-specific types into `loader/types` and `memory/types`
+- **Registry robustness** — Improve download stability with consistent output directories and tar integrity checks.
+- **Type safety** — Replace `as any` casts with typed bridge interfaces across dispatch module.
+
+### Tests
+
+- **Platform abstraction tests** — Test suite for `ISessionClient` interface and platform adapter behavior.
+- **State-gc tests** — Garbage collection tests for state management, graceful degradation renaming, and expanded path mock coverage.
+
+---
+
 ## 0.21.0
 
 ### Features

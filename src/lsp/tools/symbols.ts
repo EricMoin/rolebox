@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
 import type { LspDocumentManager } from "../document-manager.ts";
@@ -20,7 +20,7 @@ export function createLspDocumentSymbolsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "List all symbols defined in a document. Returns a hierarchical tree when the server supports it, " +
       "otherwise a flat list.",
@@ -113,7 +113,7 @@ export function createLspWorkspaceSymbolsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Search for symbols across the entire workspace. Results are grouped by symbol kind.",
     args: {

@@ -227,6 +227,116 @@ describe("runToolObserve", () => {
     expect(st!.evidenceObserved.ev).toBe(true);
   });
 
+  it("when_args.match fires spec when tool args match all conditions", () => {
+    const fn = makeFn({
+      observe: [
+        { on: "tool_after", tool: "signal", set_evidence: "signal_answer", when_args: { match: { type: "answer" } } },
+      ],
+    });
+    functionRuntime.init("sid-12", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-12",
+      tool: "signal",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolArgs: { type: "answer" },
+    });
+
+    const st = functionRuntime.get("sid-12", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.signal_answer).toBe(true);
+  });
+
+  it("when_args.match skips spec when tool args do not match", () => {
+    const fn = makeFn({
+      observe: [
+        { on: "tool_after", tool: "signal", set_evidence: "signal_answer", when_args: { match: { type: "answer" } } },
+      ],
+    });
+    functionRuntime.init("sid-13", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-13",
+      tool: "signal",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolArgs: { type: "blocked" },
+    });
+
+    const st = functionRuntime.get("sid-13", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.signal_answer).toBeUndefined();
+  });
+
+  it("when_args.match skips spec when toolArgs is undefined", () => {
+    const fn = makeFn({
+      observe: [
+        { on: "tool_after", tool: "signal", set_evidence: "signal_answer", when_args: { match: { type: "answer" } } },
+      ],
+    });
+    functionRuntime.init("sid-14", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-14",
+      tool: "signal",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      // toolArgs intentionally omitted — when_args should skip
+    });
+
+    const st = functionRuntime.get("sid-14", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.signal_answer).toBeUndefined();
+  });
+
+  it("when_args.not_match fires spec when tool args do not match any excluded key", () => {
+    const fn = makeFn({
+      observe: [
+        { on: "tool_after", tool: "signal", set_evidence: "signal_ok", when_args: { not_match: { type: "blocked" } } },
+      ],
+    });
+    functionRuntime.init("sid-15", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-15",
+      tool: "signal",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolArgs: { type: "answer" },
+    });
+
+    const st = functionRuntime.get("sid-15", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.signal_ok).toBe(true);
+  });
+
+  it("when_args.not_match skips spec when tool args match an excluded key", () => {
+    const fn = makeFn({
+      observe: [
+        { on: "tool_after", tool: "signal", set_evidence: "signal_ok", when_args: { not_match: { type: "blocked" } } },
+      ],
+    });
+    functionRuntime.init("sid-16", "plan", 1);
+
+    runToolObserve({
+      sessionID: "sid-16",
+      tool: "signal",
+      activeFns: [fn],
+      artifacts: new ArtifactStore(mkdtempSync(join(tmpdir(), "obs-"))),
+      lastAssistantText: null,
+      toolArgs: { type: "blocked" },
+    });
+
+    const st = functionRuntime.get("sid-16", "plan");
+    expect(st).toBeDefined();
+    expect(st!.evidenceObserved.signal_ok).toBeUndefined();
+  });
+
   it("requires_evidence auto-mark suppressed when output-gated observe covers same tool+evidence", () => {
     const fn = makeFn({
       requires_evidence: ["test_tool"],

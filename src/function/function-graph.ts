@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedFunction, Condition } from "../types.ts";
 
@@ -175,7 +175,7 @@ function renderStateMachine(functions: FunctionEntry[]): string {
 export function createFunctionGraphTool(roles: ResolvedRole[]) {
   const allFunctions = collectFunctions(roles);
 
-  return tool({
+  return defineTool({
     description:
       "Visualise function dependency and state-machine graphs across resolved roles and sub-agents. Shows how functions relate through requires/produces/consumes (dependencies mode) or how transitions activate/deactivate functions based on conditions (state_machine mode).",
     args: {

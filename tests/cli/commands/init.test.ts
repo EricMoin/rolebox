@@ -10,12 +10,12 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { load } from "js-yaml";
-import { validateInitRoleId, deriveRoleId, checkTargetDir } from "../../../src/cli/commands/init-utils";
+import { validateInitRoleId, deriveRoleId, checkTargetDir } from "../../../src/cli/commands/init/init-utils";
 import {
   generateRoleYaml,
   generatePromptFile,
   scaffoldRole,
-} from "../../../src/cli/commands/init-scaffold";
+} from "../../../src/cli/commands/init/init-scaffold";
 import type { InitConfig, TemplateType } from "../../../src/cli/templates/index";
 
 // ===========================================================================

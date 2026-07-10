@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/state-lock";
+import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/concurrency/state-lock";
 
 const dirs: string[] = [];
 

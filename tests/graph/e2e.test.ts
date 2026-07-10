@@ -11,7 +11,7 @@ import { tmpdir as osTmpdir } from "node:os";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
 
-import { discoverRoles } from "../../src/role-loader";
+import { discoverRoles } from "../../src/loader/role-loader";
 import { parseCollaboration } from "../../src/graph/parser";
 import { graphSessionState, buildGraphStateBlock } from "../../src/graph/state";
 import { advanceGraphForDispatch } from "../../src/graph/advance";

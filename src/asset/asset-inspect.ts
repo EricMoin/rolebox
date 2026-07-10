@@ -1,4 +1,4 @@
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type {
   ResolvedRole,
@@ -185,6 +185,7 @@ function formatFunction(fn: ResolvedFunction, ownerId: string): string {
       if (obs.inject) lines.push(`  - inject: \`${obs.inject}\``);
       if (obs.set_evidence) lines.push(`  - set_evidence: \`${obs.set_evidence}\``);
       if (obs.capture_artifact) lines.push(`  - capture_artifact: \`${obs.capture_artifact}\``);
+      if (obs.capture_payload_as) lines.push(`  - capture_payload_as: \`${obs.capture_payload_as}\``);
       if (obs.sync_todos) lines.push("  - sync_todos: true");
       if (obs.when_output) {
         lines.push("  - when_output:");
@@ -261,7 +262,7 @@ function formatCondition(cond: unknown): string {
 // ── Public factory ─────────────────────────────────────────────────────
 
 export function createAssetInspectTool(resolvedRoles: ResolvedRole[]) {
-  return tool({
+  return defineTool({
     description:
       "Inspect a single rolebox asset (skill, function, or reference) by exact name and type. Returns the complete frontmatter metadata for the matched asset, or a clear error if not found. Searches across all resolved roles and their sub-agents.",
     args: {

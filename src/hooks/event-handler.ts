@@ -1,5 +1,5 @@
 import type { Event } from "@opencode-ai/sdk";
-import { functionSessionState } from "../session-state.ts";
+import { functionSessionState } from "../function/session-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { loadHandlers, safeCall } from "../function/handlers-loader.ts";
@@ -162,7 +162,7 @@ export async function handleEvent(
       );
       const hasHandlers = activeFns.some((f) => !!f.handlers);
       const lastText = (hasCapture || hasHandlers)
-        ? await fetchLastAssistantText(deps.client, sid)
+        ? await fetchLastAssistantText(deps.session, sid)
         : null;
       if (hasCapture && lastText) {
         runTextCapture({ sessionID: sid, activeFns, artifacts, assistantText: lastText });
@@ -211,7 +211,7 @@ export async function handleEvent(
         // Declarative: continue_until
         if (fn.continue_until) {
           const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
-            requiredEvidence, userMessagedThisTurn: false };
+            requiredEvidence, userMessagedThisTurn: false, workspaceDir: deps.dir };
           if (evaluateCondition(fn.continue_until, env)) {
             st.phase = "complete"; functionRuntime.markDirty(); continue;
           }
@@ -254,7 +254,9 @@ export async function handleEvent(
               ...sessionAgent ? { agent: sessionAgent } : {},
               parts: [{ type: "text", text: decision.reminder }],
             },
-          }).catch(() => {});
+          }).catch((err) => {
+            log.warn("Failed to send continuation prompt", { sessionID: sid, err });
+          });
           sentContinuation = true;
           break; // ONE continuation per idle event
         }

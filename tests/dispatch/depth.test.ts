@@ -168,7 +168,7 @@ describe("T5: depth survives serialize→recover", () => {
       getDataDir: () => dir,
     }));
 
-    const { TaskStateStore } = await import("../../src/dispatch/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
 
     const store = new TaskStateStore(dir);
     const task = makeDepthTask({ id: "persist-test", depth: 2, sessionId: "ses_persist" });
@@ -195,7 +195,7 @@ describe("T5: depth survives serialize→recover", () => {
       getDataDir: () => dir,
     }));
 
-    const { TaskStateStore } = await import("../../src/dispatch/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
 
     const store = new TaskStateStore(dir);
     const task = makeDepthTask({ id: "no-depth-task", sessionId: "ses_old" });
@@ -223,7 +223,7 @@ describe("T5: depth survives serialize→recover", () => {
 function makeDepthManager() {
   const { createMockClient } = require("./helpers");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { DispatchManager } = require("../../src/dispatch/manager");
+  const { DispatchManager } = require("../../src/dispatch/core/manager");
   const client = createMockClient();
   return new DispatchManager(client, {
     maxConcurrent: 10,

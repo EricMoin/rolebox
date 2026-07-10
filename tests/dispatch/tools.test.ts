@@ -8,7 +8,7 @@ import {
   createDispatchCancelTool,
   createDispatchMetricsTool,
 } from "../../src/dispatch/tools.ts";
-import type { DispatchManager } from "../../src/dispatch/manager.ts";
+import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 // ── helpers ──────────────────────────────────────────────────────────────

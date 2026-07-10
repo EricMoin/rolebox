@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { resolveFunctions } from "../src/function-resolver";
+import { resolveFunctions } from "../src/function/file-resolver";
 
 let tmpRoots: string[] = [];
 

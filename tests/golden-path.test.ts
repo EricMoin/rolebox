@@ -26,8 +26,8 @@ import { evaluateGateAndTransitions } from "../src/function/phase-machine";
 import { decideContinuation } from "../src/function/continuation";
 import { runToolObserve } from "../src/function/observe";
 import { extractResultBlockNamed } from "../src/function/fence";
-import { FunctionSessionState } from "../src/session-state";
-import { buildActiveArtifactBlock } from "../src/prompt-builder";
+import { FunctionSessionState } from "../src/function/session-state";
+import { buildActiveArtifactBlock } from "../src/prompt/builder";
 import type { ResolvedFunction } from "../src/types";
 
 // ─────── ResolvedFunction definitions matching our builtins ───────

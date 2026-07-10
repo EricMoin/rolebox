@@ -38,6 +38,16 @@ mock.module("../../src/cli/paths", () => ({
     }
     throw new Error(`Unknown sync target: "${t}". Supported targets: opencode`);
   },
+  getOpencodeConfigPath: () => {
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg) return join(xdg, "opencode", "opencode.jsonc");
+    return join(homedir(), ".config", "opencode", "opencode.jsonc");
+  },
+  getOpencodeSkillsDir: () => {
+    const xdg = process.env.XDG_CONFIG_HOME;
+    if (xdg) return join(xdg, "opencode", "skills");
+    return join(homedir(), ".config", "opencode", "skills");
+  },
 }));
 
 afterAll(() => {
@@ -263,7 +273,13 @@ describe("CLI E2E", () => {
       mkdirSync(hubDir, { recursive: true });
       const rolePath = join(hubDir, "test-role@1.0.0");
       mkdirSync(rolePath, { recursive: true });
-      writeFileSync(join(rolePath, "role.yaml"), "name: Test Role\n", "utf-8");
+      writeFileSync(join(rolePath, "role.yaml"), "name: Test Role\nmodel: openai/gpt-4o\n", "utf-8");
+
+      // Create an opencode config with the known model so sync doesn't flag it as placeholder
+      mkdirSync(join(configDir, "opencode"), { recursive: true });
+      writeFileSync(join(configDir, "opencode", "opencode.jsonc"), JSON.stringify({
+        provider: { openai: { models: { "gpt-4o": {} } } },
+      }), "utf-8");
 
       mkdirSync(join(configDir, "rolebox"), { recursive: true });
       writeFileSync(join(configDir, "rolebox", "rolebox.lock"), dump({

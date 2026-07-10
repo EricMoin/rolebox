@@ -2,6 +2,9 @@ import type { Condition } from "../types.ts";
 import type { FnState } from "./runtime-state.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import { createSubLogger } from "../logger.ts";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
 
 const log = createSubLogger("conditions");
 
@@ -12,6 +15,7 @@ export interface CondEnv {
   artifacts: ArtifactStore;
   requiredEvidence: string[];
   userMessagedThisTurn: boolean;
+  workspaceDir: string;
 }
 
 /** Count unchecked "- [ ]" boxes in the synced todo blob (kv.__todos) or an artifact. */
@@ -33,6 +37,16 @@ function stateEquals(arg: string, env: CondEnv): boolean {
  * the evaluation environment to a boolean. This object is the single source of
  * truth — {@link KNOWN_CONDITIONS} is derived from its keys so the validator
  * can never drift from the implementations.
+ *
+ * Built-in conditions:
+ * - `user_approval()` — true when the user messaged this turn
+ * - `artifact_exists(name)` — true when the named artifact file exists
+ * - `plan_todos_complete()` — true when all todo items are checked
+ * - `evidence_met()` — true when all required evidence is observed
+ * - `tool_observed(name)` — true when the named tool has been called
+ * - `signal_observed(type)` — true when the `signal` tool was called with the given type
+ * - `turn_count(n)` — true when N or more turns have passed since activation
+ * - `plan_incomplete(name)` — true when plan file has unchecked `- [ ]` checkboxes
  */
 const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> = {
   user_approval:       (_arg, env) => env.userMessagedThisTurn,
@@ -40,6 +54,10 @@ const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> =
   plan_todos_complete: (_arg, env) => uncheckedTodos(env) === 0,
   evidence_met:        (_arg, env) => env.requiredEvidence.every((t) => env.state.evidenceObserved[t] === true),
   tool_observed:       (arg, env) => env.state.toolsObserved.includes(arg),
+  signal_observed:    (arg, env) => {
+    const observed = (env.state.kv["__signals_observed"] as string[] | undefined) ?? [];
+    return observed.includes(arg);
+  },
   turn_count:          (arg, env) => (env.state.currentTurn - env.state.activatedAtTurn) >= Number(arg || "0"),
   state_eq:            stateEquals,
 };
@@ -94,3 +112,27 @@ export function registerCondition(
   NAMED_CONDITIONS[name] = handler;
   refreshKnownConditions();
 }
+
+registerCondition("plan_incomplete", (arg, env) => {
+  const plansDir = join(env.workspaceDir, ".rolebox", "plans");
+  const names: string[] = arg
+    ? [arg]
+    : (() => {
+        try {
+          return readdirSync(plansDir)
+            .filter((f) => f.endsWith(".md"))
+            .map((f) => f.slice(0, -3));
+        } catch {
+          return [];
+        }
+      })();
+  for (const name of names) {
+    try {
+      const content = readFileSync(join(plansDir, `${name}.md`), "utf-8");
+      if (/\- \[ \]/.test(content)) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+});

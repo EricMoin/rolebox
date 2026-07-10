@@ -1,5 +1,4 @@
 import { describe, it, expect, mock } from "bun:test";
-import type { OpencodeClient } from "@opencode-ai/sdk";
 import { DispatchAdapter, type IDispatchAdapter } from "../../src/loop/dispatch-adapter";
 import type { DispatchInput, DispatchTask } from "../../src/dispatch/types";
 
@@ -57,23 +56,27 @@ function createFakeClient(overrides?: {
     info?: { role?: string; id?: string };
     parts?: Array<{ type: string; text?: string }>;
   }>;
-}): OpencodeClient {
-  const messages = overrides?.messages ?? [];
+}): import("../../src/platform/ports/session-client").ISessionClient {
+  const data = overrides?.messages ?? [];
   return {
-    session: {
-      messages: mock(() =>
-        Promise.resolve({
-          data: messages,
-          error: undefined,
-        }),
-      ),
-    },
-  } as unknown as OpencodeClient;
+    messages: mock(() => Promise.resolve(data)),
+    prompt: mock(() => Promise.resolve({ id: "prompt-1" })),
+    create: mock(() => Promise.resolve({ id: "test-session-1" })),
+    promptSync: mock(() => Promise.resolve(null)),
+    get: mock(() => Promise.resolve(null)),
+    list: mock(() => Promise.resolve([])),
+    children: mock(() => Promise.resolve([])),
+    todo: mock(() => Promise.resolve([])),
+    diff: mock(() => Promise.resolve([])),
+    fork: mock(() => Promise.resolve(null)),
+    status: mock(() => Promise.resolve(null)),
+    abort: mock(() => Promise.resolve(true)),
+  } as unknown as import("../../src/platform/ports/session-client").ISessionClient;
 }
 
 describe("DispatchAdapter", () => {
   let dispatchManager: FakeDispatchManager;
-  let client: OpencodeClient;
+  let client: import("../../src/platform/ports/session-client").ISessionClient;
   let adapter: IDispatchAdapter;
 
   function freshAdapter(clientOverrides?: {
@@ -85,7 +88,7 @@ describe("DispatchAdapter", () => {
     dispatchManager = createFakeDispatchManager();
     client = createFakeClient(clientOverrides);
     adapter = new DispatchAdapter(
-      dispatchManager as unknown as import("../../src/dispatch/manager").DispatchManager,
+      dispatchManager as unknown as import("../../src/dispatch/core/manager").DispatchManager,
       client,
     );
   }

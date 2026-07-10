@@ -1,11 +1,11 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { resolveSkills } from "../skill-resolver.ts";
-import { resolveAllReferences } from "../reference-resolver.ts";
-import { resolveFunctions } from "../function-resolver.ts";
+import { resolveSkills } from "./skill-resolver.ts";
+import { resolveAllReferences } from "./reference-resolver.ts";
+import { resolveFunctions } from "../function/file-resolver.ts";
 import { buildSubagentRoleBlock, SUBAGENT_RESULT_CONTRACT, parseCollaboration } from "../graph/index.ts";
-import { buildAgentPrompt } from "../prompt-builder.ts";
-import { subagentDir, globalFunctionsPath } from "../paths.ts";
+import { buildAgentPrompt } from "../prompt/builder.ts";
+import { subagentDir, globalFunctionsPath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole, SubAgentConfig } from "../types.ts";
 import { ReferenceScope, DEFAULT_FUNCTIONS, SUBAGENT_ID_SEPARATOR, PARENT_NODE } from "../constants.ts";
@@ -51,6 +51,53 @@ export interface ResolveContext {
   roleGraphMap: Map<string, ResolvedGraph>;
 }
 
+interface ResolveAgentBundleInput {
+  skillNames: string[];
+  roleDir: string;
+  globalSkillsDir: string;
+  enabledFunctionNames: string[];
+  globalFunctionsDir: string;
+  builtinDir: string;
+  referenceConfig?: RoleConfig["references"];
+  baseReferences?: ResolvedReference[];
+}
+
+interface ResolveAgentBundleOutput {
+  skills: ResolvedSkill[];
+  functions: ResolvedFunction[];
+  roleReferences: ResolvedReference[];
+  references: ResolvedReference[];
+}
+
+async function resolveAgentBundle(
+  input: ResolveAgentBundleInput,
+): Promise<ResolveAgentBundleOutput> {
+  const {
+    skillNames,
+    roleDir,
+    globalSkillsDir,
+    enabledFunctionNames,
+    globalFunctionsDir,
+    builtinDir,
+    referenceConfig,
+    baseReferences,
+  } = input;
+
+  const skills = skillNames.length > 0
+    ? await resolveSkills(skillNames, roleDir, globalSkillsDir)
+    : [];
+
+  const functions = enabledFunctionNames.length > 0
+    ? await resolveFunctions(enabledFunctionNames, roleDir, globalFunctionsDir, builtinDir)
+    : [];
+
+  const ownRoleRefs = await resolveAllReferences(roleDir, ReferenceScope.Role, referenceConfig);
+  const skillRefs = skills.flatMap((s) => s.references);
+  const references = [...(baseReferences ?? []), ...ownRoleRefs, ...skillRefs];
+
+  return { skills, functions, roleReferences: ownRoleRefs, references };
+}
+
 async function resolveSubagents(
   parentFullId: string,
   configs: SubAgentConfig[],
@@ -79,28 +126,21 @@ async function resolveSubagents(
     const saLocalSkills = saConfig.skills ?? [];
     const saGlobalSkills = saConfig.opencode_skills ?? [];
     const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
-    let saSkills: ResolvedSkill[] = [];
-    if (saAllSkillNames.length > 0) {
-      saSkills = await resolveSkills(saAllSkillNames, saRoleDir, ctx.globalSkillsDir);
-    }
-
     const saFunctionNames = saConfig.functions ?? [...DEFAULT_FUNCTIONS];
     const saEnabledFunctions = saFunctionNames.filter(
       (fn) => !(saConfig.disable_functions ?? []).includes(fn),
     );
-    let saFunctions: ResolvedFunction[] = [];
-    if (saEnabledFunctions.length > 0) {
-      saFunctions = await resolveFunctions(
-        saEnabledFunctions,
-        saRoleDir,
-        globalFunctionsDir,
-        ctx.builtinDir,
-      );
-    }
 
-    const saOwnRefs = await resolveAllReferences(saRoleDir, ReferenceScope.Role);
-    const saSkillRefs = saSkills.flatMap((s) => s.references);
-    const saReferences = [...roleReferences, ...saOwnRefs, ...saSkillRefs];
+    const saBundle = await resolveAgentBundle({
+      skillNames: saAllSkillNames,
+      roleDir: saRoleDir,
+      globalSkillsDir: ctx.globalSkillsDir,
+      enabledFunctionNames: saEnabledFunctions,
+      globalFunctionsDir,
+      builtinDir: ctx.builtinDir,
+      baseReferences: roleReferences,
+    });
+    const { skills: saSkills, functions: saFunctions, references: saReferences } = saBundle;
 
     // Resolve nested subagents first so we can include their metadata
     // in this subagent's prompt <available_subagents> block.
@@ -170,31 +210,23 @@ export async function resolveAllRoles(
       const globalSkills = config.opencode_skills ?? [];
       const allSkillNames = [...localSkills, ...globalSkills];
 
-      let skills: ResolvedSkill[] = [];
-      if (allSkillNames.length > 0) {
-        skills = await resolveSkills(allSkillNames, roleDir, ctx.globalSkillsDir);
-      }
-
-      const roleReferences = await resolveAllReferences(
-        roleDir,
-        ReferenceScope.Role,
-        config.references as RoleConfig["references"],
-      );
-
-      const skillReferences = skills.flatMap((s) => s.references);
-      const allReferences = [...roleReferences, ...skillReferences];
-
-      const globalFunctionsDir = globalFunctionsPath(ctx.configDir);
-
       const functionNames = config.functions ?? [...DEFAULT_FUNCTIONS];
       const enabledFunctions = functionNames.filter(
         (fn) => !(config.disable_functions ?? []).includes(fn),
       );
 
-      let functions: ResolvedFunction[] = [];
-      if (enabledFunctions.length > 0) {
-        functions = await resolveFunctions(enabledFunctions, roleDir, globalFunctionsDir, ctx.builtinDir);
-      }
+      const globalFunctionsDir = globalFunctionsPath(ctx.configDir);
+
+      const bundle = await resolveAgentBundle({
+        skillNames: allSkillNames,
+        roleDir,
+        globalSkillsDir: ctx.globalSkillsDir,
+        enabledFunctionNames: enabledFunctions,
+        globalFunctionsDir,
+        builtinDir: ctx.builtinDir,
+        referenceConfig: config.references as RoleConfig["references"],
+      });
+      const { skills, functions, roleReferences, references: allReferences } = bundle;
 
       const resolvedSubagents = config.subagents?.length
         ? await resolveSubagents(roleId, config.subagents, 0, roleId, roleDir, ctx, roleReferences, config)

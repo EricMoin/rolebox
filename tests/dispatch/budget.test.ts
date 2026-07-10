@@ -18,7 +18,7 @@ afterEach(() => {
 
 describe("T1: budget exhausted — background launch rejected", () => {
   it("third launch from same parent returns error when maxTotalSessionsPerRequest=2", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -56,7 +56,7 @@ describe("T1: budget exhausted — background launch rejected", () => {
 
 describe("T2: cumulative — completion does NOT free budget", () => {
   it("after 2 background tasks complete, 3rd is still rejected", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -99,7 +99,7 @@ describe("T2: cumulative — completion does NOT free budget", () => {
 
 describe("T3: budget resets on session.deleted of the parent", () => {
   it("after handleSessionDeleted(parentSessionId), new launch succeeds", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -136,7 +136,7 @@ describe("T3: budget resets on session.deleted of the parent", () => {
 
 describe("T4: session.idle does NOT reset budget", () => {
   it("after handleSessionIdle, budget is still exhausted", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -173,7 +173,7 @@ describe("T4: session.idle does NOT reset budget", () => {
 
 describe("T5: undefined budget = unlimited", () => {
   it("can launch 5+ tasks without budget rejection", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -202,7 +202,7 @@ describe("T5: undefined budget = unlimited", () => {
 
 describe("T6: executeSync throws when budget exhausted", () => {
   it("throws error matching /budget/ after budget is consumed", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -233,7 +233,7 @@ describe("T6: executeSync throws when budget exhausted", () => {
 
 describe("T7: continuation does NOT count toward budget", () => {
   it("reopenForContinuation does not increment request sessions", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -278,7 +278,7 @@ describe("T7: continuation does NOT count toward budget", () => {
 
 describe("T8: independent parents have independent budgets", () => {
   it("parent-A exhausted, parent-B can still launch", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -319,7 +319,7 @@ describe("T8: independent parents have independent budgets", () => {
 
 describe("T9: deep (depth-2) tree bounded by budget", () => {
   it("a depth-2 tree of 10+ sessions hits budget exhaustion", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();

@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, afterEach, beforeAll, afterAll } from "bun:test";
-import type { OpencodeClient } from "@opencode-ai/sdk";
+import type { ISessionClient } from "../../src/platform/ports/session-client";
 import type { DispatchTask, NotificationPayload } from "../../src/dispatch/types";
 import {
   buildNotificationText,
@@ -9,7 +9,7 @@ import {
   clearSentFinalNotifies,
   clearParentQueues,
 } from "../../src/dispatch/notification";
-import { metrics } from "../../src/dispatch/metrics";
+import { metrics } from "../../src/dispatch/persistence/metrics";
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -34,10 +34,8 @@ function createTask(overrides?: Partial<DispatchTask>): DispatchTask {
 
 function createClient() {
   return {
-    session: {
-      promptAsync: mock(() => Promise.resolve({ data: undefined, error: undefined })),
-    },
-  } as unknown as OpencodeClient;
+    prompt: mock(() => Promise.resolve({ id: "prompt-1" })),
+  } as unknown as ISessionClient;
 }
 
 // ── tests: buildNotificationText ─────────────────────────────────
@@ -211,14 +209,15 @@ describe("notifyParent", () => {
     // Wait for serial queue promise chain to flush
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callArgs = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls[0][0];
-    expect(callArgs.path.id).toBe("parent-session-1");
-    expect(callArgs.body.parts[0].type).toBe("text");
-    expect(callArgs.body.parts[0].text).toContain("[BACKGROUND TASK COMPLETED]");
-    expect(callArgs.body.parts[0].text).toContain(task.id);
-    expect(callArgs.body.noReply).toBe(true);
+    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    expect(callId).toBe("parent-session-1");
+    expect(callOpts.parts[0].type).toBe("text");
+    expect(callOpts.parts[0].text).toContain("[BACKGROUND TASK COMPLETED]");
+    expect(callOpts.parts[0].text).toContain(task.id);
+    expect(callOpts.noReply).toBe(true);
   });
 
   it("calls promptAsync with noReply: false for final notification (remainingCount === 0)", async () => {
@@ -229,11 +228,12 @@ describe("notifyParent", () => {
 
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callArgs = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls[0][0];
-    expect(callArgs.body.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
-    expect(callArgs.body.noReply).toBe(false);
+    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    expect(callOpts.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(callOpts.noReply).toBe(false);
   });
 
   it("includes task ID, description, duration, and status in notification text", async () => {
@@ -250,10 +250,11 @@ describe("notifyParent", () => {
 
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callArgs = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls[0][0];
-    const text: string = callArgs.body.parts[0].text;
+    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    const text: string = callOpts.parts[0].text;
 
     expect(text).toContain("bg_check123");
     expect(text).toContain("Running type check");
@@ -270,10 +271,11 @@ describe("notifyParent", () => {
 
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(client.prompt).toHaveBeenCalledTimes(1);
 
-    const callArgs = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls[0][0];
-    const text: string = callArgs.body.parts[0].text;
+    const callId = (client.prompt as ReturnType<typeof mock>).mock.calls[0][0];
+    const callOpts = (client.prompt as ReturnType<typeof mock>).mock.calls[0][1];
+    const text: string = callOpts.parts[0].text;
 
     expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
     expect(text).toContain("```result");
@@ -283,10 +285,10 @@ describe("notifyParent", () => {
 
   it("does not throw when promptAsync fails", async () => {
     const client = {
-      session: {
-        promptAsync: mock(() => Promise.reject(new Error("network error"))),
-      },
-    } as unknown as OpencodeClient;
+      
+        prompt: mock(() => Promise.reject(new Error("network error"))),
+      
+    } as unknown as ISessionClient;
 
     const task = createTask();
 
@@ -295,12 +297,12 @@ describe("notifyParent", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     // should not have thrown — error is caught internally
-    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(client.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("serial queue continues after rejection — next notify to same parent still runs", async () => {
     const client = createClient();
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.prompt as ReturnType<typeof mock>;
 
     // First call rejects (simulates promptAsync failure)
     promptAsyncMock.mockImplementationOnce(() => Promise.reject(new Error("network error")));
@@ -336,17 +338,17 @@ describe("notifyParent", () => {
 
     await new Promise((r) => setTimeout(r, 10));
 
-    const calls = (client.session.promptAsync as ReturnType<typeof mock>).mock.calls;
+    const calls = (client.prompt as ReturnType<typeof mock>).mock.calls;
     expect(calls).toHaveLength(2);
 
     // Both notifications were resolved at send time (inflight=0).
-    expect(calls[0][0].body.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
-    expect(calls[1][0].body.parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(calls[0][1].parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
+    expect(calls[1][1].parts[0].text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
   });
 
   it("notifications to the same parent execute in FIFO order", async () => {
     const client = createClient();
-    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    const promptAsyncMock = client.prompt as ReturnType<typeof mock>;
 
     const taskA = createTask({ id: "task-A", description: "first" });
     const taskB = createTask({ id: "task-B", description: "second" });
@@ -364,9 +366,9 @@ describe("notifyParent", () => {
     // Verify FIFO order: calls[0]/calls[1] use intermediate format (task ID in **ID:**)
     // calls[2] uses final format (description in `- description (duration)`)
     const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
-    expect(calls[0][0].body.parts[0].text).toContain("task-A");
-    expect(calls[1][0].body.parts[0].text).toContain("task-B");
-    expect(calls[2][0].body.parts[0].text).toContain("third");
+    expect(calls[0][1].parts[0].text).toContain("task-A");
+    expect(calls[1][1].parts[0].text).toContain("task-B");
+    expect(calls[2][1].parts[0].text).toContain("third");
   });
 });
 
@@ -410,8 +412,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ status: "completed" });
 
@@ -437,8 +439,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ status: "completed" });
 
@@ -464,8 +466,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ id: "bg_idem_test", status: "completed" });
 
@@ -483,8 +485,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ id: "bg_intermediate", status: "completed" });
 
@@ -496,15 +498,15 @@ describe("notifyParent retry and idempotency", () => {
     expect(promptAsyncMock).toHaveBeenCalledTimes(2);
 
     const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
-    expect(calls[0][0].body.noReply).toBe(true);
-    expect(calls[1][0].body.noReply).toBe(true);
+    expect(calls[0][1].noReply).toBe(true);
+    expect(calls[1][1].noReply).toBe(true);
   });
 
   it("per-parent ordering preserved when final notification is slow", async () => {
     const order: string[] = [];
 
-    const promptAsyncMock = mock(async (args: any) => {
-      const text = args.body.parts[0].text;
+    const promptAsyncMock = mock(async (id: string, opts: any) => {
+      const text = opts.parts[0].text;
       if (text.includes("first-task")) {
         order.push("A-start");
         await new Promise((r) => setTimeout(r, 30));
@@ -516,8 +518,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const taskA = createTask({ id: "task-A", description: "first-task" });
     const taskB = createTask({ id: "task-B", description: "second-task" });
@@ -542,8 +544,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ status: "completed" });
 
@@ -566,8 +568,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ status: "completed" });
 
@@ -597,8 +599,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ id: "bg_fail_test", status: "completed" });
 
@@ -618,8 +620,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ id: "bg_success_test", status: "completed" });
 
@@ -635,8 +637,8 @@ describe("notifyParent retry and idempotency", () => {
     });
 
     const client = {
-      session: { promptAsync: promptAsyncMock },
-    } as unknown as OpencodeClient;
+      prompt: promptAsyncMock,
+    } as unknown as ISessionClient;
 
     const task = createTask({ id: "bg_idem2", status: "completed" });
 

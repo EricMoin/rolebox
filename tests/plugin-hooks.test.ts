@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { createPluginHooks, managerMap, pendingCorrections } from "../src/plugin-hooks";
+import { createPluginHooks, managerMap, pendingCorrections } from "../src/core/composition";
 import { graphSessionState } from "../src/graph/state";
 import { advanceGraphForDispatch } from "../src/graph/advance";
 import { roleFunctionsMap } from "../src/index";

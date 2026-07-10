@@ -1,14 +1,14 @@
 import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/manager";
+import { DispatchManager } from "../../src/dispatch/core/manager";
 import type { DispatchTask } from "../../src/dispatch/types";
-import { TaskStateStore } from "../../src/dispatch/task-store.ts";
+import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMockClient, parentContext } from "./helpers";
-import { metrics } from "../../src/dispatch/metrics";
-import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/result-extractor";
+import { metrics } from "../../src/dispatch/persistence/metrics";
+import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/completion/result-extractor";
 import { MAX_CONSECUTIVE_FETCH_FAILURES } from "../../src/dispatch/config";
 
 const fastConfig = {
@@ -50,8 +50,8 @@ describe("DispatchManager", () => {
     expect(task.startedAt).toBeInstanceOf(Date);
 
     // Verify client calls
-    expect(client.session.create).toHaveBeenCalledTimes(1);
-    expect(client.session.promptAsync).toHaveBeenCalledTimes(1);
+    expect(client.create).toHaveBeenCalledTimes(1);
+    expect(client.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("launch() handles session create failure with error status", async () => {
@@ -81,13 +81,10 @@ describe("DispatchManager", () => {
     const client = createMockClient({
       sessionPrompt: () =>
         Promise.resolve({
-          data: {
-            parts: [
-              { type: "text" as const, text: "Result line 1." },
-              { type: "text" as const, text: "Result line 2." },
-            ],
-          },
-          error: undefined,
+          parts: [
+            { type: "text" as const, text: "Result line 1." },
+            { type: "text" as const, text: "Result line 2." },
+          ],
         }),
     });
     const manager = new DispatchManager(client);
@@ -102,17 +99,14 @@ describe("DispatchManager", () => {
     );
 
     expect(result).toBe("Result line 1.Result line 2.");
-    expect(client.session.create).toHaveBeenCalledTimes(1);
-    expect(client.session.prompt).toHaveBeenCalledTimes(1);
+    expect(client.create).toHaveBeenCalledTimes(1);
+    expect(client.promptSync).toHaveBeenCalledTimes(1);
   });
 
   it("executeSync() returns empty string when response is undefined", async () => {
     const client = createMockClient({
       sessionPrompt: () =>
-        Promise.resolve({
-          data: undefined,
-          error: undefined,
-        }),
+        Promise.resolve(null),
     });
     const manager = new DispatchManager(client);
 
@@ -157,7 +151,7 @@ describe("DispatchManager", () => {
   it("T8: executeSync prompt timeout releases slot and aborts session", async () => {
     const client = createMockClient({
       sessionPrompt: () => new Promise<never>(() => {}), // never resolves
-      sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+      sessionAbort: () => Promise.resolve(true),
     });
     const manager = new DispatchManager(client, { ...fastConfig, syncPromptTimeoutMs: 20, syncAcquireTimeoutMs: 5000 });
     const mgr = manager as any;
@@ -170,7 +164,7 @@ describe("DispatchManager", () => {
     ).rejects.toThrow(/timed out/);
 
     expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-    expect(client.session.abort).toHaveBeenCalled();
+    expect(client.abort).toHaveBeenCalled();
   });
 
   it("T9: executeSync acquire timeout cancels orphaned waiter", async () => {
@@ -270,8 +264,7 @@ describe("DispatchManager", () => {
 
       // Resolve the prompt
       resolvePrompt({
-        data: { parts: [{ type: "text", text: "done" }] },
-        error: undefined,
+        parts: [{ type: "text", text: "done" }],
       });
 
       await syncPromise;
@@ -369,7 +362,7 @@ describe("DispatchManager", () => {
       // so we rely on a short prompt timeout to unblock after cancel).
       const client = createMockClient({
         sessionPrompt: () => new Promise<never>(() => {}),
-        sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+        sessionAbort: () => Promise.resolve(true),
       });
       const manager = new DispatchManager(client, {
         ...fastConfig,
@@ -447,7 +440,7 @@ describe("DispatchManager", () => {
     it("sync_timeout_ms in input overrides prompt-phase timeout", async () => {
       const client = createMockClient({
         sessionPrompt: () => new Promise<never>(() => {}),
-        sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+        sessionAbort: () => Promise.resolve(true),
       });
       const manager = new DispatchManager(client, {
         ...fastConfig,
@@ -475,7 +468,7 @@ describe("DispatchManager", () => {
       // Prompt timeout case
       const client = createMockClient({
         sessionPrompt: () => new Promise<never>(() => {}),
-        sessionAbort: () => Promise.resolve({ data: undefined, error: undefined }),
+        sessionAbort: () => Promise.resolve(true),
       });
       const manager = new DispatchManager(client, {
         ...fastConfig,
@@ -551,8 +544,8 @@ describe("DispatchManager", () => {
       expect(loaded!.error).toBe("Sync task interrupted by restart");
 
       // Should NOT have notified parent
-      const notifyCalls = (client.session.promptAsync as any).mock.calls.filter(
-        (c: any) => c[0]?.path?.id === "ses_parent",
+      const notifyCalls = (client.prompt as any).mock.calls.filter(
+        (c: any) => c[0] === "ses_parent",
       );
       // No notification for sync tasks (parent was blocked, not waiting for notify)
       expect(notifyCalls.length).toBe(0);
@@ -601,7 +594,7 @@ describe("DispatchManager", () => {
     expect(result).toBe(true);
     expect(task.status).toBe("cancelled");
     expect(task.completedAt).toBeInstanceOf(Date);
-    expect(client.session.abort).toHaveBeenCalledTimes(1);
+    expect(client.abort).toHaveBeenCalledTimes(1);
   });
 
   it("cancelTask() returns false for unknown task", async () => {
@@ -627,7 +620,7 @@ describe("DispatchManager", () => {
     const result = await manager.cancelTask(task.id);
     expect(result).toBe(false);
     expect(taskRef.status).toBe("completed"); // unchanged
-    expect(client.session.abort).not.toHaveBeenCalled();
+    expect(client.abort).not.toHaveBeenCalled();
   });
 
   it("cancelTask() returns false for errored task", async () => {
@@ -645,7 +638,7 @@ describe("DispatchManager", () => {
     const result = await manager.cancelTask(task.id);
     expect(result).toBe(false);
     expect(taskRef.status).toBe("error"); // unchanged
-    expect(client.session.abort).not.toHaveBeenCalled();
+    expect(client.abort).not.toHaveBeenCalled();
   });
 
   it("cancelTask() returns false for cancelled task", async () => {
@@ -663,7 +656,7 @@ describe("DispatchManager", () => {
     const result = await manager.cancelTask(task.id);
     expect(result).toBe(false);
     expect(taskRef.status).toBe("cancelled"); // unchanged
-    expect(client.session.abort).not.toHaveBeenCalled();
+    expect(client.abort).not.toHaveBeenCalled();
   });
 
   it("cancelTask() returns false for timed out task", async () => {
@@ -681,7 +674,7 @@ describe("DispatchManager", () => {
     const result = await manager.cancelTask(task.id);
     expect(result).toBe(false);
     expect(taskRef.status).toBe("timeout"); // unchanged
-    expect(client.session.abort).not.toHaveBeenCalled();
+    expect(client.abort).not.toHaveBeenCalled();
   });
 
   it("cancelTask() returns false when notification is in-flight", async () => {
@@ -697,27 +690,21 @@ describe("DispatchManager", () => {
 
     const result = await manager.cancelTask(task.id);
     expect(result).toBe(false);
-    expect(client.session.abort).not.toHaveBeenCalled();
+    expect(client.abort).not.toHaveBeenCalled();
   });
 
   it("cancelTask() remains cancelled despite concurrent evaluateAndComplete (race prevention)", async () => {
     const client = createMockClient({
       // Simulate a session that looks "completed" to evaluateAndComplete
       sessionStatus: () =>
-        Promise.resolve({
-          data: { "test-session-1": { type: "idle" } },
-          error: undefined,
-        }),
+        Promise.resolve({ type: "idle" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "I am done working" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, fastConfig);
 
@@ -770,7 +757,7 @@ describe("DispatchManager", () => {
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
     expect(result.text).toBe("Analysis:Complete.");
-    expect(client.session.messages).not.toHaveBeenCalled();
+    expect(client.messages).not.toHaveBeenCalled();
   });
 
   it("getResult() returns not_found kind for unknown task", async () => {
@@ -811,14 +798,13 @@ describe("DispatchManager", () => {
     expect(result.kind).toBe("fetch_error");
     expect(result.error).toContain("Error retrieving task output");
     expect(result.text).toBe("");
-    expect(client.session.messages).not.toHaveBeenCalled();
+    expect(client.messages).not.toHaveBeenCalled();
   });
 
   it("T10: getResult() on continued task only returns output after messageCountAtStart boundary", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "user" as const },
               parts: [{ type: "text" as const, text: "old prompt" }],
@@ -835,9 +821,7 @@ describe("DispatchManager", () => {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "Continuation output." }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client);
 
@@ -1025,14 +1009,13 @@ describe("DispatchManager", () => {
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("ok");
     expect(result.text).toBe("cached output");
-    expect(client.session.messages).not.toHaveBeenCalled();
+    expect(client.messages).not.toHaveBeenCalled();
   });
 
   it("lazy backward-compat: completed task without result materializes once, then cached", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "user" as const },
               parts: [{ type: "text" as const, text: "prompt" }],
@@ -1041,9 +1024,7 @@ describe("DispatchManager", () => {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "lazy output" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client);
     const task = await manager.launch(
@@ -1065,7 +1046,7 @@ describe("DispatchManager", () => {
     expect(r2.text).toBe("lazy output");
 
     // session.messages called exactly once (first call only)
-    expect((client.session.messages as any).mock.calls.length).toBe(1);
+    expect((client.messages as any).mock.calls.length).toBe(1);
   });
 
   it("fetch-error: task.result with fetchError returns fetch_error kind", async () => {
@@ -1088,7 +1069,7 @@ describe("DispatchManager", () => {
     const result = await manager.getResult(task.id);
     expect(result.kind).toBe("fetch_error");
     expect(result.error).toBe("materialize timeout");
-    expect(client.session.messages).not.toHaveBeenCalled();
+    expect(client.messages).not.toHaveBeenCalled();
   });
 
   it("sidecar-survival: missing task with orphaned sidecar file returns ok", async () => {
@@ -1293,7 +1274,7 @@ describe("DispatchManager", () => {
     taskRef.startedAt = new Date(Date.now());
     mgr.sessionToTask.set("early-session", task.id);
 
-    const messagesSpy = client.session.messages;
+    const messagesSpy = client.messages;
 
     await manager.handleSessionIdle("early-session");
 
@@ -1319,19 +1300,13 @@ describe("DispatchManager", () => {
     mgr.sessionToTask.set("mature-session", task.id);
     watchdog.registerTask(task.id);
 
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [
+    client.messages = mock(() =>
+      Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ],
-        error: undefined,
-      }),
+        ]),
     );
-    client.session.status = mock(() =>
-      Promise.resolve({
-        data: { "mature-session": { type: "idle" } },
-        error: undefined,
-      }),
+    client.status = mock(() =>
+      Promise.resolve({ type: "idle" }),
     );
 
     await manager.handleSessionIdle("mature-session");
@@ -1631,7 +1606,7 @@ describe("DispatchManager", () => {
       const deferred = new Promise<any>((r) => { resolveMessages = r; });
 
       const sessionMessagesMock = mock(() => deferred);
-      client.session.messages = sessionMessagesMock;
+      client.messages = sessionMessagesMock;
 
       const manager = new DispatchManager(client, fastConfig);
 
@@ -1654,12 +1629,9 @@ describe("DispatchManager", () => {
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
 
       // Now resolve the deferred — idle resumes, starts debounce
-      resolveMessages({
-        data: [
-          { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ],
-        error: undefined,
-      });
+      resolveMessages([
+        { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+      ]);
       await idlePromise;
 
       // After idle resumes: status still completed, concurrency still 0 (no double-release)
@@ -1683,16 +1655,10 @@ describe("DispatchManager", () => {
       mgr.sessionToTask.set("idle-session-2", task.id);
       watchdog.registerTask(task.id);
 
-      client.session.messages = mock(() => Promise.resolve({
-        data: [
+      client.messages = mock(() => Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ],
-        error: undefined,
-      }));
-      client.session.status = mock(() => Promise.resolve({
-        data: { "idle-session-2": { type: "idle" } },
-        error: undefined,
-      }));
+        ]));
+      client.status = mock(() => Promise.resolve({ type: "idle" }));
 
       await manager.handleSessionIdle("idle-session-2");
       expect(watchdog.isDebouncing(task.id)).toBe(true);
@@ -1792,7 +1758,7 @@ describe("DispatchManager", () => {
       expect(task.status).toBe("pending");
       expect(task.id).toMatch(/^bg_/);
       expect(task.sessionId).toBe("");
-      expect(client.session.create).not.toHaveBeenCalled();
+      expect(client.create).not.toHaveBeenCalled();
 
       mgr.concurrency.release("default");
       await new Promise(r => setTimeout(r, 10));
@@ -1818,7 +1784,7 @@ describe("DispatchManager", () => {
       const updated = mgr.tasks.get(task.id);
       expect(updated.status).toBe("running");
       expect(updated.sessionId).not.toBe("");
-      expect(client.session.create).toHaveBeenCalled();
+      expect(client.create).toHaveBeenCalled();
     });
 
     it("T4-3: cancel queued task cleans up without session abort or slot leak", async () => {
@@ -1839,7 +1805,7 @@ describe("DispatchManager", () => {
       expect(cancelled).toBe(true);
       const updated = mgr.tasks.get(task.id);
       expect(updated.status).toBe("cancelled");
-      expect(client.session.abort).not.toHaveBeenCalled();
+      expect(client.abort).not.toHaveBeenCalled();
 
       mgr.concurrency.release("default");
       expect(mgr.concurrency.getActiveCount("default")).toBe(0);
@@ -2026,23 +1992,20 @@ describe("reopenForContinuation", () => {
 
   it("reopens a completed task: reuses session, no new session.create, re-prompts, poller re-registered", async () => {
     const sessionCreate: any[] = [];
-    const promptAsyncCalls: Array<{ path: { id: string }; body: any }> = [];
-    const msgResult = {
-      data: [
-        { info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
-        { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-      ],
-      error: undefined,
-    };
+    const promptAsyncCalls: Array<{ id: string; opts: any }> = [];
+    const msgResult = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "hello" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+    ];
 
     const client = createMockClient({
       sessionCreate: () => {
         sessionCreate.push({});
-        return Promise.resolve({ data: { id: "ses_original" }, error: undefined });
+        return Promise.resolve({ id: "ses_original" });
       },
       sessionPromptAsync: (args: any) => {
         promptAsyncCalls.push(args);
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
       sessionMessages: () => Promise.resolve(msgResult),
     });
@@ -2155,7 +2118,7 @@ describe("reopenForContinuation", () => {
 
   it("reopens from error status back to running", async () => {
     const client = createMockClient({
-      sessionMessages: () => Promise.resolve({ data: [], error: undefined }),
+      sessionMessages: () => Promise.resolve([]),
     });
     const manager = new DispatchManager(client, fastConfig);
     const mgr = manager as any;
@@ -2179,7 +2142,7 @@ describe("reopenForContinuation", () => {
 
   it("reopens from timeout status back to running", async () => {
     const client = createMockClient({
-      sessionMessages: () => Promise.resolve({ data: [], error: undefined }),
+      sessionMessages: () => Promise.resolve([]),
     });
     const manager = new DispatchManager(client, fastConfig);
     const mgr = manager as any;
@@ -2297,7 +2260,7 @@ describe("recover()", () => {
     const tempDir = createTempDir();
     const client = createMockClient({
       sessionGet: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve(null), // dead session returns null
     });
 
     const store = new TaskStateStore(tempDir);
@@ -2395,13 +2358,13 @@ describe("recover()", () => {
     expect(manager.getTask("bg_pending")).toBeUndefined();
 
     // Parent was notified about the lost pending task
-    expect(client.session.promptAsync).toHaveBeenCalled();
-    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    expect(client.prompt).toHaveBeenCalled();
+    const notifyCalls = (client.prompt as any).mock.calls;
     const lostPendingCall = notifyCalls.find(
-      (c: any) => c[0]?.body?.parts?.[0]?.text?.includes("PENDING TASKS DROPPED"),
+      (c: any) => c[1]?.parts?.[0]?.text?.includes("PENDING TASKS DROPPED"),
     );
     expect(lostPendingCall).toBeDefined();
-    const notifyText: string = lostPendingCall[0].body.parts[0].text;
+    const notifyText: string = lostPendingCall[1].parts[0].text;
     expect(notifyText).toContain("my pending work");
     expect(notifyText).toContain("re-dispatch");
 
@@ -2453,27 +2416,27 @@ describe("recover()", () => {
     expect(manager.getTask("bg_other")).toBeUndefined();
 
     // Two notification calls: one for ses_parent, one for ses_other_parent
-    const notifyCalls = (client.session.promptAsync as any).mock.calls.filter(
-      (c: any) => c[0]?.body?.parts?.[0]?.text?.includes("PENDING TASKS DROPPED"),
+    const notifyCalls = (client.prompt as any).mock.calls.filter(
+      (c: any) => c[1]?.parts?.[0]?.text?.includes("PENDING TASKS DROPPED"),
     );
     expect(notifyCalls.length).toBe(2);
 
-    // First parent: should list all 3 tasks
+    // Two notification calls — one per parent
     const parentCall = notifyCalls.find(
-      (c: any) => c[0].path.id === "ses_parent",
+      (c: any) => c[0] === "ses_parent",
     );
     expect(parentCall).toBeDefined();
-    const parentText: string = parentCall[0].body.parts[0].text;
+    const parentText: string = parentCall[1].parts[0].text;
     expect(parentText).toContain("3 pending task(s)");
     expect(parentText).toContain("pending task 0");
     expect(parentText).toContain("pending task 2");
 
     // Other parent: should list 1 task
     const otherCall = notifyCalls.find(
-      (c: any) => c[0].path.id === "ses_other_parent",
+      (c: any) => c[0] === "ses_other_parent",
     );
     expect(otherCall).toBeDefined();
-    const otherText: string = otherCall[0].body.parts[0].text;
+    const otherText: string = otherCall[1].parts[0].text;
     expect(otherText).toContain("1 pending task(s)");
     expect(otherText).toContain("other parent pending");
 
@@ -2723,12 +2686,11 @@ describe("recover()", () => {
     // 5 running tasks, 3 sessions dead, 2 alive
     const sessionData = new Set(["ses_1", "ses_2"]);
     const client = createMockClient({
-      sessionGet: (args: any) => {
-        const sid = args.path.id;
+      sessionGet: (sid: string) => {
         if (sessionData.has(sid)) {
-          return Promise.resolve({ data: { id: sid }, error: undefined });
+          return Promise.resolve({ id: sid });
         }
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve(null); // dead session returns null
       },
     });
 
@@ -2821,12 +2783,11 @@ describe("recover()", () => {
     // sessions ses_a1, ses_a3, ses_b1 alive; ses_a2, ses_b2 dead
     const aliveSessions = new Set(["ses_a1", "ses_a3", "ses_b1"]);
     const client = createMockClient({
-      sessionGet: (args: any) => {
-        const sid = args.path.id;
+      sessionGet: (sid: string) => {
         if (aliveSessions.has(sid)) {
-          return Promise.resolve({ data: { id: sid }, error: undefined });
+          return Promise.resolve({ id: sid });
         }
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve(null); // dead session returns null
       },
     });
 
@@ -2881,7 +2842,7 @@ describe("recover()", () => {
     const tempDir = createTempDir();
     const client = createMockClient({
       sessionGet: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve(null), // session lost → null
     });
 
     const store = new TaskStateStore(tempDir);
@@ -2913,12 +2874,12 @@ describe("recover()", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Parent was notified about the error via promptAsync
-    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const notifyCalls = (client.prompt as any).mock.calls;
     const completionCall = notifyCalls.find(
-      (c: any) => c[0]?.path?.id === "ses_parent" && c[0]?.body?.noReply === false,
+      (c: any) => c[0] === "ses_parent" && c[1]?.noReply === false,
     );
     expect(completionCall).toBeDefined();
-    const notifyText: string = completionCall[0].body.parts[0].text;
+    const notifyText: string = completionCall[1].parts[0].text;
     expect(notifyText).toContain("session-lost notify test");
 
     rmSync(tempDir, { recursive: true, force: true });
@@ -2961,12 +2922,12 @@ describe("recover()", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Parent was notified
-    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const notifyCalls = (client.prompt as any).mock.calls;
     const completionCall = notifyCalls.find(
-      (c: any) => c[0]?.path?.id === "ses_parent" && c[0]?.body?.noReply === false,
+      (c: any) => c[0] === "ses_parent" && c[1]?.noReply === false,
     );
     expect(completionCall).toBeDefined();
-    const notifyText: string = completionCall[0].body.parts[0].text;
+    const notifyText: string = completionCall[1].parts[0].text;
     expect(notifyText).toContain("verify-failed notify test");
 
     rmSync(tempDir, { recursive: true, force: true });
@@ -2976,7 +2937,7 @@ describe("recover()", () => {
     const tempDir = createTempDir();
     const client = createMockClient({
       sessionGet: () =>
-        Promise.resolve({ data: { id: "ses_alive" }, error: undefined }),
+        Promise.resolve({ id: "ses_alive" }),
     });
 
     const store = new TaskStateStore(tempDir);
@@ -3021,12 +2982,12 @@ describe("recover()", () => {
     expect(errorCount).toBe(1);
 
     // Parent was notified about the errored task
-    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const notifyCalls = (client.prompt as any).mock.calls;
     const completionCall = notifyCalls.find(
       (c: any) =>
-        c[0]?.path?.id === "ses_parent" &&
-        c[0]?.body?.noReply === false &&
-        c[0]?.body?.parts?.[0]?.text?.includes("Exceeded concurrency limit") === false,
+        c[0] === "ses_parent" &&
+        c[1]?.noReply === false &&
+        c[1]?.parts?.[0]?.text?.includes("Exceeded concurrency limit") === false,
     );
     // At minimum, the errored task's description should appear in some notify call
     expect(completionCall).toBeDefined();
@@ -3038,15 +2999,12 @@ describe("recover()", () => {
     const tempDir = createTempDir();
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "recovered lazy output" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
 
     const store = new TaskStateStore(tempDir);
@@ -3066,13 +3024,13 @@ describe("recover()", () => {
     tasks.set(completedTask.id, completedTask);
     await store.save(tasks);
 
-    (client.session.messages as any).mock.calls.length = 0;
+    (client.messages as any).mock.calls.length = 0;
 
     const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
-    expect((client.session.messages as any).mock.calls.length).toBe(0);
+    expect((client.messages as any).mock.calls.length).toBe(0);
 
     const sidecarPath = resultSidecarPath("bg_v3_completed", process.cwd());
     let sidecarExists = false;
@@ -3085,7 +3043,7 @@ describe("recover()", () => {
     expect(result.kind).toBe("ok");
     expect(result.text).toBe("recovered lazy output");
 
-    expect((client.session.messages as any).mock.calls.length).toBe(1);
+    expect((client.messages as any).mock.calls.length).toBe(1);
 
     const loaded = manager.getTask("bg_v3_completed");
     expect(loaded?.result).toBeDefined();
@@ -3699,7 +3657,7 @@ describe("flushPersistSync", () => {
 
     // Immediately create a new store and load — state should NOT be durable yet
     // because leaveRunning no longer calls flushPersistSync (debounced async only)
-    const { TaskStateStore } = await import("../../src/dispatch/task-store");
+    const { TaskStateStore } = await import("../../src/dispatch/persistence/task-store");
     const freshStore = new TaskStateStore(dir);
     const loaded = freshStore.load();
     expect(loaded).toBeNull();
@@ -3954,7 +3912,7 @@ describe("T8: Notification outbox", () => {
         if (opts?.body && opts.body.noReply === false) {
           finalNotifyAttempts++;
         }
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
     });
 
@@ -4255,7 +4213,7 @@ describe("Task 12: backpressure retry", () => {
     expect(mgr.getInflightCount("parent-session-1")).toBe(0);
 
     // Notification was sent
-    const notifyCalls = (client.session.promptAsync as any).mock.calls;
+    const notifyCalls = (client.prompt as any).mock.calls;
     const lastCall = notifyCalls[notifyCalls.length - 1];
     expect(lastCall).toBeDefined();
 
@@ -4392,19 +4350,13 @@ describe("Task 13: completion stability re-confirmation", () => {
     watchdog.registerTask(task.id);
 
     // First setup: idle session with 1 assistant message
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [
+    client.messages = mock(() =>
+      Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ],
-        error: undefined,
-      }),
+        ]),
     );
-    client.session.status = mock(() =>
-      Promise.resolve({
-        data: { "idle-session-1": { type: "idle" } },
-        error: undefined,
-      }),
+    client.status = mock(() =>
+      Promise.resolve({ type: "idle" }),
     );
 
     // First debounce elapse → records pendingConfirm, re-arms
@@ -4419,15 +4371,12 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(es.pendingConfirm.messageCount).toBe(1);
 
     // Change mock: model produced more messages (count grew from 1 → 3)
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [
+    client.messages = mock(() =>
+      Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
           { info: { role: "assistant" }, parts: [{ type: "text", text: "more" }] },
           { info: { role: "assistant" }, parts: [{ type: "text", text: "extra" }] },
-        ],
-        error: undefined,
-      }),
+        ]),
     );
 
     // Second debounce elapse → pendingConfirm check fails (msgCount 1 → 3)
@@ -4461,19 +4410,13 @@ describe("Task 13: completion stability re-confirmation", () => {
     watchdog.registerTask(task.id);
 
     // Stable: session idle, 1 assistant message
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [
+    client.messages = mock(() =>
+      Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-        ],
-        error: undefined,
-      }),
+        ]),
     );
-    client.session.status = mock(() =>
-      Promise.resolve({
-        data: { "idle-session-2": { type: "idle" } },
-        error: undefined,
-      }),
+    client.status = mock(() =>
+      Promise.resolve({ type: "idle" }),
     );
 
     // First debounce elapse → records pendingConfirm, re-arms
@@ -4510,21 +4453,14 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.sessionToTask.set("gone-session", task.id);
     mgr.watchdog.registerTask(task.id);
 
-    // status() returns data WITHOUT the task's session → sessionStatus undefined
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [
+    // Client returns no new messages (session still stable)
+    client.messages = mock(() =>
+      Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
-        ],
-        error: undefined,
-      }),
+        ]),
     );
-    client.session.status = mock(() =>
-      Promise.resolve({
-        data: { "other-session": { type: "idle" } }, // gone-session NOT in map
-        error: undefined,
-      }),
-    );
+    // status() returns null — session gone, not found
+    client.status = mock(() => Promise.resolve(null));
 
     // Mock verifyExistence → "missing"
     mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("missing" as const));
@@ -4558,19 +4494,13 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.watchdog.registerTask(task.id);
 
     // status() returns data WITHOUT the task's session
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [
+    client.messages = mock(() =>
+      Promise.resolve([
           { info: { role: "assistant" }, parts: [{ type: "text", text: "hello" }] },
-        ],
-        error: undefined,
-      }),
+        ]),
     );
-    client.session.status = mock(() =>
-      Promise.resolve({
-        data: { "other-session": { type: "idle" } },
-        error: undefined,
-      }),
+    client.status = mock(() =>
+      Promise.resolve({ type: "idle" }),
     );
 
     // Mock verifyExistence → "exists"
@@ -4604,15 +4534,12 @@ describe("Task 13: completion stability re-confirmation", () => {
     mgr.sessionToTask.set("idle-session", task.id);
     mgr.watchdog.registerTask(task.id);
 
-    client.session.messages = mock(() =>
-      Promise.resolve({
-        data: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }],
-        error: undefined,
-      }),
+    client.messages = mock(() =>
+      Promise.resolve([{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }]),
     );
     // Finished child is absent from the status map (server omits idle sessions).
-    client.session.status = mock(() =>
-      Promise.resolve({ data: { "other-session": { type: "idle" } }, error: undefined }),
+    client.status = mock(() =>
+      Promise.resolve({ type: "idle" }),
     );
     mgr.sessionMonitor.verifyExistence = mock(() => Promise.resolve("exists" as const));
 
@@ -4620,8 +4547,8 @@ describe("Task 13: completion stability re-confirmation", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(taskRef.status).toBe("completed");
-    const notifyCalls = (client.session.promptAsync as any).mock.calls.filter(
-      (c: any) => c[0]?.path?.id === "parent-session-1",
+    const notifyCalls = (client.prompt as any).mock.calls.filter(
+      (c: any) => c[0] === "parent-session-1",
     );
     expect(notifyCalls.length).toBeGreaterThan(0);
 
@@ -4633,17 +4560,14 @@ describe("Task 13: completion stability re-confirmation", () => {
   it("materializeResult() fetches messages, extracts result, and writes sidecar", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" as const },
               parts: [
                 { type: "text" as const, text: "Some preamble.\n```result\nclean output\n```\nSome postamble." },
               ],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client);
 
@@ -4680,10 +4604,7 @@ describe("Task 13: completion stability re-confirmation", () => {
   it("materializeResult() returns fetchError ref when messages API returns error", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: undefined,
-          error: { message: "session expired" },
-        }),
+        Promise.reject(new Error("session expired")),
     });
     const manager = new DispatchManager(client);
 
@@ -4698,7 +4619,6 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(ref.sidecarPath).toBe("");
     expect(ref.totalChars).toBe(0);
     expect(ref.hadFence).toBe(false);
-    expect(ref.fetchError).toContain("Error retrieving task output");
     expect(ref.fetchError).toContain("session expired");
     expect(ref.materializedAt).toBeString();
   });
@@ -4735,8 +4655,7 @@ describe("Task 13: completion stability re-confirmation", () => {
   it("materializeResult() respects messageCountAtStart boundary", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "old output" }],
@@ -4745,9 +4664,7 @@ describe("Task 13: completion stability re-confirmation", () => {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "new output" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client);
 
@@ -4938,15 +4855,12 @@ describe("Task 13: completion stability re-confirmation", () => {
   it("T11-1: sidecar survives cleanupTask — getResult returns ok from sidecar", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "```result\nfinal answer\n```" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, fastConfig);
 
@@ -5031,15 +4945,12 @@ describe("Task 13: completion stability re-confirmation", () => {
   it("T11-3: scheduleSidecarGC creates timer when result is set", async () => {
     const client = createMockClient({
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" as const },
               parts: [{ type: "text" as const, text: "result content" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, fastConfig);
     const mgr = manager as any;
@@ -5146,10 +5057,7 @@ describe("Task 13: completion stability re-confirmation", () => {
             return new Promise<never>(() => {}); // never resolves → TimeoutError
           }
           // Successful response
-          return Promise.resolve({
-            data: [],
-            error: undefined,
-          });
+          return Promise.resolve([]);
         },
       });
       const manager = new DispatchManager(client, {

@@ -1,11 +1,11 @@
-import { applyParams } from "../function-resolver.ts";
-import { functionSessionState } from "../session-state.ts";
+import { applyParams } from "../function/file-resolver.ts";
+import { functionSessionState } from "../function/session-state.ts";
 import { graphSessionState, buildGraphStateBlock } from "../graph/index.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
-import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock, buildMemoryBlock } from "../prompt-builder.ts";
+import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock, buildMemoryBlock } from "../prompt/builder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
 import type { ResolvedFunction } from "../types.ts";
@@ -187,6 +187,7 @@ export async function handleSystemTransform(
       artifacts,
       requiredEvidence: fn.requires_evidence ?? [],
       userMessagedThisTurn,
+      workspaceDir: deps.dir,
     };
     const tr = evaluateGateAndTransitions(fn, env);
     // Collect transitions (applied atomically after loop)

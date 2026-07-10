@@ -2,7 +2,7 @@
 // LSP Code Action Tools — lsp_code_actions, lsp_execute_code_action
 // ---------------------------------------------------------------------------
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { LspClientManager } from "../client-manager.ts";
@@ -42,7 +42,7 @@ export function createLspCodeActionsTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Retrieve available code actions (quick fixes, refactorings) for a given range in a file. " +
       "Optionally filter by action kind (e.g. 'quickfix', 'refactor', 'refactor.extract', 'source.organizeImports').",
@@ -159,7 +159,7 @@ export function createLspExecuteCodeActionTool(
   clientManager: LspClientManager,
   docManager: LspDocumentManager,
 ) {
-  return tool({
+  return defineTool({
     description:
       "Execute a code action by title for a given range. Applies workspace edits or executes commands. " +
       "Returns a summary of changes made to files.",

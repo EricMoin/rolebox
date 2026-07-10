@@ -1,7 +1,7 @@
 export { LspClientManager } from "./client-manager.ts";
 export { LspDocumentManager } from "./document-manager.ts";
 
-import { tool } from "@opencode-ai/plugin";
+import { defineTool } from "../platform/ports/tool-factory.ts";
 import type { LspClientManager } from "./client-manager.ts";
 import type { LspDocumentManager } from "./document-manager.ts";
 
@@ -112,7 +112,7 @@ export {
   createLspRestartServerTool,
 } from "./tools/server-mgmt.ts";
 
-type LspTool = ReturnType<typeof tool>;
+type LspTool = ReturnType<typeof defineTool>;
 
 export function createAllLspTools(
   clientManager: LspClientManager,

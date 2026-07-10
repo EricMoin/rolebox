@@ -9,7 +9,7 @@ import {
   activeLoopManager,
   pendingCorrections,
   loopManagerMap,
-} from "../../src/plugin-hooks";
+} from "../../src/core/composition";
 import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL } from "../../src/loop/constants";
 import { functionRuntime } from "../../src/function/runtime-state";
 

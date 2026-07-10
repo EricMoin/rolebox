@@ -18,9 +18,9 @@ import { tmpdir as osTmpdir } from "node:os";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
 
-import { discoverRoles } from "../src/role-loader";
-import { resolveSkills } from "../src/skill-resolver";
-import { buildAgentPrompt } from "../src/prompt-builder";
+import { discoverRoles } from "../src/loader/role-loader";
+import { resolveSkills } from "../src/resolver/skill-resolver";
+import { buildAgentPrompt } from "../src/prompt/builder";
 import RoleboxModule from "../src/index";
 const RoleboxPlugin = RoleboxModule.server;
 

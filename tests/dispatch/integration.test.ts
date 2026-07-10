@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { detectCompletion } from "../../src/dispatch/completion-detector";
+import { detectCompletion } from "../../src/dispatch/completion/completion-detector";
 import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types";
 import { TASK_TTL_MS } from "../../src/dispatch/config";
 import { clearSentFinalNotifies, clearParentQueues, hasFinalNotifyBeenSent } from "../../src/dispatch/notification";
@@ -89,26 +89,20 @@ describe("BUG-6: TTL=30 min", () => {
 
 describe("integration: event-driven completion flow", () => {
   it("launch → event sequence (busy→message.updated→idle) → debounce → complete → notify", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_event" }, error: undefined }),
+        Promise.resolve({ id: "ses_event" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             { info: { role: "assistant" }, parts: [{ type: "text", text: "task done" }] },
-          ],
-          error: undefined,
-        }),
+          ]),
       sessionStatus: () =>
-        Promise.resolve({
-          data: { ses_event: { type: "idle" } },
-          error: undefined,
-        }),
+        Promise.resolve({ type: "idle" }),
     });
 
     const manager = new DispatchManager(client, {
@@ -150,7 +144,7 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("session error event transitions task to error", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -172,7 +166,7 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("session deleted event transitions task to error", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -198,7 +192,7 @@ describe("integration: event-driven completion flow", () => {
 
 describe("integration: per-parent fairness gate", () => {
   it("second task from same parent is queued when parent hits maxActivePerParent, even if global slots remain", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -241,7 +235,7 @@ describe("integration: per-parent fairness gate", () => {
   });
 
   it("backpressure retry fires on queue-full scenario", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
@@ -282,23 +276,20 @@ describe("integration: per-parent fairness gate", () => {
 
 describe("integration: getResult truncation + spill", () => {
   it("getResult returns full text even when large", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const longText = "x".repeat(50000);
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_large" }, error: undefined }),
+        Promise.resolve({ id: "ses_large" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             { info: { role: "user", id: "u1" }, parts: [{ type: "text", text: "hi" }] },
             { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: longText }] },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, {
       maxConcurrent: 2,
@@ -323,21 +314,18 @@ describe("integration: getResult truncation + spill", () => {
   });
 
   it("getResult extracts fenced result block", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_fence" }, error: undefined }),
+        Promise.resolve({ id: "ses_fence" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: "preamble\n```result\nfenced content here\n```\nsuffix" }] },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
     const manager = new DispatchManager(client, {
       maxConcurrent: 2,
@@ -364,22 +352,21 @@ describe("integration: getResult truncation + spill", () => {
 
 describe("integration: FINAL notification idempotency", () => {
   it("completing last task sends FINAL notification with noReply:false", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let finalNotifyCount = 0;
     let allNotifyCalls: Array<{ noReply: boolean }> = [];
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_xxx" }, error: undefined }),
-      sessionPromptAsync: (...args: any[]) => {
-        const opts = args[0] as any;
-        const body = opts?.body;
-        allNotifyCalls.push({ noReply: body?.noReply ?? false });
-        if (body && body.noReply === false) {
+        Promise.resolve({ id: "ses_xxx" }),
+      sessionPromptAsync: (sdkCall: any) => {
+        const opts = sdkCall?.body ?? {};
+        allNotifyCalls.push({ noReply: opts?.noReply ?? false });
+        if (opts?.noReply === false) {
           finalNotifyCount++;
         }
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
     });
     const manager = new DispatchManager(client, {
@@ -421,16 +408,16 @@ describe("integration: FINAL notification idempotency", () => {
 
 describe("integration: session-gone handling", () => {
   it("handleSessionError transitions task to error and notifies parent", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let notifyCalls = 0;
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_err" }, error: undefined }),
+        Promise.resolve({ id: "ses_err" }),
       sessionPromptAsync: () => {
         notifyCalls++;
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
     });
     const manager = new DispatchManager(client, {
@@ -458,14 +445,14 @@ describe("integration: session-gone handling", () => {
 
 describe("integration: no-hang on never-resolving messages", () => {
   it("materialization times out quickly, no hang, getResult responds promptly", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_hang" }, error: undefined }),
+        Promise.resolve({ id: "ses_hang" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () => new Promise(() => {}),
     });
 
@@ -501,38 +488,32 @@ describe("integration: no-hang on never-resolving messages", () => {
 
 describe("integration: notify-after-materialize ordering", () => {
   it("session.messages is called before promptAsync during completion flow", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const callOrder: string[] = [];
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_order" }, error: undefined }),
+        Promise.resolve({ id: "ses_order" }),
       sessionPromptAsync: () => {
         callOrder.push("promptAsync");
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
       sessionMessages: () => {
         callOrder.push("messages");
         return new Promise((r) =>
           setTimeout(
             () =>
-              r({
-                data: [
-                  { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
-                ],
-                error: undefined,
-              }),
+              r([
+                { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+              ]),
             50,
           ),
         );
       },
       sessionStatus: () =>
-        Promise.resolve({
-          data: { ses_order: { type: "idle" } },
-          error: undefined,
-        }),
+        Promise.resolve({ type: "idle" }),
     });
 
     const manager = new DispatchManager(client, {
@@ -578,24 +559,21 @@ describe("integration: notify-after-materialize ordering", () => {
 
 describe("integration: reap survival", () => {
   it("getResult returns ok after cleanupTask, reading from persistent sidecar", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_reap" }, error: undefined }),
+        Promise.resolve({ id: "ses_reap" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () =>
-        Promise.resolve({
-          data: [
+        Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "survived reaping" }],
             },
-          ],
-          error: undefined,
-        }),
+          ]),
     });
 
     const manager = new DispatchManager(client, {
@@ -631,26 +609,23 @@ describe("integration: reap survival", () => {
 
 describe("integration: backward-compat lazy fetch", () => {
   it("first getResult triggers messages fetch, second uses cache only", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let messagesCallCount = 0;
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_v3" }, error: undefined }),
+        Promise.resolve({ id: "ses_v3" }),
       sessionPromptAsync: () =>
-        Promise.resolve({ data: undefined, error: undefined }),
+        Promise.resolve({ id: "prompt-1" }),
       sessionMessages: () => {
         messagesCallCount++;
-        return Promise.resolve({
-          data: [
+        return Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "v3 compat text" }],
             },
-          ],
-          error: undefined,
-        });
+          ]);
       },
     });
 
@@ -686,29 +661,26 @@ describe("integration: backward-compat lazy fetch", () => {
 
 describe("integration: concurrent evaluateAndComplete no-op", () => {
   it("calling evaluateAndComplete on already-completed task is a no-op", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/manager");
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let messagesCallCount = 0;
     let promptAsyncCallCount = 0;
     const client = createMockClient({
       sessionCreate: () =>
-        Promise.resolve({ data: { id: "ses_noop" }, error: undefined }),
+        Promise.resolve({ id: "ses_noop" }),
       sessionPromptAsync: () => {
         promptAsyncCallCount++;
-        return Promise.resolve({ data: undefined, error: undefined });
+        return Promise.resolve({ id: "prompt-1" });
       },
       sessionMessages: () => {
         messagesCallCount++;
-        return Promise.resolve({
-          data: [
+        return Promise.resolve([
             {
               info: { role: "assistant" },
               parts: [{ type: "text", text: "done" }],
             },
-          ],
-          error: undefined,
-        });
+          ]);
       },
     });
 
@@ -744,7 +716,7 @@ describe("integration: outbox resend", () => {
   it(
     "failed final notify populates outbox, sweeper retries successfully",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
 
       let notifyAttemptCount = 0;
@@ -752,10 +724,10 @@ describe("integration: outbox resend", () => {
 
       const client = createMockClient({
         sessionCreate: () =>
-          Promise.resolve({ data: { id: "ses_outbox" }, error: undefined }),
-        sessionPromptAsync: (...args: any[]) => {
-          const opts = args[0] as any;
-          if (opts?.body && "noReply" in opts.body) {
+          Promise.resolve({ id: "ses_outbox" }),
+        sessionPromptAsync: (sdkCall: any) => {
+          const opts = sdkCall?.body ?? {};
+          if (opts && "noReply" in opts) {
             notifyAttemptCount++;
             if (notifyAttemptCount <= 4) {
               return Promise.reject(new Error("notify failed"));
@@ -763,18 +735,15 @@ describe("integration: outbox resend", () => {
           } else {
             launchPromptAsyncResolved = true;
           }
-          return Promise.resolve({ data: undefined, error: undefined });
+          return Promise.resolve({ id: "prompt-1" });
         },
         sessionMessages: () =>
-          Promise.resolve({
-            data: [
+          Promise.resolve([
               {
                 info: { role: "assistant" },
                 parts: [{ type: "text", text: "outbox content" }],
               },
-            ],
-            error: undefined,
-          }),
+            ]),
       });
 
       const manager = new DispatchManager(client, {
@@ -811,7 +780,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
   it(
     "materializeAndNotify with remainingTasks > 0 does not call addToOutbox",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
 
       let promptAsyncCallCount = 0;
@@ -819,25 +788,23 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
 
       const client = createMockClient({
         sessionCreate: () =>
-          Promise.resolve({ data: { id: "ses_intermediate" }, error: undefined }),
+          Promise.resolve({ id: "ses_intermediate" }),
         sessionPromptAsync: (...args: any[]) => {
-          const opts = args[0] as any;
-          if (opts?.body && "noReply" in opts.body) {
+          const sdkCall = args[0] as any;
+          const opts = sdkCall?.body ?? {};
+          if (opts && "noReply" in opts) {
             promptAsyncCallCount++;
             promptAsyncArgs.push(opts);
           }
-          return Promise.resolve({ data: undefined, error: undefined });
+          return Promise.resolve({ id: "prompt-1" });
         },
         sessionMessages: () =>
-          Promise.resolve({
-            data: [
+          Promise.resolve([
               {
                 info: { role: "assistant" },
                 parts: [{ type: "text", text: "task output" }],
               },
-            ],
-            error: undefined,
-          }),
+            ]),
       });
 
       const manager = new DispatchManager(client, {
@@ -872,7 +839,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
       expect(mgr.notifyOutbox.has(task.id)).toBe(false);
       // Intermediate notification should have been sent once (noReply=true)
       expect(promptAsyncCallCount).toBe(1);
-      const sentText: string = promptAsyncArgs[0]?.body?.parts?.[0]?.text ?? "";
+      const sentText: string = promptAsyncArgs[0]?.parts?.[0]?.text ?? "";
       expect(sentText).toContain("[BACKGROUND TASK COMPLETED]");
       expect(sentText).not.toContain("[ALL BACKGROUND TASKS COMPLETE]");
     },
@@ -882,7 +849,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
   it(
     "intermediate notification not in outbox — sweeper does not resend",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/manager");
+      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
       const { clearSentFinalNotifies } = await import("../../src/dispatch/notification");
 
@@ -890,21 +857,18 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
 
       const client = createMockClient({
         sessionCreate: () =>
-          Promise.resolve({ data: { id: "ses_sweep" }, error: undefined }),
+          Promise.resolve({ id: "ses_sweep" }),
         sessionPromptAsync: () => {
           promptAsyncCallCount++;
-          return Promise.resolve({ data: undefined, error: undefined });
+          return Promise.resolve({ id: "prompt-1" });
         },
         sessionMessages: () =>
-          Promise.resolve({
-            data: [
+          Promise.resolve([
               {
                 info: { role: "assistant" },
                 parts: [{ type: "text", text: "output" }],
               },
-            ],
-            error: undefined,
-          }),
+            ]),
       });
 
       const manager = new DispatchManager(client, {

@@ -6,7 +6,7 @@ import {
   ROUND_TIMEOUT_MS,
   SUMMARY_INPUT_CHAR_CAP,
 } from "../../src/loop/constants";
-import type { FunctionCall } from "../../src/function-parser";
+import type { FunctionCall } from "../../src/function/parser";
 
 function callFromPositional(
   iterations?: string,

@@ -29,12 +29,18 @@ export const DEFAULT_THROTTLE_CONFIG: Readonly<ThrottleConfig> = Object.freeze({
  *    session+event-type pairs (rapid duplicate suppression).
  *
  * Auto-prunes expired entries on every `allow()` call to prevent
- * unbounded memory growth.
+ * unbounded memory growth. A periodic full-prune (every 5 minutes)
+ * removes entries older than the largest configured window.
+ *
+ * Callers MUST call `dispose()` when shutting down to clean up the
+ * periodic prune timer.
  */
 export class NotificationThrottle {
   private config: ThrottleConfig;
   /** Map keyed by `${sessionID}:${eventType}` → chronological timestamps. */
   private timestamps: Map<string, number[]> = new Map();
+  /** Periodic full-prune interval handle (5-minute interval). */
+  private pruneIntervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: ThrottleConfig) {
     if (!config || typeof config !== "object") {
@@ -46,6 +52,14 @@ export class NotificationThrottle {
         maxPerWindow: config.maxPerWindow ?? DEFAULT_THROTTLE_CONFIG.maxPerWindow,
         perEventType: config.perEventType,
       };
+    }
+
+    // ── Start periodic full-prune timer (every 5 minutes) ──────────
+    const maxWindowMs = this.computeMaxWindowMs();
+    if (maxWindowMs > 0) {
+      this.pruneIntervalId = setInterval(() => {
+        this.pruneByWindow(maxWindowMs);
+      }, 5 * 60 * 1000);
     }
   }
 
@@ -126,6 +140,31 @@ export class NotificationThrottle {
   }
 
   /**
+   * Remove all throttle entries for a given session.
+   * Scans all keys matching `${sessionID}:*` and deletes them.
+   */
+  removeSession(sessionID: string): void {
+    const prefix = `${sessionID}:`;
+    for (const key of this.timestamps.keys()) {
+      if (key.startsWith(prefix)) {
+        this.timestamps.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Dispose the throttle: clear the periodic prune timer and all tracked
+   * state. Safe to call multiple times.
+   */
+  dispose(): void {
+    if (this.pruneIntervalId !== null) {
+      clearInterval(this.pruneIntervalId);
+      this.pruneIntervalId = null;
+    }
+    this.timestamps.clear();
+  }
+
+  /**
    * Return basic stats for debugging / logging.
    *
    * - `totalTracked`: sum of all timestamp entries across all keys.
@@ -137,5 +176,39 @@ export class NotificationThrottle {
       totalTracked += stamps.length;
     }
     return { totalTracked, keys: this.timestamps.size };
+  }
+
+  // ── Private Helpers ────────────────────────────────────────────────
+
+  /**
+   * Compute the maximum window across the top-level config and all
+   * per-event-type overrides. Used by the periodic prune timer.
+   */
+  private computeMaxWindowMs(): number {
+    let max = this.config.windowMs;
+    if (this.config.perEventType) {
+      for (const entry of Object.values(this.config.perEventType)) {
+        if (entry?.windowMs && entry.windowMs > max) {
+          max = entry.windowMs;
+        }
+      }
+    }
+    return max;
+  }
+
+  /**
+   * Prune entries older than the given window from the end of now.
+   */
+  private pruneByWindow(windowMs: number): void {
+    const now = Date.now();
+    const cutoff = now - windowMs;
+    for (const [key, stamps] of this.timestamps) {
+      const filtered = stamps.filter((t) => t >= cutoff);
+      if (filtered.length === 0) {
+        this.timestamps.delete(key);
+      } else {
+        this.timestamps.set(key, filtered);
+      }
+    }
   }
 }

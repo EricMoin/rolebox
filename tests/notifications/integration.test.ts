@@ -89,29 +89,23 @@ function tempDir(): string {
 
 function createMockClient() {
   return {
-    session: {
-      get: mock(() =>
-        Promise.resolve({
-          data: { title: "Test Session" },
-          error: undefined,
-        }),
-      ),
-      messages: mock(() =>
-        Promise.resolve({
-          data: [
-            {
-              info: { role: "user" },
-              parts: [{ type: "text", text: "Hello from user" }],
-            },
-            {
-              info: { role: "assistant" },
-              parts: [{ type: "text", text: "Response from assistant" }],
-            },
-          ],
-          error: undefined,
-        }),
-      ),
-    },
+    get: mock(() =>
+      Promise.resolve({
+        title: "Test Session",
+      }),
+    ),
+    messages: mock(() =>
+      Promise.resolve([
+        {
+          info: { role: "user" },
+          parts: [{ type: "text", text: "Hello from user" }],
+        },
+        {
+          info: { role: "assistant" },
+          parts: [{ type: "text", text: "Response from assistant" }],
+        },
+      ]),
+    ),
   } as any;
 }
 
@@ -463,6 +457,65 @@ describe("NotificationThrottle", () => {
     const s = throttle.stats();
     expect(s.keys).toBe(1);
     expect(s.totalTracked).toBe(1);
+  });
+
+  it("removeSession() clears all entries for a given session", () => {
+    throttle.allow("ses_a", NOTIFICATION_EVENT_TYPES.Idle);
+    throttle.allow("ses_a", NOTIFICATION_EVENT_TYPES.Error);
+    throttle.allow("ses_a", NOTIFICATION_EVENT_TYPES.Question);
+    expect(throttle.stats().keys).toBe(3);
+
+    throttle.removeSession("ses_a");
+
+    expect(throttle.stats()).toEqual({ totalTracked: 0, keys: 0 });
+  });
+
+  it("removeSession() does not affect other sessions", () => {
+    throttle.allow("ses_a", NOTIFICATION_EVENT_TYPES.Idle);
+    throttle.allow("ses_b", NOTIFICATION_EVENT_TYPES.Idle);
+    throttle.allow("ses_c", NOTIFICATION_EVENT_TYPES.Error);
+    expect(throttle.stats().keys).toBe(3);
+
+    throttle.removeSession("ses_b");
+
+    const s = throttle.stats();
+    expect(s.keys).toBe(2);
+    expect(s.totalTracked).toBe(2);
+  });
+
+  it("removeSession() is safe for nonexistent session", () => {
+    expect(() => throttle.removeSession("nonexistent")).not.toThrow();
+    expect(throttle.stats()).toEqual({ totalTracked: 0, keys: 0 });
+  });
+
+  it("dispose() clears all state", () => {
+    throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle);
+    throttle.allow("ses_2", NOTIFICATION_EVENT_TYPES.Error);
+    expect(throttle.stats().keys).toBeGreaterThan(0);
+
+    throttle.dispose();
+
+    expect(throttle.stats()).toEqual({ totalTracked: 0, keys: 0 });
+  });
+
+  it("dispose() is safe to call multiple times", () => {
+    throttle.dispose();
+    expect(() => throttle.dispose()).not.toThrow();
+    expect(throttle.stats()).toEqual({ totalTracked: 0, keys: 0 });
+  });
+
+  it("removeSession() handles partial prefix overlap correctly", () => {
+    // Keys are `${sessionID}:${eventType}`; ensure sessionID boundary
+    // is exact (ses_1 should not match ses_10).
+    throttle.allow("ses_1", NOTIFICATION_EVENT_TYPES.Idle);
+    throttle.allow("ses_10", NOTIFICATION_EVENT_TYPES.Idle);
+    throttle.allow("ses_100", NOTIFICATION_EVENT_TYPES.Idle);
+    expect(throttle.stats().keys).toBe(3);
+
+    throttle.removeSession("ses_1");
+
+    // Only exact prefix "ses_1:" should be removed
+    expect(throttle.stats().keys).toBe(2);
   });
 });
 
@@ -1023,8 +1076,10 @@ describe("NotificationManager", () => {
     expect(cfg.idleDelayMs).toBe(2000);
   });
 
-  it("handleSessionDeleted cleans up scheduler", () => {
+  it("handleSessionDeleted cleans up scheduler and throttle", () => {
     const mgr = createManager();
+    // Fire some notifications through the throttle first
+    mgr.notify({ sessionID: "ses_del", eventType: NOTIFICATION_EVENT_TYPES.Idle }).catch(() => {});
     // Should not throw
     expect(() => mgr.handleSessionDeleted("ses_del")).not.toThrow();
   });
@@ -1134,6 +1189,22 @@ describe("NotificationManager", () => {
     await expect(mgr.dispose()).resolves.toBeUndefined();
     // Double dispose should also be safe
     await expect(mgr.dispose()).resolves.toBeUndefined();
+  });
+
+  it("rejects unknown event type — no dispatch, no error", async () => {
+    const logFile = join(tmpDir, "log_unknown.jsonl");
+    const mgr = createManager({
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
+    });
+
+    await mgr.notify({
+      sessionID: "ses_unknown",
+      eventType: "bogus_type",
+    });
+
+    // No file should have been written (no channel dispatch for unknown type)
+    expect(existsSync(logFile)).toBe(false);
+    await mgr.dispose();
   });
 });
 

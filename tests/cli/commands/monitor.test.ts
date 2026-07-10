@@ -50,7 +50,10 @@ function captureLogs(
 }
 
 async function importMonitor() {
-  return await import("../../../src/cli/commands/monitor");
+  const command = await import("../../../src/cli/commands/monitor");
+  const renderer = await import("../../../src/cli/commands/monitor/monitor-renderer");
+  const helpers = await import("../../../src/cli/commands/monitor/monitor-helpers");
+  return { ...command, ...renderer, ...helpers };
 }
 
 function writeDispatch(tasks: unknown[]) {
@@ -288,7 +291,7 @@ function makeTaskSnapshot(overrides?: Partial<TaskSnapshot>): TaskSnapshot {
   };
 }
 
-import type { MonitorSnapshot, TaskSnapshot } from "../../../src/cli/commands/monitor-reader";
+import type { MonitorSnapshot, TaskSnapshot } from "../../../src/cli/commands/monitor/monitor-reader";
 
 // ── (a) Metrics Display Tests ──────────────────────────────────◀
 

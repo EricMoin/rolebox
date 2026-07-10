@@ -1,8 +1,9 @@
 // ── Template rendering, variable building, and session info reading ──
 
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { createSubLogger } from "../logger.ts";
 import { truncate } from "./formatting.ts";
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "../utils/timeout.ts";
 import type {
   NotificationMessage,
   NotificationEventType,
@@ -122,7 +123,7 @@ export function getLastNonEmptyLine(text: string): string {
  * @returns Session title, last user message text, and last assistant message text.
  */
 export async function readSessionInfo(
-  client: PluginInput["client"],
+  client: ISessionClient,
   sessionID: string,
   dir?: string,
 ): Promise<{
@@ -130,21 +131,17 @@ export async function readSessionInfo(
   lastUserMessage?: string;
   lastAssistantMessage?: string;
 }> {
-  const query = dir ? { directory: dir } : undefined;
-
   // 1. Get session title
   let title: string | undefined;
   try {
-    const sessionResult = await client.session.get({
-      path: { id: sessionID },
-      query,
-    });
-    const sessionResp = sessionResult as {
-      data?: { title?: string };
-      error?: unknown;
-    };
-    if (!sessionResp.error && sessionResp.data?.title) {
-      title = sessionResp.data.title;
+    const sessionResult = await withTimeout(
+      client.get(sessionID, dir),
+      DEFAULT_TIMEOUT_MS,
+      `readSessionInfo.session.get:${sessionID}`,
+      log,
+    );
+    if (sessionResult !== null) {
+      title = sessionResult.title;
     }
   } catch (err) {
     log.warn(`Failed to get session ${sessionID}`, err);
@@ -154,22 +151,17 @@ export async function readSessionInfo(
   let lastUserMessage: string | undefined;
   let lastAssistantMessage: string | undefined;
   try {
-    const messagesResult = await client.session.messages({
-      path: { id: sessionID },
-      query,
-    });
-    const messagesResp = messagesResult as {
-      data?: Array<{
-        info: { role: string };
-        parts: Array<{ type: string; text?: string }>;
-      }>;
-      error?: unknown;
-    };
-    if (messagesResp.error) {
+    const msgs = await withTimeout(
+      client.messages(sessionID, { directory: dir }),
+      DEFAULT_TIMEOUT_MS,
+      `readSessionInfo.session.messages:${sessionID}`,
+      log,
+    );
+    if (msgs === null) {
+      // timeout — return title only
       return { title };
     }
 
-    const msgs = messagesResp.data ?? [];
     for (let i = msgs.length - 1; i >= 0; i--) {
       const msg = msgs[i];
       const text = extractMessageText(msg.parts);
@@ -217,7 +209,7 @@ export async function buildNotificationContent(params: {
   sessionID: string;
   eventType: NotificationEventType;
   eventConfig?: NotificationEventConfig;
-  client: PluginInput["client"];
+  client: ISessionClient;
   agent?: string;
   roleName?: string;
   dir?: string;

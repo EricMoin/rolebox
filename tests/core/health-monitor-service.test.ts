@@ -2,7 +2,7 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { PluginCore } from "../../src/core/plugin-core.ts";
 import type { PluginService, PluginCoreLike, ServiceHealth } from "../../src/core/service.ts";
 import type { PluginContext } from "../../src/core/context.ts";
-import { HealthMonitorService } from "../../src/core/health-monitor-service.ts";
+import { HealthMonitorService } from "../../src/core/services/health-monitor-service.ts";
 import type { ServiceRestartState } from "../../src/core/service-supervisor.ts";
 import { __resetForTest } from "../../src/logger.ts";
 

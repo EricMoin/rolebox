@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -153,9 +153,11 @@ export async function downloadRole(
     headers["Authorization"] = `token ${process.env.GITHUB_TOKEN}`;
   }
 
-  // Create temp directory
+  // Create temporary directories
   const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-"));
   const archivePath = join(tmpDir, "archive.tar.gz");
+  const extractDir = join(tmpDir, "extracted");
+  const outputDir = mkdtempSync(join(tmpdir(), "rolebox-out-"));
 
   // Download tarball
   let response: Response;
@@ -178,37 +180,47 @@ export async function downloadRole(
   const buffer = Buffer.from(await response.arrayBuffer());
   writeFileSync(archivePath, buffer);
 
-  // Extract using tar
-  const extractDir = join(tmpDir, "extracted");
+  // Extract, verify, and move to stable location
   mkdirSync(extractDir, { recursive: true });
 
-  let exitCode: number;
   try {
-    const proc = Bun.spawn(
-      ["tar", "xzf", archivePath, "--strip-components=1", `--include=*/roles/${roleId}/*`, "-C", extractDir],
-      {
-        stdout: "inherit",
-        stderr: "inherit",
-      }
-    );
-    exitCode = (await proc.exited) ?? 1;
-  } catch (err) {
-    throw new Error(`extraction failed for role "${roleId}": ${(err as Error).message}`);
+    // Verify tar is available on PATH before attempting extraction
+    if (!Bun.which("tar")) {
+      throw new Error("tar binary not found — please install tar");
+    }
+
+    let exitCode: number;
+    try {
+      const proc = Bun.spawn(
+        ["tar", "xzf", archivePath, "--strip-components=1", "-C", extractDir],
+        {
+          stdout: "inherit",
+          stderr: "inherit",
+        }
+      );
+      exitCode = (await proc.exited) ?? 1;
+    } catch (err) {
+      throw new Error(`extraction failed for role "${roleId}": ${(err as Error).message}`);
+    }
+
+    if (exitCode !== 0) {
+      throw new Error(`extraction failed for role "${roleId}": tar exited with code ${exitCode}`);
+    }
+
+    const roleDir = join(extractDir, "roles", roleId);
+    if (!existsSync(roleDir)) {
+      throw new Error(`extraction failed for role "${roleId}": role directory not found at ${roleDir}`);
+    }
+
+    // Move role directory to stable output location before tmpDir cleanup
+    rmSync(outputDir, { recursive: true, force: true });
+    renameSync(roleDir, outputDir);
+
+    return outputDir;
+  } finally {
+    // Always clean up temporary extraction workspace
+    rmSync(tmpDir, { recursive: true, force: true });
   }
-
-  // Clean up archive regardless of success
-  try { unlinkSync(archivePath); } catch { /* ignore */ }
-
-  if (exitCode !== 0) {
-    throw new Error(`extraction failed for role "${roleId}": tar exited with code ${exitCode}`);
-  }
-
-  const roleDir = join(extractDir, "roles", roleId);
-  if (!existsSync(roleDir)) {
-    throw new Error(`extraction failed for role "${roleId}": role directory not found at ${roleDir}`);
-  }
-
-  return roleDir;
 }
 
 // ── Integrity ─────────────────────────────────────────────────────

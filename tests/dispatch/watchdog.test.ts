@@ -1,5 +1,5 @@
 import { describe, it, expect, mock } from "bun:test";
-import { TaskWatchdogManager } from "../../src/dispatch/watchdog";
+import { TaskWatchdogManager } from "../../src/dispatch/core/watchdog";
 import {
   WATCHDOG_INTERVAL_MS,
   GLOBAL_SWEEP_INTERVAL_MS,

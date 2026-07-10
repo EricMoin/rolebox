@@ -1,7 +1,7 @@
 import { graphSessionState, advanceGraphForDispatch } from "../graph/index.ts";
 import { extractDispatchTarget } from "../graph/advance.ts";
 import { extractResultBlock, normalizeResult, hashResult } from "../graph/result-capture.ts";
-import { functionSessionState } from "../session-state.ts";
+import { functionSessionState } from "../function/session-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { loadHandlers, safeCall } from "../function/handlers-loader.ts";
@@ -99,7 +99,7 @@ export async function handleToolAfter(
     if (gs && graph?.termination?.config && needsResultCapture(graph.termination.config)) {
       const target = extractDispatchTarget(input.tool, input.args);
       if (target) {
-        const lastText = await fetchLastAssistantText(deps.client, input.sessionID);
+        const lastText = await fetchLastAssistantText(deps.session, input.sessionID);
         if (lastText) {
           const resultBlock = extractResultBlock(lastText);
           const normalized = normalizeResult(resultBlock);
@@ -132,7 +132,7 @@ export async function handleToolAfter(
       ),
     );
     const lastAssistantText = needsText
-      ? await fetchLastAssistantText(deps.client, input.sessionID)
+      ? await fetchLastAssistantText(deps.session, input.sessionID)
       : null;
     const injects = runToolObserve({
       sessionID: input.sessionID, tool: input.tool,
