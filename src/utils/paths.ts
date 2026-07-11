@@ -36,3 +36,27 @@ export function agentFilePath(agentId: string): string {
 export function agentsDir(): string {
   return join(os.homedir(), ".claude", "agents");
 }
+
+/**
+ * Returns the platform-specific agent directory.
+ * - `"pi"` → `~/.pi/agent/skills`
+ * - default (or `"opencode"`) → `~/.claude/agents`
+ */
+export function platformAgentsDir(platformId?: string): string {
+  if (platformId === "pi") {
+    return join(os.homedir(), ".pi", "agent", "skills");
+  }
+  return agentsDir();
+}
+
+/**
+ * Returns the platform-specific agent file path.
+ * - `"pi"` → `~/.pi/agent/skills/{agentId}/SKILL.md`
+ * - default (or `"opencode"`) → `~/.claude/agents/{agentId}.md`
+ */
+export function platformAgentFilePath(agentId: string, platformId?: string): string {
+  if (platformId === "pi") {
+    return join(platformAgentsDir("pi"), agentId, SKILL_MD);
+  }
+  return agentFilePath(agentId);
+}

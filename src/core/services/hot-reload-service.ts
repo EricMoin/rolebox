@@ -6,7 +6,8 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, dirname } from "node:path";
 import { discoverRoles } from "../../loader/role-loader.ts";
 import { resolveAllRoles, type ResolveContext } from "../../resolver/orchestrator.ts";
-import { syncAgentFiles } from "../../sync/agent-files.ts";
+import { syncAllAgents } from "../../sync/agent-files.ts";
+import { OpencodeAgentRegistrar } from "../../platform/adapters/opencode/agent-registrar.ts";
 import { syncSkillSymlinks } from "../../sync/skill-symlinks.ts";
 import type { ResolvedFunction, ResolvedGraph } from "../../types.ts";
 
@@ -181,7 +182,7 @@ export class HotReloadService implements PluginService {
       const newResolvedRoles = await resolveAllRoles(newRoles, resolverCtx);
 
       // 4. Sync agent files and skill symlinks
-      syncAgentFiles(newResolvedRoles);
+      await syncAllAgents(newResolvedRoles, new OpencodeAgentRegistrar());
       syncSkillSymlinks(newResolvedRoles, this.ctx.globalSkillsDir);
 
       // 5. Update the resolvedRoles array in-place (keep the reference stable)

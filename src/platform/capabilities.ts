@@ -61,3 +61,22 @@ export function minimalCapabilities(platformId: string): PlatformCapabilities {
     platformId,
   };
 }
+
+/**
+ * Capabilities for the Pi coding agent platform (pi.dev).
+ * Supports event streaming and multi-step tools, but not background
+ * dispatch, session management, or agent file sync.
+ */
+export function piCapabilities(): PlatformCapabilities {
+  return {
+    hasBackgroundTasks: true,
+    hasSessionFork: false,
+    hasSessionCreate: false,
+    hasSessionAbort: true,
+    hasAgentFileSync: false,
+    hasMultiStepTools: true,
+    hasEventStream: true,
+    hasSessionStatus: true,
+    platformId: "pi",
+  };
+}

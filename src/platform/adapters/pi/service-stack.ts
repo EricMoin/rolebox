@@ -1,0 +1,181 @@
+/**
+ * PiLightweightServiceStack — Minimal PluginCore-equivalent service stack
+ * for the Pi (plugin) platform.
+ *
+ * Pi cannot run the full PluginCore because PluginCore depends on the
+ * `@opencode-ai/plugin` SDK's client object. This stack provides a
+ * lightweight replacement that:
+ *
+ *   1. Initializes PiSessionAdapter for filesystem-backed session reading
+ *   2. Constructs all standalone tools (hashline, memory, web, signal, etc.)
+ *   3. Constructs session tools backed by PiSessionAdapter
+ *   4. Constructs asset/metadata tools from resolved roles
+ *   5. Creates stub dispatch tools returning "Not available on Pi"
+ *   6. Compiles all tools into Pi's native format via PiToolFactory
+ *   7. Registers them with pi.registerTool()
+ *
+ * Must NOT import from @opencode-ai/plugin.
+ *
+ * @module
+ */
+
+import { defineTool } from "../../ports/tool-factory.ts";
+import { PiToolFactory } from "./tool-factory.ts";
+import { PiSessionAdapter } from "./session.ts";
+import { z } from "zod";
+
+// ── Shared tool assembly ────────────────────────────────────────────────────
+
+import { buildCanonicalTools } from "../../tool-assembly.ts";
+import { piCapabilities } from "../../capabilities.ts";
+
+// ── Logger ──────────────────────────────────────────────────────────────────
+
+import { createSubLogger } from "../../../logger.ts";
+import type { ResolvedRole } from "../../../types.ts";
+import type { CanonicalToolDef } from "../../types.ts";
+
+const log = createSubLogger("pi-service-stack");
+
+// ── Stub dispatch tools ──────────────────────────────────────────────────────
+
+/**
+ * Create a stub tool that returns "Not available on Pi" for platform-specific
+ * features that Pi does not support (dispatch, etc.).
+ */
+function stubTool(description: string): CanonicalToolDef {
+  return defineTool({
+    description,
+    args: {
+      _stub: z.string().optional().describe("This tool is not available on Pi"),
+    },
+    async execute() {
+      return "Dispatch is not available on Pi — use opencode for multi-agent workflows.";
+    },
+  });
+}
+
+const stubDispatch = stubTool(
+  "Dispatch work to a subagent. (Stub — not available on Pi)",
+);
+
+const stubDispatchOutput = stubTool(
+  "Retrieve output from a completed background task. (Stub — not available on Pi)",
+);
+
+const stubDispatchCancel = stubTool(
+  "Cancel a running background task. (Stub — not available on Pi)",
+);
+
+const stubDispatchMetrics = stubTool(
+  "Retrieve runtime metrics snapshot. (Stub — not available on Pi)",
+);
+
+const stubDispatchStatus = stubTool(
+  "Proactively check task liveness. (Stub — not available on Pi)",
+);
+
+/**
+ * Registry of named canonical tool definitions before compilation.
+ * Maps tool name → CanonicalToolDef.
+ */
+type ToolRegistry = Record<string, CanonicalToolDef>;
+
+
+// ── Stub dispatch tools ─────────────────────────────────────────────────────
+
+function buildDispatchStubTools(): ToolRegistry {
+  return {
+    dispatch: stubDispatch,
+    dispatch_output: stubDispatchOutput,
+    dispatch_cancel: stubDispatchCancel,
+    dispatch_metrics: stubDispatchMetrics,
+    dispatch_status: stubDispatchStatus,
+  };
+}
+
+// ── Service Stack ───────────────────────────────────────────────────────────
+
+/**
+ * Lightweight service stack for the Pi platform.
+ *
+ * Orchestrates the creation, compilation, and registration of all rolebox
+ * tools with the Pi extension API. Does not use PluginCore or any
+ * @opencode-ai/plugin imports.
+ */
+export class PiLightweightServiceStack {
+  private _toolFactory: PiToolFactory;
+  private _sessionAdapter: PiSessionAdapter;
+  private _resolvedRoles: ResolvedRole[];
+  private _pi: any;
+  private _dispatchTools?: Record<string, CanonicalToolDef>;
+  private _loopTools?: Record<string, CanonicalToolDef>;
+
+  constructor(
+    pi: any,
+    resolvedRoles: ResolvedRole[],
+    sessionDir?: string,
+    dispatchTools?: Record<string, CanonicalToolDef>,
+    loopTools?: Record<string, CanonicalToolDef>,
+  ) {
+    this._pi = pi;
+    this._resolvedRoles = resolvedRoles;
+    this._toolFactory = new PiToolFactory();
+    this._sessionAdapter = new PiSessionAdapter(sessionDir);
+    this._dispatchTools = dispatchTools;
+    this._loopTools = loopTools;
+  }
+
+  /** The PiSessionAdapter instance for external access. */
+  get sessionAdapter(): PiSessionAdapter {
+    return this._sessionAdapter;
+  }
+
+  /** The PiToolFactory instance for external access. */
+  get toolFactory(): PiToolFactory {
+    return this._toolFactory;
+  }
+
+  /**
+   * Initialize the service stack: build all tools, compile them to Pi's
+   * native format, and register each with pi.registerTool().
+   *
+   * Returns the count of registered tools.
+   */
+  async init(): Promise<number> {
+    // 1. Build the dispatch tools override: use external dispatch tools when
+    //    provided (from real dispatch system), falling back to built-in stubs.
+    const dispatchToolsOverride: ToolRegistry = this._dispatchTools && Object.keys(this._dispatchTools).length > 0
+      ? this._dispatchTools
+      : buildDispatchStubTools();
+
+    // 2. Assemble all tools via the shared canonical builder
+    const allTools = buildCanonicalTools({
+      resolvedRoles: this._resolvedRoles,
+      sessionClient: this._sessionAdapter,
+      directory: process.cwd(),
+      capabilities: piCapabilities(),
+      dispatchToolsOverride,
+      loopToolsOverride: this._loopTools && Object.keys(this._loopTools).length > 0
+        ? this._loopTools
+        : undefined,
+    });
+
+    // 3. Compile all tools to Pi's native format
+    const compiled = this._toolFactory.compileAll(allTools);
+
+    // 4. Register each tool with pi.registerTool()
+    let registeredCount = 0;
+    for (const [name, toolDef] of Object.entries(compiled)) {
+      if (typeof this._pi.registerTool === "function") {
+        this._pi.registerTool(toolDef);
+        registeredCount++;
+      } else {
+        log.warn("pi.registerTool is not a function — cannot register tool", { name });
+      }
+    }
+
+    log.info("Tool registration complete", { registeredCount, total: Object.keys(allTools).length });
+    return registeredCount;
+  }
+}

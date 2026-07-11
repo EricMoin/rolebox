@@ -20,6 +20,10 @@
     "./tui": {
       "import": "./dist/tui.js",
       "types": "./dist/tui.d.ts"
+    },
+    "./pi": {
+      "import": "./dist/pi-extension.js",
+      "types": "./dist/pi-extension.d.ts"
     }
   },
   "files": [
@@ -42,8 +46,13 @@
     "ai-agent",
     "yaml",
     "role",
-    "prompt"
+    "prompt",
+    "pi-extension",
+    "pi-package"
   ],
+  "pi": {
+    "extensions": ["./dist/pi-extension.js"]
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -69,7 +78,8 @@
     "playwright": ">=1.40.0",
     "crawlee": ">=3.0.0",
     "@mozilla/readability": ">=0.5.0",
-    "linkedom": ">=0.18.0"
+    "linkedom": ">=0.18.0",
+    "@earendil-works/pi-coding-agent": ">=0.70.0"
   },
   "peerDependenciesMeta": {
     "@opentui/core": {
@@ -94,6 +104,9 @@
       "optional": true
     },
     "linkedom": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
       "optional": true
     }
   },

@@ -6,8 +6,8 @@
 
 import { tool } from "@opencode-ai/plugin";
 import type { z } from "zod";
-import type { IToolFactory } from "../ports/tool-factory.ts";
-import type { CanonicalToolDef } from "../types.ts";
+import type { IToolFactory } from "../../ports/tool-factory.ts";
+import type { CanonicalToolDef } from "../../types.ts";
 
 /**
  * IToolFactory adapter for the opencode platform.

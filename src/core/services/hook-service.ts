@@ -28,7 +28,7 @@ import type { RecoveryService } from "./recovery-service.ts";
 import type { ExtensionService } from "./extension-service.ts";
 import type { ToolService } from "./tool-service.ts";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../utils/timeout.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode-session.ts";
+import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
 
 const log = createSubLogger("hook-service");
 

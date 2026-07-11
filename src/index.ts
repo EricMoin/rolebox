@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import type { Plugin } from "@opencode-ai/plugin";
 import { discoverRoles } from "./loader/role-loader.ts";
 import { resolveAllRoles } from "./resolver/orchestrator.ts";
-import { syncAgentFiles } from "./sync/agent-files.ts";
+import { syncAllAgents } from "./sync/agent-files.ts";
+import { OpencodeAgentRegistrar } from "./platform/adapters/opencode/agent-registrar.ts";
 import { syncSkillSymlinks } from "./sync/skill-symlinks.ts";
 import { createPluginHooks } from "./core/composition.ts";
 export { loopManagerMap, activeLoopManager } from "./core/composition.js";
@@ -41,7 +42,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     roleGraphMap,
   });
 
-  syncAgentFiles(resolvedRoles);
+  await syncAllAgents(resolvedRoles, new OpencodeAgentRegistrar());
   syncSkillSymlinks(resolvedRoles, globalSkillsDir);
 
   const discovered = roles.size;

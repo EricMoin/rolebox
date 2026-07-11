@@ -76,3 +76,25 @@ export function getSyncTarget(target: string): string {
 export function getRolePath(registry: string, roleId: string, version: string): string {
   return join(getRolesDir(), registry, `${roleId}@${version}`);
 }
+
+// ── Pi Paths ───────────────────────────────────────────────────────
+
+/** `~/.pi/agent` */
+export function getPiConfigDir(): string {
+  return join(homedir(), ".pi", "agent");
+}
+
+/** `~/.pi/agent/skills` */
+export function getPiSkillsDir(): string {
+  return join(homedir(), ".pi", "agent", "skills");
+}
+
+/** `~/.pi/agent/sessions` */
+export function getPiSessionsDir(): string {
+  return join(homedir(), ".pi", "agent", "sessions");
+}
+
+/** `~/.pi/agent/extensions` */
+export function getPiExtensionsDir(): string {
+  return join(homedir(), ".pi", "agent", "extensions");
+}

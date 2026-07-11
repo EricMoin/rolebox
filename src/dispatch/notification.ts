@@ -46,6 +46,16 @@ export function clearSentFinalNotifies(): void {
   sentFinalNotifies.clear();
 }
 
+export function seedSentFinalNotifies(ids: Iterable<string>): void {
+  for (const id of ids) {
+    sentFinalNotifies.add(id);
+  }
+}
+
+export function getSentFinalNotifies(): Set<string> {
+  return sentFinalNotifies;
+}
+
 export function clearParentQueues(): void {
   parentQueues.clear();
 }
