@@ -81,14 +81,19 @@ export class DispatchService implements PluginService, ToolContributor {
       return;
     }
 
-    // Clear stale entries from previous init (supports hot-reload of deleted roles)
+    // Clear and repopulate in-place instead of reassigning — preserves the Map
+    // reference held by dispatch tool closures from before restartService().
     this.resolvedSubagents.clear();
     this.subagentModelKey.clear();
 
     // 1. Build subagent lineage maps from shared factory.
     const lineage = buildSubagentLineage(ctx.resolvedRoles);
-    this.resolvedSubagents = lineage.resolvedSubagents;
-    this.subagentModelKey = lineage.subagentModelKey;
+    for (const [k, v] of lineage.resolvedSubagents) {
+      this.resolvedSubagents.set(k, v);
+    }
+    for (const [k, v] of lineage.subagentModelKey) {
+      this.subagentModelKey.set(k, v);
+    }
 
     // 2. Reuse or create DispatchManager (was lines 155-167 in plugin-hooks.ts)
     // Use rawDirectory for map keys to match test expectations and legacy behavior

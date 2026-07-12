@@ -1,4 +1,7 @@
 import { dim, red, green, cyan, yellow, magenta, gray } from "../../format.ts";
+import { formatDuration, truncate, shortSessionId, statusGlyph } from "../../../utils/display-helpers.ts";
+
+export { formatDuration, truncate, shortSessionId, statusGlyph };
 
 // ── Layout helpers ──────────────────────────────────────────────
 
@@ -18,36 +21,8 @@ export function isNarrow(): boolean {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.floor((ms % 60000) / 1000);
-  return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-}
-
-export function truncate(s: string, maxLen: number): string {
-  return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
-}
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-/**
- * Canonical glyph table for status display.
- * Returns just the glyph (caller adds color).
- */
-export function statusGlyph(status: string): string {
-  switch (status) {
-    case "running": return "\u25b8"; // ▸
-    case "completed": return "\u2713"; // ✓
-    case "error": return "\u2717"; // ✗
-    case "pending": return "\u25cf"; // ●
-    case "cancelled": return "\u2298"; // ⊘
-    case "timeout": return "\u23f1"; // ⏱
-    default: return "?";
-  }
 }
 
 export function statusColor(status: string): (s: string) => string {
@@ -70,14 +45,6 @@ export function statusCell(status: string): string {
   const color = statusColor(status);
   const glyph = statusGlyph(status);
   return color(`${glyph} ${status.padEnd(9)}`);
-}
-
-/**
- * Format a session ID for display, showing only the last 8 characters.
- */
-export function shortSessionId(sessionId: string): string {
-  if (sessionId.length <= 12) return sessionId;
-  return "\u2026" + sessionId.slice(-8);
 }
 
 // ── Metric name parser ─────────────────────────────────────────────
