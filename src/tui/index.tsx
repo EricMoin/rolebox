@@ -21,12 +21,60 @@
  */
 
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui";
-import { createSidebarRenderer } from "./state";
+import { createSidebarRenderer, setEventBridgeRef } from "./state";
+import { setupKeybindings } from "./keybindings";
+import {
+  triggerRefresh,
+  triggerToggleMetrics,
+  triggerToggleFilter,
+  triggerToggleHelp,
+  triggerSelectUp,
+  triggerSelectDown,
+  triggerSelectEnter,
+  triggerSelectEscape,
+  triggerDetailScrollDown,
+  triggerDetailScrollUp,
+  triggerDetailTop,
+  triggerDetailBottom,
+} from "./state";
+import { createEventBridge } from "./events";
 
 // ── TUI Plugin ──────────────────────────────────────────────────────────
 
 const roleboxTuiPlugin: TuiPlugin = async (api, _options, _meta) => {
   const workspaceDir = api.state.path.directory;
+
+  // Create live event bridge for sub-250ms UI updates.
+  // Subscribes to opencode host events + fast-polls rolebox state files,
+  // and emits attention notifications on error/timeout.
+  const eventBridge = createEventBridge(api, workspaceDir);
+  setEventBridgeRef(eventBridge);
+
+  // Register keyboard shortcuts and preference persistence.
+  // The dispose function is wired into api.lifecycle.onDispose below.
+  const disposeKeybindings = setupKeybindings(api, {
+    onRefresh: triggerRefresh,
+    onToggleMetrics: triggerToggleMetrics,
+    onFilter: triggerToggleFilter,
+    onToggleHelp: triggerToggleHelp,
+    onToggleStatus: () => {},
+    onSelectUp: triggerSelectUp,
+    onSelectDown: triggerSelectDown,
+    onSelectEnter: triggerSelectEnter,
+    onSelectEscape: triggerSelectEscape,
+    onDetailScrollDown: triggerDetailScrollDown,
+    onDetailScrollUp: triggerDetailScrollUp,
+    onDetailTop: triggerDetailTop,
+    onDetailBottom: triggerDetailBottom,
+  });
+
+  api.lifecycle.onDispose(() => {
+    disposeKeybindings();
+    eventBridge.dispose();
+    setEventBridgeRef(null);
+  });
+
+  // Register the sidebar content slot renderer.
   api.slots.register({
     slots: {
       sidebar_content: createSidebarRenderer(workspaceDir),

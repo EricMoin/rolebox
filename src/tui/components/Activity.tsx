@@ -21,7 +21,7 @@ import type {
   ActiveFunction,
   LoopSnapshot,
   GraphSessionSnapshot,
-} from "../../cli/commands/monitor-reader.ts";
+} from "../../cli/commands/monitor/monitor-reader.ts";
 
 // ── Function line component ──────────────────────────────────────────────
 
@@ -50,11 +50,13 @@ export function renderFunctionLine(props: { c: ThemeColors; fn: ActiveFunction }
 
 // ── Dispatch row component ───────────────────────────────────────────────
 
-export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; snapTimestamp: string | undefined }) {
+export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; snapTimestamp: string | undefined; selected?: boolean }) {
   const c = props.c;
   const task = props.task;
   const sv = statusVisual(task.status, c);
   const agent = agentLeaf(task.agent ?? "");
+  const sel = props.selected ?? false;
+  const selPrefix = sel ? "▶ " : "  ";
 
   if (task.status === "running") {
     const snapTime = props.snapTimestamp ? new Date(props.snapTimestamp).getTime() : Date.now();
@@ -80,7 +82,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
     return (
       <>
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
+          <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
           <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
           <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
           {isStalled ? (
@@ -98,7 +100,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
   if (task.status === "pending") {
     return (
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
+        <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
         <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
         <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"queued"}</span>
@@ -111,7 +113,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
     return (
       <>
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
+          <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
           <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
           <span fg={rgbaToCSS(c.text)}>{" " + agent}</span>
         </text>
@@ -129,7 +131,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
   const dur = formatDuration(task.durationMs);
   return (
     <text>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
+      <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
       <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
       <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
       <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{dur}</span>
@@ -244,6 +246,7 @@ export function renderActivity(props: {
   snap: MonitorSnapshot | null;
   sessionScope: Set<string>;
   currentSessionId: string;
+  selectedIndex?: number;
 }) {
   const { c, fns, tasks, graphs, loops, snap } = props;
 
@@ -263,7 +266,7 @@ export function renderActivity(props: {
       {tasks.length > 0 && (
         <>
           {fns.length > 0 && <text>{" "}</text>}
-          <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task) => renderDispatchRow({ c, task, snapTimestamp: snap?.timestamp })}</For>
+          <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task, i) => renderDispatchRow({ c, task, snapTimestamp: snap?.timestamp, selected: i() === (props.selectedIndex ?? -1) })}</For>
           {tasks.length > MAX_DISPATCH_ROWS && (
             <text fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + (tasks.length - MAX_DISPATCH_ROWS) + " more"}</text>
           )}

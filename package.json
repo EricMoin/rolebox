@@ -38,6 +38,7 @@
     "prepublishOnly": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:tui": "bun test tests/tui/",
     "postinstall": "node dist/cli/postinstall.js"
   },
   "keywords": [
