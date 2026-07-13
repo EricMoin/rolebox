@@ -247,6 +247,10 @@ export function renderActivity(props: {
   sessionScope: Set<string>;
   currentSessionId: string;
   selectedIndex?: number;
+  /** Called when a task row is clicked — passes the row index. */
+  onSelectTask?: (index: number) => void;
+  /** Called when a task row is double-clicked or single-clicked on already-selected row. */
+  onOpenDetail?: (index: number) => void;
 }) {
   const { c, fns, tasks, graphs, loops, snap } = props;
 
@@ -266,7 +270,22 @@ export function renderActivity(props: {
       {tasks.length > 0 && (
         <>
           {fns.length > 0 && <text>{" "}</text>}
-          <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task, i) => renderDispatchRow({ c, task, snapTimestamp: snap?.timestamp, selected: i() === (props.selectedIndex ?? -1) })}</For>
+          <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task, i) => {
+            const index = i();
+            return (
+              <box
+                on:click={() => {
+                  if (index === props.selectedIndex) {
+                    props.onOpenDetail?.(index);
+                  } else {
+                    props.onSelectTask?.(index);
+                  }
+                }}
+              >
+                {renderDispatchRow({ c, task, snapTimestamp: snap?.timestamp, selected: index === (props.selectedIndex ?? -1) })}
+              </box>
+            );
+          }}</For>
           {tasks.length > MAX_DISPATCH_ROWS && (
             <text fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + (tasks.length - MAX_DISPATCH_ROWS) + " more"}</text>
           )}

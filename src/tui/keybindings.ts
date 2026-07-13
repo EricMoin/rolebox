@@ -63,20 +63,20 @@ export interface ShortcutEntry {
 }
 
 export const SHORTCUTS: ShortcutEntry[] = [
-  { key: "r", description: "Force refresh activity" },
-  { key: "m", description: "Toggle dispatch metrics" },
-  { key: "f", description: "Open filter / search mode" },
-  { key: "1", description: "Toggle running status (in filter mode)" },
-  { key: "2", description: "Toggle pending status (in filter mode)" },
-  { key: "3", description: "Toggle error status (in filter mode)" },
-  { key: "4", description: "Toggle timeout status (in filter mode)" },
+  { key: "ctrl+r", description: "Force refresh activity" },
+  { key: "ctrl+m", description: "Toggle dispatch metrics" },
+  { key: "ctrl+f", description: "Open filter / search mode" },
+  { key: "ctrl+1", description: "Toggle running status (in filter mode)" },
+  { key: "ctrl+2", description: "Toggle pending status (in filter mode)" },
+  { key: "ctrl+3", description: "Toggle error status (in filter mode)" },
+  { key: "ctrl+4", description: "Toggle timeout status (in filter mode)" },
   // Navigation
   { key: "\u2191/\u2193", description: "Select task row" },
   { key: "Enter", description: "Open task detail" },
   { key: "Esc", description: "Back to activity list" },
-  { key: "j/k", description: "Scroll detail text" },
-  { key: "g/G", description: "Top/bottom of detail" },
-  { key: "?", description: "Show this shortcut help" },
+  { key: "ctrl+j/ctrl+k", description: "Scroll detail text" },
+  { key: "ctrl+home/ctrl+end", description: "Top/bottom of detail" },
+  { key: "ctrl+shift+/", description: "Show this shortcut help" },
 ];
 
 // ── Setup ─────────────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ export function setupKeybindings(
           return true;
         },
       },
-      // ── Status filter toggles (1-4) ──
+      // ── Status filter toggles (ctrl+1-4) ──
       {
         name: "rolebox.filterStatusRunning",
         run: () => {
@@ -210,14 +210,14 @@ export function setupKeybindings(
       },
     ],
     bindings: [
-      { key: "r", cmd: "rolebox.refresh" },
-      { key: "m", cmd: "rolebox.toggleMetrics" },
-      { key: "f", cmd: "rolebox.filter" },
-      { key: "1", cmd: "rolebox.filterStatusRunning" },
-      { key: "2", cmd: "rolebox.filterStatusPending" },
-      { key: "3", cmd: "rolebox.filterStatusError" },
-      { key: "4", cmd: "rolebox.filterStatusTimeout" },
-      { key: "?", cmd: "rolebox.help" },
+      { key: "ctrl+r", cmd: "rolebox.refresh" },
+      { key: "ctrl+m", cmd: "rolebox.toggleMetrics" },
+      { key: "ctrl+f", cmd: "rolebox.filter" },
+      { key: "ctrl+1", cmd: "rolebox.filterStatusRunning" },
+      { key: "ctrl+2", cmd: "rolebox.filterStatusPending" },
+      { key: "ctrl+3", cmd: "rolebox.filterStatusError" },
+      { key: "ctrl+4", cmd: "rolebox.filterStatusTimeout" },
+      { key: "ctrl+shift+/", cmd: "rolebox.help" },
 
       // Task navigation (up/down arrows select rows in activity list)
       { key: "Up", cmd: "rolebox.selectUp" },
@@ -225,11 +225,13 @@ export function setupKeybindings(
       { key: "Enter", cmd: "rolebox.selectEnter" },
       { key: "Escape", cmd: "rolebox.selectEscape" },
 
-      // Detail scrolling (j/k scroll text, g/G jump to top/bottom)
-      { key: "j", cmd: "rolebox.detailScrollDown" },
-      { key: "k", cmd: "rolebox.detailScrollUp" },
-      { key: "g", cmd: "rolebox.detailTop" },
-      { key: "G", cmd: "rolebox.detailBottom" },
+      // Detail scrolling (ctrl+j/k scroll text, ctrl+home/end or ctrl+g/shift+g jump to top/bottom)
+      { key: "ctrl+j", cmd: "rolebox.detailScrollDown" },
+      { key: "ctrl+k", cmd: "rolebox.detailScrollUp" },
+      { key: "ctrl+home", cmd: "rolebox.detailTop" },
+      { key: "ctrl+g", cmd: "rolebox.detailTop" },
+      { key: "ctrl+end", cmd: "rolebox.detailBottom" },
+      { key: "ctrl+shift+g", cmd: "rolebox.detailBottom" },
     ],
   });
 

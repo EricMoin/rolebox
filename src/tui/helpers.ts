@@ -33,6 +33,7 @@ export const RULE_WIDTH = 36;
 export const BOLD = TextAttributes.BOLD;
 export const DIM = TextAttributes.DIM;
 export const ITALIC = TextAttributes.ITALIC;
+export const UNDERLINE = TextAttributes.UNDERLINE;
 export const DIM_ITALIC = DIM | ITALIC;
 
 // ── Glyphs ───────────────────────────────────────────────────────────────

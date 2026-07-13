@@ -4,7 +4,7 @@
  * Provides text-based agent/session search, inline status toggle buttons,
  * and session ID filtering, plus a "filtered: N of M items" indicator.
  *
- * Rendered below the pulse when filter mode is toggled via `/` or `f`.
+ * Rendered below the pulse when filter mode is toggled via `ctrl+f`.
  *
  * Inline "buttons" are rendered as styled text spans — active filters
  * are bracketed and bold, inactive ones are dimmed. Status toggles are
@@ -16,7 +16,7 @@
 /** @jsxImportSource @opentui/solid */
 import { For } from "solid-js";
 import type { ThemeColors } from "../helpers.ts";
-import { rgbaToCSS, BOLD, DIM } from "../helpers.ts";
+import { rgbaToCSS, BOLD, DIM, UNDERLINE } from "../helpers.ts";
 import { shortSessionId } from "../helpers.ts";
 
 // ── Status filter definitions ────────────────────────────────────────────
@@ -30,10 +30,10 @@ export interface StatusFilterDef {
 }
 
 export const STATUS_FILTERS: StatusFilterDef[] = [
-  { key: "running", label: "running", glyph: "\u25b8", keybind: "1" },  // ▸
-  { key: "pending", label: "pending", glyph: "\u25cf", keybind: "2" },  // ●
-  { key: "error",   label: "error",   glyph: "\u2717", keybind: "3" },  // ✗
-  { key: "timeout", label: "timeout", glyph: "\u25c7", keybind: "4" },  // ◇
+  { key: "running", label: "running", glyph: "\u25b8", keybind: "ctrl+1" },  // ▸
+  { key: "pending", label: "pending", glyph: "\u25cf", keybind: "ctrl+2" },  // ●
+  { key: "error",   label: "error",   glyph: "\u2717", keybind: "ctrl+3" },  // ✗
+  { key: "timeout", label: "timeout", glyph: "\u25c7", keybind: "ctrl+4" },  // ◇
 ];
 
 // ── Props ────────────────────────────────────────────────────────────────
@@ -53,26 +53,39 @@ export interface FilterBarProps {
   availableSessions: string[];
   /** The sidebar's own session ID (always shown). */
   currentSessionId: string;
+  /** Called when a status filter button is clicked. */
+  onToggleStatus?: (status: string) => void;
+  /** Called when a session filter selector is clicked (pass session ID or null for all). */
+  onSelectSession?: (sessionId: string | null) => void;
+  /** Called when the filter bar close is clicked. */
+  onClose?: () => void;
 }
 
 // ── Render: status toggle button (inline text) ───────────────────────────
 
-function renderStatusToggle(c: ThemeColors, def: StatusFilterDef, isActive: boolean) {
+function renderStatusToggle(
+  c: ThemeColors,
+  def: StatusFilterDef,
+  isActive: boolean,
+  onToggleStatus?: (status: string) => void,
+) {
   const info = rgbaToCSS(c.info);
   const muted = rgbaToCSS(c.textMuted);
   const keyDim = rgbaToCSS(c.textMuted);
 
+  const statusKey = def.key;
+
   if (isActive) {
     // Active: bracketed + bold + colored — looks like a pressed button
     return (
-      <span fg={info} attributes={BOLD}>
+      <span fg={info} attributes={BOLD} on:click={() => onToggleStatus?.(statusKey)}>
         {" [" + def.glyph + " " + def.label + "]"}
       </span>
     );
   }
-  // Inactive: dimmed glyph + label, shows keybinding hint
+  // Inactive: dimmed glyph + label + underlined keybinding hint (clickable)
   return (
-    <span fg={muted} attributes={DIM}>
+    <span fg={muted} attributes={DIM | UNDERLINE} on:click={() => onToggleStatus?.(statusKey)}>
       {"  " + def.glyph + " " + def.label + " [" + def.keybind + "]"}
     </span>
   );
@@ -113,7 +126,7 @@ export function renderFilterBar(props: FilterBarProps) {
       <text>
         <span fg={muted} attributes={DIM}>{"  status:"}</span>
         <For each={STATUS_FILTERS}>
-          {(def) => renderStatusToggle(c, def, activeStatuses.has(def.key))}
+          {(def) => renderStatusToggle(c, def, activeStatuses.has(def.key), props.onToggleStatus)}
         </For>
       </text>
 
@@ -124,9 +137,19 @@ export function renderFilterBar(props: FilterBarProps) {
         <For each={[currentSessionId]}>
           {(sid) =>
             sessionFilterId === null || sessionFilterId === sid ? (
-              <span fg={info} attributes={BOLD}>{" [current]"}</span>
+              <span
+                fg={info} attributes={BOLD}
+                on:click={() => props.onSelectSession?.(sid)}
+              >
+                {" [current]"}
+              </span>
             ) : (
-              <span fg={dim} attributes={DIM}>{"  current"}</span>
+              <span
+                fg={dim} attributes={DIM | UNDERLINE}
+                on:click={() => props.onSelectSession?.(sid)}
+              >
+                {"  current"}
+              </span>
             )
           }
         </For>
@@ -134,17 +157,37 @@ export function renderFilterBar(props: FilterBarProps) {
         <For each={otherSessions}>
           {(sid) =>
             sessionFilterId === sid ? (
-              <span fg={info} attributes={BOLD}>{" [" + shortSessionId(sid) + "]"}</span>
+              <span
+                fg={info} attributes={BOLD}
+                on:click={() => props.onSelectSession?.(sid)}
+              >
+                {" [" + shortSessionId(sid) + "]"}
+              </span>
             ) : (
-              <span fg={dim} attributes={DIM}>{"  " + shortSessionId(sid)}</span>
+              <span
+                fg={dim} attributes={DIM | UNDERLINE}
+                on:click={() => props.onSelectSession?.(sid)}
+              >
+                {"  " + shortSessionId(sid)}
+              </span>
             )
           }
         </For>
         {/* All-sessions toggle */}
         {sessionFilterId !== null ? (
-          <span fg={info} attributes={BOLD}>{" [all]"}</span>
+          <span
+            fg={info} attributes={BOLD}
+            on:click={() => props.onSelectSession?.(null)}
+          >
+            {" [all]"}
+          </span>
         ) : (
-          <span fg={dim} attributes={DIM}>{"  all"}</span>
+          <span
+            fg={dim} attributes={DIM | UNDERLINE}
+            on:click={() => props.onSelectSession?.(null)}
+          >
+            {"  all"}
+          </span>
         )}
       </text>
 
@@ -155,7 +198,12 @@ export function renderFilterBar(props: FilterBarProps) {
             <span fg={info} attributes={BOLD}>
               {"  filtered: " + filteredItems + " of " + totalItems + " items"}
             </span>
-            <span fg={muted} attributes={DIM}>{"  [Esc to close]"}</span>
+            <span
+              fg={muted} attributes={DIM | UNDERLINE}
+              on:click={() => props.onClose?.()}
+            >
+              {"  [Esc to close]"}
+            </span>
           </>
         ) : (
           <span fg={muted} attributes={DIM}>

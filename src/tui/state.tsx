@@ -572,6 +572,8 @@ export function createSidebarRenderer(workspaceDir: string) {
           filteredItems: filteredCount,
           availableSessions: allSessions,
           currentSessionId,
+          onToggleStatus: (status) => _toggleStatusFilterRef?.(status),
+          onClose: () => _toggleFilterRef?.(),
         });
       }
 
@@ -581,7 +583,14 @@ export function createSidebarRenderer(workspaceDir: string) {
           fallback={<text fg={rgbaToCSS(tc().error)} attributes={DIM_ITALIC}>{"Panel error"}</text>}
         >
           <box paddingX={1} paddingY={1}>
-            {renderHeader({ c: tc(), version: PACKAGE_VERSION })}
+            {renderHeader({
+              c: tc(),
+              version: PACKAGE_VERSION,
+              onRefresh: () => _refreshRef?.(),
+              onToggleMetrics: () => _toggleMetricsRef?.(),
+              onToggleFilter: () => _toggleFilterRef?.(),
+              onToggleHelp: () => _toggleHelpRef?.(),
+            })}
 
             <Show when={phase() !== "loading"} fallback={
               <text fg={rgbaToCSS(tc().textMuted)} attributes={DIM_ITALIC}>{"Loading Rolebox\u2026"}</text>
@@ -634,6 +643,16 @@ export function createSidebarRenderer(workspaceDir: string) {
                       sessionScope: sessionScope(),
                       currentSessionId,
                       selectedIndex: selectedTaskIndex(),
+                      onSelectTask: (index) => setSelectedTaskIndex(index),
+                      onOpenDetail: (index) => {
+                        const tasks = filteredActivityData().tasks;
+                        if (index < tasks.length) {
+                          setSelectedTaskIndex(index);
+                          setDetailOffset(0);
+                          setDetailView(true);
+                          readDetail(tasks[index].id, 0);
+                        }
+                      },
                     });
                   })()}
                 </Show>
@@ -648,6 +667,9 @@ export function createSidebarRenderer(workspaceDir: string) {
                     selectedTask: idx < tasks.length ? tasks[idx] : null,
                     offset: detailOffset(),
                     totalChars: dd?.totalChars ?? 0,
+                    onClose: () => _selectEscapeRef?.(),
+                    onScrollUp: () => _detailScrollUpRef?.(),
+                    onScrollDown: () => _detailScrollDownRef?.(),
                   });
                 })()}
               </Show>

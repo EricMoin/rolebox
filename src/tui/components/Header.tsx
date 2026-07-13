@@ -1,5 +1,5 @@
 /**
- * TUI header components (title bar and rule).
+ * TUI header components (title bar, action toolbar, and rule).
  *
  * @module
  */
@@ -9,13 +9,29 @@ import type { RGBA } from "@opentui/core";
 import type { ThemeColors } from "../helpers.ts";
 import { rgbaToCSS, BOLD, DIM, G_RULE, RULE_WIDTH, LEN_VERSION, truncate } from "../helpers.ts";
 
-export function renderHeader(props: { c: ThemeColors; version: string }) {
+export interface HeaderActionHandlers {
+  onRefresh?: () => void;
+  onToggleMetrics?: () => void;
+  onToggleFilter?: () => void;
+  onToggleHelp?: () => void;
+}
+
+export function renderHeader(props: { c: ThemeColors; version: string } & HeaderActionHandlers) {
   const c = props.c;
   return (
-    <text>
-      <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{"Rolebox"}</span>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" v" + truncate(props.version, LEN_VERSION)}</span>
-    </text>
+    <>
+      <text>
+        <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{"Rolebox"}</span>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" v" + truncate(props.version, LEN_VERSION)}</span>
+      </text>
+      <text>
+        {"  "}
+        <span fg={rgbaToCSS(c.primary)} attributes={BOLD} on:click={() => props.onRefresh?.()}>{"[↻ R] "}</span>
+        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleMetrics?.()}>{"[≡ M] "}</span>
+        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleFilter?.()}>{"[◇ F] "}</span>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={BOLD} on:click={() => props.onToggleHelp?.()}>{"[? H]"}</span>
+      </text>
+    </>
   );
 }
 

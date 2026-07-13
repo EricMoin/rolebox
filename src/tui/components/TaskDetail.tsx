@@ -4,8 +4,7 @@
  * Shows the task's result text (windowed via offset/limit), metadata (agent,
  * status, duration, tool-call count, liveness), and error details.
  *
- * Navigation: j/k for line scroll (500-char steps), g/G for top/bottom,
- * Escape to return to activity list.
+ * Navigation: mouse wheel or Ctrl+J/K for scroll, g/G for top/bottom,
  *
  * @module
  */
@@ -28,6 +27,12 @@ export interface TaskDetailPanelProps {
   selectedTask: TaskSnapshot | null;
   offset: number;
   totalChars: number;
+  /** Called when the close/back button is clicked. */
+  onClose?: () => void;
+  /** Called on scroll up. */
+  onScrollUp?: () => void;
+  /** Called on scroll down. */
+  onScrollDown?: () => void;
 }
 
 // ── Status glyph ──────────────────────────────────────────────────────────
@@ -104,9 +109,19 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
     : null;
 
   return (
-    <box marginBottom={1}>
+    <scrollbox
+      scrollY={true}
+      marginBottom={1}
+      onMouseScroll={(event) => {
+        if (event.scroll?.direction === "up") props.onScrollUp?.();
+        if (event.scroll?.direction === "down") props.onScrollDown?.();
+      }}
+    >
       {/* ── Header ── */}
-      <text attributes={BOLD} fg={norm}>{"Task Detail"}</text>
+      <text>
+        <span fg={info} attributes={BOLD} on:click={() => props.onClose?.()}>{"[\u2190 Back] "}</span>
+        <span attributes={BOLD} fg={norm}>{"  Task Detail"}</span>
+      </text>
 
       {/* Separator */}
       <text fg={border}>{"\u2500".repeat(36)}</text>
@@ -202,12 +217,11 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
         <span fg={muted} attributes={DIM}>{" (" + pct + "%)"}</span>
       </text>
 
-      {/* Navigation hints */}
       <text>
-        <span fg={muted} attributes={DIM}>{"j/k scroll  "}</span>
+        <span fg={muted} attributes={DIM}>{"mouse wheel / Ctrl+J/K scroll  "}</span>
         <span fg={muted} attributes={DIM}>{"g/G top/bottom  "}</span>
         <span fg={muted} attributes={DIM}>{"Esc back"}</span>
       </text>
-    </box>
+    </scrollbox>
   );
 }
