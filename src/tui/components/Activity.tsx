@@ -22,6 +22,7 @@ import type {
   LoopSnapshot,
   GraphSessionSnapshot,
 } from "../../cli/commands/monitor/monitor-reader.ts";
+import { renderProgressIndicator } from "./ProgressIndicator.tsx";
 
 // ── Function line component ──────────────────────────────────────────────
 
@@ -50,13 +51,27 @@ export function renderFunctionLine(props: { c: ThemeColors; fn: ActiveFunction }
 
 // ── Dispatch row component ───────────────────────────────────────────────
 
-export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; snapTimestamp: string | undefined; selected?: boolean }) {
+export function renderDispatchRow(props: {
+  c: ThemeColors;
+  task: TaskSnapshot;
+  snapTimestamp: string | undefined;
+  selected?: boolean;
+  /** Progress indicator data for this task (from snap.progress) */
+  progress?: { latest_stage: string; percentage?: number; message: string; event_count: number };
+  /** Whether this task has active checkpoint data */
+  hasCheckpoints?: boolean;
+}) {
   const c = props.c;
   const task = props.task;
   const sv = statusVisual(task.status, c);
   const agent = agentLeaf(task.agent ?? "");
   const sel = props.selected ?? false;
   const selPrefix = sel ? "▶ " : "  ";
+
+  // Checkpoint badge
+  const cpBadge = props.hasCheckpoints ? (
+    <span fg={rgbaToCSS(c.secondary)} attributes={BOLD}>{" [CP]"}</span>
+  ) : null;
 
   if (task.status === "running") {
     const snapTime = props.snapTimestamp ? new Date(props.snapTimestamp).getTime() : Date.now();
@@ -90,9 +105,23 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
           ) : (
             <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{dur + (activitySuffix ?? "")}</span>
           )}
+          {cpBadge}
           {desc && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + desc}</span>}
           {noOutputYet && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{" (no output yet)"}</span>}
         </text>
+        {/* Progress indicator sub-line */}
+        {props.progress && (
+          <text>
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
+            {renderProgressIndicator({
+              c,
+              stage: props.progress.latest_stage,
+              percentage: props.progress.percentage,
+              message: props.progress.message,
+              eventCount: props.progress.event_count,
+            })}
+          </text>
+        )}
       </>
     );
   }
@@ -103,6 +132,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
         <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
         <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
         <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
+        {cpBadge}
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"queued"}</span>
       </text>
     );
@@ -116,6 +146,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
           <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
           <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
           <span fg={rgbaToCSS(c.text)}>{" " + agent}</span>
+          {cpBadge}
         </text>
         {reason && (
           <text>
@@ -134,6 +165,7 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
       <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={DIM}>{selPrefix}</span>
       <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
       <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
+      {cpBadge}
       <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{dur}</span>
     </text>
   );
@@ -272,6 +304,9 @@ export function renderActivity(props: {
           {fns.length > 0 && <text>{" "}</text>}
           <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task, i) => {
             const index = i();
+            // Look up progress and checkpoint data for this task
+            const taskProgress = snap?.progress?.[task.id];
+            const taskCheckpoints = snap?.checkpoints?.[task.id];
             return (
               <box
                 on:click={() => {
@@ -282,7 +317,14 @@ export function renderActivity(props: {
                   }
                 }}
               >
-                {renderDispatchRow({ c, task, snapTimestamp: snap?.timestamp, selected: index === (props.selectedIndex ?? -1) })}
+                {renderDispatchRow({
+                  c,
+                  task,
+                  snapTimestamp: snap?.timestamp,
+                  selected: index === (props.selectedIndex ?? -1),
+                  progress: taskProgress,
+                  hasCheckpoints: taskCheckpoints !== undefined,
+                })}
               </box>
             );
           }}</For>

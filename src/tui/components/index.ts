@@ -6,3 +6,4 @@ export { renderFilterBar, countTotalItems, collectSessionIds } from "./FilterBar
 export { renderTaskDetailPanel } from "./TaskDetail.tsx";
 export { renderNotificationState } from "./NotificationState.tsx";
 export { renderRecoveryStatus } from "./RecoveryStatus.tsx";
+export { renderProgressIndicator } from "./ProgressIndicator.tsx";
