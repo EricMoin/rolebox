@@ -106,6 +106,22 @@ export const DEFAULT_METRICS_EVENT_LOG_MAX_BYTES = 102_400;
 /** Default budget sampling interval (30 s): how often to sample token/cost from sessions. */
 export const DEFAULT_BUDGET_SAMPLE_INTERVAL_MS = 30_000;
 
+// ── Streaming progress constants ────────────────────────────────────
+
+/** Default TTL for progress events (5 min): how long events live before cleanup.
+ *  LIVE — consumed by ProgressStore.cleanupExpired */
+export const DEFAULT_PROGRESS_TTL_MS = 300_000;
+
+/** Max progress events retained per task — default: 1 000.
+ *  LIVE — consumed by ProgressStore.addProgressEvent */
+export const MAX_PROGRESS_EVENTS_PER_TASK = 1_000;
+
+// ── Checkpoint constants ────────────────────────────────────────────
+
+/** Default TTL for checkpoint data (24 h): how long checkpoints live before cleanup.
+ *  LIVE — consumed by CheckpointStore.cleanupExpired */
+export const DEFAULT_CHECKPOINT_TTL_MS = 86_400_000;
+
 // ── Configuration interface ─────────────────────────────────────────
 
 /**

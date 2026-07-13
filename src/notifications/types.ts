@@ -6,6 +6,7 @@ export const NOTIFICATION_EVENT_TYPES = {
   Permission: "permission",
   Error: "error",
   DispatchComplete: "dispatch_complete",
+  DispatchProgress: "dispatch_progress",
   LoopComplete: "loop_complete",
   SessionDeleted: "session_deleted",
   Custom: "custom",
