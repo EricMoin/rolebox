@@ -34,6 +34,7 @@ import {
   createDispatchBudgetTool,
 } from "./dispatch/tools.ts";
 import { createDispatchStatusTool } from "./dispatch/query/task-status.ts";
+import { createDispatchProgressTool, createDispatchStreamTool } from "./dispatch/progress/progress-tools.ts";
 import type { CanonicalToolDef } from "./platform/index.ts";
 import {
   createDispatchManager,
@@ -245,6 +246,8 @@ export default async function (pi: any): Promise<void> {
       dispatch_metrics: createDispatchMetricsTool(),
       dispatch_status: createDispatchStatusTool(dispatchManager),
       dispatch_budget: createDispatchBudgetTool(dispatchManager),
+      dispatch_progress: createDispatchProgressTool(dispatchManager),
+      dispatch_stream: createDispatchStreamTool(dispatchManager),
     };
 
     const loopTools: Record<string, CanonicalToolDef> = {};

@@ -18,6 +18,7 @@ import { createFunctionGraphTool } from "../../function/function-graph.ts";
 import { createTaskBudgetTool } from "../../dispatch/budget/task-budget.ts";
 import { createTaskGraphTool } from "../../dispatch/query/task-graph.ts";
 import { createTaskRetryTool } from "../../dispatch/query/task-retry.ts";
+import { createCheckpointTool } from "../../dispatch/query/checkpoint-tools.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 import { buildCanonicalTools } from "../../platform/tool-assembly.ts";
 import { defaultCapabilities } from "../../platform/capabilities.ts";
@@ -72,6 +73,7 @@ export class ToolService implements PluginService {
         task_budget: createTaskBudgetTool(dispatchManager),
         task_graph: createTaskGraphTool(dispatchManager),
         task_retry: createTaskRetryTool(dispatchManager),
+        dispatch_checkpoint: createCheckpointTool(dispatchManager),
         task_concurrency: createTaskConcurrencyTool(dispatchManager),
         task_chronology: createTaskChronologyTool(dispatchManager),
         task_export: createTaskExportTool(dispatchManager, ctx.directory),

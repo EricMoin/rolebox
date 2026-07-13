@@ -45,6 +45,7 @@ import {
   createDispatchMetricsTool,
 } from "../dispatch/tools.ts";
 import { createDispatchStatusTool } from "../dispatch/query/task-status.ts";
+import { createDispatchProgressTool, createDispatchStreamTool } from "../dispatch/progress/progress-tools.ts";
 
 export interface BuildToolsOptions {
   sessionClient?: ISessionClient;
@@ -119,6 +120,9 @@ export function buildCanonicalTools(
     tools.dispatch_cancel = createDispatchCancelTool(mgr);
     tools.dispatch_metrics = createDispatchMetricsTool();
     tools.dispatch_status = createDispatchStatusTool(mgr);
+
+    tools.dispatch_progress = createDispatchProgressTool(mgr);
+    tools.dispatch_stream = createDispatchStreamTool(mgr);
   }
 
   // 4. extraTools merged on top (overrides core if same key)
