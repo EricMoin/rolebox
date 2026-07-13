@@ -126,7 +126,7 @@ async function resolveSubagents(
     const saLocalSkills = saConfig.skills ?? [];
     const saGlobalSkills = saConfig.opencode_skills ?? [];
     const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
-    const saFunctionNames = saConfig.functions ?? [...DEFAULT_FUNCTIONS];
+      const saFunctionNames = [...new Set([...DEFAULT_FUNCTIONS, ...(saConfig.functions ?? [])])];
     const saEnabledFunctions = saFunctionNames.filter(
       (fn) => !(saConfig.disable_functions ?? []).includes(fn),
     );
@@ -210,7 +210,7 @@ export async function resolveAllRoles(
       const globalSkills = config.opencode_skills ?? [];
       const allSkillNames = [...localSkills, ...globalSkills];
 
-      const functionNames = config.functions ?? [...DEFAULT_FUNCTIONS];
+      const functionNames = [...new Set([...DEFAULT_FUNCTIONS, ...(config.functions ?? [])])];
       const enabledFunctions = functionNames.filter(
         (fn) => !(config.disable_functions ?? []).includes(fn),
       );

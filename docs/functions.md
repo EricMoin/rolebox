@@ -69,16 +69,24 @@ Parameters that aren't provided fall back to their declared default values. Func
 ## Configuring functions per role
 
 ```yaml
-# Use only specific functions (replaces the default plan+execute)
+# Add custom functions alongside built-in defaults (merge, not replace)
+# The built-in functions [plan, execute, loop] are always available
+# unless explicitly removed via disable_functions.
 functions:
-  - plan
+  - plan                       # Already built-in — listed for clarity
   - review
   - my-custom-fn
 
-# Disable specific defaults
+# Disable specific built-in functions
 disable_functions:
-  - execute
+  - execute                    # Removes execute from the final set
 ```
+
+> **Note:** The `functions:` field **merges** with the built-in defaults rather than replacing them.
+> - `functions: [my-fn]` → enabled = `[plan, execute, loop, my-fn]` (merge + deduplication)
+> - `functions: [plan, my-fn]` → enabled = `[plan, execute, loop, my-fn]` (duplicates removed)
+> - `disable_functions: [execute]` → removes `execute` from the merged set
+> - If no `functions:` field is declared, the built-in defaults `[plan, execute, loop]` are used alone.
 
 ## Built-in functions
 
