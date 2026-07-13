@@ -25,6 +25,9 @@ import {
   flushPersistSync as flushPersistSyncFn,
 } from "../persistence/persist-helpers.ts";
 import { recoverOrchestrator } from "./recovery-orchestrator.ts";
+import type { CheckpointStore } from "../types.checkpoint.ts";
+import type { ProgressStore } from "../types.progress.ts";
+
 
 export interface CompletionOrchestratorDeps {
   tasks: Map<string, DispatchTask>;
@@ -45,6 +48,9 @@ export interface CompletionOrchestratorDeps {
   store: TaskStateStore;
   metricsPersister: MetricsPersister;
   directory: string;
+  checkpointStore: CheckpointStore;
+  progressStore: ProgressStore;
+  clearEmittedThresholds: (taskId: string) => void;
 
   /** Internal mutable state shared with persist-helpers. */
   _dirtyInternal?: boolean;
@@ -149,6 +155,9 @@ export class CompletionOrchestrator implements OrchestratorBridge {
   startSweeper(): void {
     const interval = this.d.config.outboxSweepIntervalMs ?? OUTBOX_SWEEP_INTERVAL_MS;
     this.d._sweeperTimerInternal = setInterval(async () => {
+      // Fire-and-forget periodic checkpoint cleanup (never blocks outbox processing)
+      this.d.checkpointStore.cleanupExpired(this.d.config.taskTtlMs ?? 1_800_000).catch(() => {});
+
       for (const taskId of this.d.notifyOutbox) {
         const task = this.d.tasks.get(taskId);
         if (!task || hasFinalNotifyBeenSent(taskId)) {

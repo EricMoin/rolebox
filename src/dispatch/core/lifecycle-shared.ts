@@ -3,6 +3,7 @@ import type { DispatchTask, DispatchTaskStatus } from "../types.ts";
 import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { resultSidecarPath } from "../completion/result-extractor.ts";
+import type { ProgressStore } from "../types.progress.ts";
 
 /** Shared mutable state injected by DispatchManager — defined in task-lifecycle.ts for manager.ts imports. */
 export interface TaskLifecycleDeps {
@@ -32,6 +33,11 @@ export interface TaskLifecycleDeps {
   persistState: () => void;
   addToOutbox: (taskId: string) => void;
   sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) => Promise<boolean>;
+  progressStore: ProgressStore;
+  /** Clear per-task emitted milestone thresholds (from progress-tools.ts). */
+  clearEmittedThresholds: (taskId: string) => void;
+  /** Delete on-disk checkpoint data for a task (fire-and-forget). */
+  deleteTaskCheckpoint: (taskId: string) => Promise<void>;
 }
 
 const DEFAULT_CONCURRENCY_KEY = "default";

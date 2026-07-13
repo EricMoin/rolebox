@@ -18,8 +18,35 @@ import {
 } from "../config.ts";
 import { withTimeout, TimeoutError } from "../core/with-timeout.ts";
 import { materializeAndNotify } from "./result-materializer.ts";
+import type { ProgressEvent } from "../types.progress.ts";
 
 // ── Helpers for common transition patterns ─────────────────────
+
+/** Build a synthetic "completed" progress event and emit it. */
+function emitCompletionEvent(d: TaskLifecycleDeps, taskId: string): void {
+  const event: ProgressEvent = {
+    task_id: taskId,
+    percentage: 100,
+    stage: "complete",
+    message: "Task completed",
+    timestamp: new Date().toISOString(),
+  };
+  d.progressStore.addProgressEvent(taskId, event);
+}
+
+/** Clear progress, milestone thresholds, and checkpoints for a completed task. */
+function cleanupTerminalCompleted(d: TaskLifecycleDeps, taskId: string): void {
+  emitCompletionEvent(d, taskId);
+  d.progressStore.clearProgress(taskId);
+  d.clearEmittedThresholds(taskId);
+  // Delete checkpoints on success — no retry needed
+  d.deleteTaskCheckpoint(taskId).catch(() => {});
+}
+
+/** Clear milestone thresholds only (preserve progress + checkpoints for retry). */
+function cleanupTerminalError(d: TaskLifecycleDeps, taskId: string): void {
+  d.clearEmittedThresholds(taskId);
+}
 
 /** Transition task to completed, log metrics, release resources. */
 function completeAndRelease(d: TaskLifecycleDeps, taskId: string): void {
@@ -31,6 +58,7 @@ function completeAndRelease(d: TaskLifecycleDeps, taskId: string): void {
   infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
   metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
   metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
+  cleanupTerminalCompleted(d, taskId);
   leaveRunning(d, taskId);
   void materializeAndNotify(d, taskId);
 }
@@ -43,6 +71,7 @@ function timeoutAndRelease(d: TaskLifecycleDeps, taskId: string, reason: string)
   const t = d.tasks.get(taskId)!;
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
+  cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
 }
@@ -68,6 +97,7 @@ function markError(d: TaskLifecycleDeps, taskId: string, errorMsg: string): void
   if (!transition(d, taskId, ["running"], "error", { error: errorMsg })) return;
   d.watchdog.unregisterTask(taskId);
   d.watchdog.cancelDebounce(taskId);
+  cleanupTerminalError(d, taskId);
   finalizeCompletion(d, taskId);
 }
 
@@ -362,6 +392,7 @@ export function handleTaskCompleted(d: TaskLifecycleDeps, taskId: string): void 
   infoLog("lifecycle", taskId, `✓ completed agent=${t.agent} duration=${duration}ms`);
   metrics.counter("dispatch_completed_total", { agent: t.agent }).inc();
   metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
+  cleanupTerminalCompleted(d, taskId);
   leaveRunning(d, taskId);
   void materializeAndNotify(d, taskId);
 }
@@ -372,6 +403,7 @@ export function handleTaskError(d: TaskLifecycleDeps, taskId: string, error: str
   const t = d.tasks.get(taskId)!;
   infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
   metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
+  cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
 }
@@ -382,6 +414,7 @@ export function handleTaskTimeout(d: TaskLifecycleDeps, taskId: string, reason: 
   const t = d.tasks.get(taskId)!;
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
+  cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
 }

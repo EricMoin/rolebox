@@ -47,6 +47,7 @@ export async function cancelTask(
     const t = d.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✕ cancelled (queued) agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
+    d.clearEmittedThresholds(taskId);
     void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
     scheduleCleanup(d, taskId);
     return true;
@@ -69,6 +70,7 @@ export async function cancelTask(
     const t = d.tasks.get(taskId)!;
     infoLog("lifecycle", taskId, `✕ cancelled (sync) agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
+    d.clearEmittedThresholds(taskId);
     return true;
   }
 
@@ -85,6 +87,7 @@ export async function cancelTask(
   metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
   d.watchdog.unregisterTask(taskId);
   d.watchdog.cancelDebounce(taskId);
+  d.clearEmittedThresholds(taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
   return true;
