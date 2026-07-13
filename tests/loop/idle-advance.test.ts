@@ -54,7 +54,7 @@ describe("idle-advance", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rolebox-idle-advance-"));
     pendingCorrections.clear();
     const client = createMockClient();
-    hooks = await createPluginHooks([], client, new Map(), new Map(), tmpDir);
+    hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
   });
 
   afterEach(() => {

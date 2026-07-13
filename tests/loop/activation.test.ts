@@ -56,7 +56,7 @@ describe("loop activation", () => {
     pendingCorrections.clear();
     userMessagedSessions.clear();
     const client = createMockClient();
-    hooks = await createPluginHooks([], client, new Map(), new Map(), tmpDir);
+    hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
   });
 
   afterEach(() => {

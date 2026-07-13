@@ -31,17 +31,24 @@ export const roleAutoActivateMap = hookState.roleAutoActivateMap;
 export const roleLockedMap = hookState.roleLockedMap;
 export let activeLoopManager = hookState.activeLoopManager;
 
-export async function createPluginHooks(
-  resolvedRoles: ResolvedRole[],
-  client: PluginInput["client"],
-  roleFunctionsMap: Map<string, ResolvedFunction[]>,
-  roleGraphMap: Map<string, ResolvedGraph>,
-  directory?: string,
-  roleboxDir?: string,
-  globalSkillsDir?: string,
-  configDir?: string,
-  builtinDir?: string,
-) {
+/**
+ * Configuration for creating plugin hooks.
+ * Groups all initialization parameters into a single named object.
+ */
+export interface CreatePluginHooksConfig {
+  resolvedRoles: ResolvedRole[];
+  client: PluginInput["client"];
+  roleFunctionsMap: Map<string, ResolvedFunction[]>;
+  roleGraphMap: Map<string, ResolvedGraph>;
+  directory?: string;
+  roleboxDir?: string;
+  globalSkillsDir?: string;
+  configDir?: string;
+  builtinDir?: string;
+}
+
+export async function createPluginHooks(config: CreatePluginHooksConfig) {
+  const { resolvedRoles, client, roleFunctionsMap, roleGraphMap, directory, roleboxDir, globalSkillsDir, configDir, builtinDir } = config;
   const rawDir = directory ?? process.cwd();
   const dir = normalizeWorkspaceDir(rawDir);
 

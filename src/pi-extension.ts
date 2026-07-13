@@ -15,8 +15,6 @@
 import path from "node:path";
 import os from "node:os";
 import { existsSync } from "node:fs";
-import { discoverRoles } from "./loader/role-loader.ts";
-import { resolveAllRoles } from "./resolver/orchestrator.ts";
 import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.ts";
 import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
@@ -48,8 +46,9 @@ import {
   seedSentFinalNotifies,
   getSentFinalNotifies,
 } from "./dispatch/notification.ts";
+import { bootstrapRoles } from "./resolver/bootstrap.ts";
 
-// ── Shared state maps (same pattern as index.ts) ──────────────────────────
+// ── Shared state maps ─────────────────────────────────────────────────────
 
 const roleFunctionsMap: Map<string, ResolvedFunction[]> = new Map();
 const roleGraphMap: Map<string, ResolvedGraph> = new Map();
@@ -94,17 +93,9 @@ export default async function (pi: any): Promise<void> {
       configDir,
     });
 
-    // ── 2. Role discovery & resolution ──────────────────────────────────
+    // ── 2. Role discovery & resolution (shared with index.ts) ───────────
 
-    const roles = await discoverRoles(roleboxDir);
-    log.info("Roles discovered", { count: roles.size });
-
-    if (roles.size === 0) {
-      log.info("No roles found — Pi extension has nothing to register");
-      return;
-    }
-
-    const resolvedRoles = await resolveAllRoles(roles, {
+    const { resolvedRoles, discovered, resolved, skipped } = await bootstrapRoles({
       roleboxDir,
       globalSkillsDir,
       configDir,
@@ -113,13 +104,14 @@ export default async function (pi: any): Promise<void> {
       roleGraphMap,
     });
 
-    const discovered = roles.size;
-    const resolved = resolvedRoles.length;
-    const skipped = discovered - resolved;
     log.info("Roles resolved", { discovered, resolved, skipped });
 
-    if (resolved === 0 && discovered > 0) {
-      log.warn("All discovered roles failed to resolve — check role.yaml files");
+    if (resolved === 0) {
+      if (discovered > 0) {
+        log.warn("All discovered roles failed to resolve — check role.yaml files");
+      } else {
+        log.info("No roles found — Pi extension has nothing to register");
+      }
       return;
     }
 

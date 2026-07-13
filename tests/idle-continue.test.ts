@@ -88,13 +88,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -117,13 +117,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -148,13 +148,13 @@ describe("session.idle CONTINUE", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -174,13 +174,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
 
@@ -194,13 +194,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan" }); // no continue_until
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -218,13 +218,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -242,13 +242,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -272,13 +272,13 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["plan"]);
@@ -312,13 +312,13 @@ describe("auto-continue counter persistence (regression)", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["synthesize"]);
@@ -369,13 +369,13 @@ describe("auto-continue counter persistence (regression)", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["synthesize"]);
@@ -421,13 +421,13 @@ describe("dispatch-notification counter persistence (regression)", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks(
-      [makePrimaryRole()],
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
       client,
       roleFunctionsMap,
-      new Map(),
-      tmpDir,
-    );
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
 
     const sessionID = "test-session";
     functionSessionState.activate(sessionID, ["synthesize"]);

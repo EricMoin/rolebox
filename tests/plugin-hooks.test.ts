@@ -134,8 +134,8 @@ describe("Plugin Hooks - Manager Singleton", () => {
       const roles = [makeRoleWithSubagents()];
       const graphMap = new Map<string, ResolvedGraph>();
 
-      await createPluginHooks(roles, client, roleFunctionsMap, graphMap, tmpDir);
-      await createPluginHooks(roles, client, roleFunctionsMap, graphMap, tmpDir);
+      await createPluginHooks({ resolvedRoles: roles, client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
+      await createPluginHooks({ resolvedRoles: roles, client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
 
       expect(managerMap.size).toBe(1);
       expect(managerMap.has(tmpDir)).toBe(true);
@@ -155,8 +155,8 @@ describe("Plugin Hooks - Manager Singleton", () => {
       const roles = [makeRoleWithSubagents()];
       const graphMap = new Map<string, ResolvedGraph>();
 
-      await createPluginHooks(roles, client, roleFunctionsMap, graphMap, dir1);
-      await createPluginHooks(roles, client, roleFunctionsMap, graphMap, dir2);
+      await createPluginHooks({ resolvedRoles: roles, client, roleFunctionsMap, roleGraphMap: graphMap, directory: dir1 });
+      await createPluginHooks({ resolvedRoles: roles, client, roleFunctionsMap, roleGraphMap: graphMap, directory: dir2 });
 
       expect(managerMap.size).toBe(2);
       expect(managerMap.has(dir1)).toBe(true);
@@ -178,8 +178,8 @@ describe("Plugin Hooks - Manager Singleton", () => {
       // Spy on process.on before the first call
       const processOnSpy = mock(process.on.bind(process));
 
-      await createPluginHooks(roles, client, roleFunctionsMap, graphMap, tmpDir);
-      await createPluginHooks(roles, client, roleFunctionsMap, graphMap, tmpDir);
+      await createPluginHooks({ resolvedRoles: roles, client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
+      await createPluginHooks({ resolvedRoles: roles, client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
 
       // The guard should prevent duplicate registrations — process.on is called
       // once for each event (exit, SIGINT, SIGTERM), not twice
@@ -206,7 +206,7 @@ describe("Plugin Hooks - Config Injection", () => {
         config: { mode: RoleMode.Primary } as any,
       });
 
-      await createPluginHooks([primary], client, roleFunctionsMap, new Map(), tmpDir);
+      await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: new Map(), directory: tmpDir });
 
       expect(managerMap.has(tmpDir)).toBe(true);
       const manager = managerMap.get(tmpDir)!;
@@ -232,7 +232,7 @@ describe("Plugin Hooks - Config Injection", () => {
       const primary = makeRoleWithSubagents();
       // No dispatchConfig set
 
-      await createPluginHooks([primary], client, roleFunctionsMap, new Map(), tmpDir);
+      await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: new Map(), directory: tmpDir });
 
       const manager = managerMap.get(tmpDir)!;
       const config = manager.getConfig();
@@ -253,7 +253,7 @@ describe("Plugin Hooks - Guardrail Correction Injection", () => {
       const graphMap = new Map<string, ResolvedGraph>();
       graphMap.set("test-primary", graph);
 
-      const hooks = await createPluginHooks([primary], client, roleFunctionsMap, graphMap, tmpDir);
+      const hooks = await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
 
       // Initialize a graph session via system.transform (which calls initGraph via chat.message)
       const sessionID = "test-session-corr-1";
@@ -303,7 +303,7 @@ describe("Plugin Hooks - Guardrail Correction Injection", () => {
       const graphMap = new Map<string, ResolvedGraph>();
       graphMap.set("test-primary", graph);
 
-      const hooks = await createPluginHooks([primary], client, roleFunctionsMap, graphMap, tmpDir);
+      const hooks = await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
       const sessionID = "test-session-onroute-1";
 
       graphSessionState.initGraph(sessionID, graph);
@@ -330,7 +330,7 @@ describe("Plugin Hooks - Guardrail Correction Injection", () => {
       const graphMap = new Map<string, ResolvedGraph>();
       graphMap.set("test-primary", graph);
 
-      const hooks = await createPluginHooks([primary], client, roleFunctionsMap, graphMap, tmpDir);
+      const hooks = await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
       const sessionID = "test-session-unknown-1";
       graphSessionState.initGraph(sessionID, graph);
 
@@ -359,7 +359,7 @@ describe("Plugin Hooks - Graph Recover", () => {
       const graphMap = new Map<string, ResolvedGraph>();
       graphMap.set("test-primary", graph);
 
-      const hooks1 = await createPluginHooks([primary], client, roleFunctionsMap, graphMap, tmpDir);
+      const hooks1 = await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
       const sessionID = "test-session-recover-1";
 
       graphSessionState.initGraph(sessionID, graph, "test-primary");
@@ -378,7 +378,7 @@ describe("Plugin Hooks - Graph Recover", () => {
 
       expect(graphSessionState.getState(sessionID)).toBeUndefined();
 
-      await createPluginHooks([primary], client, roleFunctionsMap, graphMap, tmpDir);
+      await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
 
       const recoveredState = graphSessionState.getState(sessionID);
       expect(recoveredState).toBeDefined();
@@ -397,7 +397,7 @@ describe("Plugin Hooks - Graph Recover", () => {
       const graphMap = new Map<string, ResolvedGraph>();
       graphMap.set("test-primary", testGraph());
 
-      const hooks1 = await createPluginHooks([primary], client, roleFunctionsMap, graphMap, tmpDir);
+      const hooks1 = await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: graphMap, directory: tmpDir });
       const sessionID = "test-session-skip-1";
 
       graphSessionState.initGraph(sessionID, testGraph());
@@ -409,7 +409,7 @@ describe("Plugin Hooks - Graph Recover", () => {
 
       // Now create fresh hooks with a graphMap missing the agent
       const emptyGraphMap = new Map<string, ResolvedGraph>();
-      await createPluginHooks([primary], client, roleFunctionsMap, emptyGraphMap, tmpDir);
+      await createPluginHooks({ resolvedRoles: [primary], client, roleFunctionsMap, roleGraphMap: emptyGraphMap, directory: tmpDir });
 
       const recoveredState = graphSessionState.getState(sessionID);
       expect(recoveredState).toBeUndefined();

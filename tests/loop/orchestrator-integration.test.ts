@@ -623,7 +623,7 @@ describe("Orchestrator Integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks([], client, new Map(), new Map(), tmpDir);
+      hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
