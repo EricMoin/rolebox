@@ -10,6 +10,7 @@ export { loopManagerMap, activeLoopManager } from "./core/composition.js";
 import { roleFunctionsMap, roleGraphMap } from "./resolver/registry.ts";
 export { roleFunctionsMap, roleGraphMap } from "./resolver/registry.ts";
 import { bootstrapRoles } from "./resolver/bootstrap.ts";
+import { loadProjectConfig, applyProjectConfig } from "./project-config.ts";
 import { PLUGIN_ID } from "./constants.ts";
 import { createSubLogger, getLogFilePath, configureLogDirectory } from "./logger.ts";
 import { getOpencodeConfigDir } from "./cli/paths.ts";
@@ -36,6 +37,12 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     roleFunctionsMap,
     roleGraphMap,
   });
+
+  // Apply project-level config (`.rolebox/config.json`) if present
+  const projectConfig = loadProjectConfig(ctx.directory);
+  if (projectConfig?.defaultRole) {
+    applyProjectConfig(resolvedRoles, projectConfig);
+  }
 
   await syncAllAgents(resolvedRoles, new OpencodeAgentRegistrar());
   syncSkillSymlinks(resolvedRoles, globalSkillsDir);
