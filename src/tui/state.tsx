@@ -280,6 +280,7 @@ export function createSidebarRenderer(workspaceDir: string) {
         _filterPersistRef = null;
         _eventBridgeRef = null;
         dispose();
+      });
 
       // ── Derived data for Activity component ──
       function activeTasks(): TaskSnapshot[] {
