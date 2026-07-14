@@ -5,6 +5,7 @@ import {
   getInflightCount,
   notifyCompletion,
   leaveRunning,
+  notifyTerminated,
   resetRequestSessions,
 } from "../core/lifecycle-shared.ts";
 import { detectCompletion } from "./completion-detector.ts";
@@ -49,7 +50,7 @@ function cleanupTerminalError(d: TaskLifecycleDeps, taskId: string): void {
 }
 
 /** Transition task to completed, log metrics, release resources. */
-function completeAndRelease(d: TaskLifecycleDeps, taskId: string): void {
+async function completeAndRelease(d: TaskLifecycleDeps, taskId: string): Promise<void> {
   if (!transition(d, taskId, ["running"], "completed")) return;
   d.watchdog.unregisterTask(taskId);
   d.watchdog.cancelDebounce(taskId);
@@ -60,14 +61,15 @@ function completeAndRelease(d: TaskLifecycleDeps, taskId: string): void {
   metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
   cleanupTerminalCompleted(d, taskId);
   leaveRunning(d, taskId);
-  void materializeAndNotify(d, taskId);
+  await materializeAndNotify(d, taskId);
+  notifyTerminated(d, taskId, "completed");
 }
-
 /** Transition task to timeout, log metrics, notify, release. */
 function timeoutAndRelease(d: TaskLifecycleDeps, taskId: string, reason: string): void {
   if (!transition(d, taskId, ["running"], "timeout", { error: reason })) return;
   d.watchdog.unregisterTask(taskId);
   d.watchdog.cancelDebounce(taskId);
+  notifyTerminated(d, taskId, "timeout");
   const t = d.tasks.get(taskId)!;
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
@@ -97,6 +99,7 @@ function markError(d: TaskLifecycleDeps, taskId: string, errorMsg: string): void
   if (!transition(d, taskId, ["running"], "error", { error: errorMsg })) return;
   d.watchdog.unregisterTask(taskId);
   d.watchdog.cancelDebounce(taskId);
+  notifyTerminated(d, taskId, "error");
   cleanupTerminalError(d, taskId);
   finalizeCompletion(d, taskId);
 }
@@ -159,6 +162,7 @@ export async function evaluateAndComplete(
         if (transition(d, taskId, ["running"], "error", { error: "Session no longer exists" })) {
           d.watchdog.unregisterTask(taskId);
           d.watchdog.cancelDebounce(taskId);
+          notifyTerminated(d, taskId, "error");
           const t = d.tasks.get(taskId)!;
           debugLog("evaluate", taskId, `session gone (verifyExistence=missing) — erroring task`);
           void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
@@ -189,7 +193,7 @@ export async function evaluateAndComplete(
           delete eventState.pendingConfirm;
           debugLog("evaluate", taskId, `pendingConfirm passed: msgCount stable at ${scopedMessages.length} — completing`);
         }
-        completeAndRelease(d, taskId);
+        await completeAndRelease(d, taskId);
         break;
       }
       case "error": {
@@ -211,7 +215,7 @@ export async function evaluateAndComplete(
       }
       case "stabilizing": {
         debugLog("evaluate", taskId, `stabilizing with skipStabilityGating=true — treating as completed`);
-        completeAndRelease(d, taskId);
+        await completeAndRelease(d, taskId);
         break;
       }
     }
@@ -385,7 +389,7 @@ export async function handleSessionDeleted(d: TaskLifecycleDeps, sessionId: stri
 // ── Completion helpers (externally triggered) ─────────────────
 
 /** Handle an externally-detected task completed signal. */
-export function handleTaskCompleted(d: TaskLifecycleDeps, taskId: string): void {
+export async function handleTaskCompleted(d: TaskLifecycleDeps, taskId: string): Promise<void> {
   if (!transition(d, taskId, ["pending", "running"], "completed")) return;
   const t = d.tasks.get(taskId)!;
   const duration = Date.now() - t.startedAt.getTime();
@@ -394,15 +398,16 @@ export function handleTaskCompleted(d: TaskLifecycleDeps, taskId: string): void 
   metrics.histogram("task_duration_ms", { agent: t.agent }).observe(duration);
   cleanupTerminalCompleted(d, taskId);
   leaveRunning(d, taskId);
-  void materializeAndNotify(d, taskId);
+  await materializeAndNotify(d, taskId);
+  notifyTerminated(d, taskId, "completed");
 }
-
 /** Handle an externally-detected task error. */
 export function handleTaskError(d: TaskLifecycleDeps, taskId: string, error: string): void {
   if (!transition(d, taskId, ["pending", "running"], "error", { error })) return;
   const t = d.tasks.get(taskId)!;
   infoLog("lifecycle", taskId, `✗ error agent=${t.agent}: ${error}`);
   metrics.counter("dispatch_error_total", { agent: t.agent }).inc();
+  notifyTerminated(d, taskId, "error");
   cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
@@ -414,6 +419,7 @@ export function handleTaskTimeout(d: TaskLifecycleDeps, taskId: string, reason: 
   const t = d.tasks.get(taskId)!;
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
+  notifyTerminated(d, taskId, "timeout");
   cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);

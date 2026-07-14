@@ -109,6 +109,16 @@ export const LANGUAGE_SERVER_REGISTRY: Record<string, LspServerConfig[]> = {
       extensions: [".lua"],
     },
   ],
+  kotlin: [
+    {
+      languageId: "kotlin",
+      command: "kotlin-lsp",
+      args: ["--stdio"],
+      rootUri: "",
+      filePatterns: ["build.gradle.kts", "build.gradle", "settings.gradle.kts"],
+      extensions: [".kt", ".kts"],
+    },
+  ],
 };
 
 const EXTENSION_TO_LANGUAGE: Record<string, string> = (() => {

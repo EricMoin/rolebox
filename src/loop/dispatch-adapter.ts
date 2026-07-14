@@ -45,6 +45,28 @@ export interface IDispatchAdapter {
 
   /** Inject a silent progress note into the origin session (noReply:true). */
   injectNote(sessionId: string, text: string): Promise<void>;
+
+  /**
+   * Register a one-time listener for when a dispatched worker task enters a
+   * terminal state.  The callback is invoked at most once with the task ID and
+   * its final status string.  Returns the same callback for convenience.
+   */
+  registerTerminatedListener(
+    taskId: string,
+    callback: (taskId: string, status: string) => void,
+  ): (taskId: string, status: string) => void;
+
+  /** Remove a previously registered task-terminated listener. */
+  removeTerminatedListener(
+    taskId: string,
+    callback: (taskId: string, status: string) => void,
+  ): void;
+
+  /**
+   * Read-only query: returns the current lifecycle status of a dispatched task.
+   * Returns the status string or undefined if the task ID is unknown.
+   */
+  getTaskStatus(taskId: string): Promise<string | undefined>;
 }
 
 // ── Implementation ────────────────────────────────────────────────────────
@@ -153,5 +175,24 @@ export class DispatchAdapter implements IDispatchAdapter {
       noReply: true,
       parts: [{ type: "text", text }],
     });
+  }
+
+  registerTerminatedListener(
+    taskId: string,
+    callback: (taskId: string, status: string) => void,
+  ): (taskId: string, status: string) => void {
+    return this.dispatchManager.onTaskTerminated(taskId, callback);
+  }
+
+  removeTerminatedListener(
+    taskId: string,
+    callback: (taskId: string, status: string) => void,
+  ): void {
+    this.dispatchManager.removeTaskTerminatedListener(taskId, callback);
+  }
+
+  async getTaskStatus(taskId: string): Promise<string | undefined> {
+    const task = this.dispatchManager.getTask(taskId);
+    return task?.status;
   }
 }

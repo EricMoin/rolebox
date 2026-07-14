@@ -117,7 +117,13 @@ describe("idle-advance", () => {
       iterations: 3,
     });
 
+    // Let the self-start microtask complete so the loop is in awaiting_worker
+    await new Promise((r) => setTimeout(r, 0));
+
     const loopState = activeLoopManager!.getLoopState(sid)!;
+    expect(loopState.phase).toBe("awaiting_worker");
+
+    // Directly set phase to activating (simulating the test scenario)
     loopState.phase = "activating";
 
     await hooks.event({
@@ -230,8 +236,38 @@ describe("idle-advance", () => {
     expect(correction ?? "").not.toContain("loop interrupted by restart");
   });
 
-  it("advances from awaiting_worker through summarizing to next dispatch without deadlock", async () => {
-    const sid = "ses_bridge_deadlock";
+  it("self-start microtask advances activating phase regardless of inflight count", async () => {
+    const sid = "ses_inflight_advance";
+    activeLoopManager!.register({
+      originSessionId: sid,
+      agent: "test-agent",
+      prompt: "do work",
+      mode: "fresh",
+      iterations: 1,
+    });
+
+    const beforeState = activeLoopManager!.getLoopState(sid)!;
+    expect(beforeState.phase).toBe("activating");
+
+    const dm = managerMap.get(tmpDir)!;
+    const inflightSpy = spyOn(dm, "getInflightCount");
+    inflightSpy.mockReturnValue(1);
+
+    // Fire idle event — the self-start microtask (scheduled by register)
+    // fires during the await, advancing activating → dispatching → awaiting_worker.
+    // inflight > 0 does NOT block the self-start (it only blocks continuation,
+    // not the register microtask).
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID: sid } },
+    });
+
+    const afterState = activeLoopManager!.getLoopState(sid)!;
+    // Self-start microtask advanced the loop regardless of inflight count
+    expect(afterState.phase).toBe("awaiting_worker");
+  });
+
+  it("does not advance from awaiting_worker on idle — push chain handles it", async () => {
+    const sid = "ses_push_chain_awaiting";
     activeLoopManager!.register({
       originSessionId: sid,
       agent: "test-agent",
@@ -240,15 +276,67 @@ describe("idle-advance", () => {
       iterations: 3,
     });
 
-    await activeLoopManager!.onOriginIdle(sid);
+    // Self-start microtask fires from register, no onOriginIdle needed
+    await new Promise((r) => setTimeout(r, 0));
     const loopState = activeLoopManager!.getLoopState(sid)!;
     expect(loopState.phase).toBe("awaiting_worker");
 
+    // Idle no longer advances awaiting_worker — the push chain
+    // (terminated listener → onWorkerCompleted → _advanceFromSummarizing)
+    // drives awaiting_worker → summarizing → dispatch/finalize.
     await hooks.event({
       event: { type: "session.idle", properties: { sessionID: sid } },
     });
 
     const afterState = activeLoopManager!.getLoopState(sid)!;
-    expect(afterState.phase).not.toBe("summarizing");
+    expect(afterState.phase).toBe("awaiting_worker");
+  });
+
+  it("awaiting_worker no longer advances via idle when worker completed (push chain)", async () => {
+    const sid = "ses_inflight_awaiting_push";
+    activeLoopManager!.register({
+      originSessionId: sid,
+      agent: "test-agent",
+      prompt: "do work",
+      mode: "fresh",
+      iterations: 3,
+    });
+
+    // Self-start microtask fires from register, no onOriginIdle needed
+    await new Promise((r) => setTimeout(r, 0));
+    const loopState = activeLoopManager!.getLoopState(sid)!;
+    expect(loopState.phase).toBe("awaiting_worker");
+    expect(loopState.activeWorkerTaskId).toBeDefined();
+
+    // Mock: loop's own worker task is still counted in inflight
+    const dm = managerMap.get(tmpDir)!;
+    const inflightSpy = spyOn(dm, "getInflightCount");
+    inflightSpy.mockReturnValue(1);
+
+    // Mock: the worker task is completed
+    const taskId = loopState.activeWorkerTaskId!;
+    const getTaskSpy = spyOn(dm, "getTask");
+    getTaskSpy.mockReturnValue({
+      id: taskId,
+      sessionId: "worker-session",
+      parentSessionId: sid,
+      depth: 1,
+      status: "completed",
+      agent: "test-agent",
+      prompt: "do work",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+    });
+
+    // Trigger session.idle — the awaiting_worker bypass was removed.
+    // The push chain (terminated listener → onWorkerCompleted) handles
+    // awaiting_worker → summarizing → next dispatch/finalize.
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID: sid } },
+    });
+
+    const afterState = activeLoopManager!.getLoopState(sid)!;
+    // Idle no longer advances awaiting_worker — phase stays put.
+    expect(afterState.phase).toBe("awaiting_worker");
   });
 });

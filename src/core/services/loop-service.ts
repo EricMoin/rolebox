@@ -116,6 +116,8 @@ export class LoopService implements PluginService {
         for (const [, state] of reconciled) {
           coordinator.restoreState(state);
         }
+        // Re-subscribe terminated listeners for active loops after restart
+        await coordinator.reSubscribeListeners();
       } catch (err) {
         this.stateDegraded = true;
         this.degradedDetail = "LoopStore.reconcile() failed — using empty coordinator";

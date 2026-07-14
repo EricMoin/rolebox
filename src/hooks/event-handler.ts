@@ -16,47 +16,6 @@ import type { HookDeps } from "./deps.ts";
 
 const log = createSubLogger("hook-event");
 
-// `awaiting_worker` bridges to onWorkerCompleted: when inflight hits 0 the worker
-// already finished and re-prompted, so no separate coordinator event will fire.
-//
-// IMPORTANT: This function loops until the state machine reaches a stable waiting
-// phase (awaiting_worker, dispatching) or a terminal phase. Without the loop,
-// calling onWorkerCompleted() transitions to "summarizing" but nobody calls
-// onOriginIdle() to advance further — deadlocking the loop until an external
-// event (potentially minutes later) fires another session.idle for the origin.
-async function bridgeLoopAdvance(
-  coord: LoopCoordinator,
-  sid: string,
-): Promise<void> {
-  // Safety cap prevents infinite loops if state transitions cycle unexpectedly
-  const MAX_ADVANCES = 5;
-  for (let i = 0; i < MAX_ADVANCES; i++) {
-    const loopState = coord.getLoopState(sid);
-    if (!loopState) return;
-
-    const prevPhase = loopState.phase;
-
-    if (loopState.phase === "activating" || loopState.phase === "summarizing") {
-      await coord.onOriginIdle(sid);
-    } else if (loopState.phase === "awaiting_worker" && loopState.activeWorkerTaskId) {
-      await coord.onWorkerCompleted(loopState.activeWorkerTaskId);
-    } else {
-      // Terminal or dispatching — nothing more to advance synchronously
-      return;
-    }
-
-    // Re-read state after the transition
-    const newState = coord.getLoopState(sid);
-    if (!newState) return;
-
-    // If phase didn't change, the transition was a no-op — bail to avoid livelock
-    if (newState.phase === prevPhase) return;
-
-    // If we entered a phase that requires waiting for external input, stop
-    if (newState.phase === "awaiting_worker" || newState.phase === "dispatching") return;
-  }
-}
-
 export async function handleEvent(
   event: Event,
   state: HookState,
@@ -112,6 +71,7 @@ export async function handleEvent(
         log.debug("skipping function continuation for sync session", { sessionID: sid });
         break;
       }
+
       // Invariant: while awaiting in-flight dispatches, the completion
       // <system-reminder> wakes the parent — auto-continue must NOT (it would
       // spin-poll an unsatisfiable continue_until until results arrive).
@@ -126,7 +86,6 @@ export async function handleEvent(
       // Suppress function continuation for active loop origins during loop-owned
       // phases (summarizing, activating, finalizing). Worker continuation is
       // unaffected. NOTE: we use a flag instead of `break` so that the loop
-      // advance logic further down can still execute.
       let suppressLoopContinuation = false;
       if (deps.loopManager?.isActiveLoopOrigin(sid)) {
         const loopState = deps.loopManager.getLoopState(sid);
@@ -138,18 +97,7 @@ export async function handleEvent(
         }
       }
       const activeSet = functionSessionState.getActive(sid);
-      if (activeSet.size === 0 || suppressLoopContinuation) {
-        // Loop advance: handle phase transitions when no continuation is needed
-        if (deps.loopManager && deps.dispatchManager.getInflightCount(sid) === 0) {
-          const coord = deps.loopManager as LoopCoordinator | undefined;
-          if (coord && coord.isActiveLoopOrigin(sid)) {
-            await bridgeLoopAdvance(coord, sid);
-            break;
-          }
-        }
-        if (activeSet.size === 0) break;
-      }
-      if (suppressLoopContinuation) break;
+      if (activeSet.size === 0) break;
 
       const allFns = collectAllFunctions(deps.roleFunctionsMap);
       const artifacts = new ArtifactStore(deps.dir);
@@ -259,13 +207,6 @@ export async function handleEvent(
           });
           sentContinuation = true;
           break; // ONE continuation per idle event
-        }
-      }
-      // --- LOOP ADVANCE: advance a loop session on terminal idle ---
-      if (!sentContinuation && deps.dispatchManager.getInflightCount(sid) === 0) {
-        const coord = deps.loopManager as LoopCoordinator | undefined;
-        if (coord && coord.isActiveLoopOrigin(sid)) {
-          await bridgeLoopAdvance(coord, sid);
         }
       }
       break;

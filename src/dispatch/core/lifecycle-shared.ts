@@ -38,6 +38,8 @@ export interface TaskLifecycleDeps {
   clearEmittedThresholds: (taskId: string) => void;
   /** Delete on-disk checkpoint data for a task (fire-and-forget). */
   deleteTaskCheckpoint: (taskId: string) => Promise<void>;
+  /** Per-task terminated listeners (fire-once: auto-cleared after notify). */
+  taskTerminatedListeners: Map<string, Set<Function>>;
 }
 
 const DEFAULT_CONCURRENCY_KEY = "default";
@@ -166,3 +168,25 @@ export function leaveRunning(d: TaskLifecycleDeps, taskId: string): void {
   d.persistState();
   scheduleCleanup(d, taskId);
 }
+
+/** Notify terminated listeners for a task (fire-once — auto-clears after notification).
+
+ * Must be called AFTER the task status has been transitioned to its terminal value.
+ * Callbacks receive (taskId, status). */
+
+export function notifyTerminated(d: TaskLifecycleDeps, taskId: string, status: string): void {
+  const t = d.tasks.get(taskId);
+  if (!t) return;
+  const listeners = d.taskTerminatedListeners.get(taskId);
+  if (!listeners || listeners.size === 0) return;
+
+  for (const cb of listeners) {
+    try {
+      (cb as (taskId: string, status: string) => void)(taskId, status);
+    } catch {
+      // Swallow listener errors — never crash dispatch on a misbehaving listener
+    }
+  }
+  d.taskTerminatedListeners.delete(taskId);
+}
+

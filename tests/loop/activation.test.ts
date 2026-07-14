@@ -10,8 +10,13 @@ import {
   pendingCorrections,
   loopManagerMap,
 } from "../../src/core/composition";
-import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL } from "../../src/loop/constants";
+import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL, LOOP_FUNCTION_NAME } from "../../src/loop/constants";
 import { functionRuntime } from "../../src/function/runtime-state";
+import { functionSessionState } from "../../src/function/session-state";
+import { hookState } from "../../src/hooks/state";
+import { parseFunctionActivation as _realParseFn } from "../../src/function/parser";
+// Snapshot the real parser implementation at module load time for mock restore
+const realParseFunctionActivation = _realParseFn;
 
 function createMockClient(): OpencodeClient {
   return {
@@ -153,7 +158,9 @@ describe("loop activation", () => {
     );
 
     expect(activeLoopManager?.isLoopSession("ses_006")).toBe(true);
-    expect(activeLoopManager!.getLoopState("ses_006")!.phase).toBe("activating");
+    // Self-start microtask may have already advanced past activating phase
+    const phase1 = activeLoopManager!.getLoopState("ses_006")!.phase;
+    expect(["activating", "dispatching", "awaiting_worker"]).toContain(phase1);
 
     const output2 = {
       parts: [{ type: "text" as const, text: "another message" }],
@@ -164,7 +171,9 @@ describe("loop activation", () => {
     );
 
     expect(activeLoopManager!.getLoopState("ses_006")!.cancelRequested).toBe(false);
-    expect(activeLoopManager!.getLoopState("ses_006")!.phase).toBe("activating");
+    // Loop should still be non-terminal after user message during round 1
+    const phase2 = activeLoopManager!.getLoopState("ses_006")!.phase;
+    expect(["activating", "dispatching", "awaiting_worker"]).toContain(phase2);
   });
 
   it("cancels loop when user message arrives after loop advanced off origin (round 2+)", async () => {
@@ -248,5 +257,63 @@ describe("loop activation", () => {
     );
 
     expect(userMessagedSessions.has("ses_009")).toBe(false);
+  });
+
+  it("injects correction when activeLoopManager is undefined", async () => {
+    const originalManager = hookState.activeLoopManager;
+    hookState.activeLoopManager = undefined as any;
+
+    const output = {
+      parts: [{ type: "text" as const, text: "|loop:3| do thing" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_010" },
+      output,
+    );
+
+    const correction = pendingCorrections.get("ses_010");
+    expect(correction).toContain("Loop manager is not available");
+    expect(activeLoopManager?.isLoopSession("ses_010")).toBe(false);
+
+    hookState.activeLoopManager = originalManager;
+  });
+
+  it("injects correction when |loop| is parsed but no matching loopCall exists", async () => {
+    // Mock parser so "loop" appears in parsedFunctions but NOT in calls
+    mock.module("../../src/function/parser", () => ({
+      parseFunctionActivation: (text: string) => {
+        // Only intercept our test text; delegate everything else to real impl
+        if (text === "|loop| do thing") {
+          return {
+            functions: [LOOP_FUNCTION_NAME],
+            calls: [],
+            cleanedText: "do thing",
+          };
+        }
+        return realParseFunctionActivation(text);
+      },
+    }));
+
+    try {
+      // Pre-activate loop so isActive returns true
+      functionSessionState.activate("ses_012", [LOOP_FUNCTION_NAME], []);
+
+      const output = {
+        parts: [{ type: "text" as const, text: "|loop| do thing" }],
+      };
+      await hooks["chat.message"](
+        { agent: "test-agent", sessionID: "ses_012" },
+        output,
+      );
+
+      const correction = pendingCorrections.get("ses_012");
+      expect(correction).toContain("Loop call not found");
+      expect(activeLoopManager?.isLoopSession("ses_012")).toBe(false);
+    } finally {
+      // Restore real parser implementation so other test files aren't affected
+      mock.module("../../src/function/parser", () => ({
+        parseFunctionActivation: realParseFunctionActivation,
+      }));
+    }
   });
 });

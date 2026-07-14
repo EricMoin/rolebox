@@ -5,6 +5,7 @@ import {
   scheduleCleanup,
   notifyCompletion,
   leaveRunning,
+  notifyTerminated,
 } from "./lifecycle-shared.ts";
 import { infoLog, debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
@@ -48,6 +49,7 @@ export async function cancelTask(
     infoLog("lifecycle", taskId, `✕ cancelled (queued) agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
     d.clearEmittedThresholds(taskId);
+    notifyTerminated(d, taskId, "cancelled");
     void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
     scheduleCleanup(d, taskId);
     return true;
@@ -71,6 +73,7 @@ export async function cancelTask(
     infoLog("lifecycle", taskId, `✕ cancelled (sync) agent=${t.agent}`);
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
     d.clearEmittedThresholds(taskId);
+    notifyTerminated(d, taskId, "cancelled");
     return true;
   }
 
@@ -88,6 +91,7 @@ export async function cancelTask(
   d.watchdog.unregisterTask(taskId);
   d.watchdog.cancelDebounce(taskId);
   d.clearEmittedThresholds(taskId);
+  notifyTerminated(d, taskId, "cancelled");
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
   return true;

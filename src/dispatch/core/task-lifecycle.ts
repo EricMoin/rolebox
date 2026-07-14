@@ -25,7 +25,7 @@ import {
  * Bridge interface for methods accessed by DispatchManager via `(this.lifecycle as any)`.
  */
 export interface LifecycleBridge {
-  handleTaskCompleted(taskId: string): void;
+  handleTaskCompleted(taskId: string): Promise<void>;
   handleTaskError(taskId: string, error: string): void;
   handleTaskTimeout(taskId: string, reason: string): void;
   materializeResult(taskId: string): Promise<MaterializedResultRef>;
@@ -100,10 +100,9 @@ export class TaskLifecycleManager implements LifecycleBridge {
     return evaluatorHandleDeleted(this.d, sessionId);
   }
 
-  handleTaskCompleted(taskId: string): void {
+  async handleTaskCompleted(taskId: string): Promise<void> {
     return evaluatorHandleCompleted(this.d, taskId);
   }
-
   handleTaskError(taskId: string, error: string): void {
     return evaluatorHandleTaskErr(this.d, taskId, error);
   }
