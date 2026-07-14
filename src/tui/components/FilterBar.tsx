@@ -8,7 +8,7 @@
  *
  * Inline "buttons" are rendered as styled text spans — active filters
  * are bracketed and bold, inactive ones are dimmed. Status toggles are
- * driven by `1`-`4` keys registered in keybindings (`keybindings.ts`).
+ * driven by `1`-`4` keys.
  *
  * @module
  */
@@ -25,15 +25,13 @@ export interface StatusFilterDef {
   key: string;
   label: string;
   glyph: string;
-  /** Keybinding number (1-4) to toggle this status. */
-  keybind: string;
 }
 
 export const STATUS_FILTERS: StatusFilterDef[] = [
-  { key: "running", label: "running", glyph: "\u25b8", keybind: "ctrl+1" },  // ▸
-  { key: "pending", label: "pending", glyph: "\u25cf", keybind: "ctrl+2" },  // ●
-  { key: "error",   label: "error",   glyph: "\u2717", keybind: "ctrl+3" },  // ✗
-  { key: "timeout", label: "timeout", glyph: "\u25c7", keybind: "ctrl+4" },  // ◇
+  { key: "running", label: "running", glyph: "\u25b8" },  // ▸
+  { key: "pending", label: "pending", glyph: "\u25cf" },  // ●
+  { key: "error",   label: "error",   glyph: "\u2717" },  // ✗
+  { key: "timeout", label: "timeout", glyph: "\u25c7" },  // ◇
 ];
 
 // ── Props ────────────────────────────────────────────────────────────────
@@ -83,10 +81,10 @@ function renderStatusToggle(
       </span>
     );
   }
-  // Inactive: dimmed glyph + label + underlined keybinding hint (clickable)
+  // Inactive: dimmed glyph + label (clickable)
   return (
     <span fg={muted} attributes={DIM | UNDERLINE} on:click={() => onToggleStatus?.(statusKey)}>
-      {"  " + def.glyph + " " + def.label + " [" + def.keybind + "]"}
+      {"  " + def.glyph + " " + def.label}
     </span>
   );
 }
@@ -202,7 +200,7 @@ export function renderFilterBar(props: FilterBarProps) {
               fg={muted} attributes={DIM | UNDERLINE}
               on:click={() => props.onClose?.()}
             >
-              {"  [Esc to close]"}
+              {"  [close]"}
             </span>
           </>
         ) : (

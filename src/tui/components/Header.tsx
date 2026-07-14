@@ -26,10 +26,10 @@ export function renderHeader(props: { c: ThemeColors; version: string } & Header
       </text>
       <text>
         {"  "}
-        <span fg={rgbaToCSS(c.primary)} attributes={BOLD} on:click={() => props.onRefresh?.()}>{"[↻ R] "}</span>
-        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleMetrics?.()}>{"[≡ M] "}</span>
-        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleFilter?.()}>{"[◇ F] "}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={BOLD} on:click={() => props.onToggleHelp?.()}>{"[? H]"}</span>
+        <span fg={rgbaToCSS(c.primary)} attributes={BOLD} on:click={() => props.onRefresh?.()}>{"[↻] "}</span>
+        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleMetrics?.()}>{"[≡] "}</span>
+        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleFilter?.()}>{"[◇] "}</span>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={BOLD} on:click={() => props.onToggleHelp?.()}>{"[?]"}</span>
       </text>
     </>
   );

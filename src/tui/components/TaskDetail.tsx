@@ -4,7 +4,7 @@
  * Shows the task's result text (windowed via offset/limit), metadata (agent,
  * status, duration, tool-call count, liveness), and error details.
  *
- * Navigation: mouse wheel or Ctrl+J/K for scroll, g/G for top/bottom,
+ * Navigation: mouse wheel for scroll, g/G for top/bottom,
  *
  * @module
  */
@@ -217,11 +217,6 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
         <span fg={muted} attributes={DIM}>{" (" + pct + "%)"}</span>
       </text>
 
-      <text>
-        <span fg={muted} attributes={DIM}>{"mouse wheel / Ctrl+J/K scroll  "}</span>
-        <span fg={muted} attributes={DIM}>{"g/G top/bottom  "}</span>
-        <span fg={muted} attributes={DIM}>{"Esc back"}</span>
-      </text>
     </scrollbox>
   );
 }

@@ -5,8 +5,8 @@
  * refresh cycle, health memo, and JSX assembly.
  *
  * Also exposes module-level trigger functions (`triggerRefresh`,
- * `triggerToggleMetrics`, etc.) that the keybindings module uses
- * to drive user-initiated state changes.
+ * `triggerToggleMetrics`, etc.) that were previously consumed by
+ * the (now-deleted) keybindings module, retained to support calls
  *
  * @module
  */
@@ -33,15 +33,15 @@ import {
   renderActivity, renderTaskDetailPanel,
   renderFilterBar, countTotalItems, collectSessionIds,
 } from "./components/index";
-import { SHORTCUTS } from "./keybindings";
+
 import type { EventBridge } from "./events";
 const PACKAGE_VERSION = readPackageVersion();
 
-// ── Exposed action references for keybindings ───────────────────────────
+// ── Exposed action references (prev. keybindings) ────────────────
 
 /**
- * Module-level mutable references that the keybindings module triggers
- * via `triggerRefresh()`, `triggerToggleMetrics()`, etc.
+ * Module-level mutable references that the (deleted) keybindings module would
+ * trigger via `triggerRefresh()`, `triggerToggleMetrics()`, etc.
  *
  * Set inside createRoot, cleared on cleanup.
  */
@@ -52,15 +52,7 @@ let _toggleHelpRef: (() => void) | null = null;
 let _toggleStatusFilterRef: ((status: string) => void) | null = null;
 let _toggleSessionFilterRef: ((sessionId: string | null) => void) | null = null;
 
-// ── Task navigation references ─────────────────────────────────────────
-let _selectUpRef: (() => boolean) | null = null;
-let _selectDownRef: (() => boolean) | null = null;
-let _selectEnterRef: (() => boolean) | null = null;
-let _selectEscapeRef: (() => boolean) | null = null;
-let _detailScrollDownRef: (() => boolean) | null = null;
-let _detailScrollUpRef: (() => boolean) | null = null;
-let _detailTopRef: (() => boolean) | null = null;
-let _detailBottomRef: (() => boolean) | null = null;
+
 
 /** Event bridge reference — set during plugin init, cleared on cleanup. */
 let _eventBridgeRef: EventBridge | null = null;
@@ -99,30 +91,6 @@ export function setFilterPersistCallback(
 
 /** Clear the filter persistence callback. */
 export function clearFilterPersistCallback(): void { _filterPersistRef = null; }
-
-/** Move task selection up. Returns true if the key was consumed. */
-export function triggerSelectUp(): boolean { return _selectUpRef?.() ?? false; }
-
-/** Move task selection down. Returns true if the key was consumed. */
-export function triggerSelectDown(): boolean { return _selectDownRef?.() ?? false; }
-
-/** Open detail panel for selected task. Returns true if the key was consumed. */
-export function triggerSelectEnter(): boolean { return _selectEnterRef?.() ?? false; }
-
-/** Close detail panel and return to activity list. Returns true if the key was consumed. */
-export function triggerSelectEscape(): boolean { return _selectEscapeRef?.() ?? false; }
-
-/** Scroll detail panel content down. Returns true if the key was consumed. */
-export function triggerDetailScrollDown(): boolean { return _detailScrollDownRef?.() ?? false; }
-
-/** Scroll detail panel content up. Returns true if the key was consumed. */
-export function triggerDetailScrollUp(): boolean { return _detailScrollUpRef?.() ?? false; }
-
-/** Jump detail panel to the top. Returns true if the key was consumed. */
-export function triggerDetailTop(): boolean { return _detailTopRef?.() ?? false; }
-
-/** Jump detail panel to the end. Returns true if the key was consumed. */
-export function triggerDetailBottom(): boolean { return _detailBottomRef?.() ?? false; }
 
 /** Set the module-level event bridge reference from the plugin entry. */
 export function setEventBridgeRef(bridge: EventBridge | null): void {
@@ -297,82 +265,7 @@ export function createSidebarRenderer(workspaceDir: string) {
         _filterPersistRef?.(ft, fss, fsid);
       });
 
-      // ── Navigation refs ──
-      // Each returns `true` when the key was consumed, `false` to let it propagate.
-      _selectUpRef = () => {
-        const tasks = filteredActivityData().tasks;
-        if (tasks.length === 0) return false;
-        setSelectedTaskIndex((i) => Math.max(0, i - 1));
-        return true;
-      };
-      _selectDownRef = () => {
-        const tasks = filteredActivityData().tasks;
-        if (tasks.length === 0) return false;
-        setSelectedTaskIndex((i) => Math.min(tasks.length - 1, i + 1));
-        return true;
-      };
-      _selectEnterRef = () => {
-        const tasks = filteredActivityData().tasks;
-        const idx = selectedTaskIndex();
-        if (tasks.length > 0 && idx < tasks.length) {
-          const task = tasks[idx];
-          setDetailOffset(0);
-          setDetailView(true);
-          readDetail(task.id, 0);
-          return true;
-        }
-        return false;
-      };
-      _selectEscapeRef = () => {
-        if (!detailView()) return false;
-        setDetailView(false);
-        setDetailData(null);
-        setDetailOffset(0);
-        return true;
-      };
-      _detailScrollDownRef = () => {
-        if (!detailView()) return false;
-        setDetailOffset((offset) => {
-          const newOffset = offset + DETAIL_SCROLL_STEP;
-          const dd = detailData();
-          if (dd && newOffset < dd.totalChars) {
-            readDetail(dd.task.id, newOffset);
-          }
-          return newOffset < (dd?.totalChars ?? 0) ? newOffset : offset;
-        });
-        return true;
-      };
-      _detailScrollUpRef = () => {
-        if (!detailView()) return false;
-        setDetailOffset((offset) => {
-          const newOffset = Math.max(0, offset - DETAIL_SCROLL_STEP);
-          const dd = detailData();
-          if (dd) {
-            readDetail(dd.task.id, newOffset);
-          }
-          return newOffset;
-        });
-        return true;
-      };
-      _detailTopRef = () => {
-        if (!detailView()) return false;
-        setDetailOffset(0);
-        const dd = detailData();
-        if (dd) {
-          readDetail(dd.task.id, 0);
-        }
-        return true;
-      };
-      _detailBottomRef = () => {
-        if (!detailView()) return false;
-        const dd = detailData();
-        if (dd) {
-          const lastOffset = Math.max(0, dd.totalChars - DETAIL_SCROLL_STEP);
-          setDetailOffset(lastOffset);
-          readDetail(dd.task.id, lastOffset);
-        }
-        return true;
-      };
+
 
       onCleanup(() => {
         canceled = true;
@@ -385,17 +278,8 @@ export function createSidebarRenderer(workspaceDir: string) {
         _toggleStatusFilterRef = null;
         _toggleSessionFilterRef = null;
         _filterPersistRef = null;
-        _selectUpRef = null;
-        _selectDownRef = null;
-        _selectEnterRef = null;
-        _selectEscapeRef = null;
-        _detailScrollDownRef = null;
-        _detailScrollUpRef = null;
-        _detailTopRef = null;
-        _detailBottomRef = null;
         _eventBridgeRef = null;
         dispose();
-      });
 
       // ── Derived data for Activity component ──
       function activeTasks(): TaskSnapshot[] {
@@ -492,27 +376,7 @@ export function createSidebarRenderer(workspaceDir: string) {
         return { fns, tasks, graphs, loops };
       }
 
-      // ── Help overlay ──
-      function renderShortcutHelp(): JSX.Element | null {
-        if (!showHelp()) return null;
-        const c = tc();
-        const muted = rgbaToCSS(c.textMuted);
-        const norm = rgbaToCSS(c.text);
-        return (
-          <box>
-            <text>{" ──"}</text>
-            <text attributes={BOLD} fg={norm}>{"Keyboard Shortcuts"}</text>
-            <For each={SHORTCUTS}>
-              {(shortcut) => (
-                <text>
-                  <span fg={rgbaToCSS(c.info)} attributes={BOLD}>{"  " + shortcut.key}</span>
-                  <span fg={muted} attributes={DIM}>{"  " + shortcut.description}</span>
-                </text>
-              )}
-            </For>
-          </box>
-        );
-      }
+
 
       // ── Metrics panel ──
       function renderMetricsPanel(): JSX.Element | null {
@@ -615,10 +479,6 @@ export function createSidebarRenderer(workspaceDir: string) {
 
               {/* Filter bar (toggled by `f`) — delegates to FilterBar component */}
               {renderFilterBarComponent()}
-
-              {/* Keyboard shortcut help (toggled by `?`) */}
-              {renderShortcutHelp()}
-
               {/* Dispatch metrics (toggled by `m`) */}
               {renderMetricsPanel()}
 
@@ -667,9 +527,9 @@ export function createSidebarRenderer(workspaceDir: string) {
                     selectedTask: idx < tasks.length ? tasks[idx] : null,
                     offset: detailOffset(),
                     totalChars: dd?.totalChars ?? 0,
-                    onClose: () => _selectEscapeRef?.(),
-                    onScrollUp: () => _detailScrollUpRef?.(),
-                    onScrollDown: () => _detailScrollDownRef?.(),
+                    onClose: () => { setDetailView(false); setDetailData(null); setDetailOffset(0); },
+                    onScrollUp: () => { const newOffset = Math.max(0, detailOffset() - DETAIL_SCROLL_STEP); const dd = detailData(); if (dd) { setDetailOffset(newOffset); readDetail(dd.task.id, newOffset); } },
+                    onScrollDown: () => { const newOffset = detailOffset() + DETAIL_SCROLL_STEP; const dd = detailData(); if (dd && newOffset < dd.totalChars) { setDetailOffset(newOffset); readDetail(dd.task.id, newOffset); } },
                   });
                 })()}
               </Show>
