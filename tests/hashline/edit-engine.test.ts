@@ -348,6 +348,18 @@ describe("stripInsertAnchorEcho", () => {
     const result = stripInsertAnchorEcho("hello", ["hello"]);
     expect(result).toEqual([]);
   });
+
+  it("does NOT strip echo when anchor has whitespace difference (exact-match only)", () => {
+    // anchor line is "  hello" (2 spaces), insert content is "hello" (no spaces)
+    // Without .trim(), they should NOT match
+    const result = stripInsertAnchorEcho("  hello", ["hello", "world"]);
+    expect(result).toEqual(["hello", "world"]);
+  });
+
+  it("strips echo on exact match (whitespace-sensitive)", () => {
+    const result = stripInsertAnchorEcho("hello", ["hello", "world"]);
+    expect(result).toEqual(["world"]);
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════
