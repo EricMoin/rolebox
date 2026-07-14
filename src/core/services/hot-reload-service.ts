@@ -15,6 +15,9 @@ const log = createSubLogger("hot-reload-service");
 
 const DEBOUNCE_MS = 500;
 
+/** Settle window to absorb late fsevents after symlink writes during reload. */
+const SETTLE_MS = 200;
+
 /** Result returned by triggerReload() so callers (tools, tests) can report status accurately. */
 export interface HotReloadResult {
   success: boolean;
@@ -48,7 +51,9 @@ export class HotReloadService implements PluginService {
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   private ctx!: PluginContext;
   private disabled = false;
+  private reloadSuppressUntil: number = 0;
   private initTimer: ReturnType<typeof setTimeout> | undefined;
+  private isReloading = false;
 
   async init(ctx: PluginContext): Promise<void> {
     this.ctx = ctx;
@@ -130,6 +135,7 @@ export class HotReloadService implements PluginService {
 
   private scheduleReload(): void {
     if (this.disabled) return;
+    if (Date.now() < this.reloadSuppressUntil) return;
 
     // Debounce: reset timer on each change
     if (this.debounceTimer) {
@@ -137,6 +143,7 @@ export class HotReloadService implements PluginService {
     }
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = undefined;
+      if (Date.now() < this.reloadSuppressUntil) return;
       void this.performReload();
     }, DEBOUNCE_MS);
   }
@@ -161,6 +168,16 @@ export class HotReloadService implements PluginService {
       log.warn("Hot reload aborted: resolver context fields not set on PluginContext");
       return { success: false, error: "resolver context fields not set on PluginContext" };
     }
+
+    // Concurrency guard: if a reload is already in progress, bail
+    if (this.isReloading) {
+      log.warn("Hot reload skipped — another reload is already in progress");
+      return { success: false, error: "reload already in progress" };
+    }
+    this.isReloading = true;
+
+    // Suppress watcher-triggered reloads during our own symlink writes
+    this.reloadSuppressUntil = Number.MAX_SAFE_INTEGER;
 
     try {
       // 1. Re-discover roles from disk
@@ -226,6 +243,8 @@ export class HotReloadService implements PluginService {
       const errorMsg = err instanceof Error ? err.message : String(err);
       log.error("Hot reload failed — previous state preserved", { error: errorMsg });
       return { success: false, error: errorMsg };
+    } finally {
+      this.isReloading = false;
     }
   }
 
