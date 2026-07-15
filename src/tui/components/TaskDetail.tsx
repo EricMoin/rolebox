@@ -16,7 +16,7 @@ import type { TaskSnapshot, TaskDetail } from "../../cli/commands/monitor/monito
 import {
   rgbaToCSS, BOLD, DIM, DIM_ITALIC,
   G_RUNNING, G_PENDING, G_ERROR, G_DONE, G_CANCEL, G_TIMEOUT, G_STALLED,
-  agentLeaf, formatDuration, formatTimeAgo,
+  agentLeaf, shortSessionId, formatDuration, formatTimeAgo,
 } from "../helpers.ts";
 
 // ── Props ────────────────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
       </text>
 
       {/* Separator */}
-      <text fg={border}>{"\u2500".repeat(36)}</text>
+      <text fg={border}>{"\u2500".repeat(28)}</text>
 
       {/* Status line */}
       <text>
@@ -147,6 +147,14 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
         <text>
           <span fg={muted} attributes={DIM}>{"desc: "}</span>
           <span fg={norm}>{task.description}</span>
+        </text>
+      </Show>
+
+      {/* Session ID */}
+      <Show when={task.sessionId}>
+        <text>
+          <span fg={muted} attributes={DIM}>{"session: "}</span>
+          <span fg={norm}>{shortSessionId(task.sessionId)}</span>
         </text>
       </Show>
 
@@ -208,7 +216,7 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
 
       {/* ── Scroll indicator ── */}
       <text>{" "}</text>
-      <text fg={border}>{"\u2500".repeat(36)}</text>
+      <text fg={border}>{"\u2500".repeat(28)}</text>
       <text>
         <span fg={muted} attributes={DIM}>{"chars "}</span>
         <span fg={info}>{String(windowStart)}\u2013{String(windowEnd)}</span>

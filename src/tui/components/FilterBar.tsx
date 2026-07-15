@@ -66,25 +66,26 @@ function renderStatusToggle(
   def: StatusFilterDef,
   isActive: boolean,
   onToggleStatus?: (status: string) => void,
+  showComma?: boolean,
 ) {
   const info = rgbaToCSS(c.info);
   const muted = rgbaToCSS(c.textMuted);
-  const keyDim = rgbaToCSS(c.textMuted);
 
+  const prefix = showComma ? ", " : " ";
   const statusKey = def.key;
 
   if (isActive) {
     // Active: bracketed + bold + colored — looks like a pressed button
     return (
       <span fg={info} attributes={BOLD} on:click={() => onToggleStatus?.(statusKey)}>
-        {" [" + def.glyph + " " + def.label + "]"}
+        {prefix + "[" + def.glyph + " " + def.label + "]"}
       </span>
     );
   }
   // Inactive: dimmed glyph + label (clickable)
   return (
     <span fg={muted} attributes={DIM | UNDERLINE} on:click={() => onToggleStatus?.(statusKey)}>
-      {"  " + def.glyph + " " + def.label}
+      {prefix + def.glyph + " " + def.label}
     </span>
   );
 }
@@ -97,8 +98,6 @@ export function renderFilterBar(props: FilterBarProps) {
   const muted = rgbaToCSS(c.textMuted);
   const norm = rgbaToCSS(c.text);
   const info = rgbaToCSS(c.info);
-  const warn = rgbaToCSS(c.warning);
-  const err = rgbaToCSS(c.error);
   const dim = rgbaToCSS(c.textMuted);
 
   const hasActiveFilter =
@@ -110,47 +109,50 @@ export function renderFilterBar(props: FilterBarProps) {
     .slice(0, 5);
 
   return (
-    <box marginBottom={1}>
-      {/* Section header */}
-      <text fg={muted} attributes={BOLD}>{"\u2500 filter"}</text>
+    <box>
+      {/* Line 1: Header + filter indicator + close */}
+      <text>
+        <span fg={muted} attributes={BOLD}>{"\u2500 filter"}</span>
+        {hasActiveFilter ? (
+          <span fg={info} attributes={BOLD}>{"  " + filteredItems + "/" + totalItems}</span>
+        ) : (
+          <span fg={muted} attributes={DIM}>{"  " + totalItems + " total"}</span>
+        )}
+        <span
+          fg={muted} attributes={DIM | UNDERLINE}
+          on:click={() => props.onClose?.()}
+        >
+          {"  [close]"}
+        </span>
+      </text>
 
-      {/* Search text line */}
+      {/* Line 2: Search + status + session (inline compact) */}
       <text>
         <span fg={muted} attributes={DIM}>{"  search: "}</span>
         <span fg={norm}>{filterText.length > 0 ? filterText : "\u2026"}</span>
-      </text>
-
-      {/* Status toggle buttons (inline) */}
-      <text>
-        <span fg={muted} attributes={DIM}>{"  status:"}</span>
+        <span fg={muted}>{"  |  "}</span>
+        <span fg={muted} attributes={DIM}>{"status:"}</span>
         <For each={STATUS_FILTERS}>
-          {(def) => renderStatusToggle(c, def, activeStatuses.has(def.key), props.onToggleStatus)}
+          {(def, i) => renderStatusToggle(c, def, activeStatuses.has(def.key), props.onToggleStatus, i() > 0)}
         </For>
-      </text>
-
-      {/* Session ID filter — inline session selectors */}
-      <text>
-        <span fg={muted} attributes={DIM}>{"  session:"}</span>
-        {/* Current session */}
-        <For each={[currentSessionId]}>
-          {(sid) =>
-            sessionFilterId === null || sessionFilterId === sid ? (
-              <span
-                fg={info} attributes={BOLD}
-                on:click={() => props.onSelectSession?.(sid)}
-              >
-                {" [current]"}
-              </span>
-            ) : (
-              <span
-                fg={dim} attributes={DIM | UNDERLINE}
-                on:click={() => props.onSelectSession?.(sid)}
-              >
-                {"  current"}
-              </span>
-            )
-          }
-        </For>
+        <span fg={muted}>{"  |  "}</span>
+        <span fg={muted} attributes={DIM}>{"session:"}</span>
+        {/* Current session as short ID (no "current" label) */}
+        {sessionFilterId === null || sessionFilterId === currentSessionId ? (
+          <span
+            fg={info} attributes={BOLD}
+            on:click={() => props.onSelectSession?.(currentSessionId)}
+          >
+            {" [" + shortSessionId(currentSessionId) + "]"}
+          </span>
+        ) : (
+          <span
+            fg={dim} attributes={DIM | UNDERLINE}
+            on:click={() => props.onSelectSession?.(currentSessionId)}
+          >
+            {"  " + shortSessionId(currentSessionId)}
+          </span>
+        )}
         {/* Other available sessions */}
         <For each={otherSessions}>
           {(sid) =>
@@ -185,27 +187,6 @@ export function renderFilterBar(props: FilterBarProps) {
             on:click={() => props.onSelectSession?.(null)}
           >
             {"  all"}
-          </span>
-        )}
-      </text>
-
-      {/* Filter indicator */}
-      <text>
-        {hasActiveFilter ? (
-          <>
-            <span fg={info} attributes={BOLD}>
-              {"  filtered: " + filteredItems + " of " + totalItems + " items"}
-            </span>
-            <span
-              fg={muted} attributes={DIM | UNDERLINE}
-              on:click={() => props.onClose?.()}
-            >
-              {"  [close]"}
-            </span>
-          </>
-        ) : (
-          <span fg={muted} attributes={DIM}>
-            {"  " + totalItems + " total"}
           </span>
         )}
       </text>

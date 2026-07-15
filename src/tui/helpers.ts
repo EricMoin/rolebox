@@ -10,10 +10,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TextAttributes } from "@opentui/core";
 import type { RGBA } from "@opentui/core";
-import { formatDuration, truncate, shortSessionId, barSegments } from "../utils/display-helpers";
+import { formatDuration, truncate, shortSessionId, compactDuration, barSegments } from "../utils/display-helpers";
 import { buildSessionScope } from "../utils/session-scope";
 
-export { formatDuration, truncate, shortSessionId, barSegments, buildSessionScope };
+export { formatDuration, truncate, shortSessionId, compactDuration, barSegments, buildSessionScope };
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -23,12 +23,13 @@ export type HealthState = "ACTIVE" | "IDLE" | "NO_STATE" | "STALE" | "ERROR";
 // ── Constants ────────────────────────────────────────────────────────────
 
 export const REFRESH_MS = 1000;
-export const MAX_DISPATCH_ROWS = 6;
+export const MAX_DISPATCH_ROWS = 8;
 export const MAX_GRAPH_ROWS = 2;
 export const MAX_LOOP_ROWS = 3;
-export const MAX_FN_ROWS = 4;
+export const MAX_FN_ROWS = 6;
 export const BAR_WIDTH = 6;
 export const RULE_WIDTH = 36;
+export const INDENT = "  ";
 
 export const BOLD = TextAttributes.BOLD;
 export const DIM = TextAttributes.DIM;
@@ -50,7 +51,12 @@ export const G_BAR_ON   = "\u25a0"; // ■
 export const G_BAR_OFF  = "\u25a1"; // □
 export const G_SUB      = "\u2514\u2500"; // └─
 export const G_RULE     = "\u2500"; // ─
-export const G_STALLED  = "⚠"; // ⚠
+export const G_STALLED     = "⚠"; // ⚠
+
+// ── Compact glyphs (for inline/dense layouts) ─────────────────────────
+export const G_RUNNING_COMPACT = "\u00b7"; // ·
+export const G_DONE_COMPACT    = "\u00b7"; // ·
+
 export const LEN_VERSION = 8;
 export const LEN_DUR     = 8;
 

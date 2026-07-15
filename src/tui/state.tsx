@@ -447,7 +447,7 @@ export function createSidebarRenderer(workspaceDir: string) {
         <ErrorBoundary
           fallback={<text fg={rgbaToCSS(tc().error)} attributes={DIM_ITALIC}>{"Panel error"}</text>}
         >
-          <box paddingX={1} paddingY={1}>
+          <box paddingX={0} paddingY={0}>
             {renderHeader({
               c: tc(),
               version: PACKAGE_VERSION,
@@ -493,7 +493,6 @@ export function createSidebarRenderer(workspaceDir: string) {
               {/* When in detail view, show the detail panel instead of activity list */}
               <Show when={detailView() && detailData() !== null} fallback={
                 <Show when={snapshot() !== null}>
-                  <text>{" "}</text>
                   {(() => {
                     const snap = snapshot();
                     const data = filteredActivityData();

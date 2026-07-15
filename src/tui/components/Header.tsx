@@ -24,13 +24,6 @@ export function renderHeader(props: { c: ThemeColors; version: string } & Header
         <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{"Rolebox"}</span>
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" v" + truncate(props.version, LEN_VERSION)}</span>
       </text>
-      <text>
-        {"  "}
-        <span fg={rgbaToCSS(c.primary)} attributes={BOLD} on:click={() => props.onRefresh?.()}>{"[↻] "}</span>
-        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleMetrics?.()}>{"[≡] "}</span>
-        <span fg={rgbaToCSS(c.info)} attributes={BOLD} on:click={() => props.onToggleFilter?.()}>{"[◇] "}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={BOLD} on:click={() => props.onToggleHelp?.()}>{"[?]"}</span>
-      </text>
     </>
   );
 }

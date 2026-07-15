@@ -21,6 +21,17 @@ export function formatDuration(ms: number): string {
   return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
 }
 
+/**
+ * Format a millisecond duration as a compact single-unit string for inline display.
+ * Returns "0s" for zero or negative values.
+ */
+export function compactDuration(ms: number): string {
+  if (ms <= 0) return "0s";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
+  return `${Math.floor(ms / 60000)}m`;
+}
+
 // ── Text helpers ─────────────────────────────────────────────────────────
 
 /**
@@ -32,13 +43,19 @@ export function truncate(s: string, maxLen: number): string {
 }
 
 /**
- * Shorten a session ID for display, showing only the last 8 characters
- * prefixed with an ellipsis. Returns the original string if it is 12
- * characters or fewer.
+ * Shorten a session ID for display. For IDs of 15 characters or more, strips the
+ * `ses_` prefix (if present) and shows `first3…last5`. Falls back to the original
+ * ellipsis-prefixed-last-8 behavior for shorter IDs.
  */
 export function shortSessionId(id: string): string {
-  if (id.length <= 12) return id;
-  return "\u2026" + id.slice(-8);
+  if (id.length < 15) {
+    // Original fallback: return as-is if short enough, else …last8
+    if (id.length <= 12) return id;
+    return "\u2026" + id.slice(-8);
+  }
+  // For longer IDs: strip ses_ prefix, then show first3…last5
+  const stripped = id.startsWith("ses_") ? id.slice(4) : id;
+  return stripped.slice(0, 3) + "\u2026" + stripped.slice(-5);
 }
 
 // ── Progress bar ─────────────────────────────────────────────────────────
