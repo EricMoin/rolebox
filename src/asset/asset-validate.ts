@@ -190,13 +190,22 @@ async function resolveReferenceChecks(
   const issues: ValidationIssue[] = [];
   for (const { ownerId, ref } of checks) {
     if (!ref.filePath) continue;
-    const exists = await Bun.file(ref.filePath).exists();
-    if (!exists) {
+    try {
+      const exists = await Bun.file(ref.filePath).exists();
+      if (!exists) {
+        issues.push({
+          asset: `${ownerId}/${ref.name}`,
+          type: "reference",
+          issue: `file not found: ${ref.filePath}`,
+          severity: "error",
+        });
+      }
+    } catch (e) {
       issues.push({
         asset: `${ownerId}/${ref.name}`,
         type: "reference",
-        issue: `file not found: ${ref.filePath}`,
-        severity: "error",
+        issue: `Reference path could not be verified: ${ref.filePath} (${(e as Error).message})`,
+        severity: "warning",
       });
     }
   }

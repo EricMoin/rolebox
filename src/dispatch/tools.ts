@@ -216,12 +216,15 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           .join("\n");
       }
 
-      throw new Error(
-        `Task ${task.id} is still running (status: ${task.status}). ` +
-        `Do NOT call dispatch_output again — you will receive a <system-reminder> ` +
-        `notification when this task completes. Call dispatch_output only AFTER ` +
-        `receiving that notification.`,
-      );
+      return `Task still running — run dispatch_output after <system-reminder>
+
+Task ID: ${task.id}
+Description: ${task.description || "N/A"}
+Status: ${task.status}
+
+Do NOT call dispatch_output again. You will receive a <system-reminder>
+notification when this task completes. Call dispatch_output only AFTER
+receiving that notification.`;
     },
   });
 }

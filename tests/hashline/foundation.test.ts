@@ -7,6 +7,7 @@ import {
   restoreFileText,
   formatHashLine,
   formatHashLines,
+  formatReadOutput,
   BASE64_DICT,
 } from "../../src/hashline/index.ts";
 
@@ -306,5 +307,65 @@ describe("formatHashLines", () => {
     expect(result[0]).toMatch(/^1#[A-Za-z0-9_-]{3}\|a$/);
     expect(result[1]).toMatch(/^2#[A-Za-z0-9_-]{3}\|b$/);
     expect(result[2]).toMatch(/^3#[A-Za-z0-9_-]{3}\|c$/);
+  });
+});
+
+// ── formatReadOutput: long-line display truncation ─────────────────
+
+describe("formatReadOutput", () => {
+  it("truncates lines longer than 2000 characters in display output", () => {
+    // Build a short first line + a 3000-char second line
+    const shortLine = 'const x = "hello";';
+    const longContent = "x".repeat(3000);
+    const content = shortLine + "\n" + longContent + "\n";
+
+    const result = formatReadOutput(content, "/dev/null/test.ts");
+
+    // Header should be present
+    expect(result).toContain("version:");
+    expect(result).toContain("hashWidth:");
+    expect(result).toContain("totalLines: 2");
+
+    // The short line should appear in full
+    expect(result).toContain(shortLine);
+
+    // Second line: find its annotated output
+    const lines = result.split("\n");
+    // Header = 3 lines, then 2 data lines (indices 3 and 4)
+    const shortAnnotated = lines[3];
+    const longAnnotated = lines[4];
+
+    // Short line is intact
+    expect(shortAnnotated).toMatch(/\|const x = "hello";$/);
+
+    // Long line is truncated to 1997 chars + "..."
+    expect(longAnnotated).toMatch(/\|x{1997}\.\.\.$/);
+    expect(longAnnotated!.length).toBeLessThan(2000 + 100); // ~2000 + hash width + line number + pipe
+    // Verify the displayed content after "|" is exactly 2000 chars (1997 x's + "...")
+    const pipeIndex = longAnnotated!.indexOf("|");
+    const afterPipe = longAnnotated!.slice(pipeIndex + 1);
+    expect(afterPipe).toBe("x".repeat(1997) + "...");
+    expect(afterPipe.length).toBe(2000);
+  });
+
+  it("does not truncate lines of exactly 2000 characters", () => {
+    const content = "x".repeat(2000) + "\n";
+    const result = formatReadOutput(content, "/dev/null/test.ts");
+    const lines = result.split("\n");
+    const annotLine = lines[3];
+    const pipeIndex = annotLine!.indexOf("|");
+    const afterPipe = annotLine!.slice(pipeIndex + 1);
+    expect(afterPipe).toBe("x".repeat(2000));
+    expect(afterPipe.length).toBe(2000);
+  });
+
+  it("does not truncate lines shorter than 2000 characters", () => {
+    const shortLine = 'const y = "short";';
+    const content = shortLine + "\n";
+    const result = formatReadOutput(content, "/dev/null/test.ts");
+    expect(result).toContain(shortLine);
+    const lines = result.split("\n");
+    const annotLine = lines[3];
+    expect(annotLine).toContain(shortLine);
   });
 });

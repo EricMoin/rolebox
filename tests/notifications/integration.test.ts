@@ -645,6 +645,64 @@ describe("NotificationScheduler", () => {
     await new Promise((r) => setTimeout(r, 120));
     expect(fireCount).toBe(0);
   });
+
+  it("handles rapid schedule/cancel/evict interleaving without throwing or losing state", async () => {
+    // Use very low maxTrackedSessions so cleanupOldSessions evicts aggressively
+    // on every scheduleIdleNotification call.
+    const s = createScheduler({
+      idleDelayMs: 30,
+      activityGracePeriodMs: 0,
+      maxTrackedSessions: 3,
+    });
+
+    const fired = new Set<string>();
+
+    // Rapidly schedule many sessions — each triggers cleanupOldSessions,
+    // which must snapshot eviction candidates before mutating notifiedSessions.
+    // Interleave with activity so both eviction passes are exercised.
+    expect(() => {
+      for (let i = 0; i < 20; i++) {
+        s.scheduleIdleNotification("ses_evict_" + i, () => {
+          fired.add("ses_evict_" + i);
+        });
+        // Even indices get cancelled, mixing notified and activity-only state.
+        if (i % 2 === 0) {
+          s.markSessionActivity("ses_evict_" + i);
+        }
+      }
+    }).not.toThrow();
+
+    // Wait for all timers to settle.
+    await new Promise((r) => setTimeout(r, 600));
+
+    // State consistency: every pending timer must have a matching scheduledAt.
+    const state = s as any;
+    for (const id of state.pendingTimers.keys()) {
+      expect(state.scheduledAt.has(id)).toBe(true);
+    }
+
+    // No leaked executing state.
+    for (const id of state.executingNotifications) {
+      expect(state.notifiedSessions.has(id)).toBe(true);
+    }
+
+    // Scheduler remains usable after the eviction storm.
+    expect(() => {
+      s.scheduleIdleNotification("ses_post_storm", () => {});
+    }).not.toThrow();
+
+    // Final smoke check: total tracked state stays bounded.
+    const totalEntries =
+      state.notifiedSessions.size +
+      state.pendingTimers.size +
+      state.sessionActivitySinceIdle.size +
+      state.executingNotifications.size +
+      state.scheduledAt.size;
+    // With maxTrackedSessions=3, at most ~15 entries across 5 data structures.
+    expect(totalEntries).toBeLessThanOrEqual(20);
+
+    s.dispose();
+  });
 });
 
 // ════════════════════════════════════════════════════════════════════════

@@ -165,6 +165,10 @@ export function createMemoryUpdateTool() {
     async execute(input, context) {
       const store = new MemoryStore(context.directory);
       try {
+        const existing = store.read(input.id);
+        if (!existing) {
+          return `Memory ID ${input.id} not found — nothing updated`;
+        }
         const updates: Record<string, unknown> = {};
         if (input.title !== undefined) updates.title = input.title;
         if (input.content !== undefined) updates.content = input.content;

@@ -387,7 +387,11 @@ export class LoopCoordinator {
   }
 
   async failSession(sessionId: string, reason: string): Promise<void> {
-    const loop = this.loops.get(sessionId);
+    let loop = this.loops.get(sessionId);
+    if (!loop) {
+      const originId = this._workerToOrigin.get(sessionId);
+      if (originId) loop = this.loops.get(originId);
+    }
     if (!loop || TERMINAL_PHASES.has(loop.phase)) return;
     // Clean up the pending terminated listener before failing the loop
     this._cleanupWorkerListener(loop.activeWorkerTaskId);

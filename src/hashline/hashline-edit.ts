@@ -312,16 +312,23 @@ export function createHashlineEditTool() {
       for (const file of files) {
         const result = await processSingleFile(file.filePath, file.edits, file.version, file.hashWidth);
         results.push(result);
-        if (result.error) {
-          break;
-        }
       }
 
       const errors = results.filter((r) => r.error);
       if (errors.length > 0) {
-        const output: string[] = ["Error: Edit failed."];
+        const output: string[] = ["Error: Edit failed for some files."];
+        const successes = results.filter((r) => !r.error);
+        if (successes.length > 0) {
+          output.push("");
+          output.push("Succeeded files:");
+          for (const s of successes) {
+            output.push(`  ${s.filePath}`);
+          }
+        }
+        output.push("");
+        output.push("Failed files:");
         for (const err of errors) {
-          output.push(err.error!);
+          output.push(`  ${err.filePath}: ${err.error}`);
         }
         return output.join("\n");
       }
@@ -331,10 +338,14 @@ export function createHashlineEditTool() {
         writes.push({ filePath: files[i].filePath, content: results[i].content! });
       }
 
-      if (writes.length === 1) {
-        await atomicWriteFile(writes[0].filePath, writes[0].content);
-      } else {
-        await atomicWriteBatch(writes);
+      try {
+        if (writes.length === 1) {
+          await atomicWriteFile(writes[0].filePath, writes[0].content);
+        } else {
+          await atomicWriteBatch(writes);
+        }
+      } catch (err) {
+        return `Write failed: file system error (${err instanceof Error ? err.message : String(err)}).`;
       }
 
       const output: string[] = [];

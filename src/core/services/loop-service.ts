@@ -41,6 +41,7 @@ export class LoopService implements PluginService {
   private loopStore!: LoopStore;
   private stateDegraded = false;
   private degradedDetail = "";
+  private rawDirectory?: string;
 
   async init(ctx: PluginContext): Promise<void> {
     // Check if DispatchService is degraded. If so, skip init gracefully.
@@ -71,6 +72,7 @@ export class LoopService implements PluginService {
     }
 
     const dir = ctx.directory;
+    this.rawDirectory = ctx.rawDirectory;
 
     // Reuse existing if available (keyed by raw directory for cross-call consistency)
     const mapDir = ctx.rawDirectory;
@@ -147,6 +149,14 @@ export class LoopService implements PluginService {
       this.loopManager?.dispose();
     } catch {
       // Best-effort dispose
+    }
+    // Clean up hookState caches so next init() does not hit the stale fast-path
+    if (this.rawDirectory) {
+      hookState.loopManagerMap.delete(this.rawDirectory);
+      hookState.loopStoreMap.delete(this.rawDirectory);
+      if (hookState.activeLoopManager === this.loopManager) {
+        hookState.activeLoopManager = undefined;
+      }
     }
   }
 

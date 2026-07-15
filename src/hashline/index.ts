@@ -33,7 +33,7 @@ export type {
 } from "./types.ts";
 
 // Tool creation functions
-export { createHashlineReadTool } from "./hashline-read.ts";
+export { createHashlineReadTool, formatReadOutput } from "./hashline-read.ts";
 export { createHashlineEditTool } from "./hashline-edit.ts";
 
 // Re-export key utilities for external use

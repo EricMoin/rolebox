@@ -332,3 +332,132 @@ describe("PiSessionAdapter — sessionDir with tilde expansion", () => {
     expect(adapter.sessionDir).toBe("~/test-pi-sessions");
   });
 });
+
+import { createSessionSearchTool } from "../src/session/session-browse-tools.ts";
+import type { Message, SessionInfo } from "../src/session/types.ts";
+import type { SessionClientWrapper } from "../src/session/client.ts";
+import type { CanonicalToolContext } from "../src/platform/types.ts";
+
+// ── Mock client for session_search tests ─────────────────────────────────────
+
+function createMockSearchClient(
+  totalSessions: number,
+  matchInSessionIndex?: number,
+): SessionClientWrapper {
+  const sessions: SessionInfo[] = Array.from({ length: totalSessions }, (_, i) => ({
+    id: `session-${i}`,
+    projectID: "test",
+    directory: "/test",
+    title: `Session ${i}`,
+    version: "1.0",
+    time: { created: 1000 + i, updated: 2000 + i },
+  }));
+
+  return {
+    list: async () => sessions,
+    get: async (id: string) => sessions.find((s) => s.id === id) ?? null,
+    messages: async (id: string) => {
+      const idx = parseInt(id.replace("session-", ""), 10);
+      if (isNaN(idx)) return [];
+      const text = idx === matchInSessionIndex ? "needle match" : "irrelevant noise";
+      return [{
+        info: {
+          id: `msg-${idx}`,
+          sessionID: id,
+          role: "user" as const,
+          time: { created: 1000 + idx },
+        },
+        parts: [{
+          id: `msg-${idx}-p1`,
+          sessionID: id,
+          messageID: `msg-${idx}`,
+          type: "text" as const,
+          text,
+        }],
+      }];
+    },
+    children: async () => [],
+    todo: async () => [],
+    diff: async () => [],
+    status: async () => ({ type: "idle" as const }),
+    fork: async () => null,
+    prompt: async () => null,
+    promptSync: async () => null,
+    create: async () => null,
+    abort: async () => false,
+  } as unknown as SessionClientWrapper;
+}
+
+const searchToolContext: CanonicalToolContext = {
+  sessionID: "test",
+  messageID: "",
+  agent: "test",
+  directory: "/test",
+  worktree: "/test",
+  abort: new AbortController().signal,
+  metadata: () => {},
+  ask: async () => {},
+};
+
+describe("createSessionSearchTool — 200-session scanning cap", () => {
+  it("returns cap message when >200 sessions exist and no match in first 200", async () => {
+    const tool = createSessionSearchTool(createMockSearchClient(205));
+    const result = await tool.execute(
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      searchToolContext,
+    );
+    expect(result).toBe(
+      "No matches found in the first 200 sessions. Try specifying a session_id to narrow the search.",
+    );
+  });
+
+  it("appends footer when >200 sessions exist and match found within first 200", async () => {
+    const tool = createSessionSearchTool(createMockSearchClient(205, 42));
+    const result = await tool.execute(
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      searchToolContext,
+    );
+    expect(result).toContain("needle");
+    expect(result).toContain("(searched first 200 sessions only)");
+  });
+
+  it("no footer when sessions <= 200", async () => {
+    const tool = createSessionSearchTool(createMockSearchClient(150, 10));
+    const result = await tool.execute(
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      searchToolContext,
+    );
+    expect(result).toContain("needle");
+    expect(result).not.toContain("(searched first 200 sessions only)");
+  });
+
+  it("standard no-match message when <= 200 and no match found", async () => {
+    const tool = createSessionSearchTool(createMockSearchClient(150));
+    const result = await tool.execute(
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      searchToolContext,
+    );
+    expect(result).toBe("No matches found.");
+  });
+
+  it("session_id bypasses cap", async () => {
+    const tool = createSessionSearchTool(createMockSearchClient(205, 199));
+    const result = await tool.execute(
+      { query: "needle", session_id: "session-199", case_sensitive: false, limit: 20, include_tool_output: false },
+      searchToolContext,
+    );
+    expect(result).toContain("needle");
+    // When session_id is specified, cap is not applied
+    expect(result).not.toContain("(searched first 200 sessions only)");
+  });
+
+  it("cap-hit with match at last scanned session (index 199) still returns results", async () => {
+    const tool = createSessionSearchTool(createMockSearchClient(201, 199));
+    const result = await tool.execute(
+      { query: "needle", case_sensitive: false, limit: 20, include_tool_output: false },
+      searchToolContext,
+    );
+    expect(result).toContain("needle");
+    expect(result).toContain("(searched first 200 sessions only)");
+  });
+});

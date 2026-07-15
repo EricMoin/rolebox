@@ -260,34 +260,35 @@ describe("createDispatchOutputTool", () => {
     expect(result).toContain("nonexistent");
   });
 
-  it("throws error for running task", async () => {
+  it("returns string for running task", async () => {
     const running = makeTask({ status: "running", completedAt: undefined });
     const manager = {
       getTask: mock(() => running),
     } as unknown as DispatchManager;
     const tool = createDispatchOutputTool(manager);
 
-    expect(
-      tool.execute({ task_id: "bg_test123" }, mockToolContext),
-    ).rejects.toThrow("still running");
+    const result = await tool.execute(
+      { task_id: "bg_test123" },
+      mockToolContext,
+    );
+    expect(typeof result).toBe("string");
+    expect(result).toContain("still running");
   });
 
-  it("running task error includes guidance, no deprecation note", async () => {
+  it("running task returns guidance string, no deprecation note", async () => {
     const running = makeTask({ status: "running", completedAt: undefined });
     const manager = {
       getTask: mock(() => running),
     } as unknown as DispatchManager;
     const tool = createDispatchOutputTool(manager);
 
-    try {
-      await tool.execute({ task_id: "bg_test123" }, mockToolContext);
-      expect(true).toBe(false); // Should not reach here
-    } catch (e) {
-      const msg = (e as Error).message;
-      expect(msg).toContain("still running");
-      expect(msg).toContain("system-reminder");
-      expect(msg).not.toContain("deprecated");
-    }
+    const result = await tool.execute(
+      { task_id: "bg_test123" },
+      mockToolContext,
+    );
+    expect(result).toContain("still running");
+    expect(result).toContain("system-reminder");
+    expect(result).not.toContain("deprecated");
   });
 
   it("T11: 6 distinct task states produce 6 distinguishable outputs", async () => {

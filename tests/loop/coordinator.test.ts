@@ -694,6 +694,75 @@ describe("LoopCoordinator", () => {
     });
   });
 
+  describe("failSession", () => {
+    it("fails loop via origin session ID", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      const before = c.getLoopState("origin-1")!;
+      expect(before.phase).toBe("awaiting_worker");
+
+      await c.failSession("origin-1", "something went wrong");
+
+      const after = c.getLoopState("origin-1")!;
+      expect(after.phase).toBe("error");
+      expect(after.errorReason).toMatch(/something went wrong/);
+    });
+
+    it("no-ops when loop is already terminal", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register({ ...REGISTER_INPUT, iterations: 1 });
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1");
+      await new Promise((r) => setTimeout(r, 0));
+
+      const before = c.getLoopState("origin-1")!;
+      expect(before.phase).toBe("complete");
+
+      await c.failSession("origin-1", "too late");
+
+      const after = c.getLoopState("origin-1")!;
+      expect(after.phase).toBe("complete");
+      expect(after.errorReason).toBeUndefined();
+    });
+
+    it("falls back via _workerToOrigin when called with worker task ID", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      // After dispatch, _workerToOrigin maps task-1 → origin-1
+      // Calling failSession with the task ID triggers the fallback
+      await c.failSession("task-1", "worker error");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("error");
+      expect(state.errorReason).toMatch(/worker error/);
+    });
+
+    it("no-ops for unknown session with no _workerToOrigin mapping", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      // "unknown-42" is not an origin session, worker task, or worker session
+      // The fallback returns undefined → no-op
+      await c.failSession("unknown-42", "nobody home");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).not.toBe("error");
+    });
+  });
+
   describe("getAllLoopStates", () => {
     it("returns a copy of all loops", () => {
       const { adapter } = createFakeAdapter();
