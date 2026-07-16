@@ -85,6 +85,27 @@ describe("createDispatchTool", () => {
     expect(result).toBe("test response");
   });
 
+  it("sync mode returns formatted error on executeSync throw", async () => {
+    const resolved = new Map([["test-agent", { parentFullId: "role" }]]);
+    const manager = {
+      executeSync: mock(() => Promise.reject(new Error("sync failure"))),
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(manager, resolved);
+
+    const result = await tool.execute(
+      {
+        subagent: "test-agent",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Sync dispatch failed");
+    expect(result).toContain("test-agent");
+    expect(result).toContain("sync failure");
+  });
+
   it("async mode returns task_id format", async () => {
     const resolved = new Map([["test-agent", { parentFullId: "role" }]]);
     const task = makeTask({ id: "bg_test123", status: "pending" });
@@ -434,6 +455,47 @@ describe("createDispatchOutputTool", () => {
     expect(result).not.toContain("[Error");
   });
 
+  // ── Sidecar I/O Failure (getResult throws) ────────────────────────────
+
+  it("returns error message when getResult throws for unknown task (!task path)", async () => {
+    const manager = {
+      getTask: mock(() => undefined),
+      getResult: mock(() =>
+        Promise.reject(new Error("Sidecar I/O failure: permission denied")),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_sidecar_fail" },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Task Result Error");
+    expect(result).toContain("bg_sidecar_fail");
+    expect(result).toContain("Sidecar I/O failure");
+  });
+
+  it("returns error message when getResult throws for completed task", async () => {
+    const completed = makeTask({ status: "completed" });
+    const manager = {
+      getTask: mock(() => completed),
+      getResult: mock(() =>
+        Promise.reject(new Error("Sidecar read error")),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_test123" },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Task Result Error");
+    expect(result).toContain("bg_test123");
+    expect(result).toContain("Sidecar read error");
+  });
+
   // ── T15: Pagination, Tail, and Spill-to-File ──────────────────────────
 
   it("T15.1: small result returned inline with envelope, no spill", async () => {
@@ -598,6 +660,51 @@ describe("createDispatchOutputTool", () => {
     expect(result).not.toContain("Some postamble");
     // But the spilled file (if any) would have full text — in this case it's small so no spill
   });
+
+  it("returns 'Task Expired' for expired/stale task (standalone)", async () => {
+    const manager = {
+      getTask: mock(() => undefined),
+      getResult: mock(() =>
+        Promise.resolve({
+          kind: "expired",
+          text: "",
+          resultText: "",
+          hadFence: false,
+          totalChars: 0,
+          error: "Task result no longer available (was cleaned up)",
+        }),
+      ),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_stale" },
+      mockToolContext,
+    );
+
+    expect(result).toContain("Task Expired");
+    expect(result).toContain("bg_stale");
+    expect(result).toContain("cleaned up");
+    expect(result).not.toContain("not_found");
+  });
+
+  it("returns 'still running' guidance for pending-status task", async () => {
+    const pending = makeTask({ status: "pending", completedAt: undefined });
+    const manager = {
+      getTask: mock(() => pending),
+    } as unknown as DispatchManager;
+    const tool = createDispatchOutputTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_pending" },
+      mockToolContext,
+    );
+
+    expect(result).toContain("still running");
+    expect(result).toContain("system-reminder");
+    expect(result).toContain("Status: pending");
+    expect(result).not.toContain("deprecated");
+  });
 });
 
 // ── createDispatchCancelTool ─────────────────────────────────────────────
@@ -630,6 +737,53 @@ describe("createDispatchCancelTool", () => {
     );
 
     expect(result).toContain("not found");
+  });
+
+  it("returns 'not found' for completed task (already terminal)", async () => {
+    // Real cancelTask returns false for terminal-status tasks;
+    // the tool returns a graceful 'not found' message either way.
+    const manager = {
+      getTask: mock(() => makeTask({ status: "completed" })),
+      cancelTask: mock(() => Promise.resolve(false)),
+    } as unknown as DispatchManager;
+    const tool = createDispatchCancelTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_terminal" },
+      mockToolContext,
+    );
+
+    expect(result).toBe("Task 'bg_terminal' not found.");
+  });
+
+  it("returns 'not found' for error-status task (already terminal)", async () => {
+    const manager = {
+      getTask: mock(() => makeTask({ status: "error" })),
+      cancelTask: mock(() => Promise.resolve(false)),
+    } as unknown as DispatchManager;
+    const tool = createDispatchCancelTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_err_terminal" },
+      mockToolContext,
+    );
+
+    expect(result).toBe("Task 'bg_err_terminal' not found.");
+  });
+
+  it("returns 'not found' for cancelled task (already terminal)", async () => {
+    const manager = {
+      getTask: mock(() => makeTask({ status: "cancelled" })),
+      cancelTask: mock(() => Promise.resolve(false)),
+    } as unknown as DispatchManager;
+    const tool = createDispatchCancelTool(manager);
+
+    const result = await tool.execute(
+      { task_id: "bg_cancelled_terminal" },
+      mockToolContext,
+    );
+
+    expect(result).toBe("Task 'bg_cancelled_terminal' not found.");
   });
 });
 
