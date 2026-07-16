@@ -46,6 +46,7 @@ export interface RawEditOp {
 /** Per-file edit request */
 export interface FileEditRequest {
   filePath: string;
+  version: string;     // SHA-256 hex from hashline_read
   edits: RawEditOp[];
 }
 

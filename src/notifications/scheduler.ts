@@ -312,13 +312,23 @@ export class NotificationScheduler {
     const excess = allSessions.size - this.maxTrackedSessions;
     let evicted = 0;
 
-    // First pass: evict from notifiedSessions (insertion order ≈ LRU).
+    // First pass: snapshot eviction candidates from notifiedSessions
+    // (insertion order ≈ LRU) into a local array BEFORE mutating state,
+    // because cancelSession modifies notifiedSessions and other Maps/Sets
+    // that are being iterated — concurrent modification risks iteration
+    // invalidation or dropped state.
+    const toEvict: string[] = [];
     for (const id of this.notifiedSessions) {
       if (evicted >= excess) break;
       if (!this.executingNotifications.has(id)) {
-        this.cancelSession(id);
+        toEvict.push(id);
         evicted++;
       }
+    }
+
+    // Perform evictions after iteration completes.
+    for (const id of toEvict) {
+      this.cancelSession(id);
     }
 
     // Second pass (rare): if still over limit, evict sessions that have state

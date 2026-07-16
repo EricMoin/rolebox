@@ -6,10 +6,14 @@
  * @module
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TextAttributes } from "@opentui/core";
 import type { RGBA } from "@opentui/core";
+import { formatDuration, truncate, shortSessionId, compactDuration, barSegments } from "../utils/display-helpers";
+import { buildSessionScope } from "../utils/session-scope";
+
+export { formatDuration, truncate, shortSessionId, compactDuration, barSegments, buildSessionScope };
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -19,16 +23,18 @@ export type HealthState = "ACTIVE" | "IDLE" | "NO_STATE" | "STALE" | "ERROR";
 // ── Constants ────────────────────────────────────────────────────────────
 
 export const REFRESH_MS = 1000;
-export const MAX_DISPATCH_ROWS = 6;
+export const MAX_DISPATCH_ROWS = 8;
 export const MAX_GRAPH_ROWS = 2;
 export const MAX_LOOP_ROWS = 3;
-export const MAX_FN_ROWS = 4;
+export const MAX_FN_ROWS = 6;
 export const BAR_WIDTH = 6;
 export const RULE_WIDTH = 36;
+export const INDENT = "  ";
 
 export const BOLD = TextAttributes.BOLD;
 export const DIM = TextAttributes.DIM;
 export const ITALIC = TextAttributes.ITALIC;
+export const UNDERLINE = TextAttributes.UNDERLINE;
 export const DIM_ITALIC = DIM | ITALIC;
 
 // ── Glyphs ───────────────────────────────────────────────────────────────
@@ -45,7 +51,12 @@ export const G_BAR_ON   = "\u25a0"; // ■
 export const G_BAR_OFF  = "\u25a1"; // □
 export const G_SUB      = "\u2514\u2500"; // └─
 export const G_RULE     = "\u2500"; // ─
-export const G_STALLED  = "⚠"; // ⚠
+export const G_STALLED     = "⚠"; // ⚠
+
+// ── Compact glyphs (for inline/dense layouts) ─────────────────────────
+export const G_RUNNING_COMPACT = "\u00b7"; // ·
+export const G_DONE_COMPACT    = "\u00b7"; // ·
+
 export const LEN_VERSION = 8;
 export const LEN_DUR     = 8;
 
@@ -85,56 +96,9 @@ export function agentRoot(agent: string): string {
   return parts[0] ?? agent;
 }
 
-// ── Text helpers ─────────────────────────────────────────────────────────
-
-export function shortSessionId(id: string): string {
-  if (id.length <= 12) return id;
-  return "\u2026" + id.slice(-8);
-}
-
-export function truncate(s: string, maxLen: number): string {
-  return s.length > maxLen ? s.slice(0, maxLen - 1) + "\u2026" : s;
-}
-
-/**
- * Build a set of session IDs that belong to the given parent session.
- * Reads raw dispatch-*.json files (which contain parentSessionId, unlike
- * the MonitorSnapshot which strips it) and collects all childSessionIds
- * where parentSessionId === currentSessionId.
- *
- * Also includes the currentSessionId itself (for functions activated
- * directly in the primary session).
- */
-export function buildSessionScope(stateDir: string, currentSessionId: string): Set<string> {
-  const scope = new Set<string>([currentSessionId]);
-  try {
-    for (const f of readdirSync(stateDir)) {
-      if (!f.startsWith("dispatch-") || !f.endsWith(".json")) continue;
-      try {
-        const raw = JSON.parse(readFileSync(join(stateDir, f), "utf-8") as string) as {
-          tasks?: Array<{ parentSessionId?: string; sessionId?: string }>;
-        };
-        for (const t of raw.tasks ?? []) {
-          if (t.parentSessionId === currentSessionId && t.sessionId) {
-            scope.add(t.sessionId);
-          }
-        }
-      } catch { /* skip malformed */ }
-    }
-  } catch { /* dir missing */ }
-  return scope;
-}
+// ── Text helpers (re-exported from shared utils) ─────────────────────
 
 // ── Duration formatting ──────────────────────────────────────────────────
-
-export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "?";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.floor((ms % 60000) / 1000);
-  return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-}
 
 /** Format a time duration as a human-readable relative time like "3s ago", "2m ago", or "1h ago". */
 export function formatTimeAgo(ms: number): string {
@@ -143,14 +107,6 @@ export function formatTimeAgo(ms: number): string {
   if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
   if (ms < 3600000) return `${Math.floor(ms / 60000)}m`;
   return `${Math.floor(ms / 3600000)}h`;
-}
-
-// ── Progress bar ─────────────────────────────────────────────────────────
-
-export function barSegments(current: number, total: number, width = BAR_WIDTH): { filled: number; empty: number } {
-  if (total <= 0) return { filled: 0, empty: width };
-  const filled = Math.max(0, Math.min(width, Math.round((current / total) * width)));
-  return { filled, empty: width - filled };
 }
 
 // ── Status visuals ───────────────────────────────────────────────────────

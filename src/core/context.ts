@@ -2,6 +2,7 @@ import type { PluginInput } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "../types.ts";
 import type { PluginCoreLike } from "./service.ts";
 import type { EventBus } from "./event-bus.ts";
+import type { PlatformCapabilities } from "../platform/capabilities.ts";
 
 /**
  * Context passed to every PluginService's init() method.
@@ -33,4 +34,7 @@ export interface PluginContext {
   configDir?: string;
   /** Builtin functions directory path (for resolver context). */
   builtinDir?: string;
+  /** Platform capabilities for feature detection and graceful degradation.
+   * When absent, all capabilities are assumed supported (full opencode platform). */
+  capabilities?: PlatformCapabilities;
 }

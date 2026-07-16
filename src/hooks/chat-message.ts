@@ -136,7 +136,11 @@ export async function handleChatMessage(
     const loopCall = calls.find(c => c.name === LOOP_FUNCTION_NAME);
     if (!loopActive) {
       appendCorrection(state.pendingCorrections, input.sessionID, "Loop function is not enabled for this role");
-    } else if (loopCall && state.activeLoopManager) {
+    } else if (!state.activeLoopManager) {
+      appendCorrection(state.pendingCorrections, input.sessionID, "Loop manager is not available — loop cannot be started");
+    } else if (!loopCall) {
+      appendCorrection(state.pendingCorrections, input.sessionID, "Loop call not found in parsed functions");
+    } else {
       // Recursion block: reject nested loops
       if (state.activeLoopManager.isLoopSession(input.sessionID)) {
         appendCorrection(state.pendingCorrections, input.sessionID, "Nested loops are not supported");

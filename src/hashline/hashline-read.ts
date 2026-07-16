@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, formatHashLine } from "./hash.ts";
+import { canonicalizeFileText, computeFileVersion, computeLineHash, hashWidthForLineCount, formatHashLine } from "./hash.ts";
 
 export function createHashlineReadTool() {
   return defineTool({
@@ -100,9 +100,16 @@ export function formatReadOutput(
   }
 
   // Annotate lines within the window
+  // Lines exceeding 2000 chars get display-only truncation to match the documented
+  // contract. Hash is computed from the ORIGINAL full content so anchors are stable.
   for (let i = effectiveStart; i <= effectiveEnd; i++) {
     const lineContent = allLines[i - 1] ?? "";
-    result.push(formatHashLine(i, lineContent, hashWidth));
+    const displayContent =
+      lineContent.length > 2000
+        ? lineContent.slice(0, 1997) + "..."
+        : lineContent;
+    const hash = computeLineHash(lineContent, hashWidth, i);
+    result.push(`${i}#${hash}|${displayContent}`);
   }
 
   return result.join("\n");

@@ -104,6 +104,31 @@ function createFakeAdapter(
     injectNote: mock(async (_sessionId: string, _text: string) => {
       calls.push({ method: "injectNote", args: [_sessionId, _text] });
     }),
+
+    registerTerminatedListener: mock(
+      (
+        _taskId: string,
+        _callback: (taskId: string, status: string) => void,
+      ) => {
+        calls.push({
+          method: "registerTerminatedListener",
+          args: [_taskId, _callback],
+        });
+        return _callback;
+      },
+    ),
+
+    removeTerminatedListener: mock(
+      (
+        _taskId: string,
+        _callback: (taskId: string, status: string) => void,
+      ) => {
+        calls.push({
+          method: "removeTerminatedListener",
+          args: [_taskId, _callback],
+        });
+      },
+    ),
   };
 
   return { adapter, calls };
@@ -120,6 +145,11 @@ const REGISTER_INPUT = {
 };
 
 const AGENT = "test-agent";
+
+/** Flush microtask queue to let self-start kickoff from register complete */
+function flushMicrotask(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 0));
+}
 
 // ── Plugin mock client (minimal) ─────────────────────────────────────────
 
@@ -167,7 +197,7 @@ describe("Orchestrator Integration", () => {
   // ── Scenario 1: |loop:1| runs one worker round then completes ────────
 
   describe("Scenario 1: |loop:1| single round → complete", () => {
-    it("activates via onOriginIdle, dispatches once, completes after summary", async () => {
+    it("self-starts on register, dispatches once, completes after summary", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
@@ -176,7 +206,8 @@ describe("Orchestrator Integration", () => {
       expect(initial.phase).toBe("activating");
       expect(initial.current).toBe(1);
 
-      await c.onOriginIdle("origin-1");
+      // Self-start microtask fires, no onOriginIdle needed
+      await flushMicrotask();
 
       const afterActivate = c.getLoopState("origin-1")!;
       expect(afterActivate.phase).toBe("awaiting_worker");
@@ -191,10 +222,11 @@ describe("Orchestrator Integration", () => {
       await c.onWorkerCompleted("task-1");
 
       const afterWorker = c.getLoopState("origin-1")!;
-      expect(afterWorker.phase).toBe("summarizing");
-      expect(afterWorker.activeWorkerTaskId).toBeUndefined();
+      // Push chain: onWorkerCompleted chains through summarize → finalize
+      expect(afterWorker.phase).toBe("complete");
+      expect(afterWorker.current).toBe(2);
 
-      await c.onOriginIdle("origin-1");
+      await c.onOriginIdle("origin-1"); // no-op
 
       const final = c.getLoopState("origin-1")!;
       expect(final.phase).toBe("complete");
@@ -219,7 +251,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register({ ...REGISTER_INPUT, iterations: 1 });
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
       await c.onOriginIdle("origin-1");
 
@@ -256,7 +288,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
       c.register(REGISTER_INPUT);
 
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
       await c.onOriginIdle("origin-1");
 
@@ -295,7 +327,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
       c.register(REGISTER_INPUT);
 
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
       await c.onOriginIdle("origin-1");
 
@@ -324,7 +356,7 @@ describe("Orchestrator Integration", () => {
 
       c.register({ ...REGISTER_INPUT, mode: "fresh", iterations: 2 });
 
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
       await c.onOriginIdle("origin-1");
 
@@ -355,7 +387,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register({ ...REGISTER_INPUT, mode: "fresh", iterations: 2 });
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
       await c.onOriginIdle("origin-1");
 
@@ -372,7 +404,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
 
       expect(c.getLoopState("origin-1")!.phase).toBe("awaiting_worker");
 
@@ -382,12 +414,8 @@ describe("Orchestrator Integration", () => {
       await c.onWorkerCompleted("task-1");
 
       const afterWorker = c.getLoopState("origin-1")!;
-      expect(afterWorker.phase).toBe("summarizing");
-
-      await c.onOriginIdle("origin-1");
-
-      const final = c.getLoopState("origin-1")!;
-      expect(final.phase).toBe("cancelled");
+      // Push chain: sees cancelRequested in _advanceFromSummarizing → finalize cancelled
+      expect(afterWorker.phase).toBe("cancelled");
 
       const injectCalls = calls.filter(
         (call) => call.method === "injectNote",
@@ -398,18 +426,16 @@ describe("Orchestrator Integration", () => {
       expect(cancelInject).not.toBeUndefined();
     });
 
-    it("cancelRequested between rounds (after summary) finalizes as cancelled", async () => {
+    it("cancelRequested before push chain finalizes as cancelled", async () => {
       const { adapter } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
 
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-
+      await flushMicrotask(); // self-start → dispatch round 1
+      // Cancel before onWorkerCompleted triggers the push chain
       c.requestCancel("origin-1");
-
-      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-1"); // push chain: check cancelRequested → finalize cancelled
 
       expect(c.getLoopState("origin-1")!.phase).toBe("cancelled");
     });
@@ -423,7 +449,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
 
       const systemText = `${DISPATCH_COMPLETION_MARKER} task done`;
@@ -550,7 +576,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
 
       const state = c.getLoopState("origin-1")!;
@@ -580,7 +606,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
 
       const preDispatchCount = calls.filter(
@@ -605,7 +631,7 @@ describe("Orchestrator Integration", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
 
       expect(c.isActiveLoopOrigin("origin-1")).toBe(false);
@@ -623,7 +649,7 @@ describe("Orchestrator Integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks([], client, new Map(), new Map(), tmpDir);
+      hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
@@ -644,7 +670,7 @@ describe("Orchestrator Integration", () => {
         iterations: 3,
       });
 
-      await activeLoopManager!.onOriginIdle("origin-nested");
+      await flushMicrotask();
       const loop = activeLoopManager!.getLoopState("origin-nested")!;
       const workerSessionId = loop.activeWorkerSessionId!;
 

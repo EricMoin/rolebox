@@ -157,6 +157,9 @@ function isPrivateIpv4(ip: string): boolean {
   // 192.168.x.x — RFC 1918 Class C
   if (parts[0] === 192 && parts[1] === 168) return true;
 
+  // 169.254.x.x — link-local (RFC 3927)
+  if (parts[0] === 169 && parts[1] === 254) return true;
+
   return false;
 }
 

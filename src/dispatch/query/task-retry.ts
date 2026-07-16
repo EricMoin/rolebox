@@ -48,10 +48,16 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         );
       }
 
-      // Step 3: Build the new DispatchInput from the original task
-      const prompt = modify_prompt
+      let prompt = modify_prompt
         ? modify_prompt + "\n" + task.prompt
         : task.prompt;
+
+      // Step 3.5: Inject checkpoint resume context if a checkpoint exists
+      const checkpointContext = await dispatchManager.getCheckpointStore().buildRetryContext(task_id);
+      if (checkpointContext) {
+        log.debug(`task_retry id=${task_id}: injecting checkpoint context into retry prompt`);
+        prompt = checkpointContext + "\n\n---\n\n" + prompt;
+      }
 
       const dispatchInput: DispatchInput = {
         subagent: task.agent,
@@ -67,7 +73,6 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         agent: context.agent,
         directory: context.directory,
       };
-
       // Step 5: Call reopenForContinuation
       try {
         const retriedTask = await dispatchManager.reopenForContinuation(

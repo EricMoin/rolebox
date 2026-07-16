@@ -18,6 +18,10 @@ export class LoopCoordinator {
   private loops = new Map<string, LoopState>();
   private _advancing = new Set<string>();
   private _workerToOrigin = new Map<string, string>();
+  /** Map of workerTaskId → terminated listener callback, for cleanup on cancel/fail */
+  private _workerListeners = new Map<string, (taskId: string, status: string) => void>();
+  /** Completions that arrived while the _advancing re-entrancy guard was held, keyed by originSessionId. */
+  private _pendingCompletions = new Map<string, string[]>();
 
   constructor(
     private adapter: IDispatchAdapter,
@@ -30,6 +34,120 @@ export class LoopCoordinator {
 
   private _persist(): void {
     this.opts?.persist?.(this.loops);
+  }
+
+  // ── Private helpers (push-chain) ────────────────────────────────────────
+
+  /**
+   * Register a fire-once terminated listener on the loop's active worker task.
+   * When the worker completes, the listener triggers onWorkerCompleted, which
+   * chains into _advanceFromSummarizing to continue the push-driven loop.
+   */
+  private _registerWorkerListener(loop: LoopState): void {
+    if (!loop.activeWorkerTaskId) return;
+    log.debug("loop-trace: registerWorkerListener", { originSessionId: loop.originSessionId, taskId: loop.activeWorkerTaskId });
+    const taskId = loop.activeWorkerTaskId;
+    const cb = this.adapter.registerTerminatedListener(
+      taskId,
+      (_taskId: string, _status: string) => {
+        // Fire-once: auto-removed by the registry after invocation.
+        // Remove our local reference.
+        this._workerListeners.delete(_taskId);
+        // Fire-and-forget: onWorkerCompleted catches internal errors
+        // and routes them through failLoop.
+        this.onWorkerCompleted(_taskId);
+      },
+    );
+    this._workerListeners.set(taskId, cb);
+  }
+
+  /**
+   * Remove a pending terminated listener for a worker task that is being
+   * cancelled or has errored (prevents callback leakage).
+   */
+  private _cleanupWorkerListener(workerTaskId: string | undefined): void {
+    if (!workerTaskId) return;
+    const cb = this._workerListeners.get(workerTaskId);
+    if (cb) {
+      this.adapter.removeTerminatedListener(workerTaskId, cb);
+      this._workerListeners.delete(workerTaskId);
+    }
+  }
+
+  /**
+   * Self-driving push-chain step: read summary, advance round count, then
+   * either finalize (all rounds done) or dispatch the next round and register
+   * its listener.  This runs inside the same _advancing critical section as
+   * onWorkerCompleted, so no external idle event is needed.
+   */
+  private async _advanceFromSummarizing(originSessionId: string): Promise<void> {
+    const loop = this.loops.get(originSessionId);
+    log.debug("loop-trace: _advanceFromSummarizing entry", { originSessionId, phase: loop?.phase, round: loop?.current });
+    if (!loop) return;
+    if (loop.phase !== "summarizing") return;
+
+    await handleSummary(
+      this.adapter,
+      loop,
+      this._workerToOrigin,
+      async () => {
+        log.debug("loop-trace: dispatchRound beginning in handleSummary callback", { originSessionId, round: loop.current });
+        await dispatchRound(this.adapter, loop, this._workerToOrigin, {
+          roundTimeoutMs: this.opts?.roundTimeoutMs,
+        });
+        log.debug("loop-trace: dispatchRound complete in handleSummary", { originSessionId, newTaskId: loop.activeWorkerTaskId, phase: loop.phase, round: loop.current });
+      },
+      { delayMs: this.opts?.delayMs },
+    );
+
+    // If handleSummary dispatched a new round (phase became awaiting_worker),
+    // register its terminated listener to continue the push chain.
+    // If it finalized (complete/cancelled), no listener needed.
+    // Use phase accessor to bypass TS narrowing (handleSummary mutates phase)
+    if ((loop as LoopState).phase === "awaiting_worker" && loop.activeWorkerTaskId) {
+      this._registerWorkerListener(loop);
+    }
+    log.debug("loop-trace: _advanceFromSummarizing exit", { originSessionId, phase: (loop as LoopState).phase, round: (loop as LoopState).current });
+  }
+
+  /**
+   * Self-kickoff for loops in the activating phase. When register() creates a
+   * loop with phase="activating", or reSubscribeListeners() recovers an
+   * activating loop after restart, this method transitions it to dispatching
+   * and dispatches the first round. This eliminates the previous dependency on
+   * onOriginIdle for first-round kickoff.
+   */
+  private async _kickoffFromActivating(originSessionId: string): Promise<void> {
+    const loop = this.loops.get(originSessionId);
+    if (!loop) return;
+    if (loop.phase !== "activating") return;
+    if (this._advancing.has(originSessionId)) return;
+
+    this._advancing.add(originSessionId);
+    try {
+      loop.phase = "dispatching";
+      await dispatchRound(this.adapter, loop, this._workerToOrigin, {
+        roundTimeoutMs: this.opts?.roundTimeoutMs,
+      });
+      // Register terminated listener on the first worker task,
+      // starting the push-driven chain.
+      this._registerWorkerListener(loop);
+    } catch (err) {
+      await failLoop(this.adapter, loop, err instanceof Error ? err.message : String(err), this._workerToOrigin);
+    } finally {
+      this._advancing.delete(originSessionId);
+      // Drain any completions that arrived while we held the critical section.
+      {
+        const pending = this._pendingCompletions.get(originSessionId);
+        if (pending && pending.length > 0) {
+          this._pendingCompletions.delete(originSessionId);
+          const nextTaskId = pending[pending.length - 1];
+          log.debug("loop-trace: draining deferred completion", { originSessionId, taskId: nextTaskId });
+          queueMicrotask(() => { void this.onWorkerCompleted(nextTaskId); });
+        }
+      }
+      this._persist();
+    }
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -62,6 +180,7 @@ export class LoopCoordinator {
 
     this.loops.set(input.originSessionId, state);
     this._persist();
+    void Promise.resolve().then(() => this._kickoffFromActivating(input.originSessionId));
   }
 
   async onOriginIdle(originSessionId: string): Promise<void> {
@@ -72,23 +191,6 @@ export class LoopCoordinator {
     this._advancing.add(originSessionId);
     try {
       switch (loop.phase) {
-        case "activating":
-          loop.phase = "dispatching";
-          await dispatchRound(this.adapter, loop, this._workerToOrigin, {
-            roundTimeoutMs: this.opts?.roundTimeoutMs,
-          });
-          break;
-        case "summarizing":
-          await handleSummary(
-            this.adapter,
-            loop,
-            this._workerToOrigin,
-            () => dispatchRound(this.adapter, loop, this._workerToOrigin, {
-              roundTimeoutMs: this.opts?.roundTimeoutMs,
-            }),
-            { delayMs: this.opts?.delayMs },
-          );
-          break;
         default:
           break;
       }
@@ -102,13 +204,41 @@ export class LoopCoordinator {
 
   async onWorkerCompleted(workerTaskId: string): Promise<void> {
     const originSessionId = this._workerToOrigin.get(workerTaskId);
-    if (!originSessionId) return;
+    if (!originSessionId) {
+      log.debug("loop-trace: onWorkerCompleted guard — originSessionId not found", { workerTaskId });
+      return;
+    }
 
     const loop = this.loops.get(originSessionId);
-    if (!loop) return;
-    if (loop.phase !== "awaiting_worker") return;
-    if (loop.activeWorkerTaskId !== workerTaskId) return;
-    if (this._advancing.has(originSessionId)) return;
+    if (!loop) {
+      log.debug("loop-trace: onWorkerCompleted guard — loop not found", { workerTaskId, originSessionId });
+      return;
+    }
+    if (loop.phase !== "awaiting_worker") {
+      log.debug("loop-trace: onWorkerCompleted guard — phase mismatch", { workerTaskId, originSessionId, phase: loop.phase });
+      return;
+    }
+    if (loop.activeWorkerTaskId !== workerTaskId) {
+      log.debug("loop-trace: onWorkerCompleted guard — taskId mismatch", { workerTaskId, originSessionId, activeWorkerTaskId: loop.activeWorkerTaskId });
+      return;
+    }
+
+    log.debug("loop-trace: onWorkerCompleted entry", {
+      workerTaskId,
+      originSessionId,
+      phase: loop.phase,
+      activeWorkerTaskId: loop.activeWorkerTaskId,
+      advancingHeld: this._advancing.has(originSessionId),
+    });
+
+    if (this._advancing.has(originSessionId)) {
+      // Queue for processing after the current critical section exits.
+      let pending = this._pendingCompletions.get(originSessionId);
+      if (!pending) { pending = []; this._pendingCompletions.set(originSessionId, pending); }
+      pending.push(workerTaskId);
+      log.debug("loop-trace: onWorkerCompleted deferred — _advancing held", { originSessionId, workerTaskId });
+      return;
+    }
 
     this._advancing.add(originSessionId);
     try {
@@ -147,10 +277,25 @@ export class LoopCoordinator {
       loop.summaryBoundaryMessageId = lastMsgId;
       loop.phase = "summarizing";
       loop.updatedAt = Date.now();
+
+      // Push-chain: advance from summarizing → dispatch next round or finalize.
+      // This runs inside the same _advancing critical section, so it is
+      // serialised and does not depend on an external idle event.
+      await this._advanceFromSummarizing(originSessionId);
     } catch (err) {
       await failLoop(this.adapter, loop, err instanceof Error ? err.message : String(err), this._workerToOrigin);
     } finally {
       this._advancing.delete(originSessionId);
+      // Drain any completions that arrived while we held the critical section.
+      {
+        const pending = this._pendingCompletions.get(originSessionId);
+        if (pending && pending.length > 0) {
+          this._pendingCompletions.delete(originSessionId);
+          const nextTaskId = pending[pending.length - 1];
+          log.debug("loop-trace: draining deferred completion", { originSessionId, taskId: nextTaskId });
+          queueMicrotask(() => { void this.onWorkerCompleted(nextTaskId); });
+        }
+      }
       this._persist();
     }
   }
@@ -182,6 +327,9 @@ export class LoopCoordinator {
       this._persist();
       return;
     }
+
+    // Clean up the pending terminated listener before cancelling the worker
+    this._cleanupWorkerListener(loop.activeWorkerTaskId);
 
     this._advancing.add(loop.originSessionId);
     try {
@@ -239,8 +387,14 @@ export class LoopCoordinator {
   }
 
   async failSession(sessionId: string, reason: string): Promise<void> {
-    const loop = this.loops.get(sessionId);
+    let loop = this.loops.get(sessionId);
+    if (!loop) {
+      const originId = this._workerToOrigin.get(sessionId);
+      if (originId) loop = this.loops.get(originId);
+    }
     if (!loop || TERMINAL_PHASES.has(loop.phase)) return;
+    // Clean up the pending terminated listener before failing the loop
+    this._cleanupWorkerListener(loop.activeWorkerTaskId);
     await failLoop(this.adapter, loop, reason, this._workerToOrigin);
     this._persist();
   }
@@ -254,9 +408,94 @@ export class LoopCoordinator {
     this._persist();
   }
 
+  /**
+   * Re-subscribe terminated listeners and advance loops after a restart.
+   *
+   * Called after reconcile + restoreState has loaded persisted loops and
+   * reconciled their phase against dispatch task state. For each non-terminal
+   * loop:
+   *
+   * - `awaiting_worker` with a completed worker → triggers onWorkerCompleted
+   *   to advance through the push chain (summary → next round or finalize).
+   * - `awaiting_worker` with a still-running worker → re-subscribes the
+   *   terminated listener so the push chain resumes when the worker finishes.
+   * - `summarizing` → calls _advanceFromSummarizing to resume the push chain
+   *   (the worker completed during the restart window).
+   *
+   * Each transition runs inside the _advancing re-entrancy guard to stay
+   * serialised with normal push-chain operations.
+   */
+  async reSubscribeListeners(): Promise<void> {
+    const nonTerminal = this.getNonTerminalLoops();
+
+    for (const loop of nonTerminal) {
+      const originSessionId = loop.originSessionId;
+
+      // ── summarizing: advance the push chain ─────────────────────
+      if (loop.phase === "summarizing") {
+        if (this._advancing.has(originSessionId)) continue;
+        this._advancing.add(originSessionId);
+        try {
+          await this._advanceFromSummarizing(originSessionId);
+        } catch (err) {
+          log.warn("reSubscribeListeners: _advanceFromSummarizing failed", {
+            originSessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          this._advancing.delete(originSessionId);
+        }
+        continue;
+      }
+
+      // ── activating: self-kickoff first round ──────────────────────
+      if (loop.phase === "activating") {
+        await this._kickoffFromActivating(originSessionId);
+        continue;
+      }
+
+      // ── awaiting_worker: re-subscribe or catch already-completed ─
+      if (loop.phase === "awaiting_worker" && loop.activeWorkerTaskId) {
+        const taskId = loop.activeWorkerTaskId;
+
+        let status: string | undefined;
+        try {
+          status = await this.adapter.getTaskStatus(taskId);
+        } catch {
+          log.warn("reSubscribeListeners: getTaskStatus failed", { taskId });
+          // Treat as unknown — do nothing, the loop stays awaiting_worker
+          continue;
+        }
+
+        if (!status) {
+          // Worker task not found in dispatch system — mark interrupted
+          loop.phase = "interrupted";
+          loop.errorReason = "Worker task vanished during restart recovery";
+          loop.updatedAt = Date.now();
+          this._persist();
+          continue;
+        }
+
+        // Worker already completed during restart — push-chain advance
+        if (status === "completed" || status === "error" || status === "cancelled" || status === "timeout") {
+          await this.onWorkerCompleted(taskId);
+          continue;
+        }
+
+        // Worker still running/pending — re-subscribe terminated listener
+        if (status === "running" || status === "pending") {
+          this._registerWorkerListener(loop);
+          continue;
+        }
+      }
+    }
+  }
+
   dispose(): void {
     this.loops.clear();
     this._workerToOrigin.clear();
     this._advancing.clear();
+    this._workerListeners.clear();
+    this._pendingCompletions.clear();
   }
 }

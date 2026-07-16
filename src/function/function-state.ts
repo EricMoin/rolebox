@@ -2,7 +2,7 @@ import { defineTool, type CanonicalToolContext } from "../platform/ports/tool-fa
 import { z } from "zod";
 import { functionRuntime } from "./runtime-state.ts";
 import { ArtifactStore } from "./artifact-store.ts";
-import { roleFunctionsMap } from "../index.ts";
+import { roleFunctionsMap } from "../resolver/registry.ts";
 import type { ResolvedFunction } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
 

@@ -95,9 +95,18 @@ export function createDispatchTool(
         ].join("\n");
       }
 
-      const result = await manager.executeSync(dispatchInput, parentCtx);
-
-      return result;
+      try {
+        const result = await manager.executeSync(dispatchInput, parentCtx);
+        return result;
+      } catch (error) {
+        return [
+          "Sync dispatch failed.\n",
+          `Subagent: ${input.subagent}`,
+          `Description: ${input.description || "N/A"}`,
+          "",
+          `${(error as Error).message}`,
+        ].join("\n");
+      }
     },
   });
 }
@@ -149,7 +158,17 @@ export function createDispatchOutputTool(manager: DispatchManager) {
       const task = manager.getTask(input.task_id);
 
       if (!task) {
-        const result = await manager.getResult(input.task_id);
+        let result;
+        try {
+          result = await manager.getResult(input.task_id);
+        } catch (err) {
+          return [
+            "Task Result Error",
+            "",
+            `Task ID: ${input.task_id}`,
+            `Error reading result: ${(err as Error).message}`,
+          ].join("\n");
+        }
         if (result.kind === "expired") {
           return [
             "Task Expired",
@@ -180,7 +199,18 @@ export function createDispatchOutputTool(manager: DispatchManager) {
       }
 
       if (task.status === "completed") {
-        const result = await manager.getResult(input.task_id);
+        let result;
+        try {
+          result = await manager.getResult(input.task_id);
+        } catch (err) {
+          return [
+            "Task Result Error",
+            "",
+            `Task ID: ${task.id}`,
+            `Description: ${task.description ?? "N/A"}`,
+            `Error reading result: ${(err as Error).message}`,
+          ].join("\n");
+        }
         return buildCompletedOutput(
           task,
           result,
@@ -208,7 +238,7 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           statusLabel,
           "",
           `Task ID: ${task.id}`,
-          `Description: ${task.description || "N/A"}`,
+          `Description: ${task.description ?? "N/A"}`,
           `Status: ${task.status}`,
           task.error ? `Error: ${task.error}` : "",
         ]
@@ -216,12 +246,15 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           .join("\n");
       }
 
-      throw new Error(
-        `Task ${task.id} is still running (status: ${task.status}). ` +
-        `Do NOT call dispatch_output again — you will receive a <system-reminder> ` +
-        `notification when this task completes. Call dispatch_output only AFTER ` +
-        `receiving that notification.`,
-      );
+      return `Task still running — run dispatch_output after <system-reminder>
+
+Task ID: ${task.id}
+Description: ${task.description ?? "N/A"}
+Status: ${task.status}
+
+Do NOT call dispatch_output again. You will receive a <system-reminder>
+notification when this task completes. Call dispatch_output only AFTER
+receiving that notification.`;
     },
   });
 }

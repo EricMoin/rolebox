@@ -91,13 +91,21 @@ export function flushPersistSync(deps: CompletionOrchestratorDeps): void {
 
 /**
  * Remove a task and its event state from all in-memory maps, persist,
- * and schedule-side cleanup of sidecar files.
+ * schedule-side cleanup of sidecar files, clear progress events,
+ * delete checkpoints, and clear milestone threshold tracking.
  */
 export function cleanupTask(deps: CompletionOrchestratorDeps, taskId: string): void {
   const t = deps.tasks.get(taskId);
   if (t?.sessionId) deps.sessionToTask.delete(t.sessionId);
   deps.eventState.delete(taskId);
   deps.tasks.delete(taskId);
+
+  // Fire-and-forget checkpoint delete (disk I/O, never blocks)
+  deps.checkpointStore.deleteCheckpoint(taskId).catch(() => {});
+  // Clean progress events from memory and disk
+  deps.progressStore.clearProgress(taskId);
+  // Clear milestone threshold tracking for this task
+  deps.clearEmittedThresholds(taskId);
 
   persistState(deps);
   deps.cleanedUpTasks.set(taskId, Date.now());

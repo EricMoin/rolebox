@@ -78,7 +78,28 @@ export interface MonitorSnapshot {
   dispatchSummary: DispatchSummary;
   /** Aggregate concurrency status derived from metrics or dispatch state */
   concurrency: ConcurrencyStatus;
-  }
+
+  /** Progress data per task (task_id -> latest progress summary).
+   *  Populated from .rolebox/state/progress/ files.
+   *  Optional — present when any progress files exist. */
+  progress?: Record<string, {
+    latest_stage: string;
+    percentage?: number;
+    message: string;
+    event_count: number;
+  }>;
+
+  /** Checkpoint data per task (task_id -> latest checkpoint summary).
+   *  Populated from .rolebox/state/checkpoints/ files.
+   *  Optional — present when any checkpoint files exist. */
+  checkpoints?: Record<string, {
+    checkpoint_id: string;
+    phase: string;
+    completed_count: number;
+    remaining_count: number;
+    created_at: string;
+  }>;
+}
 
 export interface LoopSnapshot {
   /** Session ID of the origin loop session */

@@ -1,18 +1,40 @@
-import type { PluginService } from "../service.ts";
+import type { PluginService, ServiceHealth } from "../service.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
+import type { PlatformCapabilities } from "../../platform/capabilities.ts";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { DispatchManager } from "../../dispatch/core/manager.ts";
-import { mergeConfig, resolveEnvConfig, DEFAULT_CONFIG, DEFAULT_MAX_QUEUE_DEPTH, DEFAULT_SYNC_RESERVED_SLOTS } from "../../dispatch/config.ts";
-import type { IConcurrencyManager } from "../../dispatch/concurrency/concurrency.ts";
 import { cleanExpiredState } from "../../dispatch/persistence/state-gc.ts";
 import { stateDirFor } from "../../utils/state-paths.ts";
-import { RoleMode } from "../../constants.ts";
 import { hookState } from "../../hooks/state.ts";
-import type { ResolvedSubAgent } from "../../types.ts";
 import { createSubLogger } from "../../logger.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode-session.ts";
+import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
+import {
+  createDispatchManager,
+  buildSubagentLineage,
+} from "../../dispatch/factory.ts";
 
 const log = createSubLogger("dispatch-service");
+
+/** Message shown by stub dispatch tools when the service is degraded on Pi. */
+const PI_UNAVAILABLE_MSG =
+  "Dispatch is not available on Pi — use opencode for multi-agent workflows.";
+
+/**
+ * Creates a stub tool definition that returns a fixed "not available" message.
+ * Used when the service is permanently degraded (e.g., on Pi).
+ */
+function stubTool(description: string): {
+  description: string;
+  args: Record<string, unknown>;
+  exec: (...args: unknown[]) => Promise<string>;
+} {
+  return {
+    description,
+    args: {},
+    exec: async () => PI_UNAVAILABLE_MSG,
+  };
+}
 
 /**
  * Extracts the DispatchManager lifecycle from plugin-hooks.ts into its own
@@ -21,6 +43,11 @@ const log = createSubLogger("dispatch-service");
  *
  * Init order: no dependencies (empty dependencies list).
  * Tool registration is deferred to ToolService (S8).
+ *
+ * Graceful degradation: when capabilities indicate the platform does not
+ * support session creation (hasSessionCreate=false, as on Pi), the service
+ * skips DispatchManager construction, registers stub tools that return
+ * clear "not available" messages, and reports degraded health.
  */
 export class DispatchService implements PluginService, ToolContributor {
   readonly name = "dispatch-service";
@@ -32,14 +59,40 @@ export class DispatchService implements PluginService, ToolContributor {
   private subagentModelKey = new Map<string, string>();
   private recoverFailed = false;
 
+  /** Optional session client override. When set, used in place of OpencodeSessionAdapter. */
+  private readonly sessionClient: ISessionClient | undefined;
+
+  constructor(options?: { sessionClient?: ISessionClient }) {
+    this.sessionClient = options?.sessionClient;
+  }
+
+  /** True when the service is permanently degraded (e.g., on Pi). */
+  private degraded = false;
+  private degradedDetail = "";
+
   async init(ctx: PluginContext): Promise<void> {
-    // Clear stale entries from previous init (supports hot-reload of deleted roles)
+    // Check for graceful degradation: platforms without session create
+    // and no injected session client cannot run the dispatch system.
+    const caps = ctx.capabilities;
+    if (!this.sessionClient && caps && !caps.hasSessionCreate) {
+      this.degraded = true;
+      this.degradedDetail = `session create not supported on Pi and no session client provided`;
+      log.warn(`dispatch-service: degraded (session create not supported on ${caps.platformId})`);
+      return;
+    }
+
+    // Clear and repopulate in-place instead of reassigning — preserves the Map
+    // reference held by dispatch tool closures from before restartService().
     this.resolvedSubagents.clear();
     this.subagentModelKey.clear();
 
-    // 1. Build subagent lineage maps (was registerSubagentLineage in plugin-hooks.ts)
-    for (const role of ctx.resolvedRoles) {
-      this.registerSubagentLineage(role.subagents, role.id, role.config.model);
+    // 1. Build subagent lineage maps from shared factory.
+    const lineage = buildSubagentLineage(ctx.resolvedRoles);
+    for (const [k, v] of lineage.resolvedSubagents) {
+      this.resolvedSubagents.set(k, v);
+    }
+    for (const [k, v] of lineage.subagentModelKey) {
+      this.subagentModelKey.set(k, v);
     }
 
     // 2. Reuse or create DispatchManager (was lines 155-167 in plugin-hooks.ts)
@@ -48,41 +101,23 @@ export class DispatchService implements PluginService, ToolContributor {
     const storeDir = ctx.directory;
     let dispatchManager = hookState.managerMap.get(mapDir);
     if (!dispatchManager) {
-      const primaryRole = ctx.resolvedRoles.find(
-        (r) => r.config.mode === RoleMode.Primary,
-      );
-      const mergedConfig = mergeConfig(
-        DEFAULT_CONFIG,
-        primaryRole?.dispatchConfig,
-        resolveEnvConfig(),
-      );
-      // Check for custom concurrency policy from role config
-      let customConcurrency: IConcurrencyManager | undefined;
-      if (primaryRole?.dispatchConfig?.concurrency_policy) {
-        customConcurrency = primaryRole.dispatchConfig.concurrency_policy(
-          mergedConfig.maxConcurrent,
-          mergedConfig.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
-          mergedConfig.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
-          mergedConfig.retryAfterMs,
-        );
-      }
+      const sessionClient =
+        this.sessionClient ?? new OpencodeSessionAdapter(ctx.client);
 
-      dispatchManager = new DispatchManager(
-        new OpencodeSessionAdapter(ctx.client),
-        mergedConfig,
-        this.subagentModelKey,
-        customConcurrency,
-      );
-      dispatchManager.setStoreDirectory(storeDir);
+      const result = await createDispatchManager({
+        sessionClient,
+        resolvedRoles: ctx.resolvedRoles,
+        storeDirectory: storeDir,
+      });
+
+      dispatchManager = result.manager;
       hookState.managerMap.set(mapDir, dispatchManager);
 
       // Graceful degradation: recover() failure → log error + use empty state
-      try {
-        await dispatchManager.recover();
-      } catch (err) {
+      if (result.recoverError) {
         this.recoverFailed = true;
         log.error("DispatchManager.recover() failed, continuing with empty state", {
-          error: err instanceof Error ? err.message : String(err),
+          error: result.recoverError.message,
         });
       }
     }
@@ -93,29 +128,8 @@ export class DispatchService implements PluginService, ToolContributor {
     cleanExpiredState(stateDirFor(storeDir)).catch(() => {});
   }
 
-  /**
-   * Recursively register a subagent subtree into resolvedSubagents and
-   * subagentModelKey. Models cascade down: a child without an explicit
-   * model inherits its parent's model.
-   */
-  private registerSubagentLineage(
-    subagents: ResolvedSubAgent[],
-    parentFullId: string,
-    parentModel: string | undefined,
-  ): void {
-    for (const sub of subagents) {
-      this.resolvedSubagents.set(sub.id, { parentFullId });
-      const model = sub.config.model ?? parentModel;
-      const key = model ? model : "default";
-      this.subagentModelKey.set(sub.id, key);
-      log.debug("model key", { subagent: sub.id, key, parentFullId });
-      if (sub.subagents.length > 0) {
-        this.registerSubagentLineage(sub.subagents, sub.id, model);
-      }
-    }
-  }
-
   async dispose(): Promise<void> {
+    if (this.degraded) return;
     try {
       await this.dispatchManager.flushPersist();
     } catch (err) {
@@ -127,7 +141,7 @@ export class DispatchService implements PluginService, ToolContributor {
 
   // ── ToolContributor ─────────────────────────────────────────────
 
-  /** Tools are registered by ToolService (S8). No-op until then. */
+  /** Returns stub dispatch tools when degraded, or empty tools otherwise. */
   getTools(): Record<
     string,
     {
@@ -136,12 +150,24 @@ export class DispatchService implements PluginService, ToolContributor {
       exec: (...args: unknown[]) => Promise<unknown>;
     }
   > {
+    if (this.degraded) {
+      return {
+        dispatch: stubTool("Dispatch work to a subagent."),
+        dispatch_output: stubTool("Retrieve output from a completed background task."),
+        dispatch_cancel: stubTool("Cancel a running background task."),
+        dispatch_metrics: stubTool("Retrieve runtime dispatch metrics."),
+        dispatch_status: stubTool("Check background task liveness."),
+      };
+    }
     return {};
   }
 
   // ── Public getters ──────────────────────────────────────────────
 
   getDispatchManager(): DispatchManager {
+    if (this.degraded) {
+      throw new Error("DispatchService is permanently degraded — cannot access DispatchManager");
+    }
     return this.dispatchManager;
   }
 
@@ -153,9 +179,22 @@ export class DispatchService implements PluginService, ToolContributor {
     return this.subagentModelKey;
   }
 
+  /** Whether the service is permanently degraded (e.g., on Pi). */
+  isDegraded(): boolean {
+    return this.degraded;
+  }
+
+  /** The reason for degradation, if any. */
+  getDegradedDetail(): string {
+    return this.degradedDetail;
+  }
+
   // ── Health ───────────────────────────────────────────────────
 
-  health(): import("../service.ts").ServiceHealth {
+  health(): ServiceHealth {
+    if (this.degraded) {
+      return { status: "degraded", detail: this.degradedDetail };
+    }
     if (!this.dispatchManager) {
       return { status: "unhealthy", detail: "DispatchManager not initialized" };
     }

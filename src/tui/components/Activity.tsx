@@ -10,8 +10,10 @@ import type { RGBA } from "@opentui/core";
 import type { ThemeColors } from "../helpers.ts";
 import {
   rgbaToCSS, BOLD, DIM, DIM_ITALIC,
+  INDENT, truncate,
   G_SUB, G_FN, G_GATED, G_RUNNING, G_PENDING, G_DONE,
   G_ERROR, G_BAR_ON, G_BAR_OFF, G_STALLED,
+  G_RUNNING_COMPACT, G_DONE_COMPACT,
   MAX_DISPATCH_ROWS, MAX_FN_ROWS, MAX_GRAPH_ROWS, MAX_LOOP_ROWS,
   agentLeaf, shortSessionId, formatDuration, formatTimeAgo, barSegments, statusVisual,
 } from "../helpers.ts";
@@ -21,7 +23,8 @@ import type {
   ActiveFunction,
   LoopSnapshot,
   GraphSessionSnapshot,
-} from "../../cli/commands/monitor-reader.ts";
+} from "../../cli/commands/monitor/monitor-reader.ts";
+import { renderProgressIndicator } from "./ProgressIndicator.tsx";
 
 // ── Function line component ──────────────────────────────────────────────
 
@@ -37,7 +40,7 @@ export function renderFunctionLine(props: { c: ThemeColors; fn: ActiveFunction }
       {agent !== null ? (
         <>
           <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{agent}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" | "}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" "}</span>
         </>
       ) : null}
       <span fg={rgbaToCSS(isGated ? c.warning : c.info)}>{(isGated ? G_GATED : G_FN) + " " + name}</span>
@@ -50,11 +53,26 @@ export function renderFunctionLine(props: { c: ThemeColors; fn: ActiveFunction }
 
 // ── Dispatch row component ───────────────────────────────────────────────
 
-export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; snapTimestamp: string | undefined }) {
+export function renderDispatchRow(props: {
+  c: ThemeColors;
+  task: TaskSnapshot;
+  snapTimestamp: string | undefined;
+  selected?: boolean;
+  /** Progress indicator data for this task (from snap.progress) */
+  progress?: { latest_stage: string; percentage?: number; message: string; event_count: number };
+  /** Whether this task has active checkpoint data */
+  hasCheckpoints?: boolean;
+}) {
   const c = props.c;
   const task = props.task;
   const sv = statusVisual(task.status, c);
   const agent = agentLeaf(task.agent ?? "");
+  const sel = props.selected ?? false;
+
+  // Checkpoint badge
+  const cpBadge = props.hasCheckpoints ? (
+    <span fg={rgbaToCSS(c.secondary)} attributes={BOLD}>{" [CP]"}</span>
+  ) : null;
 
   if (task.status === "running") {
     const snapTime = props.snapTimestamp ? new Date(props.snapTimestamp).getTime() : Date.now();
@@ -78,30 +96,39 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
     const noOutputYet = task.hasProducedOutput === false && elapsed > 10_000;
 
     return (
-      <>
-        <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
-          <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
-          <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
-          {isStalled ? (
-            <span fg={rgbaToCSS(c.warning)} attributes={BOLD}>{dur + activitySuffix}</span>
-          ) : (
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{dur + (activitySuffix ?? "")}</span>
-          )}
-          {desc && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + desc}</span>}
-          {noOutputYet && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{" (no output yet)"}</span>}
-        </text>
-      </>
+      <text>
+        <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
+        <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
+        {task.sessionId && (
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
+        )}
+        <span>{" "}</span>
+        {isStalled ? (
+          <span fg={rgbaToCSS(sel ? c.info : c.warning)} attributes={BOLD}>{dur + activitySuffix}</span>
+        ) : (
+          <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{dur + (activitySuffix ?? "")}</span>
+        )}
+        {cpBadge}
+        {desc && <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{"  " + desc}</span>}
+        {noOutputYet && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{" (no output yet)"}</span>}
+        {props.progress && (
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" \u00b7 " + truncate(props.progress.latest_stage + (props.progress.message ? ": " + props.progress.message : ""), 50)}</span>
+        )}
+      </text>
     );
   }
 
   if (task.status === "pending") {
     return (
       <text>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
-        <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
-        <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"queued"}</span>
+        <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
+        <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
+        {task.sessionId && (
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
+        )}
+        <span>{" "}</span>
+        {cpBadge}
+        <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{"queued"}</span>
       </text>
     );
   }
@@ -111,14 +138,17 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
     return (
       <>
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
-          <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
-          <span fg={rgbaToCSS(c.text)}>{" " + agent}</span>
+          <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
+          <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
+          {task.sessionId && (
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
+          )}
+          <span>{" "}</span>
+          {cpBadge}
         </text>
         {reason && (
           <text>
-            <span fg={rgbaToCSS(c.borderSubtle)}>{"  " + G_SUB + " "}</span>
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{reason}</span>
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}{reason}</span>
           </text>
         )}
       </>
@@ -129,10 +159,14 @@ export function renderDispatchRow(props: { c: ThemeColors; task: TaskSnapshot; s
   const dur = formatDuration(task.durationMs);
   return (
     <text>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
-      <span fg={rgbaToCSS(sv.color)}>{sv.glyph}</span>
-      <span fg={rgbaToCSS(c.text)}>{" " + agent + " "}</span>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{dur}</span>
+      <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
+      <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
+      {task.sessionId && (
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
+      )}
+      <span>{" "}</span>
+      {cpBadge}
+      <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{dur}</span>
     </text>
   );
 }
@@ -209,8 +243,7 @@ export function renderLoopActivity(props: { c: ThemeColors; loop: LoopSnapshot }
           <span fg={rgbaToCSS(c.error)}>{" " + G_ERROR}</span>
         </text>
         <text>
-          <span fg={rgbaToCSS(c.borderSubtle)}>{"  " + G_SUB + " "}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{reason}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}{reason}</span>
         </text>
       </>
     );
@@ -244,6 +277,11 @@ export function renderActivity(props: {
   snap: MonitorSnapshot | null;
   sessionScope: Set<string>;
   currentSessionId: string;
+  selectedIndex?: number;
+  /** Called when a task row is clicked — passes the row index. */
+  onSelectTask?: (index: number) => void;
+  /** Called when a task row is double-clicked or single-clicked on already-selected row. */
+  onOpenDetail?: (index: number) => void;
 }) {
   const { c, fns, tasks, graphs, loops, snap } = props;
 
@@ -262,8 +300,32 @@ export function renderActivity(props: {
       {/* Active dispatches */}
       {tasks.length > 0 && (
         <>
-          {fns.length > 0 && <text>{" "}</text>}
-          <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task) => renderDispatchRow({ c, task, snapTimestamp: snap?.timestamp })}</For>
+          <For each={tasks.slice(0, MAX_DISPATCH_ROWS)}>{(task, i) => {
+            const index = i();
+            // Look up progress and checkpoint data for this task
+            const taskProgress = snap?.progress?.[task.id];
+            const taskCheckpoints = snap?.checkpoints?.[task.id];
+            return (
+              <box
+                on:click={() => {
+                  if (index === props.selectedIndex) {
+                    props.onOpenDetail?.(index);
+                  } else {
+                    props.onSelectTask?.(index);
+                  }
+                }}
+              >
+                {renderDispatchRow({
+                  c,
+                  task,
+                  snapTimestamp: snap?.timestamp,
+                  selected: index === (props.selectedIndex ?? -1),
+                  progress: taskProgress,
+                  hasCheckpoints: taskCheckpoints !== undefined,
+                })}
+              </box>
+            );
+          }}</For>
           {tasks.length > MAX_DISPATCH_ROWS && (
             <text fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + (tasks.length - MAX_DISPATCH_ROWS) + " more"}</text>
           )}
@@ -273,7 +335,6 @@ export function renderActivity(props: {
       {/* Active graphs */}
       {graphs.length > 0 && (
         <>
-          {(fns.length > 0 || tasks.length > 0) && <text>{" "}</text>}
           <For each={graphs.slice(0, MAX_GRAPH_ROWS)}>{(graph) => {
             if (!snap) return null;
             return renderGraphActivity({ c, graph, snap, sessionScope: props.sessionScope, currentSessionId: props.currentSessionId });
@@ -284,7 +345,6 @@ export function renderActivity(props: {
       {/* Active loops */}
       {loops.length > 0 && (
         <>
-          {(fns.length > 0 || tasks.length > 0 || graphs.length > 0) && <text>{" "}</text>}
           <For each={loops.slice(0, MAX_LOOP_ROWS)}>{(loop) => renderLoopActivity({ c, loop })}</For>
         </>
       )}

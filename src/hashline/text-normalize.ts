@@ -55,7 +55,7 @@ export function stripInsertAnchorEcho(
 ): string[] {
   if (newLines.length === 0) return newLines;
   const stripped = newLines[0].replace(LINE_HASH_PREFIX_PATTERN, "");
-  if (stripped.trim() === anchorLine.trim()) {
+  if (stripped === anchorLine) {
     return newLines.slice(1);
   }
   return newLines;
@@ -73,7 +73,7 @@ export function stripInsertBeforeEcho(
   if (newLines.length === 0) return newLines;
   const lastIdx = newLines.length - 1;
   const stripped = newLines[lastIdx].replace(LINE_HASH_PREFIX_PATTERN, "");
-  if (stripped.trim() === anchorLine.trim()) {
+  if (stripped === anchorLine) {
     return newLines.slice(0, -1);
   }
   return newLines;
@@ -103,7 +103,7 @@ export function stripRangeBoundaryEcho(
   if (startIdx >= 0 && startIdx < lines.length) {
     const startContent = lines[startIdx].replace(LINE_HASH_PREFIX_PATTERN, "");
     const firstContent = result[0].replace(LINE_HASH_PREFIX_PATTERN, "");
-    if (firstContent.trim() === startContent.trim()) {
+    if (firstContent === startContent) {
       result = result.slice(1);
     }
   }
@@ -116,7 +116,7 @@ export function stripRangeBoundaryEcho(
     const lastIdx = result.length - 1;
     const endContent = lines[endIdx].replace(LINE_HASH_PREFIX_PATTERN, "");
     const lastContent = result[lastIdx].replace(LINE_HASH_PREFIX_PATTERN, "");
-    if (lastContent.trim() === endContent.trim()) {
+    if (lastContent === endContent) {
       result = result.slice(0, -1);
     }
   }

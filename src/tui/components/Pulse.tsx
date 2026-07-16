@@ -41,10 +41,10 @@ export function renderPulse(props: {
   return (
     <text>
       <span fg={rgbaToCSS(hd.color)} attributes={hd.glyphBold ? BOLD : 0}>{hd.glyph}</span>
-      <span fg={rgbaToCSS(hd.color)} attributes={hd.labelBold ? BOLD : 0}>{" " + hd.label}</span>
+      <span fg={rgbaToCSS(hd.color)} attributes={hd.labelBold ? BOLD : 0}>{" " + hd.label + "  "}</span>
       {showConcurrency && (
         <>
-          <span fg={rgbaToCSS(c.text)}>{"  "}</span>
+
           <span fg={rgbaToCSS(c.info)}>{String(active)}</span>
           <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"/"}</span>
           <span fg={rgbaToCSS(c.text)}>{String(limit)}</span>

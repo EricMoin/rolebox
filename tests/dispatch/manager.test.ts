@@ -5091,4 +5091,245 @@ describe("Task 13: completion stability re-confirmation", () => {
       expect(task.status).toBe("running");
     });
   });
+
+  // ── 13. task-terminated listeners ─────────────────────────
+
+  describe("task-terminated listeners", () => {
+    it("register then complete fires callback with correct (taskId, status)", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+
+      await mgr.handleTaskCompleted(task.id);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "completed");
+    });
+
+    it("fire-once: after notify, listeners set is cleared", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+
+      await mgr.handleTaskCompleted(task.id);
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // After fire-once, the map entry should be deleted
+      expect(mgr.taskTerminatedListeners.has(task.id)).toBe(false);
+
+      // Calling handleTaskCompleted again (no-op since already terminal)
+      // should NOT trigger the callback again
+      await mgr.handleTaskCompleted(task.id);
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it("removeTaskTerminatedListener prevents callback from firing", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+      manager.removeTaskTerminatedListener(task.id, callback);
+
+      await mgr.handleTaskCompleted(task.id);
+
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    it("task error fires listener with error status", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+
+      mgr.handleTaskError(task.id, "something broke");
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "error");
+    });
+
+    it("task timeout fires listener with timeout status", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+
+      mgr.handleTaskTimeout(task.id, "timed out");
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "timeout");
+    });
+
+    it("cancel fires listener with cancelled status", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+
+      await manager.cancelTask(task.id);
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "cancelled");
+    });
+
+    it("notifyTerminated with no listeners is a no-op", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      // No listener registered — should not throw
+      await mgr.handleTaskCompleted(task.id);
+      expect(task.status).toBe("completed");
+    });
+
+    it("listen-after-terminate: already-completed task fires callback once (async)", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      // Make the task already completed (simulating task finishing
+      // before the loop coordinator registers its listener)
+      mgr.handleTaskCompleted(task.id);
+      expect(task.status).toBe("completed");
+
+      // Register the terminated listener AFTER the task is already terminal
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+
+      // Callback must NOT have fired synchronously (async delivery)
+      expect(callback).toHaveBeenCalledTimes(0);
+
+      // Flush microtasks — the immediate-fire microtask fires here
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Callback fires exactly once with the correct status
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "completed");
+
+      // Listener set is cleaned up (fire-once semantics)
+      expect(mgr.taskTerminatedListeners.has(task.id)).toBe(false);
+    });
+
+    it("listen-after-terminate: error task fires callback once (async)", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      mgr.handleTaskError(task.id, "something broke");
+      expect(task.status).toBe("error");
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+      expect(callback).toHaveBeenCalledTimes(0); // not sync
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "error");
+
+      // Fire-once: listener set cleaned up
+      expect(mgr.taskTerminatedListeners.has(task.id)).toBe(false);
+    });
+
+    it("listen-after-terminate: cancelled task fires callback once (async)", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      await manager.cancelTask(task.id);
+      expect(task.status).toBe("cancelled");
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+      expect(callback).toHaveBeenCalledTimes(0); // not sync
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "cancelled");
+    });
+
+    it("listen-after-terminate: timeout task fires callback once (async)", async () => {
+      const client = createMockClient();
+      const manager = new DispatchManager(client, fastConfig);
+      const mgr = manager as any;
+
+      const task = await manager.launch(
+        { subagent: "helper", prompt: "work", run_in_background: true },
+        parentContext(),
+      );
+
+      mgr.handleTaskTimeout(task.id, "timed out");
+      expect(task.status).toBe("timeout");
+
+      const callback = mock((taskId: string, status: string) => {});
+      manager.onTaskTerminated(task.id, callback);
+      expect(callback).toHaveBeenCalledTimes(0); // not sync
+
+      await new Promise((r) => setTimeout(r, 0));
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(task.id, "timeout");
+    });
+
+  });
 });

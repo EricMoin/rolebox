@@ -22,6 +22,10 @@ import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { TaskLifecycleManager } from "./task-lifecycle.ts";
 import { CompletionOrchestrator, type CompletionOrchestratorDeps } from "../completion/completion-orchestrator.ts";
+import { FileSystemCheckpointStore } from "../checkpoint/checkpoint-store.ts";
+import { DEFAULT_CHECKPOINT_TTL_MS } from "../config.ts";
+import { InMemoryProgressStore } from "../progress/progress-store.ts";
+import { clearEmittedThresholds } from "../progress/progress-tools.ts";
 export { extractSessionErrorMessage } from "./error-utils.ts";
 
 export class DispatchManager {
@@ -38,6 +42,7 @@ export class DispatchManager {
   private sessionToTask: Map<string, string> = new Map();
   private eventState: Map<string, import("../types.ts").TaskEventState> = new Map();
   private store: TaskStateStore;
+  private checkpointStore: FileSystemCheckpointStore;
 
   private sessionsByRequest = new Map<string, number>();
   private _cancelQueue: Map<string, () => void> = new Map();
@@ -51,6 +56,8 @@ export class DispatchManager {
   private notifyOutbox = new Set<string>();
   private _deferredIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private _directory: string;
+  private progressStore: InMemoryProgressStore;
+  private taskTerminatedListeners = new Map<string, Set<Function>>();
 
   /** Delegated lifecycle manager. */
   private lifecycle: TaskLifecycleManager;
@@ -87,6 +94,8 @@ export class DispatchManager {
     this.subagentModelKey = subagentModelKey ?? new Map();
     this.sessionMonitor = new SessionMonitor();
     this.metricsPersister = new MetricsPersister(this._directory);
+    this.checkpointStore = new FileSystemCheckpointStore(this._directory);
+    this.progressStore = new InMemoryProgressStore(this._directory);
     this.budgetTracker = new BudgetTracker(this.config);
 
     // Create TaskWatchdogManager — lifecycle deps require it.
@@ -131,6 +140,9 @@ export class DispatchManager {
       store: this.store,
       metricsPersister: this.metricsPersister,
       directory: this._directory,
+      checkpointStore: this.checkpointStore,
+      progressStore: this.progressStore,
+      clearEmittedThresholds: (taskId: string) => clearEmittedThresholds(taskId),
       getInflightCount: (parentSessionId: string) => this.getInflightCount(parentSessionId),
       sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) =>
         this.notifyCompletion(task, remainingTasks, resultText),
@@ -165,7 +177,12 @@ export class DispatchManager {
       addToOutbox: (taskId: string) => this.orchestrator.addToOutbox(taskId),
       sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) =>
         this.notifyCompletion(task, remainingTasks, resultText),
+      progressStore: this.progressStore,
+      clearEmittedThresholds: (taskId: string) => clearEmittedThresholds(taskId),
+      deleteTaskCheckpoint: (taskId: string) => this.checkpointStore.deleteCheckpoint(taskId),
+      taskTerminatedListeners: this.taskTerminatedListeners,
     });
+    this.progressStore.startSweeper();
     this.orchestrator.startSweeper();
     this.orchestrator.startBudgetSampler();
   }
@@ -237,6 +254,25 @@ export class DispatchManager {
 
   async notifyCompletion(task: DispatchTask, remainingTasks: number, resultText?: string): Promise<boolean> {
     return notifyParent(this.client, task, remainingTasks, undefined, resultText);
+  }
+
+  /**
+   * Send a progress milestone `<system-reminder>` to the parent session.
+   * Used by dispatch_progress tool when a 25/50/75/100% threshold is crossed.
+   * Fire-and-forget — errors are silently caught.
+   */
+  async sendProgressMilestone(taskId: string, text: string): Promise<void> {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    try {
+      await this.client.prompt(task.parentSessionId, {
+        ...(task.parentAgent ? { agent: task.parentAgent } : {}),
+        parts: [{ type: "text", text }],
+        noReply: true,
+      });
+    } catch {
+      // Fire-and-forget — errors are non-critical
+    }
   }
 
   // ── Delegated event handlers ──────────────────────────────────
@@ -346,6 +382,63 @@ export class DispatchManager {
     return this.eventState;
   }
 
+  getCheckpointStore(): FileSystemCheckpointStore {
+    return this.checkpointStore;
+  }
+
+  getProgressStore(): InMemoryProgressStore {
+    return this.progressStore;
+  }
+
+  /** Register a one-time listener for when a task enters a terminal state.
+   *
+   * If the task is already in a terminal status (completed/error/cancelled/timeout),
+   * the callback fires immediately (async via microtask) to handle the listen-after-
+   * terminate race — e.g. the loop coordinator registering after the worker has already finished.
+   * Fire-once semantics are preserved: the callback is removed from the listener set
+   * before the microtask fires, so notifyTerminated will not call it again. */
+  onTaskTerminated(taskId: string, callback: (taskId: string, status: string) => void): (taskId: string, status: string) => void {
+    let set = this.taskTerminatedListeners.get(taskId);
+    if (!set) {
+      set = new Set();
+      this.taskTerminatedListeners.set(taskId, set);
+    }
+    set.add(callback as Function);
+
+    // Immediate-fire guard: if the task is already terminal, the normal
+    // notifyTerminated path can never fire because it runs only when the
+    // task transitions to terminal. Fire async via microtask to avoid
+    // synchronous re-entrancy into the caller's registration stack frame.
+    const task = this.getTask(taskId);
+    if (task && (task.status === "completed" || task.status === "error" || task.status === "cancelled" || task.status === "timeout")) {
+      // Remove from listener set immediately (fire-once — prevent double-fire
+      // in case notifyTerminated somehow runs, though it won't for an already-terminal task)
+      set.delete(callback as Function);
+      if (set.size === 0) {
+        this.taskTerminatedListeners.delete(taskId);
+      }
+      queueMicrotask(() => {
+        try {
+          callback(taskId, task.status);
+        } catch {
+          // Swallow — same policy as notifyTerminated
+        }
+      });
+    }
+
+    return callback;
+  }
+
+  /** Remove a previously registered task-terminated listener. */
+  removeTaskTerminatedListener(taskId: string, callback: (taskId: string, status: string) => void): void {
+    const set = this.taskTerminatedListeners.get(taskId);
+    if (!set) return;
+    set.delete(callback as Function);
+    if (set.size === 0) {
+      this.taskTerminatedListeners.delete(taskId);
+    }
+  }
+
   // ── Bridge methods (accessed by tests via (manager as any)) ──
   // See manager-bridge.ts for documentation. These one-liners delegate
   // to lifecycle/orchestrator internals for test access.
@@ -355,7 +448,7 @@ export class DispatchManager {
   get sweeperTimer(): ReturnType<typeof setInterval> | undefined { return this.orchestrator.sweeperTimer; }
 
   evaluateAndComplete(taskId: string, trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event", errorDetail?: string): Promise<void> { return this.lifecycle.evaluateAndComplete(taskId, trigger, errorDetail); }
-  handleTaskCompleted(taskId: string): void { this.lifecycle.handleTaskCompleted(taskId); }
+  async handleTaskCompleted(taskId: string): Promise<void> { return this.lifecycle.handleTaskCompleted(taskId); }
   handleTaskError(taskId: string, error: string): void { this.lifecycle.handleTaskError(taskId, error); }
   handleTaskTimeout(taskId: string, reason: string): void { this.lifecycle.handleTaskTimeout(taskId, reason); }
   materializeResult(taskId: string): Promise<import("../types.ts").MaterializedResultRef> { return this.lifecycle.materializeResult(taskId); }
@@ -376,6 +469,8 @@ export class DispatchManager {
     this._directory = directory;
     this.store = new TaskStateStore(directory);
     this.metricsPersister = new MetricsPersister(directory);
+    this.progressStore.setDirectory(directory);
+    this.checkpointStore = new FileSystemCheckpointStore(directory);
     this.lifecycle.setDirectory(directory);
     this.orchestrator.setStore(this.store);
     this.orchestrator.setMetricsPersister(this.metricsPersister);

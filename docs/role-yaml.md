@@ -28,11 +28,11 @@ opencode_skills:              # From ~/.config/opencode/skills/
   - humanizer
 
 # Functions
-functions:                    # Available functions (default: [plan, execute])
-  - plan
-  - execute
+functions:                    # Additional functions beyond built-in defaults (merge, not replace)
+  - plan                       # Built-in defaults ([plan, execute, loop]) always present
+  - execute                    # unless explicitly removed via disable_functions
   - my-custom-fn
-disable_functions:            # Remove specific defaults
+disable_functions:            # Remove specific built-in functions
   - execute
 
 # References (explicit declarations — auto-discovery needs no config)

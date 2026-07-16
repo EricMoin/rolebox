@@ -61,6 +61,7 @@ async function processSingleFile(
     lines?: string | string[] | null;
   }>,
   expectedVersion: string,
+  providedHashWidth?: number,
 ): Promise<{
   filePath: string;
   version: string;
@@ -70,6 +71,9 @@ async function processSingleFile(
   reanchored: string;
   error?: string;
   content?: string;
+  correctionsApplied?: Array<{old: string; new: string}>;
+  noopEdits?: number;
+  deduplicatedEdits?: number;
 }> {
   let raw: string;
   let fileExisted = true;
@@ -112,21 +116,38 @@ async function processSingleFile(
 
   const lineCount = canonicalContent === "" ? 0 : canonicalContent.split("\n").length;
   const hashWidth = hashWidthForLineCount(lineCount);
+
+  // Validate per-file hashWidth if provided
+  if (providedHashWidth !== undefined && providedHashWidth !== hashWidth) {
+    return {
+      filePath, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+      error: `hashWidth mismatch for ${filePath}: expected ${providedHashWidth} from read output, computed ${hashWidth} from file`,
+    };
+  }
+
   const normalizedEdits = normalizeEdits(rawEdits);
 
   let resultContent: string;
+  let correctionsApplied: Array<{old: string; new: string}> | undefined;
+  let noopEditCount = 0;
+  let dedupEditCount = 0;
 
   try {
-    const result = applyEditsWithReport(canonicalContent, normalizedEdits, hashWidth);
-    resultContent = result.content;
+    const editResult = applyEditsWithReport(canonicalContent, normalizedEdits, hashWidth);
+    resultContent = editResult.content;
+    noopEditCount = editResult.noopEdits;
+    dedupEditCount = editResult.deduplicatedEdits;
   } catch (err: unknown) {
     if (isHashMismatchError(err)) {
       const corrections = detectUniformOffset(err.mismatches, err.fileLines, hashWidth);
       if (corrections && corrections.size > 0) {
+        correctionsApplied = Array.from(corrections.entries()).map(([oldRef, newRef]) => ({ old: oldRef, new: newRef }));
         const correctedEdits = remapEditAnchors(normalizedEdits, corrections);
         try {
-          const result = applyEditsWithReport(canonicalContent, correctedEdits, hashWidth);
-          resultContent = result.content;
+          const editResult = applyEditsWithReport(canonicalContent, correctedEdits, hashWidth);
+          resultContent = editResult.content;
+          noopEditCount = editResult.noopEdits;
+          dedupEditCount = editResult.deduplicatedEdits;
         } catch (retryErr: unknown) {
           if (isHashMismatchError(retryErr)) {
             return {
@@ -147,17 +168,16 @@ async function processSingleFile(
     }
   }
 
-  const hadTrailingNewline = canonicalContent.endsWith("\n");
+  const trailingNewlineCount = canonicalContent.match(/\n+$/)?.[0].length ?? 0;
   let finalContent = resultContent;
-  if (hadTrailingNewline && !finalContent.endsWith("\n")) {
-    finalContent = finalContent + "\n";
-  } else if (!hadTrailingNewline && finalContent.endsWith("\n")) {
-    finalContent = finalContent.slice(0, -1);
-  }
+  // Strip all trailing newlines, then reapply exactly the original count
+  finalContent = finalContent.replace(/\n+$/, "");
+  finalContent = finalContent + "\n".repeat(trailingNewlineCount);
 
   if (finalContent === canonicalContent) {
     return {
       filePath, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+      correctionsApplied, noopEdits: noopEditCount, deduplicatedEdits: dedupEditCount,
       error: `No changes were made to ${filePath}. The resulting content is identical to the original. Re-read the file and provide different edit content.`,
     };
   }
@@ -180,6 +200,7 @@ async function processSingleFile(
 
   return {
     filePath, version: newVersion, diff, additions, deletions, reanchored: reanchoredStr, content: finalContent,
+    correctionsApplied, noopEdits: noopEditCount, deduplicatedEdits: dedupEditCount,
   };
 }
 
@@ -231,16 +252,12 @@ export function createHashlineEditTool() {
       "    reanchored:\n" +
       "      line N: <oldHash> -> <newHash>",
     args: {
-      expected_version: z
-        .string()
-        .describe(
-          "SHA-256 version from your last hashline_read of each file. " +
-            "Used to detect external modifications.",
-        ),
       files: z
         .array(
           z.object({
             filePath: z.string().describe("Absolute path to the file to edit"),
+            version: z.string().describe("SHA-256 version from your last hashline_read of each file. Used to detect external modifications."),
+            hashWidth: z.number().int().min(2).max(8).optional().describe("Optional hashWidth from read output. If provided, validated against the file's actual line count."),
             edits: z
               .array(
                 z.object({
@@ -276,7 +293,6 @@ export function createHashlineEditTool() {
         .describe("Files to edit"),
     },
     async execute(input) {
-      const expectedVersion = input.expected_version;
       const files = input.files;
 
       const results: Array<{
@@ -288,21 +304,31 @@ export function createHashlineEditTool() {
         reanchored: string;
         error?: string;
         content?: string;
+        correctionsApplied?: Array<{old: string; new: string}>;
+        noopEdits?: number;
+        deduplicatedEdits?: number;
       }> = [];
 
       for (const file of files) {
-        const result = await processSingleFile(file.filePath, file.edits, expectedVersion);
+        const result = await processSingleFile(file.filePath, file.edits, file.version, file.hashWidth);
         results.push(result);
-        if (result.error) {
-          break;
-        }
       }
 
       const errors = results.filter((r) => r.error);
       if (errors.length > 0) {
-        const output: string[] = ["Error: Edit failed."];
+        const output: string[] = ["Error: Edit failed for some files."];
+        const successes = results.filter((r) => !r.error);
+        if (successes.length > 0) {
+          output.push("");
+          output.push("Succeeded files:");
+          for (const s of successes) {
+            output.push(`  ${s.filePath}`);
+          }
+        }
+        output.push("");
+        output.push("Failed files:");
         for (const err of errors) {
-          output.push(err.error!);
+          output.push(`  ${err.filePath}: ${err.error}`);
         }
         return output.join("\n");
       }
@@ -312,10 +338,14 @@ export function createHashlineEditTool() {
         writes.push({ filePath: files[i].filePath, content: results[i].content! });
       }
 
-      if (writes.length === 1) {
-        await atomicWriteFile(writes[0].filePath, writes[0].content);
-      } else {
-        await atomicWriteBatch(writes);
+      try {
+        if (writes.length === 1) {
+          await atomicWriteFile(writes[0].filePath, writes[0].content);
+        } else {
+          await atomicWriteBatch(writes);
+        }
+      } catch (err) {
+        return `Write failed: file system error (${err instanceof Error ? err.message : String(err)}).`;
       }
 
       const output: string[] = [];
@@ -335,6 +365,18 @@ export function createHashlineEditTool() {
         if (result.reanchored) {
           output.push(`  reanchored:`);
           output.push(result.reanchored);
+        }
+        if (result.correctionsApplied && result.correctionsApplied.length > 0) {
+          output.push(`  corrections_applied:`);
+          for (const c of result.correctionsApplied) {
+            output.push(`    ${c.old} -> ${c.new}`);
+          }
+        }
+        if (result.noopEdits && result.noopEdits > 0) {
+          output.push(`  noop_edits: ${result.noopEdits}`);
+        }
+        if (result.deduplicatedEdits && result.deduplicatedEdits > 0) {
+          output.push(`  deduplicated_edits: ${result.deduplicatedEdits}`);
         }
         output.push("");
       }

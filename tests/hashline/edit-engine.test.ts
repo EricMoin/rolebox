@@ -1,5 +1,10 @@
-import { describe, it, expect } from "bun:test";
-import { computeLineHash } from "../../src/hashline/hash.ts";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import {
+  computeLineHash,
+  computeFileVersion,
+  canonicalizeFileText,
+  hashWidthForLineCount,
+} from "../../src/hashline/hash.ts";
 import {
   parseLineRef,
   validateLineRef,
@@ -33,6 +38,10 @@ import {
   applyEditsWithReport,
 } from "../../src/hashline/edit-primitives.ts";
 import type { EditOp } from "../../src/hashline/types.ts";
+import { createHashlineEditTool } from "../../src/hashline/index.ts";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // ════════════════════════════════════════════════════════════════════
 // 1. parseLineRef
@@ -347,6 +356,18 @@ describe("stripInsertAnchorEcho", () => {
   it("returns empty array when all lines are echo", () => {
     const result = stripInsertAnchorEcho("hello", ["hello"]);
     expect(result).toEqual([]);
+  });
+
+  it("does NOT strip echo when anchor has whitespace difference (exact-match only)", () => {
+    // anchor line is "  hello" (2 spaces), insert content is "hello" (no spaces)
+    // Without .trim(), they should NOT match
+    const result = stripInsertAnchorEcho("  hello", ["hello", "world"]);
+    expect(result).toEqual(["hello", "world"]);
+  });
+
+  it("strips echo on exact match (whitespace-sensitive)", () => {
+    const result = stripInsertAnchorEcho("hello", ["hello", "world"]);
+    expect(result).toEqual(["world"]);
   });
 });
 
@@ -964,5 +985,70 @@ describe("no Bun-specific APIs", () => {
     // Verify by checking crypto module is available
     const crypto = require("crypto");
     expect(crypto.createHash).toBeDefined();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════
+// 28. Batch partial failure (fix (a) — errors should not discard success)
+// ════════════════════════════════════════════════════════════════════
+
+describe("batch partial failure", () => {
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "hashline-batch-partial-"));
+  });
+
+  afterAll(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("first file succeeds, second file has anchor mismatch — reports both success and failure", async () => {
+    const f1 = join(tmpDir, "batch-partial-a.txt");
+    const f2 = join(tmpDir, "batch-partial-b.txt");
+    await writeFile(f1, "line one\nline two\nline three\n", "utf-8");
+    await writeFile(f2, "alpha\nbeta\ngamma\n", "utf-8");
+
+    // Read both files to get versions and anchors
+    async function readFileMeta(fp: string) {
+      const raw = await readFile(fp, "utf-8");
+      const envelope = canonicalizeFileText(raw);
+      const version = computeFileVersion(envelope.content);
+      const norm = envelope.content.endsWith("\n") ? envelope.content.slice(0, -1) : envelope.content;
+      const lines = norm === "" ? [] : norm.split("\n");
+      const hw = hashWidthForLineCount(lines.length);
+      return { version, lines, hw };
+    }
+
+    const m1 = await readFileMeta(f1);
+    const m2 = await readFileMeta(f2);
+
+    // Valid anchor for f1 line 2
+    const validAnchor = `2#${computeLineHash("line two", m1.hw)}`;
+    // Invalid anchor for f2 — no line matches "XXXX"
+    const invalidAnchor = `2#XXXX`;
+
+    const result = await createHashlineEditTool().execute({
+      files: [
+        { filePath: f1, version: m1.version, edits: [{ pos: validAnchor, lines: "MODIFIED" }] },
+        { filePath: f2, version: m2.version, edits: [{ pos: invalidAnchor, lines: "should fail" }] },
+      ],
+    });
+
+    // Should report the error prefix
+    expect(result).toContain("Error: Edit failed for some files");
+
+    // Should list the succeeded file
+    expect(result).toContain("Succeeded files:");
+    expect(result).toContain(f1);
+
+    // Should list the failed file with its error details
+    expect(result).toContain("Failed files:");
+    expect(result).toContain(f2);
+    expect(result).toContain("Hashline verification failed");
+
+    // First file should remain unchanged (no writes occur on partial failure)
+    const final1 = await readFile(f1, "utf-8");
+    expect(final1).toBe("line one\nline two\nline three\n");
   });
 });

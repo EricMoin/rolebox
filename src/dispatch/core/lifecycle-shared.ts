@@ -3,6 +3,8 @@ import type { DispatchTask, DispatchTaskStatus } from "../types.ts";
 import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { resultSidecarPath } from "../completion/result-extractor.ts";
+import type { ProgressStore } from "../types.progress.ts";
+import { clearEmittedThresholds } from "../progress/progress-tools.ts";
 
 /** Shared mutable state injected by DispatchManager — defined in task-lifecycle.ts for manager.ts imports. */
 export interface TaskLifecycleDeps {
@@ -32,6 +34,13 @@ export interface TaskLifecycleDeps {
   persistState: () => void;
   addToOutbox: (taskId: string) => void;
   sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) => Promise<boolean>;
+  progressStore: ProgressStore;
+  /** Clear per-task emitted milestone thresholds (from progress-tools.ts). */
+  clearEmittedThresholds: (taskId: string) => void;
+  /** Delete on-disk checkpoint data for a task (fire-and-forget). */
+  deleteTaskCheckpoint: (taskId: string) => Promise<void>;
+  /** Per-task terminated listeners (fire-once: auto-cleared after notify). */
+  taskTerminatedListeners: Map<string, Set<Function>>;
 }
 
 const DEFAULT_CONCURRENCY_KEY = "default";
@@ -159,4 +168,27 @@ export function leaveRunning(d: TaskLifecycleDeps, taskId: string): void {
   metrics.gauge("inflight_tasks").dec();
   d.persistState();
   scheduleCleanup(d, taskId);
+  clearEmittedThresholds(taskId);
 }
+
+/** Notify terminated listeners for a task (fire-once — auto-clears after notification).
+
+ * Must be called AFTER the task status has been transitioned to its terminal value.
+ * Callbacks receive (taskId, status). */
+
+export function notifyTerminated(d: TaskLifecycleDeps, taskId: string, status: string): void {
+  const t = d.tasks.get(taskId);
+  if (!t) return;
+  const listeners = d.taskTerminatedListeners.get(taskId);
+  if (!listeners || listeners.size === 0) return;
+
+  for (const cb of listeners) {
+    try {
+      (cb as (taskId: string, status: string) => void)(taskId, status);
+    } catch {
+      // Swallow listener errors — never crash dispatch on a misbehaving listener
+    }
+  }
+  d.taskTerminatedListeners.delete(taskId);
+}
+

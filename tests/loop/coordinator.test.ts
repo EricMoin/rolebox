@@ -95,6 +95,32 @@ function createFakeAdapter(
         calls.push({ method: "injectNote", args: [_sessionId, _text] });
       },
     ),
+
+    registerTerminatedListener: mock(
+      (
+        _taskId: string,
+        _callback: (taskId: string, status: string) => void,
+      ) => {
+        calls.push({
+          method: "registerTerminatedListener",
+          args: [_taskId, _callback],
+        });
+        // Fire-once semantics: returns the same callback
+        return _callback;
+      },
+    ),
+
+    removeTerminatedListener: mock(
+      (
+        _taskId: string,
+        _callback: (taskId: string, status: string) => void,
+      ) => {
+        calls.push({
+          method: "removeTerminatedListener",
+          args: [_taskId, _callback],
+        });
+      },
+    ),
   };
 
   return { adapter, calls };
@@ -109,6 +135,11 @@ const REGISTER_INPUT = {
   mode: "inherit" as const,
   iterations: 3,
 };
+
+/** Flush microtask queue to let self-start kickoff from register complete */
+function flushMicrotask(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 0));
+}
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
@@ -158,13 +189,14 @@ describe("LoopCoordinator", () => {
     });
   });
 
-  describe("onOriginIdle — activating", () => {
+  describe("self-start from register", () => {
     it("dispatches round 1 and transitions to awaiting_worker", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      // Wait for the self-start microtask (_kickoffFromActivating) to complete
+      await flushMicrotask();
 
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("awaiting_worker");
@@ -193,7 +225,7 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
 
       const startedNotes = calls.filter(
         (call) =>
@@ -212,8 +244,9 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
+      await flushMicrotask(); // dispatch round 1
+      await c.onWorkerCompleted("task-1"); // push chain: dispatch round 2
+      // onOriginIdle is now a no-op since push chain already advanced (phase=awaiting_worker)
       await c.onOriginIdle("origin-1");
 
       const startedNotes = calls.filter(
@@ -233,15 +266,101 @@ describe("LoopCoordinator", () => {
 
       expect(calls.filter((c) => c.method === "dispatchRound").length).toBe(0);
     });
-  });
 
-  describe("onWorkerCompleted", () => {
-    it("transitions awaiting_worker → summarizing on success", async () => {
+    it("registers terminated listener after dispatching round 1", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
+
+      const regCalls = calls.filter(
+        (call) => call.method === "registerTerminatedListener",
+      );
+      expect(regCalls.length).toBe(1);
+      expect(regCalls[0]!.args[0]).toBe("task-1");
+      // args[1] is the callback function
+      expect(typeof regCalls[0]!.args[1]).toBe("function");
+    });
+  });
+
+  describe("self-driving push chain", () => {
+    it("triggers onWorkerCompleted via terminated listener and advances phase", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      const state1 = c.getLoopState("origin-1")!;
+      expect(state1.phase).toBe("awaiting_worker");
+
+      // Capture the registered terminated listener callback
+      const regCalls = calls.filter(
+        (call) => call.method === "registerTerminatedListener",
+      );
+      const listener = regCalls[0]!.args[1] as (
+        taskId: string,
+        status: string,
+      ) => void;
+
+      // Invoke the listener (simulating DispatchManager firing terminated event).
+      // The callback calls onWorkerCompleted fire-and-forget, so we yield
+      // to drain the microtask queue before checking state.
+      listener("task-1", "completed");
+      await new Promise((r) => setTimeout(r, 0));
+
+      const state2 = c.getLoopState("origin-1")!;
+      // Push chain: listener -> onWorkerCompleted -> _advanceFromSummarizing -> dispatch round 2
+      expect(state2.phase).toBe("awaiting_worker");
+      expect(state2.current).toBe(2);
+      expect(state2.activeWorkerTaskId).toBe("task-2");
+
+      // Also verify getRoundResult was called (push chain started)
+      const getResultCalls = calls.filter(
+        (call) => call.method === "getRoundResult",
+      );
+      expect(getResultCalls.length).toBe(1);
+      expect(getResultCalls[0]!.args[0]).toBe("task-1");
+    });
+
+    it("error in push chain calls failLoop", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      // Make getRoundResult throw to simulate push-chain error
+      const mockGetResult = adapter.getRoundResult as ReturnType<typeof mock>;
+      mockGetResult.mockImplementation(async () => {
+        throw new Error("push-chain boom");
+      });
+
+      await c.onWorkerCompleted("task-1");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("error");
+      expect(state.errorReason).toContain("push-chain boom");
+
+      // failLoop injects an error note
+      const injectCalls = calls.filter((c) => c.method === "injectNote");
+      const errorNote = injectCalls.find(
+        (c) =>
+          typeof c.args[1] === "string" &&
+          (c.args[1] as string).includes("push-chain boom"),
+      );
+      expect(errorNote).not.toBeUndefined();
+    });
+  });
+
+  describe("onWorkerCompleted", () => {
+    it("transitions awaiting_worker through push chain to next round", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
 
       const state1 = c.getLoopState("origin-1")!;
       expect(state1.phase).toBe("awaiting_worker");
@@ -249,8 +368,11 @@ describe("LoopCoordinator", () => {
       await c.onWorkerCompleted("task-1");
 
       const state2 = c.getLoopState("origin-1")!;
-      expect(state2.phase).toBe("summarizing");
-      expect(state2.activeWorkerTaskId).toBeUndefined();
+      // Push chain: onWorkerCompleted → _advanceFromSummarizing → dispatch round 2
+      expect(state2.phase).toBe("awaiting_worker");
+      expect(state2.activeWorkerTaskId).toBe("task-2");
+      expect(state2.activeWorkerSessionId).toBe("session-2");
+      expect(state2.current).toBe(2);
 
       const getResultCall = calls.find(
         (call) => call.method === "getRoundResult",
@@ -270,7 +392,7 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
 
       const state = c.getLoopState("origin-1")!;
@@ -307,7 +429,7 @@ describe("LoopCoordinator", () => {
     });
   });
 
-  describe("onOriginIdle — summarizing", () => {
+  describe("push-chain advance through summarizing", () => {
     it("captures summary and advances to next round", async () => {
       const { adapter, calls } = createFakeAdapter({
         readOriginSummaryResult: "Round 1 output summary.",
@@ -315,16 +437,15 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT); // iterations=3
-      await c.onOriginIdle("origin-1"); // activating → dispatch round 1
-      await c.onWorkerCompleted("task-1"); // → summarizing
-      await c.onOriginIdle("origin-1"); // summarizing → capture + advance
+      await flushMicrotask(); // self-start → dispatch round 1
+      await c.onWorkerCompleted("task-1"); // push chain: summarize → dispatch round 2
 
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("awaiting_worker");
       expect(state.current).toBe(2);
       expect(state.lastSummary).toBe("Round 1 output summary.");
 
-      // Should have dispatched round 2
+      // Should have dispatched round 2 (via push chain, no onOriginIdle needed)
       const dispatchCalls = calls.filter(
         (call) => call.method === "dispatchRound",
       );
@@ -347,9 +468,8 @@ describe("LoopCoordinator", () => {
         ...REGISTER_INPUT,
         mode: "fresh",
       });
-      await c.onOriginIdle("origin-1"); // activating → dispatch round 1
-      await c.onWorkerCompleted("task-1"); // → summarizing
-      await c.onOriginIdle("origin-1"); // summarizing → capture + advance
+      await flushMicrotask(); // self-start → dispatch round 1
+      await c.onWorkerCompleted("task-1"); // push chain: summarize → dispatch round 2
 
       const dispatchCalls = calls.filter(
         (call) => call.method === "dispatchRound",
@@ -368,9 +488,11 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register({ ...REGISTER_INPUT, iterations: 1 });
-      await c.onOriginIdle("origin-1"); // activating → dispatch
-      await c.onWorkerCompleted("task-1"); // → summarizing
-      await c.onOriginIdle("origin-1"); // summarizing → capture + finalize
+      await flushMicrotask(); // self-start → dispatch
+      await c.onWorkerCompleted("task-1"); // push chain: summarize → finalize (current 2 > total 1)
+
+      // onOriginIdle is a no-op (phase is already complete)
+      await c.onOriginIdle("origin-1");
 
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("complete");
@@ -390,18 +512,18 @@ describe("LoopCoordinator", () => {
 
       c.register(REGISTER_INPUT); // iterations=3
 
-      // Round 1
-      await c.onOriginIdle("origin-1"); // activating → dispatch
-      await c.onWorkerCompleted("task-1"); // → summarizing
-      await c.onOriginIdle("origin-1"); // capturing → dispatch round 2
+      // Round 1 — self-start then onWorkerCompleted push-chains round 2
+      await flushMicrotask(); // self-start → dispatch
+      await c.onWorkerCompleted("task-1"); // push chain: dispatch round 2
+      await c.onOriginIdle("origin-1"); // no-op (phase=awaiting_worker)
 
-      // Round 2
-      await c.onWorkerCompleted("task-2"); // → summarizing
-      await c.onOriginIdle("origin-1"); // capturing → dispatch round 3
+      // Round 2 — onWorkerCompleted push-chains round 3
+      await c.onWorkerCompleted("task-2"); // push chain: dispatch round 3
+      await c.onOriginIdle("origin-1"); // no-op (phase=awaiting_worker)
 
-      // Round 3
-      await c.onWorkerCompleted("task-3"); // → summarizing
-      await c.onOriginIdle("origin-1"); // capturing → finalize
+      // Round 3 — onWorkerCompleted push-chains finalize
+      await c.onWorkerCompleted("task-3"); // push chain: finalize complete
+      await c.onOriginIdle("origin-1"); // no-op (phase=complete)
 
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("complete");
@@ -433,15 +555,17 @@ describe("LoopCoordinator", () => {
       expect(state.cancelRequested).toBe(true);
     });
 
-    it("cancel during summarizing finalizes as cancelled", async () => {
+    it("cancel during summarizing finalizes as cancelled via push chain", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1"); // activating → dispatch
-      await c.onWorkerCompleted("task-1"); // → summarizing
+      await flushMicrotask(); // self-start → dispatch round 1
+      // Cancel BEFORE onWorkerCompleted. The push chain inside onWorkerCompleted
+      // will check cancelRequested in _advanceFromSummarizing → handleSummary and
+      // finalize as cancelled instead of dispatching the next round.
       c.requestCancel("origin-1");
-      await c.onOriginIdle("origin-1"); // summarizing → finalize
+      await c.onWorkerCompleted("task-1"); // push chain: sees cancelRequested → finalize cancelled
 
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("cancelled");
@@ -453,6 +577,38 @@ describe("LoopCoordinator", () => {
       expect(cancelNote).not.toBeUndefined();
       expect((cancelNote!.args[1] as string)).toContain("loop cancelled");
     });
+
+    it("cancelNow removes terminated listener and cancels round", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+      expect(c.getLoopState("origin-1")!.phase).toBe("awaiting_worker");
+
+      // Clear prior calls so we isolate cancelNow side effects
+      calls.length = 0;
+
+      await c.cancelNow("origin-1");
+
+      // removeTerminatedListener should be called for cleanup
+      const remCalls = calls.filter(
+        (call) => call.method === "removeTerminatedListener",
+      );
+      expect(remCalls.length).toBe(1);
+      expect(remCalls[0]!.args[0]).toBe("task-1");
+      expect(typeof remCalls[0]!.args[1]).toBe("function");
+
+      // cancelNow also cancels the active round
+      const cancelCalls = calls.filter(
+        (call) => call.method === "cancelRound",
+      );
+      expect(cancelCalls.length).toBe(1);
+      expect(cancelCalls[0]!.args[0]).toBe("task-1");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("cancelled");
+    });
   });
 
   describe("re-entrancy lock", () => {
@@ -461,27 +617,23 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
+      // Self-start via microtask
+      await flushMicrotask();
 
-      // Fire two onOriginIdle calls concurrently
-      await Promise.all([
-        c.onOriginIdle("origin-1"),
-        c.onOriginIdle("origin-1"),
-      ]);
-
-      // Only one dispatch should have happened
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("awaiting_worker");
 
-      // Also verify re-entrancy on onWorkerCompleted
-      await c.onWorkerCompleted("task-1"); // → summarizing
+      // Push chain: onWorkerCompleted chains into _advanceFromSummarizing,
+      // which dispatches round 2.
+      await c.onWorkerCompleted("task-1");
 
-      // Fire two onOriginIdle + onWorkerCompleted concurrently
+      // Fire two onOriginIdle calls concurrently (both are no-ops now)
       await Promise.all([
         c.onOriginIdle("origin-1"),
         c.onOriginIdle("origin-1"),
       ]);
 
-      // Should have advanced exactly once to round 2
+      // Should have advanced exactly once to round 2 (via push chain)
       expect(state.current).toBe(2);
     });
   });
@@ -500,9 +652,9 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register({ ...REGISTER_INPUT, iterations: 1 });
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: finalize complete
+      await c.onOriginIdle("origin-1"); // no-op (phase is complete)
 
       expect(c.isActiveLoopOrigin("origin-1")).toBe(false);
     });
@@ -529,7 +681,7 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
 
       expect(c.isLoopSession("session-1")).toBe(true);
     });
@@ -539,6 +691,75 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       expect(c.isLoopSession("nonexistent")).toBe(false);
+    });
+  });
+
+  describe("failSession", () => {
+    it("fails loop via origin session ID", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      const before = c.getLoopState("origin-1")!;
+      expect(before.phase).toBe("awaiting_worker");
+
+      await c.failSession("origin-1", "something went wrong");
+
+      const after = c.getLoopState("origin-1")!;
+      expect(after.phase).toBe("error");
+      expect(after.errorReason).toMatch(/something went wrong/);
+    });
+
+    it("no-ops when loop is already terminal", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register({ ...REGISTER_INPUT, iterations: 1 });
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1");
+      await new Promise((r) => setTimeout(r, 0));
+
+      const before = c.getLoopState("origin-1")!;
+      expect(before.phase).toBe("complete");
+
+      await c.failSession("origin-1", "too late");
+
+      const after = c.getLoopState("origin-1")!;
+      expect(after.phase).toBe("complete");
+      expect(after.errorReason).toBeUndefined();
+    });
+
+    it("falls back via _workerToOrigin when called with worker task ID", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      // After dispatch, _workerToOrigin maps task-1 → origin-1
+      // Calling failSession with the task ID triggers the fallback
+      await c.failSession("task-1", "worker error");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("error");
+      expect(state.errorReason).toMatch(/worker error/);
+    });
+
+    it("no-ops for unknown session with no _workerToOrigin mapping", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      // "unknown-42" is not an origin session, worker task, or worker session
+      // The fallback returns undefined → no-op
+      await c.failSession("unknown-42", "nobody home");
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).not.toBe("error");
     });
   });
 
@@ -577,10 +798,10 @@ describe("LoopCoordinator", () => {
         iterations: 5,
       });
 
-      // Complete origin-1
-      await c.onOriginIdle("origin-1");
+      // Complete origin-1 (push chain finalizes on worker completion)
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await c.onOriginIdle("origin-1"); // no-op
 
       const nonTerminal = c.getNonTerminalLoops();
       expect(nonTerminal.length).toBe(1);
@@ -622,18 +843,18 @@ describe("LoopCoordinator", () => {
 
       c.register(REGISTER_INPUT); // iterations=3
 
-      // Round 1
-      await c.onOriginIdle("origin-1");
+      // Round 1: onWorkerCompleted push-chains round 2
+      await flushMicrotask();
       await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await c.onOriginIdle("origin-1"); // no-op
 
-      // Round 2
+      // Round 2: onWorkerCompleted push-chains round 3
       await c.onWorkerCompleted("task-2");
-      await c.onOriginIdle("origin-1");
+      await c.onOriginIdle("origin-1"); // no-op
 
-      // Round 3
+      // Round 3: onWorkerCompleted push-chains finalize
       await c.onWorkerCompleted("task-3");
-      await c.onOriginIdle("origin-1");
+      await c.onOriginIdle("origin-1"); // no-op
 
       const state = c.getLoopState("origin-1")!;
       expect(state.phase).toBe("complete");
@@ -672,13 +893,13 @@ describe("LoopCoordinator", () => {
       expect(state.summaryBoundaryMessageId).toBeUndefined();
     });
 
-    it("records summaryBoundaryMessageId in onWorkerCompleted", async () => {
+    it("records summaryBoundaryMessageId before push chain advances", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: sets boundary, then dispatches round 2
 
       const state = c.getLoopState("origin-1")!;
       expect(state.summaryBoundaryMessageId).toBe("msg-1");
@@ -690,14 +911,14 @@ describe("LoopCoordinator", () => {
       expect(lastMsgIdCalls[0]!.args[0]).toBe("origin-1");
     });
 
-    it("passes sinceMessageId boundary to readOriginSummary", async () => {
+    it("passes sinceMessageId boundary to readOriginSummary via push chain", async () => {
       const { adapter, calls } = createFakeAdapter();
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");       // activating → dispatch
-      await c.onWorkerCompleted("task-1");     // → summarizing (boundary=msg-1)
-      await c.onOriginIdle("origin-1");        // → _handleSummary
+      await flushMicrotask();        // self-start → dispatch
+      await c.onWorkerCompleted("task-1");     // push chain: summarize + advance (boundary=msg-1)
+      await c.onOriginIdle("origin-1");        // no-op
 
       const readCalls = calls.filter(
         (call) => call.method === "readOriginSummary",
@@ -713,18 +934,18 @@ describe("LoopCoordinator", () => {
 
       c.register(REGISTER_INPUT); // iterations=3
 
-      // Round 1: boundary=msg-1, summary read with sinceMessageId=msg-1
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      // Round 1: boundary=msg-1, push chain reads summary with sinceMessageId=msg-1
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: dispatch round 2
+      await c.onOriginIdle("origin-1"); // no-op
 
-      // Round 2: boundary=msg-2 (from getLastMessageId counter), summary read with sinceMessageId=msg-2
-      await c.onWorkerCompleted("task-2");
-      await c.onOriginIdle("origin-1");
+      // Round 2: boundary=msg-2, push chain reads summary with sinceMessageId=msg-2
+      await c.onWorkerCompleted("task-2"); // push chain: dispatch round 3
+      await c.onOriginIdle("origin-1"); // no-op
 
       // Round 3: boundary=msg-3
-      await c.onWorkerCompleted("task-3");
-      await c.onOriginIdle("origin-1");
+      await c.onWorkerCompleted("task-3"); // push chain: finalize complete
+      await c.onOriginIdle("origin-1"); // no-op
 
       // Each readOriginSummary should have a distinct sinceMessageId
       const readCalls = calls.filter(
@@ -748,9 +969,9 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: caps summary
+      await c.onOriginIdle("origin-1"); // no-op
 
       const state = c.getLoopState("origin-1")!;
       expect(state.lastSummary!.length).toBe(SEED_CHAR_CAP);
@@ -765,9 +986,9 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT); // mode=inherit, iterations=3
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: captures summary, dispatches round 2 with seed
+      await c.onOriginIdle("origin-1"); // no-op
 
       const state = c.getLoopState("origin-1")!;
       expect(state.lastSummary).toBe("isolated round 1 result.");
@@ -788,9 +1009,9 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register({ ...REGISTER_INPUT, mode: "fresh" });
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: captures summary, dispatches round 2 without seed
+      await c.onOriginIdle("origin-1"); // no-op
 
       const state = c.getLoopState("origin-1")!;
       // lastSummary is still captured (for monitoring/recovery)
@@ -813,15 +1034,113 @@ describe("LoopCoordinator", () => {
       const c = new LoopCoordinator(adapter);
 
       c.register(REGISTER_INPUT);
-      await c.onOriginIdle("origin-1");
-      await c.onWorkerCompleted("task-1");
-      await c.onOriginIdle("origin-1");
+      await flushMicrotask();
+      await c.onWorkerCompleted("task-1"); // push chain: uses msg-boundary for readOriginSummary
+      await c.onOriginIdle("origin-1"); // no-op
 
       const readCalls = calls.filter(
         (call) => call.method === "readOriginSummary",
       );
       expect(readCalls.length).toBe(1);
       expect(readCalls[0]!.args[1]).toBe("msg-boundary");
+    });
+  });
+
+  // ── New tests for self-driven semantics ───────────────────────────────
+
+  describe("self-driven semantics", () => {
+    it("self-start fires first round without onOriginIdle", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+      // Do NOT call onOriginIdle — self-start microtask should fire autonomously
+      await flushMicrotask();
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("awaiting_worker");
+      expect(state.activeWorkerTaskId).toBe("task-1");
+
+      const dispatchCalls = calls.filter(
+        (call) => call.method === "dispatchRound",
+      );
+      expect(dispatchCalls.length).toBe(1);
+    });
+
+    it("self-start error propagation → phase: error", async () => {
+      const { adapter, calls } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      // Make dispatchRound throw during the self-start microtask
+      const mockDispatch = adapter.dispatchRound as ReturnType<typeof mock>;
+      mockDispatch.mockImplementation(async () => {
+        throw new Error("self-start boom");
+      });
+
+      c.register(REGISTER_INPUT);
+      await flushMicrotask();
+
+      const state = c.getLoopState("origin-1")!;
+      expect(state.phase).toBe("error");
+      expect(state.errorReason).toContain("self-start boom");
+
+      // failLoop injects an error note
+      const injectCalls = calls.filter((c) => c.method === "injectNote");
+      const errorNote = injectCalls.find(
+        (c) =>
+          typeof c.args[1] === "string" &&
+          (c.args[1] as string).includes("self-start boom"),
+      );
+      expect(errorNote).not.toBeUndefined();
+    });
+
+    it("reSubscribeListeners handles activating phase", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      // Simulate a restored loop stuck in activating phase
+      c.restoreState({
+        originSessionId: "recovered-activating",
+        agent: "test-agent",
+        basePrompt: "recover",
+        mode: "inherit",
+        total: 3,
+        current: 1,
+        phase: "activating",
+        cancelRequested: false,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        roundStartedAt: Date.now(),
+        schemaVersion: 1,
+      });
+
+      await c.reSubscribeListeners();
+
+      // reSubscribeListeners calls _kickoffFromActivating directly (not via microtask),
+      // so the phase should be awaiting_worker after await returns.
+      const state = c.getLoopState("recovered-activating")!;
+      expect(state.phase).toBe("awaiting_worker");
+      expect(state.activeWorkerTaskId).toBe("task-1");
+    });
+
+    it("onOriginIdle no-ops for activating phase", async () => {
+      const { adapter } = createFakeAdapter();
+      const c = new LoopCoordinator(adapter);
+
+      c.register(REGISTER_INPUT);
+
+      // Phase is still activating (microtask not yet fired)
+      expect(c.getLoopState("origin-1")!.phase).toBe("activating");
+
+      // Call onOriginIdle WITHOUT await to prove it runs synchronously as a no-op
+      // (awaiting would drain microtasks and trigger the self-start kickoff)
+      c.onOriginIdle("origin-1");
+      // Phase should still be activating — onOriginIdle is a no-op
+      expect(c.getLoopState("origin-1")!.phase).toBe("activating");
+
+      // Only the self-start microtask advances the loop
+      await flushMicrotask();
+      expect(c.getLoopState("origin-1")!.phase).toBe("awaiting_worker");
     });
   });
 });

@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { normalizeWorkspaceDir, stateDirFor } from "../../../utils/state-paths.ts";
 import { readResultSidecar, resultSidecarPath } from "../../../dispatch/completion/result-extractor.ts";
 import { BACKGROUND_STALE_TIMEOUT_MS } from "../../../dispatch/config.ts";
@@ -106,6 +106,25 @@ interface RawGraphSession {
 interface RawGraphFile {
   version: number;
   sessions: RawGraphSession[];
+}
+
+// ── Raw progress / checkpoint types ─────────────────────────────
+
+interface RawProgressEvent {
+  task_id: string;
+  percentage?: number;
+  stage: string;
+  message: string;
+  timestamp: string;
+}
+
+interface RawCheckpointEntry {
+  task_id: string;
+  checkpoint_id: string;
+  phase: string;
+  completed_items: string[];
+  remaining_items: string[];
+  created_at: string;
 }
 
 // ── Task detail reader ────────────────────────────────────────────
@@ -367,6 +386,61 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
   // Aggregate concurrency status from metrics gauges
   const concurrency = computeConcurrencyStatus(metrics);
 
+  // ── Read progress data ─────────────────────────────────────────
+  const progressDir = join(stateDir, "progress");
+  let progress: MonitorSnapshot["progress"];
+  try {
+    const files = readdirSync(progressDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0) {
+      progress = {};
+      for (const file of files) {
+        const taskId = file.replace(/\.json$/, "");
+        const raw = tryReadJson(join(progressDir, file));
+        if (!Array.isArray(raw) || raw.length === 0) continue;
+        const events = raw as RawProgressEvent[];
+        const latest = events[events.length - 1];
+        progress[taskId] = {
+          latest_stage: latest.stage,
+          percentage: latest.percentage,
+          message: latest.message,
+          event_count: events.length,
+        };
+      }
+      if (Object.keys(progress).length === 0) progress = undefined;
+    }
+  } catch {
+    // progress dir does not exist or is unreadable — skip
+  }
+
+  // ── Read checkpoint data ──────────────────────────────────────
+  const checkpointDir = join(stateDir, "checkpoints");
+  let checkpoints: MonitorSnapshot["checkpoints"];
+  try {
+    const files = readdirSync(checkpointDir).filter((f) => f.endsWith(".json"));
+    if (files.length > 0) {
+      checkpoints = {};
+      for (const file of files) {
+        const taskId = file.replace(/\.json$/, "");
+        const raw = tryReadJson(join(checkpointDir, file));
+        if (!Array.isArray(raw) || raw.length === 0) continue;
+        const entries = raw as RawCheckpointEntry[];
+        // Sort by created_at descending, take latest
+        entries.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const latest = entries[0];
+        checkpoints[taskId] = {
+          checkpoint_id: latest.checkpoint_id,
+          phase: latest.phase,
+          completed_count: latest.completed_items.length,
+          remaining_count: latest.remaining_items.length,
+          created_at: latest.created_at,
+        };
+      }
+      if (Object.keys(checkpoints).length === 0) checkpoints = undefined;
+    }
+  } catch {
+    // checkpoint dir does not exist or is unreadable — skip
+  }
+
   return {
     projectDir,
     timestamp: new Date().toISOString(),
@@ -376,6 +450,8 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
     graphSessions: filteredGraphSessions,
     dispatchSummary,
     concurrency,
+    progress,
+    checkpoints,
     metrics: metrics ?? undefined,
     metricsRecentEvents: metricsRecentEvents.length > 0 ? metricsRecentEvents : undefined,
     notifications: notifications ?? undefined,

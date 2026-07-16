@@ -1,4 +1,4 @@
-import type { PluginService, PluginCoreLike } from "../service.ts";
+import type { PluginService, PluginCoreLike, ServiceHealth } from "../service.ts";
 import type { PluginContext } from "../context.ts";
 import type { DispatchService } from "./dispatch-service.ts";
 import { LoopCoordinator } from "../../loop/coordinator.ts";
@@ -8,9 +8,29 @@ import type { LoopState } from "../../loop/types.ts";
 import { INTER_ROUND_DELAY_MS } from "../../loop/constants.ts";
 import { hookState } from "../../hooks/state.ts";
 import { createSubLogger } from "../../logger.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode-session.ts";
+import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
 
 const log = createSubLogger("loop-service");
+
+/** Message shown by stub loop tools when the service is degraded on Pi. */
+const PI_LOOP_UNAVAILABLE_MSG =
+  "Loop is not available on Pi — dispatch is not supported.";
+
+/**
+ * Creates a stub tool definition that returns a fixed "not available" message.
+ * Used when the service is permanently degraded (e.g., on Pi when dispatch is degraded).
+ */
+function stubTool(description: string): {
+  description: string;
+  args: Record<string, unknown>;
+  exec: (...args: unknown[]) => Promise<string>;
+} {
+  return {
+    description,
+    args: {},
+    exec: async () => PI_LOOP_UNAVAILABLE_MSG,
+  };
+}
 
 export class LoopService implements PluginService {
   readonly name = "loop-service";
@@ -21,14 +41,38 @@ export class LoopService implements PluginService {
   private loopStore!: LoopStore;
   private stateDegraded = false;
   private degradedDetail = "";
+  private rawDirectory?: string;
 
   async init(ctx: PluginContext): Promise<void> {
-    // Get DispatchManager from DispatchService via core lookup
+    // Check if DispatchService is degraded. If so, skip init gracefully.
     const dispatchService = ctx.core.getService<DispatchService>("dispatch-service");
-    if (!dispatchService) throw new Error("dispatch-service not initialized");
-    const dispatchManager = dispatchService.getDispatchManager();
+    if (!dispatchService) {
+      this.stateDegraded = true;
+      this.degradedDetail = "dispatch-service not initialized";
+      log.warn("loop-service: degraded (dispatch-service not initialized)");
+      return;
+    }
+    // DispatchService exposes isDegraded() — check for degraded state
+    const dispatchHealth = dispatchService.health();
+    if (dispatchHealth && dispatchHealth.status === "degraded") {
+      this.stateDegraded = true;
+      this.degradedDetail = "dispatch not available on Pi";
+      log.warn("loop-service: degraded (dispatch not available on Pi)");
+      return;
+    }
+
+    let dispatchManager;
+    try {
+      dispatchManager = dispatchService.getDispatchManager();
+    } catch {
+      this.stateDegraded = true;
+      this.degradedDetail = "dispatch not available — getDispatchManager() threw";
+      log.warn("loop-service: degraded (dispatch not available)");
+      return;
+    }
 
     const dir = ctx.directory;
+    this.rawDirectory = ctx.rawDirectory;
 
     // Reuse existing if available (keyed by raw directory for cross-call consistency)
     const mapDir = ctx.rawDirectory;
@@ -74,6 +118,8 @@ export class LoopService implements PluginService {
         for (const [, state] of reconciled) {
           coordinator.restoreState(state);
         }
+        // Re-subscribe terminated listeners for active loops after restart
+        await coordinator.reSubscribeListeners();
       } catch (err) {
         this.stateDegraded = true;
         this.degradedDetail = "LoopStore.reconcile() failed — using empty coordinator";
@@ -91,6 +137,7 @@ export class LoopService implements PluginService {
   }
 
   async dispose(): Promise<void> {
+    if (this.stateDegraded) return;
     try {
       if (this.loopStore) {
         this.loopStore.saveSync(this.loopManager.getAllLoopStates());
@@ -103,22 +150,44 @@ export class LoopService implements PluginService {
     } catch {
       // Best-effort dispose
     }
+    // Clean up hookState caches so next init() does not hit the stale fast-path
+    if (this.rawDirectory) {
+      hookState.loopManagerMap.delete(this.rawDirectory);
+      hookState.loopStoreMap.delete(this.rawDirectory);
+      if (hookState.activeLoopManager === this.loopManager) {
+        hookState.activeLoopManager = undefined;
+      }
+    }
   }
 
   getLoopManager(): LoopCoordinator {
+    if (this.stateDegraded) {
+      throw new Error("LoopService is degraded — cannot access LoopCoordinator");
+    }
     return this.loopManager;
   }
 
   getLoopStore(): LoopStore {
+    if (this.stateDegraded) {
+      throw new Error("LoopService is degraded — cannot access LoopStore");
+    }
     return this.loopStore;
   }
 
-  health(): import("../service.ts").ServiceHealth {
-    if (!this.loopManager) {
-      return { status: "unhealthy", detail: "LoopCoordinator not initialized" };
-    }
+  isDegraded(): boolean {
+    return this.stateDegraded;
+  }
+
+  getDegradedDetail(): string {
+    return this.degradedDetail;
+  }
+
+  health(): ServiceHealth {
     if (this.stateDegraded) {
       return { status: "degraded", detail: this.degradedDetail };
+    }
+    if (!this.loopManager) {
+      return { status: "unhealthy", detail: "LoopCoordinator not initialized" };
     }
     return { status: "healthy" };
   }

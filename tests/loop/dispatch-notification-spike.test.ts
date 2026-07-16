@@ -58,7 +58,7 @@ describe("T1 Spike — Dispatch notification discriminator", () => {
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(DISPATCH_COMPLETION_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(DISPATCH_ALL_COMPLETE_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(DISPATCH_RECOVERY_MARKER);
-    expect(DISPATCH_NOTIFICATION_MARKERS.length).toBe(3);
+    expect(DISPATCH_NOTIFICATION_MARKERS.length).toBe(4);
   });
 
   it("completion notification uses noReply:false (assert via text format)", () => {

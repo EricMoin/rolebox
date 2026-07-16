@@ -110,6 +110,8 @@ export type AgentDefinition = {
   systemPrompt: string;
   /** Optional model override. */
   model?: string;
+  /** Optional role mode (e.g. "primary", "subagent") for file-based registrars. */
+  mode?: string;
   /** Agent-specific tool permissions. */
   tools?: {
     allow?: string[];

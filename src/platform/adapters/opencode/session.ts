@@ -6,14 +6,14 @@
  */
 
 import type { PluginInput } from "@opencode-ai/plugin";
-import type { ISessionClient } from "../ports/session-client.ts";
+import type { ISessionClient } from "../../ports/session-client.ts";
 import type {
   SessionInfo,
   Message,
   FileDiff,
   Todo,
   SessionStatus,
-} from "../types.ts";
+} from "../../types.ts";
 
 type SdkClient = PluginInput["client"];
 

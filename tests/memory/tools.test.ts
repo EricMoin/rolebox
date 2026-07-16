@@ -208,17 +208,56 @@ describe("memory tools", () => {
       }
     });
 
-    it("T12.8: update with a non-existent ID does not throw", async () => {
+    it("T12.8: update with a non-existent ID returns an error message", async () => {
       const ctx = makeContext(tempDir);
-      const updateTool = createMemoryUpdateTool();
+      const writeTool = createMemoryWriteTool();
 
-      // Should not throw — the store's update silently succeeds
+      // Write a real entry so the store is not empty
+      await writeTool.execute(
+        { title: "Real Entry", content: "Real content", scope: "role" },
+        ctx,
+      );
+
+      // Try updating a different, nonexistent ID
+      const updateTool = createMemoryUpdateTool();
       const result = await updateTool.execute(
         { id: "nonexistent-id-12345", title: "Ghost" },
         ctx,
       );
-      expect(result).toContain("updated");
+
+      expect(result).toContain("not found — nothing updated");
       expect(result).toContain("nonexistent-id-12345");
+      expect(result).not.toContain("updated.");
+    });
+
+    it("T12.9: rejects an invalid category value", async () => {
+      const ctx = makeContext(tempDir);
+      const writeTool = createMemoryWriteTool();
+      const writeResult = await writeTool.execute(
+        { title: "Valid", content: "Must exist to reach the update path", category: "note", relevance: "medium", scope: "role" },
+        ctx,
+      );
+      const id = extractId(writeResult);
+
+      const updateTool = createMemoryUpdateTool();
+      await expect(
+        updateTool.execute({ id, category: "invalid-category" }, ctx),
+      ).rejects.toThrow();
+    });
+
+    it("T12.10: rejects an invalid relevance value", async () => {
+      const ctx = makeContext(tempDir);
+      const writeTool = createMemoryWriteTool();
+      const writeResult = await writeTool.execute(
+        { title: "Valid", content: "Must exist to reach the update path", category: "note", relevance: "medium", scope: "role" },
+        ctx,
+      );
+      const id = extractId(writeResult);
+
+      const updateTool = createMemoryUpdateTool();
+      await expect(
+        updateTool.execute({ id, relevance: "urgent" }, ctx),
+      ).rejects.toThrow();
     });
   });
 });

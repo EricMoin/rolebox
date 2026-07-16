@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.23.0
+
+### Features
+
+- **TUI mouse interactions** — Click-to-select sessions, task rows, and filter options in the monitor. Keybindings updated to `Ctrl+` prefix to avoid conflicts.
+- **TUI filters, metrics panel, and live event bridge** — New filter bar (session ID, status, agent), real-time metrics panel, and event-driven live updates in `rolebox monitor`.
+- **Dispatch checkpoint and progress** — New checkpoint persistence (`dispatch_checkpoint`) and progress reporting (`dispatch_progress`) tools integrated into lifecycle hooks. Progress data displayed in both CLI and TUI. Failed tasks can be retried with checkpoint context automatically injected.
+- **Project-level config** — `rolebox` now loads `.rolebox/config.json` from the project root to set a default role per project.
+
+### Bug Fixes
+
+- **SSRF guard improvements** — Block link-local (`169.254.x.x`) addresses in `web_fetch` in addition to existing private/localhost blocks. Applied to `web_read` (page-read tool) as well.
+- **Loop idle bridging** — Replace poll-based idle detection with push-chain driven by `onTaskTerminated` event, eliminating the polling window between loop rounds.
+- **Hot-reload stability** — Break infinite self-triggering loop and eliminate `EEXIST` symlink errors during asset reload.
+- **Function merging** — Merge role-defined functions with built-in defaults instead of replacing them, preserving default capabilities when roles specify custom functions.
+- **Memory validation** — Validate `category` and `relevance` fields in `memory_write` and `memory_update` with Zod enum at runtime instead of accepting arbitrary values.
+- **Dispatch error hardening** — Robust error handling in sync dispatch and dispatch output tools; log watchdog errors and clean up emitted thresholds when a task leaves.
+- **Dispatch adapter** — Accept configurable directory path in `DispatchAdapter` constructor instead of hard-coding.
+- **TUI** — Restore missing `onCleanup` closing brace accidentally dropped during refactoring.
+- **Core reliability** — Fix cleanup and race-condition gaps across dispatch, loop, signal, and notification subsystems.
+
+### Refactors
+
+- **Hashline engine** — Per-file content-hash versioning, hashWidth auto-escalation based on line count, trailing newline preservation, and exact-match echo for better editing stability. New `src/shared/hashline/` module.
+- **TUI layout** — Compact activity rows (dense session layout), reduced filter bar to 2 lines, inline session IDs to save vertical space.
+- **TUI keyboard removal** — Remove all keyboard interaction code, replaced by mouse-click interactions.
+- **Codebase coupling** — Reduce coupling and duplication across dispatch, monitor, and tool registration for improved maintainability.
+
+### Tests
+
+- **Full lifecycle integration test** — End-to-end `pi` (plan-incomplete) scenario covering plan creation, partial execution, checkpoint, and cross-session resume.
+- **Dispatch, graph, and loop edge cases** — Coverage for checkpoint and progress unit/integration tests, dispatch notification recovery, graph visualization edge cases, and loop coordination.
+- **Integration tests** — End-to-end tests for dispatch, loop coordination, signal tool, and cross-session behavior.
+- **Hooks pipeline** — Test coverage for the hooks/lifecycle pipeline.
+- **Core services, CLI, LSP, and session** — Coverage for core service initialization, CLI command parsing, LSP integration, and session lifecycle.
+- **Asset tools and validation** — Test coverage for asset inspection, search, validation, and hot-reload.
+- **Web tools** — Test coverage for web fetching and reading tools, including SSRF guard behavior.
+
+---
+
 ## 0.22.0
 
 ### Features

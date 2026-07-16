@@ -41,7 +41,7 @@ export function buildCompletedOutput(
     "---\n",
   ].join("\n");
 
-  const windowed = applyWindow(result.resultText, opts);
+  const windowed = applyWindow(result.resultText ?? "", opts);
 
   let spillPath: string | undefined;
   if (result.totalChars > opts.maxChars) {

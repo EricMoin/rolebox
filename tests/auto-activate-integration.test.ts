@@ -117,13 +117,13 @@ describe("auto-activate on first message", () => {
         auto_activate: ["triage"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       const output = {
         parts: [{ type: "text", text: "hello world" }],
@@ -162,13 +162,13 @@ describe("auto-activate on first message", () => {
         auto_activate: ["triage"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       // First message
       await hooks["chat.message"](
@@ -202,13 +202,13 @@ describe("auto-activate on first message", () => {
 
       const primary = makePrimaryRole();
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid-auto" },
@@ -251,13 +251,13 @@ describe("on:message inject dispatch", () => {
         auto_activate: ["classifier"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },
@@ -296,13 +296,13 @@ describe("on:message inject dispatch", () => {
         auto_activate: ["classifier"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },
@@ -344,13 +344,13 @@ describe("on:message inject dispatch", () => {
         auto_activate: ["fn1", "fn2"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },
@@ -393,13 +393,13 @@ describe("on:activate inject dispatch", () => {
         auto_activate: ["greeter"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },
@@ -441,13 +441,13 @@ describe("on:activate inject dispatch", () => {
         auto_activate: ["both"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },
@@ -488,13 +488,13 @@ describe("locked protection", () => {
         locked: true,
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },
@@ -531,13 +531,13 @@ describe("locked protection", () => {
         auto_activate: ["plan"],
       });
 
-      const hooks = await createPluginHooks(
-        [primary],
+      const hooks = await createPluginHooks({
+        resolvedRoles: [primary],
         client,
         roleFunctionsMap,
-        new Map(),
-        tmpDir,
-      );
+        roleGraphMap: new Map(),
+        directory: tmpDir,
+      });
 
       await hooks["chat.message"](
         { agent: "test-primary", sessionID: "test-sid" },

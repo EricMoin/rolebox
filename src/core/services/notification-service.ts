@@ -7,7 +7,7 @@ import { parseNotificationConfig, resolveEnvVarsInConfig, DEFAULT_NOTIFICATION_C
 import { readFileSync, existsSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { createSubLogger } from "../../logger.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode-session.ts";
+import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
 
 const log = createSubLogger("notification-service");
 

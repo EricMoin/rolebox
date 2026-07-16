@@ -158,19 +158,29 @@ export function createMemoryUpdateTool() {
       id: z.string().describe("Memory ID to update"),
       title: z.string().optional(),
       content: z.string().optional(),
-      category: z.string().optional(),
+      category: z
+        .enum(["decision", "preference", "fact", "lesson", "note"])
+        .optional(),
       tags: z.array(z.string()).optional(),
-      relevance: z.string().optional(),
+      relevance: z
+        .enum(["high", "medium", "low"])
+        .optional(),
     },
     async execute(input, context) {
+      const CategoryEnum = z.enum(["decision", "preference", "fact", "lesson", "note"]);
+      const RelevanceEnum = z.enum(["high", "medium", "low"]);
       const store = new MemoryStore(context.directory);
       try {
+        const existing = store.read(input.id);
+        if (!existing) {
+          return `Memory ID ${input.id} not found — nothing updated`;
+        }
         const updates: Record<string, unknown> = {};
         if (input.title !== undefined) updates.title = input.title;
         if (input.content !== undefined) updates.content = input.content;
-        if (input.category !== undefined) updates.category = input.category;
+        if (input.category !== undefined) updates.category = CategoryEnum.parse(input.category);
         if (input.tags !== undefined) updates.tags = input.tags;
-        if (input.relevance !== undefined) updates.relevance = input.relevance;
+        if (input.relevance !== undefined) updates.relevance = RelevanceEnum.parse(input.relevance);
         store.update(input.id, updates as any);
         return `Memory ${input.id} updated.`;
       } finally {

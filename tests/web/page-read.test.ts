@@ -35,6 +35,26 @@ describe("page-read tool", () => {
   });
 
   // -----------------------------------------------------------------------
+  // SSRF guard blocks private/localhost URLs
+  // -----------------------------------------------------------------------
+
+  it("blocks private/localhost URLs via SSRF guard", async () => {
+    globalThis.fetch = mock(() =>
+      Promise.reject(new Error("fetch should not be called for blocked URLs")),
+    );
+
+    const { createPageReadTool } = await import("../../src/web/page-read");
+    const tool = createPageReadTool();
+    const result = await tool.execute({
+      url: "http://localhost:8080/secret",
+    });
+
+    expect(result).toContain("Error Reading Page");
+    expect(result).toContain("localhost");
+    expect(result).toContain("Blocked");
+  });
+
+  // -----------------------------------------------------------------------
   // Jina fallback to local fetch
   // -----------------------------------------------------------------------
 

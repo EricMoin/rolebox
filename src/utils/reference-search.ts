@@ -158,23 +158,30 @@ export function createReferenceSearchTool(roles: ResolvedRole[]) {
         refs = refs.filter((r) => r.roleId === input.role_id || r.roleId.startsWith(input.role_id + "/"));
       }
 
-      // Search all reference files in parallel
-      const searchPromises = refs.map(async (ref) => {
-        const matches = await searchInFile(
-          ref.filePath,
-          input.query,
-          input.case_sensitive ?? false,
-          input.context_lines ?? 2,
-        );
-        // Attach ref metadata to each match
-        return matches.map((m) => ({
-          ...m,
-          refName: ref.name,
-          roleId: ref.roleId,
-        }));
-      });
+      // Search all reference files in parallel, batched to limit concurrency
+      const BATCH_SIZE = 8;
+      const resultsPerFile: SearchMatch[][] = [];
 
-      const resultsPerFile = await Promise.all(searchPromises);
+      for (let i = 0; i < refs.length; i += BATCH_SIZE) {
+        const batch = refs.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map(async (ref) => {
+            const matches = await searchInFile(
+              ref.filePath,
+              input.query,
+              input.case_sensitive ?? false,
+              input.context_lines ?? 2,
+            );
+            // Attach ref metadata to each match
+            return matches.map((m) => ({
+              ...m,
+              refName: ref.name,
+              roleId: ref.roleId,
+            }));
+          }),
+        );
+        resultsPerFile.push(...batchResults);
+      }
       const allMatches = resultsPerFile.flat();
 
       if (allMatches.length === 0) {

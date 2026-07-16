@@ -21,12 +21,33 @@
  */
 
 import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui";
-import { createSidebarRenderer } from "./state";
+import {
+  createSidebarRenderer,
+  setEventBridgeRef,
+  triggerRefresh,
+  triggerToggleMetrics,
+  triggerToggleFilter,
+  triggerToggleHelp,
+} from "./state";
+import { createEventBridge } from "./events";
 
 // ── TUI Plugin ──────────────────────────────────────────────────────────
 
 const roleboxTuiPlugin: TuiPlugin = async (api, _options, _meta) => {
   const workspaceDir = api.state.path.directory;
+
+  // Create live event bridge for sub-250ms UI updates.
+  // Subscribes to opencode host events + fast-polls rolebox state files,
+  // and emits attention notifications on error/timeout.
+  const eventBridge = createEventBridge(api, workspaceDir);
+  setEventBridgeRef(eventBridge);
+
+  api.lifecycle.onDispose(() => {
+    eventBridge.dispose();
+    setEventBridgeRef(null);
+  });
+
+  // Register the sidebar content slot renderer.
   api.slots.register({
     slots: {
       sidebar_content: createSidebarRenderer(workspaceDir),

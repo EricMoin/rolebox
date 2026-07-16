@@ -85,6 +85,12 @@ export function createSessionSearchTool(client: SessionClientWrapper) {
 
       if (sessions.length === 0) return "No sessions found.";
 
+      const MAX_SESSIONS_SCANNED = 200;
+      const capHit = !input.session_id && sessions.length > MAX_SESSIONS_SCANNED;
+      if (capHit) {
+        sessions = sessions.slice(0, MAX_SESSIONS_SCANNED);
+      }
+
       const matches: SearchMatch[] = [];
 
       for (const session of sessions) {
@@ -127,9 +133,17 @@ export function createSessionSearchTool(client: SessionClientWrapper) {
         if (matches.length >= maxResults) break;
       }
 
+      if (matches.length === 0 && capHit) {
+        return "No matches found in the first 200 sessions. Try specifying a session_id to narrow the search.";
+      }
+
       const limited = matches.slice(0, maxResults);
       const sessionIds = new Set(limited.map((m) => m.sessionID));
-      return formatSearchResults(limited, matches.length, sessionIds.size);
+      let result = formatSearchResults(limited, matches.length, sessionIds.size);
+      if (capHit) {
+        result += "\n\n(searched first 200 sessions only)";
+      }
+      return result;
     },
   });
 }

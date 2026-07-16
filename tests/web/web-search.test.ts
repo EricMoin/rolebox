@@ -327,4 +327,122 @@ Markdown Content: Content of the second result.
     expect(result).toContain("https://example.org/second");
     expect(result).toContain("via Jina");
   });
+  // HN auto-routing
+  // -----------------------------------------------------------------------
+
+  it('routes to Hacker News when query contains "hacker news"', async () => {
+    const hnResponse = {
+      hits: [
+        {
+          title: "Show HN: A new project",
+          url: "https://example.com/project",
+          objectID: "123",
+          points: 10,
+          num_comments: 5,
+        },
+      ],
+    };
+
+    globalThis.fetch = mock(() =>
+      Promise.resolve(mockResponse(JSON.stringify(hnResponse))),
+    );
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "hacker news new framework",
+      source: "auto",
+      max_results: 5,
+    });
+
+    expect(result).toContain("Show HN: A new project");
+    expect(result).toContain("via Hacker News");
+  });
+
+  it('routes to Hacker News when query contains "hn " prefix', async () => {
+    const hnResponse = {
+      hits: [
+        { title: "HN: TypeScript tips", url: null, objectID: "999", points: 25, num_comments: 8 }],
+    };
+
+    globalThis.fetch = mock(() =>
+      Promise.resolve(mockResponse(JSON.stringify(hnResponse))),
+    );
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "hn typescript",
+      source: "auto",
+      max_results: 5,
+    });
+
+    expect(result).toContain("HN: TypeScript tips");
+    expect(result).toContain("via Hacker News");
+  });
 });
+
+describe("Result limits and empty results", () => {
+  it("passes max_results to Wikipedia API", async () => {
+    let capturedUrl = "";
+
+    globalThis.fetch = mock((url: string) => {
+      capturedUrl = url;
+      const wikiResponse = {
+        query: {
+          search: [
+            { title: "A", snippet: "Item A", pageid: 1 },
+            { title: "B", snippet: "Item B", pageid: 2 },
+          ],
+        },
+      };
+      return Promise.resolve(mockResponse(JSON.stringify(wikiResponse)));
+    });
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    await tool.execute({
+      query: "test wikipedia",
+      source: "auto",
+      max_results: 2,
+    });
+
+    expect(capturedUrl).toContain("srlimit=2");
+  });
+  it('returns "No Results" for empty Wikipedia response', async () => {
+    const emptyResponse = { query: { search: [] } };
+
+    globalThis.fetch = mock(() =>
+      Promise.resolve(mockResponse(JSON.stringify(emptyResponse))),
+    );
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "nonexistent",
+      source: "wikipedia",
+      max_results: 5,
+    });
+
+    expect(result).toContain("No Results Found");
+  });
+
+  it('returns "No Results" for empty HN response', async () => {
+    const emptyResponse = { hits: [] };
+
+    globalThis.fetch = mock(() =>
+      Promise.resolve(mockResponse(JSON.stringify(emptyResponse))),
+    );
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "nothing",
+      source: "hackernews",
+      max_results: 5,
+    });
+
+    expect(result).toContain("No Results Found");
+  });
+});
+

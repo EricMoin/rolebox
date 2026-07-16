@@ -25,11 +25,13 @@ export interface NotifyOpts {
 export const DISPATCH_COMPLETION_MARKER = "[BACKGROUND TASK COMPLETED]";
 export const DISPATCH_ALL_COMPLETE_MARKER = "[ALL BACKGROUND TASKS COMPLETE]";
 export const DISPATCH_RECOVERY_MARKER = "[RECOVERY: PENDING TASKS DROPPED]";
+export const DISPATCH_PROGRESS_MILESTONE_MARKER = "[PROGRESS MILESTONE]";
 
 export const DISPATCH_NOTIFICATION_MARKERS = [
   DISPATCH_COMPLETION_MARKER,
   DISPATCH_ALL_COMPLETE_MARKER,
   DISPATCH_RECOVERY_MARKER,
+  DISPATCH_PROGRESS_MILESTONE_MARKER,
 ] as const;
 
 export function isDispatchNotification(text: string): boolean {
@@ -44,6 +46,16 @@ const sentFinalNotifies = new Set<string>();
 
 export function clearSentFinalNotifies(): void {
   sentFinalNotifies.clear();
+}
+
+export function seedSentFinalNotifies(ids: Iterable<string>): void {
+  for (const id of ids) {
+    sentFinalNotifies.add(id);
+  }
+}
+
+export function getSentFinalNotifies(): Set<string> {
+  return sentFinalNotifies;
 }
 
 export function clearParentQueues(): void {
