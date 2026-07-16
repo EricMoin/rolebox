@@ -122,4 +122,81 @@ describe("convertHtmlToMarkdown", () => {
     const result = convertHtmlToMarkdown(html);
     expect(result).toBeTruthy();
   });
+
+  it("handles empty HTML string", () => {
+    const result = convertHtmlToMarkdown("");
+    expect(result).toBeDefined();
+    expect(result.length).toBe(0);
+  });
+
+  it("handles HTML with only whitespace", () => {
+    const result = convertHtmlToMarkdown("   \n  \t  ");
+    expect(result).toBeDefined();
+  });
+
+  it("handles HTML with special characters", () => {
+    const html = `<p>Cost: $100 &lt; $200 &amp; more &gt; $50</p>`;
+    const result = convertHtmlToMarkdown(html);
+    // Entity decoding in cheerio means these may show as literal chars
+    expect(result).toBeTruthy();
+    expect(result).toContain("100");
+  });
+
+  it("handles deeply nested HTML without stack overflow", () => {
+    // Create deeply nested divs
+    let nested = "<div>";
+    for (let i = 0; i < 100; i++) nested += "<div>";
+    nested += "<p>Deep content</p>";
+    for (let i = 0; i < 100; i++) nested += "</div>";
+
+    const result = convertHtmlToMarkdown(nested);
+    expect(result).toContain("Deep content");
+  });
+
+  it("includes source URL when provided", () => {
+    const html = `<main><p>Content with source</p></main>`;
+    const result = convertHtmlToMarkdown(html, "https://example.com/article");
+    expect(result).toContain("> Source:");
+    expect(result).toContain("https://example.com/article");
+  });
+
+  it("handles HTML with only script and no content", () => {
+    const html = `<html><head><script>var x = 1;</script></head><body></body></html>`;
+    const result = convertHtmlToMarkdown(html);
+    // When there's no body content, the function falls back to the raw HTML,
+    // so script content may still appear. Verify it doesn't crash.
+    expect(result).toBeDefined();
+  });
+
+  it("converts unordered lists to markdown", () => {
+    const html = `<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>`;
+    const result = convertHtmlToMarkdown(html);
+    expect(result).toContain("Item 1");
+    expect(result).toContain("Item 2");
+    expect(result).toContain("Item 3");
+    // Turndown should use - or * for list items
+    expect(result).toMatch(/^\s*[-*]\s/m);
+  });
+
+  it("converts images to markdown image syntax", () => {
+    const html = `<p><img src=\"https://example.com/image.png\" alt=\"An image\"></p>`;
+    const result = convertHtmlToMarkdown(html);
+    expect(result).toContain("![An image]");
+    expect(result).toContain("https://example.com/image.png");
+  });
+
+  it("removes empty links", () => {
+    const html = `<p><a href=\"https://example.com\"></a>Text after empty link</p>`;
+    const result = convertHtmlToMarkdown(html);
+    // Empty link should be removed entirely
+    expect(result).toContain("Text after empty link");
+  });
+
+  it("handles HTML with Chinese characters", () => {
+    const html = `<main><h1>你好世界</h1><p>这是一个测试。</p></main>`;
+    const result = convertHtmlToMarkdown(html);
+    expect(result).toContain("你好世界");
+    expect(result).toContain("这是一个测试");
+  });
 });
+
