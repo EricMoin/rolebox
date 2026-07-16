@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineCommand, runMain } from "citty";
 import { checkForUpdate } from "./version-check.ts";
 
-const __dirname = join(fileURLToPath(import.meta.url), "..");
-const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8")) as { version: string };
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8")) as { version: string };
 const version = pkg.version;
 
 const main = defineCommand({
