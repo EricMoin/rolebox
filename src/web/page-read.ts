@@ -4,6 +4,7 @@ import { createSubLogger } from "../logger.ts";
 import { TokenBucket, fetchWithRetry, fetchWithTimeout, BROWSER_USER_AGENT } from "./http-utils.ts";
 import { convertHtmlToMarkdown } from "./html-to-markdown.ts";
 import { detectBrowserCapabilities } from "./browser-detect.ts";
+import { validateUrl } from "./ssrf-guard.ts";
 import { fetchWithPlaywright } from "./playwright-backend.ts";
 import { fetchWithCrawlee } from "./crawlee-backend.ts";
 
@@ -41,6 +42,13 @@ export function createPageReadTool() {
     async execute(args) {
       const { url, selector, engine } = args;
       log.info("Reading page", { url, selector, engine });
+
+      // SSRF protection
+      const urlCheck = validateUrl(url);
+      if (!urlCheck.valid) {
+        log.warn("SSRF guard blocked URL", { url, reason: urlCheck.reason });
+        return formatError(url, `Blocked: ${urlCheck.reason}`);
+      }
 
       // Try Jina Reader first
       const jinaResult = await tryJinaReader(url, selector, engine);
