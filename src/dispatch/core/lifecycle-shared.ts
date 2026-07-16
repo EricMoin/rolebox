@@ -4,6 +4,7 @@ import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { resultSidecarPath } from "../completion/result-extractor.ts";
 import type { ProgressStore } from "../types.progress.ts";
+import { clearEmittedThresholds } from "../progress/progress-tools.ts";
 
 /** Shared mutable state injected by DispatchManager — defined in task-lifecycle.ts for manager.ts imports. */
 export interface TaskLifecycleDeps {
@@ -167,6 +168,7 @@ export function leaveRunning(d: TaskLifecycleDeps, taskId: string): void {
   metrics.gauge("inflight_tasks").dec();
   d.persistState();
   scheduleCleanup(d, taskId);
+  clearEmittedThresholds(taskId);
 }
 
 /** Notify terminated listeners for a task (fire-once — auto-clears after notification).

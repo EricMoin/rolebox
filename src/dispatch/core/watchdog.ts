@@ -11,6 +11,8 @@
  * No imports from SDK or manager.ts — this is pure timer management.
  */
 
+import { debugLog } from "./debug-log.ts";
+
 export interface TaskWatchdogDeps {
   /** Called when a task's reconcile watchdog fires. */
   onReconcile: (taskId: string) => void | Promise<void>;
@@ -240,8 +242,8 @@ export class TaskWatchdogManager {
   private async _runSafe(fn: () => void | Promise<void>): Promise<void> {
     try {
       await fn();
-    } catch {
-      // Silently swallow — timer callbacks should never throw
+    } catch (err) {
+      debugLog("watchdog", "*", `error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
