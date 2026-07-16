@@ -75,6 +75,7 @@ export class DispatchAdapter implements IDispatchAdapter {
   constructor(
     private readonly dispatchManager: DispatchManager,
     private readonly client: ISessionClient,
+    private readonly directory?: string,
   ) {}
 
   async dispatchRound(input: {
@@ -96,7 +97,7 @@ export class DispatchAdapter implements IDispatchAdapter {
     const task = await this.dispatchManager.launch(dispatchInput, {
       sessionID: input.originSessionId,
       agent: input.agent,
-      directory: process.cwd(),
+      directory: this.directory ?? process.cwd(),
     });
 
     return {
