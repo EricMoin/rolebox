@@ -229,5 +229,35 @@ describe("memory tools", () => {
       expect(result).toContain("nonexistent-id-12345");
       expect(result).not.toContain("updated.");
     });
+
+    it("T12.9: rejects an invalid category value", async () => {
+      const ctx = makeContext(tempDir);
+      const writeTool = createMemoryWriteTool();
+      const writeResult = await writeTool.execute(
+        { title: "Valid", content: "Must exist to reach the update path", category: "note", relevance: "medium", scope: "role" },
+        ctx,
+      );
+      const id = extractId(writeResult);
+
+      const updateTool = createMemoryUpdateTool();
+      await expect(
+        updateTool.execute({ id, category: "invalid-category" }, ctx),
+      ).rejects.toThrow();
+    });
+
+    it("T12.10: rejects an invalid relevance value", async () => {
+      const ctx = makeContext(tempDir);
+      const writeTool = createMemoryWriteTool();
+      const writeResult = await writeTool.execute(
+        { title: "Valid", content: "Must exist to reach the update path", category: "note", relevance: "medium", scope: "role" },
+        ctx,
+      );
+      const id = extractId(writeResult);
+
+      const updateTool = createMemoryUpdateTool();
+      await expect(
+        updateTool.execute({ id, relevance: "urgent" }, ctx),
+      ).rejects.toThrow();
+    });
   });
 });
