@@ -121,11 +121,33 @@ interface ScoredAsset {
   entry: AssetEntry;
   score: number;
 }
+// ── Module-level cache for incremental index ─────────────────────────
+//
+// Caches collectAssets() results keyed by the roles array reference identity.
+// This avoids re-collecting on every tool.execute() call while being safe
+// across hot-reload (new roles → new reference → cache miss → re-collect).
+//
+// In test environments each test creates fresh roles, so reference comparison
+// naturally prevents cross-test cache pollution.
+
+let _lastRoles: ResolvedRole[] | null = null;
+let _cachedAssets: AssetEntry[] | null = null;
+
+/**
+ * Invalidate the cached asset search index.
+ * Called by the hot-reload service when roles are re-resolved.
+ */
+export function invalidateAssetIndex(): void {
+  _lastRoles = null;
+  _cachedAssets = null;
+}
 
 export function createAssetSearchTool(roles: ResolvedRole[]) {
-  // Pre-collect assets at tool creation time
-  const allAssets = collectAssets(roles);
-
+  if (_cachedAssets === null || _lastRoles !== roles) {
+    _cachedAssets = collectAssets(roles);
+    _lastRoles = roles;
+  }
+  const allAssets = _cachedAssets;
   return defineTool({
     description:
       "Search rolebox assets (skills, functions, references) by keyword. Searches asset names and descriptions across all resolved roles and sub-agents. Returns matching assets sorted by relevance. Use this to discover which skill, function, or reference to load for a given task.",

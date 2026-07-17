@@ -13,6 +13,7 @@ import { OpencodeAgentRegistrar } from "../../platform/adapters/opencode/agent-r
 import { syncSkillSymlinks } from "../../sync/skill-symlinks.ts";
 import type { ResolvedFunction, ResolvedGraph, ResolvedRole, RoleConfig } from "../../types.ts";
 import { ROLE_YAML } from "../../constants.ts";
+import { invalidateAssetIndex } from "../../asset/asset-search.ts";
 
 const log = createSubLogger("hot-reload-service");
 
@@ -330,10 +331,16 @@ export class HotReloadService implements PluginService {
       });
     }
 
-    // 7. Refresh role hash cache for incremental diff on next change
+    // 7. Clear stale role hash cache entries (roles removed from disk)
+    this.roleHashCache.clear();
+
+    // 8. Refresh role hash cache for incremental diff on next change
     await this.refreshRoleHashCache(newRoles);
 
-    // 8. Restart dispatch-service (cascades to tool-service and hook-service,
+    // Invalidate asset search cache before restarting services
+    invalidateAssetIndex();
+
+    // 9. Restart dispatch-service (cascades to tool-service and hook-service,
     //    refreshing the frozen subagent maps and tool registrations)
     await this.ctx.core.restartService("dispatch-service");
 

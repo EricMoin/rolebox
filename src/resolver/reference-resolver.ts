@@ -52,6 +52,9 @@ async function extractFrontmatterDescription(
 
   // Cache miss — extract and store the promise so concurrent calls deduplicate
   const promise = extractFrontmatterDescriptionInner(filePath);
+  if (descriptionCache.size >= 500) {
+    descriptionCache.clear();
+  }
   descriptionCache.set(filePath, promise);
   return promise;
 }
