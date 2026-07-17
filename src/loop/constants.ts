@@ -42,3 +42,13 @@ export const STOP_LOOP_COMMAND = "stop-loop";
 
 /** Text injected by the stop-loop command; used by shouldCancelLoop to detect explicit cancellation */
 export const STOP_LOOP_SIGNAL = "[rolebox:stop-loop]";
+
+/**
+ * Maximum time (ms) a lock in the _advancing Set can be held before the sweeper
+ * considers it stale and releases it automatically. Prevents silent deadlock
+ * if an exception escapes the try block without the finally block running.
+ */
+export const ADVANCING_LOCK_TIMEOUT_MS = 30_000;
+
+/** Interval (ms) at which the _advancing sweeper runs to detect stale locks. */
+export const SWEEPER_INTERVAL_MS = 15_000;

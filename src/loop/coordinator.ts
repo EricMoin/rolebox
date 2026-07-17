@@ -1,6 +1,6 @@
 import type { LoopState, LoopMode } from "./types.js";
 import type { IDispatchAdapter } from "./dispatch-adapter.js";
-import { LOOP_PROGRESS_MARKER, LOOP_STATE_SCHEMA_VERSION } from "./constants.js";
+import { LOOP_PROGRESS_MARKER, LOOP_STATE_SCHEMA_VERSION, ADVANCING_LOCK_TIMEOUT_MS, SWEEPER_INTERVAL_MS } from "./constants.js";
 import { shouldCancelLoop, TERMINAL_PHASES } from "./cancellation.js";
 import {
   dispatchRound,
@@ -16,12 +16,16 @@ export { shouldCancelLoop, DISPATCH_MARKERS } from "./cancellation.js";
 
 export class LoopCoordinator {
   private loops = new Map<string, LoopState>();
-  private _advancing = new Set<string>();
+  private _advancing = new Map<string, number>();
   private _workerToOrigin = new Map<string, string>();
   /** Map of workerTaskId → terminated listener callback, for cleanup on cancel/fail */
   private _workerListeners = new Map<string, (taskId: string, status: string) => void>();
   /** Completions that arrived while the _advancing re-entrancy guard was held, keyed by originSessionId. */
   private _pendingCompletions = new Map<string, string[]>();
+  /** Timer reference for the stale-lock sweeper interval, cleared on dispose. */
+  private _advancingSweeper: ReturnType<typeof setInterval> | null = null;
+  /** Counter of stale locks detected and swept by the sweeper. */
+  private _staleLockCount = 0;
 
   constructor(
     private adapter: IDispatchAdapter,
@@ -30,10 +34,35 @@ export class LoopCoordinator {
       roundTimeoutMs?: number;
       persist?: (loops: Map<string, LoopState>) => void;
     },
-  ) {}
+  ) {
+    this._advancingSweeper = setInterval(() => this._sweepStaleLocks(), SWEEPER_INTERVAL_MS);
+  }
 
   private _persist(): void {
     this.opts?.persist?.(this.loops);
+  }
+
+  /**
+   * Periodic sweeper that detects and releases stale _advancing locks.
+   * Runs every SWEEPER_INTERVAL_MS. A lock is stale if it has been held
+   * longer than ADVANCING_LOCK_TIMEOUT_MS without being released, which
+   * would indicate an exception escaped the try block without the finally
+   * block executing.
+   */
+  private _sweepStaleLocks(): void {
+    const now = Date.now();
+    const stale: { sessionId: string; ageMs: number }[] = [];
+    for (const [sessionId, acquiredAt] of this._advancing) {
+      const ageMs = now - acquiredAt;
+      if (ageMs > ADVANCING_LOCK_TIMEOUT_MS) {
+        stale.push({ sessionId, ageMs });
+      }
+    }
+    for (const { sessionId, ageMs } of stale) {
+      this._advancing.delete(sessionId);
+      this._staleLockCount++;
+      log.warn("advancing-lock: swept stale lock", { sessionId, acquiredAgeMs: ageMs });
+    }
   }
 
   // ── Private helpers (push-chain) ────────────────────────────────────────
@@ -123,7 +152,7 @@ export class LoopCoordinator {
     if (loop.phase !== "activating") return;
     if (this._advancing.has(originSessionId)) return;
 
-    this._advancing.add(originSessionId);
+    this._advancing.set(originSessionId, Date.now());
     try {
       loop.phase = "dispatching";
       await dispatchRound(this.adapter, loop, this._workerToOrigin, {
@@ -188,7 +217,7 @@ export class LoopCoordinator {
     if (!loop) return;
     if (this._advancing.has(originSessionId)) return;
 
-    this._advancing.add(originSessionId);
+    this._advancing.set(originSessionId, Date.now());
     try {
       switch (loop.phase) {
         default:
@@ -240,7 +269,7 @@ export class LoopCoordinator {
       return;
     }
 
-    this._advancing.add(originSessionId);
+    this._advancing.set(originSessionId, Date.now());
     try {
       const result = await this.adapter.getRoundResult(workerTaskId);
 
@@ -331,7 +360,7 @@ export class LoopCoordinator {
     // Clean up the pending terminated listener before cancelling the worker
     this._cleanupWorkerListener(loop.activeWorkerTaskId);
 
-    this._advancing.add(loop.originSessionId);
+    this._advancing.set(loop.originSessionId, Date.now());
     try {
       loop.phase = "finalizing";
       await finalizeLoop(this.adapter, loop, "cancelled", this._workerToOrigin);
@@ -386,6 +415,18 @@ export class LoopCoordinator {
     );
   }
 
+  /**
+   * Returns the current state of the _advancing lock map for health monitoring.
+   * - `activeLocks`: number of locks currently held (non-stale)
+   * - `staleLocks`: cumulative count of stale locks detected and swept
+   */
+  getAdvancingLockState(): { activeLocks: number; staleLocks: number } {
+    return {
+      activeLocks: this._advancing.size,
+      staleLocks: this._staleLockCount,
+    };
+  }
+
   async failSession(sessionId: string, reason: string): Promise<void> {
     let loop = this.loops.get(sessionId);
     if (!loop) {
@@ -434,7 +475,7 @@ export class LoopCoordinator {
       // ── summarizing: advance the push chain ─────────────────────
       if (loop.phase === "summarizing") {
         if (this._advancing.has(originSessionId)) continue;
-        this._advancing.add(originSessionId);
+        this._advancing.set(originSessionId, Date.now());
         try {
           await this._advanceFromSummarizing(originSessionId);
         } catch (err) {
@@ -492,6 +533,10 @@ export class LoopCoordinator {
   }
 
   dispose(): void {
+    if (this._advancingSweeper !== null) {
+      clearInterval(this._advancingSweeper);
+      this._advancingSweeper = null;
+    }
     this.loops.clear();
     this._workerToOrigin.clear();
     this._advancing.clear();
