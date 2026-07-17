@@ -10,6 +10,7 @@ import {
   scheduleCleanup,
   notifyCompletion,
   leaveRunning,
+  addToParentIndex,
 } from "./lifecycle-shared.ts";
 import { infoLog, debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
@@ -47,6 +48,7 @@ export async function launch(
       completedAt: new Date(),
       progress: { lastUpdate: new Date(), toolCalls: 0 },
       timeoutMs: input.timeout_ms,
+      priority: input.priority ?? 0,
       error: JSON.stringify({
         error: "Session budget exhausted",
         limit: budget,
@@ -54,6 +56,7 @@ export async function launch(
       }),
     };
     d.tasks.set(taskId, task);
+    addToParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
     scheduleCleanup(d, taskId);
     void notifyCompletion(d, task, getInflightCount(d, task.parentSessionId));
     return task;
@@ -72,9 +75,11 @@ export async function launch(
     startedAt: new Date(),
     progress: { lastUpdate: new Date(), toolCalls: 0 },
     timeoutMs: input.timeout_ms,
+    priority: input.priority ?? 0,
   };
 
   d.tasks.set(taskId, task);
+  addToParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
   incRequestSessions(d, root);
 
   debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
@@ -240,10 +245,11 @@ function scheduleBackpressureRetry(
     const currentTask = d.tasks.get(taskId);
     if (!currentTask || currentTask.status !== "pending") return;
 
-    const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
-      parentId: task.parentSessionId,
-      maxActivePerParent: d.config.maxActivePerParent,
-    });
+  const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
+    parentId: task.parentSessionId,
+    maxActivePerParent: d.config.maxActivePerParent,
+    priority: task.priority,
+  });
 
     if (acqResult.outcome === "acquired") {
       debugLog("launch", taskId, `backpressure retry ${attempt + 1}: acquired`);
@@ -300,8 +306,8 @@ export async function reopenForContinuation(
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
     maxActivePerParent: d.config.maxActivePerParent,
+    priority: task.priority,
   });
-
   if (acqResult.outcome === "full" || acqResult.outcome === "queued") {
     if (acqResult.outcome === "queued") {
       acqResult.cancel();

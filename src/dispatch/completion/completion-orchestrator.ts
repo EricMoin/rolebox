@@ -13,7 +13,7 @@ import { MetricsPersister } from "../persistence/metrics-persister.ts";
 import { BudgetTracker } from "../budget/budget-tracker.ts";
 import { TaskStateStore } from "../persistence/task-store.ts";
 import { hasFinalNotifyBeenSent } from "../notification.ts";
-import { extractResultBlock, readResultSidecar } from "./result-extractor.ts";
+import { extractResultBlock, readResultSidecar, cleanupOrphanSidecars } from "./result-extractor.ts";
 import { debugLog } from "../core/debug-log.ts";
 import { startBudgetSampler } from "../budget/budget-sampler.ts";
 import {
@@ -27,6 +27,7 @@ import {
 import { recoverOrchestrator } from "./recovery-orchestrator.ts";
 import type { CheckpointStore } from "../types.checkpoint.ts";
 import type { ProgressStore } from "../types.progress.ts";
+import type { ParentTasksIndex } from "../core/lifecycle-shared.ts";
 
 
 export interface CompletionOrchestratorDeps {
@@ -73,6 +74,8 @@ export interface CompletionOrchestratorDeps {
   sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) => Promise<boolean>;
   /** Callback to cancel a task from the budget sampler. */
   cancelTask: (taskId: string) => Promise<boolean>;
+  /** Parent→taskIds index for O(1) getTasksByParent lookups. */
+  parentTasksIndex: ParentTasksIndex;
 }
 
 /**
@@ -157,7 +160,12 @@ export class CompletionOrchestrator implements OrchestratorBridge {
     this.d._sweeperTimerInternal = setInterval(async () => {
       // Fire-and-forget periodic checkpoint cleanup (never blocks outbox processing)
       this.d.checkpointStore.cleanupExpired(this.d.config.taskTtlMs ?? 1_800_000).catch(() => {});
-
+      // Fire-and-forget periodic orphan sidecar cleanup
+      cleanupOrphanSidecars(
+        this.d.directory,
+        this.d.tasks as unknown as ReadonlyMap<string, unknown>,
+        this.d.config.resultRetentionMs ?? 86_400_000,
+      );
       for (const taskId of this.d.notifyOutbox) {
         const task = this.d.tasks.get(taskId);
         if (!task || hasFinalNotifyBeenSent(taskId)) {

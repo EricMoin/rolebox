@@ -5,6 +5,8 @@ import {
   computeDepth,
   getRequestSessions,
   incRequestSessions,
+  addToParentIndex,
+  removeFromParentIndex,
 } from "./lifecycle-shared.ts";
 import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
@@ -83,8 +85,10 @@ export async function executeSync(
     progress: { lastUpdate: new Date(), toolCalls: 0 },
     mode: "sync",
     continuationOf: existingSessionId ? input.session_id : undefined,
+    priority: 0,
   };
   d.tasks.set(taskId, task);
+  addToParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
 
   let didAcquire = false;
   const startTime = Date.now();
@@ -201,6 +205,7 @@ export async function executeSync(
     metrics.gauge("inflight_tasks").dec();
     d.syncControllers.delete(taskId);
     d.sessionToTask.delete(task.sessionId);
+    removeFromParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
     d.tasks.delete(taskId);
     if (didAcquire) {
       d.concurrency.release(concurrencyKey, parentContext.sessionID);

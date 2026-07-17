@@ -58,6 +58,8 @@ export class DispatchManager {
   private _directory: string;
   private progressStore: InMemoryProgressStore;
   private taskTerminatedListeners = new Map<string, Set<Function>>();
+  /** Parent→taskIds index for O(1) getTasksByParent lookups. */
+  private parentTasksIndex: Map<string, Set<string>> = new Map();
 
   /** Delegated lifecycle manager. */
   private lifecycle: TaskLifecycleManager;
@@ -96,7 +98,7 @@ export class DispatchManager {
     this.metricsPersister = new MetricsPersister(this._directory);
     this.checkpointStore = new FileSystemCheckpointStore(this._directory);
     this.progressStore = new InMemoryProgressStore(this._directory);
-    this.budgetTracker = new BudgetTracker(this.config);
+    this.budgetTracker = new BudgetTracker(this.config, this._directory);
 
     // Create TaskWatchdogManager — lifecycle deps require it.
     // The `?.` guard on this.lifecycle covers the brief window before construction completes;
@@ -147,6 +149,7 @@ export class DispatchManager {
       sendNotification: (task: DispatchTask, remainingTasks: number, resultText?: string) =>
         this.notifyCompletion(task, remainingTasks, resultText),
       cancelTask: (taskId: string) => this.cancelTask(taskId),
+      parentTasksIndex: this.parentTasksIndex,
     };
     this.orchestrator = new CompletionOrchestrator(orchestratorDeps);
 
@@ -181,6 +184,7 @@ export class DispatchManager {
       clearEmittedThresholds: (taskId: string) => clearEmittedThresholds(taskId),
       deleteTaskCheckpoint: (taskId: string) => this.checkpointStore.deleteCheckpoint(taskId),
       taskTerminatedListeners: this.taskTerminatedListeners,
+      parentTasksIndex: this.parentTasksIndex,
     });
     this.progressStore.startSweeper();
     this.orchestrator.startSweeper();
@@ -213,6 +217,39 @@ export class DispatchManager {
 
   async cancelTask(taskId: string): Promise<boolean> {
     return this.lifecycle.cancelTask(taskId);
+  }
+
+  /**
+   * Approve a task that is paused in "awaiting_approval" state.
+   * Transitions the task to "completed" and notifies the parent.
+   * Returns false if the task is not in awaiting_approval state or not found.
+   */
+  async approveTask(taskId: string): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "awaiting_approval") return false;
+    task.status = "completed";
+    task.completedAt = new Date();
+    this.orchestrator.persistState();
+    this.orchestrator.scheduleCleanup(taskId);
+    void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
+    return true;
+  }
+
+  /**
+   * Reject a task that is paused in "awaiting_approval" state.
+   * Transitions the task to "error" with the provided reason and notifies the parent.
+   * Returns false if the task is not in awaiting_approval state or not found.
+   */
+  async rejectTask(taskId: string, reason?: string): Promise<boolean> {
+    const task = this.tasks.get(taskId);
+    if (!task || task.status !== "awaiting_approval") return false;
+    task.status = "error";
+    task.error = reason ?? "Rejected by parent";
+    task.completedAt = new Date();
+    this.orchestrator.persistState();
+    this.orchestrator.scheduleCleanup(taskId);
+    void this.notifyCompletion(task, this.getInflightCount(task.parentSessionId));
+    return true;
   }
 
   async getResult(
@@ -306,11 +343,12 @@ export class DispatchManager {
   }
 
   getTasksByParent(parentSessionId: string): DispatchTask[] {
+    const ids = this.parentTasksIndex.get(parentSessionId);
+    if (!ids || ids.size === 0) return [];
     const result: DispatchTask[] = [];
-    for (const task of this.tasks.values()) {
-      if (task.parentSessionId === parentSessionId) {
-        result.push(task);
-      }
+    for (const id of ids) {
+      const task = this.tasks.get(id);
+      if (task) result.push(task);
     }
     return result;
   }
