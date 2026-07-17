@@ -1,5 +1,5 @@
 import type { DispatchTask } from "./types.ts";
-import { applyWindow, spillToFile, formatResultEnvelope, DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
+import { applyWindow, applySidecarWindow, extractResultBlock, spillToFile, formatResultEnvelope, DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
 
 export function formatDuration(task: DispatchTask): string {
@@ -41,7 +41,21 @@ export function buildCompletedOutput(
     "---\n",
   ].join("\n");
 
-  const windowed = applyWindow(result.resultText ?? "", opts);
+  // Try sidecar streaming first — reads only the requested window from disk
+  // without loading the entire file into memory.
+  let windowed: { text: string; truncated: boolean; totalChars: number; returnedChars: number; nextOffset?: number };
+  const sidecarPath = task.result?.sidecarPath;
+  if (sidecarPath) {
+    const sidecarResult = applySidecarWindow(sidecarPath, opts, result.totalChars);
+    if (sidecarResult !== null) {
+      windowed = sidecarResult;
+    } else {
+      // Sidecar missing or inaccessible — fall back to in-memory windowing
+      windowed = applyWindow(result.text ?? "", opts);
+    }
+  } else {
+    windowed = applyWindow(result.resultText ?? "", opts);
+  }
 
   let spillPath: string | undefined;
   if (result.totalChars > opts.maxChars) {

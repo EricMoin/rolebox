@@ -33,7 +33,12 @@ export interface WorkerTaskState {
 export class LoopStore {
   private directory: string;
   private dirHash: string;
-  private _lock: Promise<void> = Promise.resolve();
+
+  // ── Debounce fields ─────────────────────────────────────────────────────
+  private _latestLoops: Map<string, LoopState> | null = null;
+  private _dirty = false;
+  private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private _resolveFns: Array<() => void> = [];
 
   constructor(directory: string) {
     this.directory = directory;
@@ -49,12 +54,47 @@ export class LoopStore {
     return JSON.stringify({ version: 1, loops: entries } satisfies FileShape, null, 2);
   }
 
+  /**
+   * Debounced save: stores the latest loops reference, sets dirty flag,
+   * and restarts a 200ms timer. When the timer fires, the I/O is performed
+   * and all pending promises are resolved.
+   *
+   * Multiple rapid calls are coalesced into a single I/O operation.
+   */
   async save(loops: Map<string, LoopState>): Promise<void> {
-    this._lock = this._lock.then(
-      () => this._doSave(loops),
-      () => this._doSave(loops),
-    );
-    return this._lock;
+    this._latestLoops = loops;
+    this._dirty = true;
+
+    // Clear any existing timer — restart the 200ms window
+    if (this._debounceTimer !== null) {
+      clearTimeout(this._debounceTimer);
+    }
+
+    return new Promise<void>((resolve) => {
+      this._resolveFns.push(resolve);
+
+      this._debounceTimer = setTimeout(async () => {
+        this._debounceTimer = null;
+        if (this._dirty) {
+          this._dirty = false;
+          try {
+            await this._doSave(this._latestLoops!);
+          } catch {
+            // Best-effort — errors are logged inside _doSave
+          }
+        }
+        this._flushResolves();
+      }, 200);
+    });
+  }
+
+  /** Resolve all pending save promises. */
+  private _flushResolves(): void {
+    const fns = this._resolveFns;
+    this._resolveFns = [];
+    for (const fn of fns) {
+      fn();
+    }
   }
 
   private async _doSave(loops: Map<string, LoopState>): Promise<void> {
@@ -154,5 +194,19 @@ export class LoopStore {
     }
 
     return loadedLoops;
+  }
+
+  /**
+   * Clean up the pending debounce timer. Should be called when the store
+   * is being disposed to prevent stale timer callbacks.
+   */
+  dispose(): void {
+    if (this._debounceTimer !== null) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+    this._dirty = false;
+    // Resolve any pending saves so callers don't hang.
+    this._flushResolves();
   }
 }

@@ -1,4 +1,8 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { DispatchManagerConfig } from "../config.ts";
+import { atomicWriteSync } from "../../function/fs-util.ts";
+import { shortHash } from "../../utils/state-paths.ts";
 import { createSubLogger } from "../../logger.ts";
 
 // ── Public types ───────────────────────────────────────────────────────────
@@ -17,8 +21,9 @@ export interface BudgetCheckResult {
 // ── BudgetTracker ──────────────────────────────────────────────────────────
 
 /**
- * Ephemeral in-memory tracker for token and cost budgets across dispatched
- * sessions within a single plugin lifecycle.
+ * Tracks token and cost budgets across dispatched sessions within a single
+ * plugin lifecycle. State is persisted to disk via debounced writes so it
+ * survives plugin restarts.
  *
  * Tracks two levels:
  * - **Request-level**: cumulative usage across all dispatched sessions sharing
@@ -30,7 +35,6 @@ export interface BudgetCheckResult {
  * sampling.
  *
  * Thread-safe for single-process use (no locks needed — in-memory Maps).
- * State is NOT persisted to disk; it resets on plugin restart.
  */
 export class BudgetTracker {
   private log = createSubLogger("budget");
@@ -44,8 +48,21 @@ export class BudgetTracker {
   /** The active config used for budget limit checks. */
   private config: DispatchManagerConfig;
 
-  constructor(config: DispatchManagerConfig) {
+  /** Directory hash for state-file naming. */
+  private dirHash: string;
+
+  /** Workspace directory for state file storage. */
+  private directory: string;
+
+  // ── Debounce fields for deferred persistence ────────────────────────
+  private _dirty = false;
+  private _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(config: DispatchManagerConfig, directory: string) {
     this.config = config;
+    this.directory = directory;
+    this.dirHash = shortHash(directory);
+    this.restore();
   }
 
   /**
@@ -96,6 +113,9 @@ export class BudgetTracker {
       `in=${tokens.input} out=${tokens.output} cost=${cost.toFixed(6)}`,
       { tag: "budget", taskId: sessionId },
     );
+
+    // Trigger debounced persistence
+    this._debouncedPersist();
   }
 
   /**
@@ -202,6 +222,71 @@ export class BudgetTracker {
   reset(): void {
     this.requestUsage.clear();
     this.sessionUsage.clear();
+  }
+
+  // ── Persistence ─────────────────────────────────────────────────────────
+
+  /**
+   * Path to the budget state file on disk.
+   */
+  private statePath(): string {
+    return join(this.directory, ".rolebox", "state", `budget-${this.dirHash}.json`);
+  }
+
+  /**
+   * Serialize current usage Maps to disk using atomic write pattern
+   * (.tmp + renameSync) to prevent file corruption from partial writes.
+   */
+  persist(): void {
+    const data = JSON.stringify({
+      version: 1,
+      requestUsage: [...this.requestUsage.entries()],
+      sessionUsage: [...this.sessionUsage.entries()],
+    });
+    atomicWriteSync(this.statePath(), data);
+  }
+
+  /**
+   * Restore usage Maps from disk. Called from the constructor.
+   * If the file does not exist or is corrupt, starts fresh with empty Maps.
+   */
+  restore(): void {
+    let raw: string;
+    try {
+      raw = readFileSync(this.statePath(), "utf-8");
+    } catch {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed.version !== 1) return;
+      this.requestUsage = new Map(parsed.requestUsage ?? []);
+      this.sessionUsage = new Map(parsed.sessionUsage ?? []);
+      this.log.debug("restored budget from disk", {
+        requestSessions: this.requestUsage.size,
+        dispatchSessions: this.sessionUsage.size,
+      });
+    } catch {
+      // Corrupt file — start fresh
+    }
+  }
+
+  /**
+   * Debounced persist: sets dirty flag, restarts 200ms timer.
+   * The timer callback flushes to disk when no new calls arrive within
+   * the 200ms window.
+   */
+  private _debouncedPersist(): void {
+    this._dirty = true;
+    if (this._debounceTimer !== null) {
+      clearTimeout(this._debounceTimer);
+    }
+    this._debounceTimer = setTimeout(() => {
+      this._debounceTimer = null;
+      if (!this._dirty) return;
+      this._dirty = false;
+      this.persist();
+    }, 200);
   }
 
   /**

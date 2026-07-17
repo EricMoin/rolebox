@@ -1,6 +1,7 @@
 import type { DispatchTask } from "../types.ts";
 import type { CompletionOrchestratorDeps } from "../completion/completion-orchestrator.ts";
 import { debugLog } from "../core/debug-log.ts";
+import { removeFromParentIndex } from "../core/lifecycle-shared.ts";
 
 /**
  * Debounced asynchronous state persistence. Safe to call frequently.
@@ -97,6 +98,9 @@ export function flushPersistSync(deps: CompletionOrchestratorDeps): void {
 export function cleanupTask(deps: CompletionOrchestratorDeps, taskId: string): void {
   const t = deps.tasks.get(taskId);
   if (t?.sessionId) deps.sessionToTask.delete(t.sessionId);
+  if (t) {
+    removeFromParentIndex(deps.parentTasksIndex, t.parentSessionId, taskId);
+  }
   deps.eventState.delete(taskId);
   deps.tasks.delete(taskId);
 

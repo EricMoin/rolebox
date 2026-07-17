@@ -6,6 +6,39 @@ import { resultSidecarPath } from "../completion/result-extractor.ts";
 import type { ProgressStore } from "../types.progress.ts";
 import { clearEmittedThresholds } from "../progress/progress-tools.ts";
 
+/** Index mapping parentSessionId → set of task IDs for O(1) lookup. */
+export type ParentTasksIndex = Map<string, Set<string>>;
+
+/**
+ * Add a task ID to the parent-tasks index.
+ */
+export function addToParentIndex(
+  index: ParentTasksIndex,
+  parentSessionId: string,
+  taskId: string,
+): void {
+  const set = index.get(parentSessionId) ?? new Set<string>();
+  set.add(taskId);
+  index.set(parentSessionId, set);
+}
+
+/**
+ * Remove a task ID from the parent-tasks index.
+ * Cleans up the parent key if the set becomes empty.
+ */
+export function removeFromParentIndex(
+  index: ParentTasksIndex,
+  parentSessionId: string,
+  taskId: string,
+): void {
+  const set = index.get(parentSessionId);
+  if (!set) return;
+  set.delete(taskId);
+  if (set.size === 0) {
+    index.delete(parentSessionId);
+  }
+}
+
 /** Shared mutable state injected by DispatchManager — defined in task-lifecycle.ts for manager.ts imports. */
 export interface TaskLifecycleDeps {
   tasks: Map<string, DispatchTask>;
@@ -41,6 +74,8 @@ export interface TaskLifecycleDeps {
   deleteTaskCheckpoint: (taskId: string) => Promise<void>;
   /** Per-task terminated listeners (fire-once: auto-cleared after notify). */
   taskTerminatedListeners: Map<string, Set<Function>>;
+  /** Parent→taskIds index for O(1) getTasksByParent lookups. */
+  parentTasksIndex: ParentTasksIndex;
 }
 
 const DEFAULT_CONCURRENCY_KEY = "default";

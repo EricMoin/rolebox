@@ -391,3 +391,96 @@ describe("isTerminalPhase", () => {
     expect(isTerminalPhase("finalizing")).toBe(false);
   });
 });
+
+// ── LoopStore debounce ────────────────────────────────────────────────
+
+describe("LoopStore debounce", () => {
+  let tempDir: string;
+  let store: LoopStore;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "loop-store-debounce-"));
+  });
+
+  afterAll(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    store = new LoopStore(tempDir);
+    const { shortHash } = require("../../src/utils/state-paths.ts");
+    const stateDir = join(tempDir, ".rolebox", "state");
+    mkdirSync(stateDir, { recursive: true });
+    const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
+    try { rmSync(filePath, { force: true }); } catch {}
+  });
+
+  it("save() with debounce eventually persists data", async () => {
+    const loop = makeLoop({ current: 1, phase: "activating" });
+    const input = new Map<string, LoopState>([["l1", loop]]);
+
+    await store.save(input);
+
+    // After await resolves, the save should be complete
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.size).toBe(1);
+    expect(loaded!.get("l1")).toEqual(loop);
+  });
+
+  it("multiple rapid save() calls coalesce into one I/O", async () => {
+    // Save three versions rapidly — only the last should be persisted
+    const loop1 = makeLoop({ current: 1, phase: "activating" });
+    const loop2 = makeLoop({ current: 2, phase: "awaiting_worker" });
+    const loop3 = makeLoop({ current: 3, phase: "complete" });
+
+    // Fire all three near-instantaneously (no await between them)
+    const p1 = store.save(new Map([["l1", loop1]]));
+    const p2 = store.save(new Map([["l1", loop2]]));
+    const p3 = store.save(new Map([["l1", loop3]]));
+
+    // Wait for all to resolve (they share the same debounced timer)
+    await Promise.all([p1, p2, p3]);
+
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    // Only the latest (loop3) should have been saved
+    expect(loaded!.get("l1")!.current).toBe(3);
+    expect(loaded!.get("l1")!.phase).toBe("complete");
+  });
+
+  it("dispose() clears pending timer and pending resolves", () => {
+    const loop = makeLoop({ current: 1, phase: "activating" });
+    const input = new Map<string, LoopState>([["l1", loop]]);
+
+    // Call save() to start the timer but don't await
+    const savePromise = store.save(input);
+
+    // Immediately dispose — timer should be cleared
+    store.dispose();
+
+    // The promise should resolve (even though we disposed)
+    // We just need to ensure no crash or hanging
+    // Use a short timeout to verify the promise resolves
+    const timeout = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error("save promise never resolved")), 500),
+    );
+    return Promise.race([
+      savePromise.then(() => { /* ok — disposed, resolved */ }),
+      timeout,
+    ]);
+  });
+
+  it("subsequent save() after dispose starts fresh", async () => {
+    const loop = makeLoop({ current: 5, phase: "complete" });
+
+    store.dispose();
+
+    // After dispose, save should still work
+    await store.save(new Map([["fresh", loop]]));
+
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.get("fresh")!.current).toBe(5);
+  });
+});
