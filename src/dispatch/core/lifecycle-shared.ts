@@ -76,6 +76,10 @@ export interface TaskLifecycleDeps {
   taskTerminatedListeners: Map<string, Set<Function>>;
   /** Parent→taskIds index for O(1) getTasksByParent lookups. */
   parentTasksIndex: ParentTasksIndex;
+  /** Inflight running task count per parentSessionId — replaces O(n) scan in getInflightCount. */
+  inflightByParent: Map<string, number>;
+  /** Oldest startedAt timestamp per parentSessionId — replaces O(n) scan in getOldestInflightChildStartedAt. */
+  oldestStartedAtByParent: Map<string, number>;
 }
 
 const DEFAULT_CONCURRENCY_KEY = "default";
@@ -123,22 +127,38 @@ export function transition(
   const t = d.tasks.get(taskId);
   if (!t) return false;
   if (!from.includes(t.status)) return false;
+  const wasRunning = t.status === "running";
   t.status = to;
   t.completedAt = fields && "completedAt" in fields ? fields.completedAt : new Date();
   if (fields?.error !== undefined) t.error = fields.error;
+  // Track inflight counters inline with status transitions
+  if (to === "running" && !wasRunning) {
+    const pid = t.parentSessionId;
+    d.inflightByParent.set(pid, (d.inflightByParent.get(pid) ?? 0) + 1);
+    const startedAt = t.startedAt.getTime();
+    const currOldest = d.oldestStartedAtByParent.get(pid);
+    if (currOldest === undefined || startedAt < currOldest) {
+      d.oldestStartedAtByParent.set(pid, startedAt);
+    }
+  } else if (wasRunning && to !== "running") {
+    // Decrement when leaving running — counter stays in sync with status
+    const pid = t.parentSessionId;
+    const curr = d.inflightByParent.get(pid);
+    if (curr !== undefined) {
+      if (curr <= 1) {
+        d.inflightByParent.delete(pid);
+        d.oldestStartedAtByParent.delete(pid);
+      } else {
+        d.inflightByParent.set(pid, curr - 1);
+      }
+    }
+  }
   return true;
 }
 
 /** Count inflight (running + pending) tasks for a given parent session. */
 export function getInflightCount(d: TaskLifecycleDeps, parentSessionId: string): number {
-  let count = 0;
-  for (const task of d.tasks.values()) {
-    if (task.parentSessionId === parentSessionId &&
-        (task.status === "running" || task.status === "pending")) {
-      count++;
-    }
-  }
-  return count;
+  return d.inflightByParent.get(parentSessionId) ?? 0;
 }
 
 /** Schedule cleanup of a task (via the cleanupTask callback). */

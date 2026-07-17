@@ -76,6 +76,10 @@ export interface CompletionOrchestratorDeps {
   cancelTask: (taskId: string) => Promise<boolean>;
   /** Parent→taskIds index for O(1) getTasksByParent lookups. */
   parentTasksIndex: ParentTasksIndex;
+  /** Inflight running task count per parentSessionId — shared with TaskLifecycleDeps for O(1) getInflightCount. */
+  inflightByParent: Map<string, number>;
+  /** Oldest startedAt timestamp per parentSessionId — shared with TaskLifecycleDeps for O(1) getOldestInflightChildStartedAt. */
+  oldestStartedAtByParent: Map<string, number>;
 }
 
 /**
@@ -217,9 +221,31 @@ export class CompletionOrchestrator implements OrchestratorBridge {
     const t = this.d.tasks.get(taskId);
     if (!t) return false;
     if (!from.includes(t.status)) return false;
+    const wasRunning = t.status === "running";
     t.status = to;
     t.completedAt = fields && "completedAt" in fields ? fields.completedAt : new Date();
     if (fields?.error !== undefined) t.error = fields.error;
+    // Track inflight counters (mirrors lifecycle-shared.ts transition() logic)
+    if (to === "running" && !wasRunning) {
+      const pid = t.parentSessionId;
+      this.d.inflightByParent.set(pid, (this.d.inflightByParent.get(pid) ?? 0) + 1);
+      const startedAt = t.startedAt.getTime();
+      const currOldest = this.d.oldestStartedAtByParent.get(pid);
+      if (currOldest === undefined || startedAt < currOldest) {
+        this.d.oldestStartedAtByParent.set(pid, startedAt);
+      }
+    } else if (wasRunning && to !== "running") {
+      const pid = t.parentSessionId;
+      const curr = this.d.inflightByParent.get(pid);
+      if (curr !== undefined) {
+        if (curr <= 1) {
+          this.d.inflightByParent.delete(pid);
+          this.d.oldestStartedAtByParent.delete(pid);
+        } else {
+          this.d.inflightByParent.set(pid, curr - 1);
+        }
+      }
+    }
     return true;
   }
 

@@ -130,6 +130,20 @@ function createFixture(inflightCount: number = 0): Fixture {
   // Register the task so watchdog methods (isDebouncing, startDebounce) work
   watchdog.registerTask(taskId);
 
+  // Maps for O(1) inflight counters (must match tasks)
+  const inflightByParent = new Map<string, number>();
+  const oldestStartedAtByParent = new Map<string, number>();
+  if (inflightCount > 0) {
+    inflightByParent.set(sessionId, inflightCount);
+    let oldestMs = Infinity;
+    for (const [, t] of tasks) {
+      if (t.parentSessionId === sessionId && (t.status === "running" || t.status === "pending")) {
+        oldestMs = Math.min(oldestMs, t.startedAt.getTime());
+      }
+    }
+    if (oldestMs < Infinity) oldestStartedAtByParent.set(sessionId, oldestMs);
+  }
+
   const deps = {
     sessionToTask,
     tasks,
@@ -138,6 +152,8 @@ function createFixture(inflightCount: number = 0): Fixture {
     client,
     config,
     deferredIdleTimers,
+    inflightByParent,
+    oldestStartedAtByParent,
   } as unknown as TaskLifecycleDeps;
 
   return { deps, watchdog, sessionId, taskId };
@@ -218,10 +234,13 @@ describe("inflight dispatch guard in handleSessionIdle", () => {
     expect(startDebounceSpy).not.toHaveBeenCalled();
 
     // Phase 2: simulate subagent tasks completing — change their status to "completed"
+    // Also update the O(1) inflight map to match (in production, transition() does this).
     const child1 = deps.tasks.get("child-task-0")!;
     child1.status = "completed";
     const child2 = deps.tasks.get("child-task-1")!;
     child2.status = "completed";
+    deps.inflightByParent!.delete(sessionId);
+    deps.oldestStartedAtByParent!.delete(sessionId);
 
     // Second call with inflight = 0 SHOULD start debounce
     await handleSessionIdle(deps, sessionId);
@@ -335,6 +354,20 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
 
     watchdog.registerTask(taskId);
 
+    // Maps for O(1) inflight counters (must match tasks)
+    const inflightByParent = new Map<string, number>();
+    const oldestStartedAtByParent = new Map<string, number>();
+    if (inflightCount > 0) {
+      inflightByParent.set(sessionId, inflightCount);
+      let oldestMs = Infinity;
+      for (const [, t] of tasks) {
+        if (t.parentSessionId === sessionId && (t.status === "running" || t.status === "pending")) {
+          oldestMs = Math.min(oldestMs, t.startedAt.getTime());
+        }
+      }
+      if (oldestMs < Infinity) oldestStartedAtByParent.set(sessionId, oldestMs);
+    }
+
     const deps = {
       tasks,
       sessionToTask,
@@ -343,6 +376,8 @@ describe("stale-timeout safety in evaluateAndComplete", () => {
       client,
       config,
       deferredIdleTimers,
+      inflightByParent,
+      oldestStartedAtByParent,
       // Supporting mocks for timeout path
       pendingNotifications: new Set<string>(),
       sendNotification: mock(() => Promise.resolve(true)),

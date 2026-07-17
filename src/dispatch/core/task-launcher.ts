@@ -164,6 +164,16 @@ export async function startBackgroundTask(
       consecutiveFetchFailures: 0,
     });
     task.status = "running";
+    // Track inflight counter (mirrors transition() entering-running logic for direct status assignment)
+    {
+      const pid = task.parentSessionId;
+      d.inflightByParent.set(pid, (d.inflightByParent.get(pid) ?? 0) + 1);
+      const startedAt = task.startedAt.getTime();
+      const currOldest = d.oldestStartedAtByParent.get(pid);
+      if (currOldest === undefined || startedAt < currOldest) {
+        d.oldestStartedAtByParent.set(pid, startedAt);
+      }
+    }
     didMarkRunning = true;
     infoLog("launch", taskId, `running agent=${input.subagent}`);
     metrics.counter("dispatch_total", { agent: input.subagent, mode: "background" }).inc();
@@ -187,6 +197,19 @@ export async function startBackgroundTask(
     task.error = err instanceof Error ? err.message : String(err);
     debugLog("launch", taskId, `ERROR: ${task.error}`);
     if (didMarkRunning) {
+      // Decrement inflight counter — status changed directly, not via transition()
+      {
+        const pid = task.parentSessionId;
+        const curr = d.inflightByParent.get(pid);
+        if (curr !== undefined) {
+          if (curr <= 1) {
+            d.inflightByParent.delete(pid);
+            d.oldestStartedAtByParent.delete(pid);
+          } else {
+            d.inflightByParent.set(pid, curr - 1);
+          }
+        }
+      }
       d.sessionToTask.delete(task.sessionId);
       task.completedAt = new Date();
       leaveRunning(d, taskId);

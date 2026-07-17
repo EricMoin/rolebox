@@ -193,17 +193,7 @@ function markError(d: TaskLifecycleDeps, taskId: string, errorMsg: string): void
 
 /** Find the earliest start time among inflight children of the given session, or null if none. */
 function getOldestInflightChildStartedAt(d: TaskLifecycleDeps, sessionId: string): number | null {
-  let oldest = Infinity;
-  for (const task of d.tasks.values()) {
-    if (
-      task.parentSessionId === sessionId &&
-      (task.status === "running" || task.status === "pending")
-    ) {
-      const t = task.startedAt.getTime();
-      if (t < oldest) oldest = t;
-    }
-  }
-  return oldest === Infinity ? null : oldest;
+  return d.oldestStartedAtByParent.get(sessionId) ?? null;
 }
 
 /**
