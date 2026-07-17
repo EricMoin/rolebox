@@ -55,8 +55,16 @@ const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> =
   evidence_met:        (_arg, env) => env.requiredEvidence.every((t) => env.state.evidenceObserved[t] === true),
   tool_observed:       (arg, env) => env.state.toolsObserved.includes(arg),
   signal_observed:    (arg, env) => {
-    const observed = (env.state.kv["__signals_observed"] as string[] | undefined) ?? [];
-    return observed.includes(arg);
+    const raw = env.state.kv["__signals_observed"];
+    // Record format: Record<string, unknown> where key = signal type
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      return arg in (raw as Record<string, unknown>);
+    }
+    // Legacy string-array format (pre-ledger migration)
+    if (Array.isArray(raw)) {
+      return (raw as string[]).includes(arg);
+    }
+    return false;
   },
   turn_count:          (arg, env) => (env.state.currentTurn - env.state.activatedAtTurn) >= Number(arg || "0"),
   state_eq:            stateEquals,

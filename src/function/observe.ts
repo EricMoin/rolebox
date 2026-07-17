@@ -4,6 +4,7 @@ import type { ArtifactStore } from "./artifact-store.ts";
 import { extractResultBlockNamed } from "./fence.ts";
 import { evaluateCondition } from "./conditions.ts";
 import { wrapObserveCapability } from "../extensions/capabilities.ts";
+import { recordSignal } from "../signal/signal-ledger.ts";
 
 // Shared skeleton for the message/activate observers. Always marks the runtime
 // dirty, even when no spec matched.
@@ -38,23 +39,13 @@ export function runToolObserve(opts: {
     if (!st) continue;
     if (!st.toolsObserved.includes(opts.tool)) st.toolsObserved.push(opts.tool);
     // Track signal type for signal_observed(type) condition
+    // Uses signal-ledger record format (Record<string, unknown> key=type → value=payload)
     if (opts.tool === "signal" && opts.toolArgs && typeof opts.toolArgs === "object") {
       const signalType = (opts.toolArgs as Record<string, unknown>).type;
+      const payload = (opts.toolArgs as Record<string, unknown>).payload;
       if (typeof signalType === "string") {
         st.kv["__signal_type"] = signalType;
-        // Also track in a set for multi-signal scenarios
-        const observed = (st.kv["__signals_observed"] as string[] | undefined) ?? [];
-        if (!observed.includes(signalType)) {
-          observed.push(signalType);
-          st.kv["__signals_observed"] = observed;
-        }
-      }
-    }
-    // Auto-capture signal payload as artifact when present
-    if (opts.tool === "signal" && opts.toolArgs && typeof opts.toolArgs === "object") {
-      const payload = (opts.toolArgs as Record<string, unknown>).payload;
-      if (payload !== undefined) {
-        opts.artifacts.write(opts.sessionID, "__signal_payload", JSON.stringify(payload));
+        recordSignal(st, signalType, payload);
       }
     }
     // requires_evidence auto-mark (skip when output-gated observe covers same pair)

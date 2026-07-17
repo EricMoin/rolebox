@@ -252,44 +252,54 @@ describe("evaluateCondition", () => {
     expect(evaluateCondition("signal_observed(answer)", env)).toBe(false);
   });
 
-  it("signal_observed(answer) → false when no matching signal type", () => {
+  it("signal_observed(answer) → false when no matching signal type (record format)", () => {
     const env = mockEnv({
       state: {
         ...mockEnv().state,
-        kv: { __signals_observed: ["progress"] },
+        kv: { __signals_observed: { progress: null } },
       },
     });
     expect(evaluateCondition("signal_observed(answer)", env)).toBe(false);
   });
 
-  it("signal_observed(answer) → true when matching signal type observed", () => {
+  it("signal_observed(answer) → true when matching signal type observed (record format)", () => {
     const env = mockEnv({
       state: {
         ...mockEnv().state,
-        kv: { __signals_observed: ["answer"] },
+        kv: { __signals_observed: { answer: null } },
       },
     });
     expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
   });
 
-  it("signal_observed(answer) → true among multiple observed signals", () => {
+  it("signal_observed(answer) → true among multiple observed signals (record format)", () => {
     const env = mockEnv({
       state: {
         ...mockEnv().state,
-        kv: { __signals_observed: ["progress", "answer", "need_approval"] },
+        kv: { __signals_observed: { progress: null, answer: { data: 42 }, need_approval: null } },
       },
     });
     expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
   });
 
-  it("signal_observed(need_approval) → false when only answer was observed", () => {
+  it("signal_observed(need_approval) → false when only answer was observed (record format)", () => {
     const env = mockEnv({
       state: {
         ...mockEnv().state,
-        kv: { __signals_observed: ["answer"] },
+        kv: { __signals_observed: { answer: null } },
       },
     });
     expect(evaluateCondition("signal_observed(need_approval)", env)).toBe(false);
+  });
+
+  it("signal_observed(answer) → true with legacy string array format (backward compat)", () => {
+    const env = mockEnv({
+      state: {
+        ...mockEnv().state,
+        kv: { __signals_observed: ["answer"] },
+      },
+    });
+    expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
   });
 });
 
