@@ -45,17 +45,26 @@ export async function resolveSkills(
   roleDir: string,
   globalSkillsDir: string,
 ): Promise<ResolvedSkill[]> {
+  if (skillNames.length === 0) return [];
+
+  // Collect all candidate patterns across all skill names for a single batch glob call
+  const candidateTasks: { name: string; candidates: Candidate[] }[] = [];
+  for (const name of skillNames) {
+    candidateTasks.push({ name, candidates: buildCandidates(name, roleDir, globalSkillsDir) });
+  }
+
+  const allPatterns = candidateTasks.flatMap(t => t.candidates.map(c => c.pattern));
+  const matchedPaths = await fg(allPatterns, { onlyFiles: true });
+  const matchSet = new Set(matchedPaths);
+
   const resolved: ResolvedSkill[] = [];
 
-  for (const name of skillNames) {
-    const candidates = buildCandidates(name, roleDir, globalSkillsDir);
-
+  for (const { name, candidates } of candidateTasks) {
     let found = false;
 
     for (const candidate of candidates) {
-      const matches = await fg(candidate.pattern, { onlyFiles: true });
-      if (matches.length > 0) {
-        const filePath = matches[0];
+      if (matchSet.has(candidate.pattern)) {
+        const filePath = candidate.pattern;
         let description = "";
         let references: ResolvedReference[] = [];
         try {

@@ -149,4 +149,36 @@ describe("Recursive subagent resolution", () => {
       cleanup();
     }
   });
+
+  it("parallel resolution produces deterministic output (results identical across multiple runs)", async () => {
+    // Run resolution multiple times — results must be identical
+    // regardless of Promise.all concurrency ordering
+    const runCount = 5;
+    const results: string[][] = [];
+
+    for (let i = 0; i < runCount; i++) {
+      const { ctx, roleMap, cleanup } = setup();
+      try {
+        const resolved = await resolveAllRoles(roleMap, ctx);
+        // Serialize the full structure into a stable representation for comparison
+        const serialized = resolved.map(r => ({
+          id: r.id,
+          subagentIds: r.subagents.map(sa => ({
+            id: sa.id,
+            parentId: sa.parentId,
+            childIds: sa.subagents.map(c => c.id).sort(),
+          })).sort((a, b) => a.id.localeCompare(b.id)),
+        }));
+        results.push(JSON.stringify(serialized));
+      } finally {
+        cleanup();
+      }
+    }
+
+    // All runs must produce identical output
+    const first = results[0];
+    for (let i = 1; i < results.length; i++) {
+      expect(results[i]).toBe(first);
+    }
+  });
 });

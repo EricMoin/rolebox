@@ -190,6 +190,42 @@ describe("resolveSkills", () => {
     expect(result[0].scope).toBe("rolebox");
   });
 
+  it("batch dedup priority: rolebox wins over opencode when both exist across multiple skills", async () => {
+    const roleDir = tmpDir();
+    const globalDir = tmpDir();
+
+    // Add role-local skill-a (dir-based, priority 1)
+    mkSkillFile(roleDir, "skill-a", "role-a", true);
+    // Add BOTH role-local and global versions of skill-b
+    mkSkillFile(roleDir, "skill-b", "role-b", true);
+    mkGlobalSkillFile(globalDir, "skill-b", "global-b", true);
+    // Add global-only skill-c (dir-based, priority 3)
+    mkGlobalSkillFile(globalDir, "skill-c", "global-c", true);
+
+    const result = await resolveSkills(
+      ["skill-a", "skill-b", "skill-c"],
+      roleDir,
+      globalDir,
+    );
+
+    expect(result).toHaveLength(3);
+
+    // skill-a: only in rolebox -> rolebox scope
+    const a = result.find(s => s.name === "skill-a")!;
+    expect(a.scope).toBe("rolebox");
+    expect(a.filePath).toContain("/skills/skill-a/SKILL.md");
+
+    // skill-b: in BOTH -> rolebox wins (priority over global)
+    const b = result.find(s => s.name === "skill-b")!;
+    expect(b.scope).toBe("rolebox");
+    expect(b.filePath).toContain("/skills/skill-b/SKILL.md");
+
+    // skill-c: only in global -> opencode scope
+    const c = result.find(s => s.name === "skill-c")!;
+    expect(c.scope).toBe("opencode");
+    expect(c.filePath).toContain("/skill-c/SKILL.md");
+  });
+
   it("reads description from SKILL.md frontmatter", async () => {
     const roleDir = tmpDir();
     const globalDir = tmpDir();

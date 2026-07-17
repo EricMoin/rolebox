@@ -108,92 +108,94 @@ async function resolveSubagents(
   roleReferences: ResolvedReference[],
   inheritedParent: RoleConfig,
 ): Promise<ResolvedSubAgent[]> {
+
   const globalFunctionsDir = globalFunctionsPath(ctx.configDir);
-  const resolved: ResolvedSubAgent[] = [];
 
-  for (const saConfig of configs) {
-    const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
-    const childId = `${parentFullId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
+  const results = await Promise.all(
+    configs.map(async (saConfig) => {
+      const childSlug = saConfig.name.toLowerCase().replace(/\s+/g, "-");
+      const childId = `${parentFullId}${SUBAGENT_ID_SEPARATOR}${childSlug}`;
 
-    const slugDir = subagentDir(roleDir, childSlug);
-    const nameDir = subagentDir(roleDir, saConfig.name);
-    const saRoleDir = existsSync(slugDir)
-      ? slugDir
-      : existsSync(nameDir)
-        ? nameDir
-        : roleDir;
+      const slugDir = subagentDir(roleDir, childSlug);
+      const nameDir = subagentDir(roleDir, saConfig.name);
+      const saRoleDir = existsSync(slugDir)
+        ? slugDir
+        : existsSync(nameDir)
+          ? nameDir
+          : roleDir;
 
-    const saLocalSkills = saConfig.skills ?? [];
-    const saGlobalSkills = saConfig.opencode_skills ?? [];
-    const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
+      const saLocalSkills = saConfig.skills ?? [];
+      const saGlobalSkills = saConfig.opencode_skills ?? [];
+      const saAllSkillNames = [...saLocalSkills, ...saGlobalSkills];
       const saFunctionNames = [...new Set([...DEFAULT_FUNCTIONS, ...(saConfig.functions ?? [])])];
-    const saEnabledFunctions = saFunctionNames.filter(
-      (fn) => !(saConfig.disable_functions ?? []).includes(fn),
-    );
+      const saEnabledFunctions = saFunctionNames.filter(
+        (fn) => !(saConfig.disable_functions ?? []).includes(fn),
+      );
 
-    const saBundle = await resolveAgentBundle({
-      skillNames: saAllSkillNames,
-      roleDir: saRoleDir,
-      globalSkillsDir: ctx.globalSkillsDir,
-      enabledFunctionNames: saEnabledFunctions,
-      globalFunctionsDir,
-      builtinDir: ctx.builtinDir,
-      baseReferences: roleReferences,
-    });
-    const { skills: saSkills, functions: saFunctions, references: saReferences } = saBundle;
+      const saBundle = await resolveAgentBundle({
+        skillNames: saAllSkillNames,
+        roleDir: saRoleDir,
+        globalSkillsDir: ctx.globalSkillsDir,
+        enabledFunctionNames: saEnabledFunctions,
+        globalFunctionsDir,
+        builtinDir: ctx.builtinDir,
+        baseReferences: roleReferences,
+      });
+      const { skills: saSkills, functions: saFunctions, references: saReferences } = saBundle;
 
-    // Resolve nested subagents first so we can include their metadata
-    // in this subagent's prompt <available_subagents> block.
-    const resolvedChildren = saConfig.subagents?.length
-      ? await resolveSubagents(
-          childId,
-          saConfig.subagents,
-          depth + 1,
-          roleId,
-          saRoleDir,
-          ctx,
-          saReferences,
-          saConfig as unknown as RoleConfig,
-        )
-      : [];
+      // Resolve nested subagents first so we can include their metadata
+      // in this subagent's prompt <available_subagents> block.
+      const resolvedChildren = saConfig.subagents?.length
+        ? await resolveSubagents(
+            childId,
+            saConfig.subagents,
+            depth + 1,
+            roleId,
+            saRoleDir,
+            ctx,
+            saReferences,
+            saConfig as unknown as RoleConfig,
+          )
+        : [];
 
-    const childMetadata = resolvedChildren.map(child => ({
-      id: child.id,
-      name: child.config.name,
-      description: child.config.description,
-    }));
+      const childMetadata = resolvedChildren.map(child => ({
+        id: child.id,
+        name: child.config.name,
+        description: child.config.description,
+      }));
 
-    const saPrompt = buildAgentPrompt(saConfig, saSkills, {
-      references: saReferences,
-      ...(childMetadata.length > 0 ? { subagents: childMetadata } : {}),
-    });
+      const saPrompt = buildAgentPrompt(saConfig, saSkills, {
+        references: saReferences,
+        ...(childMetadata.length > 0 ? { subagents: childMetadata } : {}),
+      });
 
-    ctx.roleFunctionsMap.set(childId, saFunctions);
+      ctx.roleFunctionsMap.set(childId, saFunctions);
 
-    const inheritedFrom: Record<string, unknown> = {};
-    const parentObj = inheritedParent as unknown as Record<string, unknown>;
-    const childObj = saConfig as unknown as Record<string, unknown>;
-    const inheritableKeys = ["model", "color", "variant", "temperature", "top_p", "permission", "tools"] as const;
-    for (const key of inheritableKeys) {
-      if (parentObj[key] !== undefined && childObj[key] === parentObj[key]) {
-        inheritedFrom[key] = parentObj[key];
+      const inheritedFrom: Record<string, unknown> = {};
+      const parentObj = inheritedParent as unknown as Record<string, unknown>;
+      const childObj = saConfig as unknown as Record<string, unknown>;
+      const inheritableKeys = ["model", "color", "variant", "temperature", "top_p", "permission", "tools"] as const;
+      for (const key of inheritableKeys) {
+        if (parentObj[key] !== undefined && childObj[key] === parentObj[key]) {
+          inheritedFrom[key] = parentObj[key];
+        }
       }
-    }
 
-    resolved.push({
-      id: childId,
-      config: saConfig,
-      prompt: saPrompt,
-      skills: saSkills,
-      functions: saFunctions,
-      references: saReferences,
-      parentId: parentFullId,
-      inheritedFrom,
-      subagents: resolvedChildren,
-    });
-  }
+      return {
+        id: childId,
+        config: saConfig,
+        prompt: saPrompt,
+        skills: saSkills,
+        functions: saFunctions,
+        references: saReferences,
+        parentId: parentFullId,
+        inheritedFrom,
+        subagents: resolvedChildren,
+      };
+    }),
+  );
 
-  return resolved;
+  return results;
 }
 
 export async function resolveAllRoles(
