@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { FileSystemCheckpointStore } from "../../src/dispatch/checkpoint/checkpoint-store.ts";
+import { FileSystemCheckpointStore, MAX_CHECKPOINTS_PER_TASK } from "../../src/dispatch/checkpoint/checkpoint-store.ts";
 import type { CheckpointData } from "../../src/dispatch/types.checkpoint.ts";
 
 function makeCheckpoint(overrides: Partial<CheckpointData> = {}): CheckpointData {
@@ -299,5 +299,29 @@ describe("FileSystemCheckpointStore", () => {
     expect(list).toHaveLength(2);
     expect(list[0].checkpoint_id).toBe("cp-2");
     expect(list[1].checkpoint_id).toBe("cp-1");
+
+  });
+
+  // ── Checkpoint entry cap ───────────────────────────────────────────
+
+  it("caps checkpoints to MAX_CHECKPOINTS_PER_TASK via FIFO eviction", async () => {
+    const taskId = "task-cap";
+    for (let i = 0; i < MAX_CHECKPOINTS_PER_TASK + 1; i++) {
+      const cp = makeCheckpoint({
+        task_id: taskId,
+        checkpoint_id: "cp-" + i,
+        created_at: new Date(Date.now() + i).toISOString(),
+      });
+      await store.saveCheckpoint(taskId, cp);
+    }
+
+    const list = await store.listCheckpoints(taskId);
+    expect(list).toHaveLength(MAX_CHECKPOINTS_PER_TASK);
+
+    // The oldest checkpoint (cp-0) should have been evicted
+    const ids = list.map((c) => c.checkpoint_id);
+    expect(ids).not.toContain("cp-0");
+    // The newest checkpoint (cp-100) should be present
+    expect(ids).toContain("cp-" + MAX_CHECKPOINTS_PER_TASK);
   });
 });

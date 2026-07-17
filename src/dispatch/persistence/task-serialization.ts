@@ -46,6 +46,7 @@ export interface SerializedDispatchTask {
   timeoutMs?: number;
   mode?: string;
   depth?: number;
+  priority?: number;
   result?: SerializedMaterializedResultRef;
 }
 

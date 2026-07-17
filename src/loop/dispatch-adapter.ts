@@ -77,7 +77,8 @@ export class DispatchAdapter implements IDispatchAdapter {
     private readonly client: ISessionClient,
     private readonly directory?: string,
   ) {}
-
+  /** Tracks the last message ID processed by readOriginSummary for incremental reads. */
+  lastProcessedMessageId?: string;
   async dispatchRound(input: {
     originSessionId: string;
     agent: string;
@@ -129,19 +130,17 @@ export class DispatchAdapter implements IDispatchAdapter {
     originSessionId: string,
     sinceMessageId?: string,
   ): Promise<string> {
+    const effectiveSinceId = sinceMessageId ?? this.lastProcessedMessageId;
     const messages = await this.client.messages(originSessionId);
-
     if (!messages || messages.length === 0) return "";
 
-    let capture = false;
-    if (!sinceMessageId) {
-      capture = true;
-    }
+    let capture = !effectiveSinceId;
+
 
     const textParts: string[] = [];
 
     for (const msg of messages) {
-      if (!capture && msg.info?.id === sinceMessageId) {
+      if (!capture && msg.info?.id === effectiveSinceId) {
         capture = true;
         continue;
       }
@@ -161,8 +160,12 @@ export class DispatchAdapter implements IDispatchAdapter {
     if (text.length > SUMMARY_INPUT_CHAR_CAP) {
       text = text.slice(-SUMMARY_INPUT_CHAR_CAP);
     }
-
-    return text;
+    const result = text;
+    // Track the last message ID for the next incremental call
+    if (messages.length > 0) {
+      this.lastProcessedMessageId = messages[messages.length - 1]?.info?.id ?? this.lastProcessedMessageId;
+    }
+    return result;
   }
 
   async getLastMessageId(originSessionId: string): Promise<string | undefined> {

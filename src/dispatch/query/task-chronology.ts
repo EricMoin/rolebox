@@ -10,11 +10,11 @@ const STATUS_COLUMNS: DispatchTaskStatus[] = [
   "pending",
   "running",
   "completed",
+  "awaiting_approval",
   "error",
   "cancelled",
   "timeout",
 ];
-
 function bucketKey(task: { startedAt: Date; agent: string }, groupBy: "hour" | "day" | "agent"): string {
   switch (groupBy) {
     case "hour": {
@@ -114,7 +114,6 @@ export function createTaskChronologyTool(manager: DispatchManager) {
         return "No tasks in the specified date range.";
       }
 
-      // Bucket tasks
       const bucketMap = new Map<
         string,
         { count: number; statusCounts: Record<DispatchTaskStatus, number> }
@@ -122,25 +121,24 @@ export function createTaskChronologyTool(manager: DispatchManager) {
 
       for (const task of filtered) {
         const key = bucketKey(task, input.group_by ?? "hour");
-        let bucket = bucketMap.get(key);
-        if (!bucket) {
-          bucket = {
+        if (!bucketMap.has(key)) {
+          bucketMap.set(key, {
             count: 0,
             statusCounts: {
               pending: 0,
               running: 0,
               completed: 0,
+              awaiting_approval: 0,
               error: 0,
               cancelled: 0,
               timeout: 0,
             },
-          };
-          bucketMap.set(key, bucket);
+          });
         }
+        const bucket = bucketMap.get(key)!;
         bucket.count++;
         bucket.statusCounts[task.status]++;
       }
-
       // Sort: chronologically for hour/day, alphabetically for agent
       const entries = [...bucketMap.entries()];
       if (input.group_by === "agent") {

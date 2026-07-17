@@ -25,6 +25,9 @@ import type { CheckpointData, CheckpointStore } from "../types.checkpoint.ts";
 
 const log = createSubLogger("dispatch:checkpoint");
 
+
+/** Maximum checkpoints retained per task. Older entries are evicted (FIFO). */
+export const MAX_CHECKPOINTS_PER_TASK = 100;
 // ── FileSystemCheckpointStore ──────────────────────────────────────────────
 
 export class FileSystemCheckpointStore implements CheckpointStore {
@@ -65,7 +68,11 @@ export class FileSystemCheckpointStore implements CheckpointStore {
 
     // Append the new checkpoint
     entries.push(data);
-
+    // Atomic write
+    // Evict oldest entries if over the cap (FIFO)
+    if (entries.length > MAX_CHECKPOINTS_PER_TASK) {
+      entries = entries.slice(-MAX_CHECKPOINTS_PER_TASK);
+    }
     // Atomic write
     const tmp = filePath + ".tmp";
     await writeFile(tmp, JSON.stringify(entries, null, 2), "utf-8");

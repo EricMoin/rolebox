@@ -189,6 +189,7 @@ export class TaskStateStore {
         timeoutMs: version === 1 || version === 2 ? undefined : st.timeoutMs,
         mode: version === 1 || version === 2 ? "background" : (st.mode as "background" | "sync" | undefined),
         depth: st.depth ?? 0,
+        priority: st.priority ?? 0,
         result: (version === 4 || version === 5) && st.result
           ? {
               sidecarPath: st.result.sidecarPath,
@@ -289,6 +290,7 @@ export class TaskStateStore {
         timeoutMs: task.timeoutMs,
         mode: task.mode,
         depth: task.depth,
+        priority: task.priority,
       };
 
       if (task.result) {

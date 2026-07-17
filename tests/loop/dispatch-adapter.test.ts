@@ -260,4 +260,44 @@ describe("DispatchAdapter", () => {
       expect(summary).toBe("short text");
     });
   });
+
+  describe("lastProcessedMessageId tracking", () => {
+    it("updates lastProcessedMessageId after readOriginSummary", async () => {
+      freshAdapter({
+        messages: [
+          {
+            info: { role: "assistant", id: "msg-1" },
+            parts: [{ type: "text", text: "first response" }],
+          },
+        ],
+      });
+
+      await adapter.readOriginSummary("origin-123");
+      expect((adapter as any).lastProcessedMessageId).toBe("msg-1");
+    });
+
+    it("uses lastProcessedMessageId as default sinceMessageId", async () => {
+      freshAdapter();
+      const da = adapter as any;
+      da.lastProcessedMessageId = "msg-1";
+      // Override client to return three messages
+      da.client = {
+        ...da.client,
+        messages: mock(() =>
+          Promise.resolve([
+            { info: { role: "assistant", id: "msg-1" }, parts: [{ type: "text", text: "old" }] },
+            { info: { role: "assistant", id: "msg-2" }, parts: [{ type: "text", text: "newer" }] },
+            { info: { role: "assistant", id: "msg-3" }, parts: [{ type: "text", text: "latest" }] },
+          ]),
+        ),
+      };
+
+      const summary = await adapter.readOriginSummary("origin-123");
+
+      // Should skip msg-1 and only include msg-2 and msg-3
+      expect(summary).not.toContain("old");
+      expect(summary).toContain("newer");
+      expect(summary).toContain("latest");
+    });
+  });
 });
