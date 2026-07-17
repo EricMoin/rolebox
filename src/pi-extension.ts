@@ -28,6 +28,8 @@ import {
   createDispatchTool,
   createDispatchOutputTool,
   createDispatchCancelTool,
+  createDispatchApproveTool,
+  createDispatchRejectTool,
   createDispatchMetricsTool,
   createDispatchBudgetTool,
 } from "./dispatch/tools.ts";
@@ -238,6 +240,8 @@ export default async function (pi: any): Promise<void> {
       dispatch_metrics: createDispatchMetricsTool(),
       dispatch_status: createDispatchStatusTool(dispatchManager),
       dispatch_budget: createDispatchBudgetTool(dispatchManager),
+      dispatch_approve: createDispatchApproveTool(dispatchManager),
+      dispatch_reject: createDispatchRejectTool(dispatchManager),
       dispatch_progress: createDispatchProgressTool(dispatchManager),
       dispatch_stream: createDispatchStreamTool(dispatchManager),
     };

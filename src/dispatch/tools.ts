@@ -277,6 +277,73 @@ export function createDispatchCancelTool(manager: DispatchManager) {
   });
 }
 
+export function createDispatchApproveTool(manager: DispatchManager) {
+  return defineTool({
+    description:
+      "Approve a human-in-the-loop task that is paused awaiting approval. " +
+      "Transitions the task to completed and notifies the parent. " +
+      "Only tasks in 'awaiting_approval' state can be approved.",
+    args: {
+      task_id: z
+        .string()
+        .describe("The task ID of the awaiting_approval task to approve"),
+    },
+    async execute(input) {
+      const approved = await manager.approveTask(input.task_id);
+      if (!approved) {
+        return [
+          "Task could not be approved.",
+          "",
+          `Task ID: ${input.task_id}`,
+          "Ensure the task exists and is in 'awaiting_approval' state.",
+        ].join("\n");
+      }
+      return [
+        "Task approved and completed.",
+        "",
+        `Task ID: ${input.task_id}`,
+        "The parent session has been notified.",
+      ].join("\n");
+    },
+  });
+}
+
+export function createDispatchRejectTool(manager: DispatchManager) {
+  return defineTool({
+    description:
+      "Reject a human-in-the-loop task that is paused awaiting approval. " +
+      "Transitions the task to error with the provided reason. " +
+      "Only tasks in 'awaiting_approval' state can be rejected.",
+    args: {
+      task_id: z
+        .string()
+        .describe("The task ID of the awaiting_approval task to reject"),
+      reason: z
+        .string()
+        .optional()
+        .describe("Optional reason for the rejection"),
+    },
+    async execute(input) {
+      const rejected = await manager.rejectTask(input.task_id, input.reason);
+      if (!rejected) {
+        return [
+          "Task could not be rejected.",
+          "",
+          `Task ID: ${input.task_id}`,
+          "Ensure the task exists and is in 'awaiting_approval' state.",
+        ].join("\n");
+      }
+      return [
+        "Task rejected.",
+        "",
+        `Task ID: ${input.task_id}`,
+        input.reason ? `Reason: ${input.reason}` : "",
+        "The parent session has been notified.",
+      ].filter(Boolean).join("\n");
+    },
+  });
+}
+
 export function createDispatchMetricsTool() {
   return defineTool({
     description:

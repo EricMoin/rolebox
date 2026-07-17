@@ -42,6 +42,8 @@ import {
   createDispatchTool,
   createDispatchOutputTool,
   createDispatchCancelTool,
+  createDispatchApproveTool,
+  createDispatchRejectTool,
   createDispatchMetricsTool,
 } from "../dispatch/tools.ts";
 import { createDispatchStatusTool } from "../dispatch/query/task-status.ts";
@@ -118,6 +120,8 @@ export function buildCanonicalTools(
     tools.dispatch = createDispatchTool(mgr, subagents, modelKey);
     tools.dispatch_output = createDispatchOutputTool(mgr);
     tools.dispatch_cancel = createDispatchCancelTool(mgr);
+    tools.dispatch_approve = createDispatchApproveTool(mgr);
+    tools.dispatch_reject = createDispatchRejectTool(mgr);
     tools.dispatch_metrics = createDispatchMetricsTool();
     tools.dispatch_status = createDispatchStatusTool(mgr);
 

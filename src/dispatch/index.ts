@@ -5,7 +5,7 @@ export { SessionMonitor } from "./completion/session-monitor.ts";
 export { TaskWatchdogManager } from "./core/watchdog.ts";
 export { detectCompletion } from "./completion/completion-detector.ts";
 export { buildNotificationText, notifyParent } from "./notification.ts";
-export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchMetricsTool } from "./tools.ts";
+export { createDispatchTool, createDispatchOutputTool, createDispatchCancelTool, createDispatchApproveTool, createDispatchRejectTool, createDispatchMetricsTool } from "./tools.ts";
 export { createCheckpointTool } from "./query/checkpoint-tools.ts";
 export { createDispatchProgressTool, createDispatchStreamTool, clearAllEmittedThresholds } from "./progress/progress-tools.ts";
 export type * from "./types.ts";

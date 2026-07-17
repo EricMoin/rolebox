@@ -20,6 +20,93 @@ import {
 import { withTimeout, TimeoutError } from "../core/with-timeout.ts";
 import { materializeAndNotify } from "./result-materializer.ts";
 import type { ProgressEvent } from "../types.progress.ts";
+import { functionRuntime } from "../../function/runtime-state.ts";
+import { hasSignal, getSignalPayload } from "../../signal/signal-ledger.ts";
+
+// ── HITL signal types that pause a task awaiting human intervention ──
+
+const HITL_SIGNALS = new Set(["need_approval", "blocked", "need_clarification"]);
+
+/**
+ * Check whether the subagent session associated with this task emitted any
+ * HITL (human-in-the-loop) signals (need_approval, blocked, need_clarification).
+ *
+ * When a HITL signal is found, the task transitions to "awaiting_approval"
+ * instead of "completed", and the parent session is notified with the signal
+ * details so a human can approve or reject via approve_task / reject_task.
+ *
+ * @returns true if a HITL signal was handled (task is now awaiting_approval).
+ */
+async function checkHitlSignals(d: TaskLifecycleDeps, taskId: string): Promise<boolean> {
+  const task = d.tasks.get(taskId);
+  if (!task || !task.sessionId) return false;
+
+  const sessionFns = functionRuntime.all(task.sessionId);
+  let hitlType: string | undefined;
+  let hitlPayload: unknown;
+
+  for (const [, fnState] of sessionFns) {
+    for (const signalType of HITL_SIGNALS) {
+      if (hasSignal(fnState, signalType)) {
+        hitlType = signalType;
+        hitlPayload = getSignalPayload(fnState, signalType);
+        break;
+      }
+    }
+    if (hitlType) break;
+  }
+
+  if (!hitlType) return false;
+
+  // Transition to awaiting_approval instead of completed
+  if (!transition(d, taskId, ["running"], "awaiting_approval")) return false;
+
+  d.watchdog.unregisterTask(taskId);
+  d.watchdog.cancelDebounce(taskId);
+
+  const t = d.tasks.get(taskId)!;
+  infoLog("lifecycle", taskId, `⏸ awaiting_approval agent=${t.agent} type=${hitlType}`);
+
+  metrics.counter("dispatch_hitl_paused_total", { type: hitlType }).inc();
+
+  // Release concurrency slot
+  if (t.concurrencyKey) {
+    d.concurrency.release(t.concurrencyKey, t.parentSessionId);
+  }
+  metrics.gauge("inflight_tasks").dec();
+  d.persistState();
+
+  // Send <system-reminder> to parent with approval details
+  const notifyText = [
+    "<system-reminder>",
+    "[HITL APPROVAL REQUIRED]",
+    `**Task ID:** ${taskId}`,
+    `**Description:** ${t.description || "N/A"}`,
+    `**Sub-agent:** ${t.agent}`,
+    `**Signal type:** ${hitlType}`,
+    `**Payload:** ${JSON.stringify(hitlPayload)}`,
+    "",
+    `Use \`approve_task(task_id="${taskId}")\` to approve and continue.`,
+    `Use \`reject_task(task_id="${taskId}", reason="...")\` to reject.`,
+    "</system-reminder>",
+  ].join("\n");
+
+  try {
+    await d.client.prompt(t.parentSessionId, {
+      ...(t.parentAgent ? { agent: t.parentAgent } : {}),
+      parts: [{ type: "text", text: notifyText }],
+      noReply: false,
+    });
+  } catch {
+    // Non-critical — parent may be offline
+  }
+
+  // Do NOT schedule cleanup — the task remains in awaiting_approval state
+  // for the parent to approve or reject.
+
+  notifyTerminated(d, taskId, hitlType);
+  return true;
+}
 
 // ── Helpers for common transition patterns ─────────────────────
 
@@ -102,6 +189,21 @@ function markError(d: TaskLifecycleDeps, taskId: string, errorMsg: string): void
   notifyTerminated(d, taskId, "error");
   cleanupTerminalError(d, taskId);
   finalizeCompletion(d, taskId);
+}
+
+/** Find the earliest start time among inflight children of the given session, or null if none. */
+function getOldestInflightChildStartedAt(d: TaskLifecycleDeps, sessionId: string): number | null {
+  let oldest = Infinity;
+  for (const task of d.tasks.values()) {
+    if (
+      task.parentSessionId === sessionId &&
+      (task.status === "running" || task.status === "pending")
+    ) {
+      const t = task.startedAt.getTime();
+      if (t < oldest) oldest = t;
+    }
+  }
+  return oldest === Infinity ? null : oldest;
 }
 
 /**
@@ -192,7 +294,29 @@ export async function evaluateAndComplete(
           }
           delete eventState.pendingConfirm;
           debugLog("evaluate", taskId, `pendingConfirm passed: msgCount stable at ${scopedMessages.length} — completing`);
+        } else {
+          // Non-idle-debounce triggers (watchdog-reconcile, global-sweep):
+          // if the task has inflight child tasks, it yielded its turn waiting for a
+          // background subagent — treat as not_ready instead of completing prematurely.
+          const inflight = getInflightCount(d, task.sessionId);
+          if (inflight > 0) {
+            const oldest = getOldestInflightChildStartedAt(d, task.sessionId);
+            const now = Date.now();
+            if (oldest !== null) {
+              const childElapsed = now - oldest;
+              const staleMs = task.timeoutMs ?? d.config.backgroundStaleTimeoutMs ?? BACKGROUND_STALE_TIMEOUT_MS;
+              if (childElapsed <= staleMs) {
+                eventState.lastProgressUpdate = now;
+                debugLog("evaluate", taskId, `completed but ${inflight} inflight child(ren) within stale timeout — treating as not_ready`);
+                break;  // treat as not_ready — children are healthy
+              }
+              // child is stale — fall through to completeAndRelease (natural timeout)
+            }
+          }
         }
+        // Check for HITL signals (need_approval, blocked, need_clarification)
+        // before completing. If found, the task pauses instead of completing.
+        if (await checkHitlSignals(d, taskId)) break;
         await completeAndRelease(d, taskId);
         break;
       }
@@ -209,12 +333,26 @@ export async function evaluateAndComplete(
         } else if (eventState.hasProducedOutput && now - eventState.lastProgressUpdate > staleMs) {
           timeoutAndRelease(d, taskId, "Task stalled");
         } else {
+          const inflight = getInflightCount(d, task.sessionId);
+          if (inflight > 0) {
+            const oldest = getOldestInflightChildStartedAt(d, task.sessionId);
+            if (oldest !== null) {
+              const childElapsed = now - oldest;
+              if (childElapsed <= staleMs) {
+                eventState.lastProgressUpdate = now;
+                debugLog("evaluate", taskId, `not_ready — ${inflight} inflight child(ren) within stale timeout, reset lastProgressUpdate`);
+                break;
+              }
+              debugLog("evaluate", taskId, `not_ready — oldest inflight child exceeded stale timeout (${childElapsed}ms > ${staleMs}ms), allowing parent timeout`);
+            }
+          }
           debugLog("evaluate", taskId, `not_ready — no stale timeout`);
         }
         break;
       }
       case "stabilizing": {
         debugLog("evaluate", taskId, `stabilizing with skipStabilityGating=true — treating as completed`);
+        if (await checkHitlSignals(d, taskId)) break;
         await completeAndRelease(d, taskId);
         break;
       }
@@ -317,6 +455,12 @@ export async function handleSessionIdle(d: TaskLifecycleDeps, sessionId: string)
 
     if (d.watchdog.isDebouncing(taskId)) {
       debugLog("event", taskId, "already debouncing — ignoring duplicate idle");
+      return;
+    }
+
+    const inflight = getInflightCount(d, sessionId);
+    if (inflight > 0) {
+      debugLog("event", taskId, `session.idle but ${inflight} child task(s) inflight — dispatch-and-yield pattern, skipping debounce`);
       return;
     }
 

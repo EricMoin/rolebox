@@ -6,6 +6,7 @@ export type DispatchTaskStatus =
   | "pending"
   | "running"
   | "completed"
+  | "awaiting_approval"
   | "error"
   | "cancelled"
   | "timeout";
@@ -91,8 +92,10 @@ export interface DispatchTask {
    *  Populated by the completion/harvest pipeline after `result` signal
    *  is emitted.  Absent until then. */
   result?: MaterializedResultRef;
+  /** Priority: lower number = higher priority. Default 0. Tasks with higher
+   *  priority (lower number) acquire concurrency slots before lower-priority ones. */
+  priority: number;
 }
-
 /**
  * Input parameters for the dispatch tool (task() call).
  * Maps directly to the tool's argument schema.
@@ -114,8 +117,11 @@ export interface DispatchInput {
   sync_timeout_ms?: number;
   /** When true, the dispatched session is created without parentID — it does NOT inherit the parent session's conversation history. Used by the loop system to ensure each round starts fresh. */
   noParentInherit?: boolean;
+  /** Priority: lower number = higher priority. Default 0 (normal).
+   *  Higher-priority tasks (lower value) acquire concurrency slots first.
+   *  Within the same priority level, tasks are dequeued in FIFO order. */
+  priority?: number;
 }
-
 /**
  * Result returned by the dispatch tool after submitting a task.
  * Provides the caller with a handle for tracking progress.

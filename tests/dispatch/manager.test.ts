@@ -1180,6 +1180,104 @@ describe("DispatchManager", () => {
     expect(emptyTasks.length).toBe(0);
   });
 
+  it("getTasksByParent() index sync: cleanup 1 of 3 tasks, returns 2 with no stale entries", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const ctx = { sessionID: "parent-cleanup", agent: "a", directory: "/tmp" };
+
+    const t1 = await manager.launch(
+      { subagent: "h1", prompt: "p1", run_in_background: false },
+      ctx,
+    );
+    const t2 = await manager.launch(
+      { subagent: "h2", prompt: "p2", run_in_background: false },
+      ctx,
+    );
+    const t3 = await manager.launch(
+      { subagent: "h3", prompt: "p3", run_in_background: false },
+      ctx,
+    );
+
+    // All 3 visible before cleanup
+    expect(manager.getTasksByParent("parent-cleanup").length).toBe(3);
+
+    // Cleanup one task
+    manager.cleanupTask(t2.id);
+
+    // Now should be 2
+    const remaining = manager.getTasksByParent("parent-cleanup");
+    expect(remaining.length).toBe(2);
+    expect(remaining.map((t) => t.id).sort()).toEqual(
+      [t1.id, t3.id].sort(),
+    );
+
+    // Internal index has no stale entries
+    const index = (manager as any).parentTasksIndex as Map<string, Set<string>>;
+    const taskIds = index.get("parent-cleanup");
+    expect(taskIds).toBeDefined();
+    expect(taskIds!.has(t1.id)).toBe(true);
+    expect(taskIds!.has(t2.id)).toBe(false); // cleaned up — removed from index
+    expect(taskIds!.has(t3.id)).toBe(true);
+    expect(taskIds!.size).toBe(2);
+  });
+
+  it("getTasksByParent() index consistency: multiple parents each have correct subsets", async () => {
+    const client = createMockClient();
+    const manager = new DispatchManager(client, fastConfig);
+
+    const ctxA = { sessionID: "parent-A", agent: "a", directory: "/tmp" };
+    const ctxB = { sessionID: "parent-B", agent: "b", directory: "/tmp" };
+    const ctxC = { sessionID: "parent-C", agent: "c", directory: "/tmp" };
+
+    // Launch tasks interleaved across parents
+    const a1 = await manager.launch(
+      { subagent: "h", prompt: "a1", run_in_background: false },
+      ctxA,
+    );
+    const b1 = await manager.launch(
+      { subagent: "h", prompt: "b1", run_in_background: false },
+      ctxB,
+    );
+    const a2 = await manager.launch(
+      { subagent: "h", prompt: "a2", run_in_background: false },
+      ctxA,
+    );
+    const c1 = await manager.launch(
+      { subagent: "h", prompt: "c1", run_in_background: false },
+      ctxC,
+    );
+    const b2 = await manager.launch(
+      { subagent: "h", prompt: "b2", run_in_background: false },
+      ctxB,
+    );
+
+    // Verify getTasksByParent returns correct subsets
+    expect(manager.getTasksByParent("parent-A").map((t) => t.id).sort())
+      .toEqual([a1.id, a2.id].sort());
+
+    expect(manager.getTasksByParent("parent-B").map((t) => t.id).sort())
+      .toEqual([b1.id, b2.id].sort());
+
+    expect(manager.getTasksByParent("parent-C").map((t) => t.id))
+      .toEqual([c1.id]);
+
+    expect(manager.getTasksByParent("parent-D").length).toBe(0);
+
+    // Cleanup one from parent-A, verify parent-B unaffected
+    manager.cleanupTask(a1.id);
+    expect(manager.getTasksByParent("parent-A").length).toBe(1);
+    expect(manager.getTasksByParent("parent-A")[0].id).toBe(a2.id);
+    expect(manager.getTasksByParent("parent-B").length).toBe(2);
+
+    // Internal index reflects correct state
+    const index = (manager as any).parentTasksIndex as Map<string, Set<string>>;
+    expect(index.get("parent-A")!.size).toBe(1);
+    expect(index.get("parent-B")!.size).toBe(2);
+    expect(index.get("parent-C")!.size).toBe(1);
+    expect(index.has("parent-D")).toBe(false);
+  });
+
   // ── 7. cleanupTask() ─────────────────────────────────────────
 
   it("cleanupTask() removes task from store", async () => {
@@ -3294,6 +3392,7 @@ describe("bounded background queue", () => {
     // Complete task 1 → task 2 acquires the freed slot
     mgr.handleTaskCompleted(t1.id);
     await Promise.resolve();
+    await Promise.resolve();
 
     const t2 = await launch2Promise;
     expect(t2.status).toBe("running");
@@ -3347,6 +3446,7 @@ describe("bounded background queue", () => {
     // Clean up t1 and t2
     mgr.handleTaskCompleted(t1.id);
     await Promise.resolve();
+    await Promise.resolve();
     const t2 = await launch2Promise;
     expect(t2.status).toBe("running");
     mgr.handleTaskCompleted(t2.id);
@@ -3386,6 +3486,7 @@ describe("bounded background queue", () => {
 
     // Complete task 1 → task 2 acquires
     mgr.handleTaskCompleted(t1.id);
+    await Promise.resolve();
     await Promise.resolve();
     const t2 = await launch2Promise;
     expect(t2.status).toBe("running");
