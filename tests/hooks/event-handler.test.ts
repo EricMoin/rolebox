@@ -2,6 +2,8 @@ import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { handleEvent } from "../../src/hooks/event-handler.ts";
 import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
+import { functionRuntime } from "../../src/function/runtime-state.ts";
+import { functionSessionState } from "../../src/function/session-state.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -199,6 +201,63 @@ describe("handleEvent — session.idle", () => {
 
     // No active functions, so no continuation expected
     expect(promptAsync).not.toHaveBeenCalled();
+  });
+
+  it("rolls back continuationCount when promptAsync fails", async () => {
+    const sid = "sess-1";
+    const fnName = "test-fn";
+
+    // A function with a continue_until condition that is never satisfied
+    const testFn = {
+      name: fnName,
+      description: "test function",
+      content: "test content",
+      filePath: "/tmp/test.ts",
+      source: "role-local" as any,
+      continue_until: "never_satisfied",
+    };
+
+    const roleFunctionsMap = new Map();
+    roleFunctionsMap.set("test-role", [testFn]);
+
+    // Setup runtime state
+    functionRuntime.resetAll();
+    const st = functionRuntime.init(sid, fnName, 1);
+    st.phase = "active";
+
+    // Setup session state
+    functionSessionState.clear(sid);
+    functionSessionState.activate(sid, [fnName]);
+
+    // promptAsync rejects
+    const promptAsync = mock(() => Promise.reject(new Error("API down")));
+
+    const deps = minimalDeps({
+      roleFunctionsMap,
+      client: { session: { promptAsync } } as any,
+      dispatchManager: {
+        handleSessionIdle: mock(() => {}),
+        isSyncSession: mock(() => false),
+        getInflightCount: mock(() => 0),
+      } as any,
+    });
+
+    expect(st.continuationCount).toBe(0);
+
+    await handleEvent(
+      makeEvent("session.idle", { sessionID: sid }),
+      makeState(),
+      deps,
+    );
+
+    // promptAsync was called
+    expect(promptAsync).toHaveBeenCalled();
+    // continuationCount was rolled back on failure
+    expect(functionRuntime.get(sid, fnName)!.continuationCount).toBe(0);
+
+    // Cleanup
+    functionRuntime.resetAll();
+    functionSessionState.clear(sid);
   });
 });
 

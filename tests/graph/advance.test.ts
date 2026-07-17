@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import {
   extractDispatchTarget,
   advanceGraphForDispatch,
+  setAdvanceJudge,
+  drainConvergence,
 } from "../../src/graph/advance";
 import { graphSessionState } from "../../src/graph/state";
 import type { ResolvedGraph } from "../../src/types";
@@ -382,5 +384,54 @@ describe("advanceGraphForDispatch", () => {
     const state = graphSessionState.getState(SESSION_ID);
     expect(state!.completed.filter((s) => s === "coder").length).toBe(1);
     expect(state!.iterationCount).toBe(0);
+  });
+
+  it("does not mutate state when async convergence judge rejects", async () => {
+    const CONVERGE_SESSION = "test-async-converge-fail";
+
+    // Set a judge that throws on every call
+    setAdvanceJudge(async () => {
+      throw new Error("judge unavailable");
+    });
+
+    // Graph with two nodes so completing "coder" does not exhaust the graph
+    const graph: ResolvedGraph = {
+      edges: [
+        { from: "parent", to: "coder" },
+        { from: "coder", to: "reviewer" },
+      ],
+      nodes: ["coder", "reviewer"],
+      maxIterations: 3,
+      exitEdges: [],
+      loopGroups: [],
+      termination: {
+        config: { any_of: [{ converged: "is it done?" }] },
+        loopGroups: [],
+      },
+    };
+
+    graphSessionState.initGraph(CONVERGE_SESSION, graph);
+
+    const outcome = advanceGraphForDispatch(CONVERGE_SESSION, "task", {
+      subagent_type: "coder",
+      prompt: "do work",
+    });
+
+    expect(outcome.result.kind).toBe("advanced");
+    expect(outcome.correction).toBeUndefined();
+
+    // Wait for the async convergence to complete (fail with retries)
+    await drainConvergence(CONVERGE_SESSION);
+
+    // State must remain unchanged — no stale mutation
+    const state = graphSessionState.getState(CONVERGE_SESSION);
+    expect(state).toBeDefined();
+    expect(state!.status).toBe("active");
+    expect(state!.terminationReason).toBeNull();
+    expect(state!.convergenceSignal).toBeUndefined();
+
+    // Cleanup
+    setAdvanceJudge(undefined as any);
+    graphSessionState.clear(CONVERGE_SESSION);
   });
 });

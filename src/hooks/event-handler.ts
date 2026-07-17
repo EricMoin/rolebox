@@ -193,20 +193,26 @@ export async function handleEvent(
           cfg: { globalMaxTurns: 25, perFnMax: fn.continue_max ?? 5 },
           totalContinuationsThisBurst: burst,
         });
-        functionRuntime.markDirty();
         if (decision.shouldContinue && decision.reminder) {
           const sessionAgent = state.sessionAgentRegistry.get(sid);
-          await deps.client.session.promptAsync({
-            path: { id: sid },
-            body: {
-              ...sessionAgent ? { agent: sessionAgent } : {},
-              parts: [{ type: "text", text: decision.reminder }],
-            },
-          }).catch((err) => {
+          try {
+            await deps.client.session.promptAsync({
+              path: { id: sid },
+              body: {
+                ...sessionAgent ? { agent: sessionAgent } : {},
+                parts: [{ type: "text", text: decision.reminder }],
+              },
+            });
+            // Only persist and mark as sent on success
+            functionRuntime.markDirty();
+            sentContinuation = true;
+            break; // ONE continuation per idle event
+          } catch (err) {
             log.warn("Failed to send continuation prompt", { sessionID: sid, err });
-          });
-          sentContinuation = true;
-          break; // ONE continuation per idle event
+            // Rollback the continuation count that decideContinuation incremented
+            st.continuationCount -= 1;
+            // Do NOT mark dirty — no state change to persist on failure
+          }
         }
       }
       break;

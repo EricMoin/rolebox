@@ -9,7 +9,7 @@ import { FunctionContext } from "../function/context.ts";
 import { runToolObserve } from "../function/observe.ts";
 import { collectAllFunctions, fetchLastAssistantText, appendCorrection } from "./context.ts";
 import { drainHandlerContext } from "./drain-handler.ts";
-import { createSubLogger } from "../logger.ts";
+import { createSubLogger, formatError } from "../logger.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
 
@@ -118,20 +118,24 @@ export async function handleToolAfter(
   }
 
   // --- function OBSERVE ---
-  try {
-    const activeNames = functionSessionState.getActive(input.sessionID);
-    if (activeNames.size === 0) return;
-    const allFns = collectAllFunctions(deps.roleFunctionsMap);
-    const activeFns = allFns.filter((f) => activeNames.has(f.name));
-    if (activeFns.length === 0) return;
+  const activeNames = functionSessionState.getActive(input.sessionID);
+  if (activeNames.size === 0) return;
+  const allFns = collectAllFunctions(deps.roleFunctionsMap);
+  const activeFns = allFns.filter((f) => activeNames.has(f.name));
+  if (activeFns.length === 0) return;
 
-    const artifacts = new ArtifactStore(deps.dir);
+  let artifacts: ArtifactStore | undefined;
+  let lastAssistantText: string | null = null;
+
+  // Tier-1: function observe
+  try {
+    artifacts = new ArtifactStore(deps.dir);
     const needsText = activeFns.some((f) =>
       (f.observe ?? []).some(
         (s) => s.on === "tool_after" && s.capture_artifact && (!s.tool || s.tool === input.tool),
       ),
     );
-    const lastAssistantText = needsText
+    lastAssistantText = needsText
       ? await fetchLastAssistantText(deps.session, input.sessionID)
       : null;
     const injects = runToolObserve({
@@ -143,21 +147,25 @@ export async function handleToolAfter(
     for (const inj of injects) {
       appendCorrection(state.pendingCorrections, input.sessionID, inj);
     }
+  } catch (err) {
+    log.warn("tool.execute.after observe error", { error: formatError(err) });
+  }
 
-    // --- Tier-2 handlers: onToolAfter ---
+  // --- Tier-2 handlers: onToolAfter ---
+  try {
     for (const fn of activeFns) {
       if (!fn.handlers) continue;
       const mod = await loadHandlers(fn.filePath, fn.handlers);
       if (!mod?.onToolAfter) continue;
       const ctx = new FunctionContext(
-        input.sessionID, fn.name, functionRuntime, artifacts,
-        lastAssistantText, fn.state_schema_version ?? 1,
+        input.sessionID, fn.name, functionRuntime, artifacts ?? new ArtifactStore(deps.dir),
+        lastAssistantText ?? null, fn.state_schema_version ?? 1,
       );
       await safeCall(() => mod.onToolAfter!(ctx, { tool: input.tool!, args: input.args }));
       drainHandlerContext(ctx, input.sessionID, fn.name, state.pendingCorrections, functionSessionState, functionRuntime, allFns);
     }
   } catch (err) {
-    log.debug("tool.execute.after observe error", { error: err instanceof Error ? err.message : String(err) });
+    log.warn("tool.execute.after handler error", { error: formatError(err) });
   }
 
   // Custom hooks: after phase

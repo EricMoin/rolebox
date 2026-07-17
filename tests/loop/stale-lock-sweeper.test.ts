@@ -233,4 +233,54 @@ describe("_advancing stale lock sweeper", () => {
     // Cleanup
     c.dispose();
   }, 20_000); // 20s timeout for the interval-based test
+
+  it("drains pending completions when sweeping a stale lock", async () => {
+    const { adapter } = createFakeAdapter();
+    const c = new LoopCoordinator(adapter);
+    const coord = c as unknown as {
+      _advancing: Map<string, number>;
+      _pendingCompletions: Map<string, string[]>;
+      _workerToOrigin: Map<string, string>;
+      _staleLockCount: number;
+      _sweepStaleLocks: () => void;
+    };
+
+    // Register a loop so the loop state exists in this.loops
+    c.register({
+      originSessionId: "drain-test",
+      agent: "test-agent",
+      prompt: "Test draining pending completions from stale sweep",
+      mode: "inherit",
+      iterations: 3,
+    });
+    // Flush microtasks so _kickoffFromActivating runs and dispatches the first round
+    await new Promise((r) => setTimeout(r, 0));
+
+    // After kickoff, the loop should be in "awaiting_worker" with activeWorkerTaskId="task-1"
+    // and _workerToOrigin has "task-1" -> "drain-test"
+
+    // Simulate the crash scenario: the advancing lock was acquired and then abandoned,
+    // leaving it stale. During the abandoned critical section, a completion was deferred.
+    coord._advancing.set("drain-test", Date.now() - ADVANCING_LOCK_TIMEOUT_MS - 10_000);
+    coord._pendingCompletions.set("drain-test", ["task-1"]);
+
+    // Trigger the sweeper — should release the lock AND drain pending completions
+    coord._sweepStaleLocks();
+
+    // Verify the stale lock was swept
+    expect(coord._advancing.has("drain-test")).toBe(false);
+    expect(coord._staleLockCount).toBe(1);
+
+    // Verify pending completions were cleared immediately (deleted from map)
+    expect(coord._pendingCompletions.has("drain-test")).toBe(false);
+
+    // Flush microtasks so the deferred onWorkerCompleted runs (scheduled via queueMicrotask)
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Verify getRoundResult was called — proof that drain completed successfully.
+    // onWorkerCompleted("task-1") should have proceeded past guard clauses
+    // (originSessionId found, loop found, phase == awaiting_worker, taskId matches, advancing not held)
+    // and called adapter.getRoundResult("task-1").
+    expect(adapter.getRoundResult).toHaveBeenCalledWith("task-1");
+  });
 });

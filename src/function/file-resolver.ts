@@ -37,16 +37,21 @@ export async function resolveFunctions(
       { source: FunctionSource.BuiltIn, path: functionPath(builtinDir, name) },
     ];
 
+    // Parallel existence checks — all three candidates checked concurrently
+    const existsResults = await Promise.all(
+      candidates.map(c => Bun.file(c.path).exists()),
+    );
+
     let matched = false;
 
-    for (const candidate of candidates) {
-      if (!(await Bun.file(candidate.path).exists())) {
+    for (let i = 0; i < candidates.length; i++) {
+      if (!existsResults[i]) {
         continue;
       }
 
       let content: string;
       try {
-        content = await Bun.file(candidate.path).text();
+        content = await Bun.file(candidates[i].path).text();
       } catch {
         continue;
       }
@@ -62,8 +67,8 @@ export async function resolveFunctions(
         name: m.name ?? name,
         description: m.description ?? "",
         content: body,
-        filePath: candidate.path,
-        source: candidate.source,
+        filePath: candidates[i].path,
+        source: candidates[i].source,
         params: m.params,
         phase: m.phase,
         priority: m.priority,

@@ -62,6 +62,15 @@ export class LoopCoordinator {
       this._advancing.delete(sessionId);
       this._staleLockCount++;
       log.warn("advancing-lock: swept stale lock", { sessionId, acquiredAgeMs: ageMs });
+      // Drain any pending completions that were deferred during the abandoned critical section.
+      // Mirror the pattern in _kickoffFromActivating and onWorkerCompleted finally blocks.
+      const pending = this._pendingCompletions.get(sessionId);
+      if (pending && pending.length > 0) {
+        this._pendingCompletions.delete(sessionId);
+        const nextTaskId = pending[pending.length - 1];
+        log.debug("loop-trace: draining deferred completion from stale-lock sweep", { sessionId, taskId: nextTaskId });
+        queueMicrotask(() => { void this.onWorkerCompleted(nextTaskId); });
+      }
     }
   }
 

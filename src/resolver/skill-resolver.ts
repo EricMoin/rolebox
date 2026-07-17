@@ -57,44 +57,63 @@ export async function resolveSkills(
   const matchedPaths = await fg(allPatterns, { onlyFiles: true });
   const matchSet = new Set(matchedPaths);
 
-  const resolved: ResolvedSkill[] = [];
+  // First pass: determine winner for each skill (fast — no I/O, just Set lookups)
+  interface Winner {
+    name: string;
+    filePath: string;
+    scope: ResolvedSkill["scope"];
+  }
+  const winners: Winner[] = [];
+  const notFoundNames: string[] = [];
 
   for (const { name, candidates } of candidateTasks) {
     let found = false;
-
     for (const candidate of candidates) {
       if (matchSet.has(candidate.pattern)) {
-        const filePath = candidate.pattern;
-        let description = "";
-        let references: ResolvedReference[] = [];
-        try {
-          const content = await Bun.file(filePath).text();
-          const { metadata } = parseFrontmatter(content);
-          description = metadata.description ?? "";
-
-          // Resolve references for this skill from its directory
-          const skillDir = dirname(filePath);
-          references = await resolveAllReferences(
-            skillDir,
-            ReferenceScope.Skill,
-            metadata.references as SkillMetadata["references"],
-          );
-        } catch (err) {
-          // If the file can't be read, use empty description
-          log.debug("Failed to read skill file", { filePath, error: formatError(err) });
-        }
-        resolved.push({ name, description, scope: candidate.scope, filePath, references });
+        winners.push({ name, filePath: candidate.pattern, scope: candidate.scope });
         found = true;
         break;
       }
     }
-
     if (!found) {
-      const candidatePaths = candidates.map((c) => c.pattern);
-      log.info(`Skill "${name}" not found. Searched:`, { candidates: candidatePaths });
+      notFoundNames.push(name);
     }
   }
 
+  // Second pass: read files and resolve references in parallel
+  const resolved: ResolvedSkill[] = await Promise.all(
+    winners.map(async ({ name, filePath, scope }) => {
+      let description = "";
+      let references: ResolvedReference[] = [];
+      try {
+        const content = await Bun.file(filePath).text();
+        const { metadata } = parseFrontmatter(content);
+        description = metadata.description ?? "";
+
+        // Resolve references for this skill from its directory
+        const skillDir = dirname(filePath);
+        references = await resolveAllReferences(
+          skillDir,
+          ReferenceScope.Skill,
+          metadata.references as SkillMetadata["references"],
+        );
+      } catch (err) {
+        // If the file can't be read, use empty description
+        log.debug("Failed to read skill file", { filePath, error: formatError(err) });
+      }
+      return { name, description, scope, filePath, references };
+    }),
+  );
+
+  // Log not-found names
+  for (const name of notFoundNames) {
+    const task = candidateTasks.find(t => t.name === name);
+    if (task) {
+      const candidatePaths = task.candidates.map(c => c.pattern);
+      log.info(`Skill "${name}" not found. Searched:`, { candidates: candidatePaths });
+    }
+
+  }
   return resolved;
 }
 

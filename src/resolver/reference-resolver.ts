@@ -8,6 +8,13 @@ import { createSubLogger, formatError } from "../logger.ts";
 const log = createSubLogger("reference-resolver");
 
 /**
+ * Module-level cache for frontmatter description extraction.
+ * Keyed by absolute filePath so different baseDir invocations naturally
+ * use separate cache entries (different absolute paths → no collision).
+ */
+const descriptionCache = new Map<string, Promise<string | undefined>>();
+
+/**
  * Derive a human-readable name from a reference file path.
  * "theory/core-principles.md" → "theory/core-principles"
  */
@@ -32,8 +39,27 @@ function deriveDescriptionFromName(name: string): string {
 /**
  * Extract description from a markdown file's YAML frontmatter.
  * Returns undefined if no frontmatter or no description field.
+ * Results are cached in the module-level descriptionCache keyed by absolute
+ * filePath, so files read during discoverReferences are not re-read by
+ * resolveExplicitReferences within the same resolveAllReferences chain.
  */
 async function extractFrontmatterDescription(
+  filePath: string,
+): Promise<string | undefined> {
+  // Check cache first
+  const cached = descriptionCache.get(filePath);
+  if (cached !== undefined) return cached;
+
+  // Cache miss — extract and store the promise so concurrent calls deduplicate
+  const promise = extractFrontmatterDescriptionInner(filePath);
+  descriptionCache.set(filePath, promise);
+  return promise;
+}
+
+/**
+ * Inner implementation: reads the file and parses YAML frontmatter.
+ */
+async function extractFrontmatterDescriptionInner(
   filePath: string,
 ): Promise<string | undefined> {
   try {
@@ -82,16 +108,16 @@ export async function discoverReferences(
     return [];
   }
 
-  const resolved: ResolvedReference[] = [];
-
-  for (const filePath of matches) {
-    const relativePath = relative(baseDir, filePath);
-    const name = deriveNameFromPath(relativePath);
-    const frontmatterDesc = await extractFrontmatterDescription(filePath);
-    const description = frontmatterDesc ?? deriveDescriptionFromName(name);
-
-    resolved.push({ name, filePath, description, scope, relativePath });
-  }
+  // Batch-read all discovered files with Promise.all using the cache
+  const resolved = await Promise.all(
+    matches.map(async (filePath) => {
+      const relativePath = relative(baseDir, filePath);
+      const name = deriveNameFromPath(relativePath);
+      const frontmatterDesc = await extractFrontmatterDescription(filePath);
+      const description = frontmatterDesc ?? deriveDescriptionFromName(name);
+      return { name, filePath, description, scope, relativePath };
+    }),
+  );
 
   // Sort for deterministic output
   resolved.sort((a, b) => a.name.localeCompare(b.name));
