@@ -224,6 +224,18 @@ export class BudgetTracker {
     this.sessionUsage.clear();
   }
 
+  /**
+   * Dispose the tracker — clears pending debounce timer and resets state.
+   * Called during DispatchManager.dispose().
+   */
+  dispose(): void {
+    if (this._debounceTimer !== null) {
+      clearTimeout(this._debounceTimer);
+      this._debounceTimer = null;
+    }
+    this.reset();
+  }
+
   // ── Persistence ─────────────────────────────────────────────────────────
 
   /**

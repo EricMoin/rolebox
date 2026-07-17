@@ -49,6 +49,8 @@ export class DispatchManager {
   private _syncControllers: Map<string, AbortController> = new Map();
   /** Maps completed sync task IDs to their opencode session IDs for continuation support. */
   private completedSyncSessions = new Map<string, string>();
+  /** Timestamps (epoch ms) for completedSyncSessions entries — used for TTL eviction. */
+  private completedSyncSessionsSetAt = new Map<string, number>();
   private subagentModelKey: Map<string, string>;
   private sessionMonitor: SessionMonitor;
   private metricsPersister: MetricsPersister;
@@ -60,6 +62,10 @@ export class DispatchManager {
   private taskTerminatedListeners = new Map<string, Set<Function>>();
   /** Parent→taskIds index for O(1) getTasksByParent lookups. */
   private parentTasksIndex: Map<string, Set<string>> = new Map();
+  /** Inflight running task count per parentSessionId — replaces O(n) scan in getInflightCount. */
+  private inflightByParent: Map<string, number> = new Map();
+  /** Oldest startedAt timestamp per parentSessionId — replaces O(n) scan in getOldestInflightChildStartedAt. */
+  private oldestStartedAtByParent: Map<string, number> = new Map();
 
   /** Delegated lifecycle manager. */
   private lifecycle: TaskLifecycleManager;
@@ -150,6 +156,8 @@ export class DispatchManager {
         this.notifyCompletion(task, remainingTasks, resultText),
       cancelTask: (taskId: string) => this.cancelTask(taskId),
       parentTasksIndex: this.parentTasksIndex,
+      inflightByParent: this.inflightByParent,
+      oldestStartedAtByParent: this.oldestStartedAtByParent,
     };
     this.orchestrator = new CompletionOrchestrator(orchestratorDeps);
 
@@ -164,6 +172,7 @@ export class DispatchManager {
       cancelQueue: this._cancelQueue,
       syncControllers: this._syncControllers,
       completedSyncSessions: this.completedSyncSessions,
+      completedSyncSessionsSetAt: this.completedSyncSessionsSetAt,
       cleanupTimers: this.cleanupTimers,
       sidecarGCTimers: this.sidecarGCTimers,
       pendingNotifications: this.pendingNotifications,
@@ -185,6 +194,8 @@ export class DispatchManager {
       deleteTaskCheckpoint: (taskId: string) => this.checkpointStore.deleteCheckpoint(taskId),
       taskTerminatedListeners: this.taskTerminatedListeners,
       parentTasksIndex: this.parentTasksIndex,
+      inflightByParent: this.inflightByParent,
+      oldestStartedAtByParent: this.oldestStartedAtByParent,
     });
     this.progressStore.startSweeper();
     this.orchestrator.startSweeper();
@@ -283,8 +294,43 @@ export class DispatchManager {
     this.orchestrator.flushPersistSync();
   }
 
+  async dispose(): Promise<void> {
+    this.orchestrator.dispose();
+    this.progressStore.stopSweeper();
+    const budgetDispose = (this.budgetTracker as unknown as { dispose?: () => void }).dispose;
+    if (budgetDispose) budgetDispose.call(this.budgetTracker);
+    this.cleanupCompletedSyncSessions();
+    await this.flushPersist();
+  }
+
+  /** Sweep completedSyncSessions entries older than 1 hour (COMPLETED_SYNC_TTL_MS). */
+  private cleanupCompletedSyncSessions(): void {
+    const ttlMs = 3_600_000; // 1 hour
+    const now = Date.now();
+    for (const [taskId, setAt] of this.completedSyncSessionsSetAt) {
+      if (now - setAt > ttlMs) {
+        this.completedSyncSessions.delete(taskId);
+        this.completedSyncSessionsSetAt.delete(taskId);
+      }
+    }
+  }
+
   async recover(): Promise<void> {
     await this.orchestrator.recover();
+    // Rebuild inflight counters from tasks after recovery (one-time O(n), replaces per-tick O(n))
+    this.inflightByParent.clear();
+    this.oldestStartedAtByParent.clear();
+    for (const task of this.tasks.values()) {
+      if (task.status === "running" || task.status === "pending") {
+        const pid = task.parentSessionId;
+        this.inflightByParent.set(pid, (this.inflightByParent.get(pid) ?? 0) + 1);
+        const startedAt = task.startedAt.getTime();
+        const currOldest = this.oldestStartedAtByParent.get(pid);
+        if (currOldest === undefined || startedAt < currOldest) {
+          this.oldestStartedAtByParent.set(pid, startedAt);
+        }
+      }
+    }
   }
 
   // ── Notification ──────────────────────────────────────────────

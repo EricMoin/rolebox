@@ -50,6 +50,7 @@ export interface TaskLifecycleDeps {
   cancelQueue: Map<string, () => void>;
   syncControllers: Map<string, AbortController>;
   completedSyncSessions: Map<string, string>;
+  completedSyncSessionsSetAt: Map<string, number>;
   cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;
   sidecarGCTimers: Map<string, ReturnType<typeof setTimeout>>;
   pendingNotifications: Set<string>;

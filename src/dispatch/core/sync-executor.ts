@@ -154,6 +154,7 @@ export async function executeSync(
       task.sessionId = session.id;
       d.sessionToTask.set(session.id, taskId);
       d.completedSyncSessions.set(taskId, session.id);
+      d.completedSyncSessionsSetAt.set(taskId, Date.now());
       if (isNewSession) incRequestSessions(d, root);
     }
 

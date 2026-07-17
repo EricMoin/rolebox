@@ -129,6 +129,23 @@ export class CompletionOrchestrator implements OrchestratorBridge {
     this.d._transition = this.transition.bind(this);
   }
 
+  // ── Dispose ───────────────────────────────────────────────────
+
+  dispose(): void {
+    if (this.d._sweeperTimerInternal) {
+      clearInterval(this.d._sweeperTimerInternal);
+      this.d._sweeperTimerInternal = undefined;
+    }
+    if (this.d._budgetSamplerTimer) {
+      clearInterval(this.d._budgetSamplerTimer);
+      this.d._budgetSamplerTimer = undefined;
+    }
+    if (this.d._persistTimerInternal) {
+      clearTimeout(this.d._persistTimerInternal);
+      this.d._persistTimerInternal = undefined;
+    }
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────
 
   cleanupTask(taskId: string): void {
