@@ -9,6 +9,7 @@ import {
   getInflightCount,
   scheduleCleanup,
   notifyCompletion,
+  notifyTerminated,
   leaveRunning,
   addToParentIndex,
 } from "./lifecycle-shared.ts";
@@ -213,10 +214,13 @@ export async function startBackgroundTask(
       d.sessionToTask.delete(task.sessionId);
       task.completedAt = new Date();
       leaveRunning(d, taskId);
+      notifyTerminated(d, taskId, "error");
+      try { await d.client.abort(task.sessionId); } catch { /* session may already be gone */ }
       void notifyParent(d.client, task, 0, { maxRetries: 0 });
     } else {
       d.concurrency.release(task.concurrencyKey!, task.parentSessionId);
       scheduleCleanup(d, taskId);
+      notifyTerminated(d, taskId, "error");
     }
   }
 }

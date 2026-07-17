@@ -158,6 +158,10 @@ function timeoutAndRelease(d: TaskLifecycleDeps, taskId: string, reason: string)
   d.watchdog.cancelDebounce(taskId);
   notifyTerminated(d, taskId, "timeout");
   const t = d.tasks.get(taskId)!;
+  // Abort the worker session to prevent leaks (mirrors task-cancellation.ts:83-84)
+  if (t.sessionId) {
+    d.client.abort(t.sessionId).catch(() => {});
+  }
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
   cleanupTerminalError(d, taskId);

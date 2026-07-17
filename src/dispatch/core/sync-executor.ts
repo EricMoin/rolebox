@@ -174,15 +174,12 @@ export async function executeSync(
     });
 
     try {
-      const promptResult =
-        await Promise.race([
-          d.client.promptSync(task.sessionId, {
-            agent: input.subagent,
-            parts: [{ type: "text", text: input.prompt }],
-            signal: controller.signal,
-          }),
-          promptTimeout,
-        ]);
+      const promptPromise = d.client.promptSync(task.sessionId, {
+        agent: input.subagent,
+        parts: [{ type: "text", text: input.prompt }],
+        signal: controller.signal,
+      }).catch(() => {});
+      const promptResult = await Promise.race([promptPromise, promptTimeout]);
 
       clearTimeout(promptTimer);
 

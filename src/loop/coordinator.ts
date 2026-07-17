@@ -108,8 +108,8 @@ export class LoopCoordinator {
     const cb = this._workerListeners.get(workerTaskId);
     if (cb) {
       this.adapter.removeTerminatedListener(workerTaskId, cb);
-      this._workerListeners.delete(workerTaskId);
     }
+    this._workerListeners.delete(workerTaskId);  // always cleanup
   }
 
   /**
@@ -328,10 +328,12 @@ export class LoopCoordinator {
       {
         const pending = this._pendingCompletions.get(originSessionId);
         if (pending && pending.length > 0) {
-          this._pendingCompletions.delete(originSessionId);
-          const nextTaskId = pending[pending.length - 1];
-          log.debug("loop-trace: draining deferred completion", { originSessionId, taskId: nextTaskId });
-          queueMicrotask(() => { void this.onWorkerCompleted(nextTaskId); });
+          const taskIds = [...pending];  // copy before clearing
+          pending.length = 0;
+          for (const taskId of taskIds) {
+            log.debug("loop-trace: draining deferred completion", { originSessionId, taskId });
+            queueMicrotask(() => { void this.onWorkerCompleted(taskId); });
+          }
         }
       }
       this._persist();
@@ -511,9 +513,12 @@ export class LoopCoordinator {
         let status: string | undefined;
         try {
           status = await this.adapter.getTaskStatus(taskId);
-        } catch {
-          log.warn("reSubscribeListeners: getTaskStatus failed", { taskId });
-          // Treat as unknown — do nothing, the loop stays awaiting_worker
+        } catch (error) {
+          log.warn("reSubscribeListeners: getTaskStatus failed", { taskId, error: error instanceof Error ? error.message : String(error) });
+          loop.phase = "interrupted";
+          loop.errorReason = "getTaskStatus failed during reSubscribe: " + (error instanceof Error ? error.message : String(error));
+          loop.updatedAt = Date.now();
+          this._persist();
           continue;
         }
 
@@ -546,10 +551,14 @@ export class LoopCoordinator {
       clearInterval(this._advancingSweeper);
       this._advancingSweeper = null;
     }
+    // Cleanup worker listeners before clearing map
+    for (const [workerTaskId, cb] of this._workerListeners) {
+      try { this.adapter.removeTerminatedListener(workerTaskId, cb); } catch { /* best effort */ }
+    }
+    this._workerListeners.clear();
     this.loops.clear();
     this._workerToOrigin.clear();
     this._advancing.clear();
-    this._workerListeners.clear();
     this._pendingCompletions.clear();
   }
 }

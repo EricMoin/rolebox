@@ -348,13 +348,10 @@ export class ConcurrencyManager implements IConcurrencyManager {
     if (bestIdx === -1) return;
 
     const w = slot.queue[bestIdx];
-    // Remove elements up to and including bestIdx, re-add non-cancelled ones except the promoted waiter
-    const removed = slot.queue.splice(0, bestIdx + 1);
-    for (let j = bestIdx - 1; j >= 0; j--) {
-      if (!removed[j].cancelled) {
-        slot.queue.unshift(removed[j]);
-      }
-    }
+    // Remove the promoted waiter and filter out any remaining cancelled waiters.
+    // w is NOT re-added — it has been promoted and will be resolved below.
+    slot.queue.splice(bestIdx, 1);
+    slot.queue = slot.queue.filter(x => !x.cancelled);
 
     const waitMs = Date.now() - w.enqueuedAt;
     metrics.histogram("queue_wait_ms", { key }).observe(waitMs);
