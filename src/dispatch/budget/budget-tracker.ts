@@ -217,6 +217,42 @@ export class BudgetTracker {
   }
 
   /**
+   * Reset usage for a specific dispatched session, subtracting its recorded
+   * token/cost from the parent request's cumulative usage. Used by task-retry
+   * with reset_budget=true so the retry does not count the old session's usage.
+   *
+   * This is a surgical reset — only the given session is affected; other
+   * concurrent sessions under the same parent are untouched.
+   */
+  resetSessionUsage(sessionId: string, parentSessionId: string): void {
+    const session = this.sessionUsage.get(sessionId);
+    if (!session) return;
+
+    // Subtract from parent request's cumulative usage
+    const parent = this.requestUsage.get(parentSessionId);
+    if (parent) {
+      parent.inputTokens = Math.max(0, parent.inputTokens - session.inputTokens);
+      parent.outputTokens = Math.max(0, parent.outputTokens - session.outputTokens);
+      parent.cost = Math.max(0, parent.cost - session.cost);
+      if (parent.inputTokens === 0 && parent.outputTokens === 0 && parent.cost === 0) {
+        this.requestUsage.delete(parentSessionId);
+      }
+    }
+
+    // Remove the session's own entry
+    this.sessionUsage.delete(sessionId);
+
+    this.log.debug(
+      "resetSessionUsage session=" + sessionId.slice(0, 12) +
+      " parent=" + parentSessionId.slice(0, 12) +
+      " in=" + session.inputTokens + " out=" + session.outputTokens +
+      " cost=" + session.cost.toFixed(6),
+    );
+
+    this._debouncedPersist();
+  }
+
+  /**
    * Reset all tracking data. Called on plugin teardown or full reset.
    */
   reset(): void {

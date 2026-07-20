@@ -1,19 +1,20 @@
 import { writeFileSync, renameSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, relative } from "node:path";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask } from "../types.ts";
+import { formatDurationBetween } from "./format-utils.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("task-export");
+const log = createSubLogger("task:export");
 
 export function createTaskExportTool(
   manager: DispatchManager,
   directory: string,
 ) {
   return defineTool({
-    description: "Export a completed task's full result to a file.",
+    description: "Export a completed task's full result to a file. Rolebox-specific: the opencode platform has no native per-task export mechanism.",
     args: {
       task_id: z.string().describe("Task ID to export"),
       format: z
@@ -105,7 +106,7 @@ export function createTaskExportTool(
       } else {
         // Markdown format
         const duration = meta.completedAt
-          ? formatDuration(meta.startedAt, meta.completedAt)
+          ? formatDurationBetween(meta.startedAt, meta.completedAt)
           : "N/A";
 
         const lines: string[] = [];
@@ -139,6 +140,14 @@ export function createTaskExportTool(
         context.worktree || context.directory || ".",
         input.output_path,
       );
+
+      // Path traversal guard: reject paths that escape the project root
+      const root = resolve(context.worktree || context.directory || ".");
+      const rel = relative(root, fullPath);
+      if (rel.startsWith("..")) {
+        return `Error: Path traversal detected — "${input.output_path}" resolves outside the project root`;
+      }
+
       const dir = dirname(fullPath);
 
       // Step 7: Write atomically
@@ -151,14 +160,4 @@ export function createTaskExportTool(
       return `Exported task ${taskId} to ${fullPath} (${content.length} chars, ${input.format} format)`;
     },
   });
-}
-
-function formatDuration(start: Date, end: Date): string {
-  const ms = end.getTime() - start.getTime();
-  if (ms < 0) return "0s";
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return `${minutes}m ${remain}s`;
 }

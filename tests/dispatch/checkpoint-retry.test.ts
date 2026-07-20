@@ -88,6 +88,7 @@ describe("task_retry with checkpoint integration", () => {
       listCheckpoints: mock(() => Promise.resolve([checkpointData])),
       deleteCheckpoint: mock(() => Promise.resolve()),
       cleanupExpired: mock(() => Promise.resolve()),
+      hasCheckpoint: mock(() => Promise.resolve(true)),
     };
 
     // Track what prompt is sent to reopenForContinuation
@@ -147,8 +148,9 @@ describe("task_retry with checkpoint integration", () => {
   });
 
   it("does NOT inject checkpoint context when no checkpoint exists", async () => {
-    // Mock: buildRetryContext returns null (no checkpoint)
+    // Mock: hasCheckpoint returns false (no checkpoint exists)
     const mockStore: CheckpointStore = {
+      hasCheckpoint: mock(() => Promise.resolve(false)),
       buildRetryContext: mock(() => Promise.resolve(null)),
       saveCheckpoint: mock(() => Promise.resolve()),
       getLatestCheckpoint: mock(() => Promise.resolve(null)),
@@ -156,7 +158,6 @@ describe("task_retry with checkpoint integration", () => {
       deleteCheckpoint: mock(() => Promise.resolve()),
       cleanupExpired: mock(() => Promise.resolve()),
     };
-
     let capturedPrompt = "";
 
     const manager: DispatchManager = {
@@ -200,6 +201,7 @@ describe("task_retry with checkpoint integration", () => {
 
   it("checkpoint context is injected before the modify_prompt when both are present", async () => {
     const mockStore: CheckpointStore = {
+      hasCheckpoint: mock(() => Promise.resolve(true)),
       buildRetryContext: mock(() =>
         Promise.resolve("## Checkpoint Resume Context\n\n**Phase:** test"),
       ),
@@ -248,6 +250,7 @@ describe("task_retry with checkpoint integration", () => {
     const buildRetrySpy = mock(() => Promise.resolve(null));
 
     const mockStore: CheckpointStore = {
+      hasCheckpoint: mock(() => Promise.resolve(true)),
       buildRetryContext: buildRetrySpy,
       saveCheckpoint: mock(() => Promise.resolve()),
       getLatestCheckpoint: mock(() => Promise.resolve(null)),
@@ -282,6 +285,7 @@ describe("task_retry with checkpoint integration", () => {
     const buildRetrySpy = mock(() => Promise.resolve(null));
 
     const mockStore: CheckpointStore = {
+      hasCheckpoint: mock(() => Promise.resolve(false)),
       buildRetryContext: buildRetrySpy,
       saveCheckpoint: mock(() => Promise.resolve()),
       getLatestCheckpoint: mock(() => Promise.resolve(null)),

@@ -2,9 +2,10 @@ import { defineTool, type CanonicalToolContext } from "../../platform/ports/tool
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask, TaskEventState } from "../types.ts";
+import { formatDuration, formatAge } from "./format-utils.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("dispatch:status");
+const log = createSubLogger("task:status");
 
 // ─── Status glyphs ──────────────────────────────────────────────────────────
 
@@ -21,29 +22,6 @@ function glyph(status: string): string {
   return STATUS_GLYPH[status] ?? "?";
 }
 
-// ─── Duration formatter ────────────────────────────────────────────────────
-
-function formatDuration(task: DispatchTask): string {
-  const end = task.completedAt ?? new Date();
-  const ms = end.getTime() - task.startedAt.getTime();
-  if (ms < 0) return "0s";
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return `${minutes}m ${remain}s`;
-}
-
-function formatAge(ms: number): string {
-  if (ms < 0) return "0ms";
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return `${minutes}m ${remain}s`;
-}
-
 // ─── Tool factory ──────────────────────────────────────────────────────────
 
 export function createDispatchStatusTool(manager: DispatchManager) {
@@ -51,7 +29,8 @@ export function createDispatchStatusTool(manager: DispatchManager) {
     description:
       "Proactively check task liveness on demand. Returns status and liveness " +
       "information for a specific task or all tasks dispatched by the calling " +
-      "session. Unlike dispatch_output, this NEVER throws — even for running tasks.",
+      "session. Unlike dispatch_output, this NEVER throws — even for running tasks. " +
+      "Rolebox-specific: the opencode platform has no native per-task liveness query that distinguishes running from stale tasks.",
     args: {
       task_id: z
         .string()

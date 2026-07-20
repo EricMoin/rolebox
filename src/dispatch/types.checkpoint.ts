@@ -44,5 +44,8 @@ export interface CheckpointStore {
 
   /** Build a human-readable retry context string from the latest checkpoint.
    *  Returns null when no checkpoint exists or the task is fully complete. */
-  buildRetryContext(taskId: string): Promise<string | null>;
+
+  /** Check if at least one checkpoint exists for the given task.
+   *  Cheaper than calling getLatestCheckpoint when only existence matters. */
+  hasCheckpoint(taskId: string): Promise<boolean>;
 }

@@ -4,7 +4,7 @@ import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchInput } from "../types.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("search:task-retry");
+const log = createSubLogger("task:retry");
 
 /** Set of dispatch task statuses considered terminal (no longer in-flight). */
 const TERMINAL_STATUSES = new Set(["completed", "error", "cancelled", "timeout"]);
@@ -32,7 +32,7 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         ),
     },
     async execute(input, context: CanonicalToolContext) {
-      const { task_id, modify_prompt } = input;
+      const { task_id, modify_prompt, reset_budget } = input;
 
       // Step 1: Look up the original task
       const task = dispatchManager.getTask(task_id);
@@ -52,11 +52,16 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         ? modify_prompt + "\n" + task.prompt
         : task.prompt;
 
-      // Step 3.5: Inject checkpoint resume context if a checkpoint exists
-      const checkpointContext = await dispatchManager.getCheckpointStore().buildRetryContext(task_id);
-      if (checkpointContext) {
+      if (await dispatchManager.getCheckpointStore().hasCheckpoint(task_id)) {
+        const checkpointContext = await dispatchManager.getCheckpointStore().buildRetryContext(task_id);
         log.debug(`task_retry id=${task_id}: injecting checkpoint context into retry prompt`);
         prompt = checkpointContext + "\n\n---\n\n" + prompt;
+      }
+
+      // Step 3.75: Reset budget counter if requested
+      if (reset_budget) {
+        dispatchManager.getBudgetTracker().resetSessionUsage(task.sessionId, task.parentSessionId);
+        log.debug(`task_retry id=${task_id}: budget reset for session ${task.sessionId.slice(0, 12)}`);
       }
 
       const dispatchInput: DispatchInput = {

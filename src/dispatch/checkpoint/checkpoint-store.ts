@@ -233,6 +233,16 @@ export class FileSystemCheckpointStore implements CheckpointStore {
       .join("\n");
   }
 
+  /**
+   * Check if at least one checkpoint exists for the given task.
+   * Returns false when no checkpoint file exists, the file is corrupt, or the array is empty.
+   * Lighter than getLatestCheckpoint when only existence matters.
+   */
+  async hasCheckpoint(taskId: string): Promise<boolean> {
+    const entries = await this._readAll(taskId);
+    return entries.length > 0;
+  }
+
   // ── Private ───────────────────────────────────────────────────────────
 
   /** Get the absolute path to the checkpoints directory. */

@@ -3,9 +3,10 @@ import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask } from "../types.ts";
 import { readResultSidecar, extractResultBlock, resultSidecarPath } from "../completion/result-extractor.ts";
+import { formatDuration } from "./format-utils.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("search:task");
+const log = createSubLogger("task:search");
 
 export function createTaskSearchTool(
   dispatchManager: DispatchManager,
@@ -13,14 +14,14 @@ export function createTaskSearchTool(
 ) {
   return defineTool({
     description:
-      "Search dispatch task history by query text, status, agent, or date range. Searches task prompt, description, and agent name. Returns a markdown table of matching tasks with status, duration, and optional result preview.",
+      "Search dispatch task history by query text, status, agent, or date range. Searches task prompt, description, and agent name. Returns a markdown table of matching tasks with status, duration, and optional result preview. Rolebox-specific: the opencode platform has no native task search with status/query filtering.",
     args: {
       query: z
         .string()
         .min(1)
         .describe("Search query — matched against task prompt, description, and agent name (case-insensitive substring)"),
       status: z
-        .enum(["pending", "running", "completed", "error", "cancelled", "timeout"])
+        .enum(["pending", "running", "completed", "awaiting_approval", "error", "cancelled", "timeout"])
         .optional()
         .describe("Filter by task status"),
       agent: z
@@ -134,18 +135,6 @@ export function createTaskSearchTool(
     },
   });
 }
-
-function formatDuration(task: DispatchTask): string {
-  const end = task.completedAt ?? new Date();
-  const ms = end.getTime() - task.startedAt.getTime();
-  if (ms < 0) return "0s";
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return `${minutes}m ${remain}s`;
-}
-
 function formatDate(date: Date): string {
   return date.toISOString().slice(0, 19).replace("T", " ");
 }

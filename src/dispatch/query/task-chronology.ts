@@ -4,7 +4,7 @@ import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTaskStatus } from "../types.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("task-chronology");
+const log = createSubLogger("task:chronology");
 
 const STATUS_COLUMNS: DispatchTaskStatus[] = [
   "pending",
@@ -77,7 +77,7 @@ function buildTable(
 export function createTaskChronologyTool(manager: DispatchManager) {
   return defineTool({
     description:
-      "Show time-bucketed task activity. Returns a markdown table grouped by hour, day, or agent with status distribution counts.",
+      "Show time-bucketed task activity. Returns a markdown table grouped by hour, day, or agent with status distribution counts. Rolebox-specific: the opencode platform has no native time-bucketed task chronology view.",
     args: {
       from_date: z
         .string()

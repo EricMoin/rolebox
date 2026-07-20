@@ -79,6 +79,7 @@ describe("checkpoint integration — tool → retry → lifecycle", () => {
 
     // Mock checkpoint store methods
     const mockStore: FileSystemCheckpointStore = {
+      hasCheckpoint: mock(() => Promise.resolve(true)),
       saveCheckpoint: mock((_taskId: string, _data: CheckpointData) => Promise.resolve()),
       getLatestCheckpoint: mock(() => Promise.resolve(checkpointData)),
       listCheckpoints: mock(() => Promise.resolve([checkpointData])),

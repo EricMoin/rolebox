@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("search:task-budget");
+const log = createSubLogger("task:budget");
 
 /**
  * Format a limit value for display: show the number when configured,

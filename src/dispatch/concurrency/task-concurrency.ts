@@ -1,18 +1,18 @@
 import { writeFileSync, renameSync, mkdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { defineTool } from "../../platform/ports/tool-factory.ts";
+import { resolve, dirname, relative } from "node:path";
+import { defineTool, type CanonicalToolContext } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("task-concurrency");
+const log = createSubLogger("task:concurrency");
 
 export function createTaskConcurrencyTool(manager: DispatchManager) {
   return defineTool({
     description:
       "Retrieve real-time concurrency slot status per concurrency key. " +
       "Shows active slots, limits, available capacity, reserved slots, and queue depth. " +
-      "Returns a human-readable summary or JSON. Optionally exports the status JSON to a file.",
+      "Returns a human-readable summary or JSON. Optionally exports the status JSON to a file. Rolebox-specific: the opencode platform has no native concurrency slot monitoring.",
     args: {
       format: z
         .enum(["summary", "json"])
@@ -24,18 +24,20 @@ export function createTaskConcurrencyTool(manager: DispatchManager) {
         .optional()
         .describe("Optional file path to write the status JSON atomically"),
     },
-    async execute(input, context) {
+    async execute(input, context: CanonicalToolContext) {
       const status = manager.getConcurrencyStatus();
       const jsonStr = JSON.stringify(status, null, 2);
 
       // Export to file if requested
       if (input.export_path) {
-        const fullPath = resolve(
-          (context as { worktree?: string; directory?: string }).worktree ||
-          (context as { directory?: string }).directory ||
-          ".",
-          input.export_path,
-        );
+        const root = resolve(context.worktree ?? context.directory ?? ".");
+        const fullPath = resolve(root, input.export_path);
+
+        // Path traversal guard: reject paths that escape the project root
+        const rel = relative(root, fullPath);
+        if (rel.startsWith("..")) {
+          return `Error: Path traversal detected — "${input.export_path}" resolves outside the project root`;
+        }
         const dir = dirname(fullPath);
         mkdirSync(dir, { recursive: true });
         const tmpPath = fullPath + ".tmp";

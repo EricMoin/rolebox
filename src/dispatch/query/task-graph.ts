@@ -4,7 +4,7 @@ import type { DispatchManager } from "../core/manager.ts";
 import type { DispatchTask } from "../types.ts";
 import { createSubLogger } from "../../logger.ts";
 
-const log = createSubLogger("search:task-graph");
+const log = createSubLogger("task:graph");
 
 // ── Internal tree node ───────────────────────────────────────────────────────
 
@@ -52,8 +52,8 @@ export function createTaskGraphTool(dispatchManager: DispatchManager) {
       const allTasks = dispatchManager.getAllTasks();
       const rootTask = allTasks.find((t) => t.sessionId === input.root_session);
 
-      // Recursively build the child tree
-      const children = buildChildren(dispatchManager, input.root_session, 1, maxDepth);
+      const visited = new Set<string>();
+      const children = buildChildren(dispatchManager, input.root_session, 1, maxDepth, visited);
 
       // No data at all
       if (children.length === 0 && !rootTask) {
@@ -84,15 +84,19 @@ function buildChildren(
   parentSessionId: string,
   currentDepth: number,
   maxDepth: number,
+  visited: Set<string>,
 ): TaskNode[] {
+  // Cycle protection: skip if this session was already visited
+  if (visited.has(parentSessionId)) return [];
+  visited.add(parentSessionId);
+
   const tasks = dispatchManager.getTasksByParent(parentSessionId);
 
-  if (tasks.length === 0 || currentDepth > maxDepth) return [];
+  if (tasks.length === 0 || currentDepth >= maxDepth) return [];
 
   const nodes: TaskNode[] = [];
-
   for (const task of tasks) {
-    const grandchildren = buildChildren(dispatchManager, task.sessionId, currentDepth + 1, maxDepth);
+    const grandchildren = buildChildren(dispatchManager, task.sessionId, currentDepth + 1, maxDepth, visited);
     nodes.push({ task, depth: currentDepth, children: grandchildren });
   }
 
