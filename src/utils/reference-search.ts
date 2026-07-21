@@ -146,6 +146,11 @@ export function createReferenceSearchTool(roles: ResolvedRole[]) {
         .string()
         .optional()
         .describe("Limit search to references of a specific role"),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .default("markdown")
+        .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
     async execute(input) {
       if (allRefs.length === 0) {
@@ -195,6 +200,10 @@ export function createReferenceSearchTool(roles: ResolvedRole[]) {
       });
 
       const limited = allMatches.slice(0, input.limit ?? 10);
+
+      if (input.format === "json") {
+        return JSON.stringify(limited, null, 2);
+      }
 
       // Format output
       const sections = limited.map((m) => {

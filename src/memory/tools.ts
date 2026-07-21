@@ -7,7 +7,8 @@ import { MemoryStore } from "./store.ts";
 export function createMemoryWriteTool() {
   return defineTool({
     description:
-      "Write a new memory entry to persistent storage. Memories persist across sessions for future recall.",
+      "Write a new memory entry to persistent storage. Memories persist across sessions for future recall. " +
+      "Returns the new memory ID on success.",
     args: {
       title: z
         .string()
@@ -61,9 +62,15 @@ export function createMemoryWriteTool() {
 export function createMemoryRecallTool() {
   return defineTool({
     description:
-      "Search memories by full-text query with optional filters. Returns ranked results.",
+      "Search memories by full-text query with optional filters (scope, category, limit). " +
+      "Returns ranked results with title, category, relevance, and content preview.",
     args: {
       query: z.string().min(1).describe("Full-text search query"),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .default("markdown")
+        .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
       scope: z
         .enum(["workspace", "role", "both"])
         .optional()
@@ -92,6 +99,11 @@ export function createMemoryRecallTool() {
         if (results.length === 0) {
           return `No memories found matching "${input.query}".`;
         }
+
+        if (input.format === "json") {
+          return JSON.stringify(results, null, 2);
+        }
+
         return results
           .map(
             (r) =>
@@ -110,7 +122,8 @@ export function createMemoryRecallTool() {
 export function createMemoryListTool() {
   return defineTool({
     description:
-      "List memory summaries for browsing or system prompt injection.",
+      "List memory summaries for browsing or system prompt injection. " +
+      "Returns a flat list sorted by recency, relevance, or access time, with title, category, and update date.",
     args: {
       scope: z
         .enum(["workspace", "role", "both"])
@@ -153,7 +166,8 @@ export function createMemoryListTool() {
 export function createMemoryUpdateTool() {
   return defineTool({
     description:
-      "Update an existing memory entry. Only provided fields are changed.",
+      "Update an existing memory entry. Only provided fields are changed. " +
+      "Returns a confirmation message with the updated memory ID.",
     args: {
       id: z.string().describe("Memory ID to update"),
       title: z.string().optional(),

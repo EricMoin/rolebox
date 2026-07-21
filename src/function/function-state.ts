@@ -46,6 +46,11 @@ export function createFunctionStateTool(directory: string) {
         .optional()
         .default(true)
         .describe("Include evidence observation tags (default true)"),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .default("markdown")
+        .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
     async execute(input, context: CanonicalToolContext) {
       const sessionID = input.session_id ?? context.sessionID;
@@ -53,6 +58,9 @@ export function createFunctionStateTool(directory: string) {
       const fnSpecMap = buildFnSpecMap();
 
       if (states.size === 0) {
+        if (input.format === "json") {
+          return JSON.stringify({ sessionID, activeFunctions: [] }, null, 2);
+        }
         return `## Function State: \`${sessionID}\`\n\nNo active functions in this session.`;
       }
 
@@ -61,56 +69,88 @@ export function createFunctionStateTool(directory: string) {
         ? new Set(artifactStore.list(sessionID))
         : null;
 
-      // ── Main table ──────────────────────────────────────────────────────
+      // ── Build structured data for both JSON and markdown ────────────────
+      const stateEntries: Array<{
+        fnName: string;
+        phase: string;
+        gate: unknown;
+        gateSatisfied: boolean | null;
+        evidence: Record<string, boolean> | null;
+        artifact: { produces: string; consumes: string; convention: string } | null;
+        continuationCount: number;
+      }> = [];
+
+      for (const [fnName, st] of states) {
+        const spec = fnSpecMap.get(fnName);
+        stateEntries.push({
+          fnName,
+          phase: st.phase,
+          gate: spec?.gate ?? null,
+          gateSatisfied: spec?.gate !== undefined ? st.gateSatisfied : null,
+          evidence: input.include_evidence !== false ? Object.fromEntries(
+            Object.entries(st.evidenceObserved).map(([k, v]) => [k, v]),
+          ) : null,
+          artifact: (input.include_artifacts !== false && spec) ? {
+            produces: spec.produces ?? "",
+            consumes: spec.consumes ?? "",
+            convention: allArtifacts?.has(fnName) ? fnName : "",
+          } : null,
+          continuationCount: st.continuationCount,
+        });
+      }
+
+      if (input.format === "json") {
+        const jsonOutput: Record<string, unknown> = {
+          sessionID,
+          activeFunctions: stateEntries.map((e) => ({
+            function: e.fnName,
+            phase: e.phase,
+            gate: e.gate,
+            gateSatisfied: e.gateSatisfied,
+            evidenceObserved: e.evidence,
+            produces: e.artifact?.produces || undefined,
+            consumes: e.artifact?.consumes || undefined,
+            continuationCount: e.continuationCount,
+          })),
+        };
+        if (allArtifacts && allArtifacts.size > 0) {
+          jsonOutput.artifacts = Array.from(allArtifacts).sort();
+        }
+        return JSON.stringify(jsonOutput, null, 2);
+      }
+
+      // ── Main table (markdown) ───────────────────────────────────────────
       const header = "| Function | Phase | Gate | Evidence | Artifacts | Cont. |";
       const separator = "|---|---|---|---|---|---|";
       const rows: string[] = [];
 
-      for (const [fnName, st] of states) {
-        const spec = fnSpecMap.get(fnName);
+      for (const entry of stateEntries) {
+        const { fnName, phase, gateSatisfied, evidence, artifact, continuationCount } = entry;
 
-        // Gate column
-        let gateStr: string;
-        if (spec?.gate !== undefined) {
-          gateStr = st.gateSatisfied ? "✅" : "❌";
-        } else {
-          gateStr = "—";
-        }
-
-        // Evidence column
+        const gateStr = gateSatisfied === null ? "—" : gateSatisfied ? "✅" : "❌";
         let evidenceStr = "—";
-        if (input.include_evidence !== false) {
-          const tags = Object.keys(st.evidenceObserved);
-          if (tags.length > 0) {
-            evidenceStr = tags
-              .map((tag) => (st.evidenceObserved[tag] ? `✅ ${tag}` : `⏳ ${tag}`))
-              .join(", ");
-          }
+        if (evidence && Object.keys(evidence).length > 0) {
+          evidenceStr = Object.entries(evidence)
+            .map(([tag, v]) => (v ? `✅ ${tag}` : `⏳ ${tag}`))
+            .join(", ");
         }
-
-        // Artifact column
         let artifactStr = "—";
-        if (input.include_artifacts !== false && allArtifacts) {
+        if (artifact && allArtifacts) {
           const parts: string[] = [];
-          // Artifact this function produces
-          if (spec?.produces) {
-            const exists = allArtifacts.has(spec.produces);
-            parts.push(`${exists ? "✅" : "⏳"} produces:\`${spec.produces}\``);
+          if (artifact.produces) {
+            parts.push(`${allArtifacts.has(artifact.produces) ? "✅" : "⏳"} produces:\`${artifact.produces}\``);
           }
-          // Artifact this function consumes
-          if (spec?.consumes) {
-            const exists = allArtifacts.has(spec.consumes);
-            parts.push(`${exists ? "✅" : "⏳"} consumes:\`${spec.consumes}\``);
+          if (artifact.consumes) {
+            parts.push(`${allArtifacts.has(artifact.consumes) ? "✅" : "⏳"} consumes:\`${artifact.consumes}\``);
           }
-          // Convention-based: artifact named after the function
-          if (allArtifacts.has(fnName)) {
-            parts.push(`✅ \`${fnName}\``);
+          if (artifact.convention && allArtifacts.has(artifact.convention)) {
+            parts.push(`✅ \`${artifact.convention}\``);
           }
           if (parts.length > 0) artifactStr = parts.join(", ");
         }
 
         rows.push(
-          `| ${fnName} | ${st.phase} | ${gateStr} | ${evidenceStr} | ${artifactStr} | ${st.continuationCount} |`,
+          `| ${fnName} | ${phase} | ${gateStr} | ${evidenceStr} | ${artifactStr} | ${continuationCount} |`,
         );
       }
 

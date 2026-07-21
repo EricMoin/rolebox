@@ -173,6 +173,11 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
         .optional()
         .default(20)
         .describe("Max results (default 20)"),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .default("markdown")
+        .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
     async execute(input) {
       if (allAssets.length === 0) {
@@ -229,6 +234,21 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
 
       if (limited.length === 0) {
         return `No assets matching "${input.query}"${input.type !== "all" ? ` of type "${input.type}"` : ""}.`;
+      }
+
+      if (input.format === "json") {
+        return JSON.stringify(
+          limited.map((s) => ({
+            name: s.entry.name,
+            type: s.entry.type,
+            roleId: s.entry.roleId,
+            description: s.entry.description,
+            phase: s.entry.phase,
+            score: s.score,
+          })),
+          null,
+          2,
+        );
       }
 
       const header = "| Name | Type | Role | Description |";

@@ -67,6 +67,11 @@ export function createSessionSearchTool(client: SessionClientWrapper) {
         .describe("Max results to return (default: 20)"),
       include_tool_output: z.boolean().optional().default(false)
         .describe("Also search in tool call outputs"),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .default("markdown")
+        .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
     async execute(input, context) {
       const ctx = context as ToolContext;
@@ -139,6 +144,11 @@ export function createSessionSearchTool(client: SessionClientWrapper) {
 
       const limited = matches.slice(0, maxResults);
       const sessionIds = new Set(limited.map((m) => m.sessionID));
+
+      if (input.format === "json") {
+        return JSON.stringify(limited, null, 2);
+      }
+
       let result = formatSearchResults(limited, matches.length, sessionIds.size);
       if (capHit) {
         result += "\n\n(searched first 200 sessions only)";

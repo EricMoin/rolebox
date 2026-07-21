@@ -53,6 +53,11 @@ export function createTaskSearchTool(
         .optional()
         .default(false)
         .describe("Include a truncated preview of the task result text (first 200 chars)"),
+      format: z
+        .enum(["markdown", "json"])
+        .optional()
+        .default("markdown")
+        .describe("Output format: 'markdown' for human-readable, 'json' for machine parsing"),
     },
     async execute(input) {
       const tasks = dispatchManager.getAllTasks();
@@ -110,6 +115,21 @@ export function createTaskSearchTool(
 
       if (limited.length === 0) {
         return `No tasks matching "${input.query}".`;
+      }
+
+      if (input.format === "json") {
+        return JSON.stringify(
+          limited.map((t) => ({
+            id: t.id,
+            agent: t.agent,
+            status: t.status,
+            description: (t.description ?? t.prompt ?? "").slice(0, 60),
+            startedAt: t.startedAt.toISOString(),
+            duration: formatDuration(t),
+          })),
+          null,
+          2,
+        );
       }
 
       // Format output
