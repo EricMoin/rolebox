@@ -147,9 +147,9 @@ const mockToolContext = {
   ask: async () => {},
 };
 
-// ── task_budget ──────────────────────────────────────────────────────────
+// ── dispatch_budget ──────────────────────────────────────────────────────────
 
-describe("task_budget", () => {
+describe("dispatch_budget", () => {
   it("returns summary table with header and column structure", async () => {
     const mgr = createMockManager([]);
     const tool = createTaskBudgetTool(mgr);
@@ -253,9 +253,9 @@ describe("task_budget", () => {
   });
 });
 
-// ── task_search ──────────────────────────────────────────────────────────
+// ── dispatch_search ──────────────────────────────────────────────────────────
 
-describe("task_search", () => {
+describe("dispatch_search", () => {
   it("returns empty message when no tasks exist", async () => {
     const mgr = createMockManager([]);
     const tool = createTaskSearchTool(mgr, "/tmp");
@@ -354,9 +354,9 @@ describe("task_search", () => {
   });
 });
 
-// ── task_export ──────────────────────────────────────────────────────────
+// ── dispatch_export ──────────────────────────────────────────────────────────
 
-describe("task_export", () => {
+describe("dispatch_export", () => {
   let tmpDir: string;
 
   beforeAll(() => {
@@ -479,9 +479,9 @@ describe("task_export", () => {
   });
 });
 
-// ── task_retry ──────────────────────────────────────────────────────────
+// ── dispatch_retry ──────────────────────────────────────────────────────────
 
-describe("task_retry", () => {
+describe("dispatch_retry", () => {
   function createRetryManager(
     tasks: DispatchTask[],
     reopenResult?: DispatchTask | ((taskId: string, input: any, ctx: any) => Promise<DispatchTask>),
@@ -618,9 +618,9 @@ describe("task_retry", () => {
   });
 });
 
-// ── task_chronology ─────────────────────────────────────────────────────
+// ── dispatch_chronology ─────────────────────────────────────────────────────
 
-describe("task_chronology", () => {
+describe("dispatch_chronology", () => {
   // Fixed timestamps so bucket keys are deterministic across timezones.
   // Use noon UTC to avoid DST/offset ambiguity.
   const T10 = new Date("2026-06-15T10:30:00.000Z");
@@ -690,9 +690,9 @@ describe("task_chronology", () => {
   });
 });
 
-// ── task_graph ─────────────────────────────────────────────────────────
+// ── dispatch_graph ─────────────────────────────────────────────────────────
 
-describe("task_graph", () => {
+describe("dispatch_graph", () => {
   it("renders root task and child nodes with correct tree format", async () => {
     const tasks = [
       makeTask({ id: "root_t", parentSessionId: "ses_grandparent", status: "completed" }),
@@ -770,9 +770,9 @@ describe("task_graph", () => {
   });
 });
 
-// ── task_concurrency ───────────────────────────────────────────────────
+// ── dispatch_concurrency ───────────────────────────────────────────────────
 
-describe("task_concurrency", () => {
+describe("dispatch_concurrency", () => {
   function makeConcurrencyStatus(
     keys: Array<{
       key: string;

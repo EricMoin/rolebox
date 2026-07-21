@@ -3,7 +3,7 @@
  * Integration tests for dispatch checkpoint lifecycle.
  *
  * - Save checkpoint via dispatch_checkpoint tool → simulate task failure →
- *   retry via task_retry → verify prompt includes checkpoint context
+ *   retry via dispatch_retry → verify prompt includes checkpoint context
  * - Checkpoint survives task error (not cleared)
  * - Checkpoint cleared on task success
  * - Expired checkpoints cleaned up by sweeper
@@ -177,7 +177,7 @@ describe("checkpoint integration — tool → retry → lifecycle", () => {
       }),
     );
 
-    // Step 2: Use task_retry tool to retry (will inject checkpoint context)
+    // Step 2: Use dispatch_retry tool to retry (will inject checkpoint context)
     const retryTool = createTaskRetryTool(manager);
     const retryResult = await retryTool.execute(
       { task_id: "bg_test-retry-1" },

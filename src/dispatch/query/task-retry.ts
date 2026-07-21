@@ -54,14 +54,14 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
 
       if (await dispatchManager.getCheckpointStore().hasCheckpoint(task_id)) {
         const checkpointContext = await dispatchManager.getCheckpointStore().buildRetryContext(task_id);
-        log.debug(`task_retry id=${task_id}: injecting checkpoint context into retry prompt`);
+        log.debug(`dispatch_retry id=${task_id}: injecting checkpoint context into retry prompt`);
         prompt = checkpointContext + "\n\n---\n\n" + prompt;
       }
 
       // Step 3.75: Reset budget counter if requested
       if (reset_budget) {
         dispatchManager.getBudgetTracker().resetSessionUsage(task.sessionId, task.parentSessionId);
-        log.debug(`task_retry id=${task_id}: budget reset for session ${task.sessionId.slice(0, 12)}`);
+        log.debug(`dispatch_retry id=${task_id}: budget reset for session ${task.sessionId.slice(0, 12)}`);
       }
 
       const dispatchInput: DispatchInput = {
@@ -87,14 +87,14 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         );
 
         log.debug(
-          `task_retry id=${task_id} status=${retriedTask.status} agent=${retriedTask.agent}`,
+          `dispatch_retry id=${task_id} status=${retriedTask.status} agent=${retriedTask.agent}`,
           { tag: "task-retry", taskId: task_id },
         );
 
         return formatRetryResult(retriedTask);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log.warn(`task_retry failed for id=${task_id}: ${message}`, {
+        log.warn(`dispatch_retry failed for id=${task_id}: ${message}`, {
           tag: "task-retry",
           taskId: task_id,
         });

@@ -138,7 +138,7 @@ export function createTaskBudgetTool(dispatchManager: DispatchManager) {
       }
 
       log.debug(
-        `task_budget session=${sessionID.slice(0, 12)} detail=${input.detail}`,
+        `dispatch_budget session=${sessionID.slice(0, 12)} detail=${input.detail}`,
         { tag: "budget-query", taskId: sessionID },
       );
 

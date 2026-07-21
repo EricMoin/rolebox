@@ -67,16 +67,16 @@ export class ToolService implements PluginService {
         // LSP tools are OpenCode-only
         ...lspService.getTools(),
         // OpenCode-only dispatch/query/function/asset extras
-        task_search: createTaskSearchTool(dispatchManager, ctx.directory),
+        dispatch_search: createTaskSearchTool(dispatchManager, ctx.directory),
         function_state: createFunctionStateTool(ctx.directory),
         function_graph: createFunctionGraphTool(ctx.resolvedRoles),
-        task_budget: createTaskBudgetTool(dispatchManager),
-        task_graph: createTaskGraphTool(dispatchManager),
-        task_retry: createTaskRetryTool(dispatchManager),
+        dispatch_budget: createTaskBudgetTool(dispatchManager),
+        dispatch_graph: createTaskGraphTool(dispatchManager),
+        dispatch_retry: createTaskRetryTool(dispatchManager),
         dispatch_checkpoint: createCheckpointTool(dispatchManager),
-        task_concurrency: createTaskConcurrencyTool(dispatchManager),
-        task_chronology: createTaskChronologyTool(dispatchManager),
-        task_export: createTaskExportTool(dispatchManager, ctx.directory),
+        dispatch_concurrency: createTaskConcurrencyTool(dispatchManager),
+        dispatch_chronology: createTaskChronologyTool(dispatchManager),
+        dispatch_export: createTaskExportTool(dispatchManager, ctx.directory),
         skill_compose: createSkillComposeTool(ctx.resolvedRoles),
         asset_hot_reload: createAssetHotReloadTool(hotReloadService),
         context_assemble: createContextAssembleTool({

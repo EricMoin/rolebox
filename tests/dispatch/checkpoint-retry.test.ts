@@ -51,7 +51,7 @@ const mockToolContext: CanonicalToolContext = {
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-describe("task_retry with checkpoint integration", () => {
+describe("dispatch_retry with checkpoint integration", () => {
   it("injects checkpoint context into the retry prompt when a checkpoint exists", async () => {
     // Build checkpoint data with known content
     const checkpointData = makeCheckpointData({
