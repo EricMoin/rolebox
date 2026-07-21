@@ -3,7 +3,8 @@ import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
 import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.ts";
 import { getRolePath } from "../paths.ts";
 import type { LockEntry } from "../types.ts";
-import { existsSync, renameSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { moveDir } from "../fs-utils.ts";
 import { join } from "node:path";
 
 export interface InstallOptions {
@@ -107,7 +108,7 @@ export async function install(spec: string): Promise<void> {
     rmSync(targetDir, { recursive: true, force: true });
   }
 
-  renameSync(extractedDir, targetDir);
+  moveDir(extractedDir, targetDir);
 
   // 10. Compute integrity hash
   const integrity = await computeIntegrity(targetDir);
