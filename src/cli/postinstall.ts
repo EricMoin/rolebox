@@ -30,6 +30,8 @@ const WORDMARK_COLORS = [sky600, sky600, sky500, sky500, sky400, sky400];
 export function showWelcome(): void {
   // ── Guard: not a TTY ──────────────────────────────────────────
   if (!process.stdout.isTTY) return;
+  // ── Guard: CI (core-js style) ─────────────────────────────────
+  if (process.env["CI"]) return;
   // ── Guard: opt-out env var ────────────────────────────────────
   if (process.env["ROLEBOX_NO_WELCOME"]) return;
 

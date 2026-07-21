@@ -39,7 +39,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:tui": "bun test tests/tui/",
-    "postinstall": "node dist/cli/postinstall.js"
+    "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\""
   },
   "keywords": [
     "opencode",
