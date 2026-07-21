@@ -17,7 +17,8 @@ export function createDispatchTool(
 ) {
   return defineTool({
     description:
-      "Dispatch work to a subagent. Run synchronously or in the background.",
+      "Dispatch work to a subagent. Run synchronously or in the background. " +
+      "Sync returns the subagent's output text directly. Background returns a task ID and session ID with instructions to await a completion notification.",
     args: {
       subagent: z.string().describe("The subagent to dispatch to"),
       prompt: z.string().describe("The task prompt for the subagent"),
@@ -261,7 +262,7 @@ receiving that notification.`;
 
 export function createDispatchCancelTool(manager: DispatchManager) {
   return defineTool({
-    description: "Cancel a running background task.",
+    description: "Cancel a running background task. Use when a dispatched task is no longer needed or is stuck. Returns a confirmation or error message.",
     args: {
       task_id: z
         .string()

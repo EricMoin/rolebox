@@ -26,7 +26,8 @@ export function createPageReadTool() {
     description:
       "Fetch a URL and convert its content to clean, LLM-friendly Markdown. " +
       "No API key required. Supports JS-rendered pages via 'browser' engine. " +
-      "Use CSS selectors to extract specific content sections.",
+      "Use CSS selectors to extract specific content sections. " +
+      "For simple page/article reads to clean markdown. For multi-format, multi-engine, or API fetching with custom headers, use web_fetch instead.",
     args: {
       url: z.string().url().describe("Full URL of the page to read"),
       selector: z

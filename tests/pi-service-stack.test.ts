@@ -50,10 +50,6 @@ const REQUIRED_TOOLS = [
   "session_info",
   "session_diff",
   "session_fork",
-  // Aliases
-  "session_inspect",
-  "session_changes",
-  "session_branch",
   // Dispatch stubs
   "dispatch",
   "dispatch_output",

@@ -34,10 +34,6 @@ export class SessionService implements PluginService, ToolContributor {
       session_info: createSessionInfoTool(sc),
       session_diff: createSessionDiffTool(sc),
       session_fork: createSessionForkTool(sc),
-      // Alternative names to avoid built-in tool name conflicts
-      session_inspect: createSessionInfoTool(sc),
-      session_changes: createSessionDiffTool(sc),
-      session_branch: createSessionForkTool(sc),
     };
   }
 

@@ -12,6 +12,7 @@ import type { ISessionClient } from "./ports/session-client.ts";
 import type { PlatformCapabilities } from "./capabilities.ts";
 import type { DispatchManager } from "../dispatch/core/manager.ts";
 import type { ResolvedRole } from "../types.ts";
+import { registerDeprecatedTool } from "../hooks/tool-before.ts";
 
 import { createHashlineReadTool } from "../hashline/hashline-read.ts";
 import { createHashlineEditTool } from "../hashline/hashline-edit.ts";
@@ -66,7 +67,7 @@ export interface BuildToolsOptions {
 export function buildCanonicalTools(
   opts: BuildToolsOptions,
 ): Record<string, CanonicalToolDef> {
-  const tools: Record<string, CanonicalToolDef<any>> = {};
+  let tools: Record<string, CanonicalToolDef<any>> = {};
 
   // 1. Core standalone + asset/reference tools (always)
   // These are the intersection tools common to both OpenCode and Pi.
@@ -103,10 +104,6 @@ export function buildCanonicalTools(
     tools.session_info = createSessionInfoTool(client);
     tools.session_diff = createSessionDiffTool(client);
     tools.session_fork = createSessionForkTool(client);
-    // Aliases for backward/forward compatibility
-    tools.session_inspect = createSessionInfoTool(client);
-    tools.session_changes = createSessionDiffTool(client);
-    tools.session_branch = createSessionForkTool(client);
   }
 
   // 3. Dispatch tools
@@ -142,6 +139,24 @@ export function buildCanonicalTools(
   if (opts.loopToolsOverride) {
     Object.assign(tools, opts.loopToolsOverride);
   }
+
+  // 6. Post-processing: augment descriptions for deprecated tools
+  // Iterates over all assembled tools. When a tool has `deprecated` set,
+  // appends "⚠️ Deprecated" (plus a message if provided) to its description
+  // so the LLM-facing system prompt shows the deprecation notice, and
+  // registers it for runtime warning logging.
+  tools = Object.fromEntries(
+    Object.entries(tools).map(([name, def]) => {
+      if (!def.deprecated) return [name, def];
+      const info = typeof def.deprecated === "object" ? def.deprecated : null;
+      const depMsg = info ? info.message : "";
+      registerDeprecatedTool(name, depMsg);
+      const suffix = depMsg
+        ? ` ⚠️ Deprecated: ${depMsg}`
+        : " ⚠️ Deprecated";
+      return [name, { ...def, description: `${def.description}${suffix}` }];
+    }),
+  );
 
   return tools;
 }

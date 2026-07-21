@@ -256,14 +256,14 @@ describe("PI Extension — Extension Point Registration", () => {
     }
   });
 
-  it("registers backward-compatibility aliases (session_inspect, session_changes, session_branch)", async () => {
+  it("does NOT register deprecated alias tools (session_inspect, session_changes, session_branch)", async () => {
     const { pi, registeredNames } = createRecordingPi();
     const stack = new PiLightweightServiceStack(pi, [emptyRole]);
     await stack.init();
 
-    expect(registeredNames).toContain("session_inspect");
-    expect(registeredNames).toContain("session_changes");
-    expect(registeredNames).toContain("session_branch");
+    expect(registeredNames).not.toContain("session_inspect");
+    expect(registeredNames).not.toContain("session_changes");
+    expect(registeredNames).not.toContain("session_branch");
   });
 
   it("registers session_search and asset_validate as optional tools", async () => {
@@ -467,7 +467,7 @@ describe("PI Extension — Asset Hot-Reload Trigger", () => {
   it("asset_hot_reload tool execute returns completion status on success", async () => {
     const service = createMockHotReloadService();
     const tool = createAssetHotReloadTool(service);
-    const result = await tool.execute({ type: "role" }, {} as any);
+    const result = await tool.execute({} as any, {} as any);
 
     expect(result).toContain("completed");
     expect(result).toContain("Discovered: 2");
@@ -477,7 +477,7 @@ describe("PI Extension — Asset Hot-Reload Trigger", () => {
   it("asset_hot_reload tool execute returns failure status on error", async () => {
     const service = createFailingHotReloadService();
     const tool = createAssetHotReloadTool(service);
-    const result = await tool.execute({ type: "role" }, {} as any);
+    const result = await tool.execute({} as any, {} as any);
 
     expect(result).toContain("failed");
     expect(result).toContain("Simulated reload failure");
@@ -488,7 +488,7 @@ describe("PI Extension — Asset Hot-Reload Trigger", () => {
     try {
       const service = createMockHotReloadService();
       const tool = createAssetHotReloadTool(service);
-      const result = await tool.execute({ type: "role" }, {} as any);
+      const result = await tool.execute({} as any, {} as any);
 
       expect(result).toContain("disabled");
     } finally {
@@ -496,13 +496,13 @@ describe("PI Extension — Asset Hot-Reload Trigger", () => {
     }
   });
 
-  it("asset_hot_reload tool execute with specific asset name still triggers reload", async () => {
+  it("asset_hot_reload tool executes and returns completion status", async () => {
     const service = createMockHotReloadService();
     const tool = createAssetHotReloadTool(service);
-    const result = await tool.execute({ type: "role", name: "test-primary" }, {} as any);
+    const result = await tool.execute({} as any, {} as any);
 
     expect(result).toContain("completed");
-    expect(result).toContain("role (test-primary)");
+    expect(result).toContain("assets (full reload)");
   });
 });
 

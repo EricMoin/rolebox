@@ -16,6 +16,24 @@ export function registerToolSchema(toolName: string, args: z.ZodRawShape): void 
   toolSchemaRegistry.set(toolName, args);
 }
 
+// ── Deprecated tool registry ──────────────────────────────────────────────
+
+/**
+ * Registry of tool name → deprecation message string.
+ * Populated by registerDeprecatedTool() when tools are assembled.
+ * Checked in handleToolBefore() to emit runtime warnings.
+ */
+const deprecatedToolRegistry = new Map<string, string>();
+
+/**
+ * Register a tool as deprecated so that runtime invocations emit a warning.
+ * @param toolName - The tool name to mark deprecated.
+ * @param message - Optional migration hint shown in the warning log.
+ */
+export function registerDeprecatedTool(toolName: string, message?: string): void {
+  deprecatedToolRegistry.set(toolName, message ?? "");
+}
+
 /**
  * Pre-execution hook: validates tool parameters with zod .strict() mode.
  * 
@@ -62,6 +80,23 @@ export async function handleToolBefore(
       }),
       { tool: input.tool, args: output.args },
     );
+  }
+
+  // ── Deprecated tool warning ───────────────────────────────────────────
+  const depMsg = deprecatedToolRegistry.get(input.tool);
+  if (depMsg !== undefined) {
+    if (depMsg) {
+      log.warn(`Deprecated tool invoked: '${input.tool}' — ${depMsg}`, {
+        tool: input.tool,
+        deprecation: depMsg,
+        sessionID: input.sessionID,
+      });
+    } else {
+      log.warn(`Deprecated tool invoked: '${input.tool}'`, {
+        tool: input.tool,
+        sessionID: input.sessionID,
+      });
+    }
   }
 
   const schema = toolSchemaRegistry.get(input.tool);

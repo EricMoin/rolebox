@@ -254,15 +254,6 @@ describe("asset-validate — empty / edge cases", () => {
     expect(result).toBe("No roles loaded. Cannot validate assets.");
   });
 
-  it("handles fix mode (returns not-implemented notice)", async () => {
-    const role = makeMinimalRole({
-      functions: [buildFn("my-fn", { requires: ["missing"] })],
-    });
-    const tool = createAssetValidateTool([role]);
-    const result: string = await tool.execute({ fix: true }) as any;
-    expect(result).toContain("Auto-fix mode is not yet implemented");
-  });
-
   // Note: role_id filtering has a known behavior where checkRoleFunctions
   // is called for ALL roles regardless of filter (only subagent checks are filtered).
   // This test documents the current behavior.

@@ -49,12 +49,30 @@ export type ToolResult =
     };
 
 /**
+ * Optional deprecation info for a tool definition.
+ * When set, the tool's description is augmented with a deprecation notice
+ * in the LLM-facing system prompt, and invoking the tool logs a warning.
+ * - `true` marks the tool as deprecated without additional context.
+ * - `{ since, message }` provides version info and a migration hint.
+ */
+export type DeprecatedInfo = {
+  /** Version or date when the deprecation took effect. */
+  since: string;
+  /** Migration hint or reason for deprecation. */
+  message: string;
+};
+
+/**
  * A platform-agnostic tool definition.
  * This is the canonical shape that all tools define against.
  * Platform adapters compile this into their native tool format.
  */
 export type CanonicalToolDef<Args extends z.ZodRawShape = z.ZodRawShape> = {
   description: string;
+  /** Marks this tool as deprecated. The LLM will see a deprecation notice
+   * and runtime invocations will emit a warning log.
+   */
+  deprecated?: boolean | DeprecatedInfo;
   args: Args;
   execute(
     args: z.infer<z.ZodObject<Args>>,

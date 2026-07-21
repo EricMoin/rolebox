@@ -24,6 +24,7 @@ export type {
   CanonicalEvent,
   CanonicalEventType,
   AgentDefinition,
+  DeprecatedInfo,
 } from "./types.ts";
 
 // ── Context and capabilities ─────────────────────────────────────────────────

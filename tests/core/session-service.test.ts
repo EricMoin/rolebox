@@ -94,27 +94,21 @@ describe("SessionService", () => {
   });
 
   describe("getTools", () => {
-    it("returns all 9 tool keys (6 canonical + 3 aliases) after init", async () => {
+    it("returns all 6 canonical tool keys after init", async () => {
       const svc = new SessionService();
       const ctx = makeMinimalContext();
       await svc.init(ctx);
 
       const tools = svc.getTools();
       expect(tools).toBeDefined();
-      expect(Object.keys(tools).length).toBe(9);
+      expect(Object.keys(tools).length).toBe(6);
 
-      // Canonical names
       expect(tools.session_list).toBeDefined();
       expect(tools.session_read).toBeDefined();
       expect(tools.session_search).toBeDefined();
       expect(tools.session_info).toBeDefined();
       expect(tools.session_diff).toBeDefined();
       expect(tools.session_fork).toBeDefined();
-
-      // Aliases
-      expect(tools.session_inspect).toBeDefined();
-      expect(tools.session_changes).toBeDefined();
-      expect(tools.session_branch).toBeDefined();
     });
 
     it("each tool entry is an object (tool definition)", async () => {

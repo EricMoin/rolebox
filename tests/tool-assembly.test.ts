@@ -98,9 +98,6 @@ const SESSION_KEYS = [
   "session_info",
   "session_diff",
   "session_fork",
-  "session_inspect",
-  "session_changes",
-  "session_branch",
 ];
 
 const DISPATCH_KEYS = [

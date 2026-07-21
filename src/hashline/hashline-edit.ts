@@ -207,50 +207,11 @@ async function processSingleFile(
 export function createHashlineEditTool() {
   return defineTool({
     description:
-      "Edit a file using LINE#HASH anchors obtained from hashline_read.\n" +
-      "\n" +
-      "WORKFLOW:\n" +
-      "  1. Read the file with hashline_read \u2014 copy the `version` and exact LINE#HASH anchors\n" +
-      "  2. Submit one hashline_edit call per file with the anchors from that read\n" +
-      "  3. If you need to edit the same file again, re-read it first to get fresh anchors\n" +
-      "\n" +
-      "SNAPSHOT SEMANTICS:\n" +
-      "  All edits reference the ORIGINAL file state. Hashes are validated against the\n" +
-      "  original file and edits are applied bottom-up so indices stay correct even with\n" +
-      "  multiple edits in the same call.\n" +
-      "\n" +
-      "OPERATIONS:\n" +
-      "  replace (default) \u2014 Replace line(s) at pos..end (inclusive) with new content.\n" +
-      "    - pos: single anchor or start of range\n" +
-      "    - end: end anchor for range (omit for single-line replace)\n" +
-      "    - lines: replacement content (no anchors, no diff markers)\n" +
-      "    - Omit lines or set to empty string/array to delete the line(s)\n" +
-      "\n" +
-      "  append \u2014 Insert content after the anchor line (or at EOF if no pos).\n" +
-      "    - pos: anchor to insert after (omit for EOF)\n" +
-      "    - lines: content to insert\n" +
-      "\n" +
-      "  prepend \u2014 Insert content before the anchor line (or at BOF if no pos).\n" +
-      "    - pos: anchor to insert before (omit for BOF)\n" +
-      "    - lines: content to insert\n" +
-      "\n" +
-      "RULES:\n" +
-      "  - lines must contain ONLY the replacement content (no anchors, no diff markers)\n" +
-      "  - Tags (LINE#HASH) must be copied exactly from read output\n" +
-      "  - Batch = multiple operations in edits[], NOT one big replace\n" +
-      "  - Use separate edit calls for separate files (or batch them in files[])\n" +
-      "  - After editing, re-read the file to get updated anchors for subsequent edits\n" +
-      "\n" +
-      "Returns:\n" +
-      "  version: <new SHA-256>\n" +
-      "  files:\n" +
-      "    filePath: <path>\n" +
-      "    version: <sha256>\n" +
-      "    diff: <unified diff>\n" +
-      "    additions: <number>\n" +
-      "    deletions: <number>\n" +
-      "    reanchored:\n" +
-      "      line N: <oldHash> -> <newHash>",
+      "Edit a file using LINE#HASH anchors obtained from hashline_read. " +
+      "Use this after reading a file with hashline_read — copy the version and anchors, then submit edits. " +
+      "All edits reference the ORIGINAL file state and are applied bottom-up. " +
+      "Supports replace (single or range), append (after anchor or EOF), and prepend (before anchor or BOF). " +
+      "Returns version, per-file diff with additions/deletions, and a reanchored map of old -> new hashes.",
     args: {
       files: z
         .array(

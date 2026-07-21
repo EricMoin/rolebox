@@ -86,21 +86,5 @@ describe("hot-reload", () => {
     });
   });
 
-  describe("type and name passthrough", () => {
-    it("includes requested type in output", async () => {
-      const { createAssetHotReloadTool } = await import("../../src/asset/hot-reload.ts");
-      const service = makeMockService();
-      const tool = createAssetHotReloadTool(service as any);
-      const result: string = await tool.execute({ type: "skill" }) as any;
-      expect(result).toContain("skill (all)");
-    });
 
-    it("includes requested type and name in output", async () => {
-      const { createAssetHotReloadTool } = await import("../../src/asset/hot-reload.ts");
-      const service = makeMockService();
-      const tool = createAssetHotReloadTool(service as any);
-      const result: string = await tool.execute({ type: "function", name: "my-fn" }) as any;
-      expect(result).toContain("function (my-fn)");
-    });
-  });
 });

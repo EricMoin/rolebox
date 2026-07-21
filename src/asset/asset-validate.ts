@@ -285,8 +285,7 @@ export function createAssetValidateTool(resolvedRoles: ResolvedRole[]) {
     args: {
       role_id: z.string().optional()
         .describe("Limit validation to assets of a specific role (by role ID). When omitted, validates all roles and their sub-agents."),
-      fix: z.boolean().optional().default(false)
-        .describe("When true, attempt to auto-fix issues. Currently not implemented — only validation feedback is returned."),
+
     },
     async execute(input) {
       if (resolvedRoles.length === 0) {
@@ -297,11 +296,6 @@ export function createAssetValidateTool(resolvedRoles: ResolvedRole[]) {
       issues.push(...checkMissingDependencies(resolvedRoles, knownFunctionNames, input.role_id));
       issues.push(...(await checkBrokenReferences(resolvedRoles, input.role_id)));
       issues.push(...checkTransitionConditions(resolvedRoles, KNOWN_CONDITIONS, input.role_id));
-
-      if (input.fix) {
-        return renderIssues(issues, input.role_id) +
-          "\n\n> ℹ️ Auto-fix mode is not yet implemented. These issues require manual resolution.";
-      }
 
       return renderIssues(issues, input.role_id);
     },

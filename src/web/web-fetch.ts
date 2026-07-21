@@ -375,7 +375,8 @@ export function createWebFetchTool() {
       "extraction). Output formats include 'markdown', 'text', 'html', " +
       "'json', 'raw', and 'auto' (smart format selection). CSS selectors " +
       "extract specific sections. SSRF-protected. Smart truncation at " +
-      "paragraph boundaries. Optional metadata extraction.",
+      "paragraph boundaries. Optional metadata extraction. " +
+      "Versatile HTTP client with format/engine selection. For simple article reading to markdown, consider the lighter web_read.",
     args: {
       url: z.string().url().describe("Full URL of the page to fetch (http or https)"),
       format: z
