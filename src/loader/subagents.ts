@@ -12,6 +12,7 @@ import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVars } from "../resolver/env-resolver.ts";
+import { resolveModel } from "../resolver/model-resolver.ts";
 import type { SubAgentConfig } from "../types.ts";
 import { ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
@@ -99,7 +100,7 @@ function buildSubAgentFields(
     ...(typeof entry.prompt_file === "string"
       ? { prompt_file: entry.prompt_file }
       : {}),
-    ...(typeof entry.model === "string" ? { model: entry.model } : {}),
+    ...(typeof entry.model === "string" ? { model: resolveModel(entry.model) } : {}),
     ...(typeof entry.color === "string" ? { color: entry.color } : {}),
     ...(typeof entry.variant === "string"
       ? { variant: entry.variant }

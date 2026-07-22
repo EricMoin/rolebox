@@ -9,6 +9,7 @@
  */
 import { discoverRoles } from "../loader/role-loader.ts";
 import { resolveAllRoles, type ResolveContext } from "./orchestrator.ts";
+import { initModelResolver } from "./model-resolver.ts";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
 
@@ -55,6 +56,10 @@ export interface BootstrapRolesResult {
  */
 export async function bootstrapRoles(opts: BootstrapRolesOptions): Promise<BootstrapRolesResult> {
   const { roleboxDir, globalSkillsDir, configDir, builtinDir, roleFunctionsMap, roleGraphMap } = opts;
+
+  // Initialize model resolver before role discovery so that load-time
+  // model resolution (via resolveModel) has access to known models and aliases.
+  initModelResolver(configDir);
 
   const roles = await discoverRoles(roleboxDir);
 

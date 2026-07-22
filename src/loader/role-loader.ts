@@ -14,6 +14,7 @@ import { basename, dirname, resolve as pathResolve } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "../resolver/env-resolver.ts";
+import { resolveModel } from "../resolver/model-resolver.ts";
 import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "../types.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
@@ -275,7 +276,7 @@ function buildRoleConfig(
       ? { prompt_file: resolved.prompt_file }
       : {}),
     ...(typeof resolved.model === "string"
-      ? { model: resolved.model }
+      ? { model: resolveModel(resolved.model) }
       : {}),
     ...(typeof resolved.mode === "string" &&
       ROLE_MODE_VALUES.includes(resolved.mode as RoleMode)

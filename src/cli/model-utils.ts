@@ -54,15 +54,15 @@ function parseJsonc(text: string): unknown {
  * Returns an empty array when the config file is missing, unreadable,
  * malformed, or contains no provider models.
  */
-export function scanAvailableModels(): ModelOption[] {
-  const configPath = getOpencodeConfigPath();
-  if (!existsSync(configPath)) {
+export function scanAvailableModels(configPath?: string): ModelOption[] {
+  const resolvedPath = configPath ?? getOpencodeConfigPath();
+  if (!existsSync(resolvedPath)) {
     return [];
   }
 
   let config: unknown;
   try {
-    const raw = readFileSync(configPath, "utf-8");
+    const raw = readFileSync(resolvedPath, "utf-8");
     config = parseJsonc(raw);
   } catch {
     return [];

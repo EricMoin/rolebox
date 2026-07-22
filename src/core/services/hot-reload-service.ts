@@ -6,6 +6,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { discoverRoles } from "../../loader/role-loader.ts";
 import { resolveAllRoles, type ResolveContext } from "../../resolver/orchestrator.ts";
+import { initModelResolver } from "../../resolver/model-resolver.ts";
 import { resolveSkills } from "../../resolver/skill-resolver.ts";
 import { buildAgentPrompt } from "../../prompt/builder.ts";
 import { syncAllAgents } from "../../sync/agent-files.ts";
@@ -285,6 +286,10 @@ export class HotReloadService implements PluginService {
    */
   private async performFullReload(): Promise<HotReloadResult> {
     log.info("Hot reload — full re-discovery and re-resolution");
+
+    // Re-initialize model resolver so edits to opencode.jsonc and
+    // role_config.yaml take effect without a process restart.
+    initModelResolver(this.ctx.configDir!);
 
     // 1. Re-discover roles from disk
     const newRoles = await discoverRoles(this.ctx.roleboxDir!);

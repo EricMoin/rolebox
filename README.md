@@ -131,6 +131,42 @@ Install any role with `rolebox install <name>` and restart opencode.
 
 ---
 
+## Model Alias Configuration
+
+Roles published on the [oh-my-role registry](https://github.com/EricMoin/oh-my-role) often use placeholder model names (e.g. `PLACEHOLDER`, `YOUR_MODEL_HERE`) instead of real provider/model identifiers. Rather than editing each role's `role.yaml` manually, you can define local alias mappings once.
+
+Create or edit `~/.config/opencode/role_config.yaml` (same directory as your `opencode.jsonc`):
+
+```yaml
+model_aliases:
+  PLACEHOLDER: hfai/deepseek-v4-pro-max
+  YOUR_MODEL_HERE: anthropic/claude-opus-4
+  # key = placeholder string from role.yaml
+  # value = provider/model_id for your actual model
+```
+
+### How resolution works
+
+At role load time, each `model:` field goes through a non-destructive fallback chain:
+
+1. **Known models first** — if the value matches a model already configured in your `opencode.jsonc` provider list, it passes through unchanged.
+2. **Alias lookup** — if not known, rolebox checks `model_aliases` in `role_config.yaml`. When a match is found, the mapped value is used (single-hop — no recursive chaining).
+3. **Passthrough with warning** — if neither matches, the original value is preserved and a warning is logged. Loading never fails because of an unrecognized model.
+
+This resolution covers both the role-level `model` field and all subagent `model` fields, including inherited values.
+
+### Error handling
+
+- **Missing config file** — treated as an empty alias map; no error.
+- **Malformed YAML** — warns and falls back to empty aliases; loading continues.
+- **Invalid alias entries** (empty keys, non-string values, empty values) — skipped with a warning; valid entries in the same file still apply.
+
+### Hot-reload
+
+Edits to `role_config.yaml` take effect on the next hot-reload cycle or role bootstrap. No process restart is required for the primary runtime. For CLI tools that bypass the bootstrap path, a restart is needed.
+
+---
+
 ## Docs Index
 
 | Topic | Docs |
