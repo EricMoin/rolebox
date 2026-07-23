@@ -15,6 +15,7 @@
 import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.ts";
 import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
+import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
 import { piCapabilities } from "./platform/capabilities.ts";
 import { createSubLogger, formatError } from "./logger.ts";
 import type { ResolvedFunction, ResolvedGraph, ResolvedSubAgent } from "./types.ts";
@@ -315,8 +316,26 @@ export default async function (pi: any): Promise<void> {
     // stack instead of stub tools. All other tools (standalone, session,
     // asset) are built as before.
 
+    // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
+    //
+    // Pi never populates `context.agent` on tool contexts. This shared ref is
+    // the single source of truth for "which rolebox agent is acting", read by
+    // the dispatch tool's direct-child gate and written by the role switcher.
+    // In a spawned subagent process it is seeded from ROLEBOX_ACTIVE_AGENT so
+    // nested dispatch can reach that subagent's own children.
+    const seededAgent = process.env.ROLEBOX_ACTIVE_AGENT?.trim() || null;
+    const activeAgent = createActiveAgentRef(seededAgent);
+    if (seededAgent) {
+      log.info("Seeded active agent from environment", { agent: seededAgent });
+    }
+
     const dispatchTools: Record<string, CanonicalToolDef> = {
-      dispatch: createDispatchTool(dispatchManager, resolvedSubagents, subagentModelKey),
+      dispatch: createDispatchTool(
+        dispatchManager,
+        resolvedSubagents,
+        subagentModelKey,
+        () => activeAgent.get() ?? "",
+      ),
       dispatch_output: createDispatchOutputTool(dispatchManager),
       dispatch_cancel: createDispatchCancelTool(dispatchManager),
       dispatch_metrics: createDispatchMetricsTool(),
