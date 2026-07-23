@@ -26,6 +26,7 @@ import { createSubLogger } from "../../../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import type { ISessionClient } from "../../ports/session-client.ts";
+import type { IEventBridge } from "../../ports/event-bridge.ts";
 import { PiSessionAdapter } from "./session.ts";
 import {
   appendEvent,
@@ -156,6 +157,9 @@ export class PiProcessSessionAdapter implements ISessionClient {
    */
   private readonly agentConfigs: Map<string, PiProcessAgentConfig> = new Map();
 
+  /** Optional event bridge for emitting canonical events (e.g., session.idle on process exit). */
+  private eventBridge?: IEventBridge;
+
   /**
    * @param agentConfigs - Optional pre-configured agent configs keyed by agent name.
    * @param sessionDir   - Optional session directory override (passed to PiSessionAdapter).
@@ -172,6 +176,15 @@ export class PiProcessSessionAdapter implements ISessionClient {
         this.agentConfigs.set(key, value);
       }
     }
+  }
+
+  /**
+   * Set the event bridge for emitting canonical events.
+   * Must be set before any spawn operations to enable completion evaluation
+   * when child Pi processes exit.
+   */
+  setEventBridge(bridge: IEventBridge): void {
+    this.eventBridge = bridge;
   }
 
   // ── Recovery ──────────────────────────────────────────────────────────────
@@ -325,22 +338,43 @@ export class PiProcessSessionAdapter implements ISessionClient {
     }
 
     const promptText = this._buildPromptText(options.parts);
+    // Honor the per-prompt agent selection: the dispatch layer passes the
+    // subagent's full id via `options.agent` (it does NOT pass it to create()).
+    // Resolve that agent's registered config so the correct model + system
+    // prompt are applied, and remember it on the record for continuation.
+    const agentConfig = options.agent
+      ? this.agentConfigs.get(options.agent)
+      : undefined;
+    if (agentConfig) record.agentConfig = agentConfig;
     const sysPrompt = options.system ?? record.agentConfig.systemPrompt;
     const model = record.agentConfig.model;
     const tools = record.agentConfig.tools;
 
-    // Build the prompt text: prepend system prompt if provided.
-    const fullPrompt = sysPrompt
-      ? `${sysPrompt}\n\n${promptText}`
-      : promptText;
-
+    // The system prompt is delivered via `--append-system-prompt` inside
+    // _spawnProcess (not prepended to the user text), so it is applied exactly
+    // once. This mirrors reopenForContinuation().
     try {
-      await this._spawnProcess(id, model, tools, fullPrompt, record);
+      await this._spawnProcess(id, model, tools, promptText, record, options.agent, sysPrompt);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.log.error("prompt() — spawn failed", { id, error: msg });
       record.exitCode = 1;
-      record.stderr += `\nSpawn error: ${msg}`;
+
+      // Emit a session.error so dispatchManager transitions to error state
+      // immediately instead of waiting for the watchdog timeout.
+      if (this.eventBridge) {
+        void this.eventBridge.emit({
+          type: "session.error",
+          rawType: "process.spawn_error",
+          properties: { sessionID: id, error: msg },
+        }).catch((emitErr: unknown) => {
+          this.log.debug("Failed to emit session.error for spawn failure", {
+            id,
+            error: emitErr instanceof Error ? emitErr.message : String(emitErr),
+          });
+        });
+      }
+
       return null;
     }
 
@@ -378,14 +412,15 @@ export class PiProcessSessionAdapter implements ISessionClient {
     }
 
     const promptText = this._buildPromptText(options.parts);
+    // Honor the per-prompt agent selection (see prompt()): resolve the
+    // subagent's registered config so its model + system prompt are applied.
+    const agentConfig = options.agent
+      ? this.agentConfigs.get(options.agent)
+      : undefined;
+    if (agentConfig) record.agentConfig = agentConfig;
     const sysPrompt = record.agentConfig.systemPrompt;
     const model = record.agentConfig.model;
     const tools = record.agentConfig.tools;
-
-    // Build the full prompt including system prompt.
-    const fullPrompt = sysPrompt
-      ? `${sysPrompt}\n\n${promptText}`
-      : promptText;
 
     // Register abort signal handler.
     const abortHandler = (): void => {
@@ -393,7 +428,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
       if (p && !p.killed) {
         this.log.debug("promptSync() — abort signal received, killing process", { id });
         p.kill("SIGTERM");
-        setTimeout(() => {
+        const sigkillHandle = setTimeout(() => {
           try {
             if (p && !p.killed) {
               p.kill("SIGKILL");
@@ -402,6 +437,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
             // Best-effort SIGKILL after timeout.
           }
         }, 5000);
+        if (sigkillHandle && typeof sigkillHandle === "object" && "unref" in sigkillHandle) (sigkillHandle as any).unref();
       }
     };
 
@@ -410,7 +446,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
     }
 
     try {
-      await this._spawnProcess(id, model, tools, fullPrompt, record);
+      await this._spawnProcess(id, model, tools, promptText, record, options.agent, sysPrompt);
 
       // Await completion via the stored resolver promise.
       const result = await new Promise<{ parts: Array<{ type: string; text?: string }> } | null>(
@@ -515,7 +551,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
       proc.kill("SIGTERM");
 
       // 5-second SIGKILL fallback.
-      setTimeout(() => {
+      const sigkillHandle = setTimeout(() => {
         try {
           if (proc && !proc.killed) {
             proc.kill("SIGKILL");
@@ -525,6 +561,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
           // Best-effort: process may have already exited.
         }
       }, 5000);
+      if (sigkillHandle && typeof sigkillHandle === "object" && "unref" in sigkillHandle) (sigkillHandle as any).unref();
 
       this.log.debug("abort() — sent SIGTERM", { id });
       return true;
@@ -747,6 +784,8 @@ export class PiProcessSessionAdapter implements ISessionClient {
     tools: string[],
     promptText: string,
     record: ProcessRecord,
+    agentId?: string,
+    systemPrompt?: string,
   ): Promise<void> {
     // Set up the sidecar path before spawning.
     record.sidecarPath = join(process.cwd(), ".rolebox", "pi-sessions", `${id}.jsonl`);
@@ -755,9 +794,11 @@ export class PiProcessSessionAdapter implements ISessionClient {
     const tmpDir = mkdtempSync(join(tmpdir(), `pi-process-${id.slice(0, 8)}-`));
     const sysPromptPath = join(tmpDir, "system-prompt.txt");
 
-    // Write the system prompt to the temp file.
-    // If the agent config has no system prompt, write an empty file.
-    await writeFile(sysPromptPath, record.agentConfig.systemPrompt, "utf-8");
+    // Write the effective system prompt to the temp file (delivered via
+    // --append-system-prompt). Falls back to the record's config when no
+    // explicit prompt is passed (e.g. reopenForContinuation).
+    // If there is no system prompt, an empty file is written.
+    await writeFile(sysPromptPath, systemPrompt ?? record.agentConfig.systemPrompt, "utf-8");
 
     // Build CLI arguments.
     const args: string[] = [
@@ -780,11 +821,19 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // Add the prompt text as the final positional argument.
     args.push(`Task: ${promptText}`);
 
-    this.log.debug("Spawning Pi process", { id, model, toolCount: tools.length });
+    this.log.debug("Spawning Pi process", { id, model, toolCount: tools.length, agent: agentId });
+
+    // Seed the child process with its own agent identity so that its dispatch
+    // tool (which sees an empty `context.agent` on Pi) can resolve *its* direct
+    // children for nested dispatch. Read back in pi-extension.ts at startup.
+    const childEnv = { ...process.env };
+    if (agentId) {
+      childEnv.ROLEBOX_ACTIVE_AGENT = agentId;
+    }
 
     const proc = spawn(this._resolvePiBinary(), args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: childEnv,
     });
 
     record.proc = proc;
@@ -794,13 +843,15 @@ export class PiProcessSessionAdapter implements ISessionClient {
       if (record.proc && !record.proc.killed && record.exitCode === null) {
         this.log.warn("Pi process timeout — sending SIGTERM", { id });
         record.proc.kill("SIGTERM");
-        setTimeout(() => {
+        const sigkillHandle = setTimeout(() => {
           if (record.proc && !record.proc.killed) {
             record.proc.kill("SIGKILL");
           }
         }, 5000);
+        if (sigkillHandle && typeof sigkillHandle === "object" && "unref" in sigkillHandle) (sigkillHandle as any).unref();
       }
     }, PiProcessSessionAdapter.DEFAULT_PROCESS_TIMEOUT_MS);
+    if (timeoutHandle && typeof timeoutHandle === "object" && "unref" in timeoutHandle) (timeoutHandle as any).unref();
 
     // ── stdout handler: parse JSON events line by line ─────────────
     let stdoutBuffer = "";
@@ -861,6 +912,21 @@ export class PiProcessSessionAdapter implements ISessionClient {
         record.resolve = null;
         record.reject = null;
       }
+
+      // Emit a synthetic session.idle event so completion evaluation triggers
+      // immediately instead of waiting for the watchdog to time out.
+      if (this.eventBridge) {
+        void this.eventBridge.emit({
+          type: "session.idle",
+          rawType: "process.exit",
+          properties: { sessionID: id, exitCode: code },
+        }).catch((err: unknown) => {
+          this.log.debug("Failed to emit session.idle for process exit", {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     });
 
     // ── error handler ──────────────────────────────────────────────
@@ -872,7 +938,21 @@ export class PiProcessSessionAdapter implements ISessionClient {
       if (record.reject) {
         record.reject(err);
         record.resolve = null;
-        record.reject = null;
+      }
+
+      // Emit a session.error so dispatchManager transitions to error state
+      // immediately instead of waiting for the watchdog timeout.
+      if (this.eventBridge) {
+        void this.eventBridge.emit({
+          type: "session.error",
+          rawType: "process.error",
+          properties: { sessionID: id, error: err.message },
+        }).catch((emitErr: unknown) => {
+          this.log.debug("Failed to emit session.error for process error", {
+            id,
+            error: emitErr instanceof Error ? emitErr.message : String(emitErr),
+          });
+        });
       }
     });
   }

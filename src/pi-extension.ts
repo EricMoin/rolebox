@@ -130,6 +130,7 @@ export default async function (pi: any): Promise<void> {
     // and wire parent notification through Pi's API when available.
 
     const sessionAdapter = new PiProcessSessionAdapter(undefined, piSessionDir);
+    sessionAdapter.setEventBridge(eventBridge);
 
     // Recover orphaned Pi sessions from sidecar files.
     const recoveredSessions = await sessionAdapter.recoverOrphanedSessions();
@@ -168,7 +169,7 @@ export default async function (pi: any): Promise<void> {
     });
 
     // Wrap sessionAdapter to support parent notification via pi.sendUserMessage.
-    const notifyClient = new PiNotificationSessionClient(sessionAdapter, pi, log);
+    const notifyClient = new PiNotificationSessionClient(sessionAdapter, pi, log, eventBridge);
 
     // Seed notification dedup from persistent storage to prevent duplicates after restart.
     const dedup = loadNotifyDedup();
@@ -177,6 +178,9 @@ export default async function (pi: any): Promise<void> {
       log.debug("Loaded notification dedup from disk", { count: dedup.size });
     }
 
+    /** Event bridge subscription cleanup functions. Populated after dispatch. */
+    const bridgeUnsubscribers: Array<() => void> = [];
+
     // ── Shutdown hooks ──────────────────────────────────────────────────
     //
     // Register process-level handlers to clean up child processes and
@@ -184,6 +188,7 @@ export default async function (pi: any): Promise<void> {
     const shutdownHandler = (): void => {
       log.debug("Pi extension shutdown — persisting notification dedup");
       persistNotifyDedupSync(getSentFinalNotifies());
+      for (const unsub of bridgeUnsubscribers) unsub();
     };
 
     process.once("SIGINT", () => {
@@ -211,6 +216,97 @@ export default async function (pi: any): Promise<void> {
     log.info("Dispatch manager initialized", {
       maxConcurrent: dispatchManager.getConfig().maxConcurrent,
       subagentKeys: subagentModelKey.size,
+    });
+
+    // ── PiEventBridge → DispatchManager wiring ──────────────────────────
+    //
+    // Subscribe to canonical Pi session lifecycle events and route them
+    // to dispatchManager handlers so Pi process sessions (spawned by
+    // PiProcessSessionAdapter) feed into the completion pipeline. Mirrors
+    // the pattern in hook-service.ts / hooks/event-handler.ts for opencode.
+
+    /** Extract session ID from canonical event properties with fallback chain. */
+    function extractSessionId(props: Record<string, unknown>): string | undefined {
+      if (typeof props.sessionID === "string") return props.sessionID;
+      if (typeof props.sessionId === "string") return props.sessionId;
+      const info = props.info as Record<string, unknown> | undefined;
+      if (typeof info?.sessionID === "string") return info.sessionID;
+      if (typeof info?.sessionId === "string") return info.sessionId;
+      if (typeof info?.id === "string") return info.id;
+      return undefined;
+    }
+
+    // session.idle — emitted by PiProcessSessionAdapter on process exit (subtask 1)
+    bridgeUnsubscribers.push(
+      eventBridge.onType("session.idle", async (event) => {
+        try {
+          const sid = extractSessionId(event.properties);
+          if (sid) await dispatchManager.handleSessionIdle(sid);
+        } catch (err) {
+          log.debug("bridge:session.idle handler error", { error: formatError(err) });
+        }
+      }),
+    );
+
+    // session.status — session state changes (busy/idle)
+    bridgeUnsubscribers.push(
+      eventBridge.onType("session.status", (event) => {
+        try {
+          const sid = extractSessionId(event.properties);
+          if (sid) {
+            const props = event.properties;
+            const statusVal = props.status;
+            const statusType =
+              typeof statusVal === "object" && statusVal !== null
+                ? ((statusVal as { type?: string }).type ?? String(statusVal))
+                : String(statusVal ?? "");
+            dispatchManager.handleSessionStatus(sid, statusType);
+          }
+        } catch (err) {
+          log.debug("bridge:session.status handler error", { error: formatError(err) });
+        }
+      }),
+    );
+
+    // message.updated — triggers inflight debounce resets
+    bridgeUnsubscribers.push(
+      eventBridge.onType("message.updated", (event) => {
+        try {
+          const sid = extractSessionId(event.properties);
+          if (sid) dispatchManager.handleMessageUpdated(sid);
+        } catch (err) {
+          log.debug("bridge:message.updated handler error", { error: formatError(err) });
+        }
+      }),
+    );
+
+    // session.error — session crash or notification failure
+    bridgeUnsubscribers.push(
+      eventBridge.onType("session.error", async (event) => {
+        try {
+          const sid = extractSessionId(event.properties);
+          if (sid) await dispatchManager.handleSessionError(sid, event.properties.error);
+        } catch (err) {
+          log.debug("bridge:session.error handler error", { error: formatError(err) });
+        }
+      }),
+    );
+
+    // session.deleted — session teardown (e.g., Pi session_shutdown)
+    bridgeUnsubscribers.push(
+      eventBridge.onType("session.deleted", async (event) => {
+        try {
+          const info = event.properties.info as { id?: string } | undefined;
+          const did = info?.id ?? extractSessionId(event.properties);
+          if (did) await dispatchManager.handleSessionDeleted(did);
+        } catch (err) {
+          log.debug("bridge:session.deleted handler error", { error: formatError(err) });
+        }
+      }),
+    );
+
+    log.debug("PiEventBridge → DispatchManager wiring complete", {
+      subscriptions: bridgeUnsubscribers.length,
     });
 
     // ── 5. Tool registration via PiLightweightServiceStack ──────────────

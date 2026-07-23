@@ -16,6 +16,7 @@
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import type { ISessionClient } from "../../ports/session-client.ts";
+import type { IEventBridge } from "../../ports/event-bridge.ts";
 import type { PiProcessSessionAdapter } from "./process-session.ts";
 import type {
   SessionInfo,
@@ -38,15 +39,18 @@ export class PiNotificationSessionClient implements ISessionClient {
   private readonly inner: PiProcessSessionAdapter;
   private readonly pi: any;
   private readonly log: Logger<ILogObj>;
+  private readonly eventBridge?: IEventBridge;
 
   constructor(
     inner: PiProcessSessionAdapter,
     pi: any,
     log: Logger<ILogObj>,
+    eventBridge?: IEventBridge,
   ) {
     this.inner = inner;
     this.pi = pi;
     this.log = log;
+    this.eventBridge = eventBridge;
   }
 
   // ── Delegated methods ────────────────────────────────────────────────────
@@ -116,6 +120,11 @@ export class PiNotificationSessionClient implements ISessionClient {
    * For sessions managed by the inner adapter (present in `processes`),
    * delegates to `inner.prompt()`. For external (parent) sessions, sends
    * the message via `pi.sendUserMessage()` if available.
+   *
+   * When `pi.sendUserMessage` is unavailable or throws, a warning is
+   * logged and a `session.error` canonical event is emitted (when
+   * an event bridge is configured) so the dispatch manager can detect
+   * the stuck state.
    */
   async prompt(
     id: string,
@@ -131,18 +140,30 @@ export class PiNotificationSessionClient implements ISessionClient {
       return this.inner.prompt(id, options);
     }
 
-    if (typeof this.pi.sendUserMessage === "function") {
-      const text = options.parts
-        ?.map((p) => p.text)
-        .join("\n") ?? "";
-      await this.pi.sendUserMessage(id, text);
-      return { id };
+    if (typeof this.pi.sendUserMessage !== "function") {
+      this.log.warn("Parent notification unavailable — no pi.sendUserMessage", {
+        sessionId: id,
+      });
+      void this._emitNotificationError(id, "pi.sendUserMessage is not available");
+      return null;
     }
 
-    this.log.debug("Parent notification unavailable — no pi.sendUserMessage", {
-      sessionId: id,
-    });
-    return null;
+    const text = options.parts
+      ?.map((p) => p.text)
+      .join("\n") ?? "";
+
+    try {
+      await this.pi.sendUserMessage(id, text);
+      return { id };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn("Parent notification failed — pi.sendUserMessage threw", {
+        sessionId: id,
+        error: message,
+      });
+      void this._emitNotificationError(id, message);
+      return null;
+    }
   }
 
   /**
@@ -164,7 +185,7 @@ export class PiNotificationSessionClient implements ISessionClient {
       return this.inner.promptSync(id, options);
     }
 
-    this.log.debug("promptSync unavailable for external session", {
+    this.log.warn("promptSync unavailable for external session", {
       sessionId: id,
     });
     return null;
@@ -180,5 +201,38 @@ export class PiNotificationSessionClient implements ISessionClient {
   private _hasProcess(id: string): boolean {
     const adapter = this.inner as any;
     return Boolean(adapter.processes?.has?.(id));
+  }
+
+  /**
+   * Emit a `session.error` canonical event when notification fails.
+   *
+   * This is a fire-and-forget best-effort emission: any error from the
+   * event bridge itself is swallowed (logged at debug level) so the
+   * notification failure path always completes without throwing.
+   *
+   * When no event bridge is configured, this is a no-op.
+   */
+  private async _emitNotificationError(
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    if (!this.eventBridge) return;
+
+    try {
+      await this.eventBridge.emit({
+        type: "session.error",
+        rawType: "notification.error",
+        properties: {
+          sessionId,
+          reason,
+          source: "PiNotificationSessionClient",
+        },
+      });
+    } catch (_err) {
+      this.log.debug("Failed to emit session.error event", {
+        sessionId,
+        reason,
+      });
+    }
   }
 }
