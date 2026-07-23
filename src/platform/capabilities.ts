@@ -22,6 +22,8 @@ export interface PlatformCapabilities {
   hasEventStream: boolean;
   /** Platform supports session status polling. */
   hasSessionStatus: boolean;
+  /** Platform supports in-session active-role switching (Pi role switcher). */
+  hasRoleSwitch: boolean;
   /** Platform identifier for logging and diagnostics. */
   platformId: string;
 }
@@ -40,6 +42,7 @@ export function defaultCapabilities(): PlatformCapabilities {
     hasMultiStepTools: true,
     hasEventStream: true,
     hasSessionStatus: true,
+    hasRoleSwitch: false,
     platformId: "opencode",
   };
 }
@@ -58,6 +61,7 @@ export function minimalCapabilities(platformId: string): PlatformCapabilities {
     hasMultiStepTools: true,
     hasEventStream: false,
     hasSessionStatus: false,
+    hasRoleSwitch: false,
     platformId,
   };
 }
@@ -77,6 +81,7 @@ export function piCapabilities(): PlatformCapabilities {
     hasMultiStepTools: true,
     hasEventStream: true,
     hasSessionStatus: true,
+    hasRoleSwitch: true,
     platformId: "pi",
   };
 }

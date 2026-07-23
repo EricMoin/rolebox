@@ -15,6 +15,7 @@
 import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.ts";
 import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
+import { wireRoleSwitcher } from "./platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
 import { piCapabilities } from "./platform/capabilities.ts";
 import { createSubLogger, formatError } from "./logger.ts";
@@ -454,6 +455,18 @@ export default async function (pi: any): Promise<void> {
     }
 
     log.info("Skill path contribution wired");
+
+    // ── 8b. In-session role switching (Pi-only capability) ──────────────
+    //
+    // Pi has no native agent picker. Surface rolebox roles as switchable
+    // primary agents via `/role`, a selector, and Ctrl+Shift+R — driven by
+    // the AgentDefinition registry. Gated by the `hasRoleSwitch` capability
+    // so other platforms (opencode has its own picker) are unaffected.
+
+    if (capabilities.hasRoleSwitch) {
+      wireRoleSwitcher({ pi, registrar, activeAgent });
+      log.info("Role switcher wired");
+    }
 
     // ── 9. Initialization complete ─────────────────────────────────────
 
