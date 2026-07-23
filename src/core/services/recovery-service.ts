@@ -30,7 +30,7 @@ export class RecoveryService implements PluginService {
   }
 
   async init(ctx: PluginContext): Promise<void> {
-    const { resolvedRoles, directory, client } = ctx;
+    const { resolvedRoles, directory, session: client } = ctx;
     const dir = directory;
 
     // Collect builtin flags and recovery configs from all roles

@@ -4,9 +4,9 @@ export const summarizeStrategy: RecoveryStrategy = {
   name: "summarize",
   async execute(ctx: RecoveryStrategyContext): Promise<RecoveryStrategyResult> {
     const model = (ctx.stepConfig.model as string) ?? "default";
-    const client = ctx.client as { session?: { promptAsync?: (args: { path: { id: string }; body: Record<string, unknown> }) => Promise<unknown> } } | undefined;
+    const client = ctx.sessionClient;
 
-    if (!client?.session?.promptAsync) {
+    if (!client?.prompt) {
       // Fallback: inject a summarize directive
       ctx.inject(
         `\n[CONTEXT SUMMARIZATION] Summarize the conversation so far, keeping key decisions, ` +
@@ -16,12 +16,9 @@ export const summarizeStrategy: RecoveryStrategy = {
     }
 
     try {
-      await client.session.promptAsync({
-        path: { id: ctx.sessionID },
-        body: {
-          parts: [{ type: "text", text: `[RECOVERY] Summarize context to reduce token usage. Error was: ${ctx.error.message}` }],
-          model: { providerID: "fallback", modelID: model },
-        },
+      await client.prompt(ctx.sessionID, {
+        parts: [{ type: "text", text: `[RECOVERY] Summarize context to reduce token usage. Error was: ${ctx.error.message}` }],
+        model: { providerID: "fallback", modelID: model },
       });
       return { status: "success", message: "context summarized via fallback model" };
     } catch {

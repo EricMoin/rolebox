@@ -1,4 +1,5 @@
 import path from "node:path";
+import { existsSync } from "node:fs";
 
 import { resolveSkills } from "./skill-resolver.ts";
 import { resolveAllReferences } from "./reference-resolver.ts";
@@ -118,9 +119,9 @@ async function resolveSubagents(
 
       const slugDir = subagentDir(roleDir, childSlug);
       const nameDir = subagentDir(roleDir, saConfig.name);
-      const saRoleDir = await Bun.file(slugDir).exists()
+      const saRoleDir = existsSync(slugDir)
         ? slugDir
-        : await Bun.file(nameDir).exists()
+        : existsSync(nameDir)
           ? nameDir
           : roleDir;
       const saLocalSkills = saConfig.skills ?? [];

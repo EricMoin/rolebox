@@ -8,7 +8,6 @@ import { cleanExpiredState } from "../../dispatch/persistence/state-gc.ts";
 import { stateDirFor } from "../../utils/state-paths.ts";
 import { hookState } from "../../hooks/state.ts";
 import { createSubLogger } from "../../logger.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
 import {
   createDispatchManager,
   buildSubagentLineage,
@@ -59,7 +58,7 @@ export class DispatchService implements PluginService, ToolContributor {
   private subagentModelKey = new Map<string, string>();
   private recoverFailed = false;
 
-  /** Optional session client override. When set, used in place of OpencodeSessionAdapter. */
+  /** Optional session client override. When set, used in place of ctx.session. */
   private readonly sessionClient: ISessionClient | undefined;
 
   constructor(options?: { sessionClient?: ISessionClient }) {
@@ -102,7 +101,7 @@ export class DispatchService implements PluginService, ToolContributor {
     let dispatchManager = hookState.managerMap.get(mapDir);
     if (!dispatchManager) {
       const sessionClient =
-        this.sessionClient ?? new OpencodeSessionAdapter(ctx.client);
+        this.sessionClient ?? ctx.session;
 
       const result = await createDispatchManager({
         sessionClient,

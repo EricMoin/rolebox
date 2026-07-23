@@ -1,6 +1,19 @@
 import { join } from "node:path";
-import os from "node:os";
 import { SKILL_MD } from "../constants.ts";
+import {
+  defaultPlatformPaths,
+  piPlatformPaths,
+  type PlatformPaths,
+} from "../platform/paths.ts";
+
+// ── Internal platform path resolver ──────────────────────────────
+
+function resolvePaths(platformId?: string): PlatformPaths {
+  if (platformId === "pi") return piPlatformPaths();
+  return defaultPlatformPaths();
+}
+
+// ── Function / Skill / Subagent helpers (pure joins) ─────────────
 
 /** `{baseDir}/{name}.md` */
 export function functionPath(baseDir: string, name: string): string {
@@ -27,36 +40,47 @@ export function globalFunctionsPath(configDir: string): string {
   return join(configDir, "functions");
 }
 
-/** `~/.claude/agents/{agentId}.md` */
+// ── Agent path helpers (delegate to PlatformPaths registry) ─────
+
+/**
+ * `{defaultPlatformPaths().agentsDir}/{agentId}.md`
+ *
+ * Delegates to the PlatformPaths registry; no longer hardcodes
+ * `~/.claude/agents` directly.
+ */
 export function agentFilePath(agentId: string): string {
-  return join(os.homedir(), ".claude", "agents", `${agentId}.md`);
+  return join(defaultPlatformPaths().agentsDir, `${agentId}.md`);
 }
 
-/** `~/.claude/agents` */
+/**
+ * `defaultPlatformPaths().agentsDir`
+ *
+ * Delegates to the PlatformPaths registry.
+ */
 export function agentsDir(): string {
-  return join(os.homedir(), ".claude", "agents");
+  return defaultPlatformPaths().agentsDir;
 }
 
 /**
  * Returns the platform-specific agent directory.
- * - `"pi"` → `~/.pi/agent/skills`
- * - default (or `"opencode"`) → `~/.claude/agents`
+ * - `"pi"` → `piPlatformPaths().agentsDir`
+ * - default (or `"opencode"`) → `defaultPlatformPaths().agentsDir`
  */
 export function platformAgentsDir(platformId?: string): string {
-  if (platformId === "pi") {
-    return join(os.homedir(), ".pi", "agent", "skills");
-  }
-  return agentsDir();
+  return resolvePaths(platformId).agentsDir;
 }
 
 /**
  * Returns the platform-specific agent file path.
- * - `"pi"` → `~/.pi/agent/skills/{agentId}/SKILL.md`
- * - default (or `"opencode"`) → `~/.claude/agents/{agentId}.md`
+ * - `"pi"` → `{piPlatformPaths().agentsDir}/{agentId}/SKILL.md`
+ * - default (or `"opencode"`) → `agentFilePath(agentId)`
  */
-export function platformAgentFilePath(agentId: string, platformId?: string): string {
+export function platformAgentFilePath(
+  agentId: string,
+  platformId?: string,
+): string {
   if (platformId === "pi") {
-    return join(platformAgentsDir("pi"), agentId, SKILL_MD);
+    return join(piPlatformPaths().agentsDir, agentId, SKILL_MD);
   }
   return agentFilePath(agentId);
 }

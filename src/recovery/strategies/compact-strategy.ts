@@ -3,14 +3,16 @@ import type { RecoveryStrategy, RecoveryStrategyContext, RecoveryStrategyResult 
 export const compactStrategy: RecoveryStrategy = {
   name: "compact",
   async execute(ctx: RecoveryStrategyContext): Promise<RecoveryStrategyResult> {
-    // The client may have a compact/session method
-    const client = ctx.client as { session?: { compact?: (args: { path: { id: string } }) => Promise<unknown> } } | undefined;
-    if (!client?.session?.compact) {
+    const client = ctx.sessionClient;
+    if (!client?.compact) {
       return { status: "next_strategy", reason: "compact not available on client" };
     }
     try {
-      await client.session.compact({ path: { id: ctx.sessionID } });
-      return { status: "success", message: "context compacted" };
+      const ok = await client.compact(ctx.sessionID);
+      if (ok) {
+        return { status: "success", message: "context compacted" };
+      }
+      return { status: "next_strategy", reason: "compact returned false" };
     } catch {
       return { status: "next_strategy", reason: "compact failed" };
     }

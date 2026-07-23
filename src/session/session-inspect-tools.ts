@@ -1,6 +1,6 @@
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import type { SessionClientWrapper } from "./client.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { ToolContext } from "./types.ts";
 import { shortId, getDirectory, collectSessionAnalytics } from "./tool-helpers.ts";
 import {
@@ -13,7 +13,7 @@ import {
   relativeTime,
 } from "./formatters.ts";
 
-export function createSessionReadTool(client: SessionClientWrapper) {
+export function createSessionReadTool(client: ISessionClient) {
   return defineTool({
     description:
       "Read the full transcript of a session with optional filtering by role, tool, or message range. Includes metadata like model info and cost per message.",
@@ -70,7 +70,7 @@ export function createSessionReadTool(client: SessionClientWrapper) {
   });
 }
 
-export function createSessionInfoTool(client: SessionClientWrapper) {
+export function createSessionInfoTool(client: ISessionClient) {
   return defineTool({
     description:
       "Get comprehensive session information including token usage breakdown, cost, tool call frequencies, model distribution, file modifications, and todo progress.",
@@ -119,7 +119,7 @@ export function createSessionInfoTool(client: SessionClientWrapper) {
   });
 }
 
-export function createSessionDiffTool(client: SessionClientWrapper) {
+export function createSessionDiffTool(client: ISessionClient) {
   return defineTool({
     description:
       "Get all file changes made in a session. Shows a unified diff of every file modified, added, or deleted. Optionally filter to a specific message.",
@@ -139,7 +139,7 @@ export function createSessionDiffTool(client: SessionClientWrapper) {
   });
 }
 
-export function createSessionForkTool(client: SessionClientWrapper) {
+export function createSessionForkTool(client: ISessionClient) {
   return defineTool({
     description:
       "Fork (branch) a session at a specific message. Creates a new session diverging from the original at the given point. If no message ID provided, forks at the latest message.",

@@ -1,7 +1,7 @@
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
-import type { SessionClientWrapper } from "../../session/client.ts";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import type { ResolvedRole } from "../../types.ts";
 import { MemoryStore } from "../../memory/store.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -10,7 +10,7 @@ const log = createSubLogger("context-assemble");
 
 interface ContextAssembleDeps {
   dispatchManager: DispatchManager;
-  sessionClient: SessionClientWrapper;
+  sessionClient: ISessionClient;
   resolvedRoles: ResolvedRole[];
   directory: string;
 }

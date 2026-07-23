@@ -1,13 +1,15 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SyncTarget } from "../constants.ts";
+import {
+  defaultPlatformPaths,
+  piPlatformPaths,
+} from "../platform/paths.ts";
 
 // ── Opencode Paths ────────────────────────────────────────────────
 
 export function getOpencodeConfigDir(): string {
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) return join(xdg, "opencode");
-  return join(homedir(), ".config", "opencode");
+  return defaultPlatformPaths().configDir;
 }
 
 export function getOpencodeConfigPath(): string {
@@ -15,7 +17,7 @@ export function getOpencodeConfigPath(): string {
 }
 
 export function getOpencodeSkillsDir(): string {
-  return join(getOpencodeConfigDir(), "skills");
+  return defaultPlatformPaths().skillsDir;
 }
 
 // ── Rolebox Paths ─────────────────────────────────────────────────
@@ -57,14 +59,13 @@ export function getRolesDir(): string {
 
 /**
  * Returns the sync target directory for a given tool.
- * Currently only supports "opencode": ~/.config/opencode/rolebox
+ * Delegates to the PlatformPaths registry for directory resolution.
+ * Currently only supports "opencode": {configDir}/rolebox
  * Extensible for future targets.
  */
 export function getSyncTarget(target: string): string {
   if (target === SyncTarget.Opencode) {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "opencode", "rolebox");
-    return join(homedir(), ".config", "opencode", "rolebox");
+    return join(defaultPlatformPaths().configDir, "rolebox");
   }
   throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
 }
@@ -79,22 +80,22 @@ export function getRolePath(registry: string, roleId: string, version: string): 
 
 // ── Pi Paths ───────────────────────────────────────────────────────
 
-/** `~/.pi/agent` */
+/** `~/.pi/agent` — delegates to `piPlatformPaths().configDir` */
 export function getPiConfigDir(): string {
-  return join(homedir(), ".pi", "agent");
+  return piPlatformPaths().configDir;
 }
 
-/** `~/.pi/agent/skills` */
+/** `~/.pi/agent/skills` — delegates to `piPlatformPaths().skillsDir` */
 export function getPiSkillsDir(): string {
-  return join(homedir(), ".pi", "agent", "skills");
+  return piPlatformPaths().skillsDir;
 }
 
-/** `~/.pi/agent/sessions` */
+/** `~/.pi/agent/sessions` — delegates to `piPlatformPaths().sessionsDir` */
 export function getPiSessionsDir(): string {
-  return join(homedir(), ".pi", "agent", "sessions");
+  return piPlatformPaths().sessionsDir!;
 }
 
-/** `~/.pi/agent/extensions` */
+/** `~/.pi/agent/extensions` — delegates to `piPlatformPaths().extensionsDir` */
 export function getPiExtensionsDir(): string {
-  return join(homedir(), ".pi", "agent", "extensions");
+  return piPlatformPaths().extensionsDir!;
 }

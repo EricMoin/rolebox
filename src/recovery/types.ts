@@ -11,6 +11,8 @@
  * @module recovery/types
  */
 
+import type { ISessionClient } from "../platform/ports/session-client.ts";
+
 // ── Error Categories ────────────────────────────────────────────────────
 
 /**
@@ -227,10 +229,10 @@ export interface RecoveryStrategyContext {
    */
   inject: (text: string) => void;
   /**
-   * The opencode plugin client instance.
-   * Kept as `unknown` to avoid circular dependency on plugin types.
+   * The platform-agnostic session client for strategies that need API access
+   * (prompt with model override, compact, etc.).
    */
-  client?: unknown;
+  sessionClient?: ISessionClient;
 }
 
 /**

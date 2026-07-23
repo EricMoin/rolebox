@@ -1,6 +1,6 @@
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import type { SessionClientWrapper } from "./client.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { SearchMatch, ToolContext, TextPart, ToolPart, ToolStateCompleted } from "./types.ts";
 import { shortId, getDirectory, searchTexts, extractContext } from "./tool-helpers.ts";
 import {
@@ -8,7 +8,7 @@ import {
   formatSearchResults,
 } from "./formatters.ts";
 
-export function createSessionListTool(client: SessionClientWrapper) {
+export function createSessionListTool(client: ISessionClient) {
   return defineTool({
     description:
       "List all sessions with optional date range filtering. Returns a markdown table with session IDs, titles, message counts, date ranges, and durations.",
@@ -55,7 +55,7 @@ export function createSessionListTool(client: SessionClientWrapper) {
   });
 }
 
-export function createSessionSearchTool(client: SessionClientWrapper) {
+export function createSessionSearchTool(client: ISessionClient) {
   return defineTool({
     description:
       "Full-text search across all session messages. Returns ranked results with context excerpts and bold match highlights.",

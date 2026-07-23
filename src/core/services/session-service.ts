@@ -1,7 +1,7 @@
 import type { PluginService } from "../service.ts";
 import type { PluginContext } from "../context.ts";
 import type { ToolContributor } from "../tool-registry.ts";
-import { SessionClientWrapper } from "../../session/client.ts";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import {
   createSessionListTool,
   createSessionReadTool,
@@ -15,14 +15,14 @@ export class SessionService implements PluginService, ToolContributor {
   readonly name = "session-service";
   readonly dependencies: string[] = [];
 
-  private sessionClient!: SessionClientWrapper;
+  private sessionClient!: ISessionClient;
 
   async init(ctx: PluginContext): Promise<void> {
-    this.sessionClient = new SessionClientWrapper(ctx.client);
+    this.sessionClient = ctx.session;
   }
 
   async dispose(): Promise<void> {
-    // no-op — SessionClientWrapper has no disposable resources
+    // no-op — ISessionClient has no disposable resources
   }
 
   getTools(): Record<string, any> {
@@ -37,7 +37,7 @@ export class SessionService implements PluginService, ToolContributor {
     };
   }
 
-  getSessionClient(): SessionClientWrapper {
+  getSessionClient(): ISessionClient {
     return this.sessionClient;
   }
 }

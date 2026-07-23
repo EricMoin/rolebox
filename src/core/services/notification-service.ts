@@ -7,7 +7,6 @@ import { parseNotificationConfig, resolveEnvVarsInConfig, DEFAULT_NOTIFICATION_C
 import { readFileSync, existsSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { createSubLogger } from "../../logger.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
 
 const log = createSubLogger("notification-service");
 
@@ -51,7 +50,7 @@ export class NotificationService implements PluginService {
     const mgr = new NotificationManager({
       globalConfig: globalNotifConfig,
       roleConfigs: roleNotifConfigs,
-      client: new OpencodeSessionAdapter(ctx.client),
+      client: ctx.session,
       dir: ctx.directory,
     });
     this.notificationManager = mgr;

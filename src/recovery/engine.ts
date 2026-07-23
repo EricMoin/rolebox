@@ -8,14 +8,15 @@ import { RecoveryChainExecutor } from "./chain-executor.ts";
 import { addKnownStrategy } from "./config.ts";
 import { appendCorrection } from "../hooks/context.ts";
 import { createSubLogger } from "../logger.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 
 const log = createSubLogger("recovery:engine");
 
 export interface RecoveryEngineDeps {
   /** Map of pending corrections keyed by sessionID — used for prompt injection */
   pendingCorrections: Map<string, string>;
-  /** Optional opencode client for strategies that need API access */
-  client?: unknown;
+  /** Platform-agnostic session client for strategies that need API access */
+  client?: ISessionClient;
 }
 
 export class RecoveryEngine {

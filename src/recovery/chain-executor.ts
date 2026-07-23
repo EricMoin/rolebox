@@ -8,6 +8,7 @@ import type {
 } from "./types.ts";
 import type { StrategyRegistry } from "./strategies/registry.ts";
 import { createSubLogger } from "../logger.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 
 const log = createSubLogger("recovery:chain-executor");
 
@@ -28,7 +29,7 @@ export class RecoveryChainExecutor {
     error: RecoveryError,
     chainConfig: RecoveryChainConfig,
     inject: (text: string) => void,
-    client?: unknown,
+    client?: ISessionClient,
     onAttempt?: (attempt: RecoveryAttempt) => void,
   ): Promise<ChainResult> {
     if (chainConfig.enabled === false) {
@@ -66,7 +67,7 @@ export class RecoveryChainExecutor {
         attempt: stepAttempt,
         stepConfig: step.config ?? {},
         inject,
-        client,
+        sessionClient: client,
       };
 
       let result: RecoveryStrategyResult;

@@ -1,4 +1,4 @@
-import type { SessionClientWrapper } from "./client.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type {
   SessionInfo,
   SessionStats,
@@ -47,7 +47,7 @@ export function extractContext(text: string, query: string, caseSensitive: boole
 }
 
 export async function collectSessionAnalytics(
-  client: SessionClientWrapper,
+  client: ISessionClient,
   session: SessionInfo,
   directory?: string,
 ): Promise<{

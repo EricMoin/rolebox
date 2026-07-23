@@ -7,17 +7,14 @@ export const fallbackModelStrategy: RecoveryStrategy = {
     if (!model) {
       return { status: "next_strategy", reason: "no fallback model configured" };
     }
-    const client = ctx.client as { session?: { promptAsync?: (args: { path: { id: string }; body: Record<string, unknown> }) => Promise<unknown> } } | undefined;
-    if (!client?.session?.promptAsync) {
-      return { status: "next_strategy", reason: "promptAsync not available" };
+    const client = ctx.sessionClient;
+    if (!client?.prompt) {
+      return { status: "next_strategy", reason: "prompt not available" };
     }
     try {
-      await client.session.promptAsync({
-        path: { id: ctx.sessionID },
-        body: {
-          parts: [{ type: "text", text: `[RECOVERY] Retrying with fallback model after error: ${ctx.error.message}` }],
-          model: { providerID: "fallback", modelID: model },
-        },
+      await client.prompt(ctx.sessionID, {
+        parts: [{ type: "text", text: `[RECOVERY] Retrying with fallback model after error: ${ctx.error.message}` }],
+        model: { providerID: "fallback", modelID: model },
       });
       return { status: "success", message: "re-prompted with fallback model" };
     } catch {
