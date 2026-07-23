@@ -11,6 +11,7 @@ import {
   managerMap,
 } from "../../src/core/composition";
 import { LOOP_PROGRESS_MARKER } from "../../src/loop/constants";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
 
 function createMockClient(): OpencodeClient {
   return {
@@ -54,7 +55,7 @@ describe("idle-advance", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rolebox-idle-advance-"));
     pendingCorrections.clear();
     const client = createMockClient();
-    hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+    hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
   });
 
   afterEach(() => {

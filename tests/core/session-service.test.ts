@@ -1,34 +1,32 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { SessionService } from "../../src/core/services/session-service.ts";
-import { SessionClientWrapper } from "../../src/session/client.ts";
 import type { PluginContext } from "../../src/core/context.ts";
 import { __resetForTest } from "../../src/logger.ts";
 
 // ── helpers ────────────────────────────────────────────────────────
 
 /**
- * Build a minimal PluginContext whose client.session is a stub object
- * satisfying OpencodeSessionAdapter's constructor requirement.
+ * Build a minimal PluginContext with a session ISessionClient stub.
  * No real SDK client or external dependencies are involved.
  */
 function makeMinimalContext(): PluginContext {
+  const sessionStub = {
+    list: mock(() => Promise.resolve([])),
+    get: mock(() => Promise.resolve(null)),
+    messages: mock(() => Promise.resolve([])),
+    children: mock(() => Promise.resolve([])),
+    todo: mock(() => Promise.resolve([])),
+    diff: mock(() => Promise.resolve([])),
+    fork: mock(() => Promise.resolve(null)),
+    status: mock(() => Promise.resolve(null)),
+    prompt: mock(() => Promise.resolve(null)),
+    promptSync: mock(() => Promise.resolve(null)),
+    create: mock(() => Promise.resolve(null)),
+    abort: mock(() => Promise.resolve(false)),
+  };
   return {
-    client: {
-      session: {
-        list: mock(() => Promise.resolve({ data: [] })),
-        get: mock(() => Promise.resolve({ data: null })),
-        messages: mock(() => Promise.resolve({ data: [] })),
-        children: mock(() => Promise.resolve({ data: [] })),
-        todo: mock(() => Promise.resolve({ data: [] })),
-        diff: mock(() => Promise.resolve({ data: [] })),
-        fork: mock(() => Promise.resolve({ data: null })),
-        status: mock(() => Promise.resolve({ data: {} })),
-        promptAsync: mock(() => Promise.resolve({ data: { id: "mock" } })),
-        prompt: mock(() => Promise.resolve({ data: { parts: [] } })),
-        create: mock(() => Promise.resolve({ data: null })),
-        abort: mock(() => Promise.resolve(undefined)),
-      },
-    } as any,
+    client: undefined as any,
+    session: sessionStub as any,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
@@ -53,7 +51,7 @@ describe("SessionService", () => {
   });
 
   describe("init", () => {
-    it("constructs SessionClientWrapper from ctx.client and completes successfully", async () => {
+    it("initializes from ctx.session and completes successfully", async () => {
       const svc = new SessionService();
       const ctx = makeMinimalContext();
 
@@ -67,7 +65,8 @@ describe("SessionService", () => {
 
       const sc = svc.getSessionClient();
       expect(sc).toBeDefined();
-      expect(sc).toBeInstanceOf(SessionClientWrapper);
+      // Returns the ISessionClient from ctx.session
+      expect(sc).toBe(ctx.session);
     });
   });
 

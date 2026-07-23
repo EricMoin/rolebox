@@ -72,9 +72,10 @@ class FailingSessionClient implements ISessionClient {
   async diff(_id: string, _options?: { directory?: string; messageID?: string }): Promise<FileDiff[]> { return []; }
   async fork(_id: string, _options?: { directory?: string; messageID?: string }): Promise<SessionInfo | null> { return null; }
   async status(_id: string, _directory?: string): Promise<SessionStatus | null> { return null; }
-  async prompt(_id: string, _options: { parts: Array<{ type: string; text: string }>; noReply?: boolean; system?: string; agent?: string }): Promise<{ id: string } | null> { return null; }
+  async prompt(_id: string, _options: { parts: Array<{ type: string; text: string }>; noReply?: boolean; system?: string; agent?: string; model?: { providerID: string; modelID: string } }): Promise<{ id: string } | null> { return null; }
   async promptSync(_id: string, _options: { parts: Array<{ type: string; text: string }>; agent?: string; signal?: AbortSignal }): Promise<{ parts: Array<{ type: string; text?: string }> } | null> { return null; }
   async abort(_id: string): Promise<boolean> { return true; }
+  async compact(_id: string): Promise<boolean> { return false; }
 }
 
 // ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──

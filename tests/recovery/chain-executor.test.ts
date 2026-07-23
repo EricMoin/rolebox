@@ -249,7 +249,7 @@ describe("RecoveryChainExecutor", () => {
     expect(result.totalAttempts).toBe(2);
   });
 
-  it("passes inject, client, and stepConfig through to the strategy", async () => {
+  it("passes inject, sessionClient, and stepConfig through to the strategy", async () => {
     const registry = new StrategyRegistry();
     const receivedCtx: any[] = [];
     registry.register({
@@ -261,7 +261,7 @@ describe("RecoveryChainExecutor", () => {
     });
 
     const inject = (t: string) => { /* noop */ };
-    const client = { name: "test-client" };
+    const client = { name: "test-client" } as any;
     const executor = new RecoveryChainExecutor(registry, makeConfig());
 
     await executor.executeChain(
@@ -278,6 +278,6 @@ describe("RecoveryChainExecutor", () => {
     expect(receivedCtx[0].attempt).toBe(0);
     expect(receivedCtx[0].stepConfig.key).toBe("val");
     expect(receivedCtx[0].inject).toBe(inject);
-    expect(receivedCtx[0].client).toBe(client);
+    expect(receivedCtx[0].sessionClient).toBe(client);
   });
 });

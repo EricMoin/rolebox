@@ -167,7 +167,7 @@ describe("abortStrategy", () => {
 });
 
 describe("compactStrategy", () => {
-  it("returns next_strategy when client has no session.compact", async () => {
+  it("returns next_strategy when sessionClient has no compact", async () => {
     const ctx = makeCtx({});
     const result = await compactStrategy.execute(ctx);
     expect(result.status).toBe("next_strategy");
@@ -175,19 +175,29 @@ describe("compactStrategy", () => {
   });
 
   it("returns success when compact succeeds", async () => {
-    const compact = mock(() => Promise.resolve());
+    const compact = mock(() => Promise.resolve(true));
     const ctx = makeCtx({
-      client: { session: { compact } },
+      sessionClient: { compact } as any,
     });
     const result = await compactStrategy.execute(ctx);
     expect(result.status).toBe("success");
-    expect(compact).toHaveBeenCalledWith({ path: { id: "test-session" } });
+    expect(compact).toHaveBeenCalledWith("test-session");
+  });
+
+  it("returns next_strategy when compact returns false", async () => {
+    const compact = mock(() => Promise.resolve(false));
+    const ctx = makeCtx({
+      sessionClient: { compact } as any,
+    });
+    const result = await compactStrategy.execute(ctx);
+    expect(result.status).toBe("next_strategy");
+    expect((result as any).reason).toContain("returned false");
   });
 
   it("returns next_strategy when compact throws", async () => {
     const compact = mock(() => Promise.reject(new Error("compact failed")));
     const ctx = makeCtx({
-      client: { session: { compact } },
+      sessionClient: { compact } as any,
     });
     const result = await compactStrategy.execute(ctx);
     expect(result.status).toBe("next_strategy");
@@ -195,7 +205,7 @@ describe("compactStrategy", () => {
 });
 
 describe("summarizeStrategy", () => {
-  it("injects+retry when no client.session.promptAsync exists", async () => {
+  it("injects+retry when sessionClient has no prompt", async () => {
     const injected: string[] = [];
     const ctx = makeCtx({ inject: (t) => { injected.push(t); } });
     const result = await summarizeStrategy.execute(ctx);
@@ -204,21 +214,21 @@ describe("summarizeStrategy", () => {
     expect(injected[0]).toContain("SUMMARIZATION");
   });
 
-  it("returns success when promptAsync succeeds", async () => {
-    const promptAsync = mock(() => Promise.resolve({}));
+  it("returns success when prompt succeeds", async () => {
+    const prompt = mock(() => Promise.resolve({ id: "msg-1" }));
     const ctx = makeCtx({
-      client: { session: { promptAsync } },
+      sessionClient: { prompt } as any,
       error: makeError({ message: "too many tokens" }),
     });
     const result = await summarizeStrategy.execute(ctx);
     expect(result.status).toBe("success");
   });
 
-  it("falls back to inject when promptAsync throws", async () => {
-    const promptAsync = mock(() => Promise.reject(new Error("api down")));
+  it("falls back to inject when prompt throws", async () => {
+    const prompt = mock(() => Promise.reject(new Error("api down")));
     const injected: string[] = [];
     const ctx = makeCtx({
-      client: { session: { promptAsync } },
+      sessionClient: { prompt } as any,
       inject: (t) => { injected.push(t); },
       error: makeError({ message: "too many tokens" }),
     });
@@ -262,22 +272,22 @@ describe("fallbackModelStrategy", () => {
     expect(result.status).toBe("next_strategy");
   });
 
-  it("returns success when promptAsync succeeds", async () => {
-    const promptAsync = mock(() => Promise.resolve({}));
+  it("returns success when prompt succeeds", async () => {
+    const prompt = mock(() => Promise.resolve({ id: "msg-1" }));
     const ctx = makeCtx({
       stepConfig: { model: "claude-3-haiku" },
-      client: { session: { promptAsync } },
+      sessionClient: { prompt } as any,
       error: makeError({ message: "model overloaded" }),
     });
     const result = await fallbackModelStrategy.execute(ctx);
     expect(result.status).toBe("success");
   });
 
-  it("returns next_strategy when promptAsync throws", async () => {
-    const promptAsync = mock(() => Promise.reject(new Error("no fallback available")));
+  it("returns next_strategy when prompt throws", async () => {
+    const prompt = mock(() => Promise.reject(new Error("no fallback available")));
     const ctx = makeCtx({
       stepConfig: { model: "gpt-3.5" },
-      client: { session: { promptAsync } },
+      sessionClient: { prompt } as any,
     });
     const result = await fallbackModelStrategy.execute(ctx);
     expect(result.status).toBe("next_strategy");

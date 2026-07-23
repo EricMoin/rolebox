@@ -10,6 +10,7 @@ import { functionSessionState } from "../src/function/session-state";
 import { functionRuntime } from "../src/function/runtime-state";
 import type { ResolvedRole, ResolvedFunction } from "../src/types";
 import { RoleMode } from "../src/constants";
+import { OpencodeSessionAdapter } from "../src/platform/adapters/opencode/session";
 
 function createMockClient(): OpencodeClient {
   return {
@@ -90,7 +91,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -119,7 +120,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -150,7 +151,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -176,7 +177,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -196,7 +197,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -220,7 +221,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -244,7 +245,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -274,7 +275,7 @@ describe("session.idle CONTINUE", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -314,7 +315,7 @@ describe("auto-continue counter persistence (regression)", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -371,7 +372,7 @@ describe("auto-continue counter persistence (regression)", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,
@@ -423,7 +424,7 @@ describe("dispatch-notification counter persistence (regression)", () => {
 
     const hooks = await createPluginHooks({
       resolvedRoles: [makePrimaryRole()],
-      client,
+      session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
       roleGraphMap: new Map(),
       directory: tmpDir,

@@ -30,7 +30,6 @@ function makeFn(name: string, overrides?: Partial<ResolvedFunction>): ResolvedFu
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    client: {} as any,
     session: { messages: mock(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),

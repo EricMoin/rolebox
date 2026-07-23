@@ -16,7 +16,6 @@ beforeEach(() => {
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    client: {} as any,
     session: {} as any,
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),

@@ -43,6 +43,12 @@ describe("signal tool", () => {
   const tool = createSignalTool();
   const ctx = makeContext();
 
+  // standalone tests expect no active functions — ensure other test suites
+  // that may have activated functions on "test-session" don't contaminate us
+  beforeEach(() => {
+    functionSessionState.clear(ctx.sessionID);
+  });
+
   it("returns a CanonicalToolDef with description, args, and execute", () => {
     expect(tool).toHaveProperty("description");
     expect(typeof tool.description).toBe("string");

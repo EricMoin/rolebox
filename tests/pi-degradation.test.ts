@@ -43,6 +43,27 @@ function createMiniCore(): {
 }
 
 /**
+ * Create a minimal ISessionClient mock for tests that need session to proceed.
+ * Only implements the methods strictly required by DispatchManager construction.
+ */
+function createMockSessionClient() {
+  return {
+    list: async () => [],
+    get: async () => null,
+    messages: async () => [],
+    children: async () => [],
+    todo: async () => [],
+    diff: async () => [],
+    fork: async () => null,
+    status: async () => null,
+    prompt: async () => null,
+    promptSync: async () => null,
+    create: async () => null,
+    abort: async () => false,
+  };
+}
+
+/**
  * Create a minimal PluginContext for testing service initialization.
  * The `client` field is unused when services degrade, so undefined is safe.
  */
@@ -55,6 +76,7 @@ function createServiceCtx(
   const dir = process.cwd();
   return {
     client: undefined as any,
+    session: undefined as any,
     resolvedRoles: resolvedRoles ?? [],
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
@@ -216,13 +238,12 @@ describe("DispatchService — normal capabilities (no degradation)", () => {
 
     // Use default capabilities (opencode mode — all features supported)
     const ctx = createServiceCtx(core, undefined);
+    ctx.session = createMockSessionClient() as any;
 
-    // Should throw because there's no real client — but the point is it
-    // reaches the DispatchManager construction before failing.
-    // The degradation path is only triggered by hasSessionCreate=false.
-    await expect(svc.init(ctx)).rejects.toThrow();
-    // It should NOT be marked as "degraded" — it should throw because
-    // critical services without capabilities degrade path need a real client.
+    // With a valid session client and full capabilities, init should succeed
+    // and the service should NOT be degraded.
+    await svc.init(ctx);
+    expect(svc.isDegraded()).toBe(false);
   });
 
   it("init() without capabilities defaults to no degradation", async () => {
@@ -232,9 +253,10 @@ describe("DispatchService — normal capabilities (no degradation)", () => {
 
     // No capabilities = opencode full support
     const ctx = createServiceCtx(core, undefined);
+    ctx.session = createMockSessionClient() as any;
 
-    // Should try to build DispatchManager and fail (no client)
-    await expect(svc.init(ctx)).rejects.toThrow();
+    await svc.init(ctx);
+    expect(svc.isDegraded()).toBe(false);
   });
 });
 

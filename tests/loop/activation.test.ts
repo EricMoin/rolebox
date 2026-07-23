@@ -15,6 +15,7 @@ import { functionRuntime } from "../../src/function/runtime-state";
 import { functionSessionState } from "../../src/function/session-state";
 import { hookState } from "../../src/hooks/state";
 import { parseFunctionActivation as _realParseFn } from "../../src/function/parser";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
 // Snapshot the real parser implementation at module load time for mock restore
 const realParseFunctionActivation = _realParseFn;
 
@@ -61,7 +62,7 @@ describe("loop activation", () => {
     pendingCorrections.clear();
     userMessagedSessions.clear();
     const client = createMockClient();
-    hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+    hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
   });
 
   afterEach(() => {

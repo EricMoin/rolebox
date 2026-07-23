@@ -9,7 +9,6 @@ import { functionSessionState } from "../../src/function/session-state.ts";
 
 function minimalDeps(overrides?: Partial<HookDeps>): HookDeps {
   return {
-    client: {} as any,
     session: { messages: mock(() => Promise.resolve([])) } as any,
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
@@ -131,10 +130,10 @@ describe("handleEvent — session.idle", () => {
 
   it("skips continuation for sync sessions", async () => {
     const isSyncSession = mock(() => true);
-    const promptAsync = mock(() => Promise.resolve({ data: undefined, error: undefined }));
+    const prompt = mock(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
       dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession, getInflightCount: mock(() => 0) } as any,
-      client: { session: { promptAsync } } as any,
+      session: { prompt } as any,
     });
 
     await handleEvent(
@@ -143,15 +142,15 @@ describe("handleEvent — session.idle", () => {
       deps,
     );
 
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it("skips continuation when there are in-flight dispatches", async () => {
     const getInflightCount = mock(() => 2);
-    const promptAsync = mock(() => Promise.resolve({ data: undefined, error: undefined }));
+    const prompt = mock(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
       dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount } as any,
-      client: { session: { promptAsync } } as any,
+      session: { prompt } as any,
     });
 
     await handleEvent(
@@ -161,17 +160,17 @@ describe("handleEvent — session.idle", () => {
     );
 
     expect(getInflightCount).toHaveBeenCalledWith("sess-1");
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it("suppresses continuation during loop-owned phases", async () => {
     const getLoopState = mock(() => ({ phase: "summarizing" }));
     const isActiveLoopOrigin = mock(() => true);
-    const promptAsync = mock(() => Promise.resolve({ data: undefined, error: undefined }));
+    const prompt = mock(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
       dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount: mock(() => 0) } as any,
       loopManager: { isActiveLoopOrigin, getLoopState } as any,
-      client: { session: { promptAsync } } as any,
+      session: { prompt } as any,
     });
 
     await handleEvent(
@@ -180,17 +179,17 @@ describe("handleEvent — session.idle", () => {
       deps,
     );
 
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it("does not suppress continuation when loop phase is not owned", async () => {
     const getLoopState = mock(() => ({ phase: "awaiting_worker" }));
     const isActiveLoopOrigin = mock(() => true);
-    const promptAsync = mock(() => Promise.resolve({ data: undefined, error: undefined }));
+    const prompt = mock(() => Promise.resolve({ id: "ok" }));
     const deps = minimalDeps({
       dispatchManager: { handleSessionIdle: mock(() => {}), isSyncSession: mock(() => false), getInflightCount: mock(() => 0) } as any,
       loopManager: { isActiveLoopOrigin, getLoopState } as any,
-      client: { session: { promptAsync } } as any,
+      session: { prompt } as any,
     });
 
     await handleEvent(
@@ -200,7 +199,7 @@ describe("handleEvent — session.idle", () => {
     );
 
     // No active functions, so no continuation expected
-    expect(promptAsync).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it("rolls back continuationCount when promptAsync fails", async () => {
@@ -229,12 +228,12 @@ describe("handleEvent — session.idle", () => {
     functionSessionState.clear(sid);
     functionSessionState.activate(sid, [fnName]);
 
-    // promptAsync rejects
-    const promptAsync = mock(() => Promise.reject(new Error("API down")));
+    // prompt rejects
+    const prompt = mock(() => Promise.reject(new Error("API down")));
 
     const deps = minimalDeps({
       roleFunctionsMap,
-      client: { session: { promptAsync } } as any,
+      session: { prompt } as any,
       dispatchManager: {
         handleSessionIdle: mock(() => {}),
         isSyncSession: mock(() => false),
@@ -250,8 +249,8 @@ describe("handleEvent — session.idle", () => {
       deps,
     );
 
-    // promptAsync was called
-    expect(promptAsync).toHaveBeenCalled();
+    // prompt was called
+    expect(prompt).toHaveBeenCalled();
     // continuationCount was rolled back on failure
     expect(functionRuntime.get(sid, fnName)!.continuationCount).toBe(0);
 

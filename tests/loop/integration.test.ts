@@ -15,6 +15,7 @@ import { STOP_LOOP_SIGNAL } from "../../src/loop/constants";
 import { LoopService } from "../../src/core/services/loop-service";
 import { hookState } from "../../src/hooks/state";
 import type { LoopState } from "../../src/loop/types";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 
 function pluginMockClient(): OpencodeClient {
   return {
@@ -66,7 +67,7 @@ describe("LoopManager integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
@@ -126,7 +127,7 @@ describe("LoopManager integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
@@ -272,18 +273,19 @@ function createDisposeInitMocks(tmpDir: string) {
   } as unknown as OpencodeClient;
 
   // ── PluginContext mock (cast-broad, same pattern as loop-service-dispose.test.ts) ──
+  const sessionAdapter = new OpencodeSessionAdapter(client);
   const ctx = {
     directory: tmpDir,
     rawDirectory: tmpDir,
     core,
-    client,
+    session: sessionAdapter,
     resolvedRoles: [],
     roleFunctionsMap: new Map(),
     roleGraphMap: new Map(),
     bus: { on: mock(() => {}), emit: mock(() => {}), off: mock(() => {}) },
   } as any;
 
-  return { ctx, dispatchManager, tasks };
+  return { ctx, dispatchManager, tasks, client };
 }
 
 /** Wait for microtask queue to drain (self-start kickoff / promise scheduling). */
@@ -389,7 +391,7 @@ describe("LoopService dispose+init round advancement", () => {
 
     // [loop-progress] note was injected once (only on round 1)
     const injectCalls = (
-      mocks.ctx.client.session.promptAsync as ReturnType<typeof mock>
+      mocks.client.session.promptAsync as ReturnType<typeof mock>
     ).mock.calls;
     const progressNotes = injectCalls.filter(
       ([args]: any[]) =>

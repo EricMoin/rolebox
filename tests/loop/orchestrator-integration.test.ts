@@ -21,6 +21,7 @@ import {
   managerMap,
   createPluginHooks,
 } from "../../src/core/composition";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
 
 // ── Fake Adapter ─────────────────────────────────────────────────────────
 
@@ -649,7 +650,7 @@ describe("Orchestrator Integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ resolvedRoles: [], client, roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
