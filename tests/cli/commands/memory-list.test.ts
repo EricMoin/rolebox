@@ -47,7 +47,7 @@ async function importList() {
   return await import("../../../src/cli/commands/memory/memory-list");
 }
 
-function insertEntry(
+async function insertEntry(
   overrides: Partial<{
     scope: string;
     role_id: string;
@@ -59,8 +59,8 @@ function insertEntry(
     session_id: string | null;
     source_sessions: string[];
   }> = {},
-): void {
-  const store = new MemoryStore(tmpDir);
+): Promise<void> {
+  const store = await MemoryStore.create(tmpDir);
   try {
     store.write({
       scope: "workspace",
@@ -96,7 +96,7 @@ describe("memory list", () => {
   });
 
   it("displays entries in table format with header and separator", async () => {
-    insertEntry({ title: "Alpha Entry" });
+    await insertEntry({ title: "Alpha Entry" });
 
     const { listCommand } = await importList();
     const { stdout } = captureLogs(() => {
@@ -119,8 +119,8 @@ describe("memory list", () => {
   });
 
   it("filters by scope", async () => {
-    insertEntry({ scope: "workspace", title: "Workspace Entry" });
-    insertEntry({ scope: "role", title: "Role Entry" });
+    await insertEntry({ scope: "workspace", title: "Workspace Entry" });
+    await insertEntry({ scope: "role", title: "Role Entry" });
 
     const { listCommand } = await importList();
 
@@ -138,8 +138,8 @@ describe("memory list", () => {
   });
 
   it("filters by category", async () => {
-    insertEntry({ category: "note", title: "Note Entry" });
-    insertEntry({ category: "fact", title: "Fact Entry" });
+    await insertEntry({ category: "note", title: "Note Entry" });
+    await insertEntry({ category: "fact", title: "Fact Entry" });
 
     const { listCommand } = await importList();
     const { stdout } = captureLogs(() => {
@@ -150,8 +150,8 @@ describe("memory list", () => {
   });
 
   it("respects non-default limit", async () => {
-    insertEntry({ title: "Entry A" });
-    insertEntry({ title: "Entry B" });
+    await insertEntry({ title: "Entry A" });
+    await insertEntry({ title: "Entry B" });
 
     const { listCommand } = await importList();
     const { stdout } = captureLogs(() => {
@@ -163,8 +163,8 @@ describe("memory list", () => {
   });
 
   it("sorts by relevance (high before low)", async () => {
-    insertEntry({ relevance: "low", title: "Low Entry" });
-    insertEntry({ relevance: "high", title: "High Entry" });
+    await insertEntry({ relevance: "low", title: "Low Entry" });
+    await insertEntry({ relevance: "high", title: "High Entry" });
 
     const { listCommand } = await importList();
     const { stdout } = captureLogs(() => {

@@ -52,8 +52,8 @@ function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
   run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
-function insertDefaultEntry(): string {
-  const store = new MemoryStore(tmpDir);
+async function insertDefaultEntry(): Promise<string> {
+  const store = await MemoryStore.create(tmpDir);
   try {
     return store.write({
       scope: "workspace",
@@ -75,7 +75,7 @@ function insertDefaultEntry(): string {
 
 describe("memory show", () => {
   it("renders all fields for an existing entry", async () => {
-    const entryId = insertDefaultEntry();
+    const entryId = await insertDefaultEntry();
 
     const { showCommand } = await importShow();
     const { stdout } = captureLogs(() => {

@@ -52,7 +52,7 @@ function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
   run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
-function insertEntry(
+async function insertEntry(
   overrides: Partial<{
     scope: string;
     role_id: string;
@@ -64,8 +64,8 @@ function insertEntry(
     session_id: string | null;
     source_sessions: string[];
   }> = {},
-): string {
-  const store = new MemoryStore(tmpDir);
+): Promise<string> {
+  const store = await MemoryStore.create(tmpDir);
   try {
     return store.write({
       scope: "workspace",
@@ -88,7 +88,7 @@ function insertEntry(
 
 describe("memory export", () => {
   it("exports markdown to stdout with header and entry structure", async () => {
-    insertEntry({
+    await insertEntry({
       title: "My Markdown Entry",
       content: "Markdown body text.",
       tags: ["alpha", "beta"],
@@ -120,7 +120,7 @@ describe("memory export", () => {
   });
 
   it("exports json to stdout as valid JSON array", async () => {
-    const entryId = insertEntry({
+    const entryId = await insertEntry({
       title: "JSON Entry",
       content: "JSON body.",
     });
@@ -145,7 +145,7 @@ describe("memory export", () => {
   });
 
   it("--output writes markdown to a file instead of stdout", async () => {
-    insertEntry({ title: "File Export Entry" });
+    await insertEntry({ title: "File Export Entry" });
 
     const outPath = join(tmpDir, "exported.md");
     const { exportCommand } = await importExport();
@@ -164,7 +164,7 @@ describe("memory export", () => {
   });
 
   it("--output writes json to a file instead of stdout", async () => {
-    insertEntry({ title: "JSON File Entry", content: "JSON file body" });
+    await insertEntry({ title: "JSON File Entry", content: "JSON file body" });
 
     const outPath = join(tmpDir, "exported.json");
     const { exportCommand } = await importExport();
@@ -190,8 +190,7 @@ describe("memory export", () => {
   });
 
   it("exits with code 1 for unknown format", async () => {
-    insertEntry();
-
+    await insertEntry();
     // Mock process.exit to throw so we can catch it
     process.exit = ((code?: number) => {
       throw new Error(`process.exit(${code})`);

@@ -52,7 +52,7 @@ function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
   run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
-function insertEntry(
+async function insertEntry(
   overrides: Partial<{
     scope: string;
     role_id: string;
@@ -64,8 +64,8 @@ function insertEntry(
     session_id: string | null;
     source_sessions: string[];
   }> = {},
-): void {
-  const store = new MemoryStore(tmpDir);
+): Promise<void> {
+  const store = await MemoryStore.create(tmpDir);
   try {
     store.write({
       scope: "workspace",
@@ -88,8 +88,8 @@ function insertEntry(
 
 describe("memory search", () => {
   it("returns matching entries in table format with header", async () => {
-    insertEntry({ title: "Apple Entry", content: "This entry is about apples and orchards." });
-    insertEntry({ title: "Banana Entry", content: "This entry is about bananas." });
+    await insertEntry({ title: "Apple Entry", content: "This entry is about apples and orchards." });
+    await insertEntry({ title: "Banana Entry", content: "This entry is about bananas." });
 
     const { searchCommand } = await importSearch();
     const { stdout } = captureLogs(() => {
@@ -118,7 +118,7 @@ describe("memory search", () => {
   });
 
   it("shows 'No results' message when query matches nothing", async () => {
-    insertEntry({ title: "Existing Entry", content: "something searchable" });
+    await insertEntry({ title: "Existing Entry", content: "something searchable" });
 
     const { searchCommand } = await importSearch();
     const { stdout } = captureLogs(() => {
@@ -129,8 +129,8 @@ describe("memory search", () => {
   });
 
   it("filters by scope", async () => {
-    insertEntry({ scope: "workspace", title: "Workspace Match", content: "unique searchable data x1yz" });
-    insertEntry({ scope: "role", title: "Role Match", content: "unique searchable data x1yz" });
+    await insertEntry({ scope: "workspace", title: "Workspace Match", content: "unique searchable data x1yz" });
+    await insertEntry({ scope: "role", title: "Role Match", content: "unique searchable data x1yz" });
 
     const { searchCommand } = await importSearch();
 
@@ -150,9 +150,9 @@ describe("memory search", () => {
   });
 
   it("respects limit argument", async () => {
-    insertEntry({ title: "Entry One", content: "common term zzzmatch" });
-    insertEntry({ title: "Entry Two", content: "common term zzzmatch" });
-    insertEntry({ title: "Entry Three", content: "common term zzzmatch" });
+    await insertEntry({ title: "Entry One", content: "common term zzzmatch" });
+    await insertEntry({ title: "Entry Two", content: "common term zzzmatch" });
+    await insertEntry({ title: "Entry Three", content: "common term zzzmatch" });
 
     const { searchCommand } = await importSearch();
     const { stdout } = captureLogs(() => {
@@ -175,7 +175,7 @@ describe("memory search", () => {
 
   it("truncates long content in the output", async () => {
     const longContent = "truncateme " + "A ".repeat(148);
-    insertEntry({
+    await insertEntry({
       title: "Long Content Entry",
       content: longContent,
     });

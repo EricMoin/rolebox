@@ -52,7 +52,7 @@ function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
   run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
-function insertEntry(
+async function insertEntry(
   overrides: Partial<{
     scope: string;
     role_id: string;
@@ -64,8 +64,8 @@ function insertEntry(
     session_id: string | null;
     source_sessions: string[];
   }> = {},
-): string {
-  const store = new MemoryStore(tmpDir);
+): Promise<string> {
+  const store = await MemoryStore.create(tmpDir);
   try {
     return store.write({
       scope: "workspace",
@@ -88,10 +88,10 @@ function insertEntry(
 
 describe("memory delete", () => {
   it("--yes deletes an existing entry and removes it from the store", async () => {
-    const entryId = insertEntry();
+    const entryId = await insertEntry();
 
     // Verify entry exists before delete
-    const storeBefore = new MemoryStore(tmpDir);
+    const storeBefore = await MemoryStore.create(tmpDir);
     try {
       expect(storeBefore.read(entryId)).not.toBeNull();
     } finally {
@@ -106,7 +106,7 @@ describe("memory delete", () => {
     expect(stdout.some((l) => l.includes(`Deleted: ${entryId}`))).toBe(true);
 
     // Verify entry is actually removed from store
-    const storeAfter = new MemoryStore(tmpDir);
+    const storeAfter = await MemoryStore.create(tmpDir);
     try {
       expect(storeAfter.read(entryId)).toBeNull();
     } finally {
@@ -126,7 +126,7 @@ describe("memory delete", () => {
   });
 
   it("without --yes shows confirmation prompt text", async () => {
-    const entryId = insertEntry();
+    const entryId = await insertEntry();
 
     const { deleteCommand } = await importDelete();
     const { stdout } = captureLogs(() => {
@@ -141,7 +141,7 @@ describe("memory delete", () => {
     expect(stdout.some((l) => l.includes("Cancelled."))).toBe(true);
     expect(stdout.some((l) => l.includes("Deleted"))).toBe(false);
 
-    const store = new MemoryStore(tmpDir);
+    const store = await MemoryStore.create(tmpDir);
     try {
       expect(store.read(entryId)).not.toBeNull();
     } finally {

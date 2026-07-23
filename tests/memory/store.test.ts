@@ -33,9 +33,9 @@ function makeEntry(
   };
 }
 
-function createStore(): { store: MemoryStore; dir: string } {
+async function createStore(): Promise<{ store: MemoryStore; dir: string }> {
   const dir = makeTempDir();
-  const store = new MemoryStore(dir);
+  const store = await MemoryStore.create(dir);
   return { store, dir };
 }
 
@@ -58,8 +58,8 @@ describe("MemoryStore", () => {
   let store: MemoryStore;
   let tempDir: string;
 
-  beforeEach(() => {
-    const created = createStore();
+  beforeEach(async () => {
+    const created = await createStore();
     store = created.store;
     tempDir = created.dir;
   });

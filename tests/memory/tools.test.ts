@@ -89,7 +89,7 @@ describe("memory tools", () => {
       const id = extractId(result);
 
       // Read back via MemoryStore directly
-      const store = new MemoryStore(tempDir);
+      const store = await MemoryStore.create(tempDir);
       try {
         const entry = store.read(id);
         expect(entry).not.toBeNull();
@@ -195,7 +195,7 @@ describe("memory tools", () => {
       await updateTool.execute({ id, title: "Updated Title" }, ctx);
 
       // Verify via MemoryStore directly
-      const store = new MemoryStore(tempDir);
+      const store = await MemoryStore.create(tempDir);
       try {
         const entry = store.read(id);
         expect(entry).not.toBeNull();

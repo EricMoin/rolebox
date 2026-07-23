@@ -52,7 +52,7 @@ function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
   run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
-function insertEntry(
+async function insertEntry(
   overrides: Partial<{
     scope: string;
     role_id: string;
@@ -64,8 +64,8 @@ function insertEntry(
     session_id: string | null;
     source_sessions: string[];
   }> = {},
-): void {
-  const store = new MemoryStore(tmpDir);
+): Promise<void> {
+  const store = await MemoryStore.create(tmpDir);
   try {
     store.write({
       scope: "workspace",
@@ -89,9 +89,9 @@ function insertEntry(
 describe("memory stats", () => {
   it("shows correct counts byScope, byCategory, and byRelevance", async () => {
     // 2 workspace, 1 role
-    insertEntry({ scope: "workspace", category: "note", relevance: "high" });
-    insertEntry({ scope: "workspace", category: "fact", relevance: "high" });
-    insertEntry({ scope: "role", category: "lesson", relevance: "medium" });
+    await insertEntry({ scope: "workspace", category: "note", relevance: "high" });
+    await insertEntry({ scope: "workspace", category: "fact", relevance: "high" });
+    await insertEntry({ scope: "role", category: "lesson", relevance: "medium" });
 
     const { statsCommand } = await importStats();
     const { stdout } = captureLogs(() => {
@@ -143,11 +143,11 @@ describe("memory stats", () => {
 
   it("correctly aggregates mixed relevance and category counts", async () => {
     // Insert a diverse set
-    insertEntry({ category: "note", relevance: "high" });
-    insertEntry({ category: "note", relevance: "medium" });
-    insertEntry({ category: "fact", relevance: "high" });
-    insertEntry({ category: "lesson", relevance: "low" });
-    insertEntry({ category: "fact", relevance: "high" });
+    await insertEntry({ category: "note", relevance: "high" });
+    await insertEntry({ category: "note", relevance: "medium" });
+    await insertEntry({ category: "fact", relevance: "high" });
+    await insertEntry({ category: "lesson", relevance: "low" });
+    await insertEntry({ category: "fact", relevance: "high" });
 
     const { statsCommand } = await importStats();
     const { stdout } = captureLogs(() => {
@@ -177,7 +177,7 @@ describe("memory stats", () => {
   });
 
   it("renders the stats header and separator", async () => {
-    insertEntry({});
+    await insertEntry({});
 
     const { statsCommand } = await importStats();
     const { stdout } = captureLogs(() => {
@@ -194,9 +194,9 @@ describe("memory stats", () => {
   });
 
   it("handles uncategorized entries correctly", async () => {
-    insertEntry({ category: "", relevance: "high" });
-    insertEntry({ category: "", relevance: "low" });
-    insertEntry({ category: "note", relevance: "medium" });
+    await insertEntry({ category: "", relevance: "high" });
+    await insertEntry({ category: "", relevance: "low" });
+    await insertEntry({ category: "note", relevance: "medium" });
 
     const { statsCommand } = await importStats();
     const { stdout } = captureLogs(() => {
