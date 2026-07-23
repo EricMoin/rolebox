@@ -185,10 +185,37 @@ export async function startBackgroundTask(
     debugLog("launch", taskId, `session created: ${session.id}`);
 
     if (input.run_in_background) {
-      await d.client.prompt(session.id, {
+      const promptResult = await d.client.prompt(session.id, {
         agent: input.subagent,
         parts: [{ type: "text", text: input.prompt }],
       });
+
+      if (!promptResult) {
+        // Spawn failed — sub-agent process never started
+        task.status = "error";
+        task.error = "Failed to spawn Pi process for sub-agent";
+        task.completedAt = new Date();
+        debugLog("launch", taskId, `SPAWN-FAILED: prompt returned null for agent=${input.subagent}`);
+        // Decrement inflight counter — status changed directly, not via transition()
+        {
+          const pid = task.parentSessionId;
+          const curr = d.inflightByParent.get(pid);
+          if (curr !== undefined) {
+            if (curr <= 1) {
+              d.inflightByParent.delete(pid);
+              d.oldestStartedAtByParent.delete(pid);
+            } else {
+              d.inflightByParent.set(pid, curr - 1);
+            }
+          }
+        }
+        d.sessionToTask.delete(task.sessionId);
+        leaveRunning(d, taskId);
+        notifyTerminated(d, taskId, "error");
+        try { await d.client.abort(task.sessionId); } catch { /* session may already be gone */ }
+        void notifyParent(d.client, task, 0, { maxRetries: 0 });
+        return;
+      }
 
       debugLog("launch", taskId, "promptAsync sent — registering with watchdog");
       d.watchdog.registerTask(taskId);

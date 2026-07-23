@@ -190,7 +190,14 @@ export class OpencodeSessionAdapter implements ISessionClient {
       });
       const r = result as { data?: { id: string }; error?: unknown };
       if (r.error) return null;
-      return r.data ?? null;
+      // opencode's promptAsync returns HTTP 204 (void data) on success — an
+      // accepted async prompt has no response body. Treat the ABSENCE of an
+      // error as success and return a truthy sentinel carrying the session id.
+      // Returning `r.data ?? null` here would collapse every successful async
+      // prompt to `null`, which the dispatch launcher interprets as a spawn
+      // failure. Only a thrown exception or an explicit `error` field is a
+      // real failure.
+      return r.data ?? { id };
     } catch {
       return null;
     }
