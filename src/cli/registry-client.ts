@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import { getDataDir } from "./paths.ts";
 import { parseRegistryManifestFromYaml } from "./schemas.ts";
 import type { RegistryManifest } from "./types.ts";
@@ -185,26 +186,26 @@ export async function downloadRole(
 
   try {
     // Verify tar is available on PATH before attempting extraction
-    if (!Bun.which("tar")) {
+    const tarCheck = spawnSync("tar", ["--version"], { stdio: "ignore" });
+    if (tarCheck.status !== 0 && tarCheck.error) {
       throw new Error("tar binary not found — please install tar");
     }
 
-    let exitCode: number;
+    let exitCode: number | null;
     try {
-      const proc = Bun.spawn(
-        ["tar", "xzf", archivePath, "--strip-components=1", "-C", extractDir],
-        {
-          stdout: "inherit",
-          stderr: "inherit",
-        }
-      );
-      exitCode = (await proc.exited) ?? 1;
+      exitCode = await new Promise<number | null>((resolve, reject) => {
+        const proc = spawn("tar", ["xzf", archivePath, "--strip-components=1", "-C", extractDir], {
+          stdio: "inherit",
+        });
+        proc.on("error", reject);
+        proc.on("close", resolve);
+      });
     } catch (err) {
       throw new Error(`extraction failed for role "${roleId}": ${(err as Error).message}`);
     }
 
-    if (exitCode !== 0) {
-      throw new Error(`extraction failed for role "${roleId}": tar exited with code ${exitCode}`);
+    if ((exitCode ?? 1) !== 0) {
+      throw new Error(`extraction failed for role "${roleId}": tar exited with code ${exitCode ?? 1}`);
     }
 
     const roleDir = join(extractDir, "roles", roleId);
