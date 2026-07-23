@@ -14,9 +14,9 @@ export const statsCommand = defineCommand({
     name: "stats",
     description: "Show memory store statistics",
   },
-  run({ args: _args }) {
+  async run({ args: _args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       const s = store.stats();
 

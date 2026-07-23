@@ -21,9 +21,9 @@ export const showCommand = defineCommand({
       required: true,
     },
   },
-  run({ args }) {
+  async run({ args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       const entry = store.read(args.id);
       if (!entry) {

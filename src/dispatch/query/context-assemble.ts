@@ -51,7 +51,7 @@ export function createContextAssembleTool(deps: ContextAssembleDeps) {
       let memorySection = "";
       if (activeSources.includes("memory")) {
         try {
-          const store = new MemoryStore(deps.directory);
+          const store = await MemoryStore.create(deps.directory);
           const results = store.search({ query: topic, limit: 5 });
           store.close();
 

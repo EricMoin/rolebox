@@ -35,9 +35,9 @@ export const listCommand = defineCommand({
       default: "recent",
     },
   },
-  run({ args }) {
+  async run({ args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       const entries = store.list({
         scope: args.scope,

@@ -25,9 +25,9 @@ export const deleteCommand = defineCommand({
       description: "Skip confirmation prompt",
     },
   },
-  run({ args }) {
+  async run({ args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       // Confirm unless --yes
       if (!args.yes) {

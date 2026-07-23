@@ -6,6 +6,7 @@
 
 import { defineCommand } from "citty";
 import { MemoryStore } from "../../../memory/store.ts";
+import { createDatabase } from "../../../memory/db-driver.ts";
 import { memoryDbPath } from "../../../utils/state-paths.ts";
 import { bold, dim } from "../../format.ts";
 import { resolveProjectRoot, truncate, relevanceLevels } from "./memory-helpers.ts";
@@ -34,7 +35,7 @@ export const cleanCommand = defineCommand({
   },
   async run({ args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       const maxAgeDays = parseInt(args["max-age-days"] ?? "180", 10);
       if (isNaN(maxAgeDays) || maxAgeDays < 1) {
@@ -48,11 +49,9 @@ export const cleanCommand = defineCommand({
         process.exit(1);
       }
 
-      // Direct SQL query for efficiency — MemoryStore's public API doesn't
-      // expose bulk query by access_count / accessed_at.
-      const { Database } = await import("bun:sqlite");
+      // Direct SQL query for efficiency — uses runtime driver (Bun or Node).
       const dbPath = memoryDbPath(projectDir);
-      const db = new Database(dbPath);
+      const db = await createDatabase(dbPath);
 
       try {
         const cutoff = new Date();

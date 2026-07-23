@@ -31,9 +31,9 @@ export const searchCommand = defineCommand({
       default: "10",
     },
   },
-  run({ args }) {
+  async run({ args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       const results = store.search({
         query: args.query,

@@ -91,7 +91,7 @@ export async function handleSystemTransform(
     if (memConfig.inject !== false) {
       try {
         const { MemoryStore } = await import("../memory/store.ts");
-        const store = new MemoryStore(deps.dir);
+        const store = await MemoryStore.create(deps.dir);
         const memories = store.list({
           scope: memConfig.scope ?? "both",
           limit: memConfig.max_inject ?? 10,

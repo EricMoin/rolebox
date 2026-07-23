@@ -26,9 +26,9 @@ export const exportCommand = defineCommand({
       description: "Write to file instead of stdout",
     },
   },
-  run({ args }) {
+  async run({ args }) {
     const projectDir = resolveProjectRoot(process.cwd());
-    const store = new MemoryStore(projectDir);
+    const store = await MemoryStore.create(projectDir);
     try {
       const summaries = store.list({ limit: 1000 });
 
