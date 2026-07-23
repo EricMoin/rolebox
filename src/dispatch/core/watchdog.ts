@@ -111,6 +111,7 @@ export class TaskWatchdogManager {
 
     this.debounceTimers.set(taskId, handle);
     this.pendingDebounce.add(taskId);
+    if (handle && typeof handle === "object" && "unref" in handle) (handle as any).unref();
   }
 
   /** Cancel a task's debounce timer (task resumed). No-op if none. */
@@ -197,6 +198,7 @@ export class TaskWatchdogManager {
     }, this.config.watchdogIntervalMs);
 
     this.watchdogTimers.set(taskId, handle);
+    if (handle && typeof handle === "object" && "unref" in handle) (handle as any).unref();
   }
 
   /** Clear a task's watchdog timer. */
@@ -228,6 +230,9 @@ export class TaskWatchdogManager {
         void this._runSafe(() => this.deps.onSweep(taskId));
       }
     }, this.config.globalSweepIntervalMs);
+    if (this.sweepInterval && typeof this.sweepInterval === "object" && "unref" in this.sweepInterval) {
+      (this.sweepInterval as any).unref();
+    }
   }
 
   /** Stop the global sweep setInterval. */

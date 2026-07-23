@@ -36,6 +36,9 @@ export class LoopCoordinator {
     },
   ) {
     this._advancingSweeper = setInterval(() => this._sweepStaleLocks(), SWEEPER_INTERVAL_MS);
+    if (this._advancingSweeper && typeof this._advancingSweeper === "object" && "unref" in this._advancingSweeper) {
+      (this._advancingSweeper as any).unref();
+    }
   }
 
   private _persist(): void {

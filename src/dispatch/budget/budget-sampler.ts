@@ -16,9 +16,11 @@ export function startBudgetSampler(deps: CompletionOrchestratorDeps): ReturnType
 
   if (!hasBudgetLimits) return undefined;
 
-  return setInterval(async () => {
+  const handle = setInterval(async () => {
     await sampleBudgetUsage(deps);
   }, interval);
+  if (handle && typeof handle === "object" && "unref" in handle) (handle as any).unref();
+  return handle;
 }
 
 export async function sampleBudgetUsage(deps: CompletionOrchestratorDeps): Promise<void> {

@@ -60,6 +60,9 @@ export class NotificationThrottle {
       this.pruneIntervalId = setInterval(() => {
         this.pruneByWindow(maxWindowMs);
       }, 5 * 60 * 1000);
+      if (this.pruneIntervalId && typeof this.pruneIntervalId === "object" && "unref" in this.pruneIntervalId) {
+        (this.pruneIntervalId as any).unref();
+      }
     }
   }
 

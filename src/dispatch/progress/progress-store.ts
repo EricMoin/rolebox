@@ -105,6 +105,9 @@ export class InMemoryProgressStore implements ProgressStore {
     this._sweeperTimer = setInterval(() => {
       this.cleanupExpired(DEFAULT_PROGRESS_TTL_MS);
     }, GLOBAL_SWEEP_INTERVAL_MS);
+    if (this._sweeperTimer && typeof this._sweeperTimer === "object" && "unref" in this._sweeperTimer) {
+      (this._sweeperTimer as any).unref();
+    }
   }
 
   /** Stop the periodic sweeper. */

@@ -206,6 +206,9 @@ export class CompletionOrchestrator implements OrchestratorBridge {
         }
       }
     }, interval);
+    if (this.d._sweeperTimerInternal && typeof this.d._sweeperTimerInternal === "object" && "unref" in this.d._sweeperTimerInternal) {
+      (this.d._sweeperTimerInternal as any).unref();
+    }
   }
 
   // ── Budget sampler ─────────────────────────────────────────────

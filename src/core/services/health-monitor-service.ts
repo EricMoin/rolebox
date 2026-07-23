@@ -36,6 +36,9 @@ export class HealthMonitorService implements PluginService {
     this.intervalTimer = setInterval(() => {
       void this.checkAll();
     }, intervalMs);
+    if (this.intervalTimer && typeof this.intervalTimer === "object" && "unref" in this.intervalTimer) {
+      (this.intervalTimer as any).unref();
+    }
 
     log.info("Health monitor started", { intervalMs });
   }
