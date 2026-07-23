@@ -264,6 +264,7 @@ export class PiSessionAdapter implements ISessionClient {
       noReply?: boolean;
       system?: string;
       agent?: string;
+      model?: { providerID: string; modelID: string };
     },
   ): Promise<{ id: string } | null> {
     this._log.debug("prompt() is unsupported on Pi — returning null");
@@ -304,6 +305,14 @@ export class PiSessionAdapter implements ISessionClient {
    */
   async abort(_id: string): Promise<boolean> {
     this._log.debug("abort() is unsupported on Pi — returning false");
+    return false;
+  }
+
+  /**
+   * Pi does not support session compaction — always returns false.
+   */
+  async compact(_id: string): Promise<boolean> {
+    this._log.debug("compact() is unsupported on Pi — returning false");
     return false;
   }
 

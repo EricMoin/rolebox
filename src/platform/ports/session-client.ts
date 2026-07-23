@@ -61,6 +61,8 @@ export interface ISessionClient {
       noReply?: boolean;
       system?: string;
       agent?: string;
+      /** Optional model override for this prompt. Ignored if the platform does not support per-prompt model selection. */
+      model?: { providerID: string; modelID: string };
     },
   ): Promise<{ id: string } | null>;
 
@@ -93,4 +95,11 @@ export interface ISessionClient {
    * Returns true if the abort was acknowledged.
    */
   abort(id: string): Promise<boolean>;
+
+  /**
+   * Compact (summarize/compress) a session's conversation context.
+   * Returns true if compaction succeeded. Platforms that do not
+   * support context compaction return false.
+   */
+  compact?(id: string): Promise<boolean>;
 }

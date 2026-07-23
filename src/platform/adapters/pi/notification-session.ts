@@ -104,6 +104,10 @@ export class PiNotificationSessionClient implements ISessionClient {
     return this.inner.abort(id);
   }
 
+  async compact(id: string): Promise<boolean> {
+    return this.inner.compact(id);
+  }
+
   // ── Intercepted methods ──────────────────────────────────────────────────
 
   /**
@@ -120,6 +124,7 @@ export class PiNotificationSessionClient implements ISessionClient {
       noReply?: boolean;
       system?: string;
       agent?: string;
+      model?: { providerID: string; modelID: string };
     },
   ): Promise<{ id: string } | null> {
     if (this._hasProcess(id)) {

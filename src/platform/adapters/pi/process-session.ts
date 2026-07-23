@@ -309,6 +309,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
       noReply?: boolean;
       system?: string;
       agent?: string;
+      model?: { providerID: string; modelID: string };
     },
   ): Promise<{ id: string } | null> {
     const record = this.processes.get(id);
@@ -532,6 +533,16 @@ export class PiProcessSessionAdapter implements ISessionClient {
       this.log.error("abort() — failed", { id, error: msg });
       return false;
     }
+  }
+
+  // ── compact() ──────────────────────────────────────────────────────────
+
+  /**
+   * Pi does not support session compaction — always returns false.
+   */
+  async compact(_id: string): Promise<boolean> {
+    this.log.debug("compact() is unsupported on Pi — returning false");
+    return false;
   }
 
   // ── reopenForContinuation() ─────────────────────────────────────────────

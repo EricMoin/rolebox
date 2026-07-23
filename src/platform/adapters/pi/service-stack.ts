@@ -20,6 +20,7 @@
  */
 
 import { defineTool } from "../../ports/tool-factory.ts";
+import type { IHookProvider } from "../../ports/hook-provider.ts";
 import { PiToolFactory } from "./tool-factory.ts";
 import { PiSessionAdapter } from "./session.ts";
 import { z } from "zod";
@@ -103,13 +104,15 @@ function buildDispatchStubTools(): ToolRegistry {
  * tools with the Pi extension API. Does not use PluginCore or any
  * @opencode-ai/plugin imports.
  */
-export class PiLightweightServiceStack {
+export class PiLightweightServiceStack implements IHookProvider {
   private _toolFactory: PiToolFactory;
   private _sessionAdapter: PiSessionAdapter;
   private _resolvedRoles: ResolvedRole[];
   private _pi: any;
   private _dispatchTools?: Record<string, CanonicalToolDef>;
   private _loopTools?: Record<string, CanonicalToolDef>;
+  /** Pi-compiled tools stored after init() for getHandlers(). */
+  private _compiledTools: Record<string, unknown> = {};
 
   constructor(
     pi: any,
@@ -164,7 +167,10 @@ export class PiLightweightServiceStack {
     // 3. Compile all tools to Pi's native format
     const compiled = this._toolFactory.compileAll(allTools);
 
-    // 4. Register each tool with pi.registerTool()
+    // 4. Store compiled tools for getHandlers() (IHookProvider compliance)
+    this._compiledTools = compiled;
+
+    // 5. Register each tool with pi.registerTool()
     let registeredCount = 0;
     for (const [name, toolDef] of Object.entries(compiled)) {
       if (typeof this._pi.registerTool === "function") {
@@ -177,5 +183,20 @@ export class PiLightweightServiceStack {
 
     log.info("Tool registration complete", { registeredCount, total: Object.keys(allTools).length });
     return registeredCount;
+  }
+
+  /**
+   * Return the assembled hook handlers.
+   *
+   * Implements IHookProvider.getHandlers(). Returns a handler map whose
+   * `tool` key carries the Pi-compiled tool definitions. Because Pi does
+   * not consume hooks through the same opencode handler pattern, only
+   * the `tool` key is populated. Additional keys (`event`, `config`, etc.)
+   * would be populated if Pi ever adopts the PluginCore pipeline.
+   */
+  getHandlers(): Record<string, unknown> {
+    return {
+      tool: this._compiledTools,
+    };
   }
 }

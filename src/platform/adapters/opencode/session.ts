@@ -174,6 +174,7 @@ export class OpencodeSessionAdapter implements ISessionClient {
       noReply?: boolean;
       system?: string;
       agent?: string;
+      model?: { providerID: string; modelID: string };
     },
   ): Promise<{ id: string } | null> {
     try {
@@ -184,6 +185,7 @@ export class OpencodeSessionAdapter implements ISessionClient {
           ...(options.noReply !== undefined ? { noReply: options.noReply } : {}),
           ...(options.system ? { system: options.system } : {}),
           ...(options.agent ? { agent: options.agent } : {}),
+          ...(options.model ? { model: options.model } : {}),
         },
       });
       const r = result as { data?: { id: string }; error?: unknown };
@@ -241,6 +243,18 @@ export class OpencodeSessionAdapter implements ISessionClient {
     try {
       await this.session.abort({ path: { id } });
       return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async compact(id: string): Promise<boolean> {
+    try {
+      const result = await (this.session as any).compact({
+        path: { id },
+      });
+      const r = result as { error?: unknown };
+      return !r.error;
     } catch {
       return false;
     }

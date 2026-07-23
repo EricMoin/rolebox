@@ -88,6 +88,7 @@ export type CanonicalToolDef<Args extends z.ZodRawShape = z.ZodRawShape> = {
  */
 export type CanonicalEventType =
   | "session.idle"
+  | "session.status"
   | "session.updated"
   | "session.error"
   | "session.created"

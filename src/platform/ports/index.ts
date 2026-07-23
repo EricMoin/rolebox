@@ -9,3 +9,4 @@ export type { CanonicalToolDef } from "./tool-factory.ts";
 export type { IEventBridge, CanonicalEventHandler } from "./event-bridge.ts";
 export type { CanonicalEvent, CanonicalEventType } from "./event-bridge.ts";
 export type { IAgentRegistrar, AgentDefinition } from "./agent-registrar.ts";
+export type { IHookProvider } from "./hook-provider.ts";
