@@ -1,8 +1,8 @@
-import type { PluginInput } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "../types.ts";
 import type { PluginCoreLike } from "./service.ts";
 import type { EventBus } from "./event-bus.ts";
 import type { PlatformCapabilities } from "../platform/capabilities.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 
 /**
  * Context passed to every PluginService's init() method.
@@ -10,8 +10,8 @@ import type { PlatformCapabilities } from "../platform/capabilities.ts";
  * to the PluginCore itself for inter-service lookups.
  */
 export interface PluginContext {
-  /** The opencode plugin client. */
-  client: PluginInput["client"];
+  /** Platform-agnostic session client adapter. */
+  session: ISessionClient;
   /** All resolved roles. */
   resolvedRoles: ResolvedRole[];
   /** Map of roleId → resolved functions (shared with index.ts). */

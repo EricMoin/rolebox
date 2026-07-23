@@ -12,13 +12,9 @@
  * @module
  */
 
-import path from "node:path";
-import os from "node:os";
-import { existsSync } from "node:fs";
 import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.ts";
 import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
-import { syncAllAgents } from "./sync/agent-files.ts";
 import { piCapabilities } from "./platform/capabilities.ts";
 import { createSubLogger, formatError } from "./logger.ts";
 import type { ResolvedFunction, ResolvedGraph, ResolvedSubAgent } from "./types.ts";
@@ -48,7 +44,7 @@ import {
   seedSentFinalNotifies,
   getSentFinalNotifies,
 } from "./dispatch/notification.ts";
-import { bootstrapRoles } from "./resolver/bootstrap.ts";
+import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
 
 // ── Shared state maps ─────────────────────────────────────────────────────
 
@@ -73,38 +69,32 @@ export default async function (pi: any): Promise<void> {
   const log = createSubLogger("pi-extension");
 
   try {
-    // ── 1. Determine directories ────────────────────────────────────────
-    //
-    // Match the same logic as src/index.ts but without opencode's configDir
-    // helper (we cannot import @opencode-ai/plugin here).
-    const configDir = path.join(os.homedir(), ".config", "opencode");
-    const cwdRoleboxDir = path.join(process.cwd(), "rolebox");
-    const roleboxDir = existsSync(cwdRoleboxDir)
-      ? cwdRoleboxDir
-      : path.join(configDir, "rolebox");
-    const globalSkillsDir = path.join(configDir, "skills");
-    const builtinDir = path.join(
-      path.dirname(new URL(import.meta.url).pathname),
-      "..",
-      "functions",
-    );
+    // ── 1. Resolve directories (delegates to R5's PlatformPaths) ─────────
+
+    const dirs = resolveRoleboxDirectories({
+      platformId: "opencode",
+    });
 
     log.info("Pi extension starting", {
-      roleboxDir,
-      globalSkillsDir,
-      configDir,
+      roleboxDir: dirs.roleboxDir,
+      globalSkillsDir: dirs.globalSkillsDir,
+      configDir: dirs.configDir,
     });
 
     // ── 2. Role discovery & resolution (shared with index.ts) ───────────
+    //
+    // The registrar is created before bootstrap so syncAllAgents can run
+    // inside initializeRoleboxRuntime() as soon as roles are resolved.
 
-    const { resolvedRoles, discovered, resolved, skipped } = await bootstrapRoles({
-      roleboxDir,
-      globalSkillsDir,
-      configDir,
-      builtinDir,
-      roleFunctionsMap,
-      roleGraphMap,
-    });
+    const registrar = new PiAgentRegistrar();
+
+    const { resolvedRoles, discovered, resolved, skipped } =
+      await initializeRoleboxRuntime({
+        directories: dirs,
+        roleFunctionsMap,
+        roleGraphMap,
+        registrar,
+      });
 
     log.info("Roles resolved", { discovered, resolved, skipped });
 
@@ -117,10 +107,11 @@ export default async function (pi: any): Promise<void> {
       return;
     }
 
+    log.info("Agent registry synced");
+
     // ── 3. Create platform adapters ─────────────────────────────────────
 
     const eventBridge = new PiEventBridge();
-    const registrar = new PiAgentRegistrar();
     // Pass sessionDir from Pi extension context if available.
     const piSessionDir = (pi as any)?.ctx?.sessionDir ?? (pi as any)?.sessionDir;
     const capabilities = piCapabilities();
@@ -132,12 +123,7 @@ export default async function (pi: any): Promise<void> {
       capabilities: capabilities.platformId,
     });
 
-    // ── 4. Sync agents into in-memory registry ─────────────────────────
-
-    await syncAllAgents(resolvedRoles, registrar);
-    log.info("Agent registry synced");
-
-    // ── 5. Initialize real dispatch pipeline ──────────────────────────────
+    // ── 4. Initialize real dispatch pipeline ──────────────────────────────
     //
     // Create a PiProcessSessionAdapter backed by child process spawning,
     // construct a DispatchManager with real multi-agent orchestration,
@@ -214,7 +200,7 @@ export default async function (pi: any): Promise<void> {
     const result = await createDispatchManager({
       sessionClient: notifyClient,
       resolvedRoles,
-      storeDirectory: configDir,
+      storeDirectory: dirs.configDir,
     });
     const dispatchManager = result.manager;
 
@@ -227,7 +213,7 @@ export default async function (pi: any): Promise<void> {
       subagentKeys: subagentModelKey.size,
     });
 
-    // ── 6. Tool registration via PiLightweightServiceStack ──────────────
+    // ── 5. Tool registration via PiLightweightServiceStack ──────────────
     //
     // Build real dispatch CanonicalToolDefs and pass them to the service
     // stack instead of stub tools. All other tools (standalone, session,
@@ -255,11 +241,9 @@ export default async function (pi: any): Promise<void> {
       dispatchTools,
       loopTools,
     );
-    const registeredCount = await serviceStack.init();
+    await serviceStack.init();
 
-    log.info("Tool registration complete", { registeredCount });
-
-    // ── 7. Event wiring ─────────────────────────────────────────────────
+    // ── 6. Event wiring ─────────────────────────────────────────────────
     //
     // Subscribe to Pi's lifecycle events and forward them through the
     // canonical event bridge. Every subscription is wrapped in a try/catch
@@ -293,7 +277,7 @@ export default async function (pi: any): Promise<void> {
 
     log.info("Event wiring complete", { events: 9 });
 
-    // ── 8. Agent system prompt injection ────────────────────────────────
+    // ── 7. Agent system prompt injection ────────────────────────────────
     //
     // Before Pi starts an agent, inject a section listing all registered
     // rolebox roles as available agents. This makes the role hierarchy
@@ -335,7 +319,7 @@ export default async function (pi: any): Promise<void> {
 
     log.info("Agent prompt injection wired");
 
-    // ── 9. Skill path contribution ──────────────────────────────────────
+    // ── 8. Skill path contribution ──────────────────────────────────────
     //
     // Surface rolebox skill directories to Pi's resource discovery system
     // so that Pi knows which skill files to load for each agent.
@@ -356,7 +340,7 @@ export default async function (pi: any): Promise<void> {
 
     log.info("Skill path contribution wired");
 
-    // ── 10. Initialization complete ─────────────────────────────────────
+    // ── 9. Initialization complete ─────────────────────────────────────
 
     const agentCount = registrar.getRegisteredAgents().length;
     log.info("Pi extension initialized", {

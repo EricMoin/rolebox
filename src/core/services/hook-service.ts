@@ -1,12 +1,12 @@
 import type { PluginService } from "../service.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
-import type { AgentConfig, Event } from "@opencode-ai/sdk";
 import type { Config } from "@opencode-ai/plugin";
+import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-bridge.ts";
 import { graphSessionState } from "../../graph/index.ts";
 import { setAdvanceJudge } from "../../graph/advance.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
-import { buildAgentConfig, transformPermission } from "../../prompt/agent-config.ts";
+import { buildAgentConfig, transformPermission, type RoleboxAgentConfig } from "../../prompt/agent-config.ts";
 import { RoleMode } from "../../constants.ts";
 import { createSubLogger } from "../../logger.ts";
 import { hookState } from "../../hooks/state.ts";
@@ -28,7 +28,6 @@ import type { RecoveryService } from "./recovery-service.ts";
 import type { ExtensionService } from "./extension-service.ts";
 import type { ToolService } from "./tool-service.ts";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../utils/timeout.ts";
-import { OpencodeSessionAdapter } from "../../platform/adapters/opencode/session.ts";
 
 const log = createSubLogger("hook-service");
 
@@ -53,7 +52,7 @@ export class HookService implements PluginService {
   private handlersWrapper: Record<string, unknown> = {};
 
   async init(ctx: PluginContext): Promise<void> {
-    const { client, resolvedRoles, roleFunctionsMap, roleGraphMap, directory } = ctx;
+    const { resolvedRoles, roleFunctionsMap, roleGraphMap, directory } = ctx;
     const dir = directory;
 
     // Graph state recovery (original lines 247-252)
@@ -109,8 +108,7 @@ export class HookService implements PluginService {
     const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
 
     this.deps = {
-      client,
-      session: new OpencodeSessionAdapter(client),
+      session: ctx.session,
       roleFunctionsMap,
       roleGraphMap,
       roleMap,
@@ -152,16 +150,17 @@ export class HookService implements PluginService {
     const deps = this.deps!;
     const handlers = {
       tool: tools,
-      event: async (input: { event: Event }) => {
-        await handleEvent(input.event, hookState, deps);
+      event: async (input: { event: unknown }) => {
+        const canonical = normalizeOpencodeEvent(input.event);
+        await handleEvent(canonical, hookState, deps);
         // Emit to bus for notification and other subscribers
-        const props = input.event.properties as Record<string, unknown> | undefined;
+        const props = canonical.properties;
         const sessionID = typeof props?.sessionID === "string" ? props.sessionID
           : typeof props?.sessionId === "string" ? props.sessionId
           : (props?.info as any)?.sessionID ?? (props?.info as any)?.sessionId ?? (props?.info as any)?.id;
         const agent = typeof props?.agent === "string" ? props.agent : undefined;
         if (sessionID) {
-          await bus.emit(`event:${input.event.type}`, { sessionID, agent, properties: props });
+          await bus.emit(`event:${canonical.type}`, { sessionID, agent, properties: props });
         }
       },
       config: async (config: Config) => {
@@ -182,7 +181,7 @@ export class HookService implements PluginService {
             if (sub.config.permission) subAgentCfg.permission = transformPermission(sub.config.permission);
 
             cfg.agent ??= {};
-            cfg.agent[sub.id] = subAgentCfg as AgentConfig;
+            cfg.agent[sub.id] = subAgentCfg as RoleboxAgentConfig;
             if (sub.subagents.length > 0) {
               registerSubAgentConfigs(sub.subagents, cfg);
             }

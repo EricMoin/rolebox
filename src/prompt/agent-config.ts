@@ -1,6 +1,21 @@
-import type { AgentConfig } from "@opencode-ai/sdk";
 import type { ResolvedRole, PermissionConfig } from "../types.ts";
 import { RoleMode } from "../constants.ts";
+
+export interface RoleboxAgentConfig {
+  prompt: string;
+  mode: RoleMode;
+  model?: string;
+  description?: string;
+  color?: string;
+  variant?: string;
+  temperature?: number;
+  top_p?: number;
+  tools?: {
+    [key: string]: boolean;
+  };
+  permission?: Record<string, string>;
+  [key: string]: unknown;
+}
 
 function assignDefined<T extends Record<string, unknown>>(
   target: T,
@@ -23,14 +38,14 @@ function assignDefined<T extends Record<string, unknown>>(
  */
 export function transformPermission(
   perm: PermissionConfig | undefined,
-): AgentConfig["permission"] | undefined {
+): RoleboxAgentConfig["permission"] | undefined {
   if (!perm) return undefined;
 
   const hasAllow = Array.isArray(perm.allow);
   const hasDeny = Array.isArray(perm.deny);
 
   if (!hasAllow && !hasDeny) {
-    return perm as AgentConfig["permission"];
+    return perm as RoleboxAgentConfig["permission"];
   }
 
   const result: Record<string, string> = {};
@@ -47,13 +62,13 @@ export function transformPermission(
     }
   }
 
-  return result as AgentConfig["permission"];
+  return result as RoleboxAgentConfig["permission"];
 }
 
-export function buildAgentConfig(resolved: ResolvedRole): AgentConfig {
+export function buildAgentConfig(resolved: ResolvedRole): RoleboxAgentConfig {
   const { config } = resolved;
 
-  return assignDefined<AgentConfig>(
+  return assignDefined<RoleboxAgentConfig>(
     {
       prompt: resolved.prompt,
       mode: config.mode ?? RoleMode.Primary,

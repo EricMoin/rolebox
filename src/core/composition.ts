@@ -1,5 +1,5 @@
-import type { PluginInput } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "../types.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { hookState } from "../hooks/state.ts";
 import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
 import { graphSessionState } from "../graph/index.ts";
@@ -37,7 +37,7 @@ export let activeLoopManager = hookState.activeLoopManager;
  */
 export interface CreatePluginHooksConfig {
   resolvedRoles: ResolvedRole[];
-  client: PluginInput["client"];
+  session: ISessionClient;
   roleFunctionsMap: Map<string, ResolvedFunction[]>;
   roleGraphMap: Map<string, ResolvedGraph>;
   directory?: string;
@@ -48,7 +48,7 @@ export interface CreatePluginHooksConfig {
 }
 
 export async function createPluginHooks(config: CreatePluginHooksConfig) {
-  const { resolvedRoles, client, roleFunctionsMap, roleGraphMap, directory, roleboxDir, globalSkillsDir, configDir, builtinDir } = config;
+  const { resolvedRoles, session, roleFunctionsMap, roleGraphMap, directory, roleboxDir, globalSkillsDir, configDir, builtinDir } = config;
   const rawDir = directory ?? process.cwd();
   const dir = normalizeWorkspaceDir(rawDir);
 
@@ -74,7 +74,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
 
-  await core.init({ client, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
+  await core.init({ session, resolvedRoles, roleFunctionsMap, roleGraphMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget)
   if (!hookState.shutdownRegistered) {

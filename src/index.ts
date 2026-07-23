@@ -1,42 +1,33 @@
-import path from "node:path";
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import type { Plugin } from "@opencode-ai/plugin";
-import { syncAllAgents } from "./sync/agent-files.ts";
 import { OpencodeAgentRegistrar } from "./platform/adapters/opencode/agent-registrar.ts";
 import { syncSkillSymlinks } from "./sync/skill-symlinks.ts";
 import { createPluginHooks } from "./core/composition.ts";
+import { OpencodeSessionAdapter } from "./platform/adapters/opencode/session.ts";
 export { loopManagerMap, activeLoopManager } from "./core/composition.js";
 import { roleFunctionsMap, roleGraphMap } from "./resolver/registry.ts";
 export { roleFunctionsMap, roleGraphMap } from "./resolver/registry.ts";
-import { bootstrapRoles } from "./resolver/bootstrap.ts";
 import { loadProjectConfig, applyProjectConfig } from "./project-config.ts";
 import { PLUGIN_ID } from "./constants.ts";
 import { createSubLogger, getLogFilePath, configureLogDirectory } from "./logger.ts";
-import { getOpencodeConfigDir } from "./cli/paths.ts";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
 
 const RoleboxPlugin: Plugin = async (ctx) => {
   configureLogDirectory(ctx.directory);
-  const configDir = getOpencodeConfigDir();
-  const ctxRoleboxDir = path.join(ctx.directory, "rolebox");
-  const roleboxDir = existsSync(ctxRoleboxDir)
-    ? ctxRoleboxDir
-    : path.join(configDir, "rolebox");
-  const globalSkillsDir = path.join(configDir, "skills");
-  const builtinDir = path.join(__dirname, "..", "functions");
+
+  const dirs = resolveRoleboxDirectories({
+    workingDir: ctx.directory,
+    platformId: "opencode",
+  });
+
   const log = createSubLogger("init");
 
-  const { resolvedRoles, discovered, resolved, skipped } = await bootstrapRoles({
-    roleboxDir,
-    globalSkillsDir,
-    configDir,
-    builtinDir,
-    roleFunctionsMap,
-    roleGraphMap,
-  });
+  const { resolvedRoles, discovered, resolved, skipped } =
+    await initializeRoleboxRuntime({
+      directories: dirs,
+      roleFunctionsMap,
+      roleGraphMap,
+      registrar: new OpencodeAgentRegistrar(),
+    });
 
   // Apply project-level config (`.rolebox/config.json`) if present
   const projectConfig = loadProjectConfig(ctx.directory);
@@ -44,8 +35,7 @@ const RoleboxPlugin: Plugin = async (ctx) => {
     applyProjectConfig(resolvedRoles, projectConfig);
   }
 
-  await syncAllAgents(resolvedRoles, new OpencodeAgentRegistrar());
-  syncSkillSymlinks(resolvedRoles, globalSkillsDir);
+  syncSkillSymlinks(resolvedRoles, dirs.globalSkillsDir);
 
   log.info("Plugin initialized", { discovered, resolved, skipped, logFile: getLogFilePath() });
   if (discovered === 0) {
@@ -54,14 +44,14 @@ const RoleboxPlugin: Plugin = async (ctx) => {
 
   return createPluginHooks({
     resolvedRoles,
-    client: ctx.client,
+    session: new OpencodeSessionAdapter(ctx.client),
     roleFunctionsMap,
     roleGraphMap,
     directory: ctx.directory,
-    roleboxDir,
-    globalSkillsDir,
-    configDir,
-    builtinDir,
+    roleboxDir: dirs.roleboxDir,
+    globalSkillsDir: dirs.globalSkillsDir,
+    configDir: dirs.configDir,
+    builtinDir: dirs.builtinDir,
   });
 };
 

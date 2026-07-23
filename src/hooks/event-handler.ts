@@ -1,4 +1,4 @@
-import type { Event } from "@opencode-ai/sdk";
+import type { CanonicalEvent } from "../platform/types.ts";
 import { functionSessionState } from "../function/session-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
@@ -17,7 +17,7 @@ import type { HookDeps } from "./deps.ts";
 const log = createSubLogger("hook-event");
 
 export async function handleEvent(
-  event: Event,
+  event: CanonicalEvent,
   state: HookState,
   deps: HookDeps,
 ): Promise<void> {
@@ -196,12 +196,9 @@ export async function handleEvent(
         if (decision.shouldContinue && decision.reminder) {
           const sessionAgent = state.sessionAgentRegistry.get(sid);
           try {
-            await deps.client.session.promptAsync({
-              path: { id: sid },
-              body: {
-                ...sessionAgent ? { agent: sessionAgent } : {},
-                parts: [{ type: "text", text: decision.reminder }],
-              },
+            await deps.session.prompt(sid, {
+              parts: [{ type: "text", text: decision.reminder }],
+              agent: sessionAgent || undefined,
             });
             // Only persist and mark as sent on success
             functionRuntime.markDirty();
