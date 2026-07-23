@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.24.0
+
+### Breaking Changes
+
+- **`task_*` → `dispatch_*` tool rename** — All dispatch introspection tools renamed: `task_search` → `dispatch_search`, `task_status` → `dispatch_status`, `task_output` → `dispatch_output`, `task_concurrency` → `dispatch_concurrency`, `task_chronology` → `dispatch_chronology`, `task_export` → `dispatch_export`, `task_budget` → `dispatch_budget`, `task_graph` → `dispatch_graph`, `task_retry` → `dispatch_retry`. Old names preserved via deprecation aliases.
+
+### Features
+
+- **Priority scheduling and HITL approval gate** — Dispatch tasks now support priority-based scheduling. Human-in-the-loop approval gate: workers signal `need_approval`, tasks pause in `awaiting_approval` state, emperor can `dispatch_approve` or `dispatch_reject`.
+- **Dispose lifecycle and O(1) inflight wiring** — New `dispose()` lifecycle method on dispatch manager for clean shutdown. Inflight tracking refactored from O(n) scans to O(1) `inflightByParent` map lookups.
+- **Signal tool wired into function state machine** — The `signal` tool now integrates with the function state machine, enabling signal-based state transitions (`answer`, `revise_needed`, `need_approval`, etc.).
+- **Model alias fallback resolution** — Resolver now supports model alias fallback at load time, allowing roles to reference model aliases that resolve to concrete models.
+- **JSON output format for query/search tools** — `dispatch_search`, `asset_search`, `reference_search`, `memory_recall`, and `session_search` now support a `format` parameter (`markdown` or `json`) for machine-parseable output.
+
+### Performance
+
+- **Incremental hot-reload with change classification** — Hot-reload now classifies file changes and only rebuilds what changed, avoiding full reloads on minor edits.
+- **Streaming sidecar result windows** — Large dispatch results are now streamed from disk in windows instead of loading entirely into memory.
+- **Batch fast-glob and parallel subagent resolution** — Resolver batches `fast-glob` calls and parallelizes subagent resolution for faster startup.
+- **Asset search index cache** — Asset search results are cached with async file check and LRU guard, eliminating redundant filesystem scans.
+
+### Bug Fixes
+
+- **Stale lock recovery and error suppression** — Resolved stale lock recovery blocking, silent error suppression, and continuation rollback issues in core services.
+- **Loop deadlock prevention** — Added 30s lock sweeper for `_advancing` deadlock prevention in loop coordinator.
+- **Parent-task index and budget persistence** — Added parent-task index, fixed budget persistence across restarts, and debounced loop store writes.
+- **Checkpoint FIFO cap and serialization** — Fixed checkpoint FIFO cap enforcement, incremental `readOriginSummary`, and serialization edge cases.
+- **Abort worker sessions and concurrency queue** — Fixed abort handling for worker sessions and concurrency queue promotion logic.
+- **Path-traversal, recursion guard, dead params** — Hardened `dispatch_*` tools against path traversal, added recursion guard, removed dead parameters, and added security tests.
+- **EXDEV cross-device rename** — Fixed `EXDEV` cross-device rename errors in CLI install/update by using copy+delete fallback.
+- **Postinstall guard for CI** — Guarded postinstall script against missing `dist/` directory in CI environments.
+
+### Refactors
+
+- **Platform abstraction updates** — Extended platform ports with model/compact interfaces, added event bridge, updated adapters. Decoupled core services from SDK types via event canonicalization. Updated recovery, resolver, and utilities for platform abstraction.
+- **Deprecation infrastructure** — Added deprecation infrastructure for tools, removed old aliases, improved tool descriptions.
+
+### Documentation
+
+- **README restructure** — Restructured README for readability and added demo GIFs.
+
+### Tests
+
+- **Platform abstraction tests** — Updated test suites for platform abstraction changes.
+
+---
+
+## 0.23.2
+
+### Bug Fixes
+
+- **README banner image** — Use HEAD ref for banner image to support all branches.
+
+---
+
+## 0.23.1
+
+### Bug Fixes
+
+- **CLI package.json path** — Resolve package.json path from correct depth in compiled binary.
+
+---
+
 ## 0.23.0
 
 ### Features
@@ -38,7 +101,6 @@
 - **Asset tools and validation** — Test coverage for asset inspection, search, validation, and hot-reload.
 - **Web tools** — Test coverage for web fetching and reading tools, including SSRF guard behavior.
 
----
 
 ## 0.22.0
 
