@@ -43,8 +43,8 @@ const mockToolContext = {
 // ── createDispatchTool ───────────────────────────────────────────────────
 
 describe("createDispatchTool", () => {
-  it("has arity 3 (manager + resolvedSubagents + optional subagentModelKey)", () => {
-    expect(createDispatchTool.length).toBe(3);
+  it("has arity 4 (manager + resolvedSubagents + optional subagentModelKey + optional getEffectiveAgent)", () => {
+    expect(createDispatchTool.length).toBe(4);
   });
 
   it("rejects invalid subagent", async () => {
@@ -224,6 +224,86 @@ describe("createDispatchTool", () => {
     const children2 = result.split("direct children:")[1].trim();
     expect(children2).toContain("emperor--chancellor");
     expect(children2).not.toContain("emperor--chancellor--drafter");
+  });
+
+  // ── effective-agent fallback (Pi: empty context.agent) ──────────────
+
+  it("uses getEffectiveAgent fallback when context.agent is empty (Pi)", async () => {
+    const resolved = new Map([
+      ["emperor--jinyiwei", { parentFullId: "emperor" }],
+    ]);
+    const manager = {
+      executeSync: mock(() => Promise.resolve("jinyiwei response")),
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(
+      manager,
+      resolved,
+      undefined,
+      () => "emperor",
+    );
+
+    const result = await tool.execute(
+      {
+        subagent: "emperor--jinyiwei",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      { ...mockToolContext, agent: "" },
+    );
+
+    expect(result).toBe("jinyiwei response");
+  });
+
+  it("prefers native context.agent over getEffectiveAgent fallback", async () => {
+    const resolved = new Map([
+      ["emperor--jinyiwei", { parentFullId: "emperor" }],
+      ["other--child", { parentFullId: "other" }],
+    ]);
+    const manager = {
+      executeSync: mock(() => Promise.resolve("should not reach")),
+    } as unknown as DispatchManager;
+    // Fallback says "emperor", but native context.agent is "other" — native wins,
+    // so dispatching an emperor child must be rejected as cross-tree.
+    const tool = createDispatchTool(
+      manager,
+      resolved,
+      undefined,
+      () => "emperor",
+    );
+
+    const result = await tool.execute(
+      {
+        subagent: "emperor--jinyiwei",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      { ...mockToolContext, agent: "other" },
+    );
+
+    expect(result).toContain("is not a direct child");
+    expect(result).toContain("your agent 'other'");
+  });
+
+  it("reports empty agent with no children when context.agent and fallback are both empty", async () => {
+    const resolved = new Map([
+      ["emperor--jinyiwei", { parentFullId: "emperor" }],
+    ]);
+    const manager = {
+      executeSync: mock(() => Promise.resolve("should not reach")),
+    } as unknown as DispatchManager;
+    const tool = createDispatchTool(manager, resolved);
+
+    const result = await tool.execute(
+      {
+        subagent: "emperor--jinyiwei",
+        prompt: "do it",
+        run_in_background: false,
+      },
+      { ...mockToolContext, agent: "" },
+    );
+
+    expect(result).toContain("is not a direct child");
+    expect(result).toContain("(none)");
   });
 });
 

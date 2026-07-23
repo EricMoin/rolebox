@@ -14,6 +14,7 @@ export function createDispatchTool(
   manager: DispatchManager,
   resolvedSubagents: Map<string, { parentFullId: string }>,
   _subagentModelKey?: Map<string, string>,
+  getEffectiveAgent?: () => string,
 ) {
   return defineTool({
     description:
@@ -50,15 +51,27 @@ export function createDispatchTool(
         return `Invalid subagent: '${input.subagent}'. Available subagents: ${available}`;
       }
 
+      // Resolve the effective acting agent. On opencode `context.agent` is
+      // populated natively. On Pi it is always empty, so fall back to the
+      // platform-provided resolver (role switcher / child-process seed).
+      const effectiveAgent =
+        context.agent && context.agent.length > 0
+          ? context.agent
+          : getEffectiveAgent?.() ?? "";
+
       const entry = resolvedSubagents.get(input.subagent);
-      if (entry && entry.parentFullId !== context.agent) {
+      if (entry && entry.parentFullId !== effectiveAgent) {
         const availableChildren = [...resolvedSubagents.entries()]
-          .filter(([, v]) => v.parentFullId === context.agent)
+          .filter(([, v]) => v.parentFullId === effectiveAgent)
           .map(([k]) => k);
-        return `Subagent '${input.subagent}' is not a direct child of your agent '${context.agent}'. You can only dispatch to your direct children: ${availableChildren.join(", ") || "(none)"}`;
+        return `Subagent '${input.subagent}' is not a direct child of your agent '${effectiveAgent}'. You can only dispatch to your direct children: ${availableChildren.join(", ") || "(none)"}`;
       }
 
-      const parentCtx = parentContextFromTool(context);
+      const parentCtx = parentContextFromTool({
+        sessionID: context.sessionID,
+        agent: effectiveAgent,
+        directory: context.directory,
+      });
 
       const dispatchInput: DispatchInput = {
         subagent: input.subagent,
