@@ -35,7 +35,7 @@ export function createMemoryWriteTool() {
         .default("medium"),
     },
     async execute(input, context) {
-      const store = new MemoryStore(context.directory);
+      const store = await MemoryStore.create(context.directory);
       try {
         const id = store.write({
           title: input.title,
@@ -85,7 +85,7 @@ export function createMemoryRecallTool() {
         .describe("Max results"),
     },
     async execute(input, context) {
-      const store = new MemoryStore(context.directory);
+      const store = await MemoryStore.create(context.directory);
       try {
         const results = store.search({
           query: input.query,
@@ -137,7 +137,7 @@ export function createMemoryListTool() {
         .default("recent"),
     },
     async execute(input, context) {
-      const store = new MemoryStore(context.directory);
+      const store = await MemoryStore.create(context.directory);
       try {
         const summaries = store.list({
           scope: input.scope,
@@ -183,7 +183,7 @@ export function createMemoryUpdateTool() {
     async execute(input, context) {
       const CategoryEnum = z.enum(["decision", "preference", "fact", "lesson", "note"]);
       const RelevanceEnum = z.enum(["high", "medium", "low"]);
-      const store = new MemoryStore(context.directory);
+      const store = await MemoryStore.create(context.directory);
       try {
         const existing = store.read(input.id);
         if (!existing) {

@@ -1,4 +1,4 @@
-import type { Database, SQLQueryBindings } from "bun:sqlite";
+import type { DatabaseDriver } from "./db-driver.ts";
 import type { MemoryEntry } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
 
@@ -16,9 +16,9 @@ export interface MemorySearchOptions {
  * Returns full MemoryEntry[] ranked by relevance.
  * Supports optional scope and category filtering.
  */
-export function searchMemories(db: Database, options: MemorySearchOptions): MemoryEntry[] {
+export function searchMemories(db: DatabaseDriver, options: MemorySearchOptions): MemoryEntry[] {
   const conditions: string[] = [];
-  const params: SQLQueryBindings[] = [];
+  const params: unknown[] = [];
 
   // Escape double quotes in the query to prevent FTS syntax errors
   const ftsQuery = options.query.replace(/"/g, "\"\"");

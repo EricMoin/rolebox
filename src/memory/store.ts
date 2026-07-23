@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { type DatabaseDriver, createDatabase } from "./db-driver.ts";
 import { memoryDbPath, shortHash } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 import type { MemoryEntry, MemorySummary } from "../types.ts";
@@ -20,15 +20,25 @@ export interface MemoryListOptions {
 export type { MemorySearchOptions } from "./search.ts";
 
 export class MemoryStore {
-  private db: Database;
+  private db: DatabaseDriver;
 
-  constructor(private workspaceDir: string) {
+  private constructor(db: DatabaseDriver) {
+    this.db = db;
+  }
+
+  /**
+   * Async factory: resolve the runtime driver (Bun or Node), open the
+   * database, and run schema migration.
+   */
+  static async create(workspaceDir: string): Promise<MemoryStore> {
     const path = memoryDbPath(workspaceDir);
     mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.ensureSchema();
+    const db = await createDatabase(path);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA foreign_keys = ON");
+    const store = new MemoryStore(db);
+    store.ensureSchema();
+    return store;
   }
 
   // ── Schema ──────────────────────────────────────────────────────────────
@@ -53,20 +63,18 @@ export class MemoryStore {
       this.db.run(
         `INSERT INTO memories (id, scope, role_id, category, title, content, tags, relevance, created_at, updated_at, session_id, source_sessions)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          id,
-          entry.scope,
-          entry.role_id,
-          entry.category,
-          entry.title,
-          entry.content,
-          JSON.stringify(entry.tags ?? []),
-          entry.relevance ?? "medium",
-          now,
-          now,
-          entry.session_id,
-          JSON.stringify(entry.source_sessions ?? []),
-        ],
+        id,
+        entry.scope,
+        entry.role_id,
+        entry.category,
+        entry.title,
+        entry.content,
+        JSON.stringify(entry.tags ?? []),
+        entry.relevance ?? "medium",
+        now,
+        now,
+        entry.session_id,
+        JSON.stringify(entry.source_sessions ?? []),
       );
       return id;
     });
@@ -107,7 +115,7 @@ export class MemoryStore {
     const doUpdate = this.db.transaction(() => {
       const now = new Date().toISOString();
       const sets: string[] = [];
-      const params: SQLQueryBindings[] = [];
+      const params: unknown[] = [];
 
       const fieldMap: Array<[keyof MemoryEntry, string]> = [
         ["scope", "scope"],
@@ -122,7 +130,7 @@ export class MemoryStore {
       for (const [key, col] of fieldMap) {
         if (fields[key] !== undefined) {
           sets.push(`${col} = ?`);
-          params.push(fields[key] as SQLQueryBindings);
+          params.push(fields[key]);
         }
       }
 
@@ -141,14 +149,13 @@ export class MemoryStore {
 
       if (sets.length === 1) {
         // Only updated_at was pushed — nothing to update beyond that
-        params.push(id);
-        this.db.run("UPDATE memories SET updated_at = ? WHERE id = ?", params);
+        this.db.run("UPDATE memories SET updated_at = ? WHERE id = ?", now, id);
         return;
       }
 
       const sql = `UPDATE memories SET ${sets.join(", ")} WHERE id = ?`;
       params.push(id);
-      this.db.run(sql, params);
+      this.db.run(sql, ...params);
     });
 
     doUpdate();
@@ -158,7 +165,7 @@ export class MemoryStore {
    * Delete a memory entry by ID. The AFTER DELETE trigger cleans up the FTS index.
    */
   delete(id: string): void {
-    this.db.run("DELETE FROM memories WHERE id = ?", [id]);
+    this.db.run("DELETE FROM memories WHERE id = ?", id);
   }
 
   // ── Query ───────────────────────────────────────────────────────────────
@@ -169,7 +176,7 @@ export class MemoryStore {
    */
   list(options?: MemoryListOptions): MemorySummary[] {
     const conditions: string[] = [];
-    const params: SQLQueryBindings[] = [];
+    const params: unknown[] = [];
 
     // Scope filtering
     if (options?.scope && options.scope !== "both") {
@@ -239,7 +246,7 @@ export class MemoryStore {
    */
   touch(id: string): void {
     const now = new Date().toISOString();
-    this.db.run("UPDATE memories SET accessed_at = ?, access_count = access_count + 1 WHERE id = ?", [now, id]);
+    this.db.run("UPDATE memories SET accessed_at = ?, access_count = access_count + 1 WHERE id = ?", now, id);
   }
 
   // ── Stats ───────────────────────────────────────────────────────────────

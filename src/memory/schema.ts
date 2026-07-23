@@ -1,11 +1,11 @@
-import type { Database } from "bun:sqlite";
+import type { DatabaseDriver } from "./db-driver.ts";
 
 /**
  * Ensure the memory database schema exists.
  * Creates tables, FTS virtual table, triggers, and indexes for the memory store.
  * All statements use IF NOT EXISTS — safe to call repeatedly (idempotent).
  */
-export function ensureMemorySchema(db: Database): void {
+export function ensureMemorySchema(db: DatabaseDriver): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id              TEXT PRIMARY KEY,
