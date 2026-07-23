@@ -1,6 +1,7 @@
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import { KNOWN_CONDITIONS } from "../function/conditions.ts";
+import { fileExists } from "../utils/fs.ts";
 import type {
   ResolvedRole,
   ResolvedFunction,
@@ -191,7 +192,7 @@ async function resolveReferenceChecks(
   for (const { ownerId, ref } of checks) {
     if (!ref.filePath) continue;
     try {
-      const exists = await Bun.file(ref.filePath).exists();
+      const exists = await fileExists(ref.filePath);
       if (!exists) {
         issues.push({
           asset: `${ownerId}/${ref.name}`,

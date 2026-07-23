@@ -5,11 +5,12 @@ import { parseFrontmatter } from "../resolver/frontmatter.ts";
 import { functionPath } from "../utils/paths.ts";
 import type { FunctionCall } from "./parser.ts";
 import { createSubLogger } from "../logger.ts";
+import { readTextFile, fileExists } from "../utils/fs.ts";
 
 const log = createSubLogger("function-resolver");
 
 /**
- * Resolve function names to their file locations using Bun.file().exists().
+ * Resolve function names to their file locations using fileExists().
  *
  * For each function name, three candidate locations are checked in priority
  * order.  The first existing file wins.  Functions whose body is empty after
@@ -39,7 +40,7 @@ export async function resolveFunctions(
 
     // Parallel existence checks — all three candidates checked concurrently
     const existsResults = await Promise.all(
-      candidates.map(c => Bun.file(c.path).exists()),
+      candidates.map(c => fileExists(c.path)),
     );
 
     let matched = false;
@@ -51,7 +52,7 @@ export async function resolveFunctions(
 
       let content: string;
       try {
-        content = await Bun.file(candidates[i].path).text();
+        content = await readTextFile(candidates[i].path);
       } catch {
         continue;
       }
@@ -156,16 +157,14 @@ export function applyParams(
 export async function loadFunctionContent(
   filePath: string,
 ): Promise<{ metadata: FunctionMetadata; content: string }> {
-  const file = Bun.file(filePath);
-
-  if (!(await file.exists())) {
+  if (!(await fileExists(filePath))) {
     throw new Error(
       `Function file not found at "${filePath}". ` +
         `The file may have been deleted.`,
     );
   }
 
-  const content = await file.text();
+  const content = await readTextFile(filePath);
   const { metadata, body } = parseFrontmatter(content);
 
   return {

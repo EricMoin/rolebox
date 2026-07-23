@@ -4,6 +4,7 @@ import yaml from "js-yaml";
 import type { ReferenceEntry, ResolvedReference } from "../types.ts";
 import type { ReferenceScope } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
+import { readTextFile, fileExists } from "../utils/fs.ts";
 
 const log = createSubLogger("reference-resolver");
 
@@ -66,7 +67,7 @@ async function extractFrontmatterDescriptionInner(
   filePath: string,
 ): Promise<string | undefined> {
   try {
-    const content = await Bun.file(filePath).text();
+    const content = await readTextFile(filePath);
     const trimmed = content.trimStart();
 
     if (!trimmed.startsWith("---")) return undefined;
@@ -146,8 +147,7 @@ export async function resolveExplicitReferences(
     const filePath = pathResolve(baseDir, entry.path);
 
     try {
-      const file = Bun.file(filePath);
-      if (!(await file.exists())) {
+      if (!(await fileExists(filePath))) {
         log.info(`Skipping reference "${key}": file not found at "${entry.path}"`);
         continue;
       }

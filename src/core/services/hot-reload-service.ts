@@ -4,6 +4,8 @@ import { createSubLogger } from "../../logger.ts";
 import { clearExtensionModuleCache } from "../../extensions/loader.ts";
 import { watch, type FSWatcher } from "node:fs";
 import { join, dirname, basename } from "node:path";
+import { createHash } from "node:crypto";
+import { readTextFile } from "../../utils/fs.ts";
 import { discoverRoles } from "../../loader/role-loader.ts";
 import { resolveAllRoles, type ResolveContext } from "../../resolver/orchestrator.ts";
 import { initModelResolver } from "../../resolver/model-resolver.ts";
@@ -449,9 +451,12 @@ export class HotReloadService implements PluginService {
     return { type: "full", roleIds: [] };
   }
 
-  /** Compute a content-addressable hash string from role.yaml content. */
-  private async hashContent(content: string): Promise<string> {
-    return Bun.hash(content).toString(36);
+  /** Compute a content-addressable hash string from role.yaml content.
+   *  Only compared in-process (roleHashCache) — NOT persisted.
+   *  Changed from Bun.hash to node:crypto sha1-hex for Node portability;
+   *  format differs but in-process comparison is self-consistent. */
+  private hashContent(content: string): string {
+    return createHash("sha1").update(content).digest("hex");
   }
 
   /** Read each role.yaml and update the hash cache for incremental detection. */
@@ -460,8 +465,8 @@ export class HotReloadService implements PluginService {
     for (const [roleId] of roles) {
       const yamlPath = join(this.ctx.roleboxDir, roleId, ROLE_YAML);
       try {
-        const content = await Bun.file(yamlPath).text();
-        this.roleHashCache.set(roleId, await this.hashContent(content));
+        const content = await readTextFile(yamlPath);
+        this.roleHashCache.set(roleId, this.hashContent(content));
       } catch {
         // Role may no longer exist — remove from cache
         this.roleHashCache.delete(roleId);

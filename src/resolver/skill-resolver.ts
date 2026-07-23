@@ -6,6 +6,7 @@ import { resolveAllReferences } from "./reference-resolver.ts";
 import { skillDirPath, skillFilePath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
+import { readTextFile, fileExists } from "../utils/fs.ts";
 
 const log = createSubLogger("skill-resolver");
 
@@ -86,7 +87,7 @@ export async function resolveSkills(
       let description = "";
       let references: ResolvedReference[] = [];
       try {
-        const content = await Bun.file(filePath).text();
+        const content = await readTextFile(filePath);
         const { metadata } = parseFrontmatter(content);
         description = metadata.description ?? "";
 
@@ -123,14 +124,12 @@ export async function resolveSkills(
  * @throws If the file cannot be read (e.g. it was deleted since resolution).
  */
 export async function loadSkillContent(skill: ResolvedSkill): Promise<string> {
-  const file = Bun.file(skill.filePath);
-
-  if (!(await file.exists())) {
+  if (!(await fileExists(skill.filePath))) {
     throw new Error(
       `Skill file not found at "${skill.filePath}" for skill "${skill.name}". ` +
         `The file may have been deleted after resolution.`,
     );
   }
 
-  return file.text();
+  return readTextFile(skill.filePath);
 }

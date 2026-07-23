@@ -2,6 +2,7 @@ import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { ResolvedRole, ResolvedReference } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
+import { readTextFile } from "./fs.ts";
 
 const log = createSubLogger("search:reference");
 
@@ -80,7 +81,7 @@ async function searchInFile(
 ): Promise<SearchMatch[]> {
   let content: string;
   try {
-    content = await Bun.file(filePath).text();
+    content = await readTextFile(filePath);
   } catch (err) {
     log.debug("Failed to read reference file", { filePath, error: String(err) });
     return [];
