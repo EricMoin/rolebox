@@ -147,15 +147,92 @@ describe("LoopStore persistence", () => {
     expect(result).toBeNull();
   });
 
-  it("version mismatch → load() returns null", () => {
+  it("unrecognised version → load() returns null", () => {
     const { shortHash } = require("../../src/utils/state-paths.ts");
     const stateDir = join(tempDir, ".rolebox", "state");
     mkdirSync(stateDir, { recursive: true });
     const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
-    writeFileSync(filePath, JSON.stringify({ version: 2, loops: [] }));
+    writeFileSync(filePath, JSON.stringify({ version: 99, loops: [] }));
 
     const result = store.load();
     expect(result).toBeNull();
+  });
+
+  it("v2 file is migrated, not rejected", () => {
+    const { shortHash } = require("../../src/utils/state-paths.ts");
+    const stateDir = join(tempDir, ".rolebox", "state");
+    mkdirSync(stateDir, { recursive: true });
+    const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
+    // Write a v2 record that lacks the four new optional fields
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        version: 2,
+        loops: [
+          {
+            id: "old-loop",
+            state: {
+              originSessionId: "ses_v2",
+              agent: "v2-agent",
+              basePrompt: "do work",
+              mode: "inherit",
+              total: 3,
+              current: 1,
+              phase: "complete",
+              cancelRequested: false,
+              startedAt: 100,
+              updatedAt: 200,
+              roundStartedAt: 100,
+              schemaVersion: 2,
+            },
+          },
+        ],
+      }),
+    );
+
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.size).toBe(1);
+    const restored = loaded!.get("old-loop")!;
+    // All four new fields land as undefined; schemaVersion bumped to 3
+    expect(restored.parentLoopId).toBeUndefined();
+    expect(restored.consecutiveStaleRounds).toBeUndefined();
+    expect(restored.objective).toBeUndefined();
+    expect(restored.promptFingerprint).toBeUndefined();
+    expect(restored.schemaVersion).toBe(3);
+  });
+
+  it("new optional fields survive save→load round-trip", async () => {
+    const loop = makeLoop({
+      phase: "dispatching",
+      objective: "write tests",
+      promptFingerprint: "fp_abc",
+      parentLoopId: "parent-loop-1",
+      consecutiveStaleRounds: 2,
+    });
+    const input = new Map<string, LoopState>([["l1", loop]]);
+    await store.save(input);
+
+    const loaded = store.load();
+    expect(loaded).not.toBeNull();
+    const restored = loaded!.get("l1")!;
+    expect(restored.objective).toBe("write tests");
+    expect(restored.promptFingerprint).toBe("fp_abc");
+    expect(restored.parentLoopId).toBe("parent-loop-1");
+    expect(restored.consecutiveStaleRounds).toBe(2);
+  });
+
+  it("writes version 3 in the persisted file", async () => {
+    const loop = makeLoop({ phase: "complete" });
+    await store.save(new Map([["l1", loop]]));
+
+    const { shortHash } = require("../../src/utils/state-paths.ts");
+    const stateDir = join(tempDir, ".rolebox", "state");
+    const filePath = join(stateDir, `loops-${shortHash(tempDir)}.json`);
+
+    const raw = require("node:fs").readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.version).toBe(3);
   });
 
   it("empty file → load() returns null", () => {

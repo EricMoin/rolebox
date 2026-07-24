@@ -8,7 +8,7 @@ import { createSubLogger } from "../logger.ts";
 const log = createSubLogger("loop-store");
 
 interface FileShape {
-  version: 1;
+  version: number;
   loops: { id: string; state: LoopState }[];
 }
 
@@ -51,7 +51,7 @@ export class LoopStore {
 
   private toFile(loops: Map<string, LoopState>): string {
     const entries = [...loops].map(([id, state]) => ({ id, state }));
-    return JSON.stringify({ version: 1, loops: entries } satisfies FileShape, null, 2);
+    return JSON.stringify({ version: 3, loops: entries } satisfies FileShape, null, 2);
   }
 
   /**
@@ -119,9 +119,18 @@ export class LoopStore {
 
     try {
       const parsed = JSON.parse(raw) as FileShape;
-      if (parsed.version !== 1 || !Array.isArray(parsed.loops)) return null;
+      if (parsed.version < 1 || parsed.version > 3 || !Array.isArray(parsed.loops)) return null;
+      const needsMigration = parsed.version < 3;
       const out = new Map<string, LoopState>();
       for (const entry of parsed.loops) {
+        if (needsMigration) {
+          const state = entry.state;
+          state.parentLoopId = state.parentLoopId ?? undefined;
+          state.consecutiveStaleRounds = state.consecutiveStaleRounds ?? undefined;
+          state.objective = state.objective ?? undefined;
+          state.promptFingerprint = state.promptFingerprint ?? undefined;
+          state.schemaVersion = 3;
+        }
         out.set(entry.id, entry.state);
       }
       return out;
