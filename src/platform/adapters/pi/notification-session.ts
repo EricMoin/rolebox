@@ -119,9 +119,19 @@ export class PiNotificationSessionClient implements ISessionClient {
    *
    * For sessions managed by the inner adapter (present in `processes`),
    * delegates to `inner.prompt()`. For external (parent) sessions, sends
-   * the message via `pi.sendUserMessage()` if available.
+   * the message via `pi.sendMessage()` with `triggerTurn` derived from
+   * `options.noReply` and `options.fromLoop`. Falls back to
+   * `pi.sendUserMessage()` on legacy Pi versions where `pi.sendMessage`
+   * is unavailable.
    *
-   * When `pi.sendUserMessage` is unavailable or throws, a warning is
+   * When `fromLoop` is true, `triggerTurn` is the logical inverse of
+   * `noReply` — the loop coordinator uses `fromLoop: true, noReply: true`
+   * for silent progress markers and `fromLoop: true, noReply: false` for
+   * terminal turn-triggering completions. When `fromLoop` is false
+   * (default), `triggerTurn` equals `!noReply` for standard dispatch
+   * notifications.
+   *
+   * When no messaging API is available or the call throws, a warning is
    * logged and a `session.error` canonical event is emitted (when
    * an event bridge is configured) so the dispatch manager can detect
    * the stuck state.
@@ -134,30 +144,36 @@ export class PiNotificationSessionClient implements ISessionClient {
       system?: string;
       agent?: string;
       model?: { providerID: string; modelID: string };
+      /** Set by the loop coordinator via DispatchAdapter.injectNote(). */
+      fromLoop?: boolean;
     },
   ): Promise<{ id: string } | null> {
     if (this._hasProcess(id)) {
       return this.inner.prompt(id, options);
     }
 
-    if (typeof this.pi.sendUserMessage !== "function") {
-      this.log.warn("Parent notification unavailable — no pi.sendUserMessage", {
+    if (
+      typeof this.pi.sendMessage !== "function" &&
+      typeof this.pi.sendUserMessage !== "function"
+    ) {
+      this.log.warn("Parent notification unavailable — no messaging API", {
         sessionId: id,
       });
-      void this._emitNotificationError(id, "pi.sendUserMessage is not available");
+      void this._emitNotificationError(id, "No messaging API available");
       return null;
     }
 
     const text = options.parts
       ?.map((p) => p.text)
       .join("\n") ?? "";
+    const triggerTurn = options.fromLoop ? !options.noReply : !options.noReply;
 
     try {
-      await this.pi.sendUserMessage(id, text);
+      this._sendMessage(text, triggerTurn);
       return { id };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      this.log.warn("Parent notification failed — pi.sendUserMessage threw", {
+      this.log.warn("Parent notification failed", {
         sessionId: id,
         error: message,
       });
@@ -233,6 +249,44 @@ export class PiNotificationSessionClient implements ISessionClient {
         sessionId,
         reason,
       });
+    }
+  }
+
+  /**
+   * Send a message to the parent session via Pi's ExtensionAPI.
+   *
+   * Uses `pi.sendMessage()` with the given `triggerTurn` flag plus the
+   * matching `deliverAs` ("followUp" when triggering, "nextTurn" when
+   * silent) for fine-grained turn control. Falls back to
+   * `pi.sendUserMessage()` (which always triggers a turn) on legacy Pi
+   * versions where `pi.sendMessage` is unavailable.
+   *
+   * @param text - The message text to send
+   * @param triggerTurn - Whether to trigger an agent turn after delivery
+   */
+  private _sendMessage(text: string, triggerTurn: boolean): void {
+    if (typeof this.pi.sendMessage === "function") {
+      this.pi.sendMessage(
+        {
+          customType: "rolebox-inject",
+          content: text,
+          display: true,
+          details: { source: "rolebox-dispatch" },
+        },
+        {
+          triggerTurn,
+          deliverAs: triggerTurn ? "followUp" : "nextTurn",
+        },
+      );
+      return;
+    }
+
+    this.log.warn(
+      "pi.sendMessage unavailable — falling back to pi.sendUserMessage (always triggers turn)",
+    );
+
+    if (typeof this.pi.sendUserMessage === "function") {
+      this.pi.sendUserMessage(text);
     }
   }
 }

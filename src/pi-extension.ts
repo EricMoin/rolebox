@@ -7,7 +7,8 @@
  *
  * It initializes rolebox on the Pi platform by: discovering roles, resolving
  * them, creating platform adapters, syncing agents in-memory, wiring events,
- * injecting agent context, and surfacing skill resources.
+ * injecting agent context, surfacing skill resources, and wiring dispatch
+ * and loop tools for multi-round iteration and background task execution.
  *
  * @module
  */
@@ -34,6 +35,10 @@ import {
 import { createDispatchStatusTool } from "./dispatch/query/task-status.ts";
 import { createDispatchProgressTool, createDispatchStreamTool } from "./dispatch/progress/progress-tools.ts";
 import type { CanonicalToolDef } from "./platform/index.ts";
+import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
+import { LoopCoordinator } from "./loop/coordinator.ts";
+import { LoopStore } from "./loop/loop-store.ts";
+import { createLoopTool } from "./platform/adapters/pi/loop-tool.ts";
 import {
   createDispatchManager,
   buildSubagentLineage,
@@ -145,13 +150,57 @@ export default async function (pi: any): Promise<void> {
       buildSubagentLineage(resolvedRoles);
 
     // Pi-specific: register agent configs on the process adapter.
+    //
+    // Child model strings come from role.yaml (`provider/model-id`). pi
+    // 0.81.1 rejects ids whose provider is not in ITS model catalog
+    // (verified live: `Error: Model "hfai-dev/deepseek-v4-pro-dev0" not
+    // found`, exit 1, zero stdout events) — such a child previously
+    // produced an empty dispatch result and a completion gate that never
+    // fired. Resolve each id against pi's model registry first and fall
+    // back to the host session's currently active model, which is by
+    // construction a spawn-resolvable id.
+    function resolveChildModel(raw: string): string {
+      try {
+        const slash = raw.indexOf("/");
+        const ctx = (pi as any)?.ctx;
+        if (slash > 0 && slash < raw.length - 1) {
+          const provider = raw.slice(0, slash);
+          const id = raw.slice(slash + 1);
+          const found = ctx?.modelRegistry?.find?.(provider, id);
+          if (found) return raw; // resolvable as configured — keep it.
+        } else if (raw === "default") {
+          // `--model default` is also rejected by pi 0.81.1 ("Model
+          // \"default\" not found") — never pass it to a child.
+        } else {
+          return raw; // Non-provider-prefixed non-default id — pass through.
+        }
+        // Fall back to the host session's active model id.
+        const host = ctx?.model;
+        const hostId =
+          typeof host === "string" ? host : (host?.id ?? host?.modelID);
+        if (typeof hostId === "string" && hostId.length > 0) {
+          log.debug("Child model not in pi registry — using host model", {
+            configured: raw,
+            host: hostId,
+          });
+          return hostId;
+        }
+      } catch (err) {
+        log.debug("Child model resolution failed — passing through as-is", {
+          model: raw,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return raw;
+    }
+
     function registerPiAgentConfigs(
       subagents: ResolvedSubAgent[],
       parentModel: string | undefined,
     ): void {
       for (const sub of subagents) {
         const model = sub.config.model ?? parentModel;
-        const key = model ? model : "default";
+        const key = model ? resolveChildModel(model) : resolveChildModel("default");
         sessionAdapter.registerAgentConfig(sub.id, {
           model: key,
           tools: [],
@@ -183,6 +232,10 @@ export default async function (pi: any): Promise<void> {
     /** Event bridge subscription cleanup functions. Populated after dispatch. */
     const bridgeUnsubscribers: Array<() => void> = [];
 
+    // ── Loop subsystem references (assigned after dispatchManager init) ──
+    let loopCoordinator!: LoopCoordinator;
+    let loopStore!: LoopStore;
+
     // ── Shutdown hooks ──────────────────────────────────────────────────
     //
     // Register process-level handlers to clean up child processes and
@@ -191,6 +244,14 @@ export default async function (pi: any): Promise<void> {
       log.debug("Pi extension shutdown — persisting notification dedup");
       persistNotifyDedupSync(getSentFinalNotifies());
       for (const unsub of bridgeUnsubscribers) unsub();
+      // Persist loop state synchronously and dispose coordinator.
+      if (loopCoordinator) {
+        loopCoordinator.dispose();
+      }
+      if (loopStore) {
+        loopStore.saveSync(loopCoordinator?.getAllLoopStates() ?? new Map());
+        loopStore.dispose();
+      }
     };
 
     process.once("SIGINT", () => {
@@ -220,6 +281,55 @@ export default async function (pi: any): Promise<void> {
       subagentKeys: subagentModelKey.size,
     });
 
+    // ── Loop subsystem ──────────────────────────────────────────────────
+    //
+    // Create the loop coordinator, store, and dispatch adapter. Recover any
+    // persisted loop state from disk and reconcile it against dispatch task
+    // status to resume interrupted loops after a restart.
+
+    loopStore = new LoopStore(dirs.configDir);
+    const loopDispatchAdapter = new DispatchAdapter(
+      dispatchManager,
+      notifyClient,
+      process.cwd(),
+    );
+    loopCoordinator = new LoopCoordinator(loopDispatchAdapter, {
+      delayMs: 2000,
+      persist: (loops) => {
+        void loopStore.save(loops);
+      },
+    });
+
+    // Recovery: load persisted loops, reconcile against dispatch task state,
+    // restore into coordinator, and re-subscribe terminated listeners.
+    const loadedLoops = loopStore.load();
+    let reconciledCount = 0;
+    if (loadedLoops && loadedLoops.size > 0) {
+      const reconciled = await loopStore.reconcile(loadedLoops, async (taskId) => {
+        const task = dispatchManager.getTask(taskId);
+        return {
+          status: task?.status ?? "unknown",
+          exists: task !== undefined,
+        };
+      });
+      for (const [id, state] of reconciled) {
+        loopCoordinator.restoreState(state);
+      }
+      reconciledCount = reconciled.size;
+      await loopCoordinator.reSubscribeListeners();
+      log.info("Loop state recovered", {
+        loaded: loadedLoops.size,
+        restored: reconciledCount,
+      });
+    }
+
+    log.info("Loop coordinator initialized");
+    log.debug("Loop coordinator details", {
+      delayMs: 2000,
+      loadedLoops: loadedLoops?.size ?? 0,
+      reconciledLoops: reconciledCount,
+      activeLocks: loopCoordinator.getAdvancingLockState().activeLocks,
+    });
     // ── PiEventBridge → DispatchManager wiring ──────────────────────────
     //
     // Subscribe to canonical Pi session lifecycle events and route them
@@ -307,6 +417,24 @@ export default async function (pi: any): Promise<void> {
       }),
     );
 
+    // session.deleted (loop) — clean up worker-to-origin mappings when a
+    // session is deleted. Mirrors the dispatch cleanup handler above but
+    // targets the loop coordinator's internal tracking.
+    bridgeUnsubscribers.push(
+      eventBridge.onType("session.deleted", async (event) => {
+        try {
+          const info = event.properties.info as { id?: string } | undefined;
+          const did = info?.id ?? extractSessionId(event.properties);
+          if (did) {
+            await loopCoordinator.cancelNow(did);
+            log.debug("bridge:session.deleted (loop): cancelled loop", { sessionId: did });
+          }
+        } catch (err) {
+          log.debug("bridge:session.deleted loop handler error", { error: formatError(err) });
+        }
+      }),
+    );
+
     log.debug("PiEventBridge → DispatchManager wiring complete", {
       subscriptions: bridgeUnsubscribers.length,
     });
@@ -348,7 +476,14 @@ export default async function (pi: any): Promise<void> {
       dispatch_stream: createDispatchStreamTool(dispatchManager),
     };
 
-    const loopTools: Record<string, CanonicalToolDef> = {};
+    const loopTool = createLoopTool(
+      loopCoordinator,
+      pi,
+      () => activeAgent.get() ?? "",
+    );
+    const loopTools: Record<string, CanonicalToolDef> = {
+      loop: loopTool,
+    };
 
     const serviceStack = new PiLightweightServiceStack(
       pi,
@@ -393,6 +528,88 @@ export default async function (pi: any): Promise<void> {
 
     log.info("Event wiring complete", { events: 9 });
 
+    // ── /stop-loop command ─────────────────────────────────────────────
+    //
+    // Register a Pi slash command that cancels the active loop for the
+    // current session. Uses pi.registerCommand (available since Pi 2.x).
+    if (typeof pi.registerCommand === "function") {
+      pi.registerCommand("stop-loop", {
+        description: "Cancel the active loop for the current session",
+        handler: async (_args: string, ctx: any) => {
+          try {
+            const sessionId = ctx?.sessionManager?.getSessionId?.();
+            if (sessionId) {
+              await loopCoordinator.cancelNow(sessionId);
+              log.info("stop-loop: cancelled loop", { sessionId });
+            }
+          } catch (err) {
+            log.debug("stop-loop handler error", { error: formatError(err) });
+          }
+        },
+      });
+      log.info("stop-loop command registered");
+    }
+
+    // ── Loop lifecycle Pi event handlers ───────────────────────────────
+    //
+    // Register Pi lifecycle event hooks that manage the loop coordinator:
+    // agent_settled → re-subscribe listeners for completed workers,
+    // session_shutdown → cancel active loops and dispose coordinator,
+    // before_agent_start → scan for [rolebox:stop-loop] marker.
+
+    if (typeof pi.on === "function") {
+      // agent_settled: fires after agent finishes and no retry/compaction
+      // is pending. Use this to recover loops whose workers completed
+      // while the agent was busy streaming or processing.
+      pi.on("agent_settled", async (_event: unknown, _ctx: unknown) => {
+        try {
+          await loopCoordinator.reSubscribeListeners();
+          log.debug("agent_settled: loop listeners re-subscribed");
+        } catch (err) {
+          log.debug("agent_settled loop handler error", { error: formatError(err) });
+        }
+      });
+
+      // session_shutdown: fires when the extension runtime is torn down
+      // (quit, reload, new session, resume, fork). Cancel any active loop
+      // bound to this session, then dispose the coordinator to release
+      // all resources.
+      pi.on("session_shutdown", async (_event: unknown, ctx: any) => {
+        try {
+          const sessionId = ctx?.sessionManager?.getSessionId?.();
+          if (sessionId) {
+            await loopCoordinator.cancelNow(sessionId);
+            log.debug("session_shutdown: cancelled loop", { sessionId });
+          }
+          loopCoordinator.dispose();
+        } catch (err) {
+          log.debug("session_shutdown loop handler error", { error: formatError(err) });
+        }
+      });
+
+      // before_agent_start: fires before each LLM call. Scan the system
+      // prompt and user prompt for the [rolebox:stop-loop] marker. When
+      // found, cancel the active loop for this session.
+      pi.on("before_agent_start", async (event: any, ctx: any) => {
+        try {
+          const marker = "[rolebox:stop-loop]";
+          const systemPrompt = typeof event?.systemPrompt === "string" ? event.systemPrompt : "";
+          const userPrompt = typeof event?.prompt === "string" ? event.prompt : "";
+          if (systemPrompt.includes(marker) || userPrompt.includes(marker)) {
+            const sessionId = ctx?.sessionManager?.getSessionId?.();
+            if (sessionId) {
+              await loopCoordinator.cancelNow(sessionId);
+              log.info("stop-loop detected via before_agent_start marker", { sessionId });
+            }
+          }
+        } catch (err) {
+          log.debug("before_agent_start loop handler error", { error: formatError(err) });
+        }
+      });
+
+      log.info("Loop lifecycle event handlers wired");
+    }
+
     // ── 7. Agent system prompt injection ────────────────────────────────
     //
     // Before Pi starts an agent, inject a section listing all registered
@@ -419,6 +636,23 @@ export default async function (pi: any): Promise<void> {
           }
 
           lines.push("</available_roles>", "");
+
+          // ── Loop tool availability ────────────────────────────────────
+          //
+          // Tell the agent about the loop tool for multi-round iteration.
+          // The loop tool runs rounds in background dispatch sessions;
+          // progress is delivered via silent notification markers and
+          // the agent can use /stop-loop to cancel an active loop.
+          lines.push(
+            "<loop_tool>",
+            "The `loop(iterations, mode)` tool runs a task across multiple sessions.",
+            "- `iterations` (1–50, default 5): number of rounds to execute.",
+            "- `mode` (\"inherit\", default): \"inherit\" shares context; \"fresh\" starts each round clean.",
+            "Use `/stop-loop` to cancel an active loop. Progress is visible via",
+            "`dispatch_stream` or `dispatch_status`.",
+            "</loop_tool>",
+            "",
+          );
 
           const agentSection = lines.join("\n");
           const currentPrompt = typeof event.systemPrompt === "string" ? event.systemPrompt : "";

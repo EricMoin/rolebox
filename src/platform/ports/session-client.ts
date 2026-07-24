@@ -63,6 +63,14 @@ export interface ISessionClient {
       agent?: string;
       /** Optional model override for this prompt. Ignored if the platform does not support per-prompt model selection. */
       model?: { providerID: string; modelID: string };
+      /**
+       * Set by the loop coordinator to distinguish loop progress markers
+       * from general dispatch notifications. When `true`, `triggerTurn` is
+       * derived from `noReply`: progress markers are silent (`triggerTurn:
+       * false`), final completion messages trigger a turn (`triggerTurn:
+       * true`).
+       */
+      fromLoop?: boolean;
     },
   ): Promise<{ id: string } | null>;
 

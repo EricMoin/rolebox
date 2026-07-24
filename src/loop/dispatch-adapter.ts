@@ -177,6 +177,7 @@ export class DispatchAdapter implements IDispatchAdapter {
   async injectNote(sessionId: string, text: string): Promise<void> {
     await this.client.prompt(sessionId, {
       noReply: true,
+      fromLoop: true,
       parts: [{ type: "text", text }],
     });
   }

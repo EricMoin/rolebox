@@ -4,7 +4,7 @@
  * Verifies that the class:
  *   1. Delegates non-prompt methods to the inner adapter
  *   2. Delegates prompt to inner for managed sessions
- *   3. Calls pi.sendUserMessage for external sessions on prompt
+ *   3. Calls pi.sendMessage for external sessions on prompt (with triggerTurn)
  *   4. Delegates promptSync to inner for managed sessions
  *   5. Returns null for external sessions on promptSync
  *
@@ -42,9 +42,10 @@ function createMockInner(processIds: string[] = []): ISessionClient & { processe
   };
 }
 
-function createMockPi(): { sendUserMessage: ReturnType<typeof mock> } {
+function createMockPi(): { sendMessage: ReturnType<typeof mock>; sendUserMessage: ReturnType<typeof mock> } {
   return {
-    sendUserMessage: mock(async (_id: string, _text: string) => {}),
+    sendMessage: mock((_message: any, _opts?: any) => {}),
+    sendUserMessage: mock((_text: string) => {}),
   };
 }
 
@@ -138,10 +139,10 @@ describe("PiNotificationSessionClient", () => {
     await managedClient.prompt("managed-1", options);
 
     expect(managedInner.prompt).toHaveBeenCalledWith("managed-1", options);
-    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("calls pi.sendUserMessage for external sessions on prompt", async () => {
+  it("calls pi.sendMessage with triggerTurn=true for external sessions on prompt", async () => {
     const options = {
       parts: [
         { type: "text", text: "hello" },
@@ -152,11 +153,14 @@ describe("PiNotificationSessionClient", () => {
     const result = await client.prompt("external-1", options);
 
     expect(inner.prompt).not.toHaveBeenCalled();
-    expect(pi.sendUserMessage).toHaveBeenCalledWith("external-1", "hello\nworld");
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      { customType: "rolebox-inject", content: "hello\nworld", display: true, details: { source: "rolebox-dispatch" } },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
     expect(result).toEqual({ id: "external-1" });
   });
 
-  it("does not call inner for external sessions and returns null when no pi.sendUserMessage", async () => {
+  it("returns null when neither sendMessage nor sendUserMessage is available", async () => {
     const emptyPi = {} as any;
     const noNotifyClient = new PiNotificationSessionClient(
       inner as any,
@@ -169,6 +173,41 @@ describe("PiNotificationSessionClient", () => {
 
     expect(inner.prompt).not.toHaveBeenCalled();
     expect(result).toBeNull();
+  });
+
+  it("calls pi.sendMessage with triggerTurn=false when noReply: true", async () => {
+    const options = {
+      parts: [{ type: "text", text: "silent note" }],
+      noReply: true,
+    };
+
+    const result = await client.prompt("external-1", options);
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      { customType: "rolebox-inject", content: "silent note", display: true, details: { source: "rolebox-dispatch" } },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
+    expect(result).toEqual({ id: "external-1" });
+  });
+
+  it("falls back to sendUserMessage when sendMessage is unavailable (legacy Pi)", async () => {
+    const legacyPi = {
+      sendUserMessage: mock((_text: string) => {}),
+    } as any;
+    const legacyClient = new PiNotificationSessionClient(
+      inner as any,
+      legacyPi,
+      log,
+    );
+
+    const options = {
+      parts: [{ type: "text", text: "legacy hello" }],
+    };
+
+    const result = await legacyClient.prompt("external-1", options);
+
+    expect(legacyPi.sendUserMessage).toHaveBeenCalledWith("legacy hello");
+    expect(result).toEqual({ id: "external-1" });
   });
 
   it("delegates promptSync to inner for managed sessions", async () => {
@@ -195,5 +234,53 @@ describe("PiNotificationSessionClient", () => {
 
     expect(inner.promptSync).not.toHaveBeenCalled();
     expect(result).toBeNull();
+  });
+
+  it("calls pi.sendMessage with triggerTurn=false when fromLoop:true and noReply:true", async () => {
+    const options = {
+      parts: [{ type: "text", text: "[loop-progress] round 1/3 completed]" }],
+      noReply: true,
+      fromLoop: true,
+    };
+
+    const result = await client.prompt("external-1", options);
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      { customType: "rolebox-inject", content: "[loop-progress] round 1/3 completed]", display: true, details: { source: "rolebox-dispatch" } },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
+    expect(result).toEqual({ id: "external-1" });
+  });
+
+  it("calls pi.sendMessage with triggerTurn=true when fromLoop:true and noReply:false", async () => {
+    const options = {
+      parts: [{ type: "text", text: "[loop-progress] loop complete]" }],
+      noReply: false,
+      fromLoop: true,
+    };
+
+    const result = await client.prompt("external-1", options);
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      { customType: "rolebox-inject", content: "[loop-progress] loop complete]", display: true, details: { source: "rolebox-dispatch" } },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+    expect(result).toEqual({ id: "external-1" });
+  });
+
+  it("non-loop dispatch notification with noReply:true still uses triggerTurn:false (no fromLoop), unchanged", async () => {
+    const options = {
+      parts: [{ type: "text", text: "dispatch completed" }],
+      noReply: true,
+      fromLoop: false,
+    };
+
+    const result = await client.prompt("external-1", options);
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      { customType: "rolebox-inject", content: "dispatch completed", display: true, details: { source: "rolebox-dispatch" } },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
+    expect(result).toEqual({ id: "external-1" });
   });
 });
