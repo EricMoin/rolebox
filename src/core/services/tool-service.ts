@@ -20,6 +20,9 @@ import { createTaskGraphTool } from "../../dispatch/query/task-graph.ts";
 import { createTaskRetryTool } from "../../dispatch/query/task-retry.ts";
 import { createCheckpointTool } from "../../dispatch/query/checkpoint-tools.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
+import type { LoopService } from "./loop-service.ts";
+import { createLoopStartTool } from "../../platform/adapters/pi/loop-tool.ts";
+import { createLoopTools } from "../../loop/loop-tools.ts";
 import { buildCanonicalTools } from "../../platform/tool-assembly.ts";
 import { defaultCapabilities } from "../../platform/capabilities.ts";
 
@@ -51,6 +54,21 @@ export class ToolService implements PluginService {
     const hotReloadService = ctx.core.getService<HotReloadService>("hot-reload-service");
     if (!hotReloadService) throw new Error("hot-reload-service not found");
     const sessionClient = sessionService.getSessionClient();
+
+    // 3.8. Get LoopService for loop tools (optional — skip if unavailable or degraded)
+    const loopService = ctx.core.getService<LoopService>("loop-service");
+    let loopTools: Record<string, any> = {};
+    if (loopService && !ctx.core.isDegraded("loop-service")) {
+      try {
+        const loopCoordinator = loopService.getLoopManager();
+        loopTools = {
+          loop_start: createLoopStartTool(loopCoordinator, undefined, () => ""),
+          ...createLoopTools(loopCoordinator, sessionClient),
+        };
+      } catch {
+        // LoopService degraded or coordinator unavailable — skip loop tools gracefully
+      }
+    }
 
     // 4. Assemble shared canonical tools + OpenCode-only extras
     this.tools = buildCanonicalTools({
@@ -85,6 +103,7 @@ export class ToolService implements PluginService {
           resolvedRoles: ctx.resolvedRoles,
           directory: ctx.directory,
         }),
+        ...loopTools,
       },
     });
 

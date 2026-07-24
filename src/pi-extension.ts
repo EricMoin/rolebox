@@ -38,7 +38,8 @@ import type { CanonicalToolDef } from "./platform/index.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { LoopStore } from "./loop/loop-store.ts";
-import { createLoopTool } from "./platform/adapters/pi/loop-tool.ts";
+import { createLoopStartTool } from "./platform/adapters/pi/loop-tool.ts";
+import { createLoopTools } from "./loop/loop-tools.ts";
 import {
   createDispatchManager,
   buildSubagentLineage,
@@ -476,13 +477,14 @@ export default async function (pi: any): Promise<void> {
       dispatch_stream: createDispatchStreamTool(dispatchManager),
     };
 
-    const loopTool = createLoopTool(
+    const loopStartTool = createLoopStartTool(
       loopCoordinator,
       pi,
       () => activeAgent.get() ?? "",
     );
     const loopTools: Record<string, CanonicalToolDef> = {
-      loop: loopTool,
+      loop_start: loopStartTool,
+      ...createLoopTools(loopCoordinator, notifyClient),
     };
 
     const serviceStack = new PiLightweightServiceStack(
@@ -645,11 +647,16 @@ export default async function (pi: any): Promise<void> {
           // the agent can use /stop-loop to cancel an active loop.
           lines.push(
             "<loop_tool>",
-            "The `loop(iterations, mode)` tool runs a task across multiple sessions.",
+            "The `loop_start(iterations, mode, prompt, objective?)` tool runs a task across",
+            "multiple sessions. All parameters except `objective` are required:",
             "- `iterations` (1–50, default 5): number of rounds to execute.",
-            "- `mode` (\"inherit\", default): \"inherit\" shares context; \"fresh\" starts each round clean.",
-            "Use `/stop-loop` to cancel an active loop. Progress is visible via",
-            "`dispatch_stream` or `dispatch_status`.",
+            '- `mode` ("inherit", default): "inherit" shares context; "fresh" starts each round clean.',
+            "- `prompt`: the task to execute across every round (required).",
+            "- `objective` (optional): convergence criteria for nested loops — when",
+            "  the summary declares this done, the loop terminates early.",
+            "Register errors (duplicate task, budget exhausted) are returned as corrective",
+            "feedback. Track progress with `loop_status`, read output with `loop_output`,",
+            "view history with `loop_history`. Use `/stop-loop` to cancel an active loop.",
             "</loop_tool>",
             "",
           );
