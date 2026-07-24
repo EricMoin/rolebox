@@ -96,7 +96,7 @@ describe("loop activation", () => {
     expect(activeLoopManager?.isLoopSession("ses_002")).toBe(true);
   });
 
-  it("rejects |loop| inside an active loop (recursion block)", async () => {
+  it("rejects |loop| on a session that already has an active loop (same-origin exclusivity)", async () => {
     const output1 = {
       parts: [{ type: "text" as const, text: "|loop:2| first loop" }],
     };
@@ -116,7 +116,7 @@ describe("loop activation", () => {
     );
 
     const correction = pendingCorrections.get("ses_003");
-    expect(correction).toContain("Nested loops are not supported");
+    expect(correction).toContain("loop already active for this session");
   });
 
   it("adds an invalid-loop-params correction for |loop:0|", async () => {

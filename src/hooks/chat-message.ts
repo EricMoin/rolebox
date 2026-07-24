@@ -141,28 +141,29 @@ export async function handleChatMessage(
     } else if (!loopCall) {
       appendCorrection(state.pendingCorrections, input.sessionID, "Loop call not found in parsed functions");
     } else {
-      // Recursion block: reject nested loops
-      if (state.activeLoopManager.isLoopSession(input.sessionID)) {
-        appendCorrection(state.pendingCorrections, input.sessionID, "Nested loops are not supported");
+      const result = parseLoopParams(loopCall);
+      if (!result.valid) {
+        appendCorrection(state.pendingCorrections, input.sessionID, `Invalid loop params: ${result.reason}`);
       } else {
-        const result = parseLoopParams(loopCall);
-        if (!result.valid) {
-          appendCorrection(state.pendingCorrections, input.sessionID, `Invalid loop params: ${result.reason}`);
-        } else {
-          const clamped = result.clamped ? ` (clamped to ${result.iterations})` : "";
-          const warn = result.warning ? ` (${result.warning})` : "";
-          if (result.clamped || result.warning) {
-            appendCorrection(state.pendingCorrections, input.sessionID, `Loop: ${result.iterations} iterations${clamped}${warn}`);
-          }
-          state.activeLoopManager.register({
-            originSessionId: input.sessionID,
-            agent: agentId,
-            prompt: cleanedText,
-            mode: result.mode,
-            iterations: result.iterations,
-          });
-          // Activation acknowledgment is handled by the orchestrator prompt (T3)
+        const clamped = result.clamped ? ` (clamped to ${result.iterations})` : "";
+        const warn = result.warning ? ` (${result.warning})` : "";
+        if (result.clamped || result.warning) {
+          appendCorrection(state.pendingCorrections, input.sessionID, `Loop: ${result.iterations} iterations${clamped}${warn}`);
         }
+        // Forward optional objective from |loop| syntax args (subtask 4)
+        const objective: string | undefined = loopCall.args.objective;
+        const registerResult = state.activeLoopManager.register({
+          originSessionId: input.sessionID,
+          agent: agentId,
+          prompt: cleanedText,
+          mode: result.mode,
+          iterations: result.iterations,
+          objective,
+        });
+        if (!registerResult.ok) {
+          appendCorrection(state.pendingCorrections, input.sessionID, `Loop not started: ${registerResult.reason}`);
+        }
+        // Activation acknowledgment is handled by the orchestrator prompt (T3)
       }
     }
   }
