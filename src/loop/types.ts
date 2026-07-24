@@ -5,6 +5,14 @@
 export type LoopMode = "inherit" | "fresh";
 
 /**
+ * Result of registering a loop with the LoopService.
+ * `ok: true` means registration succeeded and the loop was dispatched.
+ * `ok: false; reason` describes why registration was rejected (e.g. stall
+ * guard, concurrency cap, existing loop for same objective).
+ */
+export type RegisterResult = { ok: true } | { ok: false; reason: string };
+
+/**
  * Orchestrator phase of a loop execution.
  *
  * The state machine flows: activating → dispatching → awaiting_worker → summarizing → dispatching → ...
@@ -63,12 +71,31 @@ export interface LoopState {
   agent: string;
   /** Base prompt sent to the agent each round */
   basePrompt: string;
+  /**
+   * High-level objective this loop set out to accomplish.
+   * Used by the stall guard to detect convergence — when the summary
+   * declares the objective done, the loop terminates early.
+   */
+  objective?: string;
+  /**
+   * Stable fingerprint of the loop's prompt configuration (base prompt,
+   * objective, agent, mode). When two loop registration attempts share
+   * the same fingerprint, the second is rejected as a near-duplicate.
+   * Computed by the orchestrator (subtask 4).
+   */
+  promptFingerprint?: string;
   /** Loop mode — inherit conversation history or start fresh each round */
   mode: LoopMode;
   /** Total number of rounds requested (may be less if cancelled early) */
   total: number;
   /** Current round number (1-based; 1 = first round) */
   current: number;
+  /**
+   * When this loop is a tree worker dispatched by an orchestrator run,
+   * this identifies the orchestrator's loop. `undefined` for root loops.
+   * Used by the max-tree-worker cap (subtask 3).
+   */
+  parentLoopId?: string;
   /** Current orchestrator phase */
   phase: LoopPhase;
   /** DispatchManager task ID for the active worker round */
@@ -87,6 +114,13 @@ export interface LoopState {
   cancelRequested: boolean;
   /** Error description when phase is "error" */
   errorReason?: string;
+  /**
+   * Counter of consecutive rounds where the worker produced no meaningful
+   * progress (no LOOP_PROGRESS_MARKER, empty output, or summary unchanged).
+   * When it reaches CONSECUTIVE_STALE_THRESHOLD, the stall guard terminates
+   * the loop early.
+   */
+  consecutiveStaleRounds?: number;
   /** Unix timestamp (ms) when the loop started */
   startedAt: number;
   /** Unix timestamp (ms) of the most recent state update */

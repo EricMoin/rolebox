@@ -1,6 +1,6 @@
-import type { LoopState, LoopMode } from "./types.js";
+import type { LoopState, LoopMode, RegisterResult } from "./types.js";
 import type { IDispatchAdapter } from "./dispatch-adapter.js";
-import { LOOP_PROGRESS_MARKER, LOOP_STATE_SCHEMA_VERSION, ADVANCING_LOCK_TIMEOUT_MS, SWEEPER_INTERVAL_MS } from "./constants.js";
+import { LOOP_PROGRESS_MARKER, LOOP_STATE_SCHEMA_VERSION, ADVANCING_LOCK_TIMEOUT_MS, SWEEPER_INTERVAL_MS, MAX_TREE_WORKER_SESSIONS } from "./constants.js";
 import { shouldCancelLoop, TERMINAL_PHASES } from "./cancellation.js";
 import {
   dispatchRound,
@@ -9,10 +9,56 @@ import {
   failLoop,
 } from "./worker-dispatch.js";
 import { createSubLogger } from "../logger.ts";
+import { createHash } from "node:crypto";
 
 const log = createSubLogger("loop/coordinator");
 
 export { shouldCancelLoop, DISPATCH_MARKERS } from "./cancellation.js";
+
+/**
+ * Normalize a prompt string for deterministic fingerprinting:
+ * collapse all whitespace sequences to a single space, trim, and lowercase.
+ */
+function normalizePromptForFingerprint(prompt: string): string {
+  return prompt.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Compute a stable SHA-256 fingerprint of a normalized prompt string.
+ */
+function computePromptFingerprint(prompt: string): string {
+  return createHash("sha256").update(normalizePromptForFingerprint(prompt)).digest("hex");
+}
+
+/**
+ * Find the root loop ID by walking up the parentLoopId chain.
+ * Returns the originSessionId of the topmost ancestor (root).
+ */
+function findRootLoopId(loops: Map<string, LoopState>, startId: string): string {
+  let current: string | undefined = startId;
+  while (true) {
+    const loop = loops.get(current);
+    if (!loop || !loop.parentLoopId) return current;
+    current = loop.parentLoopId;
+  }
+}
+
+/**
+ * Count the number of non-terminal loops in the tree rooted at `rootId`,
+ * including the root itself. Each non-terminal loop represents an active
+ * worker session.
+ */
+function countTreeNonTerminal(loops: Map<string, LoopState>, rootId: string): number {
+  const root = loops.get(rootId);
+  if (!root) return 0;
+  let count = TERMINAL_PHASES.has(root.phase) ? 0 : 1;
+  for (const loop of loops.values()) {
+    if (loop.parentLoopId === rootId) {
+      count += countTreeNonTerminal(loops, loop.originSessionId);
+    }
+  }
+  return count;
+}
 
 export class LoopCoordinator {
   private loops = new Map<string, LoopState>();
@@ -199,14 +245,88 @@ export class LoopCoordinator {
     prompt: string;
     mode: LoopMode;
     iterations: number;
-  }): void {
-    if (this.loops.has(input.originSessionId)) return;
+    objective?: string;
+  }): RegisterResult {
+    // ── Check: already active for this session ──────────────────
+    if (this.loops.has(input.originSessionId)) {
+      return { ok: false, reason: "loop already active for this session" };
+    }
 
+    // ── (a) Compute prompt fingerprint ──────────────────────────
+    const promptFingerprint = computePromptFingerprint(input.prompt);
+
+    // ── (b) Lineage detection: is originSessionId a worker
+    //        session of an active (non-terminal) loop? ───────────
+    let parentLoopId: string | undefined;
+    for (const loop of this.loops.values()) {
+      if (TERMINAL_PHASES.has(loop.phase)) continue;
+      // Check active worker session
+      if (loop.activeWorkerSessionId === input.originSessionId) {
+        parentLoopId = loop.originSessionId;
+        break;
+      }
+      // Check past rounds' worker sessions
+      if (loop.rounds?.some((r) => r.workerSessionId === input.originSessionId)) {
+        parentLoopId = loop.originSessionId;
+        break;
+      }
+    }
+    // Also check if originSessionId is a worker task ID in _workerToOrigin
+    if (!parentLoopId) {
+      const originByTask = this._workerToOrigin.get(input.originSessionId);
+      if (originByTask) {
+        const parentLoop = this.loops.get(originByTask);
+        if (parentLoop && !TERMINAL_PHASES.has(parentLoop.phase)) {
+          parentLoopId = originByTask;
+        }
+      }
+    }
+
+    // ── (c) Ancestor chain fingerprint dedup ────────────────────
+    if (parentLoopId) {
+      let ancestorId: string | undefined = parentLoopId;
+      while (ancestorId) {
+        const ancestor = this.loops.get(ancestorId);
+        if (!ancestor) break;
+        if (ancestor.promptFingerprint === promptFingerprint) {
+          return {
+            ok: false,
+            reason:
+              "identical task already looping in ancestor chain " +
+              "— refine the task or report blockage instead",
+          };
+        }
+        ancestorId = ancestor.parentLoopId;
+      }
+    }
+
+    // ── (d) Tree-level budget enforcement ───────────────────────
+    {
+      const rootId = parentLoopId
+        ? findRootLoopId(this.loops, parentLoopId)
+        : input.originSessionId;
+      const currentCount = countTreeNonTerminal(this.loops, rootId);
+      // +1 for the loop being registered (not yet in this.loops)
+      if (currentCount + 1 > MAX_TREE_WORKER_SESSIONS) {
+        return {
+          ok: false,
+          reason:
+            `tree worker budget exhausted: ${currentCount} active ` +
+            `(max ${MAX_TREE_WORKER_SESSIONS}) — some loops must complete ` +
+            `before spawning more`,
+        };
+      }
+    }
+
+    // ── Create LoopState ────────────────────────────────────────
     const now = Date.now();
     const state: LoopState = {
       originSessionId: input.originSessionId,
       agent: input.agent,
       basePrompt: input.prompt,
+      objective: input.objective,
+      promptFingerprint,
+      parentLoopId,
       mode: input.mode,
       total: input.iterations,
       current: 1,
@@ -222,6 +342,8 @@ export class LoopCoordinator {
     this.loops.set(input.originSessionId, state);
     this._persist();
     void Promise.resolve().then(() => this._kickoffFromActivating(input.originSessionId));
+
+    return { ok: true };
   }
 
   async onOriginIdle(originSessionId: string): Promise<void> {
@@ -384,6 +506,30 @@ export class LoopCoordinator {
       this._advancing.delete(loop.originSessionId);
       this._persist();
     }
+
+    // ── (f) Cascade: cancel all child loops recursively ──────
+    // Collect child IDs first to avoid mutation during iteration.
+    const childIds: string[] = [];
+    for (const [childId, childLoop] of this.loops) {
+      if (
+        childLoop.parentLoopId === loop.originSessionId &&
+        !TERMINAL_PHASES.has(childLoop.phase) &&
+        childLoop.phase !== "finalizing"
+      ) {
+        childIds.push(childId);
+      }
+    }
+    for (const childId of childIds) {
+      try {
+        await this.cancelNow(childId);
+      } catch (err) {
+        log.warn("cancelNow: cascade failed for child loop", {
+          parentId: loop.originSessionId,
+          childId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   shouldCancelOnUserMessage(sessionId: string, messageText: string): boolean {
@@ -427,6 +573,39 @@ export class LoopCoordinator {
     return [...this.loops.values()].filter(
       (l) => !TERMINAL_PHASES.has(l.phase),
     );
+  }
+
+  // ── (g) Tree navigation helpers ───────────────────────────────
+
+  /**
+   * Walk up the parentLoopId chain and return all ancestor LoopStates,
+   * ordered from nearest ancestor to root.
+   */
+  getLoopAncestors(originSessionId: string): LoopState[] {
+    const ancestors: LoopState[] = [];
+    let current: string | undefined = this.loops.get(originSessionId)?.parentLoopId;
+    while (current) {
+      const ancestor = this.loops.get(current);
+      if (!ancestor) break;
+      ancestors.push(ancestor);
+      current = ancestor.parentLoopId;
+    }
+    return ancestors;
+  }
+
+  /**
+   * Collect all descendant loops (children, grandchildren, etc.)
+   * of the given originSessionId recursively. Returns a flat array.
+   */
+  getLoopDescendants(originSessionId: string): LoopState[] {
+    const descendants: LoopState[] = [];
+    for (const loop of this.loops.values()) {
+      if (loop.parentLoopId === originSessionId) {
+        descendants.push(loop);
+        descendants.push(...this.getLoopDescendants(loop.originSessionId));
+      }
+    }
+    return descendants;
   }
 
   /**
