@@ -58,7 +58,7 @@ describe("LoopManager integration", () => {
     mock.restore();
   });
 
-  describe("Recursion block", () => {
+  describe("Same-origin loop exclusivity", () => {
     let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
     let tmpDir: string;
 
@@ -77,7 +77,7 @@ describe("LoopManager integration", () => {
       mock.restore();
     });
 
-    it("rejects |loop| activation on a session already registered as loop origin", async () => {
+    it("rejects |loop| on a session that already has an active loop (same-origin exclusivity)", async () => {
       const sid = "ses_recursion";
 
       const output1 = {
@@ -98,7 +98,7 @@ describe("LoopManager integration", () => {
       );
 
       const correction = pendingCorrections.get(sid);
-      expect(correction).toContain("Nested loops are not supported");
+      expect(correction).toContain("loop already active for this session");
     });
 
     it("does not block |loop| on a fresh non-loop session", async () => {
@@ -114,7 +114,7 @@ describe("LoopManager integration", () => {
 
       expect(activeLoopManager?.isLoopSession(sid)).toBe(true);
       const correction = pendingCorrections.get(sid);
-      expect(correction ?? "").not.toContain("Nested loops are not supported");
+      expect(correction ?? "").not.toContain("loop already active for this session");
     });
   });
 

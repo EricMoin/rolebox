@@ -639,9 +639,9 @@ describe("Orchestrator Integration", () => {
     });
   });
 
-  // ── Scenario 7: Nested-loop rejection ────────────────────────────────
+  // ── Scenario 7: Same-origin loop exclusivity ─────────────────────────
 
-  describe("Scenario 7: Nested-loop rejection", () => {
+  describe("Scenario 7: Same-origin loop exclusivity", () => {
     let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
     let tmpDir: string;
 
@@ -705,7 +705,7 @@ describe("Orchestrator Integration", () => {
       );
 
       const correction = pendingCorrections.get("origin-reject");
-      expect(correction).toContain("Nested loops are not supported");
+      expect(correction).toContain("loop already active for this session");
     });
   });
 
