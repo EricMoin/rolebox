@@ -55,8 +55,14 @@ import type { CancelDispatchPort } from "./cascade-canceller.ts";
 
 /** Result of {@link rejectBlockedNode}. */
 export interface RejectReport {
-  /** Which lane the rejection took: `escalate` (no loop group) or `revise`. */
-  kind: "escalate" | "revise";
+  /** Which lane the rejection took. */
+  kind: "escalate" | "revise" | "already_resolved";
+  /**
+   * When `kind === "already_resolved"`, the actual node status at the time of
+   * the no-op reject (e.g. Completed, Escalate, Done). Absent for genuine
+   * rejection lanes.
+   */
+  actualStatus?: NodeStatus;
 }
 
 /** Result of {@link pruneDownstreamSubgraph}. */
@@ -163,8 +169,10 @@ export function rejectBlockedNode(
   reason?: string,
 ): RejectReport {
   if (node.status !== NodeStatus.Blocked) {
-    // Idempotent guard: replaying a reject on an already-resolved node is a no-op.
-    return { kind: node.status === NodeStatus.Escalate ? "escalate" : "revise" };
+    // Idempotent guard: replaying a reject on an already-resolved node is a
+    // no-op. Return an accurate `actualStatus` so callers can distinguish a
+    // genuine rejection from a stale replay.
+    return { kind: "already_resolved", actualStatus: node.status };
   }
 
   const reasonText = typeof reason === "string" && reason.trim() ? reason.trim() : "rejected";
@@ -216,6 +224,15 @@ export function pruneDownstreamSubgraph(
 ): PruneReport {
   const rejected = new Set(rejectedNodeIds);
   if (rejected.size === 0) return { cancelled: [], surviving: [] };
+
+  // Precondition guard: pruning only makes sense when the approval node is
+  // indeed a `needs_approval` gate. A non-gate node has no human-decision
+  // lifecycle and partial-approval semantics do not apply — return early
+  // with an empty result to avoid corrupting the graph.
+  const approvalNode = state.nodes.get(approvalNodeId);
+  if (!approvalNode || !approvalNode.needsApproval) {
+    return { cancelled: [], surviving: [] };
+  }
 
   // ── Phase 1: transitive downstream of every rejected node ─────────────────
   const downstream = new Set<string>();

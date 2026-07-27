@@ -224,9 +224,9 @@ describe("engine.cancel()", () => {
 
     const snap = engine.status();
     expect(snap.phase).toBe(EnginePhase.Complete);
-    expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Cancelled);
-    expect(snap.nodes.get("B")!.status).toBe(NodeStatus.Cancelled);
-    expect(snap.nodes.get("C")!.status).toBe(NodeStatus.Cancelled);
+    expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Done);
+    expect(snap.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    expect(snap.nodes.get("C")!.status).toBe(NodeStatus.Done);
     expect(snap.frontier).toEqual([]);
   });
 

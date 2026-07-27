@@ -56,6 +56,7 @@ import {
   removeFromFrontier,
 } from "./engine-state.ts";
 import { markReady } from "./node-lifecycle.ts";
+import { recordCheckpointForNode } from "./recorder.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -158,7 +159,9 @@ export function resetNodeForRetry(
     const node = state.nodes.get(id);
     if (!node) continue;
     resetNodeRun(node);
+    const downstreamPrevStatus = node.status;
     node.status = NodeStatus.Pending;
+    recordCheckpointForNode(node, downstreamPrevStatus, NodeStatus.Pending, Date.now());
     removeFromFrontier(state, id);
   }
 
@@ -168,7 +171,9 @@ export function resetNodeForRetry(
     target.prompt = `${opts.modifyPrompt.trim()}\n\n${target.prompt}`;
   }
   target.retryCount += 1;
+  const targetPrevStatus = target.status;
   target.status = NodeStatus.Pending;
+  recordCheckpointForNode(target, targetPrevStatus, NodeStatus.Pending, Date.now());
   markReady(target); // pending → ready (a legal transition)
   addToFrontier(state, nodeId);
 

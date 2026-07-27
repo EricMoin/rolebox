@@ -239,7 +239,7 @@ export function provision(state: EngineState): void {
     const node = registerNode(state, config);
     const incoming = upstream.get(config.id) ?? 0;
     if (incoming === 0) {
-      node.status = NodeStatus.Ready;
+      markReady(node);
       addToFrontier(state, config.id);
     } else {
       node.status = NodeStatus.Pending;

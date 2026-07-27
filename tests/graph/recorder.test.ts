@@ -192,11 +192,14 @@ describe("checkpoints (EngineState.checkpoints)", () => {
     expect(state.checkpoints!["B"]!.status).toBe(NodeStatus.Running);
   });
 
-  it("leaves checkpoints absent for a graph with no transitions", () => {
+  it("records checkpoints during provision for root nodes via markReady", () => {
     const { state } = buildEngine(chainGraph());
-    // Provision only assigned statuses directly (not via the lifecycle choke
-    // point); no transitionNode was run, so no checkpoints are recorded.
-    expect(state.checkpoints).toBeUndefined();
+    // Provision now routes root nodes through markReady (the lifecycle choke
+    // point), which records a checkpoint for each root node's pending→ready
+    // transition.
+    expect(state.checkpoints).toBeDefined();
+    expect(state.checkpoints!["A"]).toBeDefined();
+    expect(state.checkpoints!["A"].status).toBe("ready");
   });
 });
 

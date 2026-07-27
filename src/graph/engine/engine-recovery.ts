@@ -326,11 +326,25 @@ export function hydrateEngineState(
   target.loopGroups = source.loopGroups;
   target.frontier = source.frontier;
   target.budget = source.budget;
-  target.signalLedger = source.signalLedger;
+  // Deep-clone signalLedger (Map) to avoid shared-mutation between source/target.
+  const clonedLedger = new Map<string, typeof source.signalLedger extends Map<string, infer V> ? V : never>();
+  for (const [nodeId, entry] of source.signalLedger) {
+    clonedLedger.set(nodeId, {
+      ...entry,
+      signals: { ...entry.signals },
+      history: entry.history ? [...entry.history] : undefined,
+    });
+  }
+  target.signalLedger = clonedLedger as typeof source.signalLedger;
   target.startedAt = source.startedAt;
   target.updatedAt = source.updatedAt;
   target.advancingLock = source.advancingLock;
   target.pendingCompletions = source.pendingCompletions;
+  target.checkpoints = source.checkpoints
+    ? Object.fromEntries(
+        Object.entries(source.checkpoints).map(([id, r]) => [id, { ...r }])
+      )
+    : undefined;
   // Re-bind recovered nodes to the LIVE target state so post-recovery lifecycle
   // transitions auto-save checkpoints into `target.checkpoints`, not into the
   // deserialized intermediate container (subtask C-RECORD).

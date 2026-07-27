@@ -228,12 +228,13 @@ describe("graph_status backed flags return genuine engine data", () => {
     expect(out).toContain("ready→running");
   });
 
-  it("include_checkpoint reports 'no checkpoint recorded' honestly when absent", () => {
+  it("include_checkpoint surfaces the checkpoint recorded during provision", () => {
     const ts = createGraphToolSet();
-    const { graph_id } = ts.graph_create({ name: "cwire-no-cp" });
+    const { graph_id } = ts.graph_create({ name: "cwire-cp" });
     buildChain(ts, graph_id);
     const out = ts.graph_status({ graph_id, include_checkpoint: true });
-    expect(out).toContain("no checkpoint recorded");
+    // Provision now routes root nodes through markReady, recording a checkpoint.
+    expect(out).toContain("ready");
   });
 
   it("include_artifacts / include_evidence surface the node's recorded arrays", () => {

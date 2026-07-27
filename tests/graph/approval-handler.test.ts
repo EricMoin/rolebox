@@ -211,12 +211,13 @@ describe("reject (engine path)", () => {
     expect(p.signalsObserved["revise_needed"]).toBe("redo the analysis");
   });
 
-  it("rejectBlockedNode is idempotent on an already-escalated node", () => {
+  it("rejectBlockedNode is idempotent on an already-resolved node", () => {
     const rig = buildEngine(gateGraph());
     const p = rig.state.nodes.get("P")!;
     p.status = NodeStatus.Escalate;
     const report = rejectBlockedNode(rig.state, p, "x");
-    expect(report.kind).toBe("escalate");
+    expect(report.kind).toBe("already_resolved");
+    expect(report.actualStatus).toBe(NodeStatus.Escalate);
     expect(p.status).toBe(NodeStatus.Escalate);
   });
 });

@@ -465,11 +465,12 @@ describe("graph_cancel", () => {
     const { graph_id } = ts.graph_create({ name: "cancel" });
     buildReviewTeamPlus(ts, graph_id);
     const r = await ts.graph_cancel({ graph_id });
+    // All nodes transition cancelled→done; the tool picks up the done set.
     expect(r.cancelled).toHaveLength(4);
     expect(r.graph_id).toBe(graph_id);
     const state = ts["getEntry"](graph_id).runtime.status();
     for (const node of state.nodes.values()) {
-      expect(node.status).toBe("cancelled");
+      expect(node.status).toBe("done");
     }
     expect(state.phase).toBe("complete");
   });

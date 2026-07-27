@@ -1366,8 +1366,10 @@ export class GraphToolSet {
     if (!args.node_id && !args.loop_id) {
       await entry.runtime.cancel();
       const state = entry.runtime.status();
+      // After the lifecycle fix, cancelled nodes are transitioned Cancelled→Done;
+      // filter by Done status with a cancellation error reason to identify them.
       const cancelled = [...state.nodes.values()]
-        .filter((n) => n.status === NodeStatus.Cancelled)
+        .filter((n) => n.status === NodeStatus.Done && n.errorReason?.startsWith("cancelled"))
         .map((n) => n.nodeId)
         .sort();
       return { cancelled, graph_id: args.graph_id };

@@ -551,8 +551,8 @@ describe("engine.cancel() integration", () => {
 
     const snap = engine.status();
     expect(snap.phase).toBe(EnginePhase.Complete);
-    expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Cancelled);
-    expect(snap.nodes.get("B")!.status).toBe(NodeStatus.Cancelled);
+    expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Done);
+    expect(snap.nodes.get("B")!.status).toBe(NodeStatus.Done);
     expect(snap.frontier).toEqual([]);
     // The running node's dispatch task was cancelled via the seam.
     expect(fake.cancelled).toEqual(["task-A"]);
@@ -572,7 +572,7 @@ describe("engine.cancel() integration", () => {
 
     const loaded = new EnginePersistence(dir).load(graphId);
     expect(loaded!.phase).toBe(EnginePhase.Complete);
-    expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Cancelled);
+    expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Done);
     rmSync(dir, { recursive: true, force: true });
   });
 });

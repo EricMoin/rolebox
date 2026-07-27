@@ -1108,6 +1108,17 @@ export class AdvanceEngine {
           markReady(node);
           addToFrontier(this.state, nodeId);
         }
+        // Notify external observers: partial approval resolved the gate for
+        // the approved branches (their downstream edges fire); the rejected
+        // branches have been pruned + re-entered. The node's current status
+        // (Blocked while waiting for re-execution, or Ready to re-render)
+        // is the authoritative signal.
+        this._notifyCompletion(
+          node,
+          "answer",
+          { partial_approve: { approved: _approved, rejected, reason } },
+          node.status,
+        );
       }
       await this._dispatchReadyNodes();
       this._checkTermination();
@@ -1160,7 +1171,12 @@ export class AdvanceEngine {
       if (!this._edgeActivates(edge, "answer", source)) continue;
 
       const target = getNode(state, edge.to);
-      collectUpstreamResults(state, target, payload);
+      // Apply per-edge data_passthrough transform (mirrors _advance answer
+      // path ~545) so each downstream edge sees an independently-shaped
+      // payload. A per-edge clone prevents a single payload from being shared
+      // (and consequently cross-contaminated) across multiple edges.
+      const transformed = applyDataMapping(payload, edge.data_passthrough);
+      collectUpstreamResults(state, target, transformed);
       if (target.joinSatisfied) {
         const reEnter =
           target.status === NodeStatus.Pending ||

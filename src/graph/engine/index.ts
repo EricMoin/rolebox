@@ -84,7 +84,7 @@ import {
   type DispatchRecoveryPort,
   type ReconcileReport,
 } from "./engine-recovery.ts";
-import { markCancelled, canTransitionNode } from "./node-lifecycle.ts";
+import { markCancelled, markDone, canTransitionNode } from "./node-lifecycle.ts";
 import {
   canTransitionPhase,
   transitionPhase,
@@ -722,6 +722,7 @@ class EngineRuntimeImpl implements EngineRuntime {
         canTransitionNode(node.status, NodeStatus.Cancelled)
       ) {
         markCancelled(node, "cancelled by engine.cancel()");
+        markDone(node);
       }
     }
     this.state.frontier = [];

@@ -52,10 +52,24 @@ export type SignalType = (typeof SIGNAL_TYPES)[number];
 /** Signals that satisfy `continue_until` — terminate the node's run. (signal-tool.ts:16) */
 export const TERMINATING_SIGNALS = new Set<string>(["answer", "revise_needed", "escalate"]);
 
-/** Signals that pause graph advancement (approval / blocked / clarification). (signal-tool.ts:23) */
+/** Signals that pause graph advancement (approval / blocked / clarification). (signal-tool.ts:23)
+ *
+ * Engine-side routing note:
+ *   - `need_approval`   → transitions the node to `blocked` (engine-advance.ts
+ *                         _pauseForApproval), gates downstream.
+ *   - `blocked`         → recorded only, no engine-side state transition
+ *                         (reserved — future internal-deadlock escape hatch).
+ *   - `need_clarification` → recorded only, no engine-side state transition
+ *                         (reserved — future human-asks-for-info lane).
+ */
 export const PAUSING_SIGNALS = new Set<string>(["need_approval", "blocked", "need_clarification"]);
 
-/** Signals that route work elsewhere without terminating. (signal-tool.ts:30) */
+/** Signals that route work elsewhere without terminating. (signal-tool.ts:30)
+ *
+ * Engine-side routing note:
+ *   - `handoff` → recorded only, no engine-side state transition (reserved —
+ *                  future cross-graph / cross-department task routing).
+ */
 export const HANDOFF_SIGNALS = new Set<string>(["handoff"]);
 
 /** Informational signals with no state transition. (signal-tool.ts:36) */
