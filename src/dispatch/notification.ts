@@ -26,12 +26,21 @@ export const DISPATCH_COMPLETION_MARKER = "[BACKGROUND TASK COMPLETED]";
 export const DISPATCH_ALL_COMPLETE_MARKER = "[ALL BACKGROUND TASKS COMPLETE]";
 export const DISPATCH_RECOVERY_MARKER = "[RECOVERY: PENDING TASKS DROPPED]";
 export const DISPATCH_PROGRESS_MILESTONE_MARKER = "[PROGRESS MILESTONE]";
+/**
+ * Marker for graph-node-completion reminders injected into the emperor session
+ * by the graph notifier (`src/graph/engine/graph-notify.ts`). Like every other
+ * parent-targeted reminder, it is part of {@link DISPATCH_NOTIFICATION_MARKERS}
+ * so the re-entering chat.message hook recognizes it as a non-user turn and does
+ * NOT reset the auto-continue counter.
+ */
+export const GRAPH_COMPLETION_MARKER = "[GRAPH NODE COMPLETED]";
 
 export const DISPATCH_NOTIFICATION_MARKERS = [
   DISPATCH_COMPLETION_MARKER,
   DISPATCH_ALL_COMPLETE_MARKER,
   DISPATCH_RECOVERY_MARKER,
   DISPATCH_PROGRESS_MILESTONE_MARKER,
+  GRAPH_COMPLETION_MARKER,
 ] as const;
 
 export function isDispatchNotification(text: string): boolean {
@@ -66,7 +75,7 @@ export function hasFinalNotifyBeenSent(taskId: string): boolean {
   return sentFinalNotifies.has(taskId);
 }
 
-function enqueueNotify(
+export function enqueueNotify(
   parentSessionId: string,
   fn: () => Promise<boolean>,
 ): Promise<boolean> {
