@@ -14,6 +14,7 @@ import type {
   ActiveFunction,
   LoopSnapshot,
   GraphSessionSnapshot,
+  EngineGraphSnapshot,
 } from "../cli/commands/monitor/monitor-reader-types";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -34,6 +35,11 @@ export interface FilteredActivityData {
   tasks: TaskSnapshot[];
   graphs: GraphSessionSnapshot[];
   loops: LoopSnapshot[];
+  /** Engine-graph (v2) execution snapshots, session-scoped.
+   *  Engine graphs carry no graph-level sessionId, so they are surfaced in the
+   *  current session's activity view (matching the monitor reader's unfiltered
+   *  projection); only the text filter applies. */
+  engineGraphs: EngineGraphSnapshot[];
 }
 
 export interface FilterParams {
@@ -151,7 +157,7 @@ export function computeFilteredActivity(params: FilterParams): FilteredActivityD
   const { snapshot, stateDirPresent, sessionScope, currentSessionId, filterText } = params;
 
   if (!snapshot || !stateDirPresent) {
-    return { fns: [], tasks: [], graphs: [], loops: [] };
+    return { fns: [], tasks: [], graphs: [], loops: [], engineGraphs: [] };
   }
 
   const ft = filterText.toLowerCase();
@@ -185,5 +191,12 @@ export function computeFilteredActivity(params: FilterParams): FilteredActivityD
       filterMatch((l as { fnName?: string }).fnName),
   );
 
-  return { fns, tasks, graphs, loops };
+  // Engine graphs carry no graph-level sessionId, so session scoping is
+  // implicit (they are surfaced in this session's view); only the text filter
+  // applies, matching on graphId / agentId provenance when present.
+  const engineGraphs = snapshot.engineGraphs.filter((g) =>
+    filterMatch(g.graphId ?? (g.agentId ? g.agentId : undefined)),
+  );
+
+  return { fns, tasks, graphs, loops, engineGraphs };
 }

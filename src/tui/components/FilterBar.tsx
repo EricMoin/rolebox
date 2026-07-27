@@ -198,15 +198,17 @@ export function renderFilterBar(props: FilterBarProps) {
 
 /**
  * Compute total unfiltered item count from a snapshot.
- * Sums active functions, tasks, graphs, and loops.
+ * Sums active functions, tasks, graphs, engine graphs, and loops.
  */
 export function countTotalItems(data: {
   fns: unknown[];
   tasks: unknown[];
   graphs: unknown[];
+  engineGraphs?: unknown[];
   loops: unknown[];
 }): number {
-  return data.fns.length + data.tasks.length + data.graphs.length + data.loops.length;
+  return data.fns.length + data.tasks.length + data.graphs.length +
+    (data.engineGraphs?.length ?? 0) + data.loops.length;
 }
 
 /**

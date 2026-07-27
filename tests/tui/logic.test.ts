@@ -12,10 +12,11 @@ import type {
   ActiveFunction,
   LoopSnapshot,
   GraphSessionSnapshot,
+  EngineGraphSnapshot,
   DispatchSummary,
   ConcurrencyStatus,
 } from "../../src/cli/commands/monitor/monitor-reader-types";
-import { formatDuration, barSegments, truncate } from "../../src/tui/helpers";
+import { formatDuration, barSegments, truncate, engineNodeGlyph } from "../../src/tui/helpers";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -35,6 +36,8 @@ function makeSnapshot(overrides: Partial<MonitorSnapshot> = {}): MonitorSnapshot
     activeFunctions: [],
     loops: [],
     graphSessions: [],
+    engineGraphs: [],
+    graphEvents: [],
     dispatchSummary: emptyDispatchSummary(),
     concurrency: emptyConcurrency(),
     ...overrides,
@@ -85,6 +88,23 @@ function makeGraph(overrides: Partial<GraphSessionSnapshot>): GraphSessionSnapsh
     frontier: [],
     completed: [],
     iterationCount: 1,
+    ...overrides,
+  };
+}
+
+function makeEngineGraph(overrides: Partial<EngineGraphSnapshot>): EngineGraphSnapshot {
+  return {
+    graphId: "graph-abc123",
+    phase: "executing",
+    nodeCount: 1,
+    nodeStatusCounts: { running: 1 },
+    nodes: [{ nodeId: "n1", agent: "emperor--jinyiwei--ui", status: "running", startedAt: new Date().toISOString() }],
+    budget: { sessionsSpawned: 1, totalInputTokens: 1000, totalOutputTokens: 500, totalCost: 0.01 },
+    frontier: [],
+    loopGroups: [],
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    hasCheckpoints: false,
     ...overrides,
   };
 }
@@ -374,7 +394,7 @@ describe("computeFilteredActivity", () => {
       currentSessionId: "sess-1",
       filterText: "",
     });
-    expect(result).toEqual({ fns: [], tasks: [], graphs: [], loops: [] });
+    expect(result).toEqual({ fns: [], tasks: [], graphs: [], loops: [], engineGraphs: [] });
   });
 
   it("returns empty when stateDirPresent is false", () => {
@@ -385,7 +405,7 @@ describe("computeFilteredActivity", () => {
       currentSessionId: "sess-1",
       filterText: "",
     });
-    expect(result).toEqual({ fns: [], tasks: [], graphs: [], loops: [] });
+    expect(result).toEqual({ fns: [], tasks: [], graphs: [], loops: [], engineGraphs: [] });
   });
 
   it("filters functions by session scope", () => {
@@ -533,6 +553,69 @@ describe("computeFilteredActivity", () => {
     expect(result.graphs).toHaveLength(1);
     expect(result.graphs[0].sessionId).toBe("sess-1");
   });
+
+  it("includes engine graphs within session scope", () => {
+    // Engine graphs carry no graph-level sessionId — they are surfaced for
+    // this session's view (matching the monitor reader's unfiltered projection).
+    const engineGraphs: EngineGraphSnapshot[] = [
+      makeEngineGraph({ graphId: "engine-graph-1" }),
+      makeEngineGraph({ graphId: "engine-graph-2" }),
+    ];
+    const result = computeFilteredActivity({
+      snapshot: makeSnapshot({
+        activeFunctions: [],
+        tasks: [],
+        loops: [],
+        graphSessions: [],
+        engineGraphs,
+      }),
+      stateDirPresent: true,
+      sessionScope: new Set(["sess-1"]),
+      currentSessionId: "sess-1",
+      filterText: "",
+    });
+    expect(result.engineGraphs).toHaveLength(2);
+    expect(result.engineGraphs.map((g) => g.graphId)).toEqual(["engine-graph-1", "engine-graph-2"]);
+  });
+
+  it("filters engine graphs by filterText on graphId (case-insensitive)", () => {
+    const engineGraphs: EngineGraphSnapshot[] = [
+      makeEngineGraph({ graphId: "AlphaGraph" }),
+      makeEngineGraph({ graphId: "BetaGraph" }),
+    ];
+    const result = computeFilteredActivity({
+      snapshot: makeSnapshot({
+        activeFunctions: [],
+        tasks: [],
+        loops: [],
+        graphSessions: [],
+        engineGraphs,
+      }),
+      stateDirPresent: true,
+      sessionScope: new Set(["sess-1"]),
+      currentSessionId: "sess-1",
+      filterText: "alpha",
+    });
+    expect(result.engineGraphs).toHaveLength(1);
+    expect(result.engineGraphs[0].graphId).toBe("AlphaGraph");
+  });
+
+  it("returns empty engineGraphs when none present", () => {
+    const result = computeFilteredActivity({
+      snapshot: makeSnapshot({
+        activeFunctions: [],
+        tasks: [],
+        loops: [],
+        graphSessions: [],
+        engineGraphs: [],
+      }),
+      stateDirPresent: true,
+      sessionScope: new Set(["sess-1"]),
+      currentSessionId: "sess-1",
+      filterText: "",
+    });
+    expect(result.engineGraphs).toEqual([]);
+  });
 });
 
 // ── formatDuration ──────────────────────────────────────────────────────
@@ -612,5 +695,43 @@ describe("truncate", () => {
 
   it("handles empty string", () => {
     expect(truncate("", 5)).toBe("");
+  });
+});
+
+// ── engineNodeGlyph ──────────────────────────────────────────────────────
+
+describe("engineNodeGlyph", () => {
+  it("maps running to the running glyph", () => {
+    expect(engineNodeGlyph("running")).toBe("\u25b8"); // ▸
+  });
+
+  it("maps completed and done to the done glyph", () => {
+    expect(engineNodeGlyph("completed")).toBe("\u2713"); // ✓
+    expect(engineNodeGlyph("done")).toBe("\u2713");
+  });
+
+  it("maps pending and ready to the pending glyph", () => {
+    expect(engineNodeGlyph("pending")).toBe("\u25cf"); // ●
+    expect(engineNodeGlyph("ready")).toBe("\u25cf");
+  });
+
+  it("maps blocked to the gated glyph", () => {
+    expect(engineNodeGlyph("blocked")).toBe("\u23f8"); // ⏸
+  });
+
+  it("maps timeout to the timeout glyph", () => {
+    expect(engineNodeGlyph("timeout")).toBe("\u25c7"); // ◇
+  });
+
+  it("maps escalate to the error glyph", () => {
+    expect(engineNodeGlyph("escalate")).toBe("\u2717"); // ✗
+  });
+
+  it("maps cancelled to the cancel glyph", () => {
+    expect(engineNodeGlyph("cancelled")).toBe("\u25cb"); // ○
+  });
+
+  it("falls back to the pending glyph for unknown statuses", () => {
+    expect(engineNodeGlyph("mystery")).toBe("\u25cf");
   });
 });

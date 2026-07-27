@@ -25,6 +25,7 @@ export type HealthState = "ACTIVE" | "IDLE" | "NO_STATE" | "STALE" | "ERROR";
 export const REFRESH_MS = 1000;
 export const MAX_DISPATCH_ROWS = 8;
 export const MAX_GRAPH_ROWS = 2;
+export const MAX_ENGINE_GRAPH_ROWS = 2;
 export const MAX_LOOP_ROWS = 3;
 export const MAX_FN_ROWS = 6;
 export const BAR_WIDTH = 6;
@@ -121,6 +122,27 @@ export function statusVisual(status: string, c: ThemeColors): { glyph: string; c
     case "cancelled": return { glyph: G_CANCEL,  color: c.textMuted };
     case "timeout":   return { glyph: G_TIMEOUT, color: c.secondary };
     default:          return { glyph: "?",       color: c.text };
+  }
+}
+
+/**
+ * Map a graph-engine node lifecycle status onto a display glyph.
+ *
+ * Pure (color-free) so it is reusable/testable outside the UI; the caller
+ * picks the fg color. Unknown statuses fall back to a neutral dot.
+ */
+export function engineNodeGlyph(status: string): string {
+  switch (status) {
+    case "running":   return G_RUNNING;
+    case "completed":
+    case "done":      return G_DONE;
+    case "ready":     return G_PENDING;
+    case "blocked":   return G_GATED;
+    case "timeout":   return G_TIMEOUT;
+    case "escalate":  return G_ERROR;
+    case "cancelled": return G_CANCEL;
+    case "pending":   return G_PENDING;
+    default:          return G_PENDING;
   }
 }
 

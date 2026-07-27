@@ -5,10 +5,13 @@
  * to the polled snapshot — enabling sub-250ms UI updates without waiting for
  * the 1-second disk poll.
  *
- * Three event sources are merged:
+ * Four event sources are merged:
  *   1. Opencode host events via `api.event.on()`
  *   2. Fast-poll (250ms) of dispatch-*.json files for rolebox task transitions
  *   3. Fast-poll (250ms) of fnstate-*.json files for rolebox function transitions
+ *   4. Fast-poll (250ms) of graph-events-*.ndjson files for rolebox graph-engine
+ *      transitions, read with a monotonic per-file line-offset delta so each
+ *      appended line surfaces exactly one event.
  *
  * Attention notifications are dispatched for error/timeout events.
  *
@@ -17,7 +20,11 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tryReadJson, listStateFiles } from "../cli/commands/monitor/monitor-reader-utils.ts";
+import {
+  tryReadJson,
+  listStateFiles,
+  listNDJSONFiles,
+} from "../cli/commands/monitor/monitor-reader-utils.ts";
 import { stateDirFor } from "../utils/state-paths.ts";
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
 
@@ -78,6 +85,31 @@ export interface SessionErrorEvent {
   errorMessage?: string;
 }
 
+export interface GraphNodeStartEvent {
+  type: "graph_node_start";
+  graphId: string;
+  nodeId: string;
+  agent: string;
+  ts: string;
+}
+
+export interface GraphNodeEndEvent {
+  type: "graph_node_end";
+  graphId: string;
+  nodeId: string;
+  agent: string;
+  status: string;
+  signalType?: string;
+  ts: string;
+}
+
+export interface GraphSignalEvent {
+  type: "graph_signal";
+  graphId: string;
+  status: string;
+  ts: string;
+}
+
 export type RoleboxEvent =
   | DispatchStartEvent
   | DispatchEndEvent
@@ -85,7 +117,10 @@ export type RoleboxEvent =
   | FunctionActivateEvent
   | FunctionDeactivateEvent
   | SessionOpenEvent
-  | SessionErrorEvent;
+  | SessionErrorEvent
+  | GraphNodeStartEvent
+  | GraphNodeEndEvent
+  | GraphSignalEvent;
 
 // ── Ring buffer ────────────────────────────────────────────────────────────
 
@@ -174,6 +209,169 @@ interface RawFnStateFile {
   sessions: RawFnSession[];
 }
 
+// ── Graph event NDJSON (raw subset of graph-events-*.ndjson lines) ───────
+
+/** The subset of a `graph-events-*.ndjson` line this bridge surfaces. */
+interface RawGraphEventLine {
+  ts: number;
+  graphId: string;
+  nodeId?: string;
+  event: string;
+  status?: string;
+  signalType?: string;
+  agent?: string;
+}
+
+/**
+ * Parse a single NDJSON line into a {@link RawGraphEventLine}, or null when
+ * the line is malformed (not valid JSON, or missing the required `ts` /
+ * `graphId` / `event` fields). Never throws.
+ */
+function parseGraphEventLine(line: string): RawGraphEventLine | null {
+  const trimmed = line.trim();
+  if (trimmed === "") return null;
+
+  let record: unknown;
+  try {
+    record = JSON.parse(trimmed);
+  } catch {
+    return null; // malformed line — skip
+  }
+  if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+
+  const rec = record as Record<string, unknown>;
+  if (typeof rec.ts !== "number") return null;
+  if (typeof rec.graphId !== "string") return null;
+  if (typeof rec.event !== "string") return null;
+
+  const out: RawGraphEventLine = {
+    ts: rec.ts,
+    graphId: rec.graphId,
+    event: rec.event,
+  };
+  if (typeof rec.nodeId === "string") out.nodeId = rec.nodeId;
+  if (typeof rec.status === "string") out.status = rec.status;
+  if (typeof rec.signalType === "string") out.signalType = rec.signalType;
+  if (typeof rec.agent === "string") out.agent = rec.agent;
+  return out;
+}
+
+/**
+ * Map a parsed graph-event line onto the TUI {@link RoleboxEvent} vocabulary.
+ *
+ * - `node_dispatched` → `graph_node_start`
+ * - `node_completed`  → `graph_node_end` (carrying `status` / `signalType`)
+ * - `phase_change`    → `graph_signal`
+ *
+ * `budget_update` and any unknown event kinds have no TUI surface and are
+ * skipped (null). Node events missing a `nodeId` are dropped.
+ */
+function toGraphEvent(record: RawGraphEventLine): RoleboxEvent | null {
+  const ts = new Date(record.ts).toISOString();
+  switch (record.event) {
+    case "node_dispatched":
+      if (record.nodeId === undefined) return null;
+      return {
+        type: "graph_node_start",
+        graphId: record.graphId,
+        nodeId: record.nodeId,
+        agent: record.agent ?? "",
+        ts,
+      };
+    case "node_completed":
+      if (record.nodeId === undefined) return null;
+      return {
+        type: "graph_node_end",
+        graphId: record.graphId,
+        nodeId: record.nodeId,
+        agent: record.agent ?? "",
+        status: record.status ?? "completed",
+        ...(record.signalType !== undefined ? { signalType: record.signalType } : {}),
+        ts,
+      };
+    case "phase_change":
+      return {
+        type: "graph_signal",
+        graphId: record.graphId,
+        status: record.status ?? "",
+        ts,
+      };
+    default:
+      // budget_update and unknown event kinds — no TUI surface.
+      return null;
+  }
+}
+
+/**
+ * Monotonic per-file line-offset delta reader over `graph-events-*.ndjson`.
+ *
+ * Each {@link poll} scans every `graph-events-*.ndjson` file in `stateDir` and
+ * emits exactly one {@link RoleboxEvent} per newly-appended complete line. A
+ * per-file character offset is advanced past the last complete line (one that
+ * ends with `\n`); any trailing partial line is left unread and re-read on the
+ * next poll until its terminating newline arrives, so a partial or corrupted
+ * final line is never double-emitted. Independent of the snapshot-oriented
+ * {@link readGraphEvents} (which returns the last N events regardless of read
+ * position) — this reader is purely incremental.
+ *
+ * Never throws: a missing directory / unreadable file degrades to no events.
+ */
+export class GraphEventPoll {
+  private readonly stateDir: string;
+  private readonly offsets = new Map<string, number>();
+
+  constructor(stateDir: string) {
+    this.stateDir = stateDir;
+  }
+
+  /** Return new {@link RoleboxEvent}s since the last poll (empty on none). */
+  poll(): RoleboxEvent[] {
+    const events: RoleboxEvent[] = [];
+
+    for (const path of listNDJSONFiles(this.stateDir, "graph-events-")) {
+      let offset = this.offsets.get(path) ?? 0;
+
+      let content: string;
+      try {
+        content = readFileSync(path, "utf-8");
+      } catch {
+        continue; // unreadable / vanished file — skip this poll
+      }
+
+      if (offset > content.length) {
+        // File truncated below the tracked offset — restart from the top.
+        offset = 0;
+      }
+
+      const rest = content.slice(offset);
+      const nlIdx = rest.lastIndexOf("\n");
+      if (nlIdx === -1) {
+        // No complete line in the remaining tail (empty or a lone partial).
+        this.offsets.set(path, offset);
+        continue;
+      }
+
+      const completeLines = rest.slice(0, nlIdx).split("\n");
+      this.offsets.set(path, offset + nlIdx + 1);
+
+      for (const line of completeLines) {
+        if (line.trim() === "") continue;
+        const parsed = parseGraphEventLine(line);
+        if (!parsed) continue; // corrupted complete line — skip, never re-emit
+        const evt = toGraphEvent(parsed);
+        if (evt) events.push(evt);
+      }
+    }
+
+    return events;
+  }
+
+  /** Forget all tracked offsets (e.g. on dispose). */
+  reset(): void {
+    this.offsets.clear();
+  }
+}
+
 // ── Polling state (delta detection) ────────────────────────────────────────
 
 interface TaskState {
@@ -212,6 +410,7 @@ export function createEventBridge(
 ): EventBridge {
   const buffer = new EventBuffer();
   const stateDir = stateDirFor(workspaceDir);
+  const graphEventsPoll = new GraphEventPoll(stateDir);
   const FAST_POLL_MS = 250;
   const ATTENTION_THROTTLE_MS = 1_000;
 
@@ -395,7 +594,8 @@ export function createEventBridge(
 
     const dispatchEvents = readDispatchEvents();
     const functionEvents = readFunctionEvents();
-    const allEvents = [...dispatchEvents, ...functionEvents];
+    const graphEvents = graphEventsPoll.poll();
+    const allEvents = [...dispatchEvents, ...functionEvents, ...graphEvents];
 
     if (allEvents.length === 0) return;
 
@@ -468,6 +668,7 @@ export function createEventBridge(
     buffer.clear();
     knownTasks.clear();
     knownFunctions.clear();
+    graphEventsPoll.reset();
     lastErrorNotify.clear();
   };
 

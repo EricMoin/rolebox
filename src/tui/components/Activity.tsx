@@ -15,7 +15,9 @@ import {
   G_ERROR, G_BAR_ON, G_BAR_OFF, G_STALLED,
   G_RUNNING_COMPACT, G_DONE_COMPACT,
   MAX_DISPATCH_ROWS, MAX_FN_ROWS, MAX_GRAPH_ROWS, MAX_LOOP_ROWS,
+  MAX_ENGINE_GRAPH_ROWS,
   agentLeaf, shortSessionId, formatDuration, formatTimeAgo, barSegments, statusVisual,
+  engineNodeGlyph,
 } from "../helpers.ts";
 import type {
   MonitorSnapshot,
@@ -23,6 +25,7 @@ import type {
   ActiveFunction,
   LoopSnapshot,
   GraphSessionSnapshot,
+  EngineGraphSnapshot,
 } from "../../cli/commands/monitor/monitor-reader.ts";
 import { renderProgressIndicator } from "./ProgressIndicator.tsx";
 
@@ -227,6 +230,109 @@ export function renderGraphActivity(props: {
   );
 }
 
+// ── Engine graph (v2) activity component ─────────────────────────────────
+
+/** Phase glyph + color for a graph-engine lifecycle phase. */
+function enginePhaseVisual(phase: string, c: ThemeColors): { glyph: string; color: RGBA } {
+  switch (phase) {
+    case "executing": return { glyph: G_RUNNING, color: c.info };
+    case "complete":  return { glyph: G_DONE,    color: c.success };
+    case "idle":      return { glyph: G_PENDING, color: c.warning };
+    default:          return { glyph: G_PENDING, color: c.warning };
+  }
+}
+
+/** Color for a graph-engine node lifecycle status. */
+function engineNodeColor(status: string, c: ThemeColors): RGBA {
+  switch (status) {
+    case "running":   return c.info;
+    case "completed":
+    case "done":      return c.success;
+    case "blocked":
+    case "pending":
+    case "ready":     return c.warning;
+    case "timeout":   return c.secondary;
+    case "escalate":  return c.error;
+    case "cancelled": return c.textMuted;
+    default:          return c.warning;
+  }
+}
+
+const MAX_ENGINE_NODES = 6;
+
+/**
+ * Render a rich graph-engine (v2) activity block: per-node status glyphs,
+ * live signal (from graph events keyed by graphId), and cumulative budget.
+ */
+export function renderEngineGraphActivity(props: {
+  c: ThemeColors;
+  graph: EngineGraphSnapshot;
+  /** graphId → most recent signal status, fed from live graph events. */
+  graphSignals?: ReadonlyMap<string, string>;
+}) {
+  const { c, graph } = props;
+  const phase = enginePhaseVisual(graph.phase, c);
+  const gid = shortSessionId(graph.graphId);
+
+  // Recent live signal (graph_signal / node signal) if one fired for this graph.
+  const liveSignal = props.graphSignals?.get(graph.graphId);
+
+  const { sessionsSpawned, totalInputTokens, totalOutputTokens, totalCost } = graph.budget;
+  const budgetLine =
+    sessionsSpawned > 0 || totalInputTokens > 0 || totalCost > 0
+      ? `  \u00b7 ` +
+        `${sessionsSpawned}s \u00b7 ` +
+        `${Math.round(totalInputTokens / 1000)}k/\u00a0${Math.round(totalOutputTokens / 1000)}k tok \u00b7 ` +
+        `$${totalCost.toFixed(2)}`
+      : null;
+
+  const nodes = graph.nodes ?? [];
+  const shown = nodes.slice(0, MAX_ENGINE_NODES);
+  const hidden = nodes.length - shown.length;
+
+  return (
+    <>
+      <text>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"engine · "}</span>
+        <span fg={rgbaToCSS(phase.color)}>{phase.glyph + " "}</span>
+        <span fg={rgbaToCSS(c.text)}>{gid + " "}</span>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{graph.phase}</span>
+        {liveSignal && liveSignal !== "" && (
+          <span fg={rgbaToCSS(c.secondary)}>{"  sig " + liveSignal}</span>
+        )}
+        {budgetLine !== null && (
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{budgetLine}</span>
+        )}
+      </text>
+      {shown.length > 0 && (
+        <text>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
+          <For each={shown}>{(node, i) => {
+            const glyph = engineNodeGlyph(node.status);
+            const color = engineNodeColor(node.status, c);
+            const done = node.status === "completed" || node.status === "done";
+            return (
+              <>
+                {i() > 0 && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>}
+                <span fg={rgbaToCSS(color)}>{glyph + " "}</span>
+                <span fg={rgbaToCSS(done ? c.textMuted : c.text)} attributes={done ? DIM : 0}>
+                  {agentLeaf(node.agent)}
+                </span>
+                {node.signalType && !done && (
+                  <span fg={rgbaToCSS(c.secondary)}>{":" + node.signalType}</span>
+                )}
+              </>
+            );
+          }}</For>
+          {hidden > 0 && (
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + hidden + " more"}</span>
+          )}
+        </text>
+      )}
+    </>
+  );
+}
+
 // ── Loop activity component ──────────────────────────────────────────────
 
 export function renderLoopActivity(props: { c: ThemeColors; loop: LoopSnapshot }) {
@@ -274,9 +380,12 @@ export function renderActivity(props: {
   tasks: TaskSnapshot[];
   graphs: GraphSessionSnapshot[];
   loops: LoopSnapshot[];
+  engineGraphs?: EngineGraphSnapshot[];
   snap: MonitorSnapshot | null;
   sessionScope: Set<string>;
   currentSessionId: string;
+  /** graphId → most recent signal status, from live graph events. */
+  graphSignals?: ReadonlyMap<string, string>;
   selectedIndex?: number;
   /** Called when a task row is clicked — passes the row index. */
   onSelectTask?: (index: number) => void;
@@ -284,9 +393,13 @@ export function renderActivity(props: {
   onOpenDetail?: (index: number) => void;
 }) {
   const { c, fns, tasks, graphs, loops, snap } = props;
+  const engineGraphs = props.engineGraphs ?? [];
 
   // Nothing active → suppress entirely
-  if (fns.length === 0 && tasks.length === 0 && graphs.length === 0 && loops.length === 0) {
+  if (
+    fns.length === 0 && tasks.length === 0 && graphs.length === 0 && loops.length === 0 &&
+    engineGraphs.length === 0
+  ) {
     return null;
   }
 
@@ -339,6 +452,18 @@ export function renderActivity(props: {
             if (!snap) return null;
             return renderGraphActivity({ c, graph, snap, sessionScope: props.sessionScope, currentSessionId: props.currentSessionId });
           }}</For>
+        </>
+      )}
+
+      {/* Engine graphs (v2) — per-node status, live signals, budget */}
+      {engineGraphs.length > 0 && (
+        <>
+          <For each={engineGraphs.slice(0, MAX_ENGINE_GRAPH_ROWS)}>{(graph) =>
+            renderEngineGraphActivity({ c, graph, graphSignals: props.graphSignals })
+          }</For>
+          {engineGraphs.length > MAX_ENGINE_GRAPH_ROWS && (
+            <text fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + (engineGraphs.length - MAX_ENGINE_GRAPH_ROWS) + " more engine graphs"}</text>
+          )}
         </>
       )}
 

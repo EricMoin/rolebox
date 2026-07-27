@@ -133,6 +133,10 @@ export function createSidebarRenderer(workspaceDir: string) {
       // Current session ID — used to filter to only this session's activity
       const currentSessionId = props?.session_id ?? "";
       const [sessionScope, setSessionScope] = createSignal<Set<string>>(new Set([currentSessionId]));
+
+      // Live graph signals (graphId → most recent signal status), fed from
+      // drained graph events for sub-250ms engine-graph signal display.
+      const [graphSignals, setGraphSignals] = createSignal<ReadonlyMap<string, string>>(new Map());
       let lastGood: MonitorSnapshot | null = null;
       let canceled = false;
 
@@ -194,6 +198,16 @@ export function createSidebarRenderer(workspaceDir: string) {
           const hasErrorEvent = liveEvents.some(
             (e) => e.type === "dispatch_error"
           );
+
+          // Fold graph events into the live-signal map for engine-graph display.
+          if (liveEvents.some((e) => e.type === "graph_signal" || e.type === "graph_node_end")) {
+            const next = new Map(graphSignals());
+            for (const e of liveEvents) {
+              if (e.type === "graph_signal" && e.status) next.set(e.graphId, e.status);
+              else if (e.type === "graph_node_end" && e.signalType) next.set(e.graphId, e.signalType);
+            }
+            setGraphSignals(next);
+          }
 
           const snap = readMonitorSnapshot(workspaceDir);
           if (canceled) return;
@@ -310,7 +324,7 @@ export function createSidebarRenderer(workspaceDir: string) {
       // ── Compute unfiltered activity data (for total counts in filter bar) ──
       function unfilteredActivityData() {
         const snap = snapshot();
-        if (!snap || !stateDirPresent()) return { fns: [], tasks: [], graphs: [], loops: [] };
+        if (!snap || !stateDirPresent()) return { fns: [], tasks: [], graphs: [], loops: [], engineGraphs: [] };
         const scope = sessionScope();
         return {
           fns: [...snap.activeFunctions].filter((fn) => scope.has(fn.sessionId)),
@@ -319,12 +333,14 @@ export function createSidebarRenderer(workspaceDir: string) {
           loops: snap.loops.filter((l) =>
             scope.has(l.originSessionId) || l.originSessionId === currentSessionId,
           ),
+          // Engine graphs carry no sessionId — surfaced unfiltered for this session's view.
+          engineGraphs: [...snap.engineGraphs],
         };
       }
 
       function filteredActivityData() {
         const snap = snapshot();
-        if (!snap || !stateDirPresent()) return { fns: [], tasks: [], graphs: [], loops: [] };
+        if (!snap || !stateDirPresent()) return { fns: [], tasks: [], graphs: [], loops: [], engineGraphs: [] };
 
         const scope = sessionScope();
         const ft = filterText().toLowerCase();
@@ -374,7 +390,11 @@ export function createSidebarRenderer(workspaceDir: string) {
           return filterMatch(l.fnName);
         });
 
-        return { fns, tasks, graphs, loops };
+        // Engine graphs — no sessionId to match, so only the text filter applies
+        // (scoped to this session's view by the snapshot projection).
+        const engineGraphs = snap.engineGraphs.filter((g) => filterMatch(g.graphId));
+
+        return { fns, tasks, graphs, loops, engineGraphs };
       }
 
 
@@ -502,6 +522,7 @@ export function createSidebarRenderer(workspaceDir: string) {
                       snap,
                       sessionScope: sessionScope(),
                       currentSessionId,
+                      graphSignals: graphSignals(),
                       selectedIndex: selectedTaskIndex(),
                       onSelectTask: (index) => setSelectedTaskIndex(index),
                       onOpenDetail: (index) => {
