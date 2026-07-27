@@ -44,6 +44,7 @@ import {
   type NodeDispatchPort,
   type GraphBudgetPort,
   type EdgeConditionResolver,
+  type NodeCompletionEvent,
 } from "./engine-advance.ts";
 import { SignalBridge } from "./signal-bridge.ts";
 import {
@@ -290,6 +291,18 @@ export interface CreateEngineOptions {
    * unbounded `setInterval` (see failure-resilience.md §5.6).
    */
   sweeperIntervalMs?: number;
+
+  /**
+   * Optional node-completion notification seam (subtask 1). Wired into the
+   * advance engine's identical seam; the engine fires it exactly once per
+   * terminating / notable transition — `answer → completed`, `revise_needed →
+   * completed` (reviewer finished), `escalate`, `blocked → completed` on
+   * approval-resume, and the recovery-side `timeout`. Defaults to a no-op, so
+   * engine behavior is unchanged without it. Notification logic (a notifier)
+   * never lives here — this is a role-agnostic DI seam like
+   * {@link CreateEngineOptions.dispatch} (see {@link NodeCompletionEvent}).
+   */
+  onNodeCompletion?: (event: NodeCompletionEvent) => void;
 }
 
 // ── Engine identity ─────────────────────────────────────────────────────────
@@ -389,6 +402,7 @@ class EngineRuntimeImpl implements EngineRuntime {
   private readonly persistence?: EnginePersistence;
   private readonly sweeper: EngineLockSweeper;
   private readonly sweeperIntervalMs?: number;
+  private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private provisioned = false;
 
   constructor(
@@ -421,6 +435,7 @@ class EngineRuntimeImpl implements EngineRuntime {
     this.persistence = opts.stateDir
       ? new EnginePersistence(opts.stateDir)
       : undefined;
+    this.onNodeCompletion = opts.onNodeCompletion;
     const advanceOpts: AdvanceEngineOptions = {
       state: this.state,
       signalBridge: this.signalBridge,
@@ -429,6 +444,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       parentContext: opts.parentContext,
       conditionResolver: opts.conditionResolver ?? defaultConditionResolver,
       persistState: this.persistence ? (s) => this.persistence!.save(s) : undefined,
+      onNodeCompletion: this.onNodeCompletion,
     };
     this.advance = new AdvanceEngine(advanceOpts);
     // The advance engine is the terminating-signal consumer.
@@ -530,6 +546,14 @@ class EngineRuntimeImpl implements EngineRuntime {
       rebuildFrontier(this.state);
       await this.advance.dispatchReady();
       return;
+    }
+
+    // Subtask 1: surface recovery-side timeouts through the completion seam
+    // exactly once. `reconcileEngine` timed these nodes out directly (their
+    // dispatch tasks vanished) — a transition that happens outside the
+    // signal-driven advance engine, so it is emitted here via the public seam.
+    for (const id of report.timedOut) {
+      this.advance.notifyNodeTimeout(id);
     }
 
     // Drain deferred completions: re-emit each finished-during-restart node's
@@ -702,3 +726,6 @@ export {
   type RetryReport,
 } from "./node-retry.ts";
 export type { NodeDispatchPort } from "./engine-advance.ts";
+export type {
+  NodeCompletionEvent,
+} from "./engine-advance.ts";

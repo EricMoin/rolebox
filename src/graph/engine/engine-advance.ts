@@ -149,6 +149,39 @@ export type EdgeConditionResolver = (
   source: NodeRuntimeState,
 ) => boolean;
 
+/**
+ * A node-completion event emitted via the optional {@link AdvanceEngineOptions
+ * .onNodeCompletion} callback seam (subtask 1). The engine stays role-agnostic
+ * — it packages only the immutable facts; notification / delivery (a notifier)
+ * is the consumer's concern and never lives in the engine.
+ */
+export interface NodeCompletionEvent {
+  /** Owning graph id. */
+  graphId: string;
+  /** The node that reached a terminal / notable status. */
+  nodeId: string;
+  /** The node's bound agent id. */
+  nodeAgent: string;
+  /**
+   * The signal that drove the transition — one of the terminating
+   * `SignalType`s (`answer` / `revise_needed` / `escalate`) for a
+   * signal-driven transition, or the synthetic `timeout` marker for a
+   * recovery-side timing-out node (no terminating signal drives a timeout).
+   */
+  signalType: string;
+  /** The signal payload that drove the transition (may be undefined). */
+  payload: unknown;
+  /** The node's terminal / notable lifecycle status at emission time. */
+  nodeStatus: NodeStatus;
+  /**
+   * Epoch-ms timestamp when the node started (additive, may be absent for
+   * synthetic events). Lets a notifier report a real duration.
+   */
+  startedAt?: number;
+  /** Epoch-ms timestamp when the node completed (additive, may be absent). */
+  completedAt?: number;
+}
+
 export interface AdvanceEngineOptions {
   /** The engine state container this engine advances. */
   state: EngineState;
@@ -176,6 +209,17 @@ export interface AdvanceEngineOptions {
    * (in-memory only), preserving the role-agnostic primitive's constructibility.
    */
   persistState?: (state: EngineState) => void;
+  /**
+   * Optional node-completion notification seam (subtask 1). Invoked exactly
+   * once per terminating / notable transition — `answer → completed`,
+   * `revise_needed → completed` (reviewer finished), `escalate`,
+   * `blocked → completed` (approval-resume), and the recovery-side `timeout`.
+   * Defaults to a no-op when absent, so the engine's existing behavior is
+   * unchanged. Notification logic never lives in the engine — this is a pure
+   * role-agnostic DI seam, exactly like {@link AdvanceEngineOptions.dispatch} /
+   * {@link AdvanceEngineOptions.budget} / {@link AdvanceEngineOptions.persistState}.
+   */
+  onNodeCompletion?: (event: NodeCompletionEvent) => void;
 }
 
 /**
@@ -216,6 +260,7 @@ export class AdvanceEngine {
   private readonly parentContext: DispatchParentContext;
   private readonly conditionResolver?: EdgeConditionResolver;
   private readonly persistState?: (state: EngineState) => void;
+  private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
 
   constructor(opts: AdvanceEngineOptions) {
     this.state = opts.state;
@@ -224,6 +269,7 @@ export class AdvanceEngine {
     this.budgetPort = opts.budget;
     this.conditionResolver = opts.conditionResolver;
     this.persistState = opts.persistState;
+    this.onNodeCompletion = opts.onNodeCompletion;
     this.parentContext =
       opts.parentContext ??
       graphParentContext({
@@ -493,6 +539,8 @@ export class AdvanceEngine {
           // completion (subtask C-RECORD). Fields stay absent when the node
           // produced none — never fabricated.
           recordNodeArtifactsAndEvidence(this.state, node);
+          // Subtask 1: notify exactly once — `answer → completed`.
+          this._notifyCompletion(node, "answer", signalPayload, NodeStatus.Completed);
         }
         break;
       case "revise_needed":
@@ -501,17 +549,77 @@ export class AdvanceEngine {
         if (node.status === NodeStatus.Running) {
           markCompleted(node);
           recordNodeArtifactsAndEvidence(this.state, node);
+          // Subtask 1: notify exactly once — reviewer finished → completed.
+          this._notifyCompletion(node, "revise_needed", signalPayload, NodeStatus.Completed);
         }
         break;
       case "escalate":
         if (node.status === NodeStatus.Running) {
           markEscalated(node, this._extractErrorMessage(signalPayload));
+          // Subtask 1: notify exactly once — `escalate`.
+          this._notifyCompletion(node, "escalate", signalPayload, NodeStatus.Escalate);
         }
         break;
       default:
         // Pausing / handoff / info signals never reach here (guarded upstream).
         break;
     }
+  }
+
+  /**
+   * Fire the optional node-completion seam for a node that reached a terminal /
+   * notable status (subtask 1). A no-op when no callback is registered, so the
+   * engine's behavior is unchanged without the seam. The event packages the
+   * immutable facts only ({@link NodeCompletionEvent}) — notification logic is
+   * the consumer's concern. A throwing consumer must not corrupt the advancing
+   * critical section (a notifier is observability, not a control path).
+   */
+  private _notifyCompletion(
+    node: NodeRuntimeState,
+    signalType: string,
+    payload: unknown,
+    nodeStatus: NodeStatus,
+  ): void {
+    const cb = this.onNodeCompletion;
+    if (!cb) return;
+    const event: NodeCompletionEvent = {
+      graphId: this.state.graphId,
+      nodeId: node.nodeId,
+      nodeAgent: node.agent,
+      signalType,
+      payload,
+      nodeStatus,
+      startedAt: node.startedAt,
+      completedAt: node.completedAt,
+    };
+    try {
+      cb(event);
+    } catch {
+      // never let a notifier failure break graph advancement
+    }
+  }
+
+  /**
+   * Notify the completion seam for a node timed out by the recovery path
+   * (subtask 1). Recovery marks a `running` node `timeout` directly inside
+   * `reconcileEngine` (`engine-recovery.ts`) when its dispatch task vanished —
+   * that transition happens outside the signal-driven `_applySignalTransition`,
+   * so recovery surfaces it through this public seam exactly once. A no-op when
+   * the node is not `timeout` or no callback is registered. No terminating
+   * signal drives a timeout, so the event uses the synthetic `timeout` marker
+   * with the node's recorded `errorReason` as payload.
+   */
+  notifyNodeTimeout(nodeId: string): void {
+    const cb = this.onNodeCompletion;
+    if (!cb) return;
+    const node = getNode(this.state, nodeId);
+    if (node.status !== NodeStatus.Timeout) return;
+    this._notifyCompletion(
+      node,
+      "timeout",
+      node.errorReason ?? "timed out",
+      NodeStatus.Timeout,
+    );
   }
 
   /**
@@ -757,6 +865,16 @@ export class AdvanceEngine {
       );
       if (edgePayload) {
         this._forwardAnswerOnApproval(nodeId, edgePayload);
+        // Subtask 1: notify exactly once — `blocked → completed` on
+        // approval-resume. Guarded on `edgePayload` (null = not actually
+        // blocked, an idempotent no-op) so the seam fires only on a real
+        // transition, matching the signal-driven points.
+        this._notifyCompletion(
+          getNode(this.state, nodeId),
+          "answer",
+          payload ?? edgePayload.result,
+          NodeStatus.Completed,
+        );
       }
       await this._dispatchReadyNodes();
       this._checkTermination();
