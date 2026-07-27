@@ -70,7 +70,7 @@ async function createBunDatabase(path: string): Promise<DatabaseDriver> {
       db.exec(sql);
     },
     run(sql: string, ...params: unknown[]): void {
-      db.run(sql, params.length > 0 ? params : undefined);
+      db.run(sql, ...params);
     },
     query(sql: string): StatementDriver {
       const stmt = db.query(sql);
