@@ -33,6 +33,49 @@ import type {
 import { resolveJoinStrategy } from "./join-evaluator.ts";
 import { bindNodeState } from "./recorder.ts";
 
+// ── Event sinks (write-side graph event log) ────────────────────────────────
+
+/**
+ * A consumer notified on an engine lifecycle phase transition
+ * (`transitionPhase`). Registered by a {@link GraphEventRecorder} so the pure
+ * transition function can reach the durable event log without an import cycle.
+ * When undefined (no recorder), transitions are silent — no-op safe.
+ */
+export type PhaseEventSink = (
+  graphId: string,
+  from: EnginePhase,
+  to: EnginePhase,
+) => void;
+
+/** A consumer notified on a graph-level budget update (`applyBudgetDelta`). */
+export type BudgetEventSink = (
+  graphId: string,
+  budget: GraphBudgetState,
+) => void;
+
+let phaseEventSink: PhaseEventSink | undefined;
+let budgetEventSink: BudgetEventSink | undefined;
+
+/**
+ * Register the phase-transition event sink (or clear it with `undefined`).
+ * Last-writer-wins: a graph-event recorder registers on construction; single
+ * engine execution means at most one is active at a time.
+ */
+export function setPhaseEventSink(sink?: PhaseEventSink): void {
+  phaseEventSink = sink;
+}
+
+/** Register the budget-update event sink (or clear it with `undefined`). */
+export function setBudgetEventSink(sink?: BudgetEventSink): void {
+  budgetEventSink = sink;
+}
+
+/** Clear both event sinks (test isolation — a fresh recorder re-registers). */
+export function clearEventSinks(): void {
+  phaseEventSink = undefined;
+  budgetEventSink = undefined;
+}
+
 // ── Budget stub ───────────────────────────────────────────────────────────
 
 /**
@@ -74,6 +117,13 @@ export function applyBudgetDelta(
   b.totalOutputTokens += delta.outputTokens ?? 0;
   b.totalCost += delta.cost ?? 0;
   state.updatedAt = Date.now();
+  // Emit a budget-update event to the write-side log (no-op when no recorder
+  // is registered). Never lets a recorder failure corrupt the budget update.
+  try {
+    budgetEventSink?.(state.graphId, b);
+  } catch {
+    // observability — never breaks the budget mutation
+  }
 }
 
 // ── Engine lifecycle phase machine ─────────────────────────────────────────
@@ -103,9 +153,17 @@ export function transitionPhase(state: EngineState, to: EnginePhase): void {
   if (!canTransitionPhase(state, to)) {
     throw new Error(`Invalid engine phase transition: ${state.phase} -> ${to}`);
   }
+  const from = state.phase;
   const now = Date.now();
   state.phase = to;
   state.updatedAt = now;
+  // Emit a phase-change event to the write-side log (no-op when no recorder is
+  // registered). Never lets a recorder failure corrupt the phase transition.
+  try {
+    phaseEventSink?.(state.graphId, from, to);
+  } catch {
+    // observability — never breaks the lifecycle transition
+  }
 }
 
 // ── Engine state factory ───────────────────────────────────────────────────

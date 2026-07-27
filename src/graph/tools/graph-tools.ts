@@ -101,6 +101,7 @@ import {
   type CreateEngineOptions,
   type NodeDispatchPort,
   type NodeCompletionEvent,
+  GraphEventRecorder,
 } from "../engine/index.ts";
 import {
   createGraphNotifier,
@@ -546,6 +547,15 @@ export class GraphToolSet {
     if (completion) {
       options.onNodeCompletion = completion;
     }
+    // Graph monitoring: a durable write-side event log alongside the notifier.
+    // Constructed only when a stateDir is configured — absent stateDir → no
+    // recorder → no event logging (no-op safe).
+    const graphEvents = this.deps.stateDir
+      ? new GraphEventRecorder(this.deps.stateDir)
+      : undefined;
+    if (graphEvents) {
+      options.graphEvents = graphEvents;
+    }
     // An injected dispatch seam wins over the manager-backed bridge (explicit >
     // manager, per createEngine). Present when a caller drives graph dispatch
     // without a real DispatchManager.
@@ -826,6 +836,10 @@ export class GraphToolSet {
       stateDir: this.deps.stateDir,
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
       ...(completion ? { onNodeCompletion: completion } : {}),
+      // Graph monitoring: durable write-side event log when a stateDir is set.
+      ...(this.deps.stateDir
+        ? { graphEvents: new GraphEventRecorder(this.deps.stateDir) }
+        : {}),
     });
     await runtime.run();
 

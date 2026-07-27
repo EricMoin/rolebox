@@ -89,6 +89,7 @@ import type {
   SignalType,
   SignalBridge,
 } from "./signal-bridge.ts";
+import type { GraphEventRecorder } from "./graph-events.ts";
 
 // ── Ports (dependency injection seams) ──────────────────────────────────────
 
@@ -214,12 +215,21 @@ export interface AdvanceEngineOptions {
    * once per terminating / notable transition — `answer → completed`,
    * `revise_needed → completed` (reviewer finished), `escalate`,
    * `blocked → completed` (approval-resume), and the recovery-side `timeout`.
-   * Defaults to a no-op when absent, so the engine's existing behavior is
-   * unchanged. Notification logic never lives in the engine — this is a pure
+   * Defaults to a no-op, so the engine's existing behavior is unchanged.
+   * Notification logic never lives in the engine — this is a pure
    * role-agnostic DI seam, exactly like {@link AdvanceEngineOptions.dispatch} /
    * {@link AdvanceEngineOptions.budget} / {@link AdvanceEngineOptions.persistState}.
    */
   onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  /**
+   * Optional write-side durable event log (graph monitoring). When present, the
+   * engine records node dispatch (`node_dispatched`) and node terminal
+   * transitions (`node_completed`) into the recorder, alongside the
+   * `onNodeCompletion` notifier. The recorder is total (never throws), so this
+   * seam cannot break advancement. Absent → no event logging, engine behavior
+   * unchanged.
+   */
+  graphEvents?: GraphEventRecorder;
 }
 
 /**
@@ -261,6 +271,7 @@ export class AdvanceEngine {
   private readonly conditionResolver?: EdgeConditionResolver;
   private readonly persistState?: (state: EngineState) => void;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  private readonly graphEvents?: GraphEventRecorder;
 
   constructor(opts: AdvanceEngineOptions) {
     this.state = opts.state;
@@ -270,6 +281,7 @@ export class AdvanceEngine {
     this.conditionResolver = opts.conditionResolver;
     this.persistState = opts.persistState;
     this.onNodeCompletion = opts.onNodeCompletion;
+    this.graphEvents = opts.graphEvents;
     this.parentContext =
       opts.parentContext ??
       graphParentContext({
@@ -580,8 +592,6 @@ export class AdvanceEngine {
     payload: unknown,
     nodeStatus: NodeStatus,
   ): void {
-    const cb = this.onNodeCompletion;
-    if (!cb) return;
     const event: NodeCompletionEvent = {
       graphId: this.state.graphId,
       nodeId: node.nodeId,
@@ -592,11 +602,20 @@ export class AdvanceEngine {
       startedAt: node.startedAt,
       completedAt: node.completedAt,
     };
-    try {
-      cb(event);
-    } catch {
-      // never let a notifier failure break graph advancement
+    // The notification seam is optional — a throwing / absent notifier must not
+    // suppress the durable event log, so the event is built unconditionally.
+    const cb = this.onNodeCompletion;
+    if (cb) {
+      try {
+        cb(event);
+      } catch {
+        // never let a notifier failure break graph advancement
+      }
     }
+    // Write-side durable log: record the terminal transition alongside the
+    // notifier. The recorder is total (never throws), so no extra guard needed
+    // beyond the notifier's.
+    this.graphEvents?.nodeCompleted(event);
   }
 
   /**
@@ -711,6 +730,9 @@ export class AdvanceEngine {
     // left in a dispatching-ready state while the critical section awaits.
     markRunning(node);
     removeFromFrontier(state, node.nodeId);
+    // Write-side durable log: record that this node was dispatched (its
+    // `startedAt` was set by `markRunning`). Total — never breaks dispatch.
+    this.graphEvents?.nodeDispatched(state.graphId, node.nodeId, node.agent, node.startedAt);
 
     const task = await this.dispatchPort.executeNode(
       node,

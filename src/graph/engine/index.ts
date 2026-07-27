@@ -58,6 +58,7 @@ import defaultConditionResolver from "./condition-resolver.ts";
 import {
   EnginePersistence,
 } from "./engine-persistence.ts";
+import type { GraphEventRecorder } from "./graph-events.ts";
 import {
   executeLoopStep,
   recordConvergenceOutput,
@@ -303,6 +304,15 @@ export interface CreateEngineOptions {
    * {@link CreateEngineOptions.dispatch} (see {@link NodeCompletionEvent}).
    */
   onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  /**
+   * Optional write-side durable graph event log (graph monitoring). When
+   * present, the engine records node dispatch and node terminal transitions
+   * into the recorder alongside the `onNodeCompletion` notifier, and the
+   * recorder's phase-change / budget-event sinks (registered on construction)
+   * capture the engine lifecycle transitions in `engine-state.ts`. Absent →
+   * no event logging, engine behavior unchanged.
+   */
+  graphEvents?: GraphEventRecorder;
 }
 
 // ── Engine identity ─────────────────────────────────────────────────────────
@@ -403,6 +413,7 @@ class EngineRuntimeImpl implements EngineRuntime {
   private readonly sweeper: EngineLockSweeper;
   private readonly sweeperIntervalMs?: number;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  private readonly graphEvents?: GraphEventRecorder;
   private provisioned = false;
 
   constructor(
@@ -436,6 +447,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       ? new EnginePersistence(opts.stateDir)
       : undefined;
     this.onNodeCompletion = opts.onNodeCompletion;
+    this.graphEvents = opts.graphEvents;
     const advanceOpts: AdvanceEngineOptions = {
       state: this.state,
       signalBridge: this.signalBridge,
@@ -445,6 +457,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       conditionResolver: opts.conditionResolver ?? defaultConditionResolver,
       persistState: this.persistence ? (s) => this.persistence!.save(s) : undefined,
       onNodeCompletion: this.onNodeCompletion,
+      graphEvents: this.graphEvents,
     };
     this.advance = new AdvanceEngine(advanceOpts);
     // The advance engine is the terminating-signal consumer.
@@ -729,3 +742,17 @@ export type { NodeDispatchPort } from "./engine-advance.ts";
 export type {
   NodeCompletionEvent,
 } from "./engine-advance.ts";
+export {
+  GraphEventRecorder,
+  graphEventsHash,
+  graphEventsPath,
+  type GraphEventRecord,
+  type GraphEventType,
+} from "./graph-events.ts";
+export {
+  setPhaseEventSink,
+  setBudgetEventSink,
+  clearEventSinks,
+  type PhaseEventSink,
+  type BudgetEventSink,
+} from "./engine-state.ts";
