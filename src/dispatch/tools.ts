@@ -7,15 +7,28 @@ import { metrics } from "./persistence/metrics.ts";
 import { DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
 import { parentContextFromTool, buildCompletedOutput } from "./tool-helpers.ts";
+import { createDispatchStatusTool } from "./query/task-status.ts";
+import type { CanonicalToolDef } from "../platform/types.ts";
 
-
+/**
+ * dispatch tools — compatibility shims over the DispatchManager.
+ *
+ * Phase C removed these tools and consolidated multi-agent work into the
+ * graph_* engine. They were re-approved for restoration as thin compatibility
+ * shims that keep the imperative dispatch_* surface working for callers who
+ * still use it. The graph_* tools remain untouched — dispatch_* and graph_*
+ * are independent namespaces that coexist.
+ *
+ * Each factory delegates to the corresponding DispatchManager method, so no
+ * graph logic is duplicated here.
+ */
 
 export function createDispatchTool(
   manager: DispatchManager,
   resolvedSubagents: Map<string, { parentFullId: string }>,
   _subagentModelKey?: Map<string, string>,
   getEffectiveAgent?: () => string,
-) {
+): CanonicalToolDef {
   return defineTool({
     description:
       "Dispatch work to a subagent. Run synchronously or in the background. " +
@@ -125,9 +138,7 @@ export function createDispatchTool(
   });
 }
 
-
-
-export function createDispatchOutputTool(manager: DispatchManager) {
+export function createDispatchOutputTool(manager: DispatchManager): CanonicalToolDef {
   return defineTool({
     description:
       "Retrieve output from a completed background task. Call ONLY after receiving the task's <system-reminder> completion notification. There is no blocking mode — never poll this tool to wait for a task to finish.",
@@ -151,14 +162,6 @@ export function createDispatchOutputTool(manager: DispatchManager) {
         .optional()
         .default(0)
         .describe("Start position in the result text (0-based)."),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe(
-          "Maximum characters to return from offset, capped at max_chars.",
-        ),
       tail: z
         .boolean()
         .optional()
@@ -205,7 +208,6 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           {
             maxChars: input.max_chars ?? DEFAULT_MAX_RESULT_CHARS,
             offset: input.offset ?? 0,
-            limit: input.limit,
             tail: input.tail,
           },
           dir,
@@ -231,7 +233,6 @@ export function createDispatchOutputTool(manager: DispatchManager) {
           {
             maxChars: input.max_chars ?? DEFAULT_MAX_RESULT_CHARS,
             offset: input.offset ?? 0,
-            limit: input.limit,
             tail: input.tail,
           },
           dir,
@@ -273,7 +274,7 @@ receiving that notification.`;
   });
 }
 
-export function createDispatchCancelTool(manager: DispatchManager) {
+export function createDispatchCancelTool(manager: DispatchManager): CanonicalToolDef {
   return defineTool({
     description: "Cancel a running background task. Use when a dispatched task is no longer needed or is stuck. Returns a confirmation or error message.",
     args: {
@@ -291,74 +292,7 @@ export function createDispatchCancelTool(manager: DispatchManager) {
   });
 }
 
-export function createDispatchApproveTool(manager: DispatchManager) {
-  return defineTool({
-    description:
-      "Approve a human-in-the-loop task that is paused awaiting approval. " +
-      "Transitions the task to completed and notifies the parent. " +
-      "Only tasks in 'awaiting_approval' state can be approved.",
-    args: {
-      task_id: z
-        .string()
-        .describe("The task ID of the awaiting_approval task to approve"),
-    },
-    async execute(input) {
-      const approved = await manager.approveTask(input.task_id);
-      if (!approved) {
-        return [
-          "Task could not be approved.",
-          "",
-          `Task ID: ${input.task_id}`,
-          "Ensure the task exists and is in 'awaiting_approval' state.",
-        ].join("\n");
-      }
-      return [
-        "Task approved and completed.",
-        "",
-        `Task ID: ${input.task_id}`,
-        "The parent session has been notified.",
-      ].join("\n");
-    },
-  });
-}
-
-export function createDispatchRejectTool(manager: DispatchManager) {
-  return defineTool({
-    description:
-      "Reject a human-in-the-loop task that is paused awaiting approval. " +
-      "Transitions the task to error with the provided reason. " +
-      "Only tasks in 'awaiting_approval' state can be rejected.",
-    args: {
-      task_id: z
-        .string()
-        .describe("The task ID of the awaiting_approval task to reject"),
-      reason: z
-        .string()
-        .optional()
-        .describe("Optional reason for the rejection"),
-    },
-    async execute(input) {
-      const rejected = await manager.rejectTask(input.task_id, input.reason);
-      if (!rejected) {
-        return [
-          "Task could not be rejected.",
-          "",
-          `Task ID: ${input.task_id}`,
-          "Ensure the task exists and is in 'awaiting_approval' state.",
-        ].join("\n");
-      }
-      return [
-        "Task rejected.",
-        "",
-        `Task ID: ${input.task_id}`,
-        input.reason ? `Reason: ${input.reason}` : "",
-        "The parent session has been notified.",
-      ].filter(Boolean).join("\n");
-    },
-  });
-}
-
-export function createDispatchMetricsTool() {
+export function createDispatchMetricsTool(): CanonicalToolDef {
   return defineTool({
     description:
       "Retrieve runtime metrics snapshot for the dispatch subsystem — counters, gauges, and histograms. Returns a human-readable summary or JSON. Optionally exports the snapshot JSON to a file.",
@@ -440,21 +374,22 @@ export function createDispatchMetricsTool() {
   });
 }
 
-export function createDispatchBudgetTool(manager: DispatchManager) {
-  return defineTool({
-    description:
-      "Retrieve token/cost budget status for the current dispatch request. " +
-      "Shows configured limits, current usage, remaining budget, and percentage used. " +
-      "The orchestrator agent can call this to check remaining budget before dispatching more tasks.",
-    args: {
-      parent_session_id: z
-        .string()
-        .optional()
-        .describe("Parent session ID to query budget for (defaults to current session)"),
-    },
-    async execute(input, context) {
-      const parentSessionId = input.parent_session_id || context.sessionID;
-      return manager.getBudgetStatus(parentSessionId);
-    },
-  });
+/**
+ * Aggregate factory returning the full compatibility `dispatch_*` tool set.
+ * Keys: dispatch, dispatch_output, dispatch_status, dispatch_cancel, dispatch_metrics.
+ * These are real CanonicalToolDefs backed by the provided DispatchManager.
+ */
+export function createDispatchTools(
+  manager: DispatchManager,
+  resolvedSubagents: Map<string, { parentFullId: string }>,
+  subagentModelKey?: Map<string, string>,
+  getEffectiveAgent?: () => string,
+): Record<string, CanonicalToolDef> {
+  return {
+    dispatch: createDispatchTool(manager, resolvedSubagents, subagentModelKey, getEffectiveAgent),
+    dispatch_output: createDispatchOutputTool(manager),
+    dispatch_status: createDispatchStatusTool(manager),
+    dispatch_cancel: createDispatchCancelTool(manager),
+    dispatch_metrics: createDispatchMetricsTool(),
+  };
 }

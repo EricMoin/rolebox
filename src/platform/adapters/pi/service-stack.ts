@@ -111,6 +111,7 @@ export class PiLightweightServiceStack implements IHookProvider {
   private _pi: any;
   private _dispatchTools?: Record<string, CanonicalToolDef>;
   private _loopTools?: Record<string, CanonicalToolDef>;
+  private _taskTools?: Record<string, CanonicalToolDef>;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -120,6 +121,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     sessionDir?: string,
     dispatchTools?: Record<string, CanonicalToolDef>,
     loopTools?: Record<string, CanonicalToolDef>,
+    taskTools?: Record<string, CanonicalToolDef>,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
@@ -127,6 +129,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._sessionAdapter = new PiSessionAdapter(sessionDir);
     this._dispatchTools = dispatchTools;
     this._loopTools = loopTools;
+    this._taskTools = taskTools;
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -148,9 +151,13 @@ export class PiLightweightServiceStack implements IHookProvider {
   async init(): Promise<number> {
     // 1. Build the dispatch tools override: use external dispatch tools when
     //    provided (from real dispatch system), falling back to built-in stubs.
-    const dispatchToolsOverride: ToolRegistry = this._dispatchTools && Object.keys(this._dispatchTools).length > 0
+    // dispatch_* tools are graph-superseded: when no real dispatch tools are
+    // provided, register NOTHING (previously stub tools). Registering stubs
+    // would still expose the dispatch_* names to the model, inviting bare
+    // dispatch calls that bypass the graph engine.
+    const dispatchToolsOverride: ToolRegistry | undefined = this._dispatchTools && Object.keys(this._dispatchTools).length > 0
       ? this._dispatchTools
-      : buildDispatchStubTools();
+      : undefined;
 
     // 2. Assemble all tools via the shared canonical builder
     const allTools = buildCanonicalTools({
@@ -161,6 +168,12 @@ export class PiLightweightServiceStack implements IHookProvider {
       dispatchToolsOverride,
       loopToolsOverride: this._loopTools && Object.keys(this._loopTools).length > 0
         ? this._loopTools
+        : undefined,
+      // Restored legacy task_* surface. Merged additive with the same
+      // `.length > 0` degradation guard: real task_* tools when provided,
+      // omitted entirely otherwise (dispatch/loop still carry stubs).
+      taskToolsOverride: this._taskTools && Object.keys(this._taskTools).length > 0
+        ? this._taskTools
         : undefined,
     });
 

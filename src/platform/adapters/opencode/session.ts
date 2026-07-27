@@ -7,6 +7,7 @@
 
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ISessionClient } from "../../ports/session-client.ts";
+import { SessionCreateRejectedError } from "../../types.ts";
 import type {
   SessionInfo,
   Message,
@@ -35,6 +36,45 @@ function extractSingularResponse<T>(result: unknown): T | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Extract a human-readable rejection reason from the SDK's result-tuple
+ * `error` field (the parsed HTTP error body — `ThrowOnError=false` path).
+ *
+ * For session.create the server error is a `BadRequestError`:
+ *   { name: "BadRequest", data: { message: string, kind?: ... } }
+ * (see @opencode-ai/sdk dist/gen/types.gen.d.ts — SessionCreateErrors /
+ * BadRequestError). But the field is `unknown` and may take other shapes
+ * (a plain string, a bare `{ message }`, or an arbitrary object), so extract
+ * defensively and never fall through to a bare null that would hide the reason.
+ */
+function extractCreateErrorReason(error: unknown): { reason: string; code?: string } {
+  if (typeof error === "string") return { reason: error };
+
+  if (typeof error === "object" && error !== null) {
+    const e = error as { data?: unknown; message?: unknown; name?: unknown };
+    // Preferred: structured SDK body — { data: { message } } (BadRequestError).
+    if (typeof e.data === "object" && e.data !== null) {
+      const d = e.data as { message?: unknown };
+      if (typeof d.message === "string") {
+        return { reason: d.message, code: typeof e.name === "string" ? e.name : undefined };
+      }
+    }
+    if (typeof e.message === "string") {
+      return { reason: e.message, code: typeof e.name === "string" ? e.name : undefined };
+    }
+  }
+
+  // Fallback: serialize so the reason is never lost and never degrades to
+  // "[object Object]".
+  try {
+    const s = JSON.stringify(error);
+    if (s && s !== "{}") return { reason: s };
+  } catch {
+    /* non-serializable — fall through */
+  }
+  return { reason: "unknown server rejection" };
 }
 
 /**
@@ -240,9 +280,45 @@ export class OpencodeSessionAdapter implements ISessionClient {
         },
         query: { directory: options.directory },
       });
-      return extractSingularResponse<SessionInfo>(result);
-    } catch {
-      return null;
+      const r = result as { data?: SessionInfo; error?: unknown };
+      if (r.error) {
+        // Server-side rejection (result-tuple `error` field, e.g. HTTP 400
+        // BadRequestError). This is a REAL, non-transient failure — surface the
+        // underlying reason via a tagged error (NOT a bare null, which the
+        // dispatch launcher would only be able to report as "empty response",
+        // hiding the real cause). The `SessionCreateRejectedError` tag is what
+        // tells task-launcher's retry loop this is NOT transient, so it is
+        // never retried (mirrors the pre-change null-return semantics exactly).
+        const { reason, code } = extractCreateErrorReason(r.error);
+        throw new SessionCreateRejectedError(reason, code);
+      }
+      // opencode's session.create may return HTTP 204 (void data) on success —
+      // an empty response means the session WAS created. Mirror the promptAsync
+      // contract: only an explicit `error` field or a thrown exception is a real
+      // failure. Prefer the authoritative Session object when present (it carries
+      // the real server id); otherwise synthesize a truthy SessionInfo sentinel so
+      // the dispatch launcher does not misread a successful create as an
+      // "empty response" spawn failure.
+      return r.data ?? {
+        id: crypto.randomUUID(),
+        projectID: options.directory,
+        directory: options.directory,
+        parentID: options.parentID,
+        summary: { additions: 0, deletions: 0, files: 0 },
+        title: `Session ${options.directory}`,
+        version: "1.0",
+        time: { created: Date.now(), updated: Date.now() },
+      };
+    } catch (err) {
+      // Transport/network failure (e.g. the SDK's client.create threw — a
+      // dropped connection, timeout, or 5xx). This is a TRANSIENT failure and
+      // MUST remain observable to the caller so the dispatch launcher can
+      // retry it with backoff. Deliberately re-throw instead of returning null
+      // (as promptAsync/messages do): a null return is reserved for the
+      // server-side rejection path above (`r.error`), which is a REAL,
+      // non-transient error and must NOT be retried. See task-launcher
+      // startBackgroundTask for the retry policy that keys off this distinction.
+      throw err;
     }
   }
 

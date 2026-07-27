@@ -305,11 +305,16 @@ describe("handleChatMessage — loop cancellation", () => {
 });
 
 describe("handleChatMessage — loop function activation", () => {
-  it("injects correction for nested loop attempts", async () => {
+  it("injects correction when loop registration is rejected (nested/same-origin)", async () => {
+    // Nested-loop rejection now happens inside coordinator.register, which
+    // returns a RegisterResult. The hook surfaces the rejection as a correction.
     const isLoopSession = mock(() => true);
     const shouldCancelOnUserMessage = mock(() => false);
     const getLoopState = mock(() => null);
-    const register = mock(() => {});
+    const register = mock(() => ({
+      ok: false,
+      reason: "loop already active for this session",
+    }));
     const state = makeState();
     state.activeLoopManager = {
       isLoopSession,
@@ -326,16 +331,16 @@ describe("handleChatMessage — loop function activation", () => {
     );
 
     const correction = state.pendingCorrections.get("sess-1");
-    expect(correction).toContain("Nested loops are not supported");
-    // register should NOT be called since nested loops are rejected
-    expect(register).not.toHaveBeenCalled();
+    expect(correction).toContain("Loop not started: loop already active for this session");
+    // register is invoked and its rejection is surfaced to the agent
+    expect(register).toHaveBeenCalledTimes(1);
   });
 
   it("parses and activates loop function from user text", async () => {
     const isLoopSession = mock(() => false);
     const shouldCancelOnUserMessage = mock(() => false);
     const getLoopState = mock(() => null);
-    const register = mock(() => {});
+    const register = mock(() => ({ ok: true }));
     const state = makeState();
     state.activeLoopManager = {
       isLoopSession,

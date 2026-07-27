@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { resolveSkills } from "./skill-resolver.ts";
 import { resolveAllReferences } from "./reference-resolver.ts";
 import { resolveFunctions } from "../function/file-resolver.ts";
-import { buildSubagentRoleBlock, SUBAGENT_RESULT_CONTRACT, parseCollaboration } from "../graph/index.ts";
+import { buildSubagentRoleBlock, SUBAGENT_RESULT_CONTRACT, autoConvertCollaboration, graphDeclarationToResolvedGraph } from "../graph/index.ts";
 import { buildAgentPrompt } from "../prompt/builder.ts";
 import { subagentDir, globalFunctionsPath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
@@ -239,12 +239,21 @@ export async function resolveAllRoles(
         const subagentSlugNames = (config.subagents ?? []).map(sa =>
           sa.name.toLowerCase().replace(/\s+/g, "-")
         );
-        const resolvedGraph = parseCollaboration(config.collaboration, subagentSlugNames);
+        // Route the legacy `collaboration:` path through the v2 converter +
+        // bridge, which reproduces the v1 ResolvedGraph the downstream prompt
+        // and state builders consume.
+        const declaration = autoConvertCollaboration(config.collaboration, {
+          parentAgentId: roleId,
+          roleName: config.name ?? roleId,
+        });
+        const resolvedGraph = graphDeclarationToResolvedGraph(declaration, {
+          availableSubagentNames: subagentSlugNames,
+        });
         if (resolvedGraph) {
           graph = resolvedGraph;
           ctx.roleGraphMap.set(roleId, resolvedGraph);
         } else {
-          log.info("Failed to parse collaboration graph", { roleId });
+          log.info("Failed to resolve collaboration graph", { roleId });
         }
       }
 

@@ -78,6 +78,16 @@ export const DEFAULT_BACKPRESSURE_MAX_DELAY_MS = 60_000;
  *  LIVE — consumed by manager.ts (Task 12) */
 export const DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS = 120_000;
 
+/** Default total session.create attempts (1 initial + N-1 retries) for transient
+ *  transport failures. Only THROWN errors are retried; a null return (server
+ *  rejection via r.error) is never retried.
+ *  LIVE — consumed by task-launcher.ts startBackgroundTask */
+export const DEFAULT_CREATE_RETRY_ATTEMPTS = 3;
+
+/** Default backoff (ms) between session.create retry attempts.
+ *  LIVE — consumed by task-launcher.ts startBackgroundTask */
+export const DEFAULT_CREATE_RETRY_BACKOFF_MS = 250;
+
 /** Default prompt timeout (ms) for synchronous dispatch.
  *  LIVE — consumed by manager.ts (Task 12) */
 export const DEFAULT_SYNC_PROMPT_TIMEOUT_MS = 600_000;
@@ -181,6 +191,12 @@ export interface DispatchManagerConfig {
   /** Max cumulative delay (ms) under backpressure before giving up — default: 60000 */
   backpressureMaxDelayMs?: number;
 
+  /** Total session.create attempts for transient (thrown) failures — default: 3.
+   *  A null return (server rejection) is never retried. Set to 1 to disable retries. */
+  createRetryAttempts?: number;
+  /** Backoff (ms) between session.create retry attempts — default: 250. */
+  createRetryBackoffMs?: number;
+
   /** Timeout (ms) for materializing a sub-agent result fetch — default: 10000 */
   materializeTimeoutMs?: number;
   /** How long (ms) sidecar result files are kept after task cleanup — default: 3600000 */
@@ -219,6 +235,9 @@ export const DEFAULT_CONFIG: DispatchManagerConfig = {
   retryAfterMs: DEFAULT_RETRY_AFTER_MS,
   backpressureMaxRetries: DEFAULT_BACKPRESSURE_MAX_RETRIES,
   backpressureMaxDelayMs: DEFAULT_BACKPRESSURE_MAX_DELAY_MS,
+
+  createRetryAttempts: DEFAULT_CREATE_RETRY_ATTEMPTS,
+  createRetryBackoffMs: DEFAULT_CREATE_RETRY_BACKOFF_MS,
 
   materializeTimeoutMs: MATERIALIZE_TIMEOUT_MS,
   resultRetentionMs: RESULT_RETENTION_MS,

@@ -220,12 +220,14 @@ describe("PI Extension — Extension Point Registration", () => {
     }
   });
 
-  it("registers dispatch stub tools (dispatch, dispatch_output, dispatch_cancel, dispatch_metrics, dispatch_status)", async () => {
+  it("does NOT register dispatch_* tools on Pi (graph-only orchestration)", async () => {
     const { pi, registeredNames } = createRecordingPi();
     const stack = new PiLightweightServiceStack(pi, [emptyRole]);
     await stack.init();
 
-    const stubTools = [
+    // dispatch_* is graph-superseded: no stubs, no shims — exposing the names
+    // would invite bare dispatch calls that bypass the graph engine.
+    const dispatchTools = [
       "dispatch",
       "dispatch_output",
       "dispatch_cancel",
@@ -233,8 +235,8 @@ describe("PI Extension — Extension Point Registration", () => {
       "dispatch_status",
     ];
 
-    for (const toolName of stubTools) {
-      expect(registeredNames).toContain(toolName);
+    for (const toolName of dispatchTools) {
+      expect(registeredNames).not.toContain(toolName);
     }
   });
 

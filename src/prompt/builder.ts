@@ -157,13 +157,16 @@ export function buildMemoryBlock(memories: MemorySummary[]): string {
   );
 }
 
-const SUBAGENT_INSTRUCTIONS = `You can delegate tasks to these sub-agents via the dispatch() tool.
-Use dispatch(subagent="agent-id", prompt="...", run_in_background=false) for synchronous execution.
-Use dispatch(subagent="agent-id", prompt="...", run_in_background=true) for background execution.
-IMPORTANT: When run_in_background=true, you will receive a <system-reminder> notification when the task completes.
-Do NOT call dispatch_output to poll for results. Wait for the <system-reminder> notification first.
-Use dispatch_output(task_id="bg_xxx") ONLY after receiving the completion notification.
-Use dispatch_cancel(task_id="bg_xxx") to cancel a running background task.`;
+const SUBAGENT_INSTRUCTIONS = `You can delegate tasks to these sub-agents via the graph execution engine.
+Model each delegated task as a graph node. Use graph_create to start a graph, then
+graph_add_node(graph_id=..., id=..., agent=<sub-agent id>, prompt="...") to register a
+worker node, then graph_run(graph_id=..., node_id=...) to execute it.
+When graph_run returns, read the full worker result with
+graph_status(graph_id=..., node_id=<node_id>, include_output=true).
+For multi-step work that must run together, add edges (graph_add_edge) between nodes and
+run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.
+IMPORTANT: after dispatching a background node, you will receive a <system-reminder> when it
+completes. Do not poll — wait for the notification, then query graph_status to read the result.`;
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,

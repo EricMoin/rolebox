@@ -23,23 +23,12 @@ import { createSubLogger, formatError } from "./logger.ts";
 import type { ResolvedFunction, ResolvedGraph, ResolvedSubAgent } from "./types.ts";
 import { PiProcessSessionAdapter } from "./platform/adapters/pi/process-session.ts";
 import { PiNotificationSessionClient } from "./platform/adapters/pi/notification-session.ts";
-import {
-  createDispatchTool,
-  createDispatchOutputTool,
-  createDispatchCancelTool,
-  createDispatchApproveTool,
-  createDispatchRejectTool,
-  createDispatchMetricsTool,
-  createDispatchBudgetTool,
-} from "./dispatch/tools.ts";
-import { createDispatchStatusTool } from "./dispatch/query/task-status.ts";
-import { createDispatchProgressTool, createDispatchStreamTool } from "./dispatch/progress/progress-tools.ts";
-import type { CanonicalToolDef } from "./platform/index.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { LoopStore } from "./loop/loop-store.ts";
-import { createLoopStartTool } from "./platform/adapters/pi/loop-tool.ts";
+import { createDispatchTools } from "./dispatch/tools.ts";
 import { createLoopTools } from "./loop/loop-tools.ts";
+import { createTaskTools } from "./dispatch/query/task-tools.ts";
 import {
   createDispatchManager,
   buildSubagentLineage,
@@ -53,6 +42,7 @@ import {
   getSentFinalNotifies,
 } from "./dispatch/notification.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
+import { recoverInterruptedGraphs } from "./graph/engine/engine-startup.ts";
 
 // ── Shared state maps ─────────────────────────────────────────────────────
 
@@ -324,13 +314,48 @@ export default async function (pi: any): Promise<void> {
       });
     }
 
-    log.info("Loop coordinator initialized");
+        log.info("Loop coordinator initialized");
     log.debug("Loop coordinator details", {
       delayMs: 2000,
       loadedLoops: loadedLoops?.size ?? 0,
       reconciledLoops: reconciledCount,
       activeLocks: loopCoordinator.getAdvancingLockState().activeLocks,
     });
+
+    // ── Graph engine startup recovery ─────────────────────────────────────
+    //
+    // Resume any graph engine (`.rolebox/state/engine-*.json`) left
+    // mid-execution by a crash. Mirrors the loop recovery above: scan the
+    // store, skip already-`complete` graphs, and `recover()` the rest. A
+    // single bad engine file is isolated per-graph and logged — it can never
+    // block plugin startup (engine-startup.ts guarantees the sweep never
+    // throws).
+    //
+    // Opt-out: `ROLEBOX_ENGINE_RECOVERY=off|0|false` disables the sweep.
+    const graphRecoveryValue = (process.env.ROLEBOX_ENGINE_RECOVERY ?? "").trim().toLowerCase();
+    const graphRecoveryEnabled =
+      graphRecoveryValue !== "off" &&
+      graphRecoveryValue !== "0" &&
+      graphRecoveryValue !== "false";
+    const graphRecoveryReport = await recoverInterruptedGraphs({
+      // The engine persists under `{workspace}/.rolebox/state`, so the scan
+      // root is the workspace the plugin runs in (the same `process.cwd()`
+      // the loop dispatch adapter above uses for its own state store).
+      directory: process.cwd(),
+      manager: dispatchManager,
+      stateDir: process.cwd(),
+      enabled: graphRecoveryEnabled,
+    });
+    if (graphRecoveryReport.recovered > 0 || graphRecoveryReport.failed.length > 0) {
+      log.info("Interrupted graph engines recovered", {
+        enabled: graphRecoveryEnabled,
+        scanned: graphRecoveryReport.scanned,
+        recovered: graphRecoveryReport.recovered,
+        failed: graphRecoveryReport.failed.length,
+      });
+    }
+
+
     // ── PiEventBridge → DispatchManager wiring ──────────────────────────
     //
     // Subscribe to canonical Pi session lifecycle events and route them
@@ -459,40 +484,44 @@ export default async function (pi: any): Promise<void> {
       log.info("Seeded active agent from environment", { agent: seededAgent });
     }
 
-    const dispatchTools: Record<string, CanonicalToolDef> = {
-      dispatch: createDispatchTool(
-        dispatchManager,
-        resolvedSubagents,
-        subagentModelKey,
-        () => activeAgent.get() ?? "",
-      ),
-      dispatch_output: createDispatchOutputTool(dispatchManager),
-      dispatch_cancel: createDispatchCancelTool(dispatchManager),
-      dispatch_metrics: createDispatchMetricsTool(),
-      dispatch_status: createDispatchStatusTool(dispatchManager),
-      dispatch_budget: createDispatchBudgetTool(dispatchManager),
-      dispatch_approve: createDispatchApproveTool(dispatchManager),
-      dispatch_reject: createDispatchRejectTool(dispatchManager),
-      dispatch_progress: createDispatchProgressTool(dispatchManager),
-      dispatch_stream: createDispatchStreamTool(dispatchManager),
-    };
+    // ── 5. Tool registration via PiLightweightServiceStack ──────────────
+    //
+    // Subtask 5: pass the REAL restored dispatch_*/loop_*/task_* tool sets
+    // (from the shared factories) instead of empty {} so pi.registerTool
+    // registers the live tools rather than Pi stub fallbacks. Each factory
+    // delegates to the live DispatchManager/LoopCoordinator and reads the
+    // platform active-agent ref as the context.agent fallback, since Pi
+    // never populates context.agent on tool contexts.
+    //
+    // Degradation: PiLightweightServiceStack.init() guards each override
+    // with `.length > 0` — if a factory returned empty, the built-in stub
+    // dispatch tools still register (dispatch only), and loop/task are
+    // simply omitted. The stacks' graph_* tools are registered by the
+    // shared tool-assembly layer separately.
 
-    const loopStartTool = createLoopStartTool(
-      loopCoordinator,
-      pi,
-      () => activeAgent.get() ?? "",
-    );
-    const loopTools: Record<string, CanonicalToolDef> = {
-      loop_start: loopStartTool,
-      ...createLoopTools(loopCoordinator, notifyClient),
-    };
+    // dispatch_*/loop_* tool registration DISABLED — orchestration is
+    // graph-only (graph_* tools). Bare dispatch/loop calls would bypass the
+    // graph engine's budget accounting, approval gates, and loop caps.
+    // The DispatchManager/LoopCoordinator remain live for internal engine use.
+    // const dispatchTools = createDispatchTools(
+    //   dispatchManager,
+    //   resolvedSubagents,
+    //   subagentModelKey,
+    //   () => activeAgent.get() ?? "",
+    // );
+    // const loopTools = createLoopTools(loopCoordinator, notifyClient, {
+    //   fallbackAgent: () => activeAgent.get() ?? "primary",
+    // });
+    // task_retry withheld: re-dispatches outside the graph engine.
+    const { task_retry: _omittedTaskRetry, ...taskTools } = createTaskTools(dispatchManager, process.cwd());
 
     const serviceStack = new PiLightweightServiceStack(
       pi,
       resolvedRoles,
       piSessionDir,
-      dispatchTools,
-      loopTools,
+      undefined, // dispatchTools disabled (graph-only orchestration)
+      undefined, // loopTools disabled (graph_add_loop replaces loop_*)
+      taskTools,
     );
     await serviceStack.init();
 

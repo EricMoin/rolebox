@@ -119,7 +119,7 @@ export function buildNotificationText(payload: NotificationPayload): string {
   if (payload.resultText) {
     const MAX_INLINE_CHARS = 4000;
     const truncated = payload.resultText.length > MAX_INLINE_CHARS
-      ? payload.resultText.slice(0, MAX_INLINE_CHARS) + "\n\n[... result truncated, use dispatch_output for full content ...]"
+      ? payload.resultText.slice(0, MAX_INLINE_CHARS) + "\n\n[... result truncated, use graph_status for full content ...]"
       : payload.resultText;
     lines.push("**Result:**");
     lines.push("");
@@ -127,7 +127,7 @@ export function buildNotificationText(payload: NotificationPayload): string {
     lines.push(truncated);
     lines.push("```");
     lines.push("");
-    lines.push(`Use dispatch_output(task_id="${payload.taskId}") to retrieve the full result or paginate.`);
+    lines.push(`Use graph_status(node_id="${payload.taskId}", include_output=true) to retrieve the full result or paginate.`);
     lines.push("</system-reminder>");
   } else {
     lines.push("All background tasks have finished. You may continue.");

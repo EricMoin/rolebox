@@ -126,6 +126,7 @@ export async function executeSync(
         session = await withTimeout(
           d.client.create({
             directory: parentContext.directory,
+            agent: input.subagent,
             parentID: parentContext.sessionID,
           }),
           createTimeoutMs,

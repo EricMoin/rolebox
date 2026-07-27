@@ -128,7 +128,7 @@ describe("buildNotificationText", () => {
     expect(text).toContain("```result");
     expect(text).toContain("some result");
     expect(text).toContain("</system-reminder>");
-    expect(text).toContain('dispatch_output(task_id="bg_res")');
+    expect(text).toContain('graph_status(node_id="bg_res", include_output=true)');
   });
 
   it("final notification without resultText falls back to legacy format", () => {
@@ -146,7 +146,7 @@ describe("buildNotificationText", () => {
     expect(text).toContain("All background tasks have finished");
     expect(text).not.toContain("```result");
     expect(text).not.toContain("**Result:**");
-    expect(text).not.toContain("dispatch_output");
+    expect(text).not.toContain("graph_status");
   });
 
   it("intermediate notification ignores resultText", () => {
@@ -184,7 +184,7 @@ describe("buildNotificationText", () => {
     // First 4000 chars should be present
     expect(text).toContain("X".repeat(4000));
     // Truncation note should be present
-    expect(text).toContain("result truncated, use dispatch_output for full content");
+    expect(text).toContain("result truncated, use graph_status for full content");
     // The full 5000 chars should NOT be present
     expect(text).not.toContain("X".repeat(5000));
   });

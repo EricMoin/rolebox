@@ -12,7 +12,6 @@ import type { ISessionClient } from "./ports/session-client.ts";
 import type { PlatformCapabilities } from "./capabilities.ts";
 import type { DispatchManager } from "../dispatch/core/manager.ts";
 import type { ResolvedRole } from "../types.ts";
-import { registerDeprecatedTool } from "../hooks/tool-before.ts";
 
 import { createHashlineReadTool } from "../hashline/hashline-read.ts";
 import { createHashlineEditTool } from "../hashline/hashline-edit.ts";
@@ -39,16 +38,10 @@ import {
   createSessionDiffTool,
   createSessionForkTool,
 } from "../session/session-inspect-tools.ts";
-import {
-  createDispatchTool,
-  createDispatchOutputTool,
-  createDispatchCancelTool,
-  createDispatchApproveTool,
-  createDispatchRejectTool,
-  createDispatchMetricsTool,
-} from "../dispatch/tools.ts";
-import { createDispatchStatusTool } from "../dispatch/query/task-status.ts";
-import { createDispatchProgressTool, createDispatchStreamTool } from "../dispatch/progress/progress-tools.ts";
+
+// Graph Execution Engine v2 — Phase 4, Subtask 6. Additive registration of the
+// seven imperative graph_* tools. Import-only (no protected files touched).
+import { createGraphTools } from "../graph/tools/index.ts";
 
 export interface BuildToolsOptions {
   sessionClient?: ISessionClient;
@@ -62,6 +55,7 @@ export interface BuildToolsOptions {
   extraTools?: Record<string, CanonicalToolDef>;
   dispatchToolsOverride?: Record<string, CanonicalToolDef>;
   loopToolsOverride?: Record<string, CanonicalToolDef>;
+  taskToolsOverride?: Record<string, CanonicalToolDef>;
 }
 
 export function buildCanonicalTools(
@@ -106,27 +100,17 @@ export function buildCanonicalTools(
     tools.session_fork = createSessionForkTool(client);
   }
 
-  // 3. Dispatch tools
-  if (opts.dispatchToolsOverride && Object.keys(opts.dispatchToolsOverride).length > 0) {
+  // 4. dispatchToolsOverride merged below extraTools/loopToolsOverride.
+  // Lowest override precedence by design: any platform passing an explicit
+  // override for a dispatch_* key (real shims on opencode, or stubs on Pi)
+  // registers them here. If a caller also passes extraTools or
+  // loopToolsOverride with an overlapping key, those are merged afterwards
+  // (higher precedence) and win.
+  if (opts.dispatchToolsOverride) {
     Object.assign(tools, opts.dispatchToolsOverride);
-  } else if (opts.dispatchManager && opts.resolvedSubagents) {
-    const mgr = opts.dispatchManager;
-    const subagents = opts.resolvedSubagents;
-    const modelKey = opts.subagentModelKey;
-
-    tools.dispatch = createDispatchTool(mgr, subagents, modelKey);
-    tools.dispatch_output = createDispatchOutputTool(mgr);
-    tools.dispatch_cancel = createDispatchCancelTool(mgr);
-    tools.dispatch_approve = createDispatchApproveTool(mgr);
-    tools.dispatch_reject = createDispatchRejectTool(mgr);
-    tools.dispatch_metrics = createDispatchMetricsTool();
-    tools.dispatch_status = createDispatchStatusTool(mgr);
-
-    tools.dispatch_progress = createDispatchProgressTool(mgr);
-    tools.dispatch_stream = createDispatchStreamTool(mgr);
   }
 
-  // 4. extraTools merged on top (overrides core if same key)
+  // 3. extraTools merged on top (overrides core if same key)
   // Intentional: extraTools has higher precedence than dispatchToolsOverride.
   // If a caller passes both an override and extraTools with overlapping keys,
   // the extra tool wins. This is by design — extraTools is the platform's
@@ -140,23 +124,24 @@ export function buildCanonicalTools(
     Object.assign(tools, opts.loopToolsOverride);
   }
 
-  // 6. Post-processing: augment descriptions for deprecated tools
-  // Iterates over all assembled tools. When a tool has `deprecated` set,
-  // appends "⚠️ Deprecated" (plus a message if provided) to its description
-  // so the LLM-facing system prompt shows the deprecation notice, and
-  // registers it for runtime warning logging.
-  tools = Object.fromEntries(
-    Object.entries(tools).map(([name, def]) => {
-      if (!def.deprecated) return [name, def];
-      const info = typeof def.deprecated === "object" ? def.deprecated : null;
-      const depMsg = info ? info.message : "";
-      registerDeprecatedTool(name, depMsg);
-      const suffix = depMsg
-        ? ` ⚠️ Deprecated: ${depMsg}`
-        : " ⚠️ Deprecated";
-      return [name, { ...def, description: `${def.description}${suffix}` }];
-    }),
-  );
+  // 5a. taskToolsOverride — restored legacy task_* compatibility surface.
+  // Same highest-precedence, additive merge as loopToolsOverride. The task_*
+  // keys are disjoint from dispatch_*/loop_*/graph_* namespaces, so this never
+  // overrides another tool.
+  if (opts.taskToolsOverride) {
+    Object.assign(tools, opts.taskToolsOverride);
+  }
+
+  // 5b. Graph Execution Engine v2 tools — Phase A coexistence (additive only)
+  // Registered alongside the loop_* tools when a dispatch manager is present.
+  // The graph_* keys share no namespace with loop_*, so this merge never
+  // overrides a legacy tool. Same additive precedence as
+  // extraTools/loopToolsOverride (Object.assign onto the assembled map).
+  if (opts.dispatchManager) {
+    Object.assign(tools, createGraphTools(opts.dispatchManager, {
+      directory: opts.directory,
+    }));
+  }
 
   return tools;
 }

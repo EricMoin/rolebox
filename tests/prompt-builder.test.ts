@@ -199,10 +199,10 @@ describe("buildAgentPrompt", () => {
       subagents: [{ id: "a", name: "A", description: "Agent A" }],
     });
     expect(result).toContain(
-      "You can delegate tasks to these sub-agents via the dispatch() tool.",
+      "You can delegate tasks to these sub-agents via the graph execution engine.",
     );
     expect(result).toContain(
-      'dispatch(subagent=',
+      'graph_add_node(',
     );
   });
 
@@ -328,10 +328,10 @@ describe("buildSubagentBlock", () => {
   it("contains the static instruction text", () => {
     const result = buildSubagentBlock([makeSubagent()]);
     expect(result).toContain(
-      "You can delegate tasks to these sub-agents via the dispatch() tool.",
+      "You can delegate tasks to these sub-agents via the graph execution engine.",
     );
     expect(result).toContain(
-      'dispatch(subagent=',
+      'graph_add_node(',
     );
   });
 

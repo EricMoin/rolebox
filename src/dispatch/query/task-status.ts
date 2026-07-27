@@ -1,11 +1,8 @@
 import { defineTool, type CanonicalToolContext } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
-import type { DispatchTask, TaskEventState } from "../types.ts";
 import { formatDuration, formatAge } from "./format-utils.ts";
-import { createSubLogger } from "../../logger.ts";
-
-const log = createSubLogger("task:status");
+import type { CanonicalToolDef } from "../../platform/types.ts";
 
 // ─── Status glyphs ──────────────────────────────────────────────────────────
 
@@ -24,7 +21,12 @@ function glyph(status: string): string {
 
 // ─── Tool factory ──────────────────────────────────────────────────────────
 
-export function createDispatchStatusTool(manager: DispatchManager) {
+/**
+ * dispatch_status tool — all-tasks liveness summary (or per-task detail).
+ * Compatibility shim restored after Phase C. Backed by DispatchManager query
+ * methods (getTasksByParent / getTask / getEventState) — no graph logic.
+ */
+export function createDispatchStatusTool(manager: DispatchManager): CanonicalToolDef {
   return defineTool({
     description:
       "Proactively check task liveness on demand. Returns status and liveness " +

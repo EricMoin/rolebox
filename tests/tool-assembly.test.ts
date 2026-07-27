@@ -162,7 +162,7 @@ describe("buildCanonicalTools", () => {
     }
   });
 
-  it("includes dispatch tools when dispatchManager and resolvedSubagents are provided", () => {
+  it("does NOT register dispatch tools when dispatchManager is provided but no dispatchToolsOverride (Phase C removal)", () => {
     const opts = makeBaseOpts();
     opts.sessionClient = makeSessionClient();
     opts.dispatchManager = makeDispatchManager();
@@ -170,61 +170,60 @@ describe("buildCanonicalTools", () => {
 
     const tools = buildCanonicalTools(opts);
 
-    for (const key of DISPATCH_KEYS) {
-      expect(tools[key]).toBeDefined();
-    }
-  });
-
-  it("uses dispatchToolsOverride when provided", () => {
-    const opts = makeBaseOpts();
-    opts.sessionClient = makeSessionClient();
-    opts.dispatchManager = makeDispatchManager();
-    opts.resolvedSubagents = new Map();
-    opts.dispatchToolsOverride = {
-      custom_dispatch: makeDummyTool("custom_dispatch"),
-    };
-
-    const tools = buildCanonicalTools(opts);
-
-    expect(tools.custom_dispatch).toBeDefined();
-    // Standard dispatch keys should NOT be present when override is used
+    // Dispatch tools are restored via dispatchToolsOverride, NOT auto-registered
+    // when a dispatchManager is present. Without the override they stay absent.
     for (const key of DISPATCH_KEYS) {
       expect(tools[key]).toBeUndefined();
     }
   });
 
-  it("treats empty dispatchToolsOverride ({}) the same as undefined", () => {
+  it("registers dispatch tools from dispatchToolsOverride", () => {
     const opts = makeBaseOpts();
-    opts.sessionClient = makeSessionClient();
-    opts.dispatchManager = makeDispatchManager();
-    opts.resolvedSubagents = new Map();
-    opts.dispatchToolsOverride = {};
+    const dispatchDispatch = makeDummyTool("dispatch");
+    const dispatchOutput = makeDummyTool("dispatch_output");
+    opts.dispatchToolsOverride = {
+      dispatch: dispatchDispatch,
+      dispatch_output: dispatchOutput,
+      dispatch_cancel: makeDummyTool("dispatch_cancel"),
+      dispatch_metrics: makeDummyTool("dispatch_metrics"),
+      dispatch_status: makeDummyTool("dispatch_status"),
+    };
 
     const tools = buildCanonicalTools(opts);
 
-    // Empty override should not suppress dispatch tool creation.
     for (const key of DISPATCH_KEYS) {
       expect(tools[key]).toBeDefined();
     }
+    expect(tools.dispatch).toBe(dispatchDispatch);
+    expect(tools.dispatch_output).toBe(dispatchOutput);
   });
 
-  it("allows extraTools to override dispatchToolsOverride keys (intentional merge order)", () => {
+  it("applies extraTools above dispatchToolsOverride (dispatchToolsOverride has lower precedence)", () => {
     const opts = makeBaseOpts();
-    opts.sessionClient = makeSessionClient();
-    opts.dispatchManager = makeDispatchManager();
-    opts.resolvedSubagents = new Map();
-    opts.dispatchToolsOverride = {
-      dispatch: makeDummyTool("dispatch_override"),
-    };
+    const overrideDispatch = makeDummyTool("override_dispatch");
     const extraDispatch = makeDummyTool("extra_dispatch");
-    opts.extraTools = {
-      dispatch: extraDispatch,
-    };
+    opts.dispatchToolsOverride = { dispatch: overrideDispatch };
+    opts.extraTools = { dispatch: extraDispatch };
 
     const tools = buildCanonicalTools(opts);
 
-    // extraTools wins over dispatchToolsOverride for overlapping keys.
+    // extraTools wins over dispatchToolsOverride on overlap.
     expect(tools.dispatch).toBe(extraDispatch);
+    expect(tools.dispatch).not.toBe(overrideDispatch);
+  });
+
+  it("applies loopToolsOverride above dispatchToolsOverride", () => {
+    const opts = makeBaseOpts();
+    const overrideSignal = makeDummyTool("override_signal");
+    const loopSignal = makeDummyTool("loop_signal");
+    opts.dispatchToolsOverride = { signal: overrideSignal };
+    opts.loopToolsOverride = { signal: loopSignal };
+
+    const tools = buildCanonicalTools(opts);
+
+    // loopToolsOverride wins over dispatchToolsOverride on overlap.
+    expect(tools.signal).toBe(loopSignal);
+    expect(tools.signal).not.toBe(overrideSignal);
   });
 
   it("applies extraTools on top of core tools", () => {

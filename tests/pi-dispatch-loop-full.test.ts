@@ -21,7 +21,6 @@ import { PiNotificationSessionClient } from "../src/platform/adapters/pi/notific
 import { LoopCoordinator } from "../src/loop/coordinator.ts";
 import { LoopStore } from "../src/loop/loop-store.ts";
 import { DispatchAdapter, type IDispatchAdapter } from "../src/loop/dispatch-adapter.ts";
-import { createLoopTool } from "../src/platform/adapters/pi/loop-tool.ts";
 import { LOOP_PROGRESS_MARKER, LOOP_STATE_SCHEMA_VERSION } from "../src/loop/constants.ts";
 import type { LoopState, LoopPhase, LoopMode } from "../src/loop/types.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
@@ -1022,113 +1021,5 @@ describe("PI Loop — LoopStore Persistence & Recovery", () => {
     expect(progressNotes.length).toBeGreaterThanOrEqual(1);
 
     coordinator.dispose();
-  });
-});
-
-// ════════════════════════════════════════════════════════════════════════════
-//  Section E: Loop Tool — createLoopTool integration
-// ════════════════════════════════════════════════════════════════════════════
-
-describe("PI Loop — Loop Tool", () => {
-  let adapter: MockDispatchAdapter;
-  let coordinator: LoopCoordinator;
-
-  beforeEach(() => {
-    adapter = createMockDispatchAdapter();
-    coordinator = new LoopCoordinator(adapter, { delayMs: 0 });
-  });
-
-  afterEach(() => {
-    coordinator.dispose();
-  });
-
-  // ── E.1: createLoopTool execute calls coordinator.register ───────────────
-
-  it("createLoopTool execute registers loop and returns non-empty result", async () => {
-    const pi = createMockPi();
-    const activeAgent = () => "test-agent";
-
-    const tool = createLoopTool(coordinator, pi as any, activeAgent);
-
-    const ctx = {
-      sessionID: "session-loop-1",
-      messageID: "msg-1",
-      agent: "",
-      directory: "/tmp",
-      worktree: "/tmp",
-      abort: new AbortController().signal,
-      metadata: mock(() => {}),
-      ask: mock(async () => {}),
-    };
-
-    const result = await tool.execute({ iterations: 3, mode: "inherit" }, ctx);
-
-    // Return value is a non-empty string
-    expect(typeof result).toBe("string");
-    expect((result as string).length).toBeGreaterThan(0);
-    expect(result as string).toContain("Loop started");
-    expect(result as string).toContain("3");
-
-    // Verify coordinator registered the loop
-    const loop = coordinator.getLoopState("session-loop-1");
-    expect(loop).toBeDefined();
-    expect(loop!.total).toBe(3);
-    expect(loop!.mode).toBe("inherit");
-    expect(loop!.agent).toBe("test-agent"); // fallback from activeAgent
-  });
-
-  // ── E.2: createLoopTool respects mode param ─────────────────────────────
-
-  it("createLoopTool execute passes mode=fresh to coordinator", async () => {
-    const pi = createMockPi();
-    const activeAgent = () => "fresh-agent";
-
-    const tool = createLoopTool(coordinator, pi as any, activeAgent);
-
-    const ctx = {
-      sessionID: "session-fresh-1",
-      messageID: "msg-1",
-      agent: "",
-      directory: "/tmp",
-      worktree: "/tmp",
-      abort: new AbortController().signal,
-      metadata: mock(() => {}),
-      ask: mock(async () => {}),
-    };
-
-    await tool.execute({ iterations: 5, mode: "fresh" }, ctx);
-
-    const loop = coordinator.getLoopState("session-fresh-1");
-    expect(loop).toBeDefined();
-    expect(loop!.total).toBe(5);
-    expect(loop!.mode).toBe("fresh");
-  });
-
-  // ── E.3: createLoopTool returns invalid iterations message for out-of-range ──
-
-  it("createLoopTool returns error for iterations > 50", async () => {
-    const pi = createMockPi();
-    const activeAgent = () => "t";
-
-    const tool = createLoopTool(coordinator, pi as any, activeAgent);
-
-    const ctx = {
-      sessionID: "session-51",
-      messageID: "msg-1",
-      agent: "",
-      directory: "/tmp",
-      worktree: "/tmp",
-      abort: new AbortController().signal,
-      metadata: mock(() => {}),
-      ask: mock(async () => {}),
-    };
-
-    const result = await tool.execute({ iterations: 51, mode: "inherit" }, ctx);
-
-    expect(result as string).toContain("Invalid iterations");
-    expect(result as string).toContain("51");
-
-    // Coordinator should NOT have registered this loop
-    expect(coordinator.getLoopState("session-51")).toBeUndefined();
   });
 });

@@ -1,9 +1,30 @@
+/**
+ * loop tools — compatibility shims over the LoopCoordinator.
+ *
+ * Phase C removed these tools and consolidated multi-round work into the
+ * graph_* engine. They were re-approved for restoration as thin compatibility
+ * shims that keep the imperative loop_* surface working for callers who still
+ * use it. The graph_* tools remain untouched — loop_* and graph_* are
+ * independent namespaces that coexist.
+ *
+ * Each factory delegates to the corresponding LoopCoordinator method, so no
+ * loop lifecycle logic is duplicated here. The coordinator is the single
+ * source of truth for loop state (register / getAllLoopStates / getLoopState /
+ * cancelNow / getLoopDescendants / getAdvancingLockState).
+ *
+ * Recovered from commit 810f6d3 (src/loop/loop-tools.ts + the createLoopStartTool
+ * from src/platform/adapters/pi/loop-tool.ts), adapted to the current
+ * LoopCoordinator API and made platform-agnostic so it can be assembled by the
+ * shared tool-assembly layer (no Pi/OpenCode SDK imports).
+ */
+
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import type { LoopCoordinator } from "./coordinator.js";
-import type { LoopState, LoopPhase, RoundRecord } from "./types.js";
-import { applyWindow, DEFAULT_MAX_RESULT_CHARS } from "../dispatch/completion/result-extractor.js";
-import type { ISessionClient } from "../platform/ports/session-client.js";
+import type { LoopCoordinator } from "./coordinator.ts";
+import type { LoopState, LoopPhase, RoundRecord, LoopMode } from "./types.ts";
+import { applyWindow, DEFAULT_MAX_RESULT_CHARS } from "../dispatch/completion/result-extractor.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
+import type { CanonicalToolDef } from "../platform/types.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool-facing type definitions
@@ -233,6 +254,98 @@ function renderTreePrefix(ancestorsLast: boolean[], isLast: boolean): string {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool factories
 // ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * loop_start — Register a sequential multi-session loop with the coordinator.
+ *
+ * The coordinator runs the rounds asynchronously via background dispatch; this
+ * tool returns immediately (non-blocking). On success it returns the origin
+ * session ID so callers can track progress with loop_status / loop_output /
+ * loop_history. On rejection it forwards the coordinator's RegisterResult
+ * reason back to the agent as a correction.
+ *
+ * The origin session ID and acting agent are resolved from the canonical tool
+ * context (sessionID / agent), mirroring the dispatch tool's pattern. On
+ * platforms that do not populate context.agent, `fallbackAgent` is used.
+ */
+export function createLoopStartTool(
+  coordinator: LoopCoordinator,
+  opts?: { fallbackAgent?: () => string },
+): CanonicalToolDef {
+  return defineTool({
+    description:
+      "Start a sequential multi-session loop — runs the same task across fresh sessions",
+    args: {
+      prompt: z
+        .string()
+        .min(1)
+        .describe(
+          "The task to execute across every round — " +
+            "what the worker agent should do each iteration",
+        ),
+      iterations: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .default(5)
+        .describe("Number of rounds to execute (1–50, default 5)"),
+      mode: z
+        .enum(["inherit", "fresh"])
+        .default("inherit")
+        .describe(
+          'Loop mode: "inherit" shares context between rounds, ' +
+            '"fresh" starts each round clean',
+        ),
+      objective: z
+        .string()
+        .optional()
+        .describe(
+          "Convergence criteria for nested loops — when the summary " +
+            "declares this objective done, the loop terminates early",
+        ),
+    },
+    async execute(args, ctx) {
+      const iterations = args.iterations;
+      const mode = args.mode as LoopMode;
+      const prompt = args.prompt;
+      const objective = args.objective;
+
+      if (iterations < 1 || iterations > 50) {
+        return `Invalid iterations: ${iterations}. Must be between 1 and 50.`;
+      }
+
+      // Resolve the acting agent — mirrors the dispatch tool's pattern
+      // (opencode populates context.agent natively; other platforms fall back).
+      const agent =
+        ctx.agent && ctx.agent.length > 0
+          ? ctx.agent
+          : (opts?.fallbackAgent?.() ?? "primary");
+
+      // Register the loop (non-blocking)
+      const result = coordinator.register({
+        originSessionId: ctx.sessionID,
+        agent,
+        prompt,
+        mode,
+        iterations,
+        objective,
+      });
+
+      if (!result.ok) {
+        // Registration rejected — return the reason as a
+        // correction to guide the agent toward a valid request.
+        return `Loop not started: ${result.reason}`;
+      }
+
+      return (
+        `Loop started: ${iterations} rounds, mode=${mode}. ` +
+        `Track with loop_status(session_id="${ctx.sessionID}"). ` +
+        `Use /stop-loop to cancel.`
+      );
+    },
+  });
+}
 
 /**
  * loop_status — Inspect a single loop or return aggregate metrics.
@@ -880,15 +993,18 @@ export function createLoopListTool(coordinator: LoopCoordinator) {
  *
  * Returns an object suitable for merging into a platform tool registry:
  *
- *   const coordinator = new LoopCoordinator(adapter);
  *   const loopTools = createLoopTools(coordinator, sessionClient);
- *   platform.registerTools(loopTools);
+ *
+ * Keys: loop_start, loop_status, loop_list, loop_history, loop_output, loop_cancel.
+ * These are real CanonicalToolDefs backed by the provided LoopCoordinator.
  */
 export function createLoopTools(
   coordinator: LoopCoordinator,
   sessionClient?: ISessionClient,
-) {
+  opts?: { fallbackAgent?: () => string },
+): Record<string, CanonicalToolDef> {
   return {
+    loop_start: createLoopStartTool(coordinator, opts),
     loop_status: createLoopStatusTool(coordinator),
     loop_cancel: createLoopCancelTool(coordinator),
     loop_output: createLoopOutputTool(coordinator, sessionClient),

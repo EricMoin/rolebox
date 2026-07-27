@@ -163,7 +163,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch.exec();
+    const result = await tools.dispatch.execute();
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -176,7 +176,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_output.exec();
+    const result = await tools.dispatch_output.execute();
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -189,7 +189,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_cancel.exec();
+    const result = await tools.dispatch_cancel.execute();
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -202,7 +202,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_metrics.exec();
+    const result = await tools.dispatch_metrics.execute();
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -215,7 +215,7 @@ describe("DispatchService — Pi graceful degradation", () => {
     await svc.init(ctx);
     const tools = svc.getTools();
 
-    const result = await tools.dispatch_status.exec();
+    const result = await tools.dispatch_status.execute();
     expect(result).toBe("Dispatch is not available on Pi — use opencode for multi-agent workflows.");
   });
 
@@ -400,7 +400,9 @@ describe("PiLightweightServiceStack — integration", () => {
     const count = await stack.init();
     expect(count).toBeGreaterThan(0);
 
-    // Should have registered the dispatch stub tools
+    // Restored (post-Phase-C) behavior: buildCanonicalTools merges
+    // dispatchToolsOverride, so the dispatch stub tools from the degraded
+    // service ARE registered on the Pi path as unavailable stubs.
     const dispatchNames = ["dispatch", "dispatch_output", "dispatch_cancel", "dispatch_metrics", "dispatch_status"];
     const registeredNames = registeredTools.map((t: any) => t.name);
     for (const name of dispatchNames) {
@@ -435,7 +437,7 @@ describe("Pi extension log messages — degradation verification", () => {
     const dispatchTools = dispatchService.getTools();
     expect(Object.keys(dispatchTools).length).toBe(5);
     for (const tool of Object.values(dispatchTools)) {
-      const result = await (tool as any).exec();
+      const result = await (tool as any).execute();
       expect(result).toContain("not available on Pi");
     }
   });

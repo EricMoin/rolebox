@@ -18,6 +18,11 @@ import { metrics } from "../persistence/metrics.ts";
 import { notifyParent } from "../notification.ts";
 import { withTimeout } from "./with-timeout.ts";
 import { MATERIALIZE_TIMEOUT_MS } from "../config.ts";
+import {
+  SessionCreateRejectedError,
+  isSessionCreateRejected,
+  type SessionInfo,
+} from "../../platform/types.ts";
 
 /**
  * Launch a background dispatch task.
@@ -147,12 +152,55 @@ export async function startBackgroundTask(
   let didMarkRunning = false;
 
   try {
-    const session = await d.client.create({
+    // Bounded retry around session creation for TRANSIENT failures only.
+    // Classification (mirrors OpencodeSessionAdapter.create, session.ts:236-270):
+    //   - SessionCreateRejectedError (tagged) → server-side rejection (r.error)
+    //     → REAL error, never retried; reason surfaced verbatim.
+    //   - THROWN plain error → transient transport/network failure → retry with
+    //     backoff, then surface the underlying error after exhaustion.
+    //   - null RETURN → rejection with no reason available → never retried
+    //     (reported as "empty response").
+    // The happy path below is a single `await d.client.create(...)` — identical
+    // await/microtask count to a bare call, so concurrency-timing behavior is
+    // unchanged. Retries only add awaits when a throw actually occurs.
+    const createOptions = () => ({
       directory: parentContext.directory,
+      agent: input.subagent,
       ...(input.noParentInherit ? {} : { parentID: parentContext.sessionID }),
     });
+    const totalAttempts = d.config.createRetryAttempts ?? 3;
+    const backoffMs = d.config.createRetryBackoffMs ?? 250;
 
-    if (!session) throw new Error("Failed to create session: empty response");
+    let session: SessionInfo | null = null;
+    for (let attempt = 1; attempt <= totalAttempts; attempt++) {
+      try {
+        session = await d.client.create(createOptions());
+      } catch (err) {
+        // A SessionCreateRejectedError is a SERVER REJECTION (real,
+        // non-transient) — surface it immediately, never retried. This mirrors
+        // the pre-subtask-4 null-return semantics: a rejection was never
+        // retried. Any OTHER thrown error is a transient transport failure →
+        // retry, preserving the underlying error. After retries are exhausted
+        // the underlying error is re-thrown — never silently swallowed.
+        if (isSessionCreateRejected(err)) throw err;
+        if (attempt < totalAttempts) {
+          debugLog("launch", taskId, `session.create threw (transient) attempt=${attempt}/${totalAttempts} — retrying: ${err instanceof Error ? err.message : String(err)}`);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+        debugLog("launch", taskId, `session.create exhausted after ${totalAttempts} attempts`);
+        throw err;
+      }
+      // Reached only when create() returned (did not throw).
+      break;
+    }
+
+    // A bare null return is a rejection with no server reason available (some
+    // platforms / stubs return null with no error detail). Treat it as a tagged
+    // rejection so the classification stays uniform: never retried. When the
+    // adapter surfaced a real reason it already threw a
+    // SessionCreateRejectedError above, which re-threw past this point.
+    if (!session) throw new SessionCreateRejectedError("Failed to create session: empty response");
 
     task.sessionId = session.id;
     d.sessionToTask.set(session.id, taskId);

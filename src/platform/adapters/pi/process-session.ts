@@ -410,7 +410,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
 
     const promptText = this._buildPromptText(options.parts);
     // Honor the per-prompt agent selection: the dispatch layer passes the
-    // subagent's full id via `options.agent` (it does NOT pass it to create()).
+    // subagent's full id via `options.agent` to BOTH create() and prompt().
     // Resolve that agent's registered config so the correct model + system
     // prompt are applied, and remember it on the record for continuation.
     const agentConfig = options.agent

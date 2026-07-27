@@ -8,6 +8,10 @@ import { cleanExpiredState } from "../../dispatch/persistence/state-gc.ts";
 import { stateDirFor } from "../../utils/state-paths.ts";
 import { hookState } from "../../hooks/state.ts";
 import { createSubLogger } from "../../logger.ts";
+import { createDispatchTools } from "../../dispatch/tools.ts";
+import type { CanonicalToolDef } from "../../platform/types.ts";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
+import { z } from "zod";
 import {
   createDispatchManager,
   buildSubagentLineage,
@@ -20,19 +24,19 @@ const PI_UNAVAILABLE_MSG =
   "Dispatch is not available on Pi — use opencode for multi-agent workflows.";
 
 /**
- * Creates a stub tool definition that returns a fixed "not available" message.
+ * Creates a stub CanonicalToolDef that returns a fixed "not available" message.
  * Used when the service is permanently degraded (e.g., on Pi).
  */
-function stubTool(description: string): {
-  description: string;
-  args: Record<string, unknown>;
-  exec: (...args: unknown[]) => Promise<string>;
-} {
-  return {
+function stubTool(description: string): CanonicalToolDef {
+  return defineTool({
     description,
-    args: {},
-    exec: async () => PI_UNAVAILABLE_MSG,
-  };
+    args: {
+      _stub: z.string().optional().describe("This tool is not available on Pi"),
+    },
+    async execute() {
+      return PI_UNAVAILABLE_MSG;
+    },
+  });
 }
 
 /**
@@ -140,15 +144,16 @@ export class DispatchService implements PluginService, ToolContributor {
 
   // ── ToolContributor ─────────────────────────────────────────────
 
-  /** Returns stub dispatch tools when degraded, or empty tools otherwise. */
-  getTools(): Record<
-    string,
-    {
-      description: string;
-      args: Record<string, unknown>;
-      exec: (...args: unknown[]) => Promise<unknown>;
-    }
-  > {
+  /**
+   * Returns real compatibility `dispatch_*` tools (CanonicalToolDefs) when the
+   * service is healthy, or PI_UNAVAILABLE stub tools when degraded.
+   *
+   * These tools are the restored Phase-C compatibility shims backed by the
+   * DispatchManager (see src/dispatch/tools.ts). They are consumed on the
+   * opencode path via `dispatchToolsOverride` in buildCanonicalTools, which is
+   * how the five dispatch_* tools appear in ToolService.getTools() output.
+   */
+  getTools(): Record<string, CanonicalToolDef> {
     if (this.degraded) {
       return {
         dispatch: stubTool("Dispatch work to a subagent."),
@@ -158,7 +163,14 @@ export class DispatchService implements PluginService, ToolContributor {
         dispatch_status: stubTool("Check background task liveness."),
       };
     }
-    return {};
+    if (!this.dispatchManager) {
+      return {};
+    }
+    return createDispatchTools(
+      this.dispatchManager,
+      this.resolvedSubagents,
+      this.subagentModelKey,
+    );
   }
 
   // ── Public getters ──────────────────────────────────────────────

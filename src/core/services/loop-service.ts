@@ -1,6 +1,7 @@
 import type { PluginService, PluginCoreLike, ServiceHealth } from "../service.ts";
 import type { PluginContext } from "../context.ts";
 import type { DispatchService } from "./dispatch-service.ts";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { LoopCoordinator } from "../../loop/coordinator.ts";
 import { DispatchAdapter } from "../../loop/dispatch-adapter.ts";
 import { LoopStore } from "../../loop/loop-store.ts";
@@ -8,6 +9,10 @@ import type { LoopState } from "../../loop/types.ts";
 import { INTER_ROUND_DELAY_MS } from "../../loop/constants.ts";
 import { hookState } from "../../hooks/state.ts";
 import { createSubLogger } from "../../logger.ts";
+import { createLoopTools } from "../../loop/loop-tools.ts";
+import { defineTool } from "../../platform/ports/tool-factory.ts";
+import { z } from "zod";
+import type { CanonicalToolDef } from "../../platform/types.ts";
 
 const log = createSubLogger("loop-service");
 
@@ -16,19 +21,20 @@ const PI_LOOP_UNAVAILABLE_MSG =
   "Loop is not available on Pi — dispatch is not supported.";
 
 /**
- * Creates a stub tool definition that returns a fixed "not available" message.
- * Used when the service is permanently degraded (e.g., on Pi when dispatch is degraded).
+ * Creates a stub CanonicalToolDef that returns a fixed "not available" message.
+ * Used when the service is permanently degraded (e.g., on Pi when dispatch is
+ * degraded). Mirrors the dispatch-service stubTool pattern.
  */
-function stubTool(description: string): {
-  description: string;
-  args: Record<string, unknown>;
-  exec: (...args: unknown[]) => Promise<string>;
-} {
-  return {
+function stubTool(description: string): CanonicalToolDef {
+  return defineTool({
     description,
-    args: {},
-    exec: async () => PI_LOOP_UNAVAILABLE_MSG,
-  };
+    args: {
+      _stub: z.string().optional().describe("This tool is not available on Pi"),
+    },
+    async execute() {
+      return PI_LOOP_UNAVAILABLE_MSG;
+    },
+  });
 }
 
 export class LoopService implements PluginService {
@@ -41,6 +47,7 @@ export class LoopService implements PluginService {
   private stateDegraded = false;
   private degradedDetail = "";
   private rawDirectory?: string;
+  private sessionClient?: ISessionClient;
 
   async init(ctx: PluginContext): Promise<void> {
     // Check if DispatchService is degraded. If so, skip init gracefully.
@@ -72,6 +79,7 @@ export class LoopService implements PluginService {
 
     const dir = ctx.directory;
     this.rawDirectory = ctx.rawDirectory;
+    this.sessionClient = ctx.session as ISessionClient;
 
     // Reuse existing if available (keyed by raw directory for cross-call consistency)
     const mapDir = ctx.rawDirectory;
@@ -171,6 +179,34 @@ export class LoopService implements PluginService {
       throw new Error("LoopService is degraded — cannot access LoopStore");
     }
     return this.loopStore;
+  }
+
+  // ── ToolContributor ─────────────────────────────────────────────
+
+  /**
+   * Returns real compatibility `loop_*` tools (CanonicalToolDefs) when the
+   * service is healthy, or PI_UNAVAILABLE stub tools when degraded.
+   *
+   * These tools are the restored Phase-C compatibility shims backed by the
+   * LoopCoordinator (see src/loop/loop-tools.ts). They are consumed on the
+   * opencode path via `loopToolsOverride` in buildCanonicalTools, which is
+   * how the six loop_* tools appear in ToolService.getTools() output.
+   */
+  getLoopTools(): Record<string, CanonicalToolDef> {
+    if (this.stateDegraded) {
+      return {
+        loop_start: stubTool("Start a sequential multi-session loop."),
+        loop_status: stubTool("Get runtime status of a loop execution."),
+        loop_list: stubTool("List loop executions tracked by the coordinator."),
+        loop_history: stubTool("Retrieve round-by-round execution history for a loop."),
+        loop_output: stubTool("Retrieve worker output for a specific loop round."),
+        loop_cancel: stubTool("Cancel a running loop."),
+      };
+    }
+    if (!this.loopManager) {
+      return {};
+    }
+    return createLoopTools(this.loopManager, this.sessionClient);
   }
 
   isDegraded(): boolean {

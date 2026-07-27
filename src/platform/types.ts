@@ -149,3 +149,48 @@ export type {
   Todo,
   SessionStatus,
 } from "../session/types.ts";
+
+/**
+ * Error thrown when a platform SDK EXPLICITLY REJECTS a session create —
+ * i.e. the result-tuple `error` field is present (a real server-side
+ * rejection, e.g. HTTP 400 `BadRequestError`), as opposed to a transport /
+ * network failure that manifests as a thrown exception.
+ *
+ * Distinguishing contract for the dispatch launcher's create-retry loop
+ * (src/dispatch/core/task-launcher.ts — startBackgroundTask):
+ *   - `SessionCreateRejectedError` → REJECTION → NEVER retried. The reason is
+ *     surfaced verbatim so a rejection is never masked as "empty response".
+ *   - any other thrown `Error`     → TRANSIENT transport failure → RETRIED.
+ *   - a bare `null` return         → rejection with no reason available
+ *     (still not retried).
+ *
+ * The `isSessionRejected` marker field makes the guard robust even if the class
+ * is duplicated across module instances (Bun/deno cache isolation).
+ */
+export class SessionCreateRejectedError extends Error {
+  readonly isSessionRejected = true as const;
+  /** Structured code from the server, when available (e.g. SDK error `name`). */
+  readonly code?: string;
+
+  constructor(reason: string, code?: string) {
+    super(reason);
+    this.name = "SessionCreateRejectedError";
+    this.code = code;
+  }
+}
+
+/**
+ * Type guard for `SessionCreateRejectedError`. Checks the structural marker so
+ * a rejection thrown by another copy of the class (module-cache isolation) is
+ * still recognized as non-transient.
+ */
+export function isSessionCreateRejected(
+  err: unknown,
+): err is SessionCreateRejectedError {
+  return (
+    err instanceof SessionCreateRejectedError ||
+    (typeof err === "object" &&
+      err !== null &&
+      (err as { isSessionRejected?: unknown }).isSessionRejected === true)
+  );
+}

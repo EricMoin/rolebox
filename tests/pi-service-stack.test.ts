@@ -50,17 +50,21 @@ const REQUIRED_TOOLS = [
   "session_info",
   "session_diff",
   "session_fork",
-  // Dispatch stubs
-  "dispatch",
-  "dispatch_output",
-  "dispatch_cancel",
-  "dispatch_metrics",
-  "dispatch_status",
 ];
 
 const OPTIONAL_TOOLS = [
   "asset_validate",
   "session_search",
+];
+
+// dispatch_* tools are graph-superseded: no stubs are registered when no
+// real dispatch tools are provided (bare-dispatch prevention).
+const DISPATCH_TOOLS_WITHHELD = [
+  "dispatch",
+  "dispatch_output",
+  "dispatch_cancel",
+  "dispatch_metrics",
+  "dispatch_status",
 ];
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -97,8 +101,16 @@ describe("PiLightweightServiceStack", () => {
       expect(registeredNames).toContain(toolName);
     }
 
+    // Verify dispatch_* tools are NOT registered (graph-only orchestration)
+    for (const toolName of DISPATCH_TOOLS_WITHHELD) {
+      expect(registeredNames).not.toContain(toolName);
+    }
+
     // Verify no extra tools beyond our known set
-    const allKnown = new Set([...REQUIRED_TOOLS, ...OPTIONAL_TOOLS]);
+    const allKnown = new Set([
+      ...REQUIRED_TOOLS,
+      ...OPTIONAL_TOOLS,
+    ]);
     for (const name of registeredNames) {
       expect(allKnown.has(name)).toBe(true);
     }
