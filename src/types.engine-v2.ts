@@ -24,6 +24,25 @@ import type { UsageRecord } from "./dispatch/budget/budget-tracker.ts";
 // ── Engine State ────────────────────────────────────────────────────────
 
 /**
+ * A consumer notified on an engine lifecycle phase transition
+ * (`transitionPhase`). Wired into EngineState so the pure transition
+ * function can reach a durable event log without a module-level import cycle.
+ * Non-serializable (function) — excluded from persistence DTOs.
+ */
+export type PhaseEventSink = (
+  graphId: string,
+  from: EnginePhase,
+  to: EnginePhase,
+) => void;
+
+/** A consumer notified on a graph-level budget update (`applyBudgetDelta`).
+ *  Non-serializable — same persistence exclusion as PhaseEventSink. */
+export type BudgetEventSink = (
+  graphId: string,
+  budget: GraphBudgetState,
+) => void;
+
+/**
  * Runtime state of the graph execution engine.
  *
  * This is the top-level state container persisted across sessions.
@@ -68,6 +87,20 @@ export interface EngineState {
    * identically; it never carries fabricated values.
    */
   checkpoints?: Record<string, CheckpointRecord>;
+
+  /**
+   * Optional phase-transition event sink. Wired by the engine runtime at
+   * construction when a {@link GraphEventRecorder} is provided. Non-serializable
+   * (function) — excluded from persistence DTOs; always `undefined` after
+   * deserialization.
+   */
+  phaseEventSink?: PhaseEventSink;
+
+  /**
+   * Optional budget-update event sink. Same wiring and persistence exclusion as
+   * {@link phaseEventSink}.
+   */
+  budgetEventSink?: BudgetEventSink;
 }
 
 // ── Node Runtime State ──────────────────────────────────────────────────

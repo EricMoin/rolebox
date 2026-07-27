@@ -47,7 +47,6 @@ import {
   createEngineState,
   provision,
   applyBudgetDelta,
-  clearEventSinks,
 } from "../../src/graph/engine/engine-state.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -112,7 +111,7 @@ function makeWorkspace(): string {
 }
 
 afterEach(() => {
-  clearEventSinks();
+  // Sinks are now instance fields on EngineState — no module-level global to clear.
   for (const d of workspaces.splice(0)) {
     rmSync(d, { recursive: true, force: true });
   }
@@ -195,11 +194,15 @@ describe("GraphEventRecorder — engine integration", () => {
   it("emits a budget_update event via applyBudgetDelta (engine-state sink)", () => {
     const dir = makeWorkspace();
     const graphId = "g-budget-1";
-    // Constructing the recorder registers the phase + budget sinks.
-    new GraphEventRecorder(dir);
+    const recorder = new GraphEventRecorder(dir);
 
     const state = createEngineState(singleNode("A"), graphId);
     provision(state);
+
+    // Wire the sink onto the state manually (in production, AdvanceEngine's
+    // constructor does this from opts.graphEvents; here we test the engine-state
+    // functions directly so we wire it ourselves).
+    state.budgetEventSink = (gId, budget) => recorder.budgetUpdate(gId, budget);
 
     applyBudgetDelta(state, {
       sessions: 1,

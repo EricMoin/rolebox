@@ -41,7 +41,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadEngineStateFromJson } from "../engine/engine-persistence.ts";
+import { loadEngineStateFromJson } from "../engine/index.ts";
 import type { EngineState } from "../../types.engine-v2.ts";
 import type {
   GraphBudgetState,

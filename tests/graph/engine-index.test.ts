@@ -6,11 +6,11 @@ import type {
   EngineState,
 } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
-import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import {
   createEngine,
   type EngineRuntime,
+  type DispatchParentContext,
+  type NodeDispatchPort,
 } from "../../src/graph/engine/index.ts";
 
 // ── Fake dispatch seam (injectable into createEngine) ───────────────────────

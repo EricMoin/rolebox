@@ -328,6 +328,18 @@ export class AdvanceEngine {
         graphId: this.state.graphId,
         directory: process.cwd(),
       });
+
+    // Wire the write-side event sinks onto the state so transitionPhase /
+    // applyBudgetDelta can reach the recorder without a module-level import
+    // cycle. Previously done by GraphEventRecorder's constructor via global
+    // setPhaseEventSink / setBudgetEventSink; now scoped to this engine instance
+    // as EngineState fields (non-serializable, excluded from persistence DTOs).
+    if (opts.graphEvents) {
+      this.state.phaseEventSink = (gId, from, to) =>
+        opts.graphEvents!.phaseChange(gId, from, to);
+      this.state.budgetEventSink = (gId, budget) =>
+        opts.graphEvents!.budgetUpdate(gId, budget);
+    }
   }
 
   // ── Public entry points ───────────────────────────────────────────────────

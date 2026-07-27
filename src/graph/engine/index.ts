@@ -860,9 +860,22 @@ export {
   type GraphEventType,
 } from "./graph-events.ts";
 export {
-  setPhaseEventSink,
-  setBudgetEventSink,
-  clearEventSinks,
   type PhaseEventSink,
   type BudgetEventSink,
-} from "./engine-state.ts";
+} from "../../types.engine-v2.ts";
+
+// ── Re-exports for tool-layer consumers (barrel-only access) ─────────────────
+
+export { loadEngineStateFromJson } from "./engine-persistence.ts";
+
+export { graphParentContext } from "./dispatch-bridge.ts";
+export type { DispatchParentContext } from "./dispatch-bridge.ts";
+
+export {
+  createGraphNotifier,
+  createGraphTerminalNotifier,
+} from "./graph-notify.ts";
+export type {
+  GraphCompletionHandler,
+  GraphTerminalHandler,
+} from "./graph-notify.ts";

@@ -51,6 +51,12 @@ import { join } from "node:path";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import { EnginePhase } from "../../constants.ts";
 import { loadEngineStateFromJson } from "./engine-persistence.ts";
+// NOTE: imports createEngine from the public barrel (./index.ts) rather than
+// a separate factory file. createEngine is defined in index.ts alongside its
+// private EngineRuntimeImpl class — extracting it to a standalone factory
+// module is a separate refactoring task. The barrel import is safe because
+// engine-startup.ts is itself an engine-internal module; the barrel re-exports
+// are additive (no cycle).
 import { createEngine } from "./index.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────

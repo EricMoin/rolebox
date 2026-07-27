@@ -40,10 +40,6 @@ import { join } from "node:path";
 import type { EnginePhase } from "../../constants.ts";
 import type { GraphBudgetState } from "../../types.engine-v2.ts";
 import type { NodeCompletionEvent } from "./engine-advance.ts";
-import {
-  setBudgetEventSink,
-  setPhaseEventSink,
-} from "./engine-state.ts";
 
 // ── Event vocabulary ────────────────────────────────────────────────────────
 
@@ -134,15 +130,10 @@ export class GraphEventRecorder {
 
   constructor(directory?: string) {
     this.directory = directory ?? process.cwd();
-    // Register the phase + budget sinks: construction is the wiring point, so
-    // any engine transition through `transitionPhase` / `applyBudgetDelta`
-    // reaches this recorder without an engine-side import cycle.
-    setPhaseEventSink((graphId, from, to) => {
-      this.phaseChange(graphId, from, to);
-    });
-    setBudgetEventSink((graphId, budget) => {
-      this.budgetUpdate(graphId, budget);
-    });
+    // Sinks are now wired onto EngineState by the engine runtime at construction
+    // (see EngineRuntimeImpl in index.ts). The recorder no longer registers
+    // module-level singletons — those were removed to eliminate mutable global
+    // state and the risk of stale function references in deserialized states.
   }
 
   // ── Event emitters (all total — never throw) ──────────────────────────────

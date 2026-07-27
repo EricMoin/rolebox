@@ -29,52 +29,21 @@ import type {
   GraphBudgetState,
   LoopGroupRuntimeState,
   NodeRuntimeState,
+  PhaseEventSink,
+  BudgetEventSink,
 } from "../../types.engine-v2.ts";
 import { resolveJoinStrategy } from "./join-evaluator.ts";
 import { bindNodeState } from "./recorder.ts";
+import { markReady } from "./node-lifecycle.ts";
 
 // ── Event sinks (write-side graph event log) ────────────────────────────────
-
-/**
- * A consumer notified on an engine lifecycle phase transition
- * (`transitionPhase`). Registered by a {@link GraphEventRecorder} so the pure
- * transition function can reach the durable event log without an import cycle.
- * When undefined (no recorder), transitions are silent — no-op safe.
- */
-export type PhaseEventSink = (
-  graphId: string,
-  from: EnginePhase,
-  to: EnginePhase,
-) => void;
-
-/** A consumer notified on a graph-level budget update (`applyBudgetDelta`). */
-export type BudgetEventSink = (
-  graphId: string,
-  budget: GraphBudgetState,
-) => void;
-
-let phaseEventSink: PhaseEventSink | undefined;
-let budgetEventSink: BudgetEventSink | undefined;
-
-/**
- * Register the phase-transition event sink (or clear it with `undefined`).
- * Last-writer-wins: a graph-event recorder registers on construction; single
- * engine execution means at most one is active at a time.
- */
-export function setPhaseEventSink(sink?: PhaseEventSink): void {
-  phaseEventSink = sink;
-}
-
-/** Register the budget-update event sink (or clear it with `undefined`). */
-export function setBudgetEventSink(sink?: BudgetEventSink): void {
-  budgetEventSink = sink;
-}
-
-/** Clear both event sinks (test isolation — a fresh recorder re-registers). */
-export function clearEventSinks(): void {
-  phaseEventSink = undefined;
-  budgetEventSink = undefined;
-}
+//
+// PhaseEventSink / BudgetEventSink types are defined on EngineState in
+// types.engine-v2.ts. The engine runtime wires sinks onto the state at
+// construction (see EngineRuntimeImpl in index.ts). Previously these were
+// module-level mutable singletons set by GraphEventRecorder; they are now
+// instance fields on EngineState so a deserialized or snapshot state never
+// accidentally carries a stale function reference.
 
 // ── Budget stub ───────────────────────────────────────────────────────────
 
@@ -117,10 +86,10 @@ export function applyBudgetDelta(
   b.totalOutputTokens += delta.outputTokens ?? 0;
   b.totalCost += delta.cost ?? 0;
   state.updatedAt = Date.now();
-  // Emit a budget-update event to the write-side log (no-op when no recorder
-  // is registered). Never lets a recorder failure corrupt the budget update.
+  // Emit a budget-update event to the write-side log (no-op when no sink is
+  // wired on the state). Never lets a recorder failure corrupt the budget update.
   try {
-    budgetEventSink?.(state.graphId, b);
+    state.budgetEventSink?.(state.graphId, b);
   } catch {
     // observability — never breaks the budget mutation
   }
@@ -157,10 +126,10 @@ export function transitionPhase(state: EngineState, to: EnginePhase): void {
   const now = Date.now();
   state.phase = to;
   state.updatedAt = now;
-  // Emit a phase-change event to the write-side log (no-op when no recorder is
-  // registered). Never lets a recorder failure corrupt the phase transition.
+  // Emit a phase-change event to the write-side log (no-op when no sink is
+  // wired on the state). Never lets a recorder failure corrupt the phase transition.
   try {
-    phaseEventSink?.(state.graphId, from, to);
+    state.phaseEventSink?.(state.graphId, from, to);
   } catch {
     // observability — never breaks the lifecycle transition
   }

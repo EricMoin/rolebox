@@ -60,11 +60,12 @@
  *    `node_id` / `loop_id` target is applied as a **filter** on the cancelled
  *    result set rather than a scoped cancellation. `cascade` is accepted and
  *    forwarded for API-shape compatibility.
- * 6. **Observation (not a tool divergence):** `engine-state.registerNode`
- *    (`src/graph/engine/engine-state.ts:152-167`) hard-codes
- *    `joinStrategy: "all"` and ignores the node's `join` config. The declaration
- *    still carries the correct `join` (this tool writes it); propagating it into
- *    `NodeRuntimeState` is engine-phase work outside this subtask's scope.
+ * 6. **Observed & confirmed:** `engine-state.registerNode`
+ *    (`src/graph/engine/engine-state.ts:222-225`) correctly calls
+ *    `resolveJoinStrategy(config.join)` to propagate the node's declared join
+ *    (default `"all"`) into `NodeRuntimeState.joinStrategy`. The join config
+ *    written by this tool therefore flows through correctly — no engine-side
+ *    hard-coding remains.
  *
  * Design reference: `.rolebox/design/tool-merge-map.md` §2.2.
  */
@@ -103,20 +104,16 @@ import {
   type NodeCompletionEvent,
   type GraphTerminalEvent,
   GraphEventRecorder,
-} from "../engine/index.ts";
-import {
   createGraphNotifier,
   createGraphTerminalNotifier,
   type GraphCompletionHandler,
   type GraphTerminalHandler,
-} from "../engine/graph-notify.ts";
+  graphParentContext,
+  type DispatchParentContext,
+} from "../engine/index.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
 import { serializeGraphDeclaration } from "../serialize.ts";
-import {
-  graphParentContext,
-  type DispatchParentContext,
-} from "../engine/dispatch-bridge.ts";
 import {
   EnginePhase,
   NodeStatus,
