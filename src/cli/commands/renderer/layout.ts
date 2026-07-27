@@ -3,7 +3,7 @@ import { readTaskDetail } from "../monitor/monitor-reader.ts";
 import type { MonitorSnapshot, TaskSnapshot, DispatchSummary } from "../monitor/monitor-reader.ts";
 import { formatDuration, truncate, statusGlyph, statusColor, statusCell, shortSessionId, contentWidth, isNarrow, parseMetricKey, formatPromLabels, histogramPercentile } from "../monitor/monitor-helpers.ts";
 import { renderTasks } from "./table-helpers.ts";
-import { renderSystemPulse, renderOrchestration, renderActiveFunctions, renderRecovery, renderMetrics, renderNotifications } from "./status-format.ts";
+import { renderSystemPulse, renderOrchestration, renderGraphs, renderActiveFunctions, renderRecovery, renderMetrics, renderNotifications } from "./status-format.ts";
 
 // ── Local options type (avoids circular dep with monitor.ts) ───────
 
@@ -48,7 +48,7 @@ export function renderHuman(
 ): void {
   const opts = options ?? {};
 
-  // Section order: Title Bar → System Pulse → Orchestration → Tasks
+  // Section order: Title Bar → System Pulse → Orchestration → Graphs → Tasks
   // → Functions → Recovery → Metrics → (Notifications optional)
 
   renderHeader(snapshot.projectDir);
@@ -58,6 +58,7 @@ export function renderHuman(
   }
 
   renderOrchestration(snapshot);
+  renderGraphs(snapshot);
   renderTasks(snapshot, all, tailChars, opts.agent, opts.status, opts.sort);
   renderActiveFunctions(snapshot);
 

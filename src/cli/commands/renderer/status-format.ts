@@ -95,6 +95,114 @@ export function renderOrchestration(snapshot: MonitorSnapshot): void {
   panel("Orchestration", lines);
 }
 
+// ── Render: Graph Execution (engine v2) ───────────────────────────
+
+/** Ordered display of node lifecycle statuses, most interesting first. */
+const GRAPH_STATUS_ORDER: Array<{ status: string; color: (s: string) => string }> = [
+  { status: "running", color: cyan },
+  { status: "ready", color: yellow },
+  { status: "pending", color: gray },
+  { status: "blocked", color: yellow },
+  { status: "escalate", color: red },
+  { status: "timeout", color: red },
+  { status: "cancelled", color: gray },
+  { status: "completed", color: green },
+  { status: "done", color: green },
+];
+
+/** Compact human token count (e.g. 1500 → "1.5k", 2_400_000 → "2.4M"). */
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+/** Glyph per write-side graph event kind. */
+function graphEventGlyph(event: string): string {
+  switch (event) {
+    case "node_dispatched":
+      return cyan("\u25b8"); // ▸
+    case "node_completed":
+      return green("\u2713"); // ✓
+    case "phase_change":
+      return yellow("\u25c6"); // ◆
+    case "budget_update":
+      return soft("\u2211"); // ∑
+    default:
+      return soft("\u00b7");
+  }
+}
+
+/**
+ * Render per-graph execution state from the engine v2 snapshot surface:
+ * phase glyph, agent, node status counts, cumulative budget, frontier, and
+ * the last few graph events (node signals) per graph. SUPPRESSES the whole
+ * section when no engine graphs are present.
+ */
+export function renderGraphs(snapshot: MonitorSnapshot): void {
+  const graphs = snapshot.engineGraphs;
+  if (!graphs || graphs.length === 0) return; // SUPPRESS
+
+  const events = snapshot.graphEvents ?? [];
+
+  const lines: string[] = [];
+
+  for (const g of graphs) {
+    const phaseGlyph = g.phase === "executing"
+      ? cyan("\u25b8") // ▸
+      : g.phase === "complete"
+        ? green("\u2713") // ✓
+        : yellow("\u25cf"); // ●
+
+    // Header row: phase glyph, graph id, agent, node status counts
+    let headerParts = [`${phaseGlyph} ${bold(g.graphId)}`];
+    if (g.agentId) headerParts.push(soft(g.agentId));
+
+    // Node status counts (non-zero only, display priority order)
+    for (const { status, color } of GRAPH_STATUS_ORDER) {
+      const count = g.nodeStatusCounts[status];
+      if (count && count > 0) headerParts.push(`${dim(status)}:${color(String(count))}`);
+    }
+    lines.push(`  ${headerParts.join(" ").trim()}`);
+
+    // Detail row: budget + frontier
+    const totalTokens = g.budget.totalInputTokens + g.budget.totalOutputTokens;
+    const detailParts: string[] = [];
+    detailParts.push(`${dim("sess")} ${g.budget.sessionsSpawned}`);
+    detailParts.push(`${dim("tok")} ${formatTokens(totalTokens)}`);
+    detailParts.push(`${dim("cost")} $${g.budget.totalCost.toFixed(2)}`);
+
+    const frontierPreview = g.frontier
+      .slice(0, 3)
+      .map((n) => {
+        const dotIdx = n.indexOf(".");
+        return dotIdx > 0 ? n.slice(0, dotIdx) : n;
+      });
+    if (frontierPreview.length > 0) {
+      detailParts.push(`${dim("next")} [${frontierPreview.join(" ")}${g.frontier.length > 3 ? " \u2026" : ""}]`);
+    }
+    lines.push(`  ${" ".repeat(3)}${border("\u2502")} ${detailParts.join("  ")}`);
+
+    // Last few graph events (node signals) for this graph
+    const gEvents = events.filter((e) => e.graphId === g.graphId).slice(-3);
+    for (const evt of gEvents) {
+      const tsAgo = Date.now() - evt.ts;
+      const tsPart = dim(formatDuration(Math.max(0, tsAgo)) + " ago");
+      const glyph = graphEventGlyph(evt.event);
+      const evtParts: string[] = [glyph, evt.event];
+      if (evt.nodeId) {
+        const dotIdx = evt.nodeId.indexOf(".");
+        evtParts.push(soft(dotIdx > 0 ? evt.nodeId.slice(0, dotIdx) : evt.nodeId));
+      }
+      if (evt.signalType) evtParts.push(dim(`(${evt.signalType})`));
+      if (evt.agent) evtParts.push(dim(`@${evt.agent}`));
+      lines.push(`  ${" ".repeat(3)}${border("\u2514\u2500")} ${evtParts.join(" ")}  ${tsPart}`);
+    }
+  }
+
+  panel("Graphs", lines);
+}
+
 // ── Render: Active Functions ───────────────────────────────────────
 
 export function renderActiveFunctions(snapshot: MonitorSnapshot): void {
