@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Graph monitoring (engine write-side event log)** — The graph execution engine now records an append-only, durable NDJSON event log (`graph-events-{hash}.ndjson`) for every write-side transition it performs — node dispatch, node terminal transition (`answer` / `revise_needed` / `escalate` / `timeout`), engine phase change, and cumulative budget update. `GraphEventRecorder` is a total (never-throws), no-op-safe seam: with no `stateDir` configured no recorder is constructed and the engine behaves exactly as before. The recorder's phase/budget sinks are registered on construction so the engine's pure transition functions reach it without an import cycle.
+- **Monitor reads engine graphs and graph events** — `monitor` now surfaces the engine (v2) persisted state (`engine-*.json`) as rich `EngineGraphSnapshot`s (phase, per-node lifecycle, budget, frontier, loop groups, checkpoints) via `readEngineGraphs`, and reads back the last N graph events from the event log via `readGraphEvents`. Both are wired unfiltered into `MonitorSnapshot` (`engineGraphs` / `graphEvents`) — engine graphs are multi-agent primitives whose `graphId` never equals a dispatch task's `sessionId`, so the legacy live-session filter is deliberately not applied to them.
+- **CLI Graphs panel and TUI sidebar activity** — The monitor renderer gained a `Graphs` panel (phase glyph, per-status node counts, budget/frontier, and recent node signals correlated by `graphId`), emitted between Orchestration and Tasks. The TUI sidebar surfaces engine-graph activity with per-node status glyphs, live signal from graph events, and cumulative budget, plus an incremental `GraphEventPoll` that maps NDJSON event lines onto `graph_node_start` / `graph_node_end` / `graph_signal` events with a monotonic per-file offset (no double-emits, no re-reads).
+
+### Tests
+
+- **Graph monitoring end-to-end chain** — Added a cross-cutting integration test (`tests/monitor/graph-monitoring-chain.test.ts`) driving the real write-side primitives (`GraphEventRecorder` + `EnginePersistence`) through the full pipeline: readers (`engineGraphs` / `graphEvents` snapshot fields) → `renderHuman` Graphs panel → TUI `GraphEventPoll` and `computeFilteredActivity`.
+
+---
+
 ## 0.24.0
 
 ### Breaking Changes
