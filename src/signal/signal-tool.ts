@@ -89,6 +89,10 @@ export function createSignalTool() {
         if (PAUSING_SIGNALS.has(type)) {
           st.evidenceObserved["paused"] = true;
           st.phase = "gated";
+          if (type === "blocked") {
+            st.blockedAt = Date.now();
+            st.blockedTimeoutMs ??= 120_000; // default 2 min if not configured
+          }
         }
 
         functionRuntime.markDirty();

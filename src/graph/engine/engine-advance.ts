@@ -572,6 +572,33 @@ export class AdvanceEngine {
   }
 
   /**
+   * Capture the dispatch task's materialized result ref onto the node's
+   * runtime state. Best-effort — a missing task, an absent `getTask` port
+   * (test fakes), or a failed read are no-ops that never block advancement.
+   *
+   * Called after `markCompleted` in every completion path (answer / revise /
+   * approval-resume) so `node.result` is populated before downstream
+   * consumers (graph_status include_output, export_path) read it.
+   */
+  private _captureNodeResult(node: NodeRuntimeState): void {
+    if (node.result) return; // already captured (prior run, adoptPrior, etc.)
+    const taskId = node.dispatchTaskId;
+    if (!taskId) return;
+    const port = this.dispatchPort as {
+      getTask?: (taskId: string) => DispatchTask | undefined;
+    };
+    if (!port.getTask) return;
+    try {
+      const task = port.getTask(taskId);
+      if (task?.result && !task.result.fetchError) {
+        node.result = { ...task.result };
+      }
+    } catch {
+      // best-effort — a throwing getTask must never corrupt advancement
+    }
+  }
+
+  /**
    * Apply the generic node-lifecycle transition for the given signal.
    *
    * Idempotent by construction: a transition is only applied when the node is
@@ -590,6 +617,7 @@ export class AdvanceEngine {
           // Record the node's genuinely produced artifacts/evidence at
           // completion (subtask C-RECORD). Fields stay absent when the node
           // produced none — never fabricated.
+          this._captureNodeResult(node);
           recordNodeArtifactsAndEvidence(this.state, node);
           // Subtask 1: notify exactly once — `answer → completed`.
           this._notifyCompletion(node, "answer", signalPayload, NodeStatus.Completed);
@@ -600,6 +628,7 @@ export class AdvanceEngine {
         // Back-edge re-activation of the upstream node is Phase 2.
         if (node.status === NodeStatus.Running) {
           markCompleted(node);
+          this._captureNodeResult(node);
           recordNodeArtifactsAndEvidence(this.state, node);
           // Subtask 1: notify exactly once — reviewer finished → completed.
           this._notifyCompletion(node, "revise_needed", signalPayload, NodeStatus.Completed);
@@ -991,19 +1020,23 @@ export class AdvanceEngine {
    */
   approveNode(nodeId: string, payload?: unknown): Promise<void> {
     return this._runCriticalSection(async () => {
+      const node = getNode(this.state, nodeId);
       const edgePayload = approveBlockedNode(
         this.state,
-        getNode(this.state, nodeId),
+        node,
         payload,
       );
       if (edgePayload) {
+        // Capture the dispatch task's materialized result (if available)
+        // after the node transitions blocked → completed.
+        this._captureNodeResult(node);
         this._forwardAnswerOnApproval(nodeId, edgePayload);
         // Subtask 1: notify exactly once — `blocked → completed` on
         // approval-resume. Guarded on `edgePayload` (null = not actually
         // blocked, an idempotent no-op) so the seam fires only on a real
         // transition, matching the signal-driven points.
         this._notifyCompletion(
-          getNode(this.state, nodeId),
+          node,
           "answer",
           payload ?? edgePayload.result,
           NodeStatus.Completed,

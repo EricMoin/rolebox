@@ -67,6 +67,22 @@ export async function handleChatMessage(
     }
   }
 
+  // Wake-event clear: dispatch notifications and HITL approvals unblock
+  // gated functions so the next session.idle re-evaluates continue_until.
+  const isWakeEvent =
+    isDispatchNotification(firstTextStr) ||
+    firstTextStr.includes("[HITL APPROVAL REQUIRED]");
+  if (input.sessionID && isWakeEvent) {
+    for (const [, st] of functionRuntime.all(input.sessionID)) {
+      if (st.phase === "gated" && st.evidenceObserved["paused"] === true) {
+        st.phase = "active";
+        st.evidenceObserved["paused"] = false;
+        st.blockedAt = undefined;
+      }
+    }
+    functionRuntime.markDirty();
+  }
+
   const textPartIndex = output.parts.findIndex(
     (p: { type: string; text?: string }) => p.type === "text" && "text" in p,
   );

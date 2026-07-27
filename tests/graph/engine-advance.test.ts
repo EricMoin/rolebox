@@ -1,14 +1,18 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { NodeRuntimeState, EngineState } from "../../src/types.engine-v2.ts";
-import type { DispatchTask } from "../../src/dispatch/types.ts";
+import type { DispatchTask, MaterializedResultRef } from "../../src/dispatch/types.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
   AdvanceEngine,
   type NodeDispatchPort,
+  type NodeCompletionEvent,
 } from "../../src/graph/engine/engine-advance.ts";
 
 // ── Controllable fake dispatch port ────────────────────────────────────────
@@ -232,5 +236,177 @@ describe("signal semantics", () => {
     expect(state.nodes.get("A")!.errorReason).toBe("boom");
     // A escalated, B still pending → an active node remains → not complete.
     expect(state.phase).toBe(EnginePhase.Executing);
+  });
+});
+
+// ── Result capture: node.result populated from dispatch task ───────────────
+
+/** Fake dispatch that also stores a materialized result for `getTask`. */
+class ResultCaptureFake implements NodeDispatchPort {
+  private result?: MaterializedResultRef;
+  setResult(ref: MaterializedResultRef): void {
+    this.result = ref;
+  }
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    const task: DispatchTask = {
+      id: `task-${node.nodeId}`,
+      sessionId: `sess-${node.nodeId}`,
+      parentSessionId: "g-1",
+      depth: 1,
+      status: "completed",
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+    if (this.result) {
+      task.result = { ...this.result };
+    }
+    return Promise.resolve(task);
+  }
+  getTask(_taskId: string): DispatchTask | undefined {
+    // Return a task snapshot whose `.result` mirrors the fake's state,
+    // so _captureNodeResult can read it.
+    if (!this.result) return undefined;
+    return {
+      id: _taskId,
+      sessionId: "sess-x",
+      parentSessionId: "g-1",
+      depth: 1,
+      status: "completed",
+      agent: "fake",
+      prompt: "fake",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+      result: { ...this.result },
+    };
+  }
+}
+
+function buildEngineWithCapture(
+  decl: GraphDeclaration,
+  result: MaterializedResultRef | null,
+  onCompletion: (e: NodeCompletionEvent) => void = () => {},
+): { state: EngineState; engine: AdvanceEngine; fake: ResultCaptureFake } {
+  const state = createEngineState(decl, "g-1");
+  provision(state);
+  const bridge = new SignalBridge();
+  const fake = new ResultCaptureFake();
+  if (result) fake.setResult(result);
+  const engine = new AdvanceEngine({
+    state,
+    signalBridge: bridge,
+    dispatch: fake,
+    onNodeCompletion: onCompletion,
+  });
+  engine.register();
+  return { state, engine, fake };
+}
+
+/** Single-node graph (no edges) — minimal fixture for result-capture tests. */
+function standaloneNode(id = "A", agent = "a1"): GraphDeclaration {
+  return {
+    version: 2,
+    name: "standalone",
+    nodes: [{ id, agent, prompt: "p1" }],
+    edges: [],
+  };
+}
+
+describe("result capture from dispatch task", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "graph-result-capture-"));
+  const sidecar = join(tmpDir, "r.txt");
+  const sampleResult: MaterializedResultRef = {
+    sidecarPath: sidecar,
+    totalChars: 42,
+    hadFence: true,
+    materializedAt: new Date().toISOString(),
+  };
+
+  beforeAll(() => {
+    writeFileSync(sidecar, "Hello from the dispatched worker!", "utf8");
+  });
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("populates node.result from dispatch task when node completes via answer signal", async () => {
+    const { state, engine, fake } = buildEngineWithCapture(
+      standaloneNode("A", "a1"),
+      sampleResult,
+    );
+
+    await engine.dispatchReady();
+    const node = state.nodes.get("A")!;
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.result).toBeUndefined(); // not yet captured
+
+    // Simulate the worker emitting answer signal — this drives _applySignalTransition.
+    await engine.onNodeSignalEmitted("A", "answer", { summary: "done" });
+
+    expect(node.status).toBe(NodeStatus.Completed);
+    // The materialized result ref is captured from the dispatch task.
+    expect(node.result).toBeDefined();
+    expect(node.result!.sidecarPath).toBe(sidecar);
+    expect(node.result!.totalChars).toBe(42);
+    expect(node.result!.hadFence).toBe(true);
+  });
+
+  it("does not populate node.result when dispatch task has no materialized result", async () => {
+    const { state, engine } = buildEngineWithCapture(
+      standaloneNode("A", "a1"),
+      null, // no result set on the fake
+    );
+
+    await engine.dispatchReady();
+    const node = state.nodes.get("A")!;
+
+    await engine.onNodeSignalEmitted("A", "answer", "ok");
+
+    expect(node.status).toBe(NodeStatus.Completed);
+    // node.result stays undefined — no fake result, nothing to capture.
+    expect(node.result).toBeUndefined();
+  });
+
+  it("does not overwrite node.result when already populated (idempotent)", async () => {
+    const { state, engine } = buildEngineWithCapture(
+      standaloneNode("A", "a1"),
+      null,
+    );
+
+    await engine.dispatchReady();
+    const node = state.nodes.get("A")!;
+
+    // Pre-populate node.result (simulating a prior run's adoption)
+    node.result = sampleResult;
+
+    await engine.onNodeSignalEmitted("A", "answer", "ok");
+
+    expect(node.status).toBe(NodeStatus.Completed);
+    // node.result keeps the pre-populated ref (not overwritten).
+    expect(node.result!.sidecarPath).toBe(sidecar);
+  });
+
+  it("fires onNodeCompletion seam even when dispatch task has no result", async () => {
+    let captured: NodeCompletionEvent | undefined;
+    const { state, engine } = buildEngineWithCapture(
+      standaloneNode("A", "a1"),
+      null,
+      (e) => { captured = e; },
+    );
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", { ok: true });
+
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    expect(captured).toBeDefined();
+    expect(captured!.nodeId).toBe("A");
+    expect(captured!.signalType).toBe("answer");
+    expect(captured!.payload).toEqual({ ok: true });
   });
 });

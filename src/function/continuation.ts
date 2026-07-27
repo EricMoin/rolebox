@@ -67,7 +67,7 @@ export function decideContinuation(opts: ContinuationInput): ContinuationDecisio
     st.continuationCount >= cfg.perFnMax
       ? " This is your FINAL continuation — produce your output NOW, even if incomplete."
       : "";
-  const reminder = `<system-reminder>[auto-continue ${st.continuationCount}/${cfg.perFnMax} for ${opts.fnName}: ${opts.reason}] Continue until this function's completion condition is met. Do not stop yet.${finalWarning}</system-reminder>`;
+  const reminder = `<system-reminder>[auto-continue ${st.continuationCount}/${cfg.perFnMax} for ${opts.fnName}: ${opts.reason}] Self-diagnose before continuing. FALSE continuation: your last action was a non-blocking dispatch (e.g., graph_run returned "running") or you are awaiting approval / an external result, AND no newly-arrived results arrived this turn → emit signal(type="blocked") and end the turn; do NOT narrate, do NOT poll. LEGITIMATE continuation: a concrete next step is executable right now with information already available → continue working. Tie-breaker: Can I do real work with what I have right now? No → blocked; Yes → continue.${finalWarning}</system-reminder>`;
 
   return { shouldContinue: true, reminder, reason: opts.reason };
 }

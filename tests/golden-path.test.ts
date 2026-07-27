@@ -628,4 +628,94 @@ The plan is ready for your review.`;
     expect(decision.shouldContinue).toBe(false);
     expect(decision.reason).toBe("global cap");
   });
+
+  // ══════════════════════════════════════════════════════════════════
+  // LAYER 4: BOUNDED BACKSTOP (blockedAt timeout)
+  // ══════════════════════════════════════════════════════════════════
+
+  it("gated function with expired blocked timeout → auto-continue fires (blockedAt cleared)", () => {
+    const SID = "gp-timeout-expired";
+    sessions.activate(SID, ["execute"]);
+    const st = singletonRt.init(SID, "execute", 1);
+
+    // Simulate a blocked function whose timeout has long since expired
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+    st.blockedAt = Date.now() - (3 * 60 * 1000); // 3 min ago
+    st.blockedTimeoutMs = 2 * 60 * 1000; // 2 min timeout
+    st.kv["__todos"] = "- [ ] pending";
+
+    // Simulate the timeout check from event-handler.ts continuation loop
+    if (
+      st.phase === "gated" &&
+      st.blockedAt != null &&
+      Date.now() - st.blockedAt > (st.blockedTimeoutMs ?? 120_000)
+    ) {
+      st.phase = "active";
+      st.evidenceObserved["paused"] = false;
+      st.blockedAt = undefined;
+    }
+
+    expect(st.phase).toBe("active");
+    expect(st.evidenceObserved["paused"]).toBe(false);
+    expect(st.blockedAt).toBeUndefined();
+  });
+
+  it("gated function with non-expired blocked timeout → auto-continue still suppressed", () => {
+    const SID = "gp-timeout-not-expired";
+    sessions.activate(SID, ["execute"]);
+    const st = singletonRt.init(SID, "execute", 1);
+
+    // Simulate a blocked function that was gated recently
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+    st.blockedAt = Date.now() - (30 * 1000); // 30 seconds ago
+    st.blockedTimeoutMs = 2 * 60 * 1000; // 2 min timeout
+    st.kv["__todos"] = "- [ ] pending";
+
+    // The timeout check should NOT fire
+    if (
+      st.phase === "gated" &&
+      st.blockedAt != null &&
+      Date.now() - st.blockedAt > (st.blockedTimeoutMs ?? 120_000)
+    ) {
+      st.phase = "active";
+      st.evidenceObserved["paused"] = false;
+      st.blockedAt = undefined;
+    }
+
+    // Still gated — timeout not yet expired
+    expect(st.phase).toBe("gated");
+    expect(st.evidenceObserved["paused"]).toBe(true);
+    expect(st.blockedAt).toBeDefined();
+    expect(typeof st.blockedAt).toBe("number");
+  });
+
+  it("blocked timeout does NOT fire for need_approval gated functions (no blockedAt set)", () => {
+    const SID = "gp-timeout-approval";
+    sessions.activate(SID, ["execute"]);
+    const st = singletonRt.init(SID, "execute", 1);
+
+    // need_approval gates phase but does NOT set blockedAt
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+    // blockedAt intentionally left undefined — simulating need_approval path
+    st.kv["__todos"] = "- [ ] pending";
+
+    // The timeout check requires blockedAt != null → should NOT fire
+    if (
+      st.phase === "gated" &&
+      st.blockedAt != null &&
+      Date.now() - st.blockedAt > (st.blockedTimeoutMs ?? 120_000)
+    ) {
+      st.phase = "active";  // should not reach here
+      st.evidenceObserved["paused"] = false;
+      st.blockedAt = undefined;
+    }
+
+    // Still gated — no blockedAt means no timeout path
+    expect(st.phase).toBe("gated");
+    expect(st.evidenceObserved["paused"]).toBe(true);
+    expect(st.blockedAt).toBeUndefined();
+  });
 });

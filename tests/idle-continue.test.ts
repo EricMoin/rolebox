@@ -296,6 +296,37 @@ describe("session.idle CONTINUE", () => {
     expect(promptAsyncMock).toHaveBeenCalledTimes(1);
     expect((promptAsyncMock as any).mock.calls[0][0].body.parts[0].text).toContain("auto-continue");
   });
+
+  it("freezes auto-continue when function state is gated (signal blocked)", async () => {
+    const client = createMockClient();
+    const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
+    roleFunctionsMap.set("test-primary", [fn]);
+
+    const hooks = await createPluginHooks({
+      resolvedRoles: [makePrimaryRole()],
+      session: new OpencodeSessionAdapter(client),
+      roleFunctionsMap,
+      roleGraphMap: new Map(),
+      directory: tmpDir,
+    });
+
+    const sessionID = "test-session";
+    functionSessionState.activate(sessionID, ["plan"]);
+    const st = functionRuntime.init(sessionID, "plan", 1);
+    st.kv["__todos"] = "- [ ] pending task";
+    // Simulate signal(type="blocked") — sets phase=gated and evidenceObserved.paused=true
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+    const ccBefore = st.continuationCount;
+
+    const promptAsyncMock = client.session.promptAsync as ReturnType<typeof mock>;
+    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
+
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+
+    expect(promptAsyncMock).toHaveBeenCalledTimes(0);
+    expect(st.continuationCount).toBe(ccBefore);
+  });
 });
 
 describe("auto-continue counter persistence (regression)", () => {

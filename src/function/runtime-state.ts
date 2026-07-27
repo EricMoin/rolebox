@@ -14,6 +14,10 @@ export interface FnState {
   gateSatisfied: boolean;
   kv: Record<string, unknown>;
   schemaVersion: number;
+  /** Date.now() ms when phase was gated via signal(type="blocked"). */
+  blockedAt?: number;
+  /** Wall-clock timeout in ms for blocked gating (default 120_000 = 2 min). */
+  blockedTimeoutMs?: number;
 }
 
 // sessionID -> functionName -> FnState

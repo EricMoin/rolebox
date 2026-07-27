@@ -143,6 +143,27 @@ export async function handleEvent(
         if (!fn) continue;
         const st = functionRuntime.get(sid, name);
         if (!st || st.phase === "complete") continue;
+        if (st.phase === "gated") {
+          // Bounded backstop: if blockedAt is set and the wall-clock timeout
+          // has expired, force-unblock so the next idle cycle re-evaluates
+          // continue_until rather than parking the orchestrator forever.
+          if (
+            st.blockedAt != null &&
+            Date.now() - st.blockedAt > (st.blockedTimeoutMs ?? 120_000)
+          ) {
+            st.phase = "active";
+            st.evidenceObserved["paused"] = false;
+            st.blockedAt = undefined;
+            functionRuntime.markDirty();
+            log.info("force-unblocked gated function (blocked timeout)", {
+              sessionID: sid,
+              fnName: name,
+            });
+            // fall through to continuation logic below
+          } else {
+            continue; // still gated, skip continuation
+          }
+        }
 
         // Skip continuation entirely if requires_evidence is declared but not yet met.
         // This prevents e.g. synthesize from auto-continuing on DIRECT-path responses

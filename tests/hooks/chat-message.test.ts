@@ -5,6 +5,7 @@ import type { HookDeps } from "../../src/hooks/deps.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { graphSessionState } from "../../src/graph/index.ts";
+import { GRAPH_COMPLETE_MARKER, GRAPH_BLOCKED_MARKER, isDispatchNotification } from "../../src/dispatch/notification.ts";
 
 // ── Cleanup between tests ───────────────────────────────────────────────────
 
@@ -390,5 +391,115 @@ describe("handleChatMessage — text part extraction", () => {
 
     // Empty text should still be registered as user message
     expect(state.userMessagedSessions.has("sess-1")).toBe(true);
+  });
+});
+
+describe("handleChatMessage — wake-event clear for gated functions", () => {
+  it("resets gated functions to active when a [GRAPH COMPLETE] message arrives", async () => {
+    const state = makeState();
+    functionSessionState.activate("sess-1", ["plan"]);
+    const st = functionRuntime.init("sess-1", "plan", 1);
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+
+    await handleChatMessage(
+      { agent: "test-agent", sessionID: "sess-1" },
+      makeTextOutput(GRAPH_COMPLETE_MARKER),
+      state,
+      minimalDeps(),
+    );
+
+    expect(st.phase).toBe("active");
+    expect(st.evidenceObserved["paused"]).toBe(false);
+  });
+
+  it("resets gated functions to active when a [HITL APPROVAL REQUIRED] message arrives", async () => {
+    const state = makeState();
+    functionSessionState.activate("sess-1", ["plan"]);
+    const st = functionRuntime.init("sess-1", "plan", 1);
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+
+    await handleChatMessage(
+      { agent: "test-agent", sessionID: "sess-1" },
+      makeTextOutput("<system-reminder>\n[HITL APPROVAL REQUIRED]\n**Task ID:** t1\n</system-reminder>"),
+      state,
+      minimalDeps(),
+    );
+
+    expect(st.phase).toBe("active");
+    expect(st.evidenceObserved["paused"]).toBe(false);
+  });
+
+  it("does NOT reset gated functions for auto-continue messages", async () => {
+    const state = makeState();
+    functionSessionState.activate("sess-1", ["plan"]);
+    const st = functionRuntime.init("sess-1", "plan", 1);
+    st.phase = "gated";
+    st.evidenceObserved["paused"] = true;
+
+    await handleChatMessage(
+      { agent: "test-agent", sessionID: "sess-1" },
+      makeTextOutput("[auto-continue] check status (1/3)"),
+      state,
+      minimalDeps(),
+    );
+
+    expect(st.phase).toBe("gated");
+    expect(st.evidenceObserved["paused"]).toBe(true);
+  });
+
+  it("dispatch-notification markers reset blocked state; auto-continue markers do NOT", async () => {
+    // GRAPH_COMPLETE resets
+    functionSessionState.activate("sess-1", ["plan"]);
+    const st1 = functionRuntime.init("sess-1", "plan", 1);
+    st1.phase = "gated";
+    st1.evidenceObserved["paused"] = true;
+
+    await handleChatMessage(
+      { agent: "test-agent", sessionID: "sess-1" },
+      makeTextOutput(GRAPH_COMPLETE_MARKER),
+      makeState(),
+      minimalDeps(),
+    );
+
+    expect(st1.phase).toBe("active");
+    expect(st1.evidenceObserved["paused"]).toBe(false);
+
+    // Clean up and test GRAPH_BLOCKED resets
+    functionSessionState.clear("sess-2");
+    functionRuntime.clearSession("sess-2");
+    functionSessionState.activate("sess-2", ["execute"]);
+    const st2 = functionRuntime.init("sess-2", "execute", 1);
+    st2.phase = "gated";
+    st2.evidenceObserved["paused"] = true;
+
+    await handleChatMessage(
+      { agent: "other-agent", sessionID: "sess-2" },
+      makeTextOutput(GRAPH_BLOCKED_MARKER),
+      makeState(),
+      minimalDeps(),
+    );
+
+    expect(st2.phase).toBe("active");
+    expect(st2.evidenceObserved["paused"]).toBe(false);
+
+    // Clean up and verify auto-continue does NOT reset
+    functionSessionState.clear("sess-1");
+    functionRuntime.clearSession("sess-1");
+    functionSessionState.activate("sess-1", ["report"]);
+    const st3 = functionRuntime.init("sess-1", "report", 1);
+    st3.phase = "gated";
+    st3.evidenceObserved["paused"] = true;
+
+    await handleChatMessage(
+      { agent: "test-agent", sessionID: "sess-1" },
+      makeTextOutput("[auto-continue] reminder (2/5)"),
+      makeState(),
+      minimalDeps(),
+    );
+
+    expect(st3.phase).toBe("gated");
+    expect(st3.evidenceObserved["paused"]).toBe(true);
   });
 });
