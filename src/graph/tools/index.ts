@@ -34,6 +34,7 @@ import {
   createGraphToolSet,
   type GraphToolSet,
   type GraphStatusFormat,
+  type GraphNotifySource,
 } from "./graph-tools.ts";
 import { createGraphApproveTool } from "./approve-tools.ts";
 import {
@@ -124,16 +125,25 @@ const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType
  *                  execution. Optional for construction/status/cancel/dry-run.
  * @param opts.directory - Working directory for graph node dispatches.
  * @param opts.stateDir - Optional engine-state persistence dir.
+ * @param opts.graphNotify - Optional graph node-completion notifier (subtask 3):
+ *        a prebuilt `GraphCompletionHandler` or an owner config carrying the
+ *        emperor session + session client. Threaded into every engine the toolset
+ *        constructs so graph_node completions route to graph-notify.
  * @returns A record of `graph_*` key → {@link CanonicalToolDef}.
  */
 export function createGraphTools(
   manager: DispatchManager | undefined,
-  opts: { directory?: string; stateDir?: string } = {},
+  opts: {
+    directory?: string;
+    stateDir?: string;
+    graphNotify?: GraphNotifySource;
+  } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = createGraphToolSet({
     manager,
     directory: opts.directory,
     stateDir: opts.stateDir,
+    graphNotify: opts.graphNotify,
   });
 
   return {
@@ -147,6 +157,14 @@ export function createGraphTools(
     graph_approve: createGraphApproveTool(toolset),
   };
 }
+
+// Re-export the graph-notify config types (subtask 3) for platform assembly
+// layers (tool-assembly.ts) that thread the emperor session + session client
+// down into the engine's completion seam.
+export type {
+  GraphNotifySource,
+  GraphNotifyConfig,
+} from "./graph-tools.ts";
 
 // ── Individual tool factories ───────────────────────────────────────────────
 
@@ -345,9 +363,12 @@ function createGraphRunTool(
         .optional()
         .describe("Validate the graph structure without executing."),
     },
-    async execute(args) {
+    async execute(args, context) {
       try {
-        return json(await toolset.graph_run(args));
+        // Subtask 3: forward the invoking session id (the orchestrator/emperor
+        // session running graph_run) so the graph-notify completion seam targets
+        // the correct emperor session at runtime.
+        return json(await toolset.graph_run(args, context?.sessionID));
       } catch (err) {
         return `graph_run failed: ${(err as Error).message}`;
       }

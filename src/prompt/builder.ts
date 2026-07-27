@@ -165,8 +165,13 @@ When graph_run returns, read the full worker result with
 graph_status(graph_id=..., node_id=<node_id>, include_output=true).
 For multi-step work that must run together, add edges (graph_add_edge) between nodes and
 run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.
-IMPORTANT: after dispatching a background node, you will receive a <system-reminder> when it
-completes. Do not poll — wait for the notification, then query graph_status to read the result.`;
+IMPORTANT: node completion does not always push a notification. When the graph runs with
+node-completion notifications enabled (an emperor session is wired), a <system-reminder> is
+injected into your session when a background node completes. When notifications are disabled
+or no emperor session is available, no reminder is sent. Never assume a reminder will always
+arrive — read the worker result with graph_status(graph_id=..., node_id=<node_id>,
+include_output=true). Do not poll graph_status in a loop to wait for a task; re-read it when
+you need the result (or when a <system-reminder> indicates completion).`;
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,

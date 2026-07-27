@@ -165,6 +165,17 @@ export class PiLightweightServiceStack implements IHookProvider {
       sessionClient: this._sessionAdapter,
       directory: process.cwd(),
       capabilities: piCapabilities(),
+      // Subtask 3 (graph-node completion notifier): thread the emperor session
+      // identity + session client into the graph engine's completion seam. The
+      // emperor/orchestrator session is the session whose execution context
+      // drives graph_run — resolved at runtime by the graph tool's context (tool
+      // assembly is session-agnostic). `graphParentContext` budget scoping
+      // (sessionID: graphId) is untouched; the emperor session is carried ONLY
+      // for notification targeting.
+      graphNotify: {
+        sessionClient: this._sessionAdapter,
+        emperorSessionId: (invokingSessionId) => invokingSessionId,
+      },
       dispatchToolsOverride,
       loopToolsOverride: this._loopTools && Object.keys(this._loopTools).length > 0
         ? this._loopTools

@@ -100,7 +100,13 @@ import {
   type EngineRuntime,
   type CreateEngineOptions,
   type NodeDispatchPort,
+  type NodeCompletionEvent,
 } from "../engine/index.ts";
+import {
+  createGraphNotifier,
+  type GraphCompletionHandler,
+} from "../engine/graph-notify.ts";
+import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
 import { serializeGraphDeclaration } from "../serialize.ts";
 import {
@@ -131,6 +137,37 @@ interface GraphEntry {
   runtime: EngineRuntime;
 }
 
+/**
+ * Config form of a graph node-completion notifier (subtask 3). Carries the
+ * owner emperor session identity + the session client used to deliver
+ * reminders. `emperorSessionId` may be a static string or a resolver evaluated
+ * at engine-construction time (a resolver lets a caller resolve the emperor
+ * session lazily, e.g. from a live session registry).
+ */
+export interface GraphNotifyConfig {
+  /** Session client used to deliver `<system-reminder>` completions. */
+  sessionClient: ISessionClient;
+  /**
+   * Emperor session to target for reminders. A static id, or a resolver invoked
+   * once when the notifier is built (fresh per engine construction). The
+   * resolver receives the invoking session id (`invokingSessionId`) — the
+   * session whose execution context drove the engine construction — so a caller
+   * can derive the emperor session from the graph tool's execution context at
+   * runtime. When the resolved value is absent / empty, the notifier is a no-op.
+   */
+  emperorSessionId?: string | ((invokingSessionId?: string) => string | undefined);
+  /** Optional agent tag forwarded to the injected prompt. */
+  agent?: string;
+}
+
+/**
+ * Graph node-completion notifier source accepted by {@link GraphToolSetDeps}.
+ * Either a prebuilt notifier fn (a `GraphCompletionHandler` from
+ * `graph-notify.ts`) or a structured owner config. Absent → the engine runs
+ * with its default no-op completion seam (backward compatible).
+ */
+export type GraphNotifySource = GraphCompletionHandler | GraphNotifyConfig;
+
 /** Options for constructing a {@link GraphToolSet}. */
 export interface GraphToolSetDeps {
   /** Active {@link DispatchManager}; required only for non dry-run execution. */
@@ -146,6 +183,17 @@ export interface GraphToolSetDeps {
   directory?: string;
   /** Optional engine-state persistence dir (`.rolebox/state/...`). */
   stateDir?: string;
+  /**
+   * Optional graph node-completion notifier (subtask 3). When present, every
+   * engine this toolset constructs — in `buildEngine` (used by all construction
+   * paths) and in `graph_run`'s own runtime — wires the notifier into the
+   * engine's `onNodeCompletion` DI seam so graph_node completions route to
+   * graph-notify targeting the owner emperor session. Absent → the engine's
+   * default no-op completion seam (no notification). `graphParentContext`
+   * budget scoping (`sessionID: graphId`) is untouched — the emperor session is
+   * carried ONLY for notification targeting.
+   */
+  graphNotify?: GraphNotifySource;
 }
 
 // ── Tool parameter shapes (plain objects — subtask 6 wraps with zod) ─────────
@@ -452,13 +500,52 @@ export class GraphToolSet {
 
   // ── Shared helpers ─────────────────────────────────────────────────────────
 
+  /**
+   * Resolve the configured graph-notify source into a concrete
+   * `onNodeCompletion` handler, or `undefined` for the engine's default no-op
+   * seam. A prebuilt notifier fn is returned as-is; a config form is materialized
+   * via {@link createGraphNotifier} once per call (a fresh notifier = a fresh
+   * dedupe epoch per engine construction). The config's `emperorSessionId`
+   * resolver is invoked with the invoking session id (`invokingSessionId`) when
+   * provided, so the emperor session can be derived from the graph tool's
+   * execution context at runtime. Returns `undefined` when no source is
+   * configured or the resolved emperor session is absent (no-op). Subtask 3.
+   */
+  private completionHandler(
+    invokingSessionId?: string,
+  ): ((event: NodeCompletionEvent) => void) | undefined {
+    const src = this.deps.graphNotify;
+    if (src === undefined) return undefined;
+    if (typeof src === "function") return src;
+    const emperorSessionId =
+      typeof src.emperorSessionId === "function"
+        ? src.emperorSessionId(invokingSessionId)
+        : src.emperorSessionId;
+    if (!emperorSessionId) return undefined;
+    return createGraphNotifier(src.sessionClient, {
+      emperorSessionId,
+      ...(src.agent ? { agent: src.agent } : {}),
+    });
+  }
+
   /** Create a fresh, provisioned engine from a declaration (re-provision). */
-  private buildEngine(declaration: GraphDeclaration, graphId: string): EngineRuntime {
+  private buildEngine(
+    declaration: GraphDeclaration,
+    graphId: string,
+    invokingSessionId?: string,
+  ): EngineRuntime {
     const options: CreateEngineOptions = {
       manager: this.deps.manager,
       graphId,
       stateDir: this.deps.stateDir,
     };
+    // Subtask 3: wire the configured graph-notify completion seam (absent →
+    // no-op). The emperor session is targeted ONLY for notification; the
+    // graphParentContext budget scope (sessionID: graphId) is left unchanged.
+    const completion = this.completionHandler(invokingSessionId);
+    if (completion) {
+      options.onNodeCompletion = completion;
+    }
     // An injected dispatch seam wins over the manager-backed bridge (explicit >
     // manager, per createEngine). Present when a caller drives graph dispatch
     // without a real DispatchManager.
@@ -699,7 +786,10 @@ export class GraphToolSet {
 
   // ── graph_run ──────────────────────────────────────────────────────────────
 
-  async graph_run(args: GraphRunArgs): Promise<GraphRunResult> {
+  async graph_run(
+    args: GraphRunArgs,
+    invokingSessionId?: string,
+  ): Promise<GraphRunResult> {
     const entry = this.getEntry(args.graph_id);
 
     // dry_run: validate structure without executing.
@@ -724,12 +814,18 @@ export class GraphToolSet {
       );
     }
 
+    // Subtask 3: wire the configured graph-notify completion seam into the
+    // runtime graph_run builds (absent → the engine's default no-op seam).
+    // `invokingSessionId` (the graph tool's execution session) is forwarded so
+    // the emperor-session resolver can target the orchestrator at runtime.
+    const completion = this.completionHandler(invokingSessionId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
       parentContext: this.parentContext(args.graph_id),
       stateDir: this.deps.stateDir,
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
+      ...(completion ? { onNodeCompletion: completion } : {}),
     });
     await runtime.run();
 

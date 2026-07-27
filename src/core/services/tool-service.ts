@@ -61,6 +61,19 @@ export class ToolService implements PluginService {
       resolvedRoles: ctx.resolvedRoles,
       directory: ctx.directory,
       capabilities: ctx.capabilities ?? defaultCapabilities(),
+      // Subtask 3 (graph-node completion notifier): thread the emperor session
+      // identity + session client into the graph engine's completion seam. The
+      // emperor/orchestrator session is the session whose execution context
+      // drives graph_run — resolved at runtime by the graph tool's context. A
+      // resolver is used (rather than a static id) because tool assembly is
+      // session-agnostic; the real orchestrator session is only known when a
+      // graph is actually run. `graphParentContext` budget scoping
+      // (sessionID: graphId) is unaffected — the emperor session is carried ONLY
+      // for notification targeting.
+      graphNotify: {
+        sessionClient,
+        emperorSessionId: (invokingSessionId) => invokingSessionId,
+      },
       // dispatch_* tool registration DISABLED — orchestration is graph-only
       // (graph_create/graph_add_node/graph_run). Bare dispatch calls would
       // bypass graph budget accounting, approval gates, and loop caps.

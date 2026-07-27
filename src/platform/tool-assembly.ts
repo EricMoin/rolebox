@@ -42,6 +42,7 @@ import {
 // Graph Execution Engine v2 — Phase 4, Subtask 6. Additive registration of the
 // seven imperative graph_* tools. Import-only (no protected files touched).
 import { createGraphTools } from "../graph/tools/index.ts";
+import type { GraphNotifySource } from "../graph/tools/index.ts";
 
 export interface BuildToolsOptions {
   sessionClient?: ISessionClient;
@@ -56,6 +57,16 @@ export interface BuildToolsOptions {
   dispatchToolsOverride?: Record<string, CanonicalToolDef>;
   loopToolsOverride?: Record<string, CanonicalToolDef>;
   taskToolsOverride?: Record<string, CanonicalToolDef>;
+  /**
+   * Optional graph node-completion notifier (subtask 3): a prebuilt
+   * `GraphCompletionHandler` or an owner config carrying the emperor session id
+   * + session client. Threaded through `createGraphTools` into every engine the
+   * graph tools construct so node completions route to graph-notify targeting
+   * the emperor session. Absent → graph_run builds engines with the default
+   * no-op completion seam (backward compatible). `graphParentContext` budget
+   * scoping (`sessionID: graphId`) is untouched.
+   */
+  graphNotify?: GraphNotifySource;
 }
 
 export function buildCanonicalTools(
@@ -140,6 +151,7 @@ export function buildCanonicalTools(
   if (opts.dispatchManager) {
     Object.assign(tools, createGraphTools(opts.dispatchManager, {
       directory: opts.directory,
+      graphNotify: opts.graphNotify,
     }));
   }
 
