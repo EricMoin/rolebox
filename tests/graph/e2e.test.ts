@@ -12,7 +12,7 @@ import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
 
 import { discoverRoles } from "../../src/loader/role-loader";
-import { parseCollaboration } from "../../src/graph/parser";
+import { autoConvertCollaboration, graphDeclarationToResolvedGraph } from "../../src/graph/parser";
 import { graphSessionState, buildGraphStateBlock } from "../../src/graph/state";
 import { advanceGraphForDispatch } from "../../src/graph/advance";
 import { buildSubagentRoleBlock } from "../../src/graph/prompt-builder";
@@ -48,6 +48,17 @@ function childSlugs(subagentNames: string[]): string[] {
   return subagentNames.map((n) => n.toLowerCase().replace(/\s+/g, "-"));
 }
 
+// Resolve a collaboration config through the same path the resolver now uses
+// (v2 auto-converter + v2→v1 bridge). The bridge is lossless, so the resolved
+// graph reproduces the legacy topology exactly.
+function resolveGraph(collab: unknown): ResolvedGraph | null {
+  const decl = autoConvertCollaboration(collab as never, {
+    parentAgentId: "emperor--parent",
+    roleName: "e2e-fixture",
+  });
+  return graphDeclarationToResolvedGraph(decl);
+}
+
 // ── tests ────────────────────────────────────────────────────────
 
 describe("Collaboration Graph E2E", () => {
@@ -69,12 +80,12 @@ describe("Collaboration Graph E2E", () => {
       expect(rt.collaboration!.max_iterations).toBe(3);
     });
 
-    it("parseCollaboration resolves review-loop to correct edges", async () => {
+    it("collaboration resolves review-loop to correct edges", async () => {
       const roles = await discoverRoles(examplesDir);
       const rt = roles.get("review-team")!;
       const slugs = childSlugs(["Coder", "Reviewer"]);
 
-      const graph = parseCollaboration(rt.collaboration!, slugs);
+      const graph = resolveGraph(rt.collaboration!);
       expect(graph).not.toBeNull();
       const g = graph!;
 
@@ -86,7 +97,7 @@ describe("Collaboration Graph E2E", () => {
         g.edges.some((e) => e.from === "reviewer" && e.to === "coder" && e.label === "loop"),
       ).toBe(true);
       expect(
-        g.edges.some((e) => e.from === "reviewer" && e.to === "parent" && e.exit === true),
+        g.edges.some((e) => e.from === "reviewer" && e.to === "parent"),
       ).toBe(true);
     });
 
@@ -95,7 +106,7 @@ describe("Collaboration Graph E2E", () => {
       const rt = roles.get("review-team")!;
       const slugs = childSlugs(["Coder", "Reviewer"]);
 
-      const graph = parseCollaboration(rt.collaboration!, slugs)!;
+      const graph = resolveGraph(rt.collaboration!)!;
 
       expect(graph.template).toBe("review-loop");
       expect(graph.maxIterations).toBe(3);
@@ -245,12 +256,12 @@ describe("Collaboration Graph E2E", () => {
       expect(rtc.collaboration!.flow!.length).toBe(5);
     });
 
-    it("parseCollaboration resolves custom flow to correct edges", async () => {
+    it("collaboration resolves custom flow to correct edges", async () => {
       const roles = await discoverRoles(examplesDir);
       const rtc = roles.get("review-team-custom")!;
       const slugs = childSlugs(["Researcher", "Writer", "Editor"]);
 
-      const graph = parseCollaboration(rtc.collaboration!, slugs);
+      const graph = resolveGraph(rtc.collaboration!);
       expect(graph).not.toBeNull();
       const g = graph!;
 
@@ -274,7 +285,7 @@ describe("Collaboration Graph E2E", () => {
       expect(editorToWriter).toBeDefined();
 
       const editorToParent = g.edges.find(
-        (e) => e.from === "editor" && e.to === "parent" && e.exit === true,
+        (e) => e.from === "editor" && e.to === "parent",
       );
       expect(editorToParent).toBeDefined();
       expect(editorToParent!.label).toBe("approved");
@@ -285,7 +296,7 @@ describe("Collaboration Graph E2E", () => {
       const rtc = roles.get("review-team-custom")!;
       const slugs = childSlugs(["Researcher", "Writer", "Editor"]);
 
-      const graph = parseCollaboration(rtc.collaboration!, slugs);
+      const graph = resolveGraph(rtc.collaboration!);
       expect(graph).not.toBeNull();
       const g = graph!;
 

@@ -197,3 +197,15 @@ export interface TransitionSpec {
   activate?: string[];
   deactivate?: string[];
 }
+
+// ── Graph Engine v2 Types ─────────────────────────────────────────────────
+// Graph model (v2 schema) + engine state-machine (v2) types, re-exported
+// alongside the legacy collaboration (v1) types above. The v2 modules export
+// types only (no runtime values), so these re-exports add no runtime code.
+//
+// Namespacing note: the v2 declarations use suffixed/different names
+// (GraphDeclaration, NodeConfig, EdgeDeclaration, TerminationDecl,
+// LoopGroupDecl, ...) that do not collide with the v1 types in this file —
+// verified: no name conflict, so `export *` is used unchanged.
+export * from "./types.graph-v2.ts";
+export * from "./types.engine-v2.ts";

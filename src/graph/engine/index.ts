@@ -1,0 +1,704 @@
+/**
+ * Graph Execution Engine v2 — Public Engine API (barrel)
+ *
+ * Version: 2.0
+ * Date: 2026-07-24
+ *
+ * The single public entry point for the graph execution engine. Consumers
+ * construct an {@link EngineRuntime} with {@link createEngine}, then drive it
+ * through the lifecycle:
+ *
+ *     provision()  — initialize {@link EngineState} (register nodes, bootstrap roots).
+ *     run()        — transition `idle → executing` and dispatch the ready roots.
+ *     status()     — read a snapshot of the {@link EngineState}.
+ *
+ * `recover()` and `cancel()` are Phase-3 stubs (resume / teardown).
+ *
+ * Design: the engine is a role-agnostic primitive. This barrel only wires the
+ * runtime; it carries no dispatch or role logic itself. The dispatch surface
+ * is an injected seam (see {@link EngineRuntimeOptions.dispatch}) so callers
+ * and tests can avoid real sub-agent dispatch.
+ *
+ * Scope note (Phase 1): external integration — wiring this runtime into the
+ * platform entry points and re-exporting it from the package root — is a later
+ * subtask. This module exports exactly the public engine API surface.
+ *
+ * Design reference: `.rolebox/design/engine-state-machine.md`.
+ */
+
+import type { DispatchManager } from "../../dispatch/core/manager.ts";
+import type { DispatchTask } from "../../dispatch/types.ts";
+import type { GraphDeclaration } from "../../types.graph-v2.ts";
+import { EnginePhase, NodeStatus } from "../../constants.ts";
+import type {
+  EngineState,
+  NodeRuntimeState,
+} from "../../types.engine-v2.ts";
+import {
+  createEngineState,
+  provision as provisionState,
+} from "./engine-state.ts";
+import {
+  AdvanceEngine,
+  type AdvanceEngineOptions,
+  type NodeDispatchPort,
+  type GraphBudgetPort,
+  type EdgeConditionResolver,
+} from "./engine-advance.ts";
+import { SignalBridge } from "./signal-bridge.ts";
+import {
+  BudgetBridge,
+} from "./budget-bridge.ts";
+import {
+  DispatchBridge,
+  type DispatchParentContext,
+} from "./dispatch-bridge.ts";
+import defaultConditionResolver from "./condition-resolver.ts";
+import {
+  EnginePersistence,
+} from "./engine-persistence.ts";
+import {
+  executeLoopStep,
+  recordConvergenceOutput,
+  resetConvergenceTracker,
+  fingerprintPayload,
+  extractUnresolved,
+  type LoopOutcome,
+  type LoopStepReport,
+  type LoopEscalatePayload,
+} from "./loop-group-executor.ts";
+import type {
+  RetryNodeOptions,
+  RetryReport,
+} from "./node-retry.ts";
+import {
+  clearStaleCriticalSection,
+  hydrateEngineState,
+  reconcileEngine,
+  rebuildFrontier,
+  EngineLockSweeper,
+  type DispatchRecoveryPort,
+  type ReconcileReport,
+} from "./engine-recovery.ts";
+import { markCancelled, canTransitionNode } from "./node-lifecycle.ts";
+import {
+  canTransitionPhase,
+  transitionPhase,
+} from "./engine-state.ts";
+import {
+  cancelNodes as cancelScopedNodes,
+  type CancelScopeOptions,
+  type CancelScopeReport,
+} from "./cancellation.ts";
+
+// ── EngineRuntime ───────────────────────────────────────────────────────────
+
+/**
+ * A bound engine instance for a single graph execution.
+ *
+ * One `EngineRuntime` owns one {@link EngineState} and one signal-driven
+ * {@link AdvanceEngine}. It is constructed via {@link createEngine}.
+ */
+export interface EngineRuntime {
+  /**
+   * Initialize the {@link EngineState}: register every declared node and
+   * bootstrap the topology (root nodes become `ready` and enter the frontier).
+   *
+   * Idempotent — calling more than once is a no-op.
+   *
+   * @returns a snapshot of the state after provisioning.
+   */
+  provision(): EngineState;
+
+  /**
+   * Transition the engine from `idle` to `executing` and dispatch the ready
+   * root nodes. Provisioning is applied first if it has not run yet.
+   *
+   * Requires a dispatch seam (see {@link EngineRuntimeOptions.dispatch} or
+   * {@link EngineRuntimeOptions.manager}); without one, this rejects with a
+   * clear error.
+   */
+  run(): Promise<void>;
+
+  /**
+   * Resume an interrupted graph instance (Phase 3 — crash recovery).
+   *
+   * Loads the persisted {@link EngineState} (engine-state-machine.md §5.1) and
+   * reconciles every `running` node against the dispatch system
+   * (`failure-resilience.md §5.2`): vanished → `timeout`, finished-during-the-
+   * window → re-emit its signal, still-live → re-subscribe `onTaskTerminated`.
+   * Rebuilds the frontier and drains the deferred completions. A no-op when no
+   * persisted state exists (first run) or no persistence is configured.
+   */
+  recover(): Promise<void>;
+
+  /**
+   * Return a read-only snapshot of the current {@link EngineState}. The
+   * snapshot's collections (`nodes`, `edges`, `frontier`, ...) are freshly
+   * allocated clones — mutating them does not affect the live engine.
+   */
+  status(): EngineState;
+
+  /**
+   * Cancel an in-progress graph execution (Phase 3 — teardown).
+   *
+   * Transitions every active node (`running` / `ready` / `pending`) to
+   * `cancelled`, cancels in-flight dispatch tasks via the dispatch seam, and
+   * advances the engine lifecycle to `complete`. `blocked` (needs_approval)
+   * nodes await the human and are left untouched.
+   */
+  cancel(): Promise<void>;
+
+  /**
+   * Approve a blocked `needs_approval` node: `blocked → completed`, record an
+   * `answer` signal, and activate the node's downstream `answer` edges (forward
+   * data flow). Resolves the node's approval gate and lets the graph continue.
+   *
+   * @param nodeId  The `needs_approval` node currently `blocked`.
+   * @param payload Optional approval output (defaults to the node's recorded
+   *                `need_approval` summary, else an accept marker).
+   */
+  approveNode(nodeId: string, payload?: unknown): Promise<void>;
+
+  /**
+   * Reject a blocked `needs_approval` node: `blocked → ready` (re-enter with
+   * the rejection feedback merged into the re-execution prompt), or
+   * `blocked → escalate` when the node has no loop group to re-open.
+   *
+   * @param nodeId  The `needs_approval` node currently `blocked`.
+   * @param reason  Optional human-supplied rejection reason.
+   */
+  rejectNode(nodeId: string, reason?: string): Promise<void>;
+
+  /**
+   * Partially approve a blocked `needs_approval` node: accept the `approved`
+   * upstream branches and cancel the `rejected` branches' transitive
+   * dependents that cannot survive on the approved sources alone. Rejected
+   * upstreams re-enter `ready` with feedback; the approval node re-waits for
+   * their re-execution (or re-renders immediately when its join is already
+   * satisfied by the approved sources). See orchestration-patterns.md §1.5.
+   *
+   * @param nodeId    The `needs_approval` node currently `blocked`.
+   * @param approved  Upstream node ids the human accepted.
+   * @param rejected  Upstream node ids the human rejected (re-executed).
+   * @param reason    Optional rejection feedback for the re-executed branches.
+   */
+  partialApprove(
+    nodeId: string,
+    approved: string[],
+    rejected: string[],
+    reason?: string,
+  ): Promise<void>;
+
+  /**
+   * Retry a terminal graph's node (`tool-merge-map.md` §2.2
+   * `graph_run(node_id, retry=true, modify_prompt=...)`).
+   *
+   * Re-opens the target node (and its downstream subgraph) into a clean
+   * `pending` state so re-dispatch is fresh, optionally prepending
+   * `modifyPrompt` to the target's prompt, then re-marks the target `ready`
+   * and dispatches it. A terminal graph phase (`complete`) is re-opened to
+   * `executing`. See `node-retry.ts`.
+   *
+   * @param nodeId  A node in any terminal state (`completed` / `escalate` /
+   *                `timeout` / `cancelled` / `done`) — or a pending/ready node —
+   *                to re-run.
+   * @param opts    Optional `modifyPrompt` prepended to the node's prompt.
+   * @returns a {@link RetryReport} with the reset set and the number of nodes
+   *          (re-)dispatched this call.
+   */
+  retryNode(
+    nodeId: string,
+    opts?: RetryNodeOptions,
+  ): Promise<RetryReport>;
+
+  /**
+   * Cancel one or more named node ids (optionally cascading to their transitive
+   * downstream dependents) via the scoped/cascade cancellation primitive
+   * (`cancellation.ts`).
+   *
+   * Scoped — this is NOT the whole-graph {@link cancel}: only the requested
+   * targets (and, under `cascade`, everything downstream of them) are retired,
+   * and the engine phase is untouched. A loop-group target expands to its full
+   * member set. Reuses only the existing lifecycle machinery: cancellable
+   * nodes (`pending | ready | running`) advance `→ cancelled → done` with their
+   * dispatch tasks torn down fire-and-forget; `completed` / `blocked` /
+   * terminal nodes are reported as skipped and left untouched.
+   *
+   * @param nodeIds  Node ids to cancel (loop targets expand to their members).
+   * @param options  `{ cascade?: boolean }` — cascade to transitive downstream
+   *                 dependents over the declaration's edges when true.
+   * @returns a {@link CancelScopeReport} of retired vs. skipped node ids.
+   */
+  cancelNodes(
+    nodeIds: string[],
+    options?: CancelScopeOptions,
+  ): CancelScopeReport;
+}
+
+// ── Options ─────────────────────────────────────────────────────────────────
+
+/** Options for {@link createEngine}. */
+export interface CreateEngineOptions {
+  /**
+   * Dispatch seam — the only way `run()` actually launches graph nodes.
+   *
+   * Inject a fake here for tests, or pass a real one backed by a
+   * {@link DispatchManager}. When omitted (and no `manager` is supplied), the
+   * engine is still constructible and `status()`/`provision()` work, but
+   * `run()` rejects with a clear error.
+   */
+  dispatch?: NodeDispatchPort;
+
+  /**
+   * A {@link DispatchManager} used to build the *default* dispatch and budget
+   * seams (`DispatchBridge` / `BudgetBridge`) when `dispatch`/`budget` are not
+   * supplied explicitly. This is the production path.
+   */
+  manager?: DispatchManager;
+
+  /** Budget seam (defaults to a `BudgetBridge` over `manager` when available). */
+  budget?: GraphBudgetPort;
+
+  /** Parent context for node dispatches (defaults to a graph-scoped one). */
+  parentContext?: DispatchParentContext;
+
+  /**
+   * Optional `on_condition` edge resolver. When omitted, the engine injects
+   * the default resolver (Phase 2) supporting `signal_observed(<type>)` and
+   * `artifact_exists(<name>)`; unsupported conditions evaluate false.
+   */
+  conditionResolver?: EdgeConditionResolver;
+
+  /** Graph-id override (defaults to a generated unique id). */
+  graphId?: string;
+
+  /**
+   * Optional workspace directory for engine-state persistence
+   * (`.rolebox/state/engine-{graphId}.json`). When provided, the advance engine
+   * performs a write-through save after every critical transition
+   * (implementation-roadmap Q2 Option A). When omitted, the engine runs
+   * in-memory with no on-disk persistence.
+   */
+  stateDir?: string;
+
+  /**
+   * Optional stale-lock sweep interval (ms). When provided (> 0),
+   * `recover()` starts a periodic {@link EngineLockSweeper} at this interval
+   * so a lock left `true` past `ADVANCING_LOCK_TIMEOUT_MS` is released.
+   * Defaults to off — tests drive the sweeper via manual ticks instead of an
+   * unbounded `setInterval` (see failure-resilience.md §5.6).
+   */
+  sweeperIntervalMs?: number;
+}
+
+// ── Engine identity ─────────────────────────────────────────────────────────
+
+let engineSeq = 0;
+/** Generate a unique, human-scannable graph id for a runtime instance. */
+function defaultGraphId(name: string): string {
+  engineSeq += 1;
+  return `${name}-${Date.now()}-${engineSeq}`;
+}
+
+/** Minimal, dependency-free warning logger (no sub-logger import cycle). */
+function logWarn(message: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
+// ── Snapshot helpers ────────────────────────────────────────────────────────
+
+/** Deep-enough clone of a node's runtime state for a snapshot. */
+function cloneNode(n: NodeRuntimeState): NodeRuntimeState {
+  return {
+    ...n,
+    signalsObserved: { ...n.signalsObserved },
+    upstreamResults: new Map(n.upstreamResults),
+    tokensConsumed: { ...n.tokensConsumed },
+    result: n.result ? { ...n.result } : undefined,
+  };
+}
+
+/** Clone every live collection of the state into a fresh snapshot. */
+function snapshotEngineState(state: EngineState): EngineState {
+  return {
+    phase: state.phase,
+    graphId: state.graphId,
+    graphDeclaration: state.graphDeclaration,
+    nodes: new Map(
+      [...state.nodes].map(([id, n]) => [id, cloneNode(n)]),
+    ),
+    edges: new Map(
+      [...state.edges].map(([key, p]) => [
+        key,
+        { ...p, artifacts: [...p.artifacts], budgetConsumed: { ...p.budgetConsumed } },
+      ]),
+    ),
+    loopGroups: new Map(state.loopGroups),
+    frontier: [...state.frontier],
+    budget: { ...state.budget },
+    signalLedger: new Map(
+      [...state.signalLedger].map(([id, e]) => [
+        id,
+        { ...e, signals: { ...e.signals } },
+      ]),
+    ),
+    // C-WIRE: the per-node checkpoint store is an optional-additive field and
+    // must be carried into the snapshot so `graph_status`'s `include_checkpoint`
+    // flag reads genuine lifecycle snapshots. `CheckpointRecord`s are immutable
+    // snapshots, so sharing their references (shallow clone) is safe — the same
+    // reference-sharing the snapshot already uses for loop `rounds` and signal
+    // `history`. Absent until a checkpoint is recorded (subtask 2).
+    checkpoints: state.checkpoints ? { ...state.checkpoints } : undefined,
+    startedAt: state.startedAt,
+    updatedAt: state.updatedAt,
+    advancingLock: state.advancingLock,
+    pendingCompletions: [...state.pendingCompletions],
+  };
+}
+
+// ── Default dispatch stub ───────────────────────────────────────────────────
+
+/**
+ * Fallback dispatch seam when neither `dispatch` nor `manager` is supplied.
+ *
+ * `createEngine` remains constructible without a dispatch seam (so
+ * `provision()`/`status()` are usable for pure inspection), but `run()` has no
+ * way to launch a node — it rejects with an actionable error.
+ */
+const throwOnDispatch: NodeDispatchPort = {
+  executeNode(): Promise<DispatchTask> {
+    return Promise.reject(
+      new Error(
+        "createEngine: no dispatch seam provided. Inject options.dispatch " +
+          "(a NodeDispatchPort or a test fake) or options.manager (a " +
+          "DispatchManager) before calling run().",
+      ),
+    );
+  },
+};
+
+// ── EngineRuntime implementation ────────────────────────────────────────────
+
+class EngineRuntimeImpl implements EngineRuntime {
+  private readonly state: EngineState;
+  private readonly advance: AdvanceEngine;
+  private readonly signalBridge: SignalBridge;
+  private readonly dispatchPort: NodeDispatchPort;
+  private readonly persistence?: EnginePersistence;
+  private readonly sweeper: EngineLockSweeper;
+  private readonly sweeperIntervalMs?: number;
+  private provisioned = false;
+
+  constructor(
+    graphDeclaration: GraphDeclaration,
+    graphId: string,
+    opts: CreateEngineOptions,
+  ) {
+    // 1. Fresh idle EngineState.
+    this.state = createEngineState(graphDeclaration, graphId);
+
+    // 2. Resolve the dispatch seam: explicit > manager-backed > throw-on-use.
+    this.dispatchPort =
+      opts.dispatch ??
+      (opts.manager ? new DispatchBridge(opts.manager) : throwOnDispatch);
+
+    // 3. Resolve the budget seam: explicit > manager-backed > absent (Phase 1
+    //    never enforces ceilings — the advance engine treats `undefined` as a
+    //    no-op port).
+    const budget: GraphBudgetPort | undefined =
+      opts.budget ?? (opts.manager ? new BudgetBridge(opts.manager.getBudgetTracker()) : undefined);
+
+    // 4. Signal bridge — routes terminating signals into the advance engine.
+    this.signalBridge = new SignalBridge();
+
+    // 5. Wire the signal-driven advance engine over the same state.
+    //    Write-through persistence seam (Phase 3): when a `stateDir` is
+    //    supplied, every advancement critical section persists the engine
+    //    state. Optional — omitted by default so the engine stays a
+    //    constructible in-memory primitive (implementation-roadmap Q2 Option A).
+    this.persistence = opts.stateDir
+      ? new EnginePersistence(opts.stateDir)
+      : undefined;
+    const advanceOpts: AdvanceEngineOptions = {
+      state: this.state,
+      signalBridge: this.signalBridge,
+      dispatch: this.dispatchPort,
+      budget,
+      parentContext: opts.parentContext,
+      conditionResolver: opts.conditionResolver ?? defaultConditionResolver,
+      persistState: this.persistence ? (s) => this.persistence!.save(s) : undefined,
+    };
+    this.advance = new AdvanceEngine(advanceOpts);
+    // The advance engine is the terminating-signal consumer.
+    this.advance.register();
+
+    // 6. Stale-lock sweeper. Manual ticks by default; the periodic interval is
+    //    opt-in (`sweeperIntervalMs`) so tests never leak a setInterval.
+    this.sweeper = new EngineLockSweeper({
+      intervalMs: opts.sweeperIntervalMs,
+      onRelease: () => this.persistence?.save(this.state),
+    });
+    this.sweeperIntervalMs = opts.sweeperIntervalMs;
+  }
+
+  provision(): EngineState {
+    if (!this.provisioned) {
+      provisionState(this.state);
+      this.provisioned = true;
+    }
+    return snapshotEngineState(this.state);
+  }
+
+  async run(): Promise<void> {
+    if (!this.provisioned) {
+      this.provision();
+    }
+    // dispatchReady transitions `idle → executing` and dispatches the ready
+    // roots inside a single advancement critical section.
+    await this.advance.dispatchReady();
+  }
+
+  /**
+   * Resume an interrupted graph instance (engine-state-machine.md §5.1 /
+   * failure-resilience.md §5.1-§5.6):
+   *
+   * 1. Load the persisted state — a missing/corrupt/version-mismatched file
+   *    returns `null` and recovery is a clean no-op (first run).
+   * 2. Adopt the loaded state in place (the advance engine keeps referencing
+   *    this object), clear the stale critical-section state the crashed
+   *    process left behind (a stuck `advancingLock`, orphaned deferred
+   *    completions).
+   * 3. Reconcile every `running` node against the dispatch system
+   *    (`getTask`): vanished → `timeout`, terminal → re-emit its signal,
+   *    live → re-subscribe `onTaskTerminated`.
+   * 4. Drain the deferred completions (nodes that finished during the window)
+   *    by recording their terminating signal — this runs the advancement
+   *    critical section and re-dispatchs ready downstream nodes.
+   * 5. Rebuild the frontier and dispatch any remaining ready nodes.
+   *
+   * Idempotency: no node is re-dispatched — reconciliation only re-attaches to
+   * already-dispatched tasks (§5.2). A crashed process can only ever be
+   * resumed into `running` nodes whose tasks already exist in the dispatch
+   * system, or be timed-out when the task vanished.
+   */
+  async recover(): Promise<void> {
+    if (!this.persistence) return; // no persistence → nothing to recover
+    const loaded = this.persistence.load(this.state.graphId);
+    if (!loaded) return; // clean start (first run / version mismatch)
+
+    // Adopt the persisted state in place; clear the crashed process's stale
+    // critical-section state (no section is actually running here).
+    hydrateEngineState(this.state, loaded);
+    this.provisioned = true;
+    clearStaleCriticalSection(this.state);
+
+    // Restart the stale-lock sweeper (§5.1 step 6 / §5.6). An interval is only
+    // started when the consumer opted in — manual ticking otherwise.
+    if (this.sweeperIntervalMs && this.sweeperIntervalMs > 0) {
+      this.sweeper.start(this.state);
+    }
+
+    // Reconcile running nodes against the dispatch system (requires getTask).
+    const port = this.dispatchPort as DispatchRecoveryPort;
+    if (!port.getTask) {
+      // No way to reconcile — adopt the state and re-dispatch any ready nodes
+      // whose tasks were never launched (blocked / approval-resume cases).
+      rebuildFrontier(this.state);
+      await this.advance.dispatchReady();
+      return;
+    }
+
+    // Live re-subscriptions route future terminations through signalBridge.record
+    // (identical to the _dispatchNode seam). Deferred completions (nodes that
+    // finished during the window) are collected here and drained below.
+    let report: ReconcileReport;
+    try {
+      report = reconcileEngine(
+        this.state,
+        port,
+        (nodeId, type, payload) => {
+          this.signalBridge.record(this.state, nodeId, type, payload);
+        },
+      );
+    } catch (err) {
+      // A single bad node must not abort recovery — adopt the rest.
+      logWarn(
+        `engine-recover: reconcile failed for graph "${this.state.graphId}": ${String(err)}`,
+      );
+      rebuildFrontier(this.state);
+      await this.advance.dispatchReady();
+      return;
+    }
+
+    // Drain deferred completions: re-emit each finished-during-restart node's
+    // terminating signal through the public advance entry, running the
+    // critical section (the re-entrancy guard makes the follow-up advance of
+    // already-completed nodes a no-op).
+    for (const d of report.deferred) {
+      await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload);
+    }
+
+    // Rebuild the frontier and dispatch any ready nodes that recovery left
+    // waiting (e.g. downstream of a re-emitted completion, or approval-resume).
+    rebuildFrontier(this.state);
+    await this.advance.dispatchReady();
+    this.persistence?.save(this.state);
+  }
+
+  status(): EngineState {
+    return snapshotEngineState(this.state);
+  }
+
+  /**
+   * Cancel an in-progress graph execution: stop the stale-lock sweeper,
+   * cancel every in-flight dispatch task via the seam, transition every active
+   * node (`running` / `ready` / `pending`) to `cancelled`, and advance the
+   * engine lifecycle to `complete`. `blocked` (needs_approval) nodes are left
+   * for the human; terminal nodes are untouched. Best-effort cancellation is
+   * never awaited to completion — the graph teardown proceeds regardless.
+   */
+  async cancel(): Promise<void> {
+    this.sweeper.stop();
+
+    // Cancel in-flight dispatch tasks (best-effort), then cancel the nodes.
+    for (const node of this.state.nodes.values()) {
+      if (node.status === NodeStatus.Running && node.dispatchTaskId) {
+        try {
+          await this.dispatchPort.cancelTask?.(node.dispatchTaskId);
+        } catch {
+          // best-effort — teardown continues without a cancellation ack
+        }
+      }
+      if (
+        (node.status === NodeStatus.Running ||
+          node.status === NodeStatus.Ready ||
+          node.status === NodeStatus.Pending) &&
+        canTransitionNode(node.status, NodeStatus.Cancelled)
+      ) {
+        markCancelled(node, "cancelled by engine.cancel()");
+      }
+    }
+    this.state.frontier = [];
+
+    // Advance idle → executing → complete so the graph ends terminal.
+    if (
+      this.state.phase === EnginePhase.Idle &&
+      canTransitionPhase(this.state, EnginePhase.Executing)
+    ) {
+      transitionPhase(this.state, EnginePhase.Executing);
+    }
+    if (
+      this.state.phase === EnginePhase.Executing &&
+      canTransitionPhase(this.state, EnginePhase.Complete)
+    ) {
+      transitionPhase(this.state, EnginePhase.Complete);
+    }
+
+    this.persistence?.save(this.state);
+  }
+
+  async approveNode(nodeId: string, payload?: unknown): Promise<void> {
+    await this.advance.approveNode(nodeId, payload);
+  }
+
+  async rejectNode(nodeId: string, reason?: string): Promise<void> {
+    await this.advance.rejectNode(nodeId, reason);
+  }
+
+  async partialApprove(
+    nodeId: string,
+    approved: string[],
+    rejected: string[],
+    reason?: string,
+  ): Promise<void> {
+    await this.advance.partialApprove(nodeId, approved, rejected, reason);
+  }
+
+  async retryNode(
+    nodeId: string,
+    opts?: RetryNodeOptions,
+  ): Promise<RetryReport> {
+    return this.advance.retryNode(nodeId, opts);
+  }
+
+  cancelNodes(
+    nodeIds: string[],
+    options?: CancelScopeOptions,
+  ): CancelScopeReport {
+    return cancelScopedNodes(this.state, nodeIds, options, this.dispatchPort);
+  }
+}
+
+// ── Public factory ──────────────────────────────────────────────────────────
+
+/**
+ * Construct an {@link EngineRuntime} bound to the given graph declaration.
+ *
+ * @param graphDeclaration The parsed v2 graph (nodes + edges + optional budget/loops).
+ * @param options          Seams — most importantly an injectable dispatch port.
+ */
+export function createEngine(
+  graphDeclaration: GraphDeclaration,
+  options: CreateEngineOptions = {},
+): EngineRuntime {
+  const graphId =
+    options.graphId ?? defaultGraphId(graphDeclaration.name);
+  return new EngineRuntimeImpl(graphDeclaration, graphId, options);
+}
+
+// ── Re-exports (public engine API surface) ──────────────────────────────────
+
+/** The top-level engine state container — re-exported for consumer typing. */
+export type { EngineState } from "../../types.engine-v2.ts";
+
+/**
+ * Bounded-cycle orchestration primitives (Phase 2). {@link executeLoopStep} is
+ * the coalesced convergence decision for a loop-group member's terminating
+ * signal — it applies the failure-resilience.md §4.3 soft early-exits and
+ * coordinates the Phase 2 primitives (traversal counting, revise re-dispatch,
+ * escalation cascade, upstream cancellation). The fingerprint / tracker
+ * helpers are exported for direct, testable use.
+ */
+export {
+  executeLoopStep,
+  recordConvergenceOutput,
+  resetConvergenceTracker,
+  fingerprintPayload,
+  extractUnresolved,
+} from "./loop-group-executor.ts";
+export type {
+  LoopOutcome,
+  LoopStepReport,
+  LoopEscalatePayload,
+} from "./loop-group-executor.ts";
+export type { CancelDispatchPort } from "./cascade-canceller.ts";
+export {
+  cancelNodes,
+  type CancelScopeOptions,
+  type CancelScopeReport,
+} from "./cancellation.ts";
+export {
+  buildApprovalPayload,
+  type ApprovalPayload,
+  type ApprovalUpstreamResult,
+} from "./approval-payload.ts";
+export {
+  approveBlockedNode,
+  rejectBlockedNode,
+  pruneDownstreamSubgraph,
+  reenterRejectedUpstreams,
+  resetRejectedUpstreams,
+  mergeRejectionFeedback,
+  type RejectReport,
+  type PruneReport,
+} from "./approval-handler.ts";
+export {
+  resetNodeForRetry,
+  retryNode,
+  type RetryNodeOptions,
+  type RetryResetReport,
+  type RetryReport,
+} from "./node-retry.ts";
+export type { NodeDispatchPort } from "./engine-advance.ts";

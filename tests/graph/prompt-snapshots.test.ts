@@ -9,7 +9,10 @@
  * Update: bun test --update-snapshots tests/graph/prompt-snapshots.test.ts
  */
 import { describe, it, expect } from "bun:test";
-import { parseCollaboration } from "../../src/graph/parser";
+import {
+  autoConvertCollaboration,
+  graphDeclarationToResolvedGraph,
+} from "../../src/graph/parser";
 import { buildGraphStateBlock } from "../../src/graph/state";
 import type { GraphExecutionState } from "../../src/graph/state";
 import {
@@ -18,6 +21,21 @@ import {
 } from "../../src/graph/prompt-builder";
 import { computeNodeRole } from "../../src/resolver/orchestrator";
 import type { ResolvedGraph } from "../../src/types";
+import type { CollaborationConfig } from "../../src/types";
+
+// Resolve each fixture through the same path the resolver now uses: the v2
+// auto-converter plus the v2→v1 bridge. The bridge is lossless, so the
+// fixtures reproduce the exact legacy ResolvedGraph and the snapshots below
+// are unchanged from the pre-removal baseline.
+function resolveGraph(collab: CollaborationConfig): ResolvedGraph {
+  const decl = autoConvertCollaboration(collab, {
+    parentAgentId: "emperor--parent",
+    roleName: "snapshot-fixture",
+  });
+  const graph = graphDeclarationToResolvedGraph(decl);
+  if (!graph) throw new Error("snapshot fixture failed to resolve");
+  return graph;
+}
 
 // ── Fixture Configurations ─────────────────────────────────────────
 
@@ -85,22 +103,10 @@ let graphs: Record<string, ResolvedGraph> = {};
 
 function parseAll(): void {
   graphs = {
-    review2: parseCollaboration(COLLAB_REVIEW_2, ["coder", "reviewer"])!,
-    review3: parseCollaboration(COLLAB_REVIEW_3, [
-      "writer",
-      "editor",
-      "publisher",
-    ])!,
-    star: parseCollaboration(COLLAB_STAR, [
-      "frontend",
-      "backend",
-      "devops",
-    ])!,
-    custom: parseCollaboration(COLLAB_CUSTOM, [
-      "researcher",
-      "writer",
-      "editor",
-    ])!,
+    review2: resolveGraph(COLLAB_REVIEW_2 as CollaborationConfig),
+    review3: resolveGraph(COLLAB_REVIEW_3 as CollaborationConfig),
+    star: resolveGraph(COLLAB_STAR as CollaborationConfig),
+    custom: resolveGraph(COLLAB_CUSTOM as unknown as CollaborationConfig),
   };
 }
 
@@ -215,20 +221,9 @@ let termGraphs: Record<string, ResolvedGraph> = {};
 
 function parseTermGraphs(): void {
   termGraphs = {
-    review2: parseCollaboration(COLLAB_REVIEW_2_WITH_TERM, [
-      "coder",
-      "reviewer",
-    ])!,
-    review3All: parseCollaboration(COLLAB_REVIEW_3_ALL_OF, [
-      "writer",
-      "editor",
-      "publisher",
-    ])!,
-    starResult: parseCollaboration(COLLAB_STAR_WITH_RESULT, [
-      "frontend",
-      "backend",
-      "devops",
-    ])!,
+    review2: resolveGraph(COLLAB_REVIEW_2_WITH_TERM as CollaborationConfig),
+    review3All: resolveGraph(COLLAB_REVIEW_3_ALL_OF as CollaborationConfig),
+    starResult: resolveGraph(COLLAB_STAR_WITH_RESULT as CollaborationConfig),
   };
 }
 

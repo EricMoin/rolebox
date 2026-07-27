@@ -137,3 +137,62 @@ export const DEFAULT_NOTIFICATION_MAX_PER_WINDOW = 3;
 export const DEFAULT_NOTIFICATION_ACTIVITY_GRACE_MS = 100;
 export const DEFAULT_NOTIFICATION_MAX_TRACKED_SESSIONS = 100;
 export const DEFAULT_QUESTION_TOOL_NAMES = ["question", "ask_user_question", "askuserquestion"];
+
+// ── Graph Engine v2: Join Strategy ──────────────────────────────────────
+
+export const JoinStrategy = {
+  All: "all",
+  Any: "any",
+  Quorum: "quorum",
+} as const;
+
+export type JoinStrategy = (typeof JoinStrategy)[keyof typeof JoinStrategy];
+
+/** All valid JoinStrategy values, for runtime validation. */
+export const JOIN_STRATEGY_VALUES: readonly JoinStrategy[] = Object.values(JoinStrategy);
+
+// ── Graph Engine v2: Engine Phase ───────────────────────────────────────
+
+export const EnginePhase = {
+  Idle: "idle",
+  Executing: "executing",
+  Complete: "complete",
+} as const;
+
+export type EnginePhase = (typeof EnginePhase)[keyof typeof EnginePhase];
+
+/** All valid EnginePhase values, for runtime validation. */
+export const ENGINE_PHASE_VALUES: readonly EnginePhase[] = Object.values(EnginePhase);
+
+// ── Graph Engine v2: Node Status ────────────────────────────────────────
+
+/**
+ * Generic node lifecycle status for the graph execution engine.
+ *
+ * Normal path: pending → ready → running → completed → done
+ * Pause path:  running → blocked (needs_approval) → completed/ready
+ * Error paths: running → escalate → done
+ *              running → timeout → done (or ready, if retry)
+ * Cancel path: pending/ready → cancelled → done
+ *
+ * TODO(Phase 3): blocked status mechanics for needs_approval pause.
+ * The `blocked` state is reserved for human-in-the-loop approval;
+ * full engine-advancement pausing for approval nodes will be
+ * implemented in Phase 3.
+ */
+export const NodeStatus = {
+  Pending: "pending",
+  Ready: "ready",
+  Running: "running",
+  Completed: "completed",
+  Blocked: "blocked",
+  Timeout: "timeout",
+  Escalate: "escalate",
+  Cancelled: "cancelled",
+  Done: "done",
+} as const;
+
+export type NodeStatus = (typeof NodeStatus)[keyof typeof NodeStatus];
+
+/** All valid NodeStatus values, for runtime validation. */
+export const NODE_STATUS_VALUES: readonly NodeStatus[] = Object.values(NodeStatus);
