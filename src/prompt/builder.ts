@@ -160,18 +160,15 @@ export function buildMemoryBlock(memories: MemorySummary[]): string {
 const SUBAGENT_INSTRUCTIONS = `You can delegate tasks to these sub-agents via the graph execution engine.
 Model each delegated task as a graph node. Use graph_create to start a graph, then
 graph_add_node(graph_id=..., id=..., agent=<sub-agent id>, prompt="...") to register a
-worker node, then graph_run(graph_id=..., node_id=...) to execute it.
-When graph_run returns, read the full worker result with
-graph_status(graph_id=..., node_id=<node_id>, include_output=true).
+worker node, then graph_run(graph_id=..., node_id=...) to launch it.
+graph_run is non-blocking — it dispatches ready nodes and returns immediately
+(phase + active_nodes). End your turn after graph_run. The engine emits a
+[GRAPH COMPLETE] system-reminder when all nodes finish (or [GRAPH BLOCKED]
+when a node awaits approval). On the next turn, read results once via
+graph_status(graph_id=..., include_output=true). Poll graph_status only as a
+fallback when no reminder arrives; never poll in a loop.
 For multi-step work that must run together, add edges (graph_add_edge) between nodes and
-run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.
-IMPORTANT: node completion does not always push a notification. When the graph runs with
-node-completion notifications enabled (an emperor session is wired), a <system-reminder> is
-injected into your session when a background node completes. When notifications are disabled
-or no emperor session is available, no reminder is sent. Never assume a reminder will always
-arrive — read the worker result with graph_status(graph_id=..., node_id=<node_id>,
-include_output=true). Do not poll graph_status in a loop to wait for a task; re-read it when
-you need the result (or when a <system-reminder> indicates completion).`;
+run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.`;
 
 export function buildSubagentBlock(
   subagents: Array<{ id: string; name: string; description: string }>,
