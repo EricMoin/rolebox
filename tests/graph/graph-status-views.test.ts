@@ -323,7 +323,7 @@ function buildResultFixture(): { ts: GraphToolSet; graph_id: string; sidecar: st
     sidecarPath: sidecar,
     totalChars: readFileSync(sidecar, "utf8").length,
     hadFence: false,
-    materializedAt: new Date().toISOString(),
+    materializedAt: Date.now(),
   };
   return { ts, graph_id, sidecar };
 }

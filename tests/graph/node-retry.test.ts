@@ -174,7 +174,7 @@ describe("resetNodeForRetry (pure state mutation)", () => {
       sidecarPath: "/tmp/t",
       totalChars: 3,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
     B.signalsObserved = { escalate: "boom" };
     state.phase = EnginePhase.Complete as EnginePhase;

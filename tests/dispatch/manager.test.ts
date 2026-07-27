@@ -751,7 +751,7 @@ describe("DispatchManager", () => {
       sidecarPath,
       totalChars: 21,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -791,7 +791,7 @@ describe("DispatchManager", () => {
       totalChars: 0,
       hadFence: false,
       fetchError: "Error retrieving task output: session expired",
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -858,7 +858,7 @@ describe("DispatchManager", () => {
       sidecarPath,
       totalChars: 21,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -881,7 +881,7 @@ describe("DispatchManager", () => {
       sidecarPath,
       totalChars: 10,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -906,7 +906,7 @@ describe("DispatchManager", () => {
       sidecarPath,
       totalChars: fullText.length,
       hadFence: true,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -932,7 +932,7 @@ describe("DispatchManager", () => {
       sidecarPath,
       totalChars: fullText.length,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -978,7 +978,7 @@ describe("DispatchManager", () => {
       totalChars: 0,
       hadFence: false,
       fetchError: "Error retrieving task output: session expired",
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
     const fetchErr = await mgr2.getResult(t2.id);
     expect(fetchErr.kind).toBe("fetch_error");
@@ -1003,7 +1003,7 @@ describe("DispatchManager", () => {
       sidecarPath,
       totalChars: 13,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -1063,7 +1063,7 @@ describe("DispatchManager", () => {
       totalChars: 0,
       hadFence: false,
       fetchError: "materialize timeout",
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     const result = await manager.getResult(task.id);
@@ -4684,8 +4684,8 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(ref.totalChars).toBeGreaterThan(0);
     expect(ref.hadFence).toBe(true);
     expect(ref.fetchError).toBeUndefined();
-    expect(ref.materializedAt).toBeString();
-    expect(new Date(ref.materializedAt).getTime()).toBeGreaterThan(0);
+    expect(ref.materializedAt).toBeNumber();
+    expect(ref.materializedAt).toBeGreaterThan(0);
   });
 
   it("materializeResult() returns fetchError ref when task is not found", async () => {
@@ -4699,7 +4699,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(ref.totalChars).toBe(0);
     expect(ref.hadFence).toBe(false);
     expect(ref.fetchError).toBe("task not found");
-    expect(ref.materializedAt).toBeString();
+    expect(ref.materializedAt).toBeNumber();
   });
 
   it("materializeResult() returns fetchError ref when messages API returns error", async () => {
@@ -4721,7 +4721,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(ref.totalChars).toBe(0);
     expect(ref.hadFence).toBe(false);
     expect(ref.fetchError).toContain("session expired");
-    expect(ref.materializedAt).toBeString();
+    expect(ref.materializedAt).toBeNumber();
   });
 
   it("materializeResult() handles hanging messages call without hanging test", async () => {
@@ -4749,7 +4749,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     expect(ref.totalChars).toBe(0);
     expect(ref.hadFence).toBe(false);
     expect(ref.fetchError).toBe("timeout");
-    expect(ref.materializedAt).toBeString();
+    expect(ref.materializedAt).toBeNumber();
     expect(elapsed).toBeLessThan(2000); // should resolve quickly due to 100ms timeout
   });
 

@@ -141,7 +141,7 @@ export async function materializeResult(
       totalChars: 0,
       hadFence: false,
       fetchError: "task not found",
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
   }
 
@@ -163,7 +163,7 @@ export async function materializeResult(
       sidecarPath: path,
       totalChars: fullText.length,
       hadFence: extracted.hadFence,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
   } catch (err: unknown) {
     if (err instanceof TimeoutError) {
@@ -172,7 +172,7 @@ export async function materializeResult(
         totalChars: 0,
         hadFence: false,
         fetchError: "timeout",
-        materializedAt: new Date().toISOString(),
+        materializedAt: Date.now(),
       };
     }
     return {
@@ -180,7 +180,7 @@ export async function materializeResult(
       totalChars: 0,
       hadFence: false,
       fetchError: String(err),
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
   }
 }

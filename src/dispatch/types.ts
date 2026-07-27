@@ -39,8 +39,8 @@ export interface MaterializedResultRef {
   hadFence: boolean;
   /** Set when materialization failed (timeout/SDK error); sidecar may be empty */
   fetchError?: string;
-  /** ISO timestamp of when materialization completed */
-  materializedAt: string;
+  /** Epoch ms timestamp of when materialization completed */
+  materializedAt: number;
 }
 
 /**

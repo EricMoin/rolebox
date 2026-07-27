@@ -325,7 +325,7 @@ describe("result capture from dispatch task", () => {
     sidecarPath: sidecar,
     totalChars: 42,
     hadFence: true,
-    materializedAt: new Date().toISOString(),
+    materializedAt: Date.now(),
   };
 
   beforeAll(() => {

@@ -187,7 +187,7 @@ describe("monitor", () => {
           sidecarPath: join(resultsDir, "t1.txt"),
           totalChars: fullOutput.length,
           hadFence: false,
-          materializedAt: new Date().toISOString(),
+          materializedAt: Date.now(),
         },
       }),
     ]);
@@ -216,7 +216,7 @@ describe("monitor", () => {
           sidecarPath: join(resultsDir, "t1.txt"),
           totalChars: fullOutput.length,
           hadFence: false,
-          materializedAt: new Date().toISOString(),
+          materializedAt: Date.now(),
         },
       }),
     ]);

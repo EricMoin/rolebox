@@ -20,7 +20,7 @@ export interface SerializedMaterializedResultRef {
   totalChars: number;
   hadFence: boolean;
   fetchError?: string;
-  materializedAt: string;
+  materializedAt: number;
 }
 
 /**

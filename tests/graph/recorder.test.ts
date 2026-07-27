@@ -216,7 +216,7 @@ describe("artifacts and evidence (NodeRuntimeState.artifacts / evidence)", () =>
       sidecarPath: sidecar,
       totalChars: 20,
       hadFence: false,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
 
     await engine.onNodeSignalEmitted("A", "answer", "produced");

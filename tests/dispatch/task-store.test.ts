@@ -476,7 +476,7 @@ describe("TaskStateStore", () => {
           sidecarPath: "/tmp/state/results/bg_v4_result.txt",
           totalChars: 1420,
           hadFence: true,
-          materializedAt: new Date().toISOString(),
+          materializedAt: Date.now(),
         },
       });
       const outbox = new Set(["bg_v4_result"]);
@@ -493,7 +493,7 @@ describe("TaskStateStore", () => {
       expect(t.result!.totalChars).toBe(1420);
       expect(t.result!.hadFence).toBe(true);
       expect(t.result!.fetchError).toBeUndefined();
-      expect(typeof t.result!.materializedAt).toBe("string");
+      expect(typeof t.result!.materializedAt).toBe("number");
 
       // Verify disk file is v4 with result + outbox
       const sp = stateFilePath(dir);
@@ -517,7 +517,7 @@ describe("TaskStateStore", () => {
           totalChars: 0,
           hadFence: false,
           fetchError: "timeout after 30s",
-          materializedAt: new Date().toISOString(),
+          materializedAt: Date.now(),
         },
       });
       await store.save(new Map([[task.id, task]]));

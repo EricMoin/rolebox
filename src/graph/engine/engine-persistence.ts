@@ -76,7 +76,7 @@ export interface NodeRuntimeStateDTO {
     totalChars: number;
     hadFence: boolean;
     fetchError?: string;
-    materializedAt: string;
+    materializedAt: number;
   };
   signalsObserved: Record<string, unknown>;
   sessionsSpawned: number;

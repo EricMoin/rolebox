@@ -27,11 +27,11 @@ describe("dispatch types", () => {
       totalChars: 42,
       hadFence: true,
       fetchError: undefined,
-      materializedAt: new Date().toISOString(),
+      materializedAt: Date.now(),
     };
     expect(ref.sidecarPath).toBeDefined();
     expect(ref.totalChars).toBe(42);
     expect(ref.hadFence).toBe(true);
-    expect(ref.materializedAt).toEqual(expect.any(String));
+    expect(ref.materializedAt).toEqual(expect.any(Number));
   });
 });
