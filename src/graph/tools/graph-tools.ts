@@ -646,10 +646,22 @@ export class GraphToolSet {
           validation.errors.map((e) => `  - ${e}`).join("\n"),
       );
     }
-    this.registry.set(graphId, {
-      declaration: candidate,
-      runtime: this.buildEngine(candidate, graphId),
-    });
+    const prior = this.registry.get(graphId);
+    const runtime = this.buildEngine(candidate, graphId);
+    if (prior) {
+      const priorState = prior.runtime.status();
+      const hasProgress = [...priorState.nodes.values()].some(
+        (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
+      );
+      if (hasProgress || priorState.phase !== EnginePhase.Idle) {
+        // Fire-and-forget is unacceptable here (constructors are sync), but
+        // adoption's async half is only the dispatch reconcile — which is
+        // safe to run detached: it never re-dispatches, only re-attaches /
+        // re-emits already-finished work.
+        void runtime.adoptPrior(priorState);
+      }
+    }
+    this.registry.set(graphId, { declaration: candidate, runtime });
   }
 
   private static shallowCloneDeclaration(d: GraphDeclaration): GraphDeclaration {
@@ -886,11 +898,26 @@ export class GraphToolSet {
       stateDir: this.deps.stateDir,
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
       ...(completion ? { onNodeCompletion: completion } : {}),
+      ...(terminal ? { onGraphTerminal: terminal } : {}),
       // Graph monitoring: durable write-side event log when a stateDir is set.
       ...(this.deps.stateDir
         ? { graphEvents: new GraphEventRecorder(this.deps.stateDir) }
         : {}),
     });
+
+    // Idempotent re-run: adopt the prior runtime's per-node progress into the
+    // fresh engine BEFORE dispatching. Without this, a second `graph_run` on
+    // the same graph (a common pattern when a model runs each node with its
+    // own graph_run call) rebuilds every node as `ready`/`pending` and
+    // re-dispatches nodes that already completed or are still running.
+    const priorState = entry.runtime.status();
+    const priorHasProgress = [...priorState.nodes.values()].some(
+      (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
+    );
+    if (priorHasProgress || priorState.phase !== EnginePhase.Idle) {
+      await runtime.adoptPrior(priorState, { replayAnswers: true });
+    }
+
     await runtime.run();
 
     // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is supplied

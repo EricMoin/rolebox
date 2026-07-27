@@ -75,6 +75,7 @@ import type {
   RetryReport,
 } from "./node-retry.ts";
 import {
+  adoptPriorNodeStates,
   clearStaleCriticalSection,
   hydrateEngineState,
   reconcileEngine,
@@ -140,6 +141,21 @@ export interface EngineRuntime {
    * snapshot's collections (`nodes`, `edges`, `frontier`, ...) are freshly
    * allocated clones — mutating them does not affect the live engine.
    */
+  /**
+   * Adopt a prior engine run's per-node progress into this (freshly built)
+   * runtime. Used by the imperative `graph_*` toolset, which rebuilds a fresh
+   * engine from the declaration after every construction step and on every
+   * `graph_run` — without adoption, a rebuild would reset completed nodes to
+   * `ready`/`pending` and a subsequent `run()` would re-dispatch them.
+   *
+   * Provisions first if needed, copies each prior node's execution state onto
+   * the matching node (skipping nodes with no progress or a changed agent),
+   * corrects the frontier, and reconciles adopted `running` nodes against the
+   * dispatch system (vanished → timeout, finished-during-window → re-emit,
+   * live → re-subscribe). Never re-dispatches an already-progressed node.
+   */
+  adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void>;
+
   status(): EngineState;
 
   /**
@@ -237,6 +253,19 @@ export interface EngineRuntime {
     nodeIds: string[],
     options?: CancelScopeOptions,
   ): CancelScopeReport;
+}
+
+/** Options for {@link EngineRuntime.adoptPrior}. */
+export interface AdoptPriorOptions {
+  /**
+   * When true, replay adopted completed nodes' `answer` forward flow into
+   * downstream targets that have not yet received their upstream result (e.g.
+   * a node appended to the declaration after its upstream completed). Replay
+   * may dispatch freshly-ready downstream nodes, so it should only be enabled
+   * on an execution path (`graph_run`), never during pure construction.
+   * Default: false.
+   */
+  replayAnswers?: boolean;
 }
 
 // ── Options ─────────────────────────────────────────────────────────────────
@@ -594,6 +623,71 @@ class EngineRuntimeImpl implements EngineRuntime {
     // waiting (e.g. downstream of a re-emitted completion, or approval-resume).
     rebuildFrontier(this.state);
     await this.advance.dispatchReady();
+    this.persistence?.save(this.state);
+  }
+
+  async adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void> {
+    if (!this.provisioned) {
+      this.provision();
+    }
+    // Copy the prior run's per-node progress + graph-level counters in place.
+    adoptPriorNodeStates(this.state, prior);
+
+    // Reconcile adopted `running` nodes against the dispatch system so a node
+    // whose worker finished (or vanished) while the toolset was rebuilding the
+    // engine still advances — identical semantics to `recover()`.
+    const port = this.dispatchPort as DispatchRecoveryPort;
+    if (port.getTask) {
+      try {
+        const report = reconcileEngine(
+          this.state,
+          port,
+          (nodeId, type, payload) => {
+            this.signalBridge.record(this.state, nodeId, type, payload);
+          },
+        );
+        for (const id of report.timedOut) {
+          this.advance.notifyNodeTimeout(id);
+        }
+        for (const d of report.deferred) {
+          await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload);
+        }
+      } catch (err) {
+        logWarn(
+          `engine-adopt: reconcile failed for graph "${this.state.graphId}": ${String(err)}`,
+        );
+      }
+    }
+
+    if (!opts?.replayAnswers) {
+      this.persistence?.save(this.state);
+      return;
+    }
+
+    // Replay `answer` forward flow for adopted completed nodes whose downstream
+    // targets have not yet received their result — this covers nodes ADDED to
+    // the declaration after the upstream completed (e.g. a validate node
+    // appended mid-flight). Re-emitting is safe: `_applySignalTransition` is
+    // idempotent for a non-running node, so only the forward data flow and
+    // downstream activation run.
+    for (const node of this.state.nodes.values()) {
+      if (node.status !== NodeStatus.Completed) continue;
+      const answer = node.signalsObserved["answer"];
+      if (answer === undefined) continue;
+      const needsReplay = this.state.graphDeclaration.edges.some((e) => {
+        if (e.from !== node.nodeId) return false;
+        const target = this.state.nodes.get(e.to);
+        return (
+          target !== undefined &&
+          target.status === NodeStatus.Pending &&
+          !target.upstreamResults.has(node.nodeId)
+        );
+      });
+      if (needsReplay) {
+        await this.advance.onNodeSignalEmitted(node.nodeId, "answer", answer);
+      }
+    }
+
     this.persistence?.save(this.state);
   }
 

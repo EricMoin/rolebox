@@ -51,7 +51,7 @@ import type {
   EngineState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
-import { releaseAdvancingLock } from "./engine-state.ts";
+import { releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
 import { bindNodeState } from "./recorder.ts";
 import type { SignalType } from "./signal-bridge.ts";
@@ -337,6 +337,93 @@ export function hydrateEngineState(
   for (const node of target.nodes.values()) {
     bindNodeState(node, target);
   }
+}
+
+// ── Prior-state adoption (incremental graph rebuild) ────────────────────────
+
+/**
+ * Adopt a *prior* engine run's per-node progress into a freshly provisioned
+ * state (same graph id, possibly a superset declaration).
+ *
+ * This backs the imperative `graph_*` tool flow where the toolset rebuilds a
+ * fresh engine from the declaration after every mutation (`graph_add_node`) and
+ * on every `graph_run`. Without adoption, a rebuild resets every node to
+ * `ready`/`pending`, so a second `graph_run` re-dispatches nodes that already
+ * completed — the "completed node re-run" bug.
+ *
+ * For every node present in BOTH states whose prior status is not `pending`
+ * (i.e. it made real progress), the prior run's execution fields are copied
+ * onto the freshly provisioned node **in place** (the target node object stays
+ * bound to its owning state for checkpoint recording). The frontier is then
+ * corrected: adopted non-`ready` nodes leave the frontier; adopted `ready`
+ * nodes (re-entered by a prior retry/revise) are kept dispatchable.
+ *
+ * Nodes that exist only in the new declaration are untouched (fresh
+ * `pending`/`ready` as provisioned). A prior node whose `agent` no longer
+ * matches is skipped — its identity changed, so a fresh run is correct.
+ *
+ * Graph-level progress is carried too: budget counters, the signal ledger,
+ * checkpoints, and loop-group traversal counts (so loop caps stay honest
+ * across rebuilds).
+ */
+export function adoptPriorNodeStates(
+  target: EngineState,
+  prior: EngineState,
+): void {
+  for (const [nodeId, prev] of prior.nodes) {
+    const node = target.nodes.get(nodeId);
+    if (!node) continue; // node removed / renamed — nothing to adopt
+    if (prev.status === NodeStatus.Pending) continue; // no progress to carry
+    if (prev.agent !== node.agent) continue; // identity changed — fresh run
+
+    // Copy the prior run's execution state in place (keep the object bound).
+    node.status = prev.status;
+    node.prompt = prev.prompt; // preserves modify_prompt mutations
+    node.signalsObserved = { ...prev.signalsObserved };
+    node.result = prev.result ? { ...prev.result } : undefined;
+    node.dispatchTaskId = prev.dispatchTaskId;
+    node.dispatchSessionId = prev.dispatchSessionId;
+    node.errorReason = prev.errorReason;
+    node.upstreamResults = new Map(prev.upstreamResults);
+    node.joinSatisfied = prev.joinSatisfied;
+    node.traversalCount = prev.traversalCount;
+    node.retryCount = prev.retryCount;
+    node.sessionsSpawned = prev.sessionsSpawned;
+    node.tokensConsumed = { ...prev.tokensConsumed };
+    node.startedAt = prev.startedAt;
+    node.completedAt = prev.completedAt;
+
+    // Frontier correction: only genuinely-ready nodes stay dispatchable.
+    if (node.status === NodeStatus.Ready) {
+      if (!target.frontier.includes(nodeId)) target.frontier.push(nodeId);
+    } else {
+      removeFromFrontier(target, nodeId);
+    }
+  }
+
+  // Graph-level progress: budget counters, signal history, checkpoints.
+  target.budget = { ...prior.budget };
+  for (const [nodeId, entry] of prior.signalLedger) {
+    target.signalLedger.set(nodeId, {
+      ...entry,
+      signals: { ...entry.signals },
+      history: entry.history ? [...entry.history] : undefined,
+    });
+  }
+  if (prior.checkpoints) {
+    target.checkpoints = { ...prior.checkpoints, ...(target.checkpoints ?? {}) };
+  }
+
+  // Loop-group traversal counters (caps stay honest across rebuilds).
+  for (const [groupId, prevGroup] of prior.loopGroups) {
+    const group = target.loopGroups.get(groupId);
+    if (!group) continue;
+    group.traversalCount = prevGroup.traversalCount;
+    group.consecutiveStale = prevGroup.consecutiveStale;
+    if (prevGroup.rounds) group.rounds = [...prevGroup.rounds];
+  }
+
+  target.updatedAt = Date.now();
 }
 
 // ── Stale critical-section state ─────────────────────────────────────────────
