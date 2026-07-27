@@ -183,6 +183,34 @@ export interface NodeCompletionEvent {
   completedAt?: number;
 }
 
+/**
+ * A graph-terminal event emitted via the optional {@link AdvanceEngineOptions
+ * .onGraphTerminal} callback seam. The engine stays role-agnostic — it packages
+ * only the immutable facts; notification / delivery is the consumer's concern
+ * and never lives in the engine.
+ *
+ * Emitted exactly once per terminal transition per event type (complete /
+ * blocked). A blocked fire followed later by approval-resume and eventual
+ * completion MAY fire the complete event — blocked and complete are separate
+ * dedupe guards.
+ */
+export interface GraphTerminalEvent {
+  /** Owning graph id. */
+  graphId: string;
+  /** The graph's engine phase at emission time. */
+  phase: string;
+  /** Counts of nodes in each terminal / notable status at emission time. */
+  nodeStatusSummaries: {
+    completed: number;
+    escalate: number;
+    timeout: number;
+    blocked: number;
+    running: number;
+  };
+  /** True when the graph is quiescent-blocked (no active nodes, ≥1 blocked). */
+  isBlocked: boolean;
+}
+
 export interface AdvanceEngineOptions {
   /** The engine state container this engine advances. */
   state: EngineState;
@@ -230,6 +258,14 @@ export interface AdvanceEngineOptions {
    * unchanged.
    */
   graphEvents?: GraphEventRecorder;
+  /**
+   * Optional graph-terminal notification seam. Invoked exactly once per
+   * terminal transition (GRAPH COMPLETE / GRAPH BLOCKED). When absent, the
+   * engine behaves identically — this is a pure DI seam like
+   * {@link AdvanceEngineOptions.onNodeCompletion}. Callback exceptions must
+   * never break advancement (try/catch + log).
+   */
+  onGraphTerminal?: (event: GraphTerminalEvent) => void;
 }
 
 /**
@@ -272,6 +308,9 @@ export class AdvanceEngine {
   private readonly persistState?: (state: EngineState) => void;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
+  private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  private _firedTerminalComplete = false;
+  private _firedTerminalBlocked = false;
 
   constructor(opts: AdvanceEngineOptions) {
     this.state = opts.state;
@@ -282,6 +321,7 @@ export class AdvanceEngine {
     this.persistState = opts.persistState;
     this.onNodeCompletion = opts.onNodeCompletion;
     this.graphEvents = opts.graphEvents;
+    this.onGraphTerminal = opts.onGraphTerminal;
     this.parentContext =
       opts.parentContext ??
       graphParentContext({
@@ -759,24 +799,95 @@ export class AdvanceEngine {
   /**
    * Advance `executing → complete` when no node remains active (running, ready,
    * pending, or blocked). Mirrors the exit guard in design §1.2.
+   *
+   * Also detects the quiescent-blocked terminal: no running / ready / pending
+   * nodes remain but ≥1 blocked node exists. Fires `onGraphTerminal` with
+   * `isBlocked=true` WITHOUT a phase transition. Each terminal type (complete /
+   * blocked) fires at most once via separate dedupe guards.
    */
   private _checkTermination(): void {
     const state = this.state;
     if (state.phase !== EnginePhase.Executing) return;
-    let hasActive = false;
+
+    // Tally node statuses for the optional terminal-event summary.
+    const counts = { completed: 0, escalate: 0, timeout: 0, blocked: 0, running: 0 };
+    let hasSchedulerActive = false;
+    let hasBlocked = false;
     for (const node of state.nodes.values()) {
-      if (
-        node.status === NodeStatus.Running ||
-        node.status === NodeStatus.Ready ||
-        node.status === NodeStatus.Pending ||
-        node.status === NodeStatus.Blocked
-      ) {
-        hasActive = true;
-        break;
+      switch (node.status) {
+        case NodeStatus.Completed: counts.completed += 1; break;
+        case NodeStatus.Escalate: counts.escalate += 1; break;
+        case NodeStatus.Timeout: counts.timeout += 1; break;
+        case NodeStatus.Blocked:
+          counts.blocked += 1;
+          hasBlocked = true;
+          break;
+        case NodeStatus.Running:
+          counts.running += 1;
+          hasSchedulerActive = true;
+          break;
+        case NodeStatus.Ready:
+        case NodeStatus.Pending:
+          hasSchedulerActive = true;
+          break;
+        default: break;
       }
     }
-    if (!hasActive && canTransitionPhase(state, EnginePhase.Complete)) {
+
+    const hasAnyActive = hasSchedulerActive || hasBlocked;
+
+    // Standard completion path: no active node remains.
+    if (!hasAnyActive && canTransitionPhase(state, EnginePhase.Complete)) {
       transitionPhase(state, EnginePhase.Complete);
+      this._fireGraphTerminal(counts, false);
+    } else if (!hasSchedulerActive && hasBlocked) {
+      // Quiescent-blocked: no running/ready/pending nodes remain but ≥1
+      // blocked node exists. The graph is paused, waiting on a human.
+      // Do NOT transition the phase — executing stays executing.
+      this._fireGraphTerminal(counts, true);
+    }
+  }
+
+  /**
+   * Fire the optional onGraphTerminal callback seam exactly once per event
+   * type (complete / blocked). Blocked and complete use separate dedupe
+   * guards, so a blocked fire followed later by approval-resume and eventual
+   * completion may fire the complete event.
+   *
+   * A throwing consumer must not corrupt the advancing critical section
+   * (mirrors _notifyCompletion conventions). A no-op when no callback is
+   * registered.
+   */
+  private _fireGraphTerminal(
+    counts: { completed: number; escalate: number; timeout: number; blocked: number; running: number },
+    isBlocked: boolean,
+  ): void {
+    const cb = this.onGraphTerminal;
+    if (!cb) return;
+    // Dedupe: each terminal type fires at most once.
+    if (isBlocked) {
+      if (this._firedTerminalBlocked) return;
+      this._firedTerminalBlocked = true;
+    } else {
+      if (this._firedTerminalComplete) return;
+      this._firedTerminalComplete = true;
+    }
+    const event: GraphTerminalEvent = {
+      graphId: this.state.graphId,
+      phase: this.state.phase,
+      nodeStatusSummaries: {
+        completed: counts.completed,
+        escalate: counts.escalate,
+        timeout: counts.timeout,
+        blocked: counts.blocked,
+        running: counts.running,
+      },
+      isBlocked,
+    };
+    try {
+      cb(event);
+    } catch {
+      // Never let a notifier failure break graph advancement.
     }
   }
 

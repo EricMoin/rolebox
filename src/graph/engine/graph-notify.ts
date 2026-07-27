@@ -36,8 +36,13 @@ import { metrics } from "../../dispatch/persistence/metrics.ts";
 import {
   enqueueNotify,
   GRAPH_COMPLETION_MARKER,
+  GRAPH_COMPLETE_MARKER,
+  GRAPH_BLOCKED_MARKER,
 } from "../../dispatch/notification.ts";
-import type { NodeCompletionEvent } from "./engine-advance.ts";
+import type {
+  NodeCompletionEvent,
+  GraphTerminalEvent,
+} from "./engine-advance.ts";
 
 const log = createSubLogger("graph:notify");
 
@@ -164,6 +169,130 @@ export function createGraphNotifier(
         metrics.counter("graph_notify_failed_total").inc();
         log.warn(
           `Failed to notify emperor session ${emperorSessionId} about graph node ${event.graphId}::${event.nodeId}`,
+          err instanceof Error ? err.message : String(err),
+        );
+        return false;
+      }
+    });
+  };
+}
+
+// ── Graph-Terminal Notifier ──────────────────────────────────────────────────
+
+/**
+ * The graph-terminal handler the factory returns. Satisfies the engine seam
+ * `(event: GraphTerminalEvent) => void` structurally; the resolved boolean tells
+ * the caller whether a notification was dispatched (`true`) or suppressed.
+ */
+export type GraphTerminalHandler = (event: GraphTerminalEvent) => Promise<boolean>;
+
+/** Per-run dedupe key: `graphId::terminalType` (complete / blocked). */
+function terminalDedupeKey(event: GraphTerminalEvent): string {
+  return `${event.graphId}::${event.isBlocked ? "blocked" : "complete"}`;
+}
+
+/**
+ * Build the `<system-reminder>` text for a graph-terminal event.
+ *
+ * Uses {@link GRAPH_COMPLETE_MARKER} when the graph reached COMPLETE phase, and
+ * {@link GRAPH_BLOCKED_MARKER} when the graph is quiescent-blocked. Both markers
+ * are members of {@link DISPATCH_NOTIFICATION_MARKERS} so the chat.message hook
+ * classifies them as non-user turns.
+ *
+ * Content: graph_id, phase, node status summary counts, and an instruction
+ * to read results via `graph_status`. BLOCKED adds an approval instruction.
+ */
+export function buildGraphTerminalText(event: GraphTerminalEvent): string {
+  const marker = event.isBlocked ? GRAPH_BLOCKED_MARKER : GRAPH_COMPLETE_MARKER;
+  const { completed, escalate, timeout, blocked, running } = event.nodeStatusSummaries;
+
+  const lines = [
+    "<system-reminder>",
+    marker,
+    `**Graph:** ${event.graphId}`,
+    `**Phase:** ${event.phase}`,
+    `**Node Status Summary:**`,
+    `  - Completed: ${completed}`,
+    `  - Escalated: ${escalate}`,
+    `  - Timed Out: ${timeout}`,
+    `  - Blocked: ${blocked}`,
+    `  - Running: ${running}`,
+    "",
+  ];
+
+  if (event.isBlocked) {
+    lines.push(
+      `The graph is quiescent-blocked — no active nodes remain but one or more nodes await approval.`,
+      `Inspect blocked node(s) via graph_status(graph_id="${event.graphId}", status="blocked", include_output=true)`,
+      `and use graph_approve(graph_id="${event.graphId}", node_id="<blocked_node_id>", action="approve")`,
+      `to resume, or action="reject" with a reason to re-enter the node for revision.`,
+      "",
+      `Read all results via graph_status(graph_id="${event.graphId}", include_output=true).`,
+    );
+  } else {
+    lines.push(
+      `Read all results via graph_status(graph_id="${event.graphId}", include_output=true).`,
+    );
+  }
+
+  lines.push("</system-reminder>");
+  return lines.join("\n");
+}
+
+/**
+ * Create a graph-terminal notifier wired to the engine's `onGraphTerminal` seam.
+ *
+ * Follows the same session-client injection + dedupe + failure-logging pattern
+ * as {@link createGraphNotifier}, EXCEPT it injects with `noReply: false` so the
+ * terminal reminder wakes the orchestrator (per-node completions stay silent).
+ * Dedupe is per terminal type (complete / blocked)
+ * per graph, per notifier run epoch — a blocked-then-resumed-then-completed graph
+ * fires two distinct messages, but a second idempotent fire of the same type is
+ * dropped. Per-loop-graph re-entry (separate `graph_run`) creates a fresh
+ * notifier with a clean dedupe epoch.
+ *
+ * @returns a handler that is a no-op when disabled or when no emperor session is
+ *   configured, drops idempotent replays, and otherwise enqueues the reminder.
+ */
+export function createGraphTerminalNotifier(
+  client: ISessionClient,
+  opts: GraphNotifierOptions = {},
+): GraphTerminalHandler {
+  const enabled = opts.enabled !== false;
+  const emperorSessionId = opts.emperorSessionId;
+  // Per-run epoch: a fresh notifier starts a clean dedupe epoch.
+  const notified = new Set<string>();
+
+  return async (event: GraphTerminalEvent): Promise<boolean> => {
+    if (!enabled) return false;
+    if (!emperorSessionId) return false;
+
+    const key = terminalDedupeKey(event);
+    if (notified.has(key)) return false;
+    notified.add(key);
+
+    const text = buildGraphTerminalText(event);
+    return enqueueNotify(emperorSessionId, async () => {
+      try {
+        await client.prompt(emperorSessionId, {
+          ...(opts.agent ? { agent: opts.agent } : {}),
+          parts: [{ type: "text", text }],
+          // Terminal events (GRAPH COMPLETE / BLOCKED) MUST wake the
+          // orchestrator so it collects node results and advances (or handles
+          // the approval gate). This mirrors the FINAL dispatch notification in
+          // `notifyParent` (noReply:false when remaining===0). Without this the
+          // reminder lands in the session but never triggers a turn, so the
+          // graph appears "stuck" until the user manually prompts. The marker is
+          // still a member of DISPATCH_NOTIFICATION_MARKERS, so the re-entering
+          // chat.message hook does NOT reset the auto-continue counter.
+          noReply: false,
+        });
+        metrics.counter("graph_notify_sent_total").inc();
+        return true;
+      } catch (err) {
+        metrics.counter("graph_notify_failed_total").inc();
+        log.warn(
+          `Failed to notify emperor session ${emperorSessionId} about graph terminal ${event.graphId}`,
           err instanceof Error ? err.message : String(err),
         );
         return false;

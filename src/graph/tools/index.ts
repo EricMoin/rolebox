@@ -125,10 +125,12 @@ const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType
  *                  execution. Optional for construction/status/cancel/dry-run.
  * @param opts.directory - Working directory for graph node dispatches.
  * @param opts.stateDir - Optional engine-state persistence dir.
- * @param opts.graphNotify - Optional graph node-completion notifier (subtask 3):
- *        a prebuilt `GraphCompletionHandler` or an owner config carrying the
- *        emperor session + session client. Threaded into every engine the toolset
- *        constructs so graph_node completions route to graph-notify.
+ * @param opts.graphNotify - Optional graph node-completion + graph-terminal
+ *        notifier (subtask 3): a prebuilt `GraphCompletionHandler` or an owner
+ *        config carrying the emperor session + session client. Threaded into
+ *        every engine the toolset constructs so graph node completions AND
+ *        graph-terminal transitions route to graph-notify targeting the emperor
+ *        session. More here in src/graph/tools/graph-tools.ts.
  * @returns A record of `graph_*` key → {@link CanonicalToolDef}.
  */
 export function createGraphTools(
@@ -160,7 +162,7 @@ export function createGraphTools(
 
 // Re-export the graph-notify config types (subtask 3) for platform assembly
 // layers (tool-assembly.ts) that thread the emperor session + session client
-// down into the engine's completion seam.
+// down into the engine's completion and graph-terminal seams.
 export type {
   GraphNotifySource,
   GraphNotifyConfig,
@@ -340,10 +342,14 @@ function createGraphRunTool(
 ): CanonicalToolDef {
   return defineTool({
     description:
-      "Execute a constructed graph (dispatches nodes, routes signals, " +
-      "enforces joins, manages loop groups, tracks budgets). With " +
-      "dry_run=true, validates the graph structure without executing. " +
-      "Requires a dispatch manager for non dry-run execution.",
+      "Non-blocking — dispatches ready root nodes and returns immediately " +
+      "with phase and active_nodes. End your turn after graph_run; the " +
+      "engine emits a [GRAPH COMPLETE] system-reminder when all nodes " +
+      "finish, or [GRAPH BLOCKED] when a node awaits approval. On the " +
+      "next turn, read results once via graph_status(graph_id, " +
+      "include_output=true). Poll graph_status only as a fallback when " +
+      "no reminder arrives. With dry_run=true, validates structure " +
+      "without executing.",
     args: {
       graph_id: z.string().describe("Graph to execute."),
       node_id: z

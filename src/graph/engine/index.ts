@@ -45,6 +45,7 @@ import {
   type GraphBudgetPort,
   type EdgeConditionResolver,
   type NodeCompletionEvent,
+  type GraphTerminalEvent,
 } from "./engine-advance.ts";
 import { SignalBridge } from "./signal-bridge.ts";
 import {
@@ -313,6 +314,15 @@ export interface CreateEngineOptions {
    * no event logging, engine behavior unchanged.
    */
   graphEvents?: GraphEventRecorder;
+  /**
+   * Optional graph-terminal notification seam. Wired into the advance engine's
+   * identical seam; the engine fires it exactly once per terminal transition
+   * (GRAPH COMPLETE / GRAPH BLOCKED). Defaults to a no-op, so engine behavior
+   * is unchanged without it. Notification logic never lives here — this is a
+   * role-agnostic DI seam like {@link CreateEngineOptions.onNodeCompletion}
+   * (see {@link GraphTerminalEvent}).
+   */
+  onGraphTerminal?: (event: GraphTerminalEvent) => void;
 }
 
 // ── Engine identity ─────────────────────────────────────────────────────────
@@ -414,6 +424,7 @@ class EngineRuntimeImpl implements EngineRuntime {
   private readonly sweeperIntervalMs?: number;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
+  private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
   private provisioned = false;
 
   constructor(
@@ -448,6 +459,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       : undefined;
     this.onNodeCompletion = opts.onNodeCompletion;
     this.graphEvents = opts.graphEvents;
+    this.onGraphTerminal = opts.onGraphTerminal;
     const advanceOpts: AdvanceEngineOptions = {
       state: this.state,
       signalBridge: this.signalBridge,
@@ -458,6 +470,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       persistState: this.persistence ? (s) => this.persistence!.save(s) : undefined,
       onNodeCompletion: this.onNodeCompletion,
       graphEvents: this.graphEvents,
+      onGraphTerminal: this.onGraphTerminal,
     };
     this.advance = new AdvanceEngine(advanceOpts);
     // The advance engine is the terminating-signal consumer.
@@ -741,6 +754,9 @@ export {
 export type { NodeDispatchPort } from "./engine-advance.ts";
 export type {
   NodeCompletionEvent,
+} from "./engine-advance.ts";
+export type {
+  GraphTerminalEvent,
 } from "./engine-advance.ts";
 export {
   GraphEventRecorder,

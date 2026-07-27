@@ -16,14 +16,21 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { NodeStatus } from "../../src/constants.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
-import type { NodeCompletionEvent } from "../../src/graph/engine/engine-advance.ts";
+import type {
+  NodeCompletionEvent,
+  GraphTerminalEvent,
+} from "../../src/graph/engine/engine-advance.ts";
 import {
   createGraphNotifier,
   buildGraphCompletionText,
+  buildGraphTerminalText,
+  createGraphTerminalNotifier,
 } from "../../src/graph/engine/graph-notify.ts";
 import {
   DISPATCH_NOTIFICATION_MARKERS,
   GRAPH_COMPLETION_MARKER,
+  GRAPH_COMPLETE_MARKER,
+  GRAPH_BLOCKED_MARKER,
   isDispatchNotification,
   clearParentQueues,
 } from "../../src/dispatch/notification.ts";
@@ -208,5 +215,198 @@ describe("createGraphNotifier", () => {
     const handler2 = createGraphNotifier(client2, { emperorSessionId: EMPEROR_SESSION });
     expect(await handler2(event)).toBe(true);
     expect(client2.prompts).toHaveLength(1);
+  });
+});
+
+// ── Graph-Terminal Notifier Fixtures ─────────────────────────────────────────
+
+function makeTerminalEvent(
+  overrides: Partial<GraphTerminalEvent> = {},
+): GraphTerminalEvent {
+  return {
+    graphId: "g-42",
+    phase: overrides.isBlocked ? "executing" : "complete",
+    nodeStatusSummaries: {
+      completed: 3,
+      escalate: 0,
+      timeout: 0,
+      blocked: overrides.isBlocked ? 1 : 0,
+      running: 0,
+    },
+    isBlocked: false,
+    ...overrides,
+  };
+}
+
+// ── Graph-Terminal Notifier Tests ────────────────────────────────────────────
+
+describe("GRAPH_TERMINAL_MARKERS", () => {
+  it("GRAPH_COMPLETE_MARKER is a member of DISPATCH_NOTIFICATION_MARKERS", () => {
+    expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_COMPLETE_MARKER);
+  });
+
+  it("GRAPH_BLOCKED_MARKER is a member of DISPATCH_NOTIFICATION_MARKERS", () => {
+    expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_BLOCKED_MARKER);
+  });
+
+  it("GRAPH_COMPLETE_MARKER is recognized as a dispatch notification (non-user turn)", () => {
+    expect(isDispatchNotification(GRAPH_COMPLETE_MARKER)).toBe(true);
+  });
+
+  it("GRAPH_BLOCKED_MARKER is recognized as a dispatch notification (non-user turn)", () => {
+    expect(isDispatchNotification(GRAPH_BLOCKED_MARKER)).toBe(true);
+  });
+});
+
+describe("buildGraphTerminalText", () => {
+  it("renders COMPLETE marker, graph_id, phase, and status summary", () => {
+    const text = buildGraphTerminalText(makeTerminalEvent());
+    expect(text).toContain(GRAPH_COMPLETE_MARKER);
+    expect(text).toContain("<system-reminder>");
+    expect(text).toContain("**Graph:** g-42");
+    expect(text).toContain("**Phase:** complete");
+    expect(text).toContain("  - Completed: 3");
+    expect(text).toContain("  - Escalated: 0");
+    expect(text).toContain("  - Timed Out: 0");
+    expect(text).toContain("  - Blocked: 0");
+    expect(text).toContain("  - Running: 0");
+    expect(text).toContain("Read all results via graph_status(graph_id=\"g-42\", include_output=true)");
+  });
+
+  it("renders BLOCKED marker, phase, blocked count, and approval instruction", () => {
+    const text = buildGraphTerminalText(makeTerminalEvent({
+      phase: "executing",
+      isBlocked: true,
+      nodeStatusSummaries: { completed: 2, escalate: 0, timeout: 0, blocked: 1, running: 0 },
+    }));
+    expect(text).toContain(GRAPH_BLOCKED_MARKER);
+    expect(text).toContain("**Phase:** executing");
+    expect(text).toContain("  - Blocked: 1");
+    expect(text).toContain("quiescent-blocked");
+    expect(text).toContain("graph_approve");
+    expect(text).toContain("graph_status(graph_id=\"g-42\", status=\"blocked\", include_output=true)");
+  });
+
+  it("uses COMPLETE marker when isBlocked is false regardless of phase", () => {
+    const text = buildGraphTerminalText(makeTerminalEvent({ phase: "executing", isBlocked: false }));
+    expect(text).toContain(GRAPH_COMPLETE_MARKER);
+    expect(text).not.toContain(GRAPH_BLOCKED_MARKER);
+    expect(text).not.toContain("quiescent-blocked");
+  });
+});
+
+describe("createGraphTerminalNotifier", () => {
+  it("sends a COMPLETE reminder to the emperor session", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, { emperorSessionId: EMPEROR_SESSION });
+
+    const ok = await handler(makeTerminalEvent());
+    expect(ok).toBe(true);
+    expect(client.prompts).toHaveLength(1);
+    expect(client.prompts[0].id).toBe(EMPEROR_SESSION);
+    // Terminal reminders must wake the orchestrator (triggerTurn = !noReply).
+    expect(client.prompts[0].noReply).toBe(false);
+    expect(client.prompts[0].text).toContain(GRAPH_COMPLETE_MARKER);
+    expect(client.prompts[0].text).toContain("**Graph:** g-42");
+  });
+
+  it("sends a BLOCKED reminder with the BLOCKED marker", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, { emperorSessionId: EMPEROR_SESSION });
+
+    const ok = await handler(makeTerminalEvent({ isBlocked: true, phase: "executing" }));
+    expect(ok).toBe(true);
+    expect(client.prompts).toHaveLength(1);
+    expect(client.prompts[0].text).toContain(GRAPH_BLOCKED_MARKER);
+    expect(client.prompts[0].text).toContain("quiescent-blocked");
+  });
+
+  it("dedupes a second send of the same complete event", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, { emperorSessionId: EMPEROR_SESSION });
+    const event = makeTerminalEvent();
+
+    expect(await handler(event)).toBe(true);
+    expect(await handler(event)).toBe(false);
+    expect(client.prompts).toHaveLength(1);
+  });
+
+  it("dedupes a second send of the same blocked event", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, { emperorSessionId: EMPEROR_SESSION });
+    const event = makeTerminalEvent({ isBlocked: true, phase: "executing" });
+
+    expect(await handler(event)).toBe(true);
+    expect(await handler(event)).toBe(false);
+    expect(client.prompts).toHaveLength(1);
+  });
+
+  it("legally fires blocked then complete for the same graph (separate terminal types)", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, { emperorSessionId: EMPEROR_SESSION });
+
+    await handler(makeTerminalEvent({ isBlocked: true, phase: "executing" }));
+    await handler(makeTerminalEvent({ isBlocked: false, phase: "complete" }));
+    expect(client.prompts).toHaveLength(2);
+    expect(client.prompts[0].text).toContain(GRAPH_BLOCKED_MARKER);
+    expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
+  });
+
+  it("is a no-op when enabled: false", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, {
+      emperorSessionId: EMPEROR_SESSION,
+      enabled: false,
+    });
+
+    expect(await handler(makeTerminalEvent())).toBe(false);
+    expect(client.prompts).toHaveLength(0);
+  });
+
+  it("is a no-op when no emperor session is configured", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, {});
+
+    expect(await handler(makeTerminalEvent())).toBe(false);
+    expect(client.prompts).toHaveLength(0);
+  });
+
+  it("forwards the agent option and a fresh run starts a clean epoch", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, {
+      emperorSessionId: EMPEROR_SESSION,
+      agent: "emperor",
+    });
+    const event = makeTerminalEvent();
+
+    await handler(event);
+    expect(client.prompts[0].agent).toBe("emperor");
+
+    // A new notifier = new run epoch → same event re-notifies.
+    const client2 = new FakeSessionClient();
+    const handler2 = createGraphTerminalNotifier(client2, { emperorSessionId: EMPEROR_SESSION });
+    expect(await handler2(event)).toBe(true);
+    expect(client2.prompts).toHaveLength(1);
+  });
+
+  it("injection failure does not throw (returns false on prompt error)", async () => {
+    class ThrowingSessionClient extends FakeSessionClient {
+      override async prompt(
+        _id: string,
+        _options: {
+          parts: Array<{ type: string; text: string }>;
+          noReply?: boolean;
+          agent?: string;
+        },
+      ): Promise<{ id: string } | null> {
+        throw new Error("injection exploded");
+      }
+    }
+    const client = new ThrowingSessionClient();
+    const handler = createGraphTerminalNotifier(client, { emperorSessionId: EMPEROR_SESSION });
+
+    // Must resolve and return false, not throw.
+    const ok = await handler(makeTerminalEvent());
+    expect(ok).toBe(false);
   });
 });

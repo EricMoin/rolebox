@@ -34,6 +34,21 @@ export const DISPATCH_PROGRESS_MILESTONE_MARKER = "[PROGRESS MILESTONE]";
  * NOT reset the auto-continue counter.
  */
 export const GRAPH_COMPLETION_MARKER = "[GRAPH NODE COMPLETED]";
+/**
+ * Marker for graph-terminal reminders (GRAPH COMPLETE) injected into the emperor
+ * session by the graph terminal notifier (`src/graph/engine/graph-notify.ts`).
+ * Like every other parent-targeted reminder, it is part of
+ * {@link DISPATCH_NOTIFICATION_MARKERS} so the re-entering chat.message hook
+ * recognizes it as a non-user turn.
+ */
+export const GRAPH_COMPLETE_MARKER = "[GRAPH COMPLETE]";
+/**
+ * Marker for graph-terminal reminders (GRAPH BLOCKED) injected into the emperor
+ * session by the graph terminal notifier (`src/graph/engine/graph-notify.ts`).
+ * Distinct from GRAPH_COMPLETE_MARKER so a graph that is blocked-then-resumed-then-completed
+ * produces two distinct terminal reminders with different markers.
+ */
+export const GRAPH_BLOCKED_MARKER = "[GRAPH BLOCKED]";
 
 export const DISPATCH_NOTIFICATION_MARKERS = [
   DISPATCH_COMPLETION_MARKER,
@@ -41,6 +56,8 @@ export const DISPATCH_NOTIFICATION_MARKERS = [
   DISPATCH_RECOVERY_MARKER,
   DISPATCH_PROGRESS_MILESTONE_MARKER,
   GRAPH_COMPLETION_MARKER,
+  GRAPH_COMPLETE_MARKER,
+  GRAPH_BLOCKED_MARKER,
 ] as const;
 
 export function isDispatchNotification(text: string): boolean {

@@ -28,6 +28,8 @@ import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import {
   GRAPH_COMPLETION_MARKER,
+  GRAPH_COMPLETE_MARKER,
+  GRAPH_BLOCKED_MARKER,
   clearParentQueues,
 } from "../../src/dispatch/notification.ts";
 import type { NodeCompletionEvent } from "../../src/graph/engine/engine-advance.ts";
@@ -189,7 +191,9 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
     dispatch.completeLatest();
     await flush();
 
-    expect(client.prompts).toHaveLength(1);
+    // Both per-node completion and graph-terminal notifiers fire.
+    expect(client.prompts).toHaveLength(2);
+    // Per-node reminder (fires first).
     expect(client.prompts[0].id).toBe(EMPEROR_SESSION);
     expect(client.prompts[0].noReply).toBe(true);
     expect(client.prompts[0].text).toContain(GRAPH_COMPLETION_MARKER);
@@ -197,6 +201,12 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
     expect(client.prompts[0].text).toContain("**Node:** A");
     expect(client.prompts[0].text).toContain("**Agent:** emperor--jinyiwei--ui");
     expect(client.prompts[0].text).toContain("**Status:** completed");
+    // Graph-terminal reminder (fires second, after _checkTermination).
+    expect(client.prompts[1].id).toBe(EMPEROR_SESSION);
+    // Terminal reminder wakes the orchestrator (triggerTurn = !noReply).
+    expect(client.prompts[1].noReply).toBe(false);
+    expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
+    expect(client.prompts[1].text).toContain("**Graph:** notify-single");
   });
 
   it("resolves the emperor session from the invoking session when a resolver is used", async () => {
@@ -217,9 +227,13 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
     dispatch.completeLatest();
     await flush();
 
-    expect(client.prompts).toHaveLength(1);
+    // Both per-node completion and graph-terminal notifiers fire — both target
+    // the resolved emperor session.
+    expect(client.prompts).toHaveLength(2);
     expect(client.prompts[0].id).toBe("emperor-live-session");
     expect(client.prompts[0].text).toContain(GRAPH_COMPLETION_MARKER);
+    expect(client.prompts[1].id).toBe("emperor-live-session");
+    expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
   });
 
   it("uses a prebuilt notifier fn as-is", async () => {

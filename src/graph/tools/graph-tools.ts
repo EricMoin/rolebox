@@ -101,11 +101,14 @@ import {
   type CreateEngineOptions,
   type NodeDispatchPort,
   type NodeCompletionEvent,
+  type GraphTerminalEvent,
   GraphEventRecorder,
 } from "../engine/index.ts";
 import {
   createGraphNotifier,
+  createGraphTerminalNotifier,
   type GraphCompletionHandler,
+  type GraphTerminalHandler,
 } from "../engine/graph-notify.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
@@ -139,11 +142,14 @@ interface GraphEntry {
 }
 
 /**
- * Config form of a graph node-completion notifier (subtask 3). Carries the
- * owner emperor session identity + the session client used to deliver
- * reminders. `emperorSessionId` may be a static string or a resolver evaluated
- * at engine-construction time (a resolver lets a caller resolve the emperor
- * session lazily, e.g. from a live session registry).
+ * Config form of a graph-notify source (subtask 3). Carries the owner emperor
+ * session identity + the session client used to deliver reminders. A single
+ * config feeds both the per-node {@link onNodeCompletion} seam (via
+ * {@link createGraphNotifier}) and the graph-terminal {@link onGraphTerminal}
+ * seam (via {@link createGraphTerminalNotifier}), each with independent dedupe
+ * epochs per engine construction. `emperorSessionId` may be a static string or a
+ * resolver evaluated at engine-construction time (a resolver lets a caller
+ * resolve the emperor session lazily, e.g. from a live session registry).
  */
 export interface GraphNotifyConfig {
   /** Session client used to deliver `<system-reminder>` completions. */
@@ -164,8 +170,11 @@ export interface GraphNotifyConfig {
 /**
  * Graph node-completion notifier source accepted by {@link GraphToolSetDeps}.
  * Either a prebuilt notifier fn (a `GraphCompletionHandler` from
- * `graph-notify.ts`) or a structured owner config. Absent → the engine runs
- * with its default no-op completion seam (backward compatible).
+ * `graph-notify.ts`) or a structured owner config. When a structured config is
+ * supplied, it also produces a graph-terminal notifier (`onGraphTerminal` seam)
+ * via {@link createGraphTerminalNotifier} — the config form feeds both per-node
+ * completion and graph-terminal reminders. Absent → the engine runs with its
+ * default no-op seams (backward compatible).
  */
 export type GraphNotifySource = GraphCompletionHandler | GraphNotifyConfig;
 
@@ -185,12 +194,16 @@ export interface GraphToolSetDeps {
   /** Optional engine-state persistence dir (`.rolebox/state/...`). */
   stateDir?: string;
   /**
-   * Optional graph node-completion notifier (subtask 3). When present, every
-   * engine this toolset constructs — in `buildEngine` (used by all construction
-   * paths) and in `graph_run`'s own runtime — wires the notifier into the
-   * engine's `onNodeCompletion` DI seam so graph_node completions route to
-   * graph-notify targeting the owner emperor session. Absent → the engine's
-   * default no-op completion seam (no notification). `graphParentContext`
+   * Optional graph-notify source (subtask 3). When present, every engine this
+   * toolset constructs — in `buildEngine` (used by all construction paths) and
+   * in `graph_run`'s own runtime — wires both the engine's `onNodeCompletion`
+   * DI seam (via {@link createGraphNotifier}) and the `onGraphTerminal` seam
+   * (via {@link createGraphTerminalNotifier}), so per-node completions AND
+   * graph-terminal transitions (COMPLETE / BLOCKED) route to graph-notify
+   * targeting the owner emperor session. A prebuilt `GraphCompletionHandler` fn
+   * is used as-is for `onNodeCompletion` but cannot produce a terminal handler
+   * — use the config form ({@link GraphNotifyConfig}) to enable both. Absent →
+   * the engine's default no-op seams (no notification). `graphParentContext`
    * budget scoping (`sessionID: graphId`) is untouched — the emperor session is
    * carried ONLY for notification targeting.
    */
@@ -529,6 +542,32 @@ export class GraphToolSet {
     });
   }
 
+  /**
+   * Resolve the configured graph-notify source into a concrete
+   * `onGraphTerminal` handler, or `undefined` for the engine's default no-op
+   * seam. Same resolution logic as {@link completionHandler} — but only the
+   * config form (`GraphNotifyConfig`) can produce a terminal handler; a prebuilt
+   * `GraphCompletionHandler` fn cannot be deconstructed, so it yields
+   * `undefined`. A fresh notifier = a fresh dedupe epoch per engine construction.
+   */
+  private terminalHandler(
+    invokingSessionId?: string,
+  ): ((event: GraphTerminalEvent) => void) | undefined {
+    const src = this.deps.graphNotify;
+    if (src === undefined) return undefined;
+    // A prebuilt per-node handler cannot produce a terminal handler.
+    if (typeof src === "function") return undefined;
+    const emperorSessionId =
+      typeof src.emperorSessionId === "function"
+        ? src.emperorSessionId(invokingSessionId)
+        : src.emperorSessionId;
+    if (!emperorSessionId) return undefined;
+    return createGraphTerminalNotifier(src.sessionClient, {
+      emperorSessionId,
+      ...(src.agent ? { agent: src.agent } : {}),
+    }) as (event: GraphTerminalEvent) => void;
+  }
+
   /** Create a fresh, provisioned engine from a declaration (re-provision). */
   private buildEngine(
     declaration: GraphDeclaration,
@@ -546,6 +585,10 @@ export class GraphToolSet {
     const completion = this.completionHandler(invokingSessionId);
     if (completion) {
       options.onNodeCompletion = completion;
+    }
+    const terminal = this.terminalHandler(invokingSessionId);
+    if (terminal) {
+      options.onGraphTerminal = terminal;
     }
     // Graph monitoring: a durable write-side event log alongside the notifier.
     // Constructed only when a stateDir is configured — absent stateDir → no
@@ -588,7 +631,13 @@ export class GraphToolSet {
     return entry;
   }
 
-  /** Commit a candidate declaration: validate → store → rebuild runtime. */
+  /** Commit a candidate declaration: validate → store → rebuild runtime.
+   *
+   * When the graph already has a runtime with execution progress (a
+   * construction tool was called AFTER `graph_run` — e.g. the emperor adds a
+   * validate node mid-flight), the prior runtime's per-node progress is
+   * adopted into the rebuilt engine so completed / running nodes are never
+   * reset back to `ready` and re-dispatched on the next `graph_run`. */
   private commit(graphId: string, candidate: GraphDeclaration): void {
     const validation = validateGraphDeclaration(candidate);
     if (!validation.valid) {
@@ -829,6 +878,7 @@ export class GraphToolSet {
     // `invokingSessionId` (the graph tool's execution session) is forwarded so
     // the emperor-session resolver can target the orchestrator at runtime.
     const completion = this.completionHandler(invokingSessionId);
+    const terminal = this.terminalHandler(invokingSessionId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,

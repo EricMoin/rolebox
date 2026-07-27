@@ -58,13 +58,14 @@ export interface BuildToolsOptions {
   loopToolsOverride?: Record<string, CanonicalToolDef>;
   taskToolsOverride?: Record<string, CanonicalToolDef>;
   /**
-   * Optional graph node-completion notifier (subtask 3): a prebuilt
+   * Optional graph-notify source (subtask 3): a prebuilt
    * `GraphCompletionHandler` or an owner config carrying the emperor session id
    * + session client. Threaded through `createGraphTools` into every engine the
-   * graph tools construct so node completions route to graph-notify targeting
-   * the emperor session. Absent → graph_run builds engines with the default
-   * no-op completion seam (backward compatible). `graphParentContext` budget
-   * scoping (`sessionID: graphId`) is untouched.
+   * graph tools construct so per-node completions AND graph-terminal transitions
+   * (COMPLETE / BLOCKED) route to graph-notify targeting the emperor session.
+   * Absent → graph_run builds engines with the default no-op seams (backward
+   * compatible). `graphParentContext` budget scoping (`sessionID: graphId`) is
+   * untouched.
    */
   graphNotify?: GraphNotifySource;
 }
