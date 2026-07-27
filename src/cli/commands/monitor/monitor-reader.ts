@@ -10,6 +10,8 @@ import type {
   MonitorSnapshot,
   LoopSnapshot,
   GraphSessionSnapshot,
+  EngineGraphSnapshot,
+  GraphEvent,
   DispatchSummary,
   ConcurrencyStatus,
   NDJSONEvent,
@@ -18,7 +20,8 @@ import type {
   TaskDetail,
 } from "./monitor-reader-types.ts";
 import { readMetricsSnapshot, readMetricsRecentEvents } from "./monitor-reader-metrics.ts";
-import { readLoopSnapshots, readGraphSessions } from "./monitor-reader-graph.ts";
+import { readLoopSnapshots, readGraphSessions, readGraphEvents } from "./monitor-reader-graph.ts";
+import { readEngineGraphs } from "./monitor-reader-engine.ts";
 import { tryReadJson, listStateFiles } from "./monitor-reader-utils.ts";
 import { readNotificationState, readRecoveryMetrics } from "./monitor-reader-state.ts";
 import { computeDurationMs, computeDispatchSummary, computeConcurrencyStatus } from "./monitor-reader-compute.ts";
@@ -29,6 +32,11 @@ export type {
   MonitorSnapshot,
   LoopSnapshot,
   GraphSessionSnapshot,
+  EngineGraphSnapshot,
+  GraphNodeSnapshot,
+  EngineBudgetSnapshot,
+  EngineLoopGroupSnapshot,
+  GraphEvent,
   DispatchSummary,
   ConcurrencyStatus,
   NDJSONEvent,
@@ -37,7 +45,8 @@ export type {
   TaskDetail,
 } from "./monitor-reader-types.ts";
 export { readMetricsSnapshot, readMetricsRecentEvents } from "./monitor-reader-metrics.ts";
-export { readLoopSnapshots, readGraphSessions } from "./monitor-reader-graph.ts";
+export { readLoopSnapshots, readGraphSessions, readGraphEvents } from "./monitor-reader-graph.ts";
+export { readEngineGraphs } from "./monitor-reader-engine.ts";
 export { readNotificationState, readRecoveryMetrics } from "./monitor-reader-state.ts";
 export { computeDurationMs, computeDispatchSummary, computeConcurrencyStatus } from "./monitor-reader-compute.ts";
 
@@ -371,6 +380,16 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
   const loops = readLoopSnapshots(stateDir);
 
   const graphSessions = readGraphSessions(stateDir);
+  // Engine-graph (v2) and event readers — surfaced unfiltered. An engine graph
+  // is a multi-agent primitive: its `graphId` never equals a dispatch task's
+  // `sessionId`, and per-node liveness is tracked under `dispatchTaskId` /
+  // `dispatchSessionId`, not the graphId. So filtering engine graphs against
+  // `liveSessions` (the legacy graph-session filter below) would wrongly hide
+  // running graphs; the graph's own `phase` already conveys liveness. We drop
+  // the liveSessions requirement for engine graphs so a persisted engine graph
+  // is surfaced even when no running dispatch task sessionId equals its graphId.
+  const engineGraphs = readEngineGraphs(stateDir);
+  const graphEvents = readGraphEvents(stateDir);
   // Cross-filter loops and graphSessions by live sessions
   const filteredLoops = loops.filter(
     (l) =>
@@ -448,6 +467,8 @@ export function readMonitorSnapshot(projectDir: string, tailChars = 0): MonitorS
     activeFunctions,
     loops: filteredLoops,
     graphSessions: filteredGraphSessions,
+    engineGraphs,
+    graphEvents,
     dispatchSummary,
     concurrency,
     progress,

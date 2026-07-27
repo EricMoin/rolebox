@@ -1,4 +1,6 @@
 import type { MetricsSnapshot } from "../../../dispatch/persistence/metrics.ts";
+import type { GraphEventType } from "../../../graph/engine/graph-events.ts";
+import type { EnginePhase, NodeStatus } from "../../../constants.ts";
 
 // ── Public types ────────────────────────────────────────────────────
 
@@ -74,6 +76,15 @@ export interface MonitorSnapshot {
   loops: LoopSnapshot[];
   /** Full graph execution state snapshots (frontier, completed, status) */
   graphSessions: GraphSessionSnapshot[];
+  /** Rich graph execution engine (v2) snapshots, read from engine-*.json files.
+   *  Surfaced unfiltered: the engine is a multi-agent primitive with no
+   *  graph-level sessionId to match against dispatch liveSessions, so a
+   *  persisted engine graph appears even when no dispatch task sessionId
+   *  equals its graphId (liveness is carried by the graph's own `phase`). */
+  engineGraphs: EngineGraphSnapshot[];
+  /** Recent durable graph events (graph-events-*.ndjson), chronological,
+   *  limited to the most recent window. */
+  graphEvents: GraphEvent[];
   /** Summary of task status counts computed from the tasks array */
   dispatchSummary: DispatchSummary;
   /** Aggregate concurrency status derived from metrics or dispatch state */
@@ -139,6 +150,82 @@ export interface GraphSessionSnapshot {
   terminationReason?: string | null;
 }
 
+// ── Rich engine-graph snapshot (graph execution engine v2) ──────────
+
+/**
+ * Per-node projection of the graph engine v2 runtime state. Timestamps are
+ * ISO-8601 strings (converted from the epoch-ms values the engine persists),
+ * matching the rest of the monitor snapshot surface. Optional fields are
+ * absent when the source data does not carry them.
+ */
+export interface GraphNodeSnapshot {
+  /** Node ID from the graph declaration */
+  nodeId: string;
+  /** Agent identifier dispatched for this node */
+  agent: string;
+  /** Current node lifecycle status */
+  status: NodeStatus;
+  /** First signal the node observed (insertion order of `signalsObserved`), when any. */
+  signalType?: string;
+  /** ISO timestamp when the node started (absent for never-started nodes) */
+  startedAt?: string;
+  /** ISO timestamp when the node completed (absent while running) */
+  completedAt?: string;
+  /** Number of retries attempted */
+  retryCount?: number;
+  /** Loop group this node belongs to, if any */
+  loopGroupId?: string;
+}
+
+/** Cumulative graph-level budget consumption projection. */
+export interface EngineBudgetSnapshot {
+  sessionsSpawned: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost: number;
+}
+
+/** Loop-group runtime projection. */
+export interface EngineLoopGroupSnapshot {
+  id: string;
+  traversalCount: number;
+  maxTraversals: number;
+}
+
+/**
+ * Rich snapshot of a single graph execution engine (v2) persisted state file.
+ *
+ * Read from `engine-{slug}.json` via {@link readEngineGraphs}. The engine is a
+ * multi-agent primitive, so there is no single owning `agentId` at graph level —
+ * the field is reserved for provenance and is left unset by the reader.
+ */
+export interface EngineGraphSnapshot {
+  /** Graph instance identifier */
+  graphId: string;
+  /** Engine lifecycle phase */
+  phase: EnginePhase;
+  /** Reserved graph-level agent provenance; not derivable from engine state. */
+  agentId?: string;
+  /** Total number of nodes in the graph */
+  nodeCount: number;
+  /** Per-status node counts, keyed by {@link NodeStatus} value */
+  nodeStatusCounts: Record<string, number>;
+  /** Per-node runtime snapshots */
+  nodes: GraphNodeSnapshot[];
+  /** Cumulative graph-level budget consumption */
+  budget: EngineBudgetSnapshot;
+  /** Node IDs awaiting dispatch (frontier set) */
+  frontier: string[];
+  /** Loop-group runtime snapshots */
+  loopGroups: EngineLoopGroupSnapshot[];
+  /** ISO timestamp when the graph started */
+  startedAt: string;
+  /** ISO timestamp of the last state update */
+  updatedAt: string;
+  /** Whether any per-node checkpoints have been recorded */
+  hasCheckpoints: boolean;
+}
+
 export interface DispatchSummary {
   /** Number of tasks with status pending */
   pending: number;
@@ -150,6 +237,37 @@ export interface DispatchSummary {
   error: number;
   /** Number of tasks with status cancelled */
   cancelled: number;
+}
+
+/**
+ * One graph event as read back from the durable event log
+ * (`graph-events-{hash}.ndjson`). Mirrors the subset of {@link
+ * GraphEventRecord} that the monitor surfaces: the write-side events
+ * (`node_dispatched` / `node_completed` / `phase_change` / `budget_update`)
+ * with their node-scoped and signal fields. Optional fields (`?`) are absent
+ * when the serialized line omitted them — a `phase_change` line has no
+ * `nodeId`, a `node_dispatched` line has no `signalType`, etc. The `budget`
+ * snapshot of `budget_update` events is not projected onto this surface.
+ */
+export interface GraphEvent {
+  /** Epoch-ms timestamp when the event was recorded. */
+  ts: number;
+  /** Owning graph id. */
+  graphId: string;
+  /** Node id — present for node-scoped events. */
+  nodeId?: string;
+  /** The event kind. */
+  event: GraphEventType;
+  /** Generic status: target `EnginePhase` / `NodeStatus` / `"running"`. */
+  status?: string;
+  /** Terminating signal for `node_completed` (`answer` / `revise_needed` / …). */
+  signalType?: string;
+  /** The node's bound agent id (node-scoped events). */
+  agent?: string;
+  /** When the node started (node-scoped events). */
+  startedAt?: number;
+  /** When the node completed (`node_completed`). */
+  completedAt?: number;
 }
 
 export interface ConcurrencyStatus {
