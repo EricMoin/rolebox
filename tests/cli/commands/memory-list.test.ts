@@ -27,7 +27,7 @@ afterEach(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
+async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
@@ -35,7 +35,7 @@ function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
   console.log = (...args: any[]) => { stdout.push(args.join(" ")); };
   console.error = (...args: any[]) => { stderr.push(args.join(" ")); };
   try {
-    fn();
+    await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -79,9 +79,9 @@ async function insertEntry(
   }
 }
 
-function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
-  const run = cmd.run as (ctx: Record<string, unknown>) => void;
-  run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
+function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {
+  const run = cmd.run as (ctx: Record<string, unknown>) => Promise<void>;
+  return run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -89,9 +89,9 @@ function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
 describe("memory list", () => {
   it("shows 'No memory entries found' when store is empty", async () => {
     const { listCommand } = await importList();
-    const { stdout } = captureLogs(() => {
-      invoke(listCommand, { scope: "both", limit: "20", sort: "recent" });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(listCommand, { scope: "both", limit: "20", sort: "recent" }),
+    );
     expect(stdout.some((l) => l.includes("No memory entries found"))).toBe(true);
   });
 
@@ -99,9 +99,9 @@ describe("memory list", () => {
     await insertEntry({ title: "Alpha Entry" });
 
     const { listCommand } = await importList();
-    const { stdout } = captureLogs(() => {
-      invoke(listCommand, { scope: "both", limit: "20", sort: "recent" });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(listCommand, { scope: "both", limit: "20", sort: "recent" }),
+    );
 
     // Header row
     expect(stdout[0]).toContain("ID");
@@ -124,15 +124,15 @@ describe("memory list", () => {
 
     const { listCommand } = await importList();
 
-    const r1 = captureLogs(() => {
-      invoke(listCommand, { scope: "workspace", limit: "20", sort: "recent" });
-    });
+    const r1 = await captureLogs(() =>
+        invoke(listCommand, { scope: "workspace", limit: "20", sort: "recent" }),
+    );
     expect(r1.stdout.some((l) => l.includes("Workspace Entry"))).toBe(true);
     expect(r1.stdout.some((l) => l.includes("Role Entry"))).toBe(false);
 
-    const r2 = captureLogs(() => {
-      invoke(listCommand, { scope: "role", limit: "20", sort: "recent" });
-    });
+    const r2 = await captureLogs(() =>
+        invoke(listCommand, { scope: "role", limit: "20", sort: "recent" }),
+    );
     expect(r2.stdout.some((l) => l.includes("Role Entry"))).toBe(true);
     expect(r2.stdout.some((l) => l.includes("Workspace Entry"))).toBe(false);
   });
@@ -142,9 +142,9 @@ describe("memory list", () => {
     await insertEntry({ category: "fact", title: "Fact Entry" });
 
     const { listCommand } = await importList();
-    const { stdout } = captureLogs(() => {
-      invoke(listCommand, { scope: "both", category: "note", limit: "20", sort: "recent" });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(listCommand, { scope: "both", category: "note", limit: "20", sort: "recent" }),
+    );
     expect(stdout.some((l) => l.includes("Note Entry"))).toBe(true);
     expect(stdout.some((l) => l.includes("Fact Entry"))).toBe(false);
   });
@@ -154,9 +154,9 @@ describe("memory list", () => {
     await insertEntry({ title: "Entry B" });
 
     const { listCommand } = await importList();
-    const { stdout } = captureLogs(() => {
-      invoke(listCommand, { scope: "both", limit: "1", sort: "recent" });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(listCommand, { scope: "both", limit: "1", sort: "recent" }),
+    );
     // Only one entry should appear in the data rows
     const entryLines = stdout.filter((l) => l.includes("Entry A") || l.includes("Entry B"));
     expect(entryLines.length).toBe(1);
@@ -167,9 +167,9 @@ describe("memory list", () => {
     await insertEntry({ relevance: "high", title: "High Entry" });
 
     const { listCommand } = await importList();
-    const { stdout } = captureLogs(() => {
-      invoke(listCommand, { scope: "both", limit: "20", sort: "relevance" });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(listCommand, { scope: "both", limit: "20", sort: "relevance" }),
+    );
     const highIdx = stdout.findIndex((l) => l.includes("High Entry"));
     const lowIdx = stdout.findIndex((l) => l.includes("Low Entry"));
     expect(highIdx).toBeGreaterThanOrEqual(0);

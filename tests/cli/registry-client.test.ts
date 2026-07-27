@@ -390,25 +390,28 @@ describe("downloadRole", () => {
     const mockResponse = new Response(archiveBytes, { status: 200 });
     globalThis.fetch = mock(() => Promise.resolve(mockResponse));
 
-    // Install a spy on Bun.spawn to capture extraction args
-    // while still delegating to the real implementation
-    const originalSpawn = Bun.spawn;
+    // Spy on the spawn dependency passed to downloadRole to capture the tar
+    // extraction args while still delegating to the real spawn, so real
+    // extraction happens (verifying the output dir below). downloadRole
+    // accepts injected spawn/spawnSync (defaults to node:child_process).
+    const { spawn: realSpawn, spawnSync: realSpawnSync } = await import("node:child_process");
     const extractionArgs: string[] = [];
-    Bun.spawn = mock((cmd: string[], opts?: any) => {
-      if (cmd[0] === "tar" && cmd.includes("xzf")) {
-        extractionArgs.push(...cmd);
-      }
-      return originalSpawn(cmd, opts);
-    });
-
     const resultDir = await downloadRole(
       { name: "community", url: "https://github.com/example/myrepo" },
       "code-reviewer",
-      "1.0.0"
+      "1.0.0",
+      undefined,
+      {
+        spawnSync: realSpawnSync,
+        spawn: (command: any, args?: any, options?: any) => {
+          // node:child_process spawn is spawn(command, args, options).
+          if (command === "tar" && args && args.includes("xzf")) {
+            extractionArgs.push(command, ...args);
+          }
+          return realSpawn(command, args, options) as any;
+        },
+      }
     );
-
-    // Restore original spawn
-    Bun.spawn = originalSpawn;
 
     // Verify tar is invoked WITHOUT --include flag
     expect(extractionArgs.length).toBeGreaterThan(0);
@@ -444,19 +447,21 @@ describe("downloadRole", () => {
     const mockResponse = new Response(archiveBytes, { status: 200 });
     globalThis.fetch = mock(() => Promise.resolve(mockResponse));
 
-    // Mock Bun.which to return null for tar
-    const originalWhich = Bun.which;
-    Bun.which = mock(() => null) as unknown as typeof Bun.which;
-
+    // downloadRole detects a missing tar via spawnSync("tar", ["--version"]).
+    // Inject a spawnSync that reports a failure so the tar check throws.
+    const { spawn: realSpawn } = await import("node:child_process");
     await expect(
       downloadRole(
         { name: "community", url: "https://github.com/example/myrepo" },
         "code-reviewer",
-        "1.0.0"
+        "1.0.0",
+        undefined,
+        {
+          spawn: realSpawn,
+          spawnSync: () => ({ status: -1, error: new Error("ENOENT: tar not found") }) as any,
+        }
       )
     ).rejects.toThrow("tar binary not found");
-
-    Bun.which = originalWhich;
 
     rmSync(tmpDir, { recursive: true, force: true });
   });

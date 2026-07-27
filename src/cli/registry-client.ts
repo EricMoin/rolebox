@@ -137,14 +137,30 @@ export async function fetchRegistryManifest(
 // ── Role Download ─────────────────────────────────────────────────
 
 /**
+ * Optional dependency injection for downloadRole's process invocation.
+ *
+ * Tests inject recording/spying spawn functions here; production callers
+ * omit it and get the real spawn/spawnSync from node:child_process. This
+ * seam exists because mocking the node:child_process builtin (or a re-export)
+ * via mock.module hangs in Bun when a real child is spawned.
+ */
+export interface DownloadRoleProcess {
+  spawn: typeof spawn;
+  spawnSync: typeof spawnSync;
+}
+
+/**
  * Download a role from a GitHub registry tarball and extract it.
  */
 export async function downloadRole(
   registry: { name: string; url: string },
   roleId: string,
   _version: string,
-  ref?: string
+  ref?: string,
+  deps?: DownloadRoleProcess
 ): Promise<string> {
+  const runSpawn = deps?.spawn ?? spawn;
+  const runSpawnSync = deps?.spawnSync ?? spawnSync;
   const { owner, repo } = parseGitHubUrl(registry.url);
   const branch = ref || DEFAULT_GIT_BRANCH;
   const url = `https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
@@ -186,7 +202,7 @@ export async function downloadRole(
 
   try {
     // Verify tar is available on PATH before attempting extraction
-    const tarCheck = spawnSync("tar", ["--version"], { stdio: "ignore" });
+    const tarCheck = runSpawnSync("tar", ["--version"], { stdio: "ignore" });
     if (tarCheck.status !== 0 && tarCheck.error) {
       throw new Error("tar binary not found — please install tar");
     }
@@ -194,7 +210,7 @@ export async function downloadRole(
     let exitCode: number | null;
     try {
       exitCode = await new Promise<number | null>((resolve, reject) => {
-        const proc = spawn("tar", ["xzf", archivePath, "--strip-components=1", "-C", extractDir], {
+        const proc = runSpawn("tar", ["xzf", archivePath, "--strip-components=1", "-C", extractDir], {
           stdio: "inherit",
         });
         proc.on("error", reject);

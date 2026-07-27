@@ -31,6 +31,7 @@ const main = defineCommand({
     monitor: () => import("./commands/monitor.ts").then((m) => m.default),
     memory: () => import("./commands/memory.ts").then((m) => m.default),
     checkpoint: () => import("./commands/checkpoint.ts").then((m) => m.default),
+    migrate: () => import("./commands/migrate.ts").then((m) => m.default),
   },
   cleanup() {
     return checkForUpdate(version);

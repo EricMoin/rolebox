@@ -27,7 +27,7 @@ afterEach(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
+async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
@@ -35,7 +35,7 @@ function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
   console.log = (...args: any[]) => { stdout.push(args.join(" ")); };
   console.error = (...args: any[]) => { stderr.push(args.join(" ")); };
   try {
-    fn();
+    await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -47,9 +47,9 @@ async function importSearch() {
   return await import("../../../src/cli/commands/memory/memory-search");
 }
 
-function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
-  const run = cmd.run as (ctx: Record<string, unknown>) => void;
-  run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
+function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {
+  const run = cmd.run as (ctx: Record<string, unknown>) => Promise<void>;
+  return run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
 async function insertEntry(
@@ -92,9 +92,9 @@ describe("memory search", () => {
     await insertEntry({ title: "Banana Entry", content: "This entry is about bananas." });
 
     const { searchCommand } = await importSearch();
-    const { stdout } = captureLogs(() => {
-      invoke(searchCommand, { query: "apple", scope: "both", limit: "10", _: ["apple"] });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(searchCommand, { query: "apple", scope: "both", limit: "10", _: ["apple"] }),
+    );
 
     // Header row
     expect(stdout[0]).toContain("ID");
@@ -121,9 +121,9 @@ describe("memory search", () => {
     await insertEntry({ title: "Existing Entry", content: "something searchable" });
 
     const { searchCommand } = await importSearch();
-    const { stdout } = captureLogs(() => {
-      invoke(searchCommand, { query: "nonexistent-term", scope: "both", limit: "10", _: ["nonexistent-term"] });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(searchCommand, { query: "nonexistent-term", scope: "both", limit: "10", _: ["nonexistent-term"] }),
+    );
 
     expect(stdout.some((l) => l.includes('No results for "nonexistent-term"'))).toBe(true);
   });
@@ -135,16 +135,16 @@ describe("memory search", () => {
     const { searchCommand } = await importSearch();
 
     // Scope = workspace
-    const r1 = captureLogs(() => {
-      invoke(searchCommand, { query: "x1yz", scope: "workspace", limit: "10", _: ["x1yz"] });
-    });
+    const r1 = await captureLogs(() =>
+      invoke(searchCommand, { query: "x1yz", scope: "workspace", limit: "10", _: ["x1yz"] }),
+    );
     expect(r1.stdout.some((l) => l.includes("Workspace Match"))).toBe(true);
     expect(r1.stdout.some((l) => l.includes("Role Match"))).toBe(false);
 
     // Scope = role
-    const r2 = captureLogs(() => {
-      invoke(searchCommand, { query: "x1yz", scope: "role", limit: "10", _: ["x1yz"] });
-    });
+    const r2 = await captureLogs(() =>
+      invoke(searchCommand, { query: "x1yz", scope: "role", limit: "10", _: ["x1yz"] }),
+    );
     expect(r2.stdout.some((l) => l.includes("Role Match"))).toBe(true);
     expect(r2.stdout.some((l) => l.includes("Workspace Match"))).toBe(false);
   });
@@ -155,9 +155,9 @@ describe("memory search", () => {
     await insertEntry({ title: "Entry Three", content: "common term zzzmatch" });
 
     const { searchCommand } = await importSearch();
-    const { stdout } = captureLogs(() => {
-      invoke(searchCommand, { query: "zzzmatch", scope: "both", limit: "2", _: ["zzzmatch"] });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(searchCommand, { query: "zzzmatch", scope: "both", limit: "2", _: ["zzzmatch"] }),
+    );
 
     const entryLines = stdout.filter(
       (l) => l.includes("Entry One") || l.includes("Entry Two") || l.includes("Entry Three"),
@@ -181,9 +181,9 @@ describe("memory search", () => {
     });
 
     const { searchCommand } = await importSearch();
-    const { stdout } = captureLogs(() => {
-      invoke(searchCommand, { query: "truncateme", scope: "both", limit: "10", _: ["truncateme"] });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(searchCommand, { query: "truncateme", scope: "both", limit: "10", _: ["truncateme"] }),
+    );
 
     // Content snippet should be truncated (end with …)
     const dataLine = stdout.slice(2).find((l) => l.includes("Long Content Entry"));

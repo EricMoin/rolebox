@@ -27,7 +27,7 @@ afterEach(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
+async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
@@ -35,7 +35,7 @@ function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
   console.log = (...args: any[]) => { stdout.push(args.join(" ")); };
   console.error = (...args: any[]) => { stderr.push(args.join(" ")); };
   try {
-    fn();
+    await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -47,9 +47,9 @@ async function importShow() {
   return await import("../../../src/cli/commands/memory/memory-show");
 }
 
-function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
-  const run = cmd.run as (ctx: Record<string, unknown>) => void;
-  run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
+function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {
+  const run = cmd.run as (ctx: Record<string, unknown>) => Promise<void>;
+  return run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
 async function insertDefaultEntry(): Promise<string> {
@@ -78,9 +78,9 @@ describe("memory show", () => {
     const entryId = await insertDefaultEntry();
 
     const { showCommand } = await importShow();
-    const { stdout } = captureLogs(() => {
-      invoke(showCommand, { id: entryId, _: [entryId] });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(showCommand, { id: entryId, _: [entryId] }),
+    );
 
     const output = stdout.join("\n");
 
@@ -127,10 +127,8 @@ describe("memory show", () => {
     }) as typeof process.exit;
 
     const { showCommand } = await importShow();
-    const { stdout, stderr } = captureLogs(() => {
-      expect(() => {
-        invoke(showCommand, { id: "nonexistent-id", _: ["nonexistent-id"] });
-      }).toThrow("process.exit(1)");
+    const { stdout, stderr } = await captureLogs(async () => {
+      await expect(invoke(showCommand, { id: "nonexistent-id", _: ["nonexistent-id"] })).rejects.toThrow("process.exit(1)");
     });
 
     expect(stderr.some((l) => l.includes("Memory not found: nonexistent-id"))).toBe(true);
@@ -143,10 +141,8 @@ describe("memory show", () => {
     }) as typeof process.exit;
 
     const { showCommand } = await importShow();
-    const { stderr } = captureLogs(() => {
-      expect(() => {
-        invoke(showCommand, { id: "any-id", _: ["any-id"] });
-      }).toThrow("process.exit(1)");
+    const { stderr } = await captureLogs(async () => {
+      await expect(invoke(showCommand, { id: "any-id", _: ["any-id"] })).rejects.toThrow("process.exit(1)");
     });
 
     expect(stderr.some((l) => l.includes("Memory not found: any-id"))).toBe(true);

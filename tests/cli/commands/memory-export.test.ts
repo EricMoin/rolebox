@@ -27,7 +27,7 @@ afterEach(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
+async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
@@ -35,7 +35,7 @@ function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
   console.log = (...args: any[]) => { stdout.push(args.join(" ")); };
   console.error = (...args: any[]) => { stderr.push(args.join(" ")); };
   try {
-    fn();
+    await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -47,9 +47,9 @@ async function importExport() {
   return await import("../../../src/cli/commands/memory/memory-export");
 }
 
-function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
-  const run = cmd.run as (ctx: Record<string, unknown>) => void;
-  run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
+function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {
+  const run = cmd.run as (ctx: Record<string, unknown>) => Promise<void>;
+  return run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
 async function insertEntry(
@@ -95,9 +95,9 @@ describe("memory export", () => {
     });
 
     const { exportCommand } = await importExport();
-    const { stdout } = captureLogs(() => {
-      invoke(exportCommand, { format: "markdown" });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(exportCommand, { format: "markdown" }),
+    );
 
     const output = stdout.join("\n");
 
@@ -126,9 +126,9 @@ describe("memory export", () => {
     });
 
     const { exportCommand } = await importExport();
-    const { stdout } = captureLogs(() => {
-      invoke(exportCommand, { format: "json" });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(exportCommand, { format: "json" }),
+    );
 
     const raw = stdout.join("\n");
     let parsed: unknown;
@@ -149,9 +149,9 @@ describe("memory export", () => {
 
     const outPath = join(tmpDir, "exported.md");
     const { exportCommand } = await importExport();
-    const { stdout } = captureLogs(() => {
-      invoke(exportCommand, { format: "markdown", output: outPath });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(exportCommand, { format: "markdown", output: outPath }),
+    );
 
     // stdout should have the success message, not the full export
     expect(stdout.some((l) => l.includes(`Exported to ${outPath}`))).toBe(true);
@@ -168,9 +168,9 @@ describe("memory export", () => {
 
     const outPath = join(tmpDir, "exported.json");
     const { exportCommand } = await importExport();
-    const { stdout } = captureLogs(() => {
-      invoke(exportCommand, { format: "json", output: outPath });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(exportCommand, { format: "json", output: outPath }),
+    );
 
     expect(stdout.some((l) => l.includes(`Exported to ${outPath}`))).toBe(true);
 
@@ -182,9 +182,9 @@ describe("memory export", () => {
 
   it("prints 'No memory entries to export' when store is empty", async () => {
     const { exportCommand } = await importExport();
-    const { stdout } = captureLogs(() => {
-      invoke(exportCommand, { format: "markdown" });
-    });
+    const { stdout } = await captureLogs(() =>
+      invoke(exportCommand, { format: "markdown" }),
+    );
 
     expect(stdout.some((l) => l.includes("No memory entries to export"))).toBe(true);
   });
@@ -197,10 +197,8 @@ describe("memory export", () => {
     }) as typeof process.exit;
 
     const { exportCommand } = await importExport();
-    const { stderr } = captureLogs(() => {
-      expect(() => {
-        invoke(exportCommand, { format: "xml" });
-      }).toThrow("process.exit(1)");
+    const { stderr } = await captureLogs(async () => {
+      await expect(invoke(exportCommand, { format: "xml" })).rejects.toThrow("process.exit(1)");
     });
 
     expect(stderr.some((l) => l.includes('Unknown format "xml"'))).toBe(true);

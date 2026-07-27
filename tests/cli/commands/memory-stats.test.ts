@@ -27,7 +27,7 @@ afterEach(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
+async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
@@ -35,7 +35,7 @@ function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
   console.log = (...args: any[]) => { stdout.push(args.join(" ")); };
   console.error = (...args: any[]) => { stderr.push(args.join(" ")); };
   try {
-    fn();
+    await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -47,9 +47,9 @@ async function importStats() {
   return await import("../../../src/cli/commands/memory/memory-stats");
 }
 
-function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
-  const run = cmd.run as (ctx: Record<string, unknown>) => void;
-  run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
+function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {
+  const run = cmd.run as (ctx: Record<string, unknown>) => Promise<void>;
+  return run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
 async function insertEntry(
@@ -94,9 +94,9 @@ describe("memory stats", () => {
     await insertEntry({ scope: "role", category: "lesson", relevance: "medium" });
 
     const { statsCommand } = await importStats();
-    const { stdout } = captureLogs(() => {
-      invoke(statsCommand, {});
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(statsCommand, {}),
+    );
 
     const output = stdout.join("\n");
 
@@ -119,9 +119,9 @@ describe("memory stats", () => {
 
   it("shows (none) for all sections when store is empty", async () => {
     const { statsCommand } = await importStats();
-    const { stdout } = captureLogs(() => {
-      invoke(statsCommand, {});
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(statsCommand, {}),
+    );
 
     const output = stdout.join("\n");
 
@@ -150,9 +150,9 @@ describe("memory stats", () => {
     await insertEntry({ category: "fact", relevance: "high" });
 
     const { statsCommand } = await importStats();
-    const { stdout } = captureLogs(() => {
-      invoke(statsCommand, {});
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(statsCommand, {}),
+    );
 
     const output = stdout.join("\n");
 
@@ -180,9 +180,9 @@ describe("memory stats", () => {
     await insertEntry({});
 
     const { statsCommand } = await importStats();
-    const { stdout } = captureLogs(() => {
-      invoke(statsCommand, {});
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(statsCommand, {}),
+    );
 
     // Header
     expect(stdout[0]).toBe("");
@@ -199,9 +199,9 @@ describe("memory stats", () => {
     await insertEntry({ category: "note", relevance: "medium" });
 
     const { statsCommand } = await importStats();
-    const { stdout } = captureLogs(() => {
-      invoke(statsCommand, {});
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(statsCommand, {}),
+    );
 
     const output = stdout.join("\n");
 

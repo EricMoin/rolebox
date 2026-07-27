@@ -27,7 +27,7 @@ afterEach(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
+async function captureLogs(fn: () => Promise<void> | void): Promise<{ stdout: string[]; stderr: string[] }> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const origLog = console.log;
@@ -35,7 +35,7 @@ function captureLogs(fn: () => void): { stdout: string[]; stderr: string[] } {
   console.log = (...args: any[]) => { stdout.push(args.join(" ")); };
   console.error = (...args: any[]) => { stderr.push(args.join(" ")); };
   try {
-    fn();
+    await fn();
   } finally {
     console.log = origLog;
     console.error = origErr;
@@ -47,9 +47,9 @@ async function importDelete() {
   return await import("../../../src/cli/commands/memory/memory-delete");
 }
 
-function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): void {
-  const run = cmd.run as (ctx: Record<string, unknown>) => void;
-  run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
+function invoke(cmd: { run?: unknown }, args: Record<string, unknown>): Promise<void> {
+  const run = cmd.run as (ctx: Record<string, unknown>) => Promise<void>;
+  return run({ rawArgs: [] as string[], args: { _: [] as string[], ...args }, cmd });
 }
 
 async function insertEntry(
@@ -99,9 +99,9 @@ describe("memory delete", () => {
     }
 
     const { deleteCommand } = await importDelete();
-    const { stdout } = captureLogs(() => {
-      invoke(deleteCommand, { id: entryId, yes: true, _: [entryId] });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(deleteCommand, { id: entryId, yes: true, _: [entryId] }),
+    );
 
     expect(stdout.some((l) => l.includes(`Deleted: ${entryId}`))).toBe(true);
 
@@ -116,9 +116,9 @@ describe("memory delete", () => {
 
   it("--yes on non-existent entry prints 'Not found'", async () => {
     const { deleteCommand } = await importDelete();
-    const { stdout } = captureLogs(() => {
-      invoke(deleteCommand, { id: "nonexistent-id", yes: true, _: ["nonexistent-id"] });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(deleteCommand, { id: "nonexistent-id", yes: true, _: ["nonexistent-id"] }),
+    );
 
     expect(stdout.some((l) => l.includes("Not found: nonexistent-id"))).toBe(true);
     // Should NOT say Deleted
@@ -129,9 +129,9 @@ describe("memory delete", () => {
     const entryId = await insertEntry();
 
     const { deleteCommand } = await importDelete();
-    const { stdout } = captureLogs(() => {
-      invoke(deleteCommand, { id: entryId, yes: false, _: [entryId] });
-    });
+    const { stdout } = await captureLogs(() =>
+        invoke(deleteCommand, { id: entryId, yes: false, _: [entryId] }),
+    );
 
     // The prompt message is printed before any stdin read
     expect(stdout.some((l) => l.includes(`Delete memory ${entryId}? (y/N)`))).toBe(true);
