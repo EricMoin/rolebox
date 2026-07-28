@@ -582,8 +582,9 @@ export function createEventBridge(
         notification: { when: "always" },
         sound: { name: "error" },
       });
-    } catch {
+    } catch (err) {
       // Attention API call failed — silent (TUI may not support it in headless mode)
+      console.warn("[rolebox-tui] api.attention.notify() failed:", err);
     }
   }
 
@@ -624,8 +625,9 @@ export function createEventBridge(
       });
     });
     opencodeCleanups.push(unsubStatus);
-  } catch {
-    // api.event subscription not available in all environments — silent
+  } catch (err) {
+    // api.event subscription not available in all environments — non-fatal
+    console.warn('[rolebox-tui] api.event.on("session.status") failed:', err);
   }
 
   try {
@@ -642,8 +644,9 @@ export function createEventBridge(
       });
     });
     opencodeCleanups.push(unsubError);
-  } catch {
+  } catch (err) {
     // Silent
+    console.warn('[rolebox-tui] api.event.on("session.error") failed:', err);
   }
 
   // ── Start fast-poll ──
