@@ -12,8 +12,9 @@
  * COMPLETE — only then did `retryNode()` re-open the phase. Result: a
  * `[GRAPH COMPLETE]` arrived while nodes were still running/pending.
  *
- * B2 (stale dedupe guard): `_firedTerminalComplete` /
- * `_firedTerminalBlocked` are one-shot guards set by `_fireGraphTerminal`.
+ * B2 (stale dedupe guard): `TerminationContext.terminalComplete` /
+ * `TerminationContext.terminalBlocked` are one-shot dedupe guards on the
+ * internal {@link TerminationContext}.
  * `retryNode()` re-opened the phase but never reset them — so after the
  * retried chain legitimately completed, the notification was permanently
  * suppressed (fired zero times).
@@ -320,17 +321,17 @@ describe("terminal notification on retry reopen (defect B)", () => {
   // ── Test (b): B2 stale dedupe guard — exactly-once fire after retry ────────
   //
   // Pre-fix: `retryNode` re-opened the phase via `resetNodeForRetry` but
-  // never reset `_firedTerminalComplete` / `_firedTerminalBlocked` (the
-  // one-shot dedupe guards set by `_fireGraphTerminal`). After the retried
+  // never reset `TerminationContext.terminalComplete` / `TerminationContext.terminalBlocked`
+  // (the one-shot dedupe guards on the internal `_terminationCtx`). After the retried
   // chain legitimately completed, the notification was permanently
   // suppressed — zero fires, not one.
   //
   // Fix: both guards are reset in `retryNode()` after the phase re-open
-  // (`engine-advance.ts:1245-1246`).
+  // (`engine-advance.ts:1165-1166`).
   //
   // Revert-would-fail: if the guard-reset lines were removed, the second
   // `_checkTermination()` after the retried chain completes would hit the
-  // still-true `_firedTerminalComplete` guard and skip the callback. The
+  // still-true `terminalComplete` guard and skip the callback. The
   // total COMPLETE count would be 1 (only the original), but it should
   // be 2.
 
@@ -488,11 +489,9 @@ describe("terminal notification on retry reopen (defect B)", () => {
       // (phase Idle) and run() transitions Idle→Executing. Here we
       // reuse the same engine instance, so we must manually re-open
       // the phase and reset the terminal dedupe guard — exactly as
-      // `retryNode` does for retries (engine-advance.ts:1245-1246).
+      // `retryNode` does for retries (engine-advance.ts:1165-1166).
       state.phase = EnginePhase.Executing;
-      // eslint-disable-next-line dot-notation, @typescript-eslint/dot-notation
-      (engine as unknown as Record<string, boolean>)["_firedTerminalComplete"] = false;
-      (engine as unknown as Record<string, boolean>)["_firedTerminalBlocked"] = false;
+      engine.resetTerminalDedupe();
 
       // Now call dispatchReady (the non-retry path, like a plain
       // `graph_run`). This dispatches B and checks termination. Since
@@ -529,8 +528,7 @@ describe("terminal notification on retry reopen (defect B)", () => {
 
       // Re-open terminal phase and reset dedupe guards for the extend.
       state.phase = EnginePhase.Executing;
-      (engine as unknown as Record<string, boolean>)["_firedTerminalComplete"] = false;
-      (engine as unknown as Record<string, boolean>)["_firedTerminalBlocked"] = false;
+      engine.resetTerminalDedupe();
 
       // Dispatch C — it becomes Running.
       await engine.dispatchReady();
@@ -565,8 +563,7 @@ describe("terminal notification on retry reopen (defect B)", () => {
 
       // Re-open terminal phase and reset dedupe guards.
       state.phase = EnginePhase.Executing;
-      (engine as unknown as Record<string, boolean>)["_firedTerminalComplete"] = false;
-      (engine as unknown as Record<string, boolean>)["_firedTerminalBlocked"] = false;
+      engine.resetTerminalDedupe();
 
       // Dispatch C to running, then complete it.
       await engine.dispatchReady();
@@ -593,7 +590,7 @@ describe("terminal notification on retry reopen (defect B)", () => {
 
   // ── BLOCKED dedupe guard reset ─────────────────────────────────────────────
   //
-  // Verify that `retryNode` also resets `_firedTerminalBlocked` (the
+  // Verify that `retryNode` also resets `TerminationContext.terminalBlocked` (the
   // blocked dedupe guard), so that after a blocked-then-retry-then-complete
   // cycle, the graph can enter a legitimate blocked state again from the
   // retried branch. This is the symmetric half of the B2 fix.
