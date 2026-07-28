@@ -53,7 +53,6 @@ import type {
 } from "../../types.engine-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
-import { bindNodeState } from "./recorder.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -211,14 +210,20 @@ export function mapDispatchStatusToSignal(
 
 /**
  * Register a one-time `onTaskTerminated` listener for a node's in-flight
- * dispatch task and route the terminal transition back into the graph via
- * {@link emitSignal} (which records a terminating signal → advances the engine).
+ * dispatch task. This is the **single delivery seam** for dispatch→signal
+ * routing — every dispatch termination (live or recovery) funnels through
+ * {@link emitSignal}, which records a terminating signal and advances the
+ * engine. The post-registration race-condition guard in _dispatchNode
+ * (engine-advance.ts) catches already-terminal tasks via a deferred completion
+ * instead of duplicating the emitSignal path, so this callback owns the
+ * exclusive `signalBridge.record()` call.
  *
  * Guarded so a stale listener (from a superseded dispatch task id, or a node
  * the engine already moved past `running`) can never advance a node twice:
  * - the node's `dispatchTaskId` must still match the completed task id;
  * - the node must still be `running` (a cancellation that the engine already
- *   applied — e.g. via the cascade canceller — is skipped).
+ *   applied — e.g. via the cascade canceller — or a deferred completion that
+ *   drained earlier in the same critical section — is skipped).
  *
  * When the dispatch task reports `cancelled`, the node is cancelled directly
  * (`running → cancelled`) — there is no terminating signal to record.
@@ -239,7 +244,7 @@ export function subscribeTaskTermination(
     if (current.dispatchTaskId !== completedTaskId) return; // superseded task
     if (current.status !== NodeStatus.Running) return; // already advanced / cancelled
     if (status === "cancelled") {
-      markCancelled(current, "dispatch task cancelled");
+      markCancelled(state, current, "dispatch task cancelled");
       return;
     }
     const task = safeGetTask(port, completedTaskId);
@@ -283,7 +288,7 @@ export function reconcileEngine(
 
     const taskId = node.dispatchTaskId;
     if (!taskId) {
-      markTimedOut(node, ORPHAN_REASON);
+      markTimedOut(state, node, ORPHAN_REASON);
       timedOut.push(node.nodeId);
       deferred.push({
         nodeId: node.nodeId,
@@ -295,7 +300,7 @@ export function reconcileEngine(
 
     const task = safeGetTask(port, taskId);
     if (!task) {
-      markTimedOut(node, ORPHAN_REASON);
+      markTimedOut(state, node, ORPHAN_REASON);
       timedOut.push(node.nodeId);
       deferred.push({
         nodeId: node.nodeId,
@@ -307,7 +312,7 @@ export function reconcileEngine(
 
     if (TERMINAL_DISPATCH_STATUSES.has(task.status)) {
       if (task.status === "cancelled") {
-        markCancelled(node, "dispatch task cancelled during restart");
+        markCancelled(state, node, "dispatch task cancelled during restart");
       } else {
         const sig = mapDispatchStatusToSignal(task.status, task);
         if (sig) {
@@ -392,12 +397,6 @@ export function hydrateEngineState(
         Object.entries(source.checkpoints).map(([id, r]) => [id, { ...r }])
       )
     : undefined;
-  // Re-bind recovered nodes to the LIVE target state so post-recovery lifecycle
-  // transitions auto-save checkpoints into `target.checkpoints`, not into the
-  // deserialized intermediate container (subtask C-RECORD).
-  for (const node of target.nodes.values()) {
-    bindNodeState(node, target);
-  }
 }
 
 // ── Prior-state adoption (incremental graph rebuild) ────────────────────────
@@ -513,9 +512,8 @@ export function adoptPriorNodeStates(
   }
 
   target.updatedAt = Date.now();
+  target.isDirty = true;
 }
-
-// ── Stale critical-section state ─────────────────────────────────────────────
 
 /**
  * Clear the critical-section state a crashed process left behind: the

@@ -75,6 +75,14 @@ export interface EngineState {
   updatedAt: number;
   /** Re-entrancy guard — only one advancement critical section at a time */
   advancingLock: boolean;
+  /**
+   * Runtime-only (non-persisted) dirty flag. Set to `true` by any state
+   * mutation so that {@link _runCriticalSection} avoids redundant
+   * `persistState?.` writes when no mutations occurred in a section.
+   * Cleared immediately after a successful persist. Defaults to `false`
+   * for fresh and deserialized states (never resurrected from persistence).
+   */
+  isDirty: boolean;
   /** Completions deferred during a critical section (drained on unlock) */
   pendingCompletions: string[];
 

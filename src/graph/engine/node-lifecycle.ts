@@ -45,8 +45,9 @@
  */
 
 import { NodeStatus } from "../../constants.ts";
-import type { NodeRuntimeState } from "../../types.engine-v2.ts";
+import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Transition table ───────────────────────────────────────────────────────
 
@@ -119,6 +120,7 @@ export interface TransitionOptions {
  * bookkeeping (spawn counters, task ids, timing) along the way.
  */
 export function transitionNode(
+  state: EngineState,
   node: NodeRuntimeState,
   to: NodeStatus,
   opts: TransitionOptions = {},
@@ -152,85 +154,85 @@ export function transitionNode(
   }
 
   node.status = to;
+  if (state) markDirty(state);
 
   // Auto-save a lifecycle checkpoint on every status change (subtask C-RECORD).
   // Fires for every transition because ALL convenience transitions funnel
-  // through this single choke point. No-ops when the node is not bound to an
-  // engine state (standalone construction) — nothing is fabricated.
-  recordCheckpointForNode(node, from, to, now);
+  // through this single choke point. No-ops when state is falsy (standalone
+  // construction without an engine) — nothing is fabricated.
+  recordCheckpointForNode(state, node, from, to, now);
 
   return node;
 }
 
-// ── Phase-3 pause stub ─────────────────────────────────────────────────────
-
 /**
- * Stub: transition a running node into the `blocked` (needs_approval) state.
+ * Transition a node into the `blocked` (needs_approval) state.
  *
- * TODO(Phase 3): Full `needs_approval` pause mechanics are not implemented in
- * Phase 1. The complete flow — dispatch the node with a pause-capable prompt,
- * have the worker emit `signal(type="need_approval")`, pause graph advancement
- * for this node's downstream subgraph, then resume via `dispatch_approve`
- * (→ `completed`) or `dispatch_reject` (→ `ready` for retry) — is deferred to
- * Phase 3 (see `.rolebox/design/engine-state-machine.md` §2.2 `blocked` and
- * `src/constants.ts` `NodeStatus.Blocked`). Today this only records the state
- * transition so the `blocked` status is representable.
+ * A blocked node awaits human approval before it can continue its lifecycle.
+ * The engine pauses graph advancement for this node's downstream subgraph
+ * until a `graph_approve` call resolves or rejects the block.
  */
-export function markNodeBlocked(node: NodeRuntimeState): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Blocked);
+export function markNodeBlocked(state: EngineState, node: NodeRuntimeState): NodeRuntimeState {
+  return transitionNode(state, node, NodeStatus.Blocked);
 }
 
 // ── Convenience transitions ────────────────────────────────────────────────
 
 /** pending → ready. */
-export function markReady(node: NodeRuntimeState): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Ready);
+export function markReady(state: EngineState, node: NodeRuntimeState): NodeRuntimeState {
+  return transitionNode(state, node, NodeStatus.Ready);
 }
 
 /** ready → running, recording the dispatch ids. */
 export function markRunning(
+  state: EngineState,
   node: NodeRuntimeState,
   opts: Pick<TransitionOptions, "dispatchTaskId" | "dispatchSessionId"> = {},
 ): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Running, opts);
+  return transitionNode(state, node, NodeStatus.Running, opts);
 }
 
 /** running → completed. */
 export function markCompleted(
+  state: EngineState,
   node: NodeRuntimeState,
   opts: Pick<TransitionOptions, "result"> = {},
 ): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Completed, opts);
+  return transitionNode(state, node, NodeStatus.Completed, opts);
 }
 
 /** running → escalate, with a required error reason. */
 export function markEscalated(
+  state: EngineState,
   node: NodeRuntimeState,
   errorReason: string,
 ): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Escalate, { errorReason });
+  return transitionNode(state, node, NodeStatus.Escalate, { errorReason });
 }
 
 /** running → timeout, with an optional error reason. */
 export function markTimedOut(
+  state: EngineState,
   node: NodeRuntimeState,
   errorReason?: string,
 ): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Timeout, { errorReason });
+  return transitionNode(state, node, NodeStatus.Timeout, { errorReason });
 }
 
 /** pending | ready | running → cancelled. */
 export function markCancelled(
+  state: EngineState,
   node: NodeRuntimeState,
   errorReason?: string,
 ): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Cancelled, { errorReason });
+  return transitionNode(state, node, NodeStatus.Cancelled, { errorReason });
 }
 
 /** escalate | timeout | cancelled | completed → done. */
 export function markDone(
+  state: EngineState,
   node: NodeRuntimeState,
   errorReason?: string,
 ): NodeRuntimeState {
-  return transitionNode(node, NodeStatus.Done, { errorReason });
+  return transitionNode(state, node, NodeStatus.Done, { errorReason });
 }

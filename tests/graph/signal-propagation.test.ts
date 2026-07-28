@@ -183,7 +183,7 @@ describe("propagateRevise (unit)", () => {
     const node = state.nodes.get("A")!;
     expect(node.loopGroupId).toBeUndefined();
     // A just finished running and emits revise_needed with no loop to route into.
-    markRunning(node);
+    markRunning(state, node);
 
     const report = propagateRevise(state, node, "revise me");
 
@@ -231,8 +231,8 @@ describe("propagateEscalate (unit)", () => {
   it("re-marks the source ready for an automatic retry when an outbound edge allows it", () => {
     const state = buildState(linearGraph(2));
     const node = state.nodes.get("A")!;
-    markRunning(node);
-    markEscalated(node, "boom"); // _applySignalTransition already escalated A
+    markRunning(state, node);
+    markEscalated(state, node, "boom"); // _applySignalTransition already escalated A
 
     const report = propagateEscalate(state, node, { reason: "boom" });
 
@@ -251,8 +251,8 @@ describe("propagateEscalate (unit)", () => {
     const state = buildState(linearGraph(1));
     const node = state.nodes.get("A")!;
     node.retryCount = 1; // already retried once against retry.max = 1
-    markRunning(node);
-    markEscalated(node, "boom");
+    markRunning(state, node);
+    markEscalated(state, node, "boom");
 
     const report = propagateEscalate(state, node, { reason: "boom" });
 
@@ -264,7 +264,7 @@ describe("propagateEscalate (unit)", () => {
   it("propagates the escalation to a failed join-all convergence node", () => {
     const state = buildState(convergeGraph("all"));
     const node = state.nodes.get("B")!;
-    markEscalated(node, "branch B failed");
+    markEscalated(state, node, "branch B failed");
 
     const report = propagateEscalate(state, node, { reason: "branch B failed" });
 
@@ -290,7 +290,7 @@ describe("propagateEscalate (unit)", () => {
     c.joinSatisfied = true;
 
     const node = state.nodes.get("B")!;
-    markEscalated(node, "B failed but not needed");
+    markEscalated(state, node, "B failed but not needed");
 
     const report = propagateEscalate(state, node, { reason: "B failed but not needed" });
 

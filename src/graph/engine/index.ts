@@ -416,6 +416,7 @@ function snapshotEngineState(state: EngineState): EngineState {
     startedAt: state.startedAt,
     updatedAt: state.updatedAt,
     advancingLock: state.advancingLock,
+    isDirty: state.isDirty,
     pendingCompletions: [...state.pendingCompletions],
   };
 }
@@ -721,8 +722,8 @@ class EngineRuntimeImpl implements EngineRuntime {
           node.status === NodeStatus.Pending) &&
         canTransitionNode(node.status, NodeStatus.Cancelled)
       ) {
-        markCancelled(node, "cancelled by engine.cancel()");
-        markDone(node);
+        markCancelled(this.state, node, "cancelled by engine.cancel()");
+        markDone(this.state, node);
       }
     }
     this.state.frontier = [];

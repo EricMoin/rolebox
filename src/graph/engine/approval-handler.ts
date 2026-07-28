@@ -125,7 +125,7 @@ export function approveBlockedNode(
         : "approved";
 
   node.signalsObserved.answer = answerOutput;
-  markCompleted(node);
+  markCompleted(state, node);
 
   const tc = node.tokensConsumed;
   return {
@@ -179,13 +179,13 @@ export function rejectBlockedNode(
   node.signalsObserved.revise_needed = reasonText;
 
   if (!node.loopGroupId) {
-    markEscalated(node, reasonText);
+    markEscalated(state, node, reasonText);
     removeFromFrontier(state, node.nodeId);
     return { kind: "escalate" };
   }
 
   node.prompt = mergeRejectionFeedback(node.prompt, reasonText);
-  markReady(node);
+  markReady(state, node);
   addToFrontier(state, node.nodeId);
   return { kind: "revise" };
 }
@@ -316,7 +316,7 @@ export function reenterRejectedUpstreams(
     const node = state.nodes.get(nodeId);
     if (!node || !canTransitionNode(node.status, NodeStatus.Ready)) continue;
     node.prompt = mergeRejectionFeedback(node.prompt, reason);
-    markReady(node);
+    markReady(state, node);
     addToFrontier(state, nodeId);
     report.reEntered.push(nodeId);
   }
@@ -353,8 +353,8 @@ function cancelNode(
   dispatchPort?: CancelDispatchPort,
 ): void {
   if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
-  markCancelled(node, `cancelled by partial-approval pruning at "${state.graphId}"`);
-  markDone(node);
+  markCancelled(state, node, `cancelled by partial-approval pruning at "${state.graphId}"`);
+  markDone(state, node);
   removeFromFrontier(state, node.nodeId);
   if (dispatchPort?.cancelTask && node.dispatchTaskId) {
     void dispatchPort.cancelTask(node.dispatchTaskId);

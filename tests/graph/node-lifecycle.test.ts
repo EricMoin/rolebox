@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { NodeStatus } from "../../src/constants.ts";
-import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
+import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import {
   canTransitionNode,
   transitionNode,
@@ -14,6 +14,10 @@ import {
   markDone,
   markNodeBlocked,
 } from "../../src/graph/engine/node-lifecycle.ts";
+
+// Sentinel for tests that exercise transition legality without an engine state.
+// recordCheckpointForNode is a no-op when state is falsy.
+const NO_STATE = undefined as unknown as EngineState;
 
 // ── Fixture builder ──────────────────────────────────────────────────────
 
@@ -42,30 +46,30 @@ function makeNode(overrides?: Partial<NodeRuntimeState>): NodeRuntimeState {
 describe("normal path: pending → ready → running → completed", () => {
   it("walks the full happy path via transitionNode", () => {
     const node = makeNode();
-    transitionNode(node, NodeStatus.Ready);
+    transitionNode(NO_STATE, node, NodeStatus.Ready);
     expect(node.status).toBe(NodeStatus.Ready);
 
-    transitionNode(node, NodeStatus.Running, { dispatchTaskId: "t1", dispatchSessionId: "s1" });
+    transitionNode(NO_STATE, node, NodeStatus.Running, { dispatchTaskId: "t1", dispatchSessionId: "s1" });
     expect(node.status).toBe(NodeStatus.Running);
     expect(node.dispatchTaskId).toBe("t1");
     expect(node.dispatchSessionId).toBe("s1");
     expect(node.sessionsSpawned).toBe(1);
 
-    transitionNode(node, NodeStatus.Completed);
+    transitionNode(NO_STATE, node, NodeStatus.Completed);
     expect(node.status).toBe(NodeStatus.Completed);
     expect(typeof node.completedAt).toBe("number");
   });
 
   it("completed → done", () => {
     const node = makeNode({ status: NodeStatus.Completed, completedAt: 1 });
-    transitionNode(node, NodeStatus.Done);
+    transitionNode(NO_STATE, node, NodeStatus.Done);
     expect(node.status).toBe(NodeStatus.Done);
   });
 
   it("completed → ready (revise-driven loop re-entry)", () => {
     const node = makeNode({ status: NodeStatus.Completed, completedAt: 1 });
     expect(canTransitionNode(NodeStatus.Completed, NodeStatus.Ready)).toBe(true);
-    transitionNode(node, NodeStatus.Ready);
+    transitionNode(NO_STATE, node, NodeStatus.Ready);
     expect(node.status).toBe(NodeStatus.Ready);
   });
 });
@@ -75,27 +79,27 @@ describe("normal path: pending → ready → running → completed", () => {
 describe("error and cancel paths", () => {
   it("running → escalate → done", () => {
     const node = makeNode({ status: NodeStatus.Running });
-    transitionNode(node, NodeStatus.Escalate, { errorReason: "boom" });
+    transitionNode(NO_STATE, node, NodeStatus.Escalate, { errorReason: "boom" });
     expect(node.status).toBe(NodeStatus.Escalate);
     expect(node.errorReason).toBe("boom");
-    transitionNode(node, NodeStatus.Done);
+    transitionNode(NO_STATE, node, NodeStatus.Done);
     expect(node.status).toBe(NodeStatus.Done);
   });
 
   it("running → timeout → done", () => {
     const node = makeNode({ status: NodeStatus.Running });
-    transitionNode(node, NodeStatus.Timeout, { errorReason: "slow" });
+    transitionNode(NO_STATE, node, NodeStatus.Timeout, { errorReason: "slow" });
     expect(node.status).toBe(NodeStatus.Timeout);
     expect(node.errorReason).toBe("slow");
-    transitionNode(node, NodeStatus.Done);
+    transitionNode(NO_STATE, node, NodeStatus.Done);
     expect(node.status).toBe(NodeStatus.Done);
   });
 
   it("running → cancelled → done", () => {
     const node = makeNode({ status: NodeStatus.Running });
-    transitionNode(node, NodeStatus.Cancelled);
+    transitionNode(NO_STATE, node, NodeStatus.Cancelled);
     expect(node.status).toBe(NodeStatus.Cancelled);
-    transitionNode(node, NodeStatus.Done);
+    transitionNode(NO_STATE, node, NodeStatus.Done);
     expect(node.status).toBe(NodeStatus.Done);
   });
 
@@ -110,25 +114,25 @@ describe("error and cancel paths", () => {
 describe("convenience transitions", () => {
   it("marks each stage through the happy path", () => {
     let node = makeNode();
-    node = markReady(node);
+    node = markReady(NO_STATE, node);
     expect(node.status).toBe(NodeStatus.Ready);
-    node = markRunning(node, { dispatchTaskId: "t1" });
+    node = markRunning(NO_STATE, node, { dispatchTaskId: "t1" });
     expect(node.status).toBe(NodeStatus.Running);
-    node = markCompleted(node);
+    node = markCompleted(NO_STATE, node);
     expect(node.status).toBe(NodeStatus.Completed);
-    node = markDone(node);
+    node = markDone(NO_STATE, node);
     expect(node.status).toBe(NodeStatus.Done);
   });
 
   it("marks error/cancel stages", () => {
-    expect(markEscalated(makeNode({ status: NodeStatus.Running }), "e").status).toBe(
+    expect(markEscalated(NO_STATE, makeNode({ status: NodeStatus.Running }), "e").status).toBe(
       NodeStatus.Escalate,
     );
-    expect(markTimedOut(makeNode({ status: NodeStatus.Running })).status).toBe(NodeStatus.Timeout);
-    expect(markCancelled(makeNode({ status: NodeStatus.Running })).status).toBe(
+    expect(markTimedOut(NO_STATE, makeNode({ status: NodeStatus.Running })).status).toBe(NodeStatus.Timeout);
+    expect(markCancelled(NO_STATE, makeNode({ status: NodeStatus.Running })).status).toBe(
       NodeStatus.Cancelled,
     );
-    expect(markDone(makeNode({ status: NodeStatus.Escalate })).status).toBe(NodeStatus.Done);
+    expect(markDone(NO_STATE, makeNode({ status: NodeStatus.Escalate })).status).toBe(NodeStatus.Done);
   });
 });
 
@@ -146,7 +150,7 @@ describe("illegal transitions are rejected", () => {
 
   it("transitionNode leaves status unchanged when it rejects", () => {
     const node = makeNode(); // pending
-    expect(() => transitionNode(node, NodeStatus.Completed)).toThrow();
+    expect(() => transitionNode(NO_STATE, node, NodeStatus.Completed)).toThrow();
     expect(node.status).toBe(NodeStatus.Pending);
   });
 });
@@ -156,10 +160,10 @@ describe("illegal transitions are rejected", () => {
 describe("blocked state (Phase-3 stub)", () => {
   it("running → blocked is representable and reversible", () => {
     const node = makeNode({ status: NodeStatus.Running });
-    markNodeBlocked(node);
+    markNodeBlocked(NO_STATE, node);
     expect(node.status).toBe(NodeStatus.Blocked);
     // Phase 3: approve → completed
-    transitionNode(node, NodeStatus.Completed);
+    transitionNode(NO_STATE, node, NodeStatus.Completed);
     expect(node.status).toBe(NodeStatus.Completed);
   });
 
@@ -184,9 +188,9 @@ describe("no node-type-specific handling", () => {
         needsApproval: agent === "human_gate", // pausing flag — not a node category
       });
       // identical transition sequence for every node
-      markReady(node);
-      markRunning(node);
-      markCompleted(node);
+      markReady(NO_STATE, node);
+      markRunning(NO_STATE, node);
+      markCompleted(NO_STATE, node);
       results.push({
         status: node.status,
         sessions: node.sessionsSpawned,

@@ -10,7 +10,10 @@
  *
  * - traversal counting → `engine-state.ts` (`incrementLoopTraversal`,
  *   `isLoopExhausted`, `loopGroups`)
- * - revise-driven re-dispatch → `signal-propagation.ts` (`propagateRevise`)
+ * - convergence tracking → `engine-state.ts` (`recordConvergenceOutput`,
+ *   `resetConvergenceTracker`)
+ * - revise-driven re-dispatch + stuck detection + hard-cap enforcement →
+ *   `signal-propagation.ts` (`propagateRevise` — single enforcement point)
  * - worst-signal forward propagation → `signal-propagation.ts`
  *   (`propagateEscalate`)
  * - upstream cancellation → `cascade-canceller.ts` (`cancelPendingUpstreams`)
@@ -27,8 +30,10 @@
  * | **stuck** | Consecutive convergence outputs are identical for `>= CONSECUTIVE_STALE_THRESHOLD` (= 2) traversals | `completed → escalate` with reason `"stuck"` before any further traversal is consumed (§4.3). |
  *
  * Otherwise (`revise_needed` with traversals remaining) the executor delegates
- * to {@link propagateRevise}, which increments the traversal counter and
- * re-enters the offending upstream nodes (bounded-cycle re-dispatch). An
+ * to {@link propagateRevise}, which now owns stuck detection and hard-cap
+ * enforcement as the single enforcement point: it increments the traversal
+ * counter and re-enters the offending upstream nodes (bounded-cycle
+ * re-dispatch). An
  * `escalate` from a loop-group member delegates to {@link propagateEscalate}
  * and, at any convergence node whose join has now failed, retires the
  * still-pending upstream nodes via the cascade canceller (§3.3).
@@ -41,7 +46,6 @@
  */
 
 import { NodeStatus } from "../../constants.ts";
-import { CONSECUTIVE_STALE_THRESHOLD } from "../../loop/constants.ts";
 import type {
   EngineState,
   LoopGroupRuntimeState,
@@ -53,9 +57,12 @@ import type { SignalPropagationReport } from "./signal-propagation.ts";
 import { propagateEscalate, propagateRevise } from "./signal-propagation.ts";
 import { cancelPendingUpstreams, type CancelDispatchPort } from "./cascade-canceller.ts";
 import { evaluateJoin } from "./join-evaluator.ts";
-import { isLoopExhausted } from "./engine-state.ts";
-import { markDone } from "./node-lifecycle.ts";
 import { recordLoopRound } from "./recorder.ts";
+import {
+  fingerprintPayload,
+  recordConvergenceOutput,
+  resetConvergenceTracker,
+} from "./engine-state.ts";
 
 // ── Outcomes ────────────────────────────────────────────────────────────────
 
@@ -126,40 +133,10 @@ export interface LoopStepReport {
   downgradeReason?: string;
 }
 
-// ── Convergence-output fingerprinting ───────────────────────────────────────
+// Re-export convergence tracking functions for test consumption.
+export { fingerprintPayload, recordConvergenceOutput, resetConvergenceTracker };
 
-/**
- * Stable, order-insensitive canonical string for an arbitrary JSON payload.
- *
- * Keys are sorted recursively so `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce
- * the same fingerprint — the convergence output's *content* is what matters for
- * staleness, not the incidental key order the reviewer happened to emit.
- */
-function canonicalize(value: unknown): string {
-  if (value === null || value === undefined) return "null";
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalize).join(",")}]`;
-  }
-  if (typeof value === "object") {
-    const entries = Object.keys(value as Record<string, unknown>)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k])}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-/**
- * Fingerprint a convergence node's signal payload for stuck detection.
- *
- * Strings are compared on their trimmed text; objects are canonicalized. This
- * is the "identical output" test in graph-model.md §4.3 — two revision findings
- * that carry the same verdict/content count as a repeated output.
- */
-export function fingerprintPayload(payload: unknown): string {
-  if (typeof payload === "string") return payload.trim();
-  return canonicalize(payload);
-}
+// ── Payload inspection helpers ──────────────────────────────────────────────
 
 /**
  * Best-effort extraction of the unresolved items from a `revise_needed` payload.
@@ -206,58 +183,6 @@ function hasUnresolvedPayload(payload: unknown): boolean {
     if (typeof verdict === "string" && ["veto", "revise"].includes(verdict)) return true;
   }
   return false;
-}
-
-// ── Stuck detection ─────────────────────────────────────────────────────────
-
-/**
- * Record a convergence node's output against the loop group's rolling
- * fingerprint and report whether the loop is now stuck.
- *
- * - Fingerprint unchanged from the last traversal → `consecutiveStale` rises.
- * - Fingerprint changed → `consecutiveStale` resets to 1 (a fresh signal).
- * - First recorded output → `consecutiveStale` set to 1.
- *
- * Returns `true` when `consecutiveStale >= CONSECUTIVE_STALE_THRESHOLD`, i.e.
- * the loop has produced identical convergence output on at least the required
- * consecutive traversals and should exit with `escalate` (reason `"stuck"`).
- *
- * Pure state mutation on the loop group's tracker — never touches a node or the
- * frontier. The caller decides how to react to the `stuck` verdict.
- */
-export function recordConvergenceOutput(
-  state: EngineState,
-  groupId: string,
-  payload: unknown,
-): boolean {
-  const group = state.loopGroups.get(groupId);
-  if (!group) {
-    throw new Error(`Unknown loop group "${groupId}" in graph "${state.graphId}"`);
-  }
-  const fp = fingerprintPayload(payload);
-
-  if (group.convergenceFingerprint !== undefined && group.convergenceFingerprint === fp) {
-    group.consecutiveStale += 1;
-  } else {
-    group.convergenceFingerprint = fp;
-    group.consecutiveStale = 1;
-  }
-  state.updatedAt = Date.now();
-
-  return group.consecutiveStale >= CONSECUTIVE_STALE_THRESHOLD;
-}
-
-/**
- * Clear a loop group's stuck tracker.
- *
- * Called on a `converged` (`answer`) signal — the loop exited on the happy path,
- * so no output history needs to carry into a fresh group run.
- */
-export function resetConvergenceTracker(state: EngineState, groupId: string): void {
-  const group = state.loopGroups.get(groupId)!;
-  group.convergenceFingerprint = undefined;
-  group.consecutiveStale = 0;
-  state.updatedAt = Date.now();
 }
 
 // ── Convergence-node identification ─────────────────────────────────────────
@@ -381,9 +306,8 @@ export function executeLoopStep(
     // An answer signal whose payload still indicates unresolved work
     // (verdict: "revise" or "veto", or non-empty findings/items) is
     // downgraded to revise_needed semantics to prevent false convergence.
-    // The downgrade path mirrors the revise_needed branch exactly: stuck
-    // detection (recordConvergenceOutput), hard-cap exhaustion check,
-    // then propagateRevise for bounded-cycle continuation.
+    // Stuck detection and hard-cap enforcement are delegated entirely to
+    // propagateRevise (single enforcement point).
     // Skipped for synthetic answers (isInferred guard above).
     if (!isInferred && hasUnresolvedPayload(payload)) {
       const verdictObj = payload as Record<string, unknown>;
@@ -392,34 +316,6 @@ export function executeLoopStep(
         typeof verdict === "string" ? `: verdict=${verdict}` : ""
       }`;
 
-      // ── stuck early-exit (mirrors revise_needed path) ────────────────────
-      if (recordConvergenceOutput(state, groupId, payload)) {
-        markDone(node, "stuck");
-        report.outcome = "stuck";
-        report.escalated.push(node.nodeId);
-        report.escalatePayload = {
-          reason: "stuck",
-          unresolved: extractUnresolved(payload),
-          traversals: group.traversalCount,
-        };
-        report.traversals = group.traversalCount;
-        return report;
-      }
-
-      // ── hard-cap early-exit (mirrors revise_needed path) ──────────────────
-      if (isLoopExhausted(state, groupId)) {
-        markDone(node, "max_traversals exhausted");
-        report.outcome = "max_traversals_exhausted";
-        report.escalated.push(node.nodeId);
-        report.escalatePayload = {
-          reason: "max_traversals exhausted",
-          unresolved: extractUnresolved(payload),
-          traversals: group.traversalCount,
-        };
-        report.traversals = group.traversalCount;
-        return report;
-      }
-
       // ── bounded-cycle continuation: delegate to the revise propagator ────
       const prop = propagateRevise(state, node, payload);
       report.propagation = prop;
@@ -427,9 +323,10 @@ export function executeLoopStep(
       report.escalated = prop.escalated;
       report.traversals = group.traversalCount;
       if (prop.escalated.length > 0) {
-        report.outcome = "max_traversals_exhausted";
+        const isStuck = prop.reason === "stuck";
+        report.outcome = isStuck ? "stuck" : "max_traversals_exhausted";
         report.escalatePayload = {
-          reason: "max_traversals exhausted",
+          reason: isStuck ? "stuck" : "max_traversals exhausted",
           unresolved: extractUnresolved(payload),
           traversals: group.traversalCount,
         };
@@ -466,46 +363,19 @@ export function executeLoopStep(
   }
 
   if (signalType === "revise_needed") {
-    // ── stuck early-exit (§4.3) ────────────────────────────────────────────
-    if (recordConvergenceOutput(state, groupId, payload)) {
-      markDone(node, "stuck");
-      report.outcome = "stuck";
-      report.escalated.push(node.nodeId);
-      report.escalatePayload = {
-        reason: "stuck",
-        unresolved: extractUnresolved(payload),
-        traversals: group.traversalCount,
-      };
-      report.traversals = group.traversalCount;
-      return report;
-    }
-
-    // ── hard-cap early-exit (§1.6) ─────────────────────────────────────────
-    if (isLoopExhausted(state, groupId)) {
-      markDone(node, "max_traversals exhausted");
-      report.outcome = "max_traversals_exhausted";
-      report.escalated.push(node.nodeId);
-      report.escalatePayload = {
-        reason: "max_traversals exhausted",
-        unresolved: extractUnresolved(payload),
-        traversals: group.traversalCount,
-      };
-      report.traversals = group.traversalCount;
-      return report;
-    }
-
     // ── bounded-cycle continuation: delegate to the revise propagator ─────
+    // Stuck detection and hard-cap enforcement are delegated entirely to
+    // propagateRevise (single enforcement point).
     const prop = propagateRevise(state, node, payload);
     report.propagation = prop;
     report.revisedUpstream = prop.revisedUpstream;
     report.escalated = prop.escalated;
     report.traversals = group.traversalCount;
-    // propagateRevise can still escalate (its own increment check races the
-    // cap) — surface that with the structured payload for a consistent shape.
     if (prop.escalated.length > 0) {
-      report.outcome = "max_traversals_exhausted";
+      const isStuck = prop.reason === "stuck";
+      report.outcome = isStuck ? "stuck" : "max_traversals_exhausted";
       report.escalatePayload = {
-        reason: "max_traversals exhausted",
+        reason: isStuck ? "stuck" : "max_traversals exhausted",
         unresolved: extractUnresolved(payload),
         traversals: group.traversalCount,
       };

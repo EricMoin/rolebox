@@ -166,8 +166,8 @@ describe("resetNodeForRetry (pure state mutation)", () => {
     const C = state.nodes.get("C")!;
 
     // Force a terminal graph: B escalated, C escalated, phase complete.
-    markEscalated(B, "boom");
-    markEscalated(C, "boom");
+    markEscalated(state, B, "boom");
+    markEscalated(state, C, "boom");
     B.retryCount = 2;
     B.sessionsSpawned = 4;
     B.result = {

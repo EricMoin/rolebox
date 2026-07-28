@@ -6,16 +6,20 @@ import { join } from "node:path";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
-import { createEngineState } from "../../src/graph/engine/engine-state.ts";
+import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
   EnginePersistence,
   ENGINE_PERSISTENCE_VERSION,
   serializeEngineState,
   loadEngineStateFromJson,
   engineStatePath,
+  markDirty,
+  clearDirty,
+  shouldPersist,
 } from "../../src/graph/engine/engine-persistence.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
+import { AdvanceEngine, type NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
+import { SignalBridge, type SignalType } from "../../src/graph/engine/signal-bridge.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
@@ -178,6 +182,29 @@ describe("EnginePersistence", () => {
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("dirty flag: a round-trip save → load does NOT carry isDirty", () => {
+    // Set isDirty on a rich state to simulate a mutated state before save.
+    const state = buildRichState();
+    state.isDirty = true;
+
+    // The DTO-level serialize should NOT include isDirty (it is never persisted).
+    const dto = serializeEngineState(state);
+    expect((dto as unknown as Record<string, unknown>).isDirty).toBeUndefined();
+
+    // Persist and reload.
+    store.save(state);
+    const loaded = store.load("graph-1")!;
+    // The loaded state must NOT carry the dirty flag — it's a runtime-only field
+    // that is always reset to clean (false) after deserialization.
+    expect(loaded.isDirty).toBe(false);
+  });
+
+  it("dirty flag: a fresh state from createEngineState has no isDirty", () => {
+    const state = createEngineState(singleNodeDeclaration(), "graph-1");
+    // Fresh states are clean — isDirty is explicitly false in createEngineState.
+    expect(state.isDirty).toBe(false);
   });
 
   it("lossless round-trip: every field survives save → load", () => {
@@ -384,8 +411,8 @@ function populateAdditiveFields(state: EngineState): void {
 
   // SignalLedgerEntry.history (include_history / stream / since)
   state.signalLedger.get("A")!.history = [
-    { signal: "progress", payload: { step: 1 }, atMs: 150 },
-    { signal: "answer", atMs: 200 },
+    { signal: "progress", payload: { step: 1 }, atMs: 150, source: "dispatch" },
+    { signal: "answer", atMs: 200, source: "dispatch" },
   ];
 }
 
@@ -464,8 +491,194 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
 
     // Signal-event history survives in order.
     expect(loaded.signalLedger.get("A")!.history).toEqual([
-      { signal: "progress", payload: { step: 1 }, atMs: 150 },
-      { signal: "answer", atMs: 200 },
+      { signal: "progress", payload: { step: 1 }, atMs: 150, source: "dispatch" },
+      { signal: "answer", atMs: 200, source: "dispatch" },
     ]);
+  });
+});
+
+// ── Dirty-flag helpers (engine-persistence.ts contract) ─────────────────────
+
+describe("dirty-flag helpers (markDirty / clearDirty / shouldPersist)", () => {
+  it("markDirty sets isDirty true, shouldPersist reflects it", () => {
+    const state = createEngineState(singleNodeDeclaration(), "g-helpers-1");
+    expect(state.isDirty).toBe(false);
+    expect(shouldPersist(state)).toBe(false);
+
+    markDirty(state);
+    expect(state.isDirty).toBe(true);
+    expect(shouldPersist(state)).toBe(true);
+  });
+
+  it("clearDirty resets isDirty to false after markDirty", () => {
+    const state = createEngineState(singleNodeDeclaration(), "g-helpers-2");
+    markDirty(state);
+    expect(shouldPersist(state)).toBe(true);
+
+    clearDirty(state);
+    expect(state.isDirty).toBe(false);
+    expect(shouldPersist(state)).toBe(false);
+  });
+
+  it("deserialized state starts clean (isDirty is false, never resurrected)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-persist-helpers-"));
+    try {
+      const localStore = new EnginePersistence(dir);
+      const state = buildRichState();
+      state.isDirty = true; // simulate dirt before save
+      localStore.save(state);
+      const loaded = localStore.load("graph-1")!;
+      // isDirty must NOT survive the round-trip — it is runtime-only.
+      expect(loaded.isDirty).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Dirty-flag durability: state is complete after persist ──────────────────
+
+describe("dirty-flag durability", () => {
+  it("after engine.run(), persisted state is complete and isDirty is false on disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-dirt-durable-"));
+    try {
+      const engine = createEngine(singleNodeDeclaration(), {
+        graphId: "g-dirt-durable-1",
+        dispatch: new FakeDispatch(),
+        stateDir: dir,
+      });
+      await engine.run();
+
+      // The state is persisted at the end of the critical section.
+      const path = engineStatePath(dir, "g-dirt-durable-1");
+      expect(existsSync(path)).toBe(true);
+
+      // Load the persisted state: it must be complete and clean.
+      const loaded = new EnginePersistence(dir).load("g-dirt-durable-1");
+      expect(loaded).not.toBeNull();
+      expect(loaded!.phase).toBe(EnginePhase.Executing);
+      expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Running);
+      // isDirty must not survive serialization — it is runtime-only.
+      expect(loaded!.isDirty).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a mutating section persists exactly once, then idle sections produce zero extra writes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-dirt-once-"));
+    try {
+      let persistCount = 0;
+      const state = createEngineState(singleNodeDeclaration(), "g-dirt-once-1");
+      provision(state);
+      const signalBridge = new SignalBridge();
+      const engine = new AdvanceEngine({
+        state,
+        signalBridge,
+        dispatch: new FakeDispatch(),
+        persistState: (s) => {
+          persistCount++;
+          // Persist to disk inside the mock to match real behavior.
+          new EnginePersistence(dir).save(s);
+        },
+      });
+
+      // Dispatch the root → exactly 1 persist.
+      await engine.dispatchReady();
+      expect(persistCount).toBe(1);
+
+      // Verify the persisted file on disk is complete.
+      const loaded1 = new EnginePersistence(dir).load("g-dirt-once-1");
+      expect(loaded1).not.toBeNull();
+      expect(loaded1!.phase).toBe(EnginePhase.Executing);
+      expect(loaded1!.nodes.get("A")!.status).toBe(NodeStatus.Running);
+      expect(loaded1!.isDirty).toBe(false);
+
+      // Run 5 idle sections → zero additional persists.
+      for (let i = 0; i < 5; i++) {
+        await engine.dispatchReady();
+      }
+      expect(persistCount).toBe(1);
+
+      // The on-disk state remains unchanged (no further writes).
+      const loaded2 = new EnginePersistence(dir).load("g-dirt-once-1");
+      expect(loaded2).not.toBeNull();
+      expect(loaded2!.phase).toBe(EnginePhase.Executing);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Subtask 7 revision: dirty-flag batching optimization + durability ────────
+//
+// The optimization must fire: idle critical sections (nothing ready, no
+// mutations) must produce ZERO extra persists. And durability must be preserved:
+// a section whose only mutation is a recorded signal must still persist,
+// because signalLedger / signalsObserved are durable graph state.
+
+describe("dirty-flag batching: optimization fires on idle sections", () => {
+  it("idle dispatchReady sections produce zero extra writes", async () => {
+    const state = createEngineState(singleNodeDeclaration(), "g-opt-1");
+    provision(state); // root "A" becomes ready, in frontier
+
+    let persistCount = 0;
+    const signalBridge = new SignalBridge();
+
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge,
+      dispatch: new FakeDispatch(),
+      persistState: () => {
+        persistCount++;
+      },
+    });
+
+    // First dispatch: dispatches the ready root → 1 persist (isDirty from
+    // provisioning + phase transition + markRunning + removeFromFrontier).
+    await engine.dispatchReady();
+    expect(persistCount).toBe(1);
+
+    // Five idle dispatches: nothing ready, frontier empty, lock acquire is
+    // non-dirtying, drainPendingCompletions is empty → zero extra persists.
+    const N = 5;
+    for (let i = 0; i < N; i++) {
+      await engine.dispatchReady();
+    }
+    expect(persistCount).toBe(1);
+  });
+});
+
+describe("dirty-flag batching: durability preserved for signal-only mutations", () => {
+  it("signalBridge.record() sets isDirty so a critical section persists signal ledger", async () => {
+    const state = createEngineState(singleNodeDeclaration(), "g-sig-1");
+    provision(state);
+
+    let persistCount = 0;
+    const signalBridge = new SignalBridge();
+
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge,
+      dispatch: new FakeDispatch(),
+      persistState: () => {
+        persistCount++;
+      },
+    });
+
+    // Dispatch the root first so the node is running and frontier is empty.
+    await engine.dispatchReady();
+    expect(persistCount).toBe(1);
+
+    // Record a non-terminating signal — this writes to signalLedger and
+    // node.signalsObserved. With the fix in subtask 7 revision, this sets
+    // state.isDirty = true.
+    signalBridge.record(state, "A", "progress" as SignalType, { step: 1 });
+    expect(state.isDirty).toBe(true);
+
+    // Now run an idle section. Nothing is ready, BUT isDirty was set by
+    // the signal record above → the critical section's finally must persist.
+    await engine.dispatchReady();
+    expect(persistCount).toBe(2);
   });
 });

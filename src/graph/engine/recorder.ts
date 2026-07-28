@@ -36,38 +36,7 @@ import type {
   NodeRuntimeState,
   RoundHistoryEntry,
 } from "../../types.engine-v2.ts";
-
-// ── Node → EngineState binding ──────────────────────────────────────────────
-
-/**
- * Binding a {@link NodeRuntimeState} object to the {@link EngineState} that owns
- * it, so the generic lifecycle transition choke point
- * (`node-lifecycle.ts:transitionNode`) can auto-save a checkpoint on every
- * status change WITHOUT every caller having to thread an `EngineState` through.
- *
- * A `WeakMap` (weak keys) is used deliberately:
- * - A bound node never keeps an `EngineState` (and its whole graph) alive after
- *   the node is released — no unbounded growth across long-lived sessions.
- * - Keys are the exact node *objects*, so there is zero cross-engine leakage: a
- *   node object belongs to at most one `EngineState` (the one that registered
- *   it). A standalone node constructed without `bindNodeState` simply has no
- *   state to record into — its checkpoint recorder is a no-op (never fabricates).
- */
-const nodeToState = new WeakMap<NodeRuntimeState, EngineState>();
-
-/**
- * Bind a node to its owning engine state. Called at node-creation boundaries so
- * the lifecycle transition point can find the checkpoint destination:
- *
- * - `engine-state.ts:registerNode` — the primary registration path.
- * - `engine-recovery.ts:hydrateEngineState` — re-binds recovered nodes to the
- *   LIVE target state (recovery copies node references into a fresh container).
- *
- * Overwriting an existing binding is harmless (a node has exactly one owner).
- */
-export function bindNodeState(node: NodeRuntimeState, state: EngineState): void {
-  nodeToState.set(node, state);
-}
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Checkpoints (EngineState.checkpoints) ───────────────────────────────────
 
@@ -83,16 +52,16 @@ export function bindNodeState(node: NodeRuntimeState, state: EngineState): void 
  * from real data: the node's own id, the actual `to` status, and a genuine
  * epoch-ms timestamp.
  *
- * When the node is not bound to a state (standalone unit construction), this is
- * a no-op — no checkpoint is invented for a state that does not exist.
+ * When `state` is falsy (standalone unit construction without an engine), this
+ * is a no-op — no checkpoint is invented for a state that does not exist.
  */
 export function recordCheckpointForNode(
+  state: EngineState,
   node: NodeRuntimeState,
   _from: NodeStatus,
   to: NodeStatus,
   at: number,
 ): void {
-  const state = nodeToState.get(node);
   if (!state) return;
   const record: CheckpointRecord = { nodeId: node.nodeId, status: to, at };
   if (!state.checkpoints) {
@@ -100,6 +69,7 @@ export function recordCheckpointForNode(
   }
   state.checkpoints[node.nodeId] = record;
   state.updatedAt = at;
+  markDirty(state);
 }
 
 // ── Loop round history (LoopGroupRuntimeState.rounds) ───────────────────────
@@ -124,6 +94,7 @@ export function recordLoopRound(
   }
   group.rounds.push(entry);
   state.updatedAt = Date.now();
+  markDirty(state);
 }
 
 // ── Artifacts / evidence (NodeRuntimeState.artifacts / evidence) ────────────
@@ -187,13 +158,19 @@ export function recordNodeArtifactsAndEvidence(
   state: EngineState,
   node: NodeRuntimeState,
 ): void {
+  let written = false;
   const artifacts = deriveNodeArtifacts(node);
   if (artifacts.length > 0) {
     node.artifacts = artifacts;
+    written = true;
   }
   const evidence = deriveNodeEvidence(node);
   if (evidence.length > 0) {
     node.evidence = evidence;
+    written = true;
   }
-  state.updatedAt = Date.now();
+  if (written) {
+    state.updatedAt = Date.now();
+    markDirty(state);
+  }
 }

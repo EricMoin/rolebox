@@ -23,6 +23,7 @@
  */
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
+import { CONSECUTIVE_STALE_THRESHOLD } from "../../loop/constants.ts";
 import type { EdgeDeclaration, GraphDeclaration, NodeConfig } from "../../types.graph-v2.ts";
 import type {
   EngineState,
@@ -33,8 +34,8 @@ import type {
   BudgetEventSink,
 } from "../../types.engine-v2.ts";
 import { resolveJoinStrategy, isReviseBackEdge } from "./join-evaluator.ts";
-import { bindNodeState } from "./recorder.ts";
 import { markReady } from "./node-lifecycle.ts";
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Event sinks (write-side graph event log) ────────────────────────────────
 //
@@ -64,12 +65,12 @@ export function emptyGraphBudget(): GraphBudgetState {
 }
 
 /**
- * Stub: apply a consumption delta to the graph-level budget.
+ * Apply a consumption delta to the graph-level budget counters.
  *
- * TODO(Phase 7): Budget *enforcement* (checking cumulative consumption against
- * `graphDeclaration.budget.max_total_*` limits before dispatch and rejecting
- * with `escalate` once exhausted) is out of scope here. This only accumulates
- * the graph-level counters embedded in `EngineState.budget`.
+ * Budget *enforcement* (checking cumulative consumption against
+ * `graphDeclaration.budget.max_total_*` limits before dispatch) is a
+ * deliberate non-goal for this engine primitive. This function only
+ * accumulates the graph-level counters embedded in `EngineState.budget`.
  */
 export function applyBudgetDelta(
   state: EngineState,
@@ -86,6 +87,7 @@ export function applyBudgetDelta(
   b.totalOutputTokens += delta.outputTokens ?? 0;
   b.totalCost += delta.cost ?? 0;
   state.updatedAt = Date.now();
+  markDirty(state);
   // Emit a budget-update event to the write-side log (no-op when no sink is
   // wired on the state). Never lets a recorder failure corrupt the budget update.
   try {
@@ -126,6 +128,7 @@ export function transitionPhase(state: EngineState, to: EnginePhase): void {
   const now = Date.now();
   state.phase = to;
   state.updatedAt = now;
+  markDirty(state);
   // Emit a phase-change event to the write-side log (no-op when no sink is
   // wired on the state). Never lets a recorder failure corrupt the phase transition.
   try {
@@ -159,6 +162,7 @@ export function createEngineState(
     startedAt: now,
     updatedAt: now,
     advancingLock: false,
+    isDirty: false,
     pendingCompletions: [],
   };
 }
@@ -197,10 +201,8 @@ export function registerNode(
     retryCount: 0,
   };
   state.nodes.set(config.id, node);
-  // Bind the node to its owning state so the lifecycle transition point can
-  // auto-save checkpoints into `EngineState.checkpoints` (subtask C-RECORD).
-  bindNodeState(node, state);
   state.updatedAt = now;
+  markDirty(state);
   return node;
 }
 
@@ -303,7 +305,7 @@ export function provision(state: EngineState): void {
     const node = registerNode(state, config);
     const incoming = upstream.get(config.id) ?? 0;
     if (incoming === 0) {
-      markReady(node);
+      markReady(state, node);
       addToFrontier(state, config.id);
     } else {
       node.status = NodeStatus.Pending;
@@ -345,6 +347,7 @@ function provisionLoopGroups(state: EngineState): void {
       const node = state.nodes.get(nodeId);
       if (node) {
         node.loopGroupId = decl.id;
+        markDirty(state);
       }
     }
   }
@@ -457,6 +460,7 @@ export function incrementLoopTraversal(state: EngineState, groupId: string): boo
   }
   group.traversalCount += 1;
   state.updatedAt = Date.now();
+  markDirty(state);
   return true;
 }
 
@@ -489,6 +493,7 @@ export function addToFrontier(state: EngineState, nodeId: string): boolean {
   }
   state.frontier.push(nodeId);
   state.updatedAt = Date.now();
+  markDirty(state);
   return true;
 }
 
@@ -500,6 +505,7 @@ export function removeFromFrontier(state: EngineState, nodeId: string): boolean 
   }
   state.frontier.splice(idx, 1);
   state.updatedAt = Date.now();
+  markDirty(state);
   return true;
 }
 
@@ -519,6 +525,10 @@ export function acquireAdvancingLock(state: EngineState): boolean {
   }
   state.advancingLock = true;
   state.updatedAt = Date.now();
+  // Acquiring a lock is transient in-process bookkeeping, not durable graph
+  // state — a lock acquire/release has no persistence value on its own.
+  // The actual durable mutations (node transitions, frontier changes, etc.)
+  // set isDirty individually.
   return true;
 }
 
@@ -536,6 +546,7 @@ export function releaseAdvancingLock(state: EngineState): void {
 export function queuePendingCompletion(state: EngineState, nodeId: string): void {
   if (!state.pendingCompletions.includes(nodeId)) {
     state.pendingCompletions.push(nodeId);
+    markDirty(state);
   }
 }
 
@@ -548,6 +559,9 @@ export function drainPendingCompletions(state: EngineState): string[] {
   const drained = state.pendingCompletions;
   state.pendingCompletions = [];
   state.updatedAt = Date.now();
+  // Only dirty when the drained queue was actually non-empty — draining an
+  // empty queue is a no-op and has no persistence value on its own.
+  if (drained.length > 0) markDirty(state);
   return drained;
 }
 
@@ -558,4 +572,91 @@ export function getNode(state: EngineState, nodeId: string): NodeRuntimeState {
     throw new Error(`Unknown node id "${nodeId}" in graph "${state.graphId}"`);
   }
   return node;
+}
+
+// ── Convergence-output fingerprinting (stuck detection) ─────────────────────
+
+/**
+ * Stable, order-insensitive canonical string for an arbitrary JSON payload.
+ *
+ * Keys are sorted recursively so `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce
+ * the same fingerprint — the convergence output's *content* is what matters for
+ * staleness, not the incidental key order the reviewer happened to emit.
+ */
+function canonicalize(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalize).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * Fingerprint a convergence node's signal payload for stuck detection.
+ *
+ * Strings are compared on their trimmed text; objects are canonicalized. This
+ * is the "identical output" test in graph-model.md §4.3 — two revision findings
+ * that carry the same verdict/content count as a repeated output.
+ */
+export function fingerprintPayload(payload: unknown): string {
+  if (typeof payload === "string") return payload.trim();
+  return canonicalize(payload);
+}
+
+/**
+ * Record a convergence node's output against the loop group's rolling
+ * fingerprint and report whether the loop is now stuck.
+ *
+ * - Fingerprint unchanged from the last traversal → `consecutiveStale` rises.
+ * - Fingerprint changed → `consecutiveStale` resets to 1 (a fresh signal).
+ * - First recorded output → `consecutiveStale` set to 1.
+ *
+ * Returns `true` when `consecutiveStale >= CONSECUTIVE_STALE_THRESHOLD`, i.e.
+ * the loop has produced identical convergence output on at least the required
+ * consecutive traversals and should exit with `escalate` (reason `"stuck"`).
+ *
+ * Pure state mutation on the loop group's tracker — never touches a node or the
+ * frontier. The caller decides how to react to the `stuck` verdict.
+ */
+export function recordConvergenceOutput(
+  state: EngineState,
+  groupId: string,
+  payload: unknown,
+): boolean {
+  const group = state.loopGroups.get(groupId);
+  if (!group) {
+    throw new Error(`Unknown loop group "${groupId}" in graph "${state.graphId}"`);
+  }
+  const fp = fingerprintPayload(payload);
+
+  if (group.convergenceFingerprint !== undefined && group.convergenceFingerprint === fp) {
+    group.consecutiveStale += 1;
+  } else {
+    group.convergenceFingerprint = fp;
+    group.consecutiveStale = 1;
+  }
+  state.updatedAt = Date.now();
+  markDirty(state);
+
+  return group.consecutiveStale >= CONSECUTIVE_STALE_THRESHOLD;
+}
+
+/**
+ * Clear a loop group's stuck tracker.
+ *
+ * Called on a `converged` (`answer`) signal — the loop exited on the happy path,
+ * so no output history needs to carry into a fresh group run.
+ */
+export function resetConvergenceTracker(state: EngineState, groupId: string): void {
+  const group = state.loopGroups.get(groupId)!;
+  group.convergenceFingerprint = undefined;
+  group.consecutiveStale = 0;
+  state.updatedAt = Date.now();
+  markDirty(state);
 }

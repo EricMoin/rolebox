@@ -190,7 +190,7 @@ function addRootNode(state: EngineState, id: string, agent: string): NodeRuntime
     prompt: `p-${id}`,
   });
   const node = registerNode(state, { id, agent, prompt: `p-${id}` });
-  markReady(node);
+  markReady(state, node);
   addToFrontier(state, id);
   return node;
 }

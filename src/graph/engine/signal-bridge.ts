@@ -22,6 +22,7 @@
  */
 
 import type { EngineState, SignalLedgerEvent } from "../../types.engine-v2.ts";
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Signal-type vocabulary (imported from src/signal/signal-constants.ts) ────
 
@@ -130,6 +131,7 @@ export class SignalBridge {
       });
     }
     state.updatedAt = now;
+    markDirty(state);
 
     if (!TERMINATING_SIGNALS.has(type)) {
       return false;

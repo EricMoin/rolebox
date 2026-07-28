@@ -142,8 +142,8 @@ export function cancelPendingUpstreams(
     if (!upstream || !isCancellable(upstream)) continue;
 
     // Retire the node's lifecycle: running | ready | pending → cancelled → done.
-    markCancelled(upstream, `cancelled by join cascade at convergence node "${node.nodeId}"`);
-    markDone(upstream);
+    markCancelled(state, upstream, `cancelled by join cascade at convergence node "${node.nodeId}"`);
+    markDone(state, upstream);
     cancelled.push(sourceId);
 
     // Best-effort dispatch teardown, fire-and-forget. Never await the ack —

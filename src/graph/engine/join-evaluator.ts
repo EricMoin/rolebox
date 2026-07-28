@@ -361,6 +361,7 @@ export function collectUpstreamResults(
 ): void {
   node.upstreamResults.set(edgePayload.fromNode, edgePayload);
   node.joinSatisfied = joinSatisfied(state, node);
+  state.isDirty = true;
 }
 
 // ── Fan-in context merge ────────────────────────────────────────────────────

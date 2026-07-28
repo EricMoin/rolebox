@@ -47,7 +47,7 @@ import type {
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
-import { addToFrontier, incrementLoopTraversal } from "./engine-state.ts";
+import { addToFrontier, incrementLoopTraversal, recordConvergenceOutput } from "./engine-state.ts";
 import {
   canTransitionNode,
   markDone,
@@ -157,11 +157,14 @@ function activatesOnRevise(edge: EdgeDeclaration): boolean {
  *
  * 1. No loop group → the revision has nowhere to re-enter; the node escalates
  *    with reason `no loop group`.
- * 2. Loop group present but `incrementLoopTraversal` is rejected
+ * 2. Stuck detection — identical consecutive convergence outputs for
+ *    `>= CONSECUTIVE_STALE_THRESHOLD` traversals → `completed → done` with
+ *    reason `"stuck"`; no traversal consumed.
+ * 3. Loop group present but `incrementLoopTraversal` is rejected
  *    (`traversalCount >= max_traversals`) → the `revise_needed` back-edge is
  *    deactivated (graph-model.md §4.2); the node escalates with reason
  *    `max_traversals exhausted`.
- * 3. Otherwise the traversal counter is incremented and every upstream target
+ * 4. Otherwise the traversal counter is incremented and every upstream target
  *    reachable via an `on_signal(revise_needed)` back-edge within the loop
  *    group re-enters `ready` (added to the frontier) with the revision feedback
  *    merged into its re-execution prompt. The caller's `_dispatchReadyNodes`
@@ -169,8 +172,8 @@ function activatesOnRevise(edge: EdgeDeclaration): boolean {
  *    node-lifecycle.ts).
  *
  * The escalating node is expected to already be `completed` (the reviewing
- * pass finished); exhausting the cap flips it to `escalate`
- * (`completed → escalate`).
+ * pass finished); exhausting the cap flips it to `done`
+ * (`completed → done`).
  */
 export function propagateRevise(
   state: EngineState,
@@ -188,14 +191,24 @@ export function propagateRevise(
 
   const groupId = node.loopGroupId;
   if (!groupId) {
-    escalateNode(node, "no loop group");
+    escalateNode(state, node, "no loop group");
     report.reason = "no loop group";
     report.escalated.push(node.nodeId);
     return report;
   }
 
+  // ── stuck early-exit (§4.3) ────────────────────────────────────────────
+  // Check before consuming any traversal: identical consecutive convergence
+  // outputs mean the reviewer cannot make progress.
+  if (recordConvergenceOutput(state, groupId, payload)) {
+    markDone(state, node, "stuck");
+    report.reason = "stuck";
+    report.escalated.push(node.nodeId);
+    return report;
+  }
+
   if (!incrementLoopTraversal(state, groupId)) {
-    markDone(node, "max_traversals exhausted");
+    markDone(state, node, "max_traversals exhausted");
     report.reason = "max_traversals exhausted";
     report.escalated.push(node.nodeId);
     return report;
@@ -216,7 +229,7 @@ export function propagateRevise(
     if (!canTransitionNode(target.status, NodeStatus.Ready)) continue;
 
     target.prompt = mergeRevisionFeedback(target.prompt, round, payload);
-    markReady(target);
+    markReady(state, target);
     target.traversalCount += 1;
     addToFrontier(state, edge.to);
     report.revisedUpstream.push(edge.to);
@@ -292,7 +305,7 @@ export function propagateEscalate(
   if (findRetryEdge(state, node) && canTransitionNode(node.status, NodeStatus.Ready)) {
     node.retryCount += 1;
     node.prompt = `${node.prompt}\n\n[Automatic retry ${node.retryCount}]: previous attempt escalated — ${extractReason(payload)}`;
-    markReady(node);
+    markReady(state, node);
     addToFrontier(state, node.nodeId);
     report.retried.push(node.nodeId);
     return report;
@@ -339,7 +352,7 @@ function propagateEscalationForward(
       const verdict = evaluateJoin(state, target);
       if (verdict.kind === "failed") {
         if (canTransitionNode(target.status, NodeStatus.Escalate)) {
-          markEscalated(target, extractReason(payload));
+          markEscalated(state, target, extractReason(payload));
           report.escalated.push(target.nodeId);
           queue.push(target); // its failure may fail the next convergence node
           advanced = true;
@@ -387,8 +400,8 @@ function recordEscalate(
  * `completed → escalate` transition represents "revision rejected at the cap →
  * escalate". Guarded so replaying an already-escalated node is a no-op.
  */
-function escalateNode(node: NodeRuntimeState, reason: string): void {
+function escalateNode(state: EngineState, node: NodeRuntimeState, reason: string): void {
   if (canTransitionNode(node.status, NodeStatus.Escalate)) {
-    markEscalated(node, reason);
+    markEscalated(state, node, reason);
   }
 }

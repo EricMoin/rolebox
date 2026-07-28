@@ -56,6 +56,42 @@ export const NON_CRITICAL_DEBOUNCE_MS = 500 as const;
 /** Characters allowed verbatim in the per-graph filename slug. */
 const SAFE_SLUG = /[^A-Za-z0-9._-]/g;
 
+// ── Dirty-flag helpers (write-through batching) ──────────────────────────────
+
+/**
+ * Mark the engine state as mutated. Every critical mutation site MUST call
+ * this after mutating any persistent field (node lifecycle, phase, frontier,
+ * budget, signal ledger, loop group state, checkpoints, etc.). The
+ * advancement critical section's `finally` block only persists when the flag
+ * is set, avoiding redundant writes on idle sections.
+ *
+ * This function is the official choke-point — callers never set
+ * `state.isDirty` directly. The field is deliberately omitted from the
+ * serialization DTO so a deserialized (recovered) state always starts clean.
+ */
+export function markDirty(state: EngineState): void {
+  state.isDirty = true;
+}
+
+/**
+ * Clear the dirty flag after a successful persist. Called in the advancement
+ * critical section's `finally` block immediately after `persistState?.`.
+ * The state is now durably on disk and the flag is reset so the next idle
+ * section does not re-persist.
+ */
+export function clearDirty(state: EngineState): void {
+  state.isDirty = false;
+}
+
+/**
+ * Whether the engine state has unpersisted mutations. When `false`, the
+ * advancement critical section's `finally` block skips the `persistState?.`
+ * call — the section was idle (no mutations occurred).
+ */
+export function shouldPersist(state: EngineState): boolean {
+  return state.isDirty;
+}
+
 // ── Serialization DTO types ─────────────────────────────────────────────────
 
 /**
@@ -193,6 +229,9 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     signalLedger[id] = cloneSignalLedgerEntry(e);
   }
 
+  // isDirty is deliberately NOT serialized — it is a runtime-only flag.
+  // The persisted snapshot never carries it, so a recovered state always
+  // starts clean (isDirty = false), preventing stale-flag resurrection.
   return {
     version: ENGINE_PERSISTENCE_VERSION,
     graphId: state.graphId,
@@ -262,6 +301,8 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     advancingLock: file.advancingLock,
     pendingCompletions: [...file.pendingCompletions],
     checkpoints: cloneCheckpoints(file.checkpoints),
+    // isDirty is runtime-only — a recovered state always starts clean.
+    isDirty: false,
   } as EngineState;
 }
 

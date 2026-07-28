@@ -161,7 +161,7 @@ export function resetNodeForRetry(
     resetNodeRun(node);
     const downstreamPrevStatus = node.status;
     node.status = NodeStatus.Pending;
-    recordCheckpointForNode(node, downstreamPrevStatus, NodeStatus.Pending, Date.now());
+    recordCheckpointForNode(state, node, downstreamPrevStatus, NodeStatus.Pending, Date.now());
     removeFromFrontier(state, id);
   }
 
@@ -173,14 +173,15 @@ export function resetNodeForRetry(
   target.retryCount += 1;
   const targetPrevStatus = target.status;
   target.status = NodeStatus.Pending;
-  recordCheckpointForNode(target, targetPrevStatus, NodeStatus.Pending, Date.now());
-  markReady(target); // pending → ready (a legal transition)
+  recordCheckpointForNode(state, target, targetPrevStatus, NodeStatus.Pending, Date.now());
+  markReady(state, target); // pending → ready (a legal transition)
   addToFrontier(state, nodeId);
 
   // 3. Re-open a terminal graph phase so the re-run stays active.
   if (state.phase === EnginePhase.Complete) {
     state.phase = EnginePhase.Executing;
     state.updatedAt = Date.now();
+    state.isDirty = true;
   }
 
   return {

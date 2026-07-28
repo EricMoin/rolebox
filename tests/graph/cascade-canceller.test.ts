@@ -100,8 +100,8 @@ function buildRig(decl: GraphDeclaration): Rig {
 /** Transition a node into `running`, assigning a dispatch task id. */
 function setRunning(state: EngineState, id: string, taskId: string): void {
   const node = state.nodes.get(id)!;
-  if (node.status === NodeStatus.Pending) markReady(node);
-  markRunning(node, { dispatchTaskId: taskId, dispatchSessionId: `sess-${id}` });
+  if (node.status === NodeStatus.Pending) markReady(state, node);
+  markRunning(state, node, { dispatchTaskId: taskId, dispatchSessionId: `sess-${id}` });
 }
 
 // ── satisfied verdict: cancel the still-outstanding upstreams ───────────────

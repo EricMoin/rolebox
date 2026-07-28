@@ -38,6 +38,7 @@ import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
 import type { BudgetCheckResult } from "../../dispatch/budget/budget-tracker.ts";
+import { shouldPersist, clearDirty, markDirty } from "./engine-persistence.ts";
 import {
   type DispatchParentContext,
   type TaskTerminatedCallback,
@@ -226,8 +227,8 @@ export interface AdvanceEngineOptions {
   /** Parent context for node dispatches (defaults to a graph-scoped one). */
   parentContext?: DispatchParentContext;
   /**
-   * Optional `on_condition` edge evaluator. Phase 1: when absent, `on_condition`
-   * edges never activate (TODO Phase 2 wires the condition vocabulary).
+   * Optional `on_condition` edge evaluator. When absent, `on_condition`
+   * edges never activate.
    */
   conditionResolver?: EdgeConditionResolver;
   /**
@@ -460,13 +461,16 @@ export class AdvanceEngine {
       return await work();
     } finally {
       releaseAdvancingLock(this.state);
-      // Write-through persistence point (Phase 3): every critical transition
-      // produced by this critical section (node lifecycle, graph phase, frontier)
-      // is persisted before deferred completions are re-processed. The drain
-      // below re-enters fresh critical sections, each persisting its own work —
-      // so no critical mutation escapes durability. The seam is optional: when
-      // absent (no persistence configured) this is a no-op. See Q2 Option A.
-      this.persistState?.(this.state);
+      // Write-through persistence point (Phase 3): only persist when the state
+      // has been mutated during this critical section (isDirty flag). This
+      // avoids redundant writes on no-op sections. The flag is cleared after a
+      // successful persist. The seam is optional: when absent (no persistence
+      // configured) this is a no-op. See Q2 Option A and engine-persistence.ts
+      // dirty-flag helpers (shouldPersist / clearDirty).
+      if (shouldPersist(this.state)) {
+        this.persistState?.(this.state);
+        clearDirty(this.state);
+      }
       await this._drainDeferred();
     }
   }
@@ -599,7 +603,7 @@ export class AdvanceEngine {
                 // exhaustion path so the graph's termination logic sees a
                 // consistent outcome. No traversal was consumed — the cap
                 // was already at maxTraversals from a prior re-entry.
-                markDone(target, "max_traversals exhausted");
+                markDone(this.state, target, "max_traversals exhausted");
                 blockedByCap = true;
               } else {
                 // Per-node traversal count for loop re-entry diagnostics
@@ -622,7 +626,7 @@ export class AdvanceEngine {
               }
             }
             if (!blockedByCap) {
-              markReady(target);
+              markReady(this.state, target);
               addToFrontier(state, edge.to);
             }
           }
@@ -658,6 +662,7 @@ export class AdvanceEngine {
       const task = port.getTask(taskId);
       if (task?.result && !task.result.fetchError) {
         node.result = { ...task.result };
+        markDirty(this.state);
       }
     } catch {
       // best-effort — a throwing getTask must never corrupt advancement
@@ -679,7 +684,7 @@ export class AdvanceEngine {
     switch (signalType) {
       case "answer":
         if (node.status === NodeStatus.Running) {
-          markCompleted(node);
+          markCompleted(this.state, node);
           // Record the node's genuinely produced artifacts/evidence at
           // completion (subtask C-RECORD). Fields stay absent when the node
           // produced none — never fabricated.
@@ -693,7 +698,7 @@ export class AdvanceEngine {
         // The reviewing node finished its pass; its own lifecycle completes.
         // Back-edge re-activation of the upstream node is Phase 2.
         if (node.status === NodeStatus.Running) {
-          markCompleted(node);
+          markCompleted(this.state, node);
           this._captureNodeResult(node);
           recordNodeArtifactsAndEvidence(this.state, node);
           // Subtask 1: notify exactly once — reviewer finished → completed.
@@ -702,7 +707,7 @@ export class AdvanceEngine {
         break;
       case "escalate":
         if (node.status === NodeStatus.Running) {
-          markEscalated(node, this._extractErrorMessage(signalPayload));
+          markEscalated(this.state, node, this._extractErrorMessage(signalPayload));
           // Subtask 1: notify exactly once — `escalate`.
           this._notifyCompletion(node, "escalate", signalPayload, NodeStatus.Escalate);
         }
@@ -808,8 +813,8 @@ export class AdvanceEngine {
    *
    * - `always` → true (any terminating signal).
    * - `on_signal` → true when the signal is in the edge's `signal_filter`.
-   * - `on_condition` → Phase 1 stub: delegates to the injected resolver; with no
-   *   resolver the edge never activates (TODO Phase 2 wires the vocabulary).
+   * - `on_condition` → delegates to the injected resolver; with no
+   *   resolver the edge never activates.
    */
   private _edgeActivates(
     edge: EdgeDeclaration,
@@ -823,7 +828,7 @@ export class AdvanceEngine {
         return (edge.signal_filter ?? []).includes(signalType);
       case "on_condition":
         if (!edge.condition) return false;
-        if (!this.conditionResolver) return false; // TODO Phase 2
+        if (!this.conditionResolver) return false;
         return this.conditionResolver(edge.condition, source);
       default:
         return false;
@@ -855,7 +860,7 @@ export class AdvanceEngine {
       const check = this.budgetPort.checkGraphBudget(state.graphId);
       if (check.exceeded) {
         if (node.status === NodeStatus.Ready) {
-          markEscalated(node, check.reason ?? "graph budget exhausted");
+          markEscalated(this.state, node, check.reason ?? "graph budget exhausted");
         }
         return;
       }
@@ -863,7 +868,7 @@ export class AdvanceEngine {
 
     // ready → running happens before the async launch so the node is never
     // left in a dispatching-ready state while the critical section awaits.
-    markRunning(node);
+    markRunning(this.state, node);
     removeFromFrontier(state, node.nodeId);
     // Write-side durable log: record that this node was dispatched (its
     // `startedAt` was set by `markRunning`). Total — never breaks dispatch.
@@ -876,6 +881,7 @@ export class AdvanceEngine {
     );
     node.dispatchTaskId = task.id;
     node.dispatchSessionId = task.sessionId;
+    markDirty(state);
     // Phase-3 delivery seam (closes the known integration gap): a real dispatch
     // completion never reached the advance engine — only direct
     // `signalBridge.record` injection did. Register an `onTaskTerminated`
@@ -922,7 +928,11 @@ export class AdvanceEngine {
         ) {
           const sig = mapDispatchStatusToSignal(currentStatus.status, currentStatus);
           if (sig) {
-            this.signalBridge.record(this.state, node.nodeId, sig.type, sig.payload);
+            // Record the signal directly so _latestTerminating() can find it
+            // when the deferred completion is drained. This mirrors the recovery
+            // path (engine-recovery.ts reconcileEngine → deferred signals).
+            node.signalsObserved[sig.type] = sig.payload;
+            queuePendingCompletion(this.state, node.nodeId);
           }
         }
       }
@@ -1107,10 +1117,11 @@ export class AdvanceEngine {
     // Only a declared `needs_approval` node pauses; a stray `need_approval`
     // signal on a non-gate node is recorded but never blocks the graph.
     if (!node.needsApproval) return;
-    markNodeBlocked(node);
+    markNodeBlocked(this.state, node);
     removeFromFrontier(this.state, node.nodeId);
     // Assemble the human-facing decision context from the frozen upstream state.
     node.signalsObserved["approval_payload"] = buildApprovalPayload(this.state, node);
+    markDirty(this.state);
   }
 
   /**
@@ -1198,7 +1209,7 @@ export class AdvanceEngine {
           node.joinSatisfied &&
           canTransitionNode(node.status, NodeStatus.Ready)
         ) {
-          markReady(node);
+          markReady(this.state, node);
           addToFrontier(this.state, nodeId);
         }
         // Notify external observers: partial approval resolved the gate for
@@ -1283,7 +1294,7 @@ export class AdvanceEngine {
           (target.status === NodeStatus.Completed &&
             target.loopGroupId !== undefined);
         if (reEnter) {
-          markReady(target);
+          markReady(this.state, target);
           addToFrontier(state, edge.to);
         }
       }

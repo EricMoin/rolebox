@@ -182,8 +182,8 @@ function cancelOne(
 ): void {
   // Double guard: transition-table legality + the Cancellable rule.
   if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
-  markCancelled(node, reason);
-  markDone(node);
+  markCancelled(state, node, reason);
+  markDone(state, node);
   removeFromFrontier(state, node.nodeId);
   if (dispatchPort?.cancelTask && node.dispatchTaskId) {
     cancelCalls.push(node.dispatchTaskId);
