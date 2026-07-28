@@ -13,67 +13,27 @@
  *    hook (implemented in a later subtask — this module only defines the
  *    interface and the callback-injection point).
  *
- * The 8-signal vocabulary is mirrored from `src/signal/signal-tool.ts:16-43`
- * (which derives it from the Zod enum at `signal-tool.ts:53-62`). It is NOT
- * redefined here from scratch — the categories (terminating / pausing /
- * handoff / info) are read from that single source of truth:
- *
- *   TERMINATING_SIGNALS = { answer, revise_needed, escalate }     (line 16)
- *   PAUSING_SIGNALS     = { need_approval, blocked, need_clarification } (23)
- *   HANDOFF_SIGNALS     = { handoff }                              (line 30)
- *   INFO_SIGNALS        = { progress }                             (line 36)
- *
- * Note: `ALL_SIGNAL_TYPES` in `signal-tool.ts` is module-private, so the
- * literal union is re-declared here as `SignalType` for engine typing. The
- * *categories* are kept in sync with the tool's categories above.
+ * The 8-signal vocabulary is imported from `src/signal/signal-constants.ts`
+ * (the single source of truth), then re-exported for backward-compatible
+ * engine-side consumption. No signal-type definitions live here — every
+ * constant is routed through `signal-constants.ts`.
  *
  * Design reference: `.rolebox/design/engine-state-machine.md` §3.4.
  */
 
 import type { EngineState, SignalLedgerEvent } from "../../types.engine-v2.ts";
 
-// ── Signal-type vocabulary (mirrors src/signal/signal-tool.ts:16-43) ────────
+// ── Signal-type vocabulary (imported from src/signal/signal-constants.ts) ────
 
-/** The 8 valid signal types, in the order of the tool's Zod enum (signal-tool.ts:53-62). */
-export const SIGNAL_TYPES = [
-  "answer",
-  "need_approval",
-  "blocked",
-  "need_clarification",
-  "handoff",
-  "progress",
-  "revise_needed",
-  "escalate",
-] as const;
-
-/** Union of the 8 valid signal types. */
-export type SignalType = (typeof SIGNAL_TYPES)[number];
-
-/** Signals that satisfy `continue_until` — terminate the node's run. (signal-tool.ts:16) */
-export const TERMINATING_SIGNALS = new Set<string>(["answer", "revise_needed", "escalate"]);
-
-/** Signals that pause graph advancement (approval / blocked / clarification). (signal-tool.ts:23)
- *
- * Engine-side routing note:
- *   - `need_approval`   → transitions the node to `blocked` (engine-advance.ts
- *                         _pauseForApproval), gates downstream.
- *   - `blocked`         → recorded only, no engine-side state transition
- *                         (reserved — future internal-deadlock escape hatch).
- *   - `need_clarification` → recorded only, no engine-side state transition
- *                         (reserved — future human-asks-for-info lane).
- */
-export const PAUSING_SIGNALS = new Set<string>(["need_approval", "blocked", "need_clarification"]);
-
-/** Signals that route work elsewhere without terminating. (signal-tool.ts:30)
- *
- * Engine-side routing note:
- *   - `handoff` → recorded only, no engine-side state transition (reserved —
- *                  future cross-graph / cross-department task routing).
- */
-export const HANDOFF_SIGNALS = new Set<string>(["handoff"]);
-
-/** Informational signals with no state transition. (signal-tool.ts:36) */
-export const INFO_SIGNALS = new Set<string>(["progress"]);
+import {
+  SIGNAL_TYPES,
+  TERMINATING_SIGNALS,
+  PAUSING_SIGNALS,
+  HANDOFF_SIGNALS,
+  INFO_SIGNALS,
+  type SignalType,
+} from "../../signal/signal-constants.ts";
+export { SIGNAL_TYPES, TERMINATING_SIGNALS, PAUSING_SIGNALS, HANDOFF_SIGNALS, INFO_SIGNALS, type SignalType };
 
 // ── Callback interface (injection point for subtask 6) ──────────────────────
 

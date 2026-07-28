@@ -4,43 +4,12 @@ import { functionRuntime } from "../function/runtime-state.ts";
 import { functionSessionState } from "../function/session-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { recordSignal, hasSignal, getSignalPayload } from "./signal-ledger.ts";
+import { sessionSignalLedger } from "./session-signal-ledger.ts";
 import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("signal-tool");
 
-/**
- * Signal types that satisfy `continue_until` conditions.
- * When one of these fires, the signal_observed(…) condition returns true,
- * which may trigger phase="complete" on the next idle cycle.
- */
-const TERMINATING_SIGNALS = new Set(["answer", "revise_needed", "escalate"]);
-
-/**
- * Signal types that trigger a pausing transition.
- * These record the signal in the ledger AND set an evidence tag `paused`
- * so the FSM's transition system can detect the pause.
- */
-const PAUSING_SIGNALS = new Set(["need_approval", "blocked", "need_clarification"]);
-
-/**
- * Signal types that trigger a non-terminating handoff transition.
- * Recorded in the ledger with the handoff target payload, but does NOT
- * satisfy completion conditions by itself.
- */
-const HANDOFF_SIGNALS = new Set(["handoff"]);
-
-/**
- * Informational-only signal types. Recorded in the ledger but satisfy
- * no completion or pause conditions.
- */
-const INFO_SIGNALS = new Set(["progress"]);
-
-const ALL_SIGNAL_TYPES = new Set([
-  ...TERMINATING_SIGNALS,
-  ...PAUSING_SIGNALS,
-  ...HANDOFF_SIGNALS,
-  ...INFO_SIGNALS,
-]);
+import { TERMINATING_SIGNALS, PAUSING_SIGNALS, HANDOFF_SIGNALS, INFO_SIGNALS, ALL_SIGNAL_TYPES } from "./signal-constants.ts";
 
 export function createSignalTool() {
   return defineTool({
@@ -65,6 +34,10 @@ export function createSignalTool() {
     async execute(input, context) {
       const { type, payload } = input;
       const sessionID = context.sessionID;
+
+      // ── Record signal at session level (before any function-state iteration) ──
+      sessionSignalLedger.record(sessionID, type, payload);
+      log.debug("session signal recorded", { sessionID, type });
 
       // ── Safety net: reject unrecognized types ────────────────────────────
       // (Zod already catches at parse time; this guards against direct calls.)
