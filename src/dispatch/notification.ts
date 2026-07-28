@@ -2,6 +2,7 @@ import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { DispatchTask, NotificationPayload } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
 import { metrics } from "./persistence/metrics.ts";
+import { buildReminder, type ReminderField } from "../prompt/reminder.ts";
 
 const log = createSubLogger("dispatch:notify");
 
@@ -120,26 +121,23 @@ export function buildNotificationText(payload: NotificationPayload): string {
   const duration = payload.duration;
 
   if (payload.remainingTasks > 0) {
-    return [
-      "<system-reminder>",
-      DISPATCH_COMPLETION_MARKER,
-      `**ID:** ${payload.taskId}`,
-      `**Description:** ${payload.description || "N/A"}`,
-      `**Duration:** ${duration}`,
-      `**Status:** ${payload.status}`,
-      "",
-      `${payload.remainingTasks} task(s) still in progress. You'll be notified when all complete.`,
-      "</system-reminder>",
-    ].join("\n");
+    // Intermediate: single task completed, more remain
+    return buildReminder({
+      marker: DISPATCH_COMPLETION_MARKER,
+      fields: [
+        { label: "task", value: payload.taskId },
+        { label: "desc", value: payload.description || "N/A" },
+        { label: "dur", value: duration },
+        { label: "status", value: payload.status },
+      ],
+      action: `${payload.remainingTasks} task(s) still in progress. You'll be notified when all complete.`,
+    });
   }
 
   // Final notification
-  const lines = [
-    "<system-reminder>",
-    DISPATCH_ALL_COMPLETE_MARKER,
-    "**Completed:**",
-    `- ${label} (${duration})`,
-    "",
+  const fields: ReminderField[] = [
+    { label: "task", value: label },
+    { label: "dur", value: duration },
   ];
 
   if (payload.resultText) {
@@ -147,20 +145,20 @@ export function buildNotificationText(payload: NotificationPayload): string {
     const truncated = payload.resultText.length > MAX_INLINE_CHARS
       ? payload.resultText.slice(0, MAX_INLINE_CHARS) + "\n\n[... result truncated, use graph_status for full content ...]"
       : payload.resultText;
-    lines.push("**Result:**");
-    lines.push("");
-    lines.push("```result");
-    lines.push(truncated);
-    lines.push("```");
-    lines.push("");
-    lines.push(`Use graph_status(node_id="${payload.taskId}", include_output=true) to retrieve the full result or paginate.`);
-    lines.push("</system-reminder>");
-  } else {
-    lines.push("All background tasks have finished. You may continue.");
-    lines.push("</system-reminder>");
+
+    return buildReminder({
+      marker: DISPATCH_ALL_COMPLETE_MARKER,
+      fields,
+      action: `Use graph_status(node_id="${payload.taskId}", include_output=true) to retrieve the full result or paginate.`,
+      body: ["```result", truncated, "```"].join("\n"),
+    });
   }
 
-  return lines.join("\n");
+  return buildReminder({
+    marker: DISPATCH_ALL_COMPLETE_MARKER,
+    fields,
+    action: "All background tasks have finished. You may continue.",
+  });
 }
 
 /**

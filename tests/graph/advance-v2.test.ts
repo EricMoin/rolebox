@@ -123,7 +123,7 @@ describe("advanceGraphForDispatch v2", () => {
     });
     expect(r1.result.kind).toBe("off_route");
     expect(r1.correction).toBeDefined();
-    expect(r1.correction!).toContain("went off the collaboration graph route");
+    expect(r1.correction!).toContain("went off-route");
     expect(r1.correction!).not.toContain("has terminated due to repeated");
 
     // Off-route #2 (correctionCount: 1→2)
@@ -132,8 +132,8 @@ describe("advanceGraphForDispatch v2", () => {
     });
     expect(r2.result.kind).toBe("off_route");
     expect(r2.correction).toBeDefined();
-    expect(r2.correction!).toContain("went off the collaboration graph route");
-    expect(r2.correction!).not.toContain("has terminated due to repeated");
+    expect(r2.correction!).toContain("went off-route");
+    expect(r2.correction!).not.toContain("repeated off-route");
 
     // Off-route #3 (correctionCount: 2→3) → escalated
     const r3 = advanceGraphForDispatch(SID, "task", {
@@ -142,7 +142,7 @@ describe("advanceGraphForDispatch v2", () => {
     expect(r3.result.kind).toBe("off_route");
     expect(r3.correction).toBeDefined();
     expect(r3.correction!).toContain(
-      "has terminated due to repeated off-route dispatches",
+      "repeated off-route dispatches",
     );
     expect(r3.correction!).toContain(
       "Stop dispatching and synthesize the best final result",
@@ -157,7 +157,7 @@ describe("advanceGraphForDispatch v2", () => {
       subagent_type: "coder",
     });
     expect(r4.correction!).toContain(
-      "has terminated due to repeated off-route dispatches",
+      "repeated off-route dispatches",
     );
     expect(graphSessionState.getState(SID)!.correctionCount).toBe(4);
   });
@@ -411,7 +411,7 @@ describe("advanceGraphForDispatch v2", () => {
     expect(out.result.kind).toBe("unknown");
     expect(out.correction).toBeDefined();
     expect(out.correction!).toContain("unknown-agent");
-    expect(out.correction!).toContain("not part of the collaboration graph");
+    expect(out.correction!).toContain("Not part of the collaboration graph");
   });
 
   it("ignored for missing session or inactive state (legacy paths)", () => {

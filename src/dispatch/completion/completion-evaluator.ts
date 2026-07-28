@@ -22,10 +22,20 @@ import { materializeAndNotify } from "./result-materializer.ts";
 import type { ProgressEvent } from "../types.progress.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
 import { hasSignal, getSignalPayload } from "../../signal/signal-ledger.ts";
+import { buildReminder } from "../../prompt/reminder.ts";
 
-// ── HITL signal types that pause a task awaiting human intervention ──
+// ── Signal-type classification ──────────────────────────────────────
 
+/** HITL signal types that pause a task awaiting human intervention. */
 const HITL_SIGNALS = new Set(["need_approval", "blocked", "need_clarification"]);
+
+/**
+ * Terminating signal types emitted by a sub-agent that indicate the reason it
+ * completed. Mirrors `TERMINATING_SIGNALS` in `src/signal/signal-tool.ts`.
+ * Listed in descending severity so the highest-severity signal wins when
+ * multiple were recorded.
+ */
+const TERMINATING_SIGNALS = ["escalate", "revise_needed", "answer"] as const;
 
 /**
  * Check whether the subagent session associated with this task emitted any
@@ -77,19 +87,20 @@ async function checkHitlSignals(d: TaskLifecycleDeps, taskId: string): Promise<b
   d.persistState();
 
   // Send <system-reminder> to parent with approval details
-  const notifyText = [
-    "<system-reminder>",
-    "[HITL APPROVAL REQUIRED]",
-    `**Task ID:** ${taskId}`,
-    `**Description:** ${t.description || "N/A"}`,
-    `**Sub-agent:** ${t.agent}`,
-    `**Signal type:** ${hitlType}`,
-    `**Payload:** ${JSON.stringify(hitlPayload)}`,
-    "",
-    `Use \`approve_task(task_id="${taskId}")\` to approve and continue.`,
-    `Use \`reject_task(task_id="${taskId}", reason="...")\` to reject.`,
-    "</system-reminder>",
-  ].join("\n");
+  const notifyText = buildReminder({
+    marker: "[HITL APPROVAL REQUIRED]",
+    fields: [
+      { label: "task", value: taskId },
+      ...(t.description ? [{ label: "desc", value: t.description }] : []),
+      { label: "agent", value: t.agent },
+      { label: "signal", value: hitlType },
+      { label: "payload", value: JSON.stringify(hitlPayload) },
+    ],
+    action: [
+      `Use \`approve_task(task_id="${taskId}")\` to approve and continue.`,
+      `Use \`reject_task(task_id="${taskId}", reason="...")\` to reject.`,
+    ].join("\n"),
+  });
 
   try {
     await d.client.prompt(t.parentSessionId, {
@@ -106,6 +117,39 @@ async function checkHitlSignals(d: TaskLifecycleDeps, taskId: string): Promise<b
 
   notifyTerminated(d, taskId, hitlType);
   return true;
+}
+
+/**
+ * Read the last terminating signal emitted by the sub-agent session
+ * associated with a task from the function runtime signal ledger.
+ *
+ * When the sub-agent called `signal(type="revise_needed")` (or `escalate`,
+ * `answer`) before its session completed, that signal type and payload are
+ * recorded in the session's function runtime state. This function reads the
+ * highest-severity terminating signal so the completion evaluator can pass
+ * it through to the graph engine instead of hardcoding "completed → answer".
+ *
+ * Severity order: escalate > revise_needed > answer.
+ *
+ * @returns The terminating signal info, or `null` when no terminating signal
+ *          was recorded (normal completion → defaults to answer downstream).
+ */
+function getTerminatingSignal(
+  taskId: string,
+  sessionId: string,
+): { type: string; payload: unknown } | null {
+  const sessionFns = functionRuntime.all(sessionId);
+  for (const signalType of TERMINATING_SIGNALS) {
+    for (const [, fnState] of sessionFns) {
+      if (hasSignal(fnState, signalType)) {
+        return {
+          type: signalType,
+          payload: getSignalPayload(fnState, signalType),
+        };
+      }
+    }
+  }
+  return null;
 }
 
 // ── Helpers for common transition patterns ─────────────────────
@@ -311,6 +355,11 @@ export async function evaluateAndComplete(
         // Check for HITL signals (need_approval, blocked, need_clarification)
         // before completing. If found, the task pauses instead of completing.
         if (await checkHitlSignals(d, taskId)) break;
+        // Record the real terminating signal (if any) from the function runtime
+        // state before completing, so the graph engine emits the correct signal
+        // type (e.g. revise_needed) instead of unconditionally mapping
+        // completed → answer.
+        task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? undefined;
         await completeAndRelease(d, taskId);
         break;
       }
@@ -347,6 +396,7 @@ export async function evaluateAndComplete(
       case "stabilizing": {
         debugLog("evaluate", taskId, `stabilizing with skipStabilityGating=true — treating as completed`);
         if (await checkHitlSignals(d, taskId)) break;
+        task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? undefined;
         await completeAndRelease(d, taskId);
         break;
       }

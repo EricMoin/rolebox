@@ -143,8 +143,21 @@ export function mapDispatchStatusToSignal(
   task?: DispatchTask,
 ): DispatchStatusSignal | null {
   switch (status) {
-    case "completed":
+    case "completed": {
+      // When the sub-agent emitted a real terminating signal (revise_needed,
+      // escalate, answer) that was recorded in the function runtime state and
+      // carried through by the completion evaluator, use it instead of the
+      // hardcoded answer default. This preserves the signal type so loop
+      // back-edges (on_signal(revise_needed)) and other terminating-signal
+      // consumers activate correctly.
+      if (task?.terminatingSignal) {
+        return {
+          type: task.terminatingSignal.type as SignalType,
+          payload: task.terminatingSignal.payload,
+        };
+      }
       return { type: "answer", payload: null };
+    }
     case "error":
       return {
         type: "escalate",

@@ -6,6 +6,7 @@ import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";
 import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
 import { buildFunctionBlock, buildActiveArtifactBlock, buildAvailableFunctionsBlock, buildMemoryBlock } from "../prompt/builder.ts";
+import { buildReminder } from "../prompt/reminder.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { createSubLogger } from "../logger.ts";
 import type { ResolvedFunction } from "../types.ts";
@@ -216,7 +217,14 @@ export async function handleSystemTransform(
   for (const fn of activeFunctions) {
     const missing = (fn.requires ?? []).filter((d) => !activeSet.has(d));
     if (missing.length > 0) {
-      output.system.push(`<system-reminder>Function '${fn.name}' requires ${missing.map((m) => `'${m}'`).join(", ")} active first.</system-reminder>`);
+      output.system.push(buildReminder({
+        fields: [
+          { label: "fn", value: fn.name },
+          { label: "requires", value: missing.map((m) => `'${m}'`).join(", ") },
+        ],
+        action: "activate required functions first",
+        compact: true,
+      }));
       continue;
     }
     guarded.push(fn);

@@ -197,16 +197,16 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
     expect(client.prompts[0].id).toBe(EMPEROR_SESSION);
     expect(client.prompts[0].noReply).toBe(true);
     expect(client.prompts[0].text).toContain(GRAPH_COMPLETION_MARKER);
-    expect(client.prompts[0].text).toContain("**Graph:** notify-single");
-    expect(client.prompts[0].text).toContain("**Node:** A");
-    expect(client.prompts[0].text).toContain("**Agent:** emperor--jinyiwei--ui");
-    expect(client.prompts[0].text).toContain("**Status:** completed");
+    expect(client.prompts[0].text).toContain("graph: notify-single");
+    expect(client.prompts[0].text).toContain("node: A");
+    expect(client.prompts[0].text).toContain("agent: emperor--jinyiwei--ui");
+    expect(client.prompts[0].text).toContain("status: completed");
     // Graph-terminal reminder (fires second, after _checkTermination).
     expect(client.prompts[1].id).toBe(EMPEROR_SESSION);
     // Terminal reminder wakes the orchestrator (triggerTurn = !noReply).
     expect(client.prompts[1].noReply).toBe(false);
     expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
-    expect(client.prompts[1].text).toContain("**Graph:** notify-single");
+    expect(client.prompts[1].text).toContain("graph: notify-single");
   });
 
   it("resolves the emperor session from the invoking session when a resolver is used", async () => {

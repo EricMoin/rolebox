@@ -17,6 +17,8 @@ import {
   applyBudgetDelta,
   incrementLoopTraversal,
   isLoopExhausted,
+  buildSignalContract,
+  injectSignalContracts,
 } from "../../src/graph/engine/engine-state.ts";
 
 // ── Fixture builders ──────────────────────────────────────────────────────
@@ -187,6 +189,35 @@ describe("provision", () => {
     expect(state.loopGroups.size).toBe(0);
     expect(state.nodes.get("root")!.loopGroupId).toBeUndefined();
   });
+
+  it("roots the loop entry node when its only incoming edge is a revise back-edge", () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "revise-back-edge-loop",
+      nodes: [
+        { id: "a", agent: "a1", prompt: "p1" },
+        { id: "b", agent: "a2", prompt: "p2" },
+      ],
+      edges: [
+        { from: "a", to: "b", type: "always" },
+        { from: "b", to: "a", type: "on_signal", signal_filter: ["revise_needed"] },
+      ],
+      loop_groups: [
+        { id: "review-cycle", nodes: ["a", "b"], max_traversals: 2 },
+      ],
+    };
+    const state = createEngineState(decl, "g-revise");
+    provision(state);
+
+    // Node a has no non-revise incoming edges → root → Ready + frontier
+    const a = state.nodes.get("a")!;
+    expect(a.status).toBe(NodeStatus.Ready);
+    expect(isInFrontier(state, "a")).toBe(true);
+
+    // Node b has a → b (always) → has an incoming edge → Pending
+    const b = state.nodes.get("b")!;
+    expect(b.status).toBe(NodeStatus.Pending);
+  });
 });
 
 // ── Loop-group traversal counters ─────────────────────────────────────────
@@ -318,5 +349,148 @@ describe("budget stub", () => {
       totalOutputTokens: 50,
       totalCost: 0.01,
     });
+  });
+});
+
+// ── Signal contract injection ───────────────────────────────────────────
+
+describe("buildSignalContract", () => {
+  it("includes answer and escalate signals by default", () => {
+    const contract = buildSignalContract(["revise_needed"]);
+    expect(contract).toContain("<signal_contract>");
+    expect(contract).toContain("</signal_contract>");
+    expect(contract).toContain('signal(type="answer")');
+    expect(contract).toContain('signal(type="escalate")');
+  });
+
+  it("includes revise_needed instruction when present in signalTypes", () => {
+    const contract = buildSignalContract(["revise_needed"]);
+    expect(contract).toContain('signal(type="revise_needed")');
+    expect(contract).toContain("findings");
+  });
+
+  it("does not duplicate escalate when it is in signalTypes", () => {
+    const contract = buildSignalContract(["escalate", "revise_needed"]);
+    // escalate should appear exactly once (not duplicated in universal section)
+    const escalateCount =
+      contract.split('signal(type="escalate")').length - 1;
+    expect(escalateCount).toBe(1);
+  });
+
+  it("handles arbitrary signal types dynamically", () => {
+    const contract = buildSignalContract(["custom_signal"]);
+    expect(contract).toContain('"custom_signal"');
+    expect(contract).toContain('signal(type="custom_signal")');
+  });
+
+  it("contract is empty-prompts safe (starts with newline)", () => {
+    const contract = buildSignalContract(["revise_needed"]);
+    expect(contract.startsWith("\n<signal_contract>")).toBe(true);
+  });
+});
+
+describe("injectSignalContracts", () => {
+  function loopGraphWithRevise(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "review-loop",
+      nodes: [
+        { id: "coder", agent: "a1", prompt: "Write code." },
+        { id: "reviewer", agent: "a2", prompt: "Review code." },
+        { id: "sink", agent: "a3", prompt: "Merge." },
+      ],
+      edges: [
+        { from: "coder", to: "reviewer", type: "always" },
+        { from: "reviewer", to: "coder", type: "on_signal", signal_filter: ["revise_needed"] },
+        { from: "reviewer", to: "sink", type: "on_signal", signal_filter: ["answer"] },
+      ],
+      loop_groups: [
+        { id: "review-cycle", nodes: ["coder", "reviewer"], max_traversals: 3 },
+      ],
+    };
+  }
+
+  it("injects signal contract into loop member node with on_signal outbound edges", () => {
+    const state = createEngineState(loopGraphWithRevise(), "g-sig-1");
+    provision(state);
+
+    // reviewer has on_signal outbound edges (revise_needed → coder, answer → sink)
+    const reviewer = state.nodes.get("reviewer")!;
+    expect(reviewer.prompt).toContain("<signal_contract>");
+    expect(reviewer.prompt).toContain('signal(type="answer")');
+    expect(reviewer.prompt).toContain('signal(type="revise_needed")');
+    expect(reviewer.prompt).toContain("findings");
+    // Original prompt is preserved
+    expect(reviewer.prompt).toContain("Review code.");
+  });
+
+  it("injects signal contract into coder node with on_signal edges too", () => {
+    const state = createEngineState(loopGraphWithRevise(), "g-sig-2");
+    provision(state);
+
+    // coder has on_signal outbound edges? Let's check...
+    // coder → reviewer is type "always", so no on_signal edges from coder.
+    // We need the reviewer's revise_needed to go back to coder, so reviewer
+    // gets the contract. Coder has only always edges, so no contract.
+    const coder = state.nodes.get("coder")!;
+    expect(coder.prompt).not.toContain("<signal_contract>");
+  });
+
+  it("does not inject into non-loop nodes", () => {
+    const state = createEngineState(loopGraphWithRevise(), "g-sig-3");
+    provision(state);
+
+    // sink is not in the loop group
+    const sink = state.nodes.get("sink")!;
+    expect(sink.prompt).not.toContain("<signal_contract>");
+    expect(sink.prompt).toBe("Merge.");
+  });
+
+  it("does not inject into a linear (non-loop) graph", () => {
+    const state = createEngineState(linearGraph(), "g-sig-4");
+    provision(state);
+
+    expect(state.nodes.get("root")!.prompt).not.toContain("<signal_contract>");
+    expect(state.nodes.get("leaf")!.prompt).not.toContain("<signal_contract>");
+  });
+
+  it("does not inject when loop node has only on_signal(answer) edges", () => {
+    // A loop node whose only on_signal outbound edges are for "answer"
+    // should not get a contract (the universal answer line covers it,
+    // but we skip injection when there are no non-answer signal types).
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "answer-only-loop",
+      nodes: [
+        { id: "a", agent: "a1", prompt: "Do work." },
+        { id: "b", agent: "a2", prompt: "Continue." },
+      ],
+      edges: [
+        { from: "a", to: "b", type: "always" },
+        { from: "b", to: "a", type: "on_signal", signal_filter: ["answer"] },
+      ],
+      loop_groups: [
+        { id: "cycle", nodes: ["a", "b"], max_traversals: 2 },
+      ],
+    };
+    const state = createEngineState(decl, "g-sig-5");
+    provision(state);
+
+    // Node b has an on_signal(answer) edge, but answer is excluded from
+    // signalTypes collection (it's universal). So signalTypes.size === 0
+    // and no contract is injected.
+    expect(state.nodes.get("b")!.prompt).not.toContain("<signal_contract>");
+  });
+
+  it("preserves original prompt when injecting signal contract", () => {
+    const state = createEngineState(loopGraphWithRevise(), "g-sig-6");
+    provision(state);
+
+    const reviewer = state.nodes.get("reviewer")!;
+    // Original prompt text still at the start
+    expect(reviewer.prompt.startsWith("Review code.")).toBe(true);
+    // Contract is appended
+    const contractIdx = reviewer.prompt.indexOf("\n<signal_contract>");
+    expect(contractIdx).toBeGreaterThan(0);
   });
 });

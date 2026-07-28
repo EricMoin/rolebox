@@ -122,6 +122,8 @@ export interface LoopStepReport {
   propagation?: SignalPropagationReport;
   /** Structured escalation payload for `stuck` / `max_traversals_exhausted`. */
   escalatePayload?: LoopEscalatePayload;
+  /** Human-readable reason when `answer` was downgraded to `revise_needed` semantics. */
+  downgradeReason?: string;
 }
 
 // ── Convergence-output fingerprinting ───────────────────────────────────────
@@ -180,6 +182,30 @@ export function extractUnresolved(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (payload !== undefined && payload !== null) return [payload];
   return [];
+}
+
+/**
+ * Defensive check: does a signal payload represent unresolved work?
+ *
+ * Mirrors {@link extractUnresolved} but is intentionally narrower — it only
+ * returns `true` when the payload is a non-null, non-array object whose
+ * structure carries a clear unresolved signal. Strings, arrays, and objects
+ * without unresolved markers are treated as resolved (backward-compatible).
+ *
+ * A payload is "unresolved" when it has:
+ * - A non-empty array at `unresolved`, `findings`, or `items`, OR
+ * - A `verdict` field whose string value is `"veto"` or `"revise"`.
+ */
+function hasUnresolvedPayload(payload: unknown): boolean {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const obj = payload as Record<string, unknown>;
+    for (const key of ["unresolved", "items", "findings"]) {
+      if (Array.isArray(obj[key]) && (obj[key] as unknown[]).length > 0) return true;
+    }
+    const verdict = obj["verdict"];
+    if (typeof verdict === "string" && ["veto", "revise"].includes(verdict)) return true;
+  }
+  return false;
 }
 
 // ── Stuck detection ─────────────────────────────────────────────────────────
@@ -330,7 +356,78 @@ export function executeLoopStep(
   const report = initReport(group);
 
   if (signalType === "answer") {
-    // ── converged: happy path ──────────────────────────────────────────────
+    // ── defensive payload validation ─────────────────────────────────────────
+    //
+    // An answer signal whose payload still indicates unresolved work
+    // (verdict: "revise" or "veto", or non-empty findings/items) is
+    // downgraded to revise_needed semantics to prevent false convergence.
+    // The downgrade path mirrors the revise_needed branch exactly: stuck
+    // detection (recordConvergenceOutput), hard-cap exhaustion check,
+    // then propagateRevise for bounded-cycle continuation.
+    if (hasUnresolvedPayload(payload)) {
+      const verdictObj = payload as Record<string, unknown>;
+      const verdict = verdictObj["verdict"];
+      report.downgradeReason = `answer payload contained unresolved items${
+        typeof verdict === "string" ? `: verdict=${verdict}` : ""
+      }`;
+
+      // ── stuck early-exit (mirrors revise_needed path) ────────────────────
+      if (recordConvergenceOutput(state, groupId, payload)) {
+        markEscalated(node, "stuck");
+        report.outcome = "stuck";
+        report.escalated.push(node.nodeId);
+        report.escalatePayload = {
+          reason: "stuck",
+          unresolved: extractUnresolved(payload),
+          traversals: group.traversalCount,
+        };
+        report.traversals = group.traversalCount;
+        return report;
+      }
+
+      // ── hard-cap early-exit (mirrors revise_needed path) ──────────────────
+      if (isLoopExhausted(state, groupId)) {
+        markEscalated(node, "max_traversals exhausted");
+        report.outcome = "max_traversals_exhausted";
+        report.escalated.push(node.nodeId);
+        report.escalatePayload = {
+          reason: "max_traversals exhausted",
+          unresolved: extractUnresolved(payload),
+          traversals: group.traversalCount,
+        };
+        report.traversals = group.traversalCount;
+        return report;
+      }
+
+      // ── bounded-cycle continuation: delegate to the revise propagator ────
+      const prop = propagateRevise(state, node, payload);
+      report.propagation = prop;
+      report.revisedUpstream = prop.revisedUpstream;
+      report.escalated = prop.escalated;
+      report.traversals = group.traversalCount;
+      if (prop.escalated.length > 0) {
+        report.outcome = "max_traversals_exhausted";
+        report.escalatePayload = {
+          reason: "max_traversals exhausted",
+          unresolved: extractUnresolved(payload),
+          traversals: group.traversalCount,
+        };
+      } else {
+        report.outcome = "revising";
+        const roundEntry: RoundHistoryEntry = {
+          round: (group.rounds?.length ?? 0) + 1,
+          traversalCount: group.traversalCount,
+          nodeIds: [...report.revisedUpstream],
+          status: node.status,
+          startedAt: node.startedAt,
+          completedAt: Date.now(),
+        };
+        recordLoopRound(state, groupId, roundEntry);
+      }
+      return report;
+    }
+
+    // ── converged: happy path (backward-compatible) ────────────────────────
     //
     // Only the loop's convergence/reviewer node — the one that routes revisions
     // back along a `revise_needed` back-edge — records the `converged` outcome

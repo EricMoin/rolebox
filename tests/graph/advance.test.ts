@@ -355,7 +355,7 @@ describe("advanceGraphForDispatch", () => {
     expect(outcome.result.kind).toBe("unknown");
     expect(outcome.correction).toBeDefined();
     expect(outcome.correction!).toContain("unknown-agent");
-    expect(outcome.correction!).toContain("not part of the collaboration graph");
+    expect(outcome.correction!).toContain("Not part of the collaboration graph");
 
     // State unchanged
     const state = graphSessionState.getState(SESSION_ID);

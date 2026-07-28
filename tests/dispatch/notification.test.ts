@@ -54,10 +54,10 @@ describe("buildNotificationText", () => {
 
     expect(text).toContain("<system-reminder>");
     expect(text).toContain("[BACKGROUND TASK COMPLETED]");
-    expect(text).toContain("**ID:** bg_abc");
-    expect(text).toContain("**Description:** code review task");
-    expect(text).toContain("**Duration:** 3.2s");
-    expect(text).toContain("**Status:** completed");
+    expect(text).toContain("task: bg_abc");
+    expect(text).toContain("desc: code review task");
+    expect(text).toContain("dur: 3.2s");
+    expect(text).toContain("status: completed");
     expect(text).toContain("2 task(s) still in progress");
     expect(text).toContain("</system-reminder>");
     expect(text).not.toContain("[ALL BACKGROUND TASKS COMPLETE]");
@@ -76,8 +76,8 @@ describe("buildNotificationText", () => {
 
     expect(text).toContain("<system-reminder>");
     expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
-    expect(text).toContain("**Completed:**");
-    expect(text).toContain("lint fix (12.5s)");
+    expect(text).toContain("task: lint fix");
+    expect(text).toContain("dur: 12.5s");
     expect(text).toContain("All background tasks have finished");
     expect(text).toContain("</system-reminder>");
     expect(text).not.toContain("[BACKGROUND TASK COMPLETED]");
@@ -94,7 +94,8 @@ describe("buildNotificationText", () => {
 
     const text = buildNotificationText(payload);
 
-    expect(text).toContain("bg_xyz (1.0s)");
+    expect(text).toContain("task: bg_xyz");
+    expect(text).toContain("dur: 1.0s");
   });
 
   it("intermediate format uses description as label in remaining message", () => {
@@ -145,7 +146,6 @@ describe("buildNotificationText", () => {
     expect(text).toContain("[ALL BACKGROUND TASKS COMPLETE]");
     expect(text).toContain("All background tasks have finished");
     expect(text).not.toContain("```result");
-    expect(text).not.toContain("**Result:**");
     expect(text).not.toContain("graph_status");
   });
 
@@ -363,8 +363,9 @@ describe("notifyParent", () => {
 
     expect(promptAsyncMock).toHaveBeenCalledTimes(3);
 
-    // Verify FIFO order: calls[0]/calls[1] use intermediate format (task ID in **ID:**)
-    // calls[2] uses final format (description in `- description (duration)`)
+    // Verify FIFO order: calls[0]/calls[1] use intermediate format
+    // (task ID in task field); calls[2] uses final format
+    // (description in task field).
     const calls = (promptAsyncMock as ReturnType<typeof mock>).mock.calls;
     expect(calls[0][1].parts[0].text).toContain("task-A");
     expect(calls[1][1].parts[0].text).toContain("task-B");

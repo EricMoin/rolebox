@@ -271,14 +271,14 @@ describe("Plugin Hooks - Guardrail Correction Injection", () => {
       expect(pendingCorrections.has(sessionID)).toBe(true);
       const correction = pendingCorrections.get(sessionID)!;
       expect(correction).toContain("<system-reminder>");
-      expect(correction).toContain("not part of the collaboration graph");
+      expect(correction).toContain("Not part of the collaboration graph");
 
       // Now call system.transform — should inject the correction and clear it
       const output = { system: ["existing-system-prompt"] };
       await hooks["experimental.chat.system.transform"]({ sessionID }, output);
 
       // Correction should be injected
-      const hasCorrectionInOutput = output.system.some((s) => s.includes("<system-reminder>") && s.includes("not part of the collaboration graph"));
+      const hasCorrectionInOutput = output.system.some((s) => s.includes("<system-reminder>") && s.includes("Not part of the collaboration graph"));
       expect(hasCorrectionInOutput).toBe(true);
 
       // Correction should be cleared
@@ -287,7 +287,7 @@ describe("Plugin Hooks - Guardrail Correction Injection", () => {
       // Second transform should NOT inject it again
       const output2 = { system: ["another-prompt"] };
       await hooks["experimental.chat.system.transform"]({ sessionID }, output2);
-      const hasCorrectionInOutput2 = output2.system.some((s) => s.includes("not part of the collaboration graph"));
+      const hasCorrectionInOutput2 = output2.system.some((s) => s.includes("Not part of the collaboration graph"));
       expect(hasCorrectionInOutput2).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -341,7 +341,7 @@ describe("Plugin Hooks - Guardrail Correction Injection", () => {
       );
 
       const correction = pendingCorrections.get(sessionID)!;
-      expect(correction).toContain("not part of the collaboration graph");
+      expect(correction).toContain("Not part of the collaboration graph");
       expect(correction).toContain("nonexistent-agent");
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

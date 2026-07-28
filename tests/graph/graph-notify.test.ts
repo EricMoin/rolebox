@@ -134,17 +134,17 @@ describe("buildGraphCompletionText", () => {
     const text = buildGraphCompletionText(makeEvent());
     expect(text).toContain(GRAPH_COMPLETION_MARKER);
     expect(text).toContain("<system-reminder>");
-    expect(text).toContain("**Graph:** g-1");
-    expect(text).toContain("**Node:** A");
-    expect(text).toContain("**Agent:** emperor--jinyiwei--ui");
-    expect(text).toContain("**Status:** completed");
-    expect(text).toContain("**Signal:** answer");
-    expect(text).toContain("**Duration:** 2.5s");
+    expect(text).toContain("graph: g-1");
+    expect(text).toContain("node: A");
+    expect(text).toContain("agent: emperor--jinyiwei--ui");
+    expect(text).toContain("status: completed");
+    expect(text).toContain("signal: answer");
+    expect(text).toContain("dur: 2.5s");
   });
 
   it("falls back to '?' when timestamps are absent", () => {
     const text = buildGraphCompletionText(makeEvent({ startedAt: undefined, completedAt: undefined }));
-    expect(text).toContain("**Duration:** ?");
+    expect(text).toContain("dur: ?");
   });
 });
 
@@ -159,9 +159,9 @@ describe("createGraphNotifier", () => {
     expect(client.prompts[0].id).toBe(EMPEROR_SESSION);
     expect(client.prompts[0].noReply).toBe(true);
     expect(client.prompts[0].text).toContain(GRAPH_COMPLETION_MARKER);
-    expect(client.prompts[0].text).toContain("**Graph:** g-1");
-    expect(client.prompts[0].text).toContain("**Node:** A");
-    expect(client.prompts[0].text).toContain("**Status:** completed");
+    expect(client.prompts[0].text).toContain("graph: g-1");
+    expect(client.prompts[0].text).toContain("node: A");
+    expect(client.prompts[0].text).toContain("status: completed");
   });
 
   it("dedupes a second send with the same graphId::nodeId::signalType", async () => {
@@ -263,14 +263,10 @@ describe("buildGraphTerminalText", () => {
     const text = buildGraphTerminalText(makeTerminalEvent());
     expect(text).toContain(GRAPH_COMPLETE_MARKER);
     expect(text).toContain("<system-reminder>");
-    expect(text).toContain("**Graph:** g-42");
-    expect(text).toContain("**Phase:** complete");
-    expect(text).toContain("  - Completed: 3");
-    expect(text).toContain("  - Escalated: 0");
-    expect(text).toContain("  - Timed Out: 0");
-    expect(text).toContain("  - Blocked: 0");
-    expect(text).toContain("  - Running: 0");
-    expect(text).toContain("Read all results via graph_status(graph_id=\"g-42\", include_output=true)");
+    expect(text).toContain("graph: g-42");
+    expect(text).toContain("phase: complete");
+    expect(text).toContain("nodes: completed=3");
+    expect(text).toContain("→ Read all results: graph_status(graph_id=\"g-42\", include_output=true)");
   });
 
   it("renders BLOCKED marker, phase, blocked count, and approval instruction", () => {
@@ -280,8 +276,8 @@ describe("buildGraphTerminalText", () => {
       nodeStatusSummaries: { completed: 2, escalate: 0, timeout: 0, blocked: 1, running: 0 },
     }));
     expect(text).toContain(GRAPH_BLOCKED_MARKER);
-    expect(text).toContain("**Phase:** executing");
-    expect(text).toContain("  - Blocked: 1");
+    expect(text).toContain("phase: executing");
+    expect(text).toContain("nodes: completed=2 blocked=1");
     expect(text).toContain("quiescent-blocked");
     expect(text).toContain("graph_approve");
     expect(text).toContain("graph_status(graph_id=\"g-42\", status=\"blocked\", include_output=true)");
@@ -307,7 +303,7 @@ describe("createGraphTerminalNotifier", () => {
     // Terminal reminders must wake the orchestrator (triggerTurn = !noReply).
     expect(client.prompts[0].noReply).toBe(false);
     expect(client.prompts[0].text).toContain(GRAPH_COMPLETE_MARKER);
-    expect(client.prompts[0].text).toContain("**Graph:** g-42");
+    expect(client.prompts[0].text).toContain("graph: g-42");
   });
 
   it("sends a BLOCKED reminder with the BLOCKED marker", async () => {

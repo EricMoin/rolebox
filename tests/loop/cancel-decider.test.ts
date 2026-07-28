@@ -61,8 +61,8 @@ describe("shouldCancelLoop — dispatch system re-prompts", () => {
     const msg = [
       "<system-reminder>",
       DISPATCH_COMPLETION_MARKER,
-      "**ID:** task-123",
-      "**Status:** completed",
+      "id: task-123",
+      "status: completed",
       "</system-reminder>",
     ].join("\n");
     expect(shouldCancelLoop(state, msg)).toBe(false);

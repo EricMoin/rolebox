@@ -3,6 +3,7 @@ import type { DispatchTask } from "../types.ts";
 import { DISPATCH_RECOVERY_MARKER } from "../notification.ts";
 import { debugLog } from "../core/debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
+import { buildReminder } from "../../prompt/reminder.ts";
 
 const DEFAULT_CONCURRENCY_KEY = "default";
 
@@ -141,15 +142,12 @@ async function notifyLostPendingTasks(
   const taskList = lostTasks
     .map((t) => `- ${t.description || t.id}`)
     .join("\n");
-  const text = [
-    "<system-reminder>",
-    DISPATCH_RECOVERY_MARKER,
-    `**${lostTasks.length} pending task(s) were lost during process restart:**`,
-    taskList,
-    "",
-    "You can re-dispatch these tasks with dispatch(...).",
-    "</system-reminder>",
-  ].join("\n");
+  const text = buildReminder({
+    marker: DISPATCH_RECOVERY_MARKER,
+    fields: [{ label: "count", value: String(lostTasks.length) }],
+    action: "You can re-dispatch these tasks with dispatch(...).",
+    body: taskList,
+  });
 
   const parentAgent = lostTasks[0]?.parentAgent;
   try {

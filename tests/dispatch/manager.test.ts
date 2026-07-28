@@ -2525,7 +2525,7 @@ describe("recover()", () => {
     );
     expect(parentCall).toBeDefined();
     const parentText: string = parentCall[1].parts[0].text;
-    expect(parentText).toContain("3 pending task(s)");
+    expect(parentText).toContain("count: 3");
     expect(parentText).toContain("pending task 0");
     expect(parentText).toContain("pending task 2");
 
@@ -2535,7 +2535,7 @@ describe("recover()", () => {
     );
     expect(otherCall).toBeDefined();
     const otherText: string = otherCall[1].parts[0].text;
-    expect(otherText).toContain("1 pending task(s)");
+    expect(otherText).toContain("count: 1");
     expect(otherText).toContain("other parent pending");
 
     rmSync(tempDir, { recursive: true, force: true });

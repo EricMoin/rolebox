@@ -4,6 +4,7 @@ import { evaluateAsync } from "./termination-async.ts";
 import type { JudgeFn } from "./termination-async.ts";
 import type { ResolvedGraph } from "../types.ts";
 import { createSubLogger } from "../logger.ts";
+import { buildReminder } from "../prompt/reminder.ts";
 
 export const MAX_CORRECTIONS = 3;
 export const ASYNC_TIMEOUT_MS = 30_000;
@@ -113,24 +114,27 @@ export function advanceGraphForDispatch(
 
     let correction: string;
     if (state.correctionCount >= MAX_CORRECTIONS) {
-      correction = `<system-reminder>
-The workflow has terminated due to repeated off-route dispatches. Stop dispatching and synthesize the best final result from the completed agents' work.
-</system-reminder>`;
+      correction = buildReminder({
+        fields: [{ label: "reason", value: "repeated off-route dispatches" }],
+        action: "Stop dispatching and synthesize the best final result from the completed agents' work.",
+      });
     } else {
-      correction = `<system-reminder>
-The dispatch to "${result.got}" went off the collaboration graph route.
-Expected next target(s): ${expected}.
-The graph state has not been advanced.
-</system-reminder>`;
+      correction = buildReminder({
+        fields: [
+          { label: "got", value: result.got },
+          { label: "expected", value: expected },
+        ],
+        action: "The dispatch went off-route. Graph state has not been advanced.",
+      });
     }
     return { result, correction };
   }
 
   if (result.kind === "unknown") {
-    const correction = `<system-reminder>
-"${result.got}" is not part of the collaboration graph.
-The graph state has not been advanced.
-</system-reminder>`;
+    const correction = buildReminder({
+      fields: [{ label: "got", value: result.got }],
+      action: "Not part of the collaboration graph. Graph state has not been advanced.",
+    });
     return { result, correction };
   }
 

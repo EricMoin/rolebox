@@ -95,6 +95,21 @@ export interface DispatchTask {
   /** Priority: lower number = higher priority. Default 0. Tasks with higher
    *  priority (lower number) acquire concurrency slots before lower-priority ones. */
   priority: number;
+  /**
+   * The real terminating signal emitted by the sub-agent (e.g. `revise_needed`,
+   * `escalate`, `answer`) as recorded in the function runtime signal ledger.
+   *
+   * Populated by the completion evaluator when a task finishes normally
+   * (status="completed") and a terminating signal was observed. Absent when
+   * the task completed without an explicit terminating signal (defaults to
+   * `answer`), or on error/timeout/cancelled paths.
+   *
+   * The graph engine's `mapDispatchStatusToSignal` reads this field to emit
+   * the correct signal type instead of unconditionally mapping `completed →
+   * answer`, so loop back-edges (`on_signal(revise_needed)`) activate
+   * correctly.
+   */
+  terminatingSignal?: { type: string; payload: unknown };
 }
 /**
  * Input parameters for the dispatch tool (task() call).

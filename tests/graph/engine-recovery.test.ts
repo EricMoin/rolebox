@@ -95,6 +95,40 @@ describe("mapDispatchStatusToSignal", () => {
     });
   });
 
+  it("completed with terminatingSignal=revise_needed → revise_needed with payload", () => {
+    const task = makeTask("t", "completed");
+    task.terminatingSignal = {
+      type: "revise_needed",
+      payload: { findings: ["n1", "n2"] },
+    };
+    const sig = mapDispatchStatusToSignal("completed", task);
+    expect(sig).toEqual({
+      type: "revise_needed",
+      payload: { findings: ["n1", "n2"] },
+    });
+  });
+
+  it("completed with terminatingSignal=escalate → escalate with payload", () => {
+    const task = makeTask("t", "completed");
+    task.terminatingSignal = {
+      type: "escalate",
+      payload: { reason: "crash" },
+    };
+    const sig = mapDispatchStatusToSignal("completed", task);
+    expect(sig).toEqual({
+      type: "escalate",
+      payload: { reason: "crash" },
+    });
+  });
+
+  it("completed without terminatingSignal → answer (backward-compat default)", () => {
+    const task = makeTask("t", "completed");
+    expect(mapDispatchStatusToSignal("completed", task)).toEqual({
+      type: "answer",
+      payload: null,
+    });
+  });
+
   it("error → escalate carrying task.error", () => {
     const sig = mapDispatchStatusToSignal(
       "error",
@@ -130,6 +164,7 @@ describe("subscribeTaskTermination", () => {
   function subscribe(
     status: NodeRuntimeState["status"],
     taskId = "task-A",
+    customTask?: DispatchTask,
   ): {
     state: EngineState;
     emitted: Array<[string, SignalType, unknown]>;
@@ -142,7 +177,9 @@ describe("subscribeTaskTermination", () => {
     const emitted: Array<[string, SignalType, unknown]> = [];
     const listeners: Array<(id: string, st: string) => void> = [];
     const port = {
-      getTask: (id: string) => (id === taskId ? makeTask(taskId, "running") : undefined),
+      getTask: (id: string) =>
+        customTask ??
+        (id === taskId ? makeTask(taskId, "running") : undefined),
       onTaskTerminated: (_id: string, cb: (id: string, st: string) => void) =>
         listeners.push(cb),
     };
@@ -188,6 +225,34 @@ describe("subscribeTaskTermination", () => {
     // Fire the OLD subscription's callback path is exercised via the helper port;
     // here we verify a stale task id guard by invoking with a mismatched id.
     expect(state.nodes.get("A")!.dispatchTaskId).toBe("task-A-new");
+  });
+
+  it("completed with terminatingSignal=revise_needed → emits revise_needed (not answer)", () => {
+    const task = makeTask("task-A", "completed");
+    task.terminatingSignal = {
+      type: "revise_needed",
+      payload: { findings: ["bad"] },
+    };
+    const { fire, emitted } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      task,
+    );
+    fire("completed");
+    expect(emitted).toEqual([
+      ["A", "revise_needed", { findings: ["bad"] }],
+    ]);
+  });
+
+  it("completed without terminatingSignal → emits answer (default)", () => {
+    const task = makeTask("task-A", "completed");
+    const { fire, emitted } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      task,
+    );
+    fire("completed");
+    expect(emitted).toEqual([["A", "answer", null]]);
   });
 });
 

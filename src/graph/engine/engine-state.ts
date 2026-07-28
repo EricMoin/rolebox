@@ -23,7 +23,7 @@
  */
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
-import type { GraphDeclaration, NodeConfig } from "../../types.graph-v2.ts";
+import type { EdgeDeclaration, GraphDeclaration, NodeConfig } from "../../types.graph-v2.ts";
 import type {
   EngineState,
   GraphBudgetState,
@@ -32,7 +32,7 @@ import type {
   PhaseEventSink,
   BudgetEventSink,
 } from "../../types.engine-v2.ts";
-import { resolveJoinStrategy } from "./join-evaluator.ts";
+import { resolveJoinStrategy, isReviseBackEdge } from "./join-evaluator.ts";
 import { bindNodeState } from "./recorder.ts";
 import { markReady } from "./node-lifecycle.ts";
 
@@ -210,6 +210,7 @@ export function registerNode(
 export function getRootNodeIds(state: EngineState): string[] {
   const upstream = new Map<string, number>();
   for (const edge of state.graphDeclaration.edges) {
+    if (isReviseBackEdge(edge)) continue;
     upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
   }
   const roots: string[] = [];
@@ -232,6 +233,7 @@ export function provision(state: EngineState): void {
   const declaration = state.graphDeclaration;
   const upstream = new Map<string, number>();
   for (const edge of declaration.edges) {
+    if (isReviseBackEdge(edge)) continue;
     upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
   }
 
@@ -248,6 +250,10 @@ export function provision(state: EngineState): void {
 
   // Populate loop-group runtime state and tag member nodes (Phase 2).
   provisionLoopGroups(state);
+
+  // Inject signal contracts for loop-group member nodes that have
+  // on_signal outbound edges (so they know which signals to emit).
+  injectSignalContracts(state);
 }
 
 // ── Loop-group runtime state ───────────────────────────────────────────────
@@ -279,6 +285,98 @@ function provisionLoopGroups(state: EngineState): void {
         node.loopGroupId = decl.id;
       }
     }
+  }
+}
+
+// ── Signal contract injection ───────────────────────────────────────────────
+
+/**
+ * Build the signal contract text for a loop-group member node.
+ *
+ * Generates a `<signal_contract>` XML block telling the agent which signals
+ * to emit and when. The contract is dynamic — it includes only the signal
+ * types found in the node's on_signal outbound edges (plus the universal
+ * `answer` and `escalate` signals, which every node needs).
+ *
+ * Non-loop nodes and nodes without `on_signal` outbound edges are unaffected.
+ */
+export function buildSignalContract(signalTypes: string[]): string {
+  const lines: string[] = [];
+  lines.push("");
+  lines.push("<signal_contract>");
+  lines.push("You are inside a graph loop group. You MUST signal your completion using the signal tool:");
+
+  // Universal signals every loop-group node needs to know about.
+  lines.push('- When complete and everything passes / converges: signal(type="answer")');
+
+  // Document each specific signal from the node's outbound on_signal edges.
+  for (const st of signalTypes) {
+    switch (st) {
+      case "revise_needed":
+        lines.push('- When revisions are needed / iteration must continue: signal(type="revise_needed") with findings in payload (e.g., signal(type="revise_needed", payload={findings: "..."}))');
+        break;
+      case "escalate":
+        lines.push('- On unrecoverable failure / cannot proceed: signal(type="escalate") with reason in payload');
+        break;
+      case "answer":
+        // answer is documented above as universal; skip here to avoid duplication.
+        break;
+      default:
+        lines.push(`- To activate the "${st}" path: signal(type="${st}") with relevant context in payload`);
+        break;
+    }
+  }
+
+  // Unrecoverable failure is always documented (omitted above when escalate
+  // is NOT in signalTypes — we add it here to ensure it's always present).
+  if (!signalTypes.includes("escalate")) {
+    lines.push('- On unrecoverable failure / cannot proceed: signal(type="escalate") with reason in payload');
+  }
+
+  lines.push("</signal_contract>");
+  return lines.join("\n");
+}
+
+/**
+ * Inject signal contract instructions into every loop-group member node
+ * that has one or more `on_signal` outbound edges.
+ *
+ * When a node is part of a loop group AND has outgoing edges that are
+ * signal-activated (type === "on_signal"), the agent needs to know which
+ * signals to emit so the engine can route the result correctly. This
+ * function scans the graph declaration and appends a <signal_contract>
+ * block to the node's prompt.
+ *
+ * Non-loop nodes and loop nodes without on_signal outbound edges are
+ * left unchanged.
+ */
+export function injectSignalContracts(state: EngineState): void {
+  const edges = state.graphDeclaration.edges;
+
+  for (const node of state.nodes.values()) {
+    // Only loop-group member nodes need signal contracts.
+    if (node.loopGroupId === undefined) continue;
+
+    const outbound = edges.filter(
+      (e: EdgeDeclaration) => e.from === node.nodeId && e.type === "on_signal",
+    );
+    if (outbound.length === 0) continue;
+
+    // Collect the union of all signal_filter values from the node's
+    // outbound on_signal edges, excluding `answer` (which is already
+    // universal and always gets documented).
+    const signalTypes = new Set<string>();
+    for (const e of outbound) {
+      for (const s of e.signal_filter ?? []) {
+        if (s !== "answer") signalTypes.add(s);
+      }
+    }
+    // Only inject when there are non-answer signal types to document.
+    // (A loop node with only on_signal(answer) edges doesn't need extra
+    // instructions — the universal answer line in the contract covers it.)
+    if (signalTypes.size === 0) continue;
+
+    node.prompt += buildSignalContract([...signalTypes]);
   }
 }
 

@@ -413,3 +413,95 @@ describe("resetConvergenceTracker", () => {
     expect(state.loopGroups.get("lg")!.convergenceFingerprint).toBeUndefined();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// loop-group executor — answer payload downgrade (defensive validation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("loop-group executor — answer payload downgrade (defensive validation)", () => {
+  it("answer with {verdict:'revise', findings:[...]} downgrades to revise semantics (loop continues)", () => {
+    const { state } = buildEngine(reviewLoopGraph(5));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+
+    const report = executeLoopStep(state, review, "answer", {
+      verdict: "revise",
+      findings: ["still needs work", "missing tests"],
+    });
+
+    // Should NOT be converged — payload indicates unresolved work
+    expect(report.outcome).not.toBe("converged");
+    // Should behave like revise_needed: revise upstream nodes
+    expect(report.outcome).toBe("revising");
+    expect(report.revisedUpstream).toEqual(["impl"]);
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    // The convergence tracker should NOT have been reset
+    expect(state.loopGroups.get("lg")!.consecutiveStale).toBe(1);
+    // Downgrade reason should be recorded
+    expect(report.downgradeReason).toContain("verdict=revise");
+  });
+
+  it("answer with {verdict:'veto'} downgrades to revise semantics and triggers stuck on repeat", () => {
+    const { state } = buildEngine(reviewLoopGraph(5));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+
+    // First veto: should revise
+    const first = executeLoopStep(state, review, "answer", {
+      verdict: "veto",
+      findings: ["blocking"],
+    });
+    expect(first.outcome).toBe("revising");
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+
+    // Second identical veto: should trigger stuck detection
+    const second = executeLoopStep(state, review, "answer", {
+      verdict: "veto",
+      findings: ["blocking"],
+    });
+    expect(second.outcome).toBe("stuck");
+    expect(second.escalated).toEqual(["review"]);
+    // No additional traversal consumed by stuck exit
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+  });
+
+  it("answer with null payload converges normally (backward compatible)", () => {
+    const { state } = buildEngine(reviewLoopGraph(5));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+
+    // Pre-warm tracker to verify it gets reset
+    recordConvergenceOutput(state, "lg", "findings X");
+    recordConvergenceOutput(state, "lg", "findings X");
+
+    const report = executeLoopStep(state, review, "answer", null);
+
+    expect(report.outcome).toBe("converged");
+    expect(report.traversals).toBe(0);
+    expect(state.loopGroups.get("lg")!.consecutiveStale).toBe(0);
+  });
+
+  it("answer with a plain string payload converges normally", () => {
+    const { state } = buildEngine(reviewLoopGraph(5));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+
+    const report = executeLoopStep(state, review, "answer", "all good");
+
+    expect(report.outcome).toBe("converged");
+  });
+
+  it("answer with benign object payload (no unresolved fields) converges normally", () => {
+    const { state } = buildEngine(reviewLoopGraph(5));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+
+    const report = executeLoopStep(state, review, "answer", {
+      summary: "done",
+      score: 95,
+    });
+
+    expect(report.outcome).toBe("converged");
+    expect(report.traversals).toBe(0);
+  });
+});

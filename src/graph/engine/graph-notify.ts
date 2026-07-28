@@ -39,6 +39,7 @@ import {
   GRAPH_COMPLETE_MARKER,
   GRAPH_BLOCKED_MARKER,
 } from "../../dispatch/notification.ts";
+import { buildReminder, type ReminderField } from "../../prompt/reminder.ts";
 import type {
   NodeCompletionEvent,
   GraphTerminalEvent,
@@ -98,25 +99,24 @@ export function formatGraphDuration(startedAt?: number, completedAt?: number): s
 }
 
 /**
- * Build the `<system-reminder>` text for a completed graph node, following the
- * same XML style as the dispatch notifications. Contains the graph id, node id,
- * agent, status, signal, and duration.
+ * Build the `<system-reminder>` text for a completed graph node via
+ * {@link buildReminder}. Contains graph id, node id, agent, status, signal,
+ * and duration.
  */
 export function buildGraphCompletionText(event: NodeCompletionEvent): string {
-  const duration = formatGraphDuration(event.startedAt, event.completedAt);
-  return [
-    "<system-reminder>",
-    GRAPH_COMPLETION_MARKER,
-    `**Graph:** ${event.graphId}`,
-    `**Node:** ${event.nodeId}`,
-    `**Agent:** ${event.nodeAgent || "N/A"}`,
-    `**Status:** ${event.nodeStatus}`,
-    `**Signal:** ${event.signalType}`,
-    `**Duration:** ${duration}`,
-    "",
-    `Use graph_status(graph_id="${event.graphId}", node_id="${event.nodeId}", include_output=true) to inspect the node result.`,
-    "</system-reminder>",
-  ].join("\n");
+  const dur = formatGraphDuration(event.startedAt, event.completedAt);
+  return buildReminder({
+    marker: GRAPH_COMPLETION_MARKER,
+    fields: [
+      { label: "graph", value: event.graphId },
+      { label: "node", value: event.nodeId },
+      { label: "agent", value: event.nodeAgent || "N/A" },
+      { label: "status", value: event.nodeStatus },
+      { label: "signal", value: event.signalType },
+      { label: "dur", value: dur },
+    ],
+    action: `Use graph_status(graph_id="${event.graphId}", node_id="${event.nodeId}", include_output=true) to inspect the node result.`,
+  });
 }
 
 // ── Factory ─────────────────────────────────────────────────────────────────
@@ -192,51 +192,54 @@ function terminalDedupeKey(event: GraphTerminalEvent): string {
 }
 
 /**
- * Build the `<system-reminder>` text for a graph-terminal event.
+ * Build the `<system-reminder>` text for a graph-terminal event via
+ * {@link buildReminder}.
  *
  * Uses {@link GRAPH_COMPLETE_MARKER} when the graph reached COMPLETE phase, and
  * {@link GRAPH_BLOCKED_MARKER} when the graph is quiescent-blocked. Both markers
  * are members of {@link DISPATCH_NOTIFICATION_MARKERS} so the chat.message hook
  * classifies them as non-user turns.
  *
- * Content: graph_id, phase, node status summary counts, and an instruction
- * to read results via `graph_status`. BLOCKED adds an approval instruction.
+ * Content: graph id, phase, compact node-status summary (zero counts omitted
+ * except completed always present), and next-step actions.
+ * BLOCKED adds full approval instruction set as multi-line action.
  */
 export function buildGraphTerminalText(event: GraphTerminalEvent): string {
   const marker = event.isBlocked ? GRAPH_BLOCKED_MARKER : GRAPH_COMPLETE_MARKER;
   const { completed, escalate, timeout, blocked, running } = event.nodeStatusSummaries;
 
-  const lines = [
-    "<system-reminder>",
-    marker,
-    `**Graph:** ${event.graphId}`,
-    `**Phase:** ${event.phase}`,
-    `**Node Status Summary:**`,
-    `  - Completed: ${completed}`,
-    `  - Escalated: ${escalate}`,
-    `  - Timed Out: ${timeout}`,
-    `  - Blocked: ${blocked}`,
-    `  - Running: ${running}`,
-    "",
+  // Compact node-status summary: completed always shown; zero counts omitted.
+  const summaryParts: string[] = [`completed=${completed}`];
+  if (escalate > 0) summaryParts.push(`escalated=${escalate}`);
+  if (timeout > 0) summaryParts.push(`timeout=${timeout}`);
+  if (blocked > 0) summaryParts.push(`blocked=${blocked}`);
+  if (running > 0) summaryParts.push(`running=${running}`);
+
+  const fields: ReminderField[] = [
+    { label: "graph", value: event.graphId },
+    { label: "phase", value: event.phase },
+    { label: "nodes", value: summaryParts.join(" ") },
   ];
 
   if (event.isBlocked) {
-    lines.push(
-      `The graph is quiescent-blocked — no active nodes remain but one or more nodes await approval.`,
-      `Inspect blocked node(s) via graph_status(graph_id="${event.graphId}", status="blocked", include_output=true)`,
-      `and use graph_approve(graph_id="${event.graphId}", node_id="<blocked_node_id>", action="approve")`,
-      `to resume, or action="reject" with a reason to re-enter the node for revision.`,
-      "",
-      `Read all results via graph_status(graph_id="${event.graphId}", include_output=true).`,
-    );
-  } else {
-    lines.push(
-      `Read all results via graph_status(graph_id="${event.graphId}", include_output=true).`,
-    );
+    return buildReminder({
+      marker,
+      fields,
+      action: [
+        `Graph quiescent-blocked — nodes await approval.`,
+        `Inspect blocked nodes: graph_status(graph_id="${event.graphId}", status="blocked", include_output=true)`,
+        `Approve: graph_approve(graph_id="${event.graphId}", node_id="<blocked_node_id>", action="approve")`,
+        `Reject: graph_approve(graph_id="${event.graphId}", node_id="<blocked_node_id>", action="reject") with reason`,
+        `Read all results: graph_status(graph_id="${event.graphId}", include_output=true)`,
+      ].join("\n"),
+    });
   }
 
-  lines.push("</system-reminder>");
-  return lines.join("\n");
+  return buildReminder({
+    marker,
+    fields,
+    action: `Read all results: graph_status(graph_id="${event.graphId}", include_output=true)`,
+  });
 }
 
 /**

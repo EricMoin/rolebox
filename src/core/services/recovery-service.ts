@@ -107,7 +107,7 @@ export class RecoveryService implements PluginService {
     if (health.quarantined.length > 0 && !RecoveryService.notifiedQuarantine) {
       RecoveryService.notifiedQuarantine = true;
       const fileList = health.quarantined.join(", ");
-      log.warn(`<system-reminder> State files quarantined during startup: ${fileList}. Some state may have been lost. </system-reminder>`);
+      log.warn(`State files quarantined during startup: ${fileList}. Some state may have been lost.`);
     }
 
     if (health.warnings.length > 0) {

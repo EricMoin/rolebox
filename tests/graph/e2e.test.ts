@@ -993,7 +993,7 @@ describe("Collaboration Graph E2E", () => {
 
       expect(result.result.kind).toBe("off_route");
       expect(result.correction).toBeDefined();
-      expect(result.correction!).toContain("off the collaboration graph route");
+      expect(result.correction!).toContain("went off-route");
       expect(result.correction!).toContain("reviewer");
       expect(result.correction!).toContain("coder");
     });
@@ -1008,7 +1008,7 @@ describe("Collaboration Graph E2E", () => {
 
       expect(result.result.kind).toBe("unknown");
       expect(result.correction).toBeDefined();
-      expect(result.correction!).toContain("not part of the collaboration graph");
+      expect(result.correction!).toContain("Not part of the collaboration graph");
       expect(result.correction!).toContain("ghost");
     });
 

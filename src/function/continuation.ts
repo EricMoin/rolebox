@@ -1,4 +1,5 @@
 import type { FnState } from "./runtime-state.ts";
+import { buildReminder } from "../prompt/reminder.ts";
 
 export interface CooldownRule {
   atCount: number;
@@ -67,7 +68,18 @@ export function decideContinuation(opts: ContinuationInput): ContinuationDecisio
     st.continuationCount >= cfg.perFnMax
       ? " This is your FINAL continuation — produce your output NOW, even if incomplete."
       : "";
-  const reminder = `<system-reminder>[auto-continue ${st.continuationCount}/${cfg.perFnMax} for ${opts.fnName}: ${opts.reason}] Self-diagnose before continuing. FALSE continuation: your last action was a non-blocking dispatch (e.g., graph_run returned "running") or you are awaiting approval / an external result, AND no newly-arrived results arrived this turn → emit signal(type="blocked") and end the turn; do NOT narrate, do NOT poll. LEGITIMATE continuation: a concrete next step is executable right now with information already available → continue working. Tie-breaker: Can I do real work with what I have right now? No → blocked; Yes → continue.${finalWarning}</system-reminder>`;
+
+  const actionLines = [
+    "After non-blocking dispatch or awaiting external result with no new results → signal(type=\"blocked\"), end turn. Do not narrate/poll.",
+    "Concrete step executable now → continue. Can you do real work? No=blocked, Yes=continue.",
+  ];
+  if (finalWarning) actionLines.push(finalWarning.trim());
+
+  const reminder = buildReminder({
+    marker: `[auto-continue ${st.continuationCount}/${cfg.perFnMax} for ${opts.fnName}]`,
+    fields: [{ label: "reason", value: opts.reason }],
+    action: actionLines.join("\n"),
+  });
 
   return { shouldContinue: true, reminder, reason: opts.reason };
 }
