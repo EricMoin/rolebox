@@ -1978,6 +1978,7 @@ export class GraphToolSet {
       for (const ev of e.events) {
         lines.push(
           `  ${new Date(ev.atMs).toISOString()}  ${ev.signal}` +
+            `  [${ev.source}]` +
             (ev.payload !== undefined ? `  ${JSON.stringify(ev.payload)}` : ""),
         );
       }

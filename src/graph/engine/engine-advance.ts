@@ -98,6 +98,7 @@ import type {
   SignalType,
   SignalBridge,
 } from "./signal-bridge.ts";
+import type { SignalLedgerSource } from "../../types.engine-v2.ts";
 import type { GraphEventRecorder } from "./graph-events.ts";
 
 // ── Ports (dependency injection seams) ──────────────────────────────────────
@@ -338,11 +339,16 @@ export class AdvanceEngine {
    * (pausing / handoff / info) are recorded only — they never advance the graph
    * in Phase 1. Terminating signals then run the advancement critical section
    * (`_advanceSignal`), which also routes through the re-entrancy guard.
+   *
+   * @param source Origin discriminator for the signal ledger event (defaults
+   *               to `"dispatch"` for live worker signals; recovery deferred
+   *               drain paths pass `"recovery"`).
    */
   onNodeSignalEmitted(
     nodeId: string,
     signalType: SignalType,
     signalPayload: unknown,
+    source: SignalLedgerSource = "dispatch",
   ): Promise<void> {
     // Step 1: record the signal (per-node ledger + graph signalLedger).
     const terminating = this.signalBridge.record(
@@ -350,6 +356,7 @@ export class AdvanceEngine {
       nodeId,
       signalType,
       signalPayload,
+      source,
     );
     // `need_approval` is a PAUSING signal (signal-bridge.ts PAUSING_SIGNALS),
     // so `terminating` is false for it — yet it still drives an advancement
@@ -875,24 +882,29 @@ export class AdvanceEngine {
     // manager's immediate-fire guard uses a microtask), so re-entrancy into the
     // advancing critical section is safe.
     subscribeTaskTermination(this.state, this.dispatchPort, node, (nid, type, payload) => {
-      this.signalBridge.record(this.state, nid, type, payload);
+      this.signalBridge.record(this.state, nid, type, payload, "dispatch");
     });
 
     // Post-registration race-condition guard: after the onTaskTerminated listener
     // is attached, re-read the dispatched task's current status. If the task has
     // ALREADY reached a terminal status (completed / error / timeout) before the
-    // listener was attached, the microtask-scheduled listener fire would miss it
-    // — derive the signal via mapDispatchStatusToSignal and feed it through
-    // signalBridge.record now so the node advances instead of hanging in
-    // `running` forever.
+    // listener was attached, the microtask-scheduled listener fire would miss it.
+    // Derive the signal via mapDispatchStatusToSignal, record it in
+    // node.signalsObserved (so _latestTerminating() can replay it during drain),
+    // and queue a deferred completion that _drainDeferred() will process when the
+    // current critical section exits. This keeps signalBridge.record() as the
+    // exclusive delivery seam owned by the subscribeTaskTermination callback —
+    // no duplicate dispatch→signal paths to keep in sync.
     //
-    // Double-advance prevention: the guard checks that the node is still
-    // `running` and its `dispatchTaskId` still matches before recording the
-    // signal. If the microtask-scheduled listener fires first (theoretical),
-    // the node will no longer be `running` → guard skipped. If this guard fires
-    // first, the node transitions out of `running` → the listener's own guard
-    // (subscribeTaskTermination, engine-recovery.ts:240) rejects the stale
-    // callback. Both paths are mutually exclusive and idempotent.
+    // Double-advance prevention: the deferred completion drains AFTER the lock
+    // is released by _runCriticalSection's finally block. If the
+    // microtask-scheduled onTaskTerminated listener fires first (theoretical —
+    // it is scheduled after this guard runs synchronously), the listener
+    // advances via signalBridge.record → _advanceSignal → lock-held →
+    // queuePendingCompletion, which is the same deferred path. When the guard's
+    // deferred completion finally drains, subscribeTaskTermination's own
+    // status != Running guard (engine-recovery.ts:240) rejects the stale
+    // callback (the node already transitioned out of Running).
     //
     // cancelled status must NOT be turned into a signal (handled by direct node
     // cancellation via the cascade canceller or the listener's cancelled path).

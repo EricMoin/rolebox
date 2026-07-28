@@ -271,8 +271,8 @@ describe("graph_status backed flags return genuine engine data", () => {
       signals: { progress: { stage: "writing", percentage: 50, message: "halfway" } },
       lastSignalAt: 5000,
       history: [
-        { signal: "progress", payload: { percentage: 25, message: "started" }, atMs: 1000 },
-        { signal: "progress", payload: { percentage: 50, message: "halfway" }, atMs: 5000 },
+        { signal: "progress", payload: { percentage: 25, message: "started" }, atMs: 1000, source: "dispatch" },
+        { signal: "progress", payload: { percentage: 50, message: "halfway" }, atMs: 5000, source: "dispatch" },
       ],
     });
 
@@ -282,6 +282,8 @@ describe("graph_status backed flags return genuine engine data", () => {
     expect(out).toContain('"percentage":25');
     expect(out).toContain('"percentage":50');
     expect(out).toContain("halfway");
+    // Assert the source discriminator is surfaced in the output.
+    expect(out).toContain("[dispatch]");
   });
 
   it("since filters the signal stream after an ISO timestamp (honest when empty)", () => {
@@ -293,8 +295,8 @@ describe("graph_status backed flags return genuine engine data", () => {
       signals: {},
       lastSignalAt: 5000,
       history: [
-        { signal: "progress", payload: { percentage: 25, message: "started" }, atMs: 1000 },
-        { signal: "answer", payload: { done: true }, atMs: 5000 },
+        { signal: "progress", payload: { percentage: 25, message: "started" }, atMs: 1000, source: "dispatch" },
+        { signal: "answer", payload: { done: true }, atMs: 5000, source: "dispatch" },
       ],
     });
 
@@ -303,6 +305,7 @@ describe("graph_status backed flags return genuine engine data", () => {
     // The earlier (atMs 1000) event is filtered out; the atMs 5000 event remains.
     expect(out).not.toContain("percentage");
     expect(out).toContain("answer");
+    expect(out).toContain("[dispatch]");
 
     // A since bound after every event → explicit "no events since" note.
     const late = ts.graph_status({ graph_id, node_id: "reporter", stream: true, since: new Date(9999).toISOString() });
@@ -338,6 +341,33 @@ describe("graph_status backed flags return genuine engine data", () => {
     ]);
     // Nodes without the requested arrays are omitted honestly from artifacts_evidence.
     expect(parsed.artifacts_evidence).toHaveLength(1);
+  });
+
+  it("json format includes source discriminator in signal_stream entries", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "cwire-stream-json" });
+    buildChain(ts, graph_id);
+    const state = liveState(ts, graph_id);
+    state.signalLedger.set("reporter", {
+      signals: { answer: { ok: true } },
+      lastSignalAt: 2000,
+      history: [
+        { signal: "progress", payload: { step: 1 }, atMs: 1000, source: "dispatch" },
+        { signal: "answer", payload: { ok: true }, atMs: 2000, source: "recovery" },
+      ],
+    });
+
+    const parsed = JSON.parse(
+      status(ts, graph_id, { format: "json", stream: true }),
+    );
+    expect(parsed.signal_stream).toBeDefined();
+    const reporterStream = parsed.signal_stream.find(
+      (s: { node_id: string }) => s.node_id === "reporter",
+    );
+    expect(reporterStream).toBeDefined();
+    expect(reporterStream.events).toHaveLength(2);
+    expect(reporterStream.events[0].source).toBe("dispatch");
+    expect(reporterStream.events[1].source).toBe("recovery");
   });
 });
 

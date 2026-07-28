@@ -80,6 +80,7 @@ describe("SignalBridge.record — per-node signal history dual-write (unit)", ()
     const evt = entry!.history![0];
     expect(evt.signal).toBe("answer");
     expect(evt.payload).toEqual({ note: "done" });
+    expect(evt.source).toBe("dispatch");
     // Timestamp is a genuine epoch-ms value inside the emission window.
     expect(evt.atMs).toBeGreaterThanOrEqual(before);
     expect(evt.atMs).toBeLessThanOrEqual(after);

@@ -33,6 +33,7 @@ import { EnginePhase, NodeStatus } from "../../constants.ts";
 import type {
   EngineState,
   NodeRuntimeState,
+  SignalLedgerSource,
 } from "../../types.engine-v2.ts";
 import {
   createEngineState,
@@ -591,7 +592,7 @@ class EngineRuntimeImpl implements EngineRuntime {
         this.state,
         port,
         (nodeId, type, payload) => {
-          this.signalBridge.record(this.state, nodeId, type, payload);
+          this.signalBridge.record(this.state, nodeId, type, payload, "recovery");
         },
       );
     } catch (err) {
@@ -617,7 +618,7 @@ class EngineRuntimeImpl implements EngineRuntime {
     // critical section (the re-entrancy guard makes the follow-up advance of
     // already-completed nodes a no-op).
     for (const d of report.deferred) {
-      await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload);
+      await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload, "recovery");
     }
 
     // Rebuild the frontier and dispatch any ready nodes that recovery left
@@ -644,14 +645,14 @@ class EngineRuntimeImpl implements EngineRuntime {
           this.state,
           port,
           (nodeId, type, payload) => {
-            this.signalBridge.record(this.state, nodeId, type, payload);
+            this.signalBridge.record(this.state, nodeId, type, payload, "recovery");
           },
         );
         for (const id of report.timedOut) {
           this.advance.notifyNodeTimeout(id);
         }
         for (const d of report.deferred) {
-          await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload);
+          await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload, "recovery");
         }
       } catch (err) {
         logWarn(

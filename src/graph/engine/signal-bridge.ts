@@ -21,7 +21,7 @@
  * Design reference: `.rolebox/design/engine-state-machine.md` §3.4.
  */
 
-import type { EngineState, SignalLedgerEvent } from "../../types.engine-v2.ts";
+import type { EngineState, SignalLedgerEvent, SignalLedgerSource } from "../../types.engine-v2.ts";
 import { markDirty } from "./engine-persistence.ts";
 
 // ── Signal-type vocabulary (imported from src/signal/signal-constants.ts) ────
@@ -91,6 +91,8 @@ export class SignalBridge {
    *
    * @param state    Optional engine state — when provided, the graph-level
    *                 `signalLedger` history entry is kept in sync.
+   * @param source   Origin discriminator for this signal event (dispatch /
+   *                 recovery / deferred / race_guard).
    * @returns `true` if `type` is terminating, `false` otherwise.
    */
   record(
@@ -98,6 +100,7 @@ export class SignalBridge {
     nodeId: string,
     type: SignalType,
     payload?: unknown,
+    source: SignalLedgerSource = "dispatch",
   ): boolean {
     const now = Date.now();
     const value = payload !== undefined ? payload : null;
@@ -109,7 +112,7 @@ export class SignalBridge {
 
     // Build the timestamped history event. Payload is normalized to `null`
     // when absent, mirroring the `signals` field behavior just below.
-    const event: SignalLedgerEvent = { signal: type, payload: value, atMs: now };
+    const event: SignalLedgerEvent = { signal: type, payload: value, atMs: now, source };
 
     // Keep the graph-level signal ledger in sync (lastSignalAt timestamp +
     // ordered history). The `history` array is OPTIONAL-ADDITIVE — it is

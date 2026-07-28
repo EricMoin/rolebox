@@ -348,6 +348,13 @@ export interface SignalLedgerEntry {
 }
 
 /**
+ * Discriminator for the origin of a signal recorded in the per-node ledger
+ * history. Helps graph_status consumers distinguish live worker signals from
+ * recovery-side reconciliation, engine-deferred drain, and race-guard paths.
+ */
+export type SignalLedgerSource = "dispatch" | "recovery" | "deferred" | "race_guard";
+
+/**
  * A single timestamped signal event in the per-node ledger history.
  *
  * Backs the `stream` (chronological) and `since` (from a given timestamp)
@@ -361,4 +368,13 @@ export interface SignalLedgerEvent {
   payload?: unknown;
   /** Epoch ms timestamp when the event occurred */
   atMs: number;
+  /**
+   * Origin discriminator for this signal event.
+   *
+   * - `dispatch`     — live worker signal (onNodeSignalEmitted / dispatch listener)
+   * - `recovery`     — recovery-side re-subscription or reconciliation
+   * - `deferred`     — engine-deferred completion drained after lock release
+   * - `race_guard`   — race guard detected an already-terminal dispatch task
+   */
+  source: SignalLedgerSource;
 }
