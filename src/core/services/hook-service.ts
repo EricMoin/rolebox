@@ -6,6 +6,7 @@ import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-b
 import { graphSessionState } from "../../graph/index.ts";
 import { setAdvanceJudge } from "../../graph/advance.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
+import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
 import { buildAgentConfig, transformPermission, type RoleboxAgentConfig } from "../../prompt/agent-config.ts";
 import { RoleMode } from "../../constants.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -59,9 +60,11 @@ export class HookService implements PluginService {
     if (dir) {
       graphSessionState.setStoreDirectory(dir);
       functionRuntime.setStoreDirectory(dir);
+      sessionSignalLedger.setStoreDirectory(dir);
     }
     graphSessionState.recover((_sessionID, agentId) => roleGraphMap.get(agentId));
     functionRuntime.recover();
+    sessionSignalLedger.recover();
     // Refresh hookState auto-activate and locked maps (supports hot-reload)
     hookState.roleAutoActivateMap.clear();
     hookState.roleLockedMap.clear();

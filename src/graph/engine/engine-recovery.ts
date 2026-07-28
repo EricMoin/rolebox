@@ -55,7 +55,9 @@ import { releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
 import { bindNodeState } from "./recorder.ts";
 import type { SignalType } from "./signal-bridge.ts";
+import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
+import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -131,7 +133,13 @@ export type RecoveryEmitSignal = (
  * Map a dispatch task's terminal status to the terminating engine signal that
  * advances its node:
  *
- * - `completed` → `answer` (forward data flow runs).
+ * - `completed` → `answer` (forward data flow runs). When the subtask emitted a
+ *   real terminating signal (`task.terminatingSignal`), it is preserved
+ *   including the signal type (e.g. `revise_needed` / `escalate` / `answer`)
+ *   so loop back-edges and other signal consumers activate correctly. When no
+ *   terminating signal was recorded, the payload is tagged `{ __inferred: true }`
+ *   — this is a best-effort inference that the task "just finished", emitted so
+ *   downstream join evaluation and signal routing never silently stall.
  * - `error`     → `escalate` (payload carries `task.error`).
  * - `timeout`   → `escalate` (a timed-out worker is an unrecoverable failure).
  * - `cancelled` → `null` — a cancellation is not a terminating signal; the node
@@ -150,13 +158,39 @@ export function mapDispatchStatusToSignal(
       // hardcoded answer default. This preserves the signal type so loop
       // back-edges (on_signal(revise_needed)) and other terminating-signal
       // consumers activate correctly.
-      if (task?.terminatingSignal) {
+      if (task?.terminatingSignal && TERMINATING_SIGNALS.has(task.terminatingSignal.type)) {
         return {
           type: task.terminatingSignal.type as SignalType,
           payload: task.terminatingSignal.payload,
         };
       }
-      return { type: "answer", payload: null };
+      // Last-resort: when the task object lacks terminatingSignal, check the
+      // sessionSignalLedger. The completion evaluator records the real
+      // terminating signal in the ledger before propagating it to the task
+      // object; in rare timing/ordering edge cases, the signal may exist in the
+      // ledger but not yet on the task.
+      if (task?.sessionId) {
+        const ledgerSignal = sessionSignalLedger.getTerminating(task.sessionId);
+        if (ledgerSignal) {
+          logWarn(
+            `engine-recovery: recovered terminating signal from sessionSignalLedger ` +
+            `(sessionId=${task.sessionId}, taskId=${task.id}) — ` +
+            `type=${ledgerSignal.type}`,
+          );
+          return {
+            type: ledgerSignal.type as SignalType,
+            payload: ledgerSignal.payload,
+          };
+        }
+      }
+      // No terminating signal recorded anywhere — infer an "answer" with a
+      // marker so downstream routing never silently drops the node's completion.
+      logInfo(
+        `engine-recovery: no terminatingSignal recorded for completed task ` +
+        `(sessionId=${task?.sessionId ?? "unknown"}, taskId=${task?.id ?? "unknown"}) — ` +
+        `inferred answer signal`,
+      );
+      return { type: "answer", payload: { __inferred: true } };
     }
     case "error":
       return {
@@ -562,6 +596,18 @@ export class EngineLockSweeper {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Minimal, dependency-free warning logger (no createSubLogger import cycle). */
+function logWarn(message: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
+/** Minimal, dependency-free info logger. */
+function logInfo(message: string): void {
+  // eslint-disable-next-line no-console
+  console.info(message);
+}
 
 /** Defensive `getTask` — a throwing/lacking port yields `undefined`. */
 function safeGetTask(

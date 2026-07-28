@@ -29,6 +29,7 @@ import {
   type ReconcileReport,
 } from "../../src/graph/engine/engine-recovery.ts";
 import type { SignalType } from "../../src/graph/engine/signal-bridge.ts";
+import { sessionSignalLedger } from "../../src/signal/session-signal-ledger.ts";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -88,23 +89,23 @@ function buildState(
 // ── mapDispatchStatusToSignal ───────────────────────────────────────────────
 
 describe("mapDispatchStatusToSignal", () => {
-  it("completed → answer", () => {
+  it("completed → answer (inferred)", () => {
     expect(mapDispatchStatusToSignal("completed")).toEqual({
       type: "answer",
-      payload: null,
+      payload: { __inferred: true },
     });
   });
 
-  it("completed with terminatingSignal=revise_needed → revise_needed with payload", () => {
+  it("completed with terminatingSignal=revise_needed → revise_needed with payload (Tier 1 preserves exact type + payload)", () => {
     const task = makeTask("t", "completed");
     task.terminatingSignal = {
       type: "revise_needed",
-      payload: { findings: ["n1", "n2"] },
+      payload: { findings: "x" },
     };
     const sig = mapDispatchStatusToSignal("completed", task);
     expect(sig).toEqual({
       type: "revise_needed",
-      payload: { findings: ["n1", "n2"] },
+      payload: { findings: "x" },
     });
   });
 
@@ -121,11 +122,74 @@ describe("mapDispatchStatusToSignal", () => {
     });
   });
 
-  it("completed without terminatingSignal → answer (backward-compat default)", () => {
+  it("completed with terminatingSignal wins over ledger: Tier 1 priority (both present)", () => {
+    const sessionId = "sess-map-tier1-priority";
+    const task = makeTask("t-tier1", "completed");
+    (task as { sessionId: string }).sessionId = sessionId;
+    // Tier 1: terminatingSignal on the task.
+    task.terminatingSignal = {
+      type: "revise_needed",
+      payload: { findings: "x" },
+    };
+    // Tier 2: ledger has a different signal — escalate (must be ignored).
+    sessionSignalLedger.record(sessionId, "escalate", {
+      reason: "should-be-ignored",
+    });
+    const sig = mapDispatchStatusToSignal("completed", task);
+    expect(sig).toEqual({
+      type: "revise_needed",
+      payload: { findings: "x" },
+    });
+    sessionSignalLedger.clearSession(sessionId);
+  });
+
+  it("completed without terminatingSignal → answer with __inferred", () => {
     const task = makeTask("t", "completed");
     expect(mapDispatchStatusToSignal("completed", task)).toEqual({
       type: "answer",
-      payload: null,
+      payload: { __inferred: true },
+    });
+  });
+
+  it("completed without terminatingSignal but ledger has revise_needed → reads signal from ledger", () => {
+    const sessionId = "sess-map-ledger-revise";
+    const task = makeTask("t-ledger", "completed");
+    // Overwrite the auto-generated sessionId so we control the ledger key.
+    (task as { sessionId: string }).sessionId = sessionId;
+    sessionSignalLedger.record(sessionId, "revise_needed", {
+      findings: ["ledger-found"],
+    });
+    const sig = mapDispatchStatusToSignal("completed", task);
+    expect(sig).toEqual({
+      type: "revise_needed",
+      payload: { findings: ["ledger-found"] },
+    });
+    sessionSignalLedger.clearSession(sessionId);
+  });
+
+  it("completed without terminatingSignal but ledger has escalate → recovers escalate from ledger (Tier 2)", () => {
+    const sessionId = "sess-map-ledger-escalate";
+    const task = makeTask("t-ledger-e", "completed");
+    (task as { sessionId: string }).sessionId = sessionId;
+    sessionSignalLedger.record(sessionId, "escalate", {
+      reason: "ledger-escalate-reason",
+    });
+    const sig = mapDispatchStatusToSignal("completed", task);
+    expect(sig).toEqual({
+      type: "escalate",
+      payload: { reason: "ledger-escalate-reason" },
+    });
+    sessionSignalLedger.clearSession(sessionId);
+  });
+
+  it("completed without terminatingSignal and no ledger entry → answer with __inferred", () => {
+    const sessionId = "sess-map-no-signal";
+    const task = makeTask("t-no-sig", "completed");
+    (task as { sessionId: string }).sessionId = sessionId;
+    sessionSignalLedger.clearSession(sessionId); // explicit clean before test
+    expect(mapDispatchStatusToSignal("completed", task)).toEqual({
+      type: "answer",
+      payload: { __inferred: true },
     });
   });
 
@@ -196,7 +260,7 @@ describe("subscribeTaskTermination", () => {
   it("emits a mapped signal when the task terminates while the node is running", () => {
     const { fire, emitted } = subscribe(NodeStatus.Running);
     fire("completed");
-    expect(emitted).toEqual([["A", "answer", null]]);
+    expect(emitted).toEqual([["A", "answer", { __inferred: true }]]);
   });
 
   it("does NOT emit for a node that is no longer running", () => {
@@ -252,7 +316,32 @@ describe("subscribeTaskTermination", () => {
       task,
     );
     fire("completed");
-    expect(emitted).toEqual([["A", "answer", null]]);
+    expect(emitted).toEqual([["A", "answer", { __inferred: true }]]);
+  });
+
+  it("completed with ledger revise_needed but no task terminatingSignal → emits revise_needed via ledger", () => {
+    // Simulate the full dispatch→signal pipeline: the completion evaluator
+    // recorded a revise_needed in the sessionSignalLedger (via
+    // getTerminatingSignal), but the task object itself does NOT carry
+    // terminatingSignal. The mapDispatchStatusToSignal last-resort ledger
+    // read must recover it so subscribeTaskTermination emits revise_needed
+    // instead of defaulting to answer.
+    const sessionId = "sess-sub-ledger";
+    sessionSignalLedger.record(sessionId, "revise_needed", {
+      findings: ["ledger-revise"],
+    });
+    const customTask = makeTask("task-A", "completed");
+    (customTask as { sessionId: string }).sessionId = sessionId;
+    const { fire, emitted } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      customTask,
+    );
+    fire("completed");
+    expect(emitted).toEqual([
+      ["A", "revise_needed", { findings: ["ledger-revise"] }],
+    ]);
+    sessionSignalLedger.clearSession(sessionId);
   });
 });
 

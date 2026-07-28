@@ -4,6 +4,7 @@ import { hookState } from "../hooks/state.ts";
 import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
 import { graphSessionState } from "../graph/index.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
+import { sessionSignalLedger } from "../signal/session-signal-ledger.ts";
 import { createSubLogger } from "../logger.ts";
 import { PluginCore } from "./plugin-core.ts";
 import { HotReloadService } from "./services/hot-reload-service.ts";
@@ -85,7 +86,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
         mgr.dispose();
       }
       core.getService<DispatchService>("dispatch-service")?.getDispatchManager().flushPersistSync();
-      if (directory) { graphSessionState.flushSync(); functionRuntime.flushSync(); }
+      if (directory) { graphSessionState.flushSync(); functionRuntime.flushSync(); sessionSignalLedger.flushSync(); }
       void core.dispose(); // fire-and-forget for async service disposal
     };
     process.on("exit", () => flushAllSync());

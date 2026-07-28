@@ -20,22 +20,11 @@ import {
 import { withTimeout, TimeoutError } from "../core/with-timeout.ts";
 import { materializeAndNotify } from "./result-materializer.ts";
 import type { ProgressEvent } from "../types.progress.ts";
-import { functionRuntime } from "../../function/runtime-state.ts";
-import { hasSignal, getSignalPayload } from "../../signal/signal-ledger.ts";
 import { buildReminder } from "../../prompt/reminder.ts";
+import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
+import { SYNTHETIC_ANSWER_SIGNAL } from "../../signal/signal-constants.ts";
 
 // ── Signal-type classification ──────────────────────────────────────
-
-/** HITL signal types that pause a task awaiting human intervention. */
-const HITL_SIGNALS = new Set(["need_approval", "blocked", "need_clarification"]);
-
-/**
- * Terminating signal types emitted by a sub-agent that indicate the reason it
- * completed. Mirrors `TERMINATING_SIGNALS` in `src/signal/signal-tool.ts`.
- * Listed in descending severity so the highest-severity signal wins when
- * multiple were recorded.
- */
-const TERMINATING_SIGNALS = ["escalate", "revise_needed", "answer"] as const;
 
 /**
  * Check whether the subagent session associated with this task emitted any
@@ -51,22 +40,11 @@ async function checkHitlSignals(d: TaskLifecycleDeps, taskId: string): Promise<b
   const task = d.tasks.get(taskId);
   if (!task || !task.sessionId) return false;
 
-  const sessionFns = functionRuntime.all(task.sessionId);
-  let hitlType: string | undefined;
-  let hitlPayload: unknown;
+  const hitlInfo = sessionSignalLedger.getHitlSignal(task.sessionId);
+  if (!hitlInfo) return false;
 
-  for (const [, fnState] of sessionFns) {
-    for (const signalType of HITL_SIGNALS) {
-      if (hasSignal(fnState, signalType)) {
-        hitlType = signalType;
-        hitlPayload = getSignalPayload(fnState, signalType);
-        break;
-      }
-    }
-    if (hitlType) break;
-  }
-
-  if (!hitlType) return false;
+  const hitlType = hitlInfo.type;
+  const hitlPayload = hitlInfo.payload;
 
   // Transition to awaiting_approval instead of completed
   if (!transition(d, taskId, ["running"], "awaiting_approval")) return false;
@@ -138,18 +116,7 @@ function getTerminatingSignal(
   taskId: string,
   sessionId: string,
 ): { type: string; payload: unknown } | null {
-  const sessionFns = functionRuntime.all(sessionId);
-  for (const signalType of TERMINATING_SIGNALS) {
-    for (const [, fnState] of sessionFns) {
-      if (hasSignal(fnState, signalType)) {
-        return {
-          type: signalType,
-          payload: getSignalPayload(fnState, signalType),
-        };
-      }
-    }
-  }
-  return null;
+  return sessionSignalLedger.getTerminating(sessionId);
 }
 
 // ── Helpers for common transition patterns ─────────────────────
@@ -358,8 +325,9 @@ export async function evaluateAndComplete(
         // Record the real terminating signal (if any) from the function runtime
         // state before completing, so the graph engine emits the correct signal
         // type (e.g. revise_needed) instead of unconditionally mapping
-        // completed → answer.
-        task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? undefined;
+        // completed → answer. When the sub-agent never called signal(), we
+        // populate a synthetic answer on its behalf.
+        task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? SYNTHETIC_ANSWER_SIGNAL;
         await completeAndRelease(d, taskId);
         break;
       }
@@ -396,7 +364,7 @@ export async function evaluateAndComplete(
       case "stabilizing": {
         debugLog("evaluate", taskId, `stabilizing with skipStabilityGating=true — treating as completed`);
         if (await checkHitlSignals(d, taskId)) break;
-        task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? undefined;
+        task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? SYNTHETIC_ANSWER_SIGNAL;
         await completeAndRelease(d, taskId);
         break;
       }
@@ -578,6 +546,16 @@ export async function handleSessionDeleted(d: TaskLifecycleDeps, sessionId: stri
 
 /** Handle an externally-detected task completed signal. */
 export async function handleTaskCompleted(d: TaskLifecycleDeps, taskId: string): Promise<void> {
+  // Record the real terminating signal (if any) from the function runtime
+  // state before completing, so the graph engine emits the correct signal
+  // type (e.g. revise_needed) instead of unconditionally mapping
+  // completed → answer. Must happen before the transition so it's
+  // available when notifyTerminated fires downstream.
+  const task = d.tasks.get(taskId);
+  if (task && task.sessionId) {
+    task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? SYNTHETIC_ANSWER_SIGNAL;
+  }
+
   if (!transition(d, taskId, ["pending", "running"], "completed")) return;
   const t = d.tasks.get(taskId)!;
   const duration = Date.now() - t.startedAt.getTime();

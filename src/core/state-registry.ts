@@ -1,6 +1,7 @@
 import { FunctionSessionState } from "../function/session-state.ts";
 import { GraphSessionState } from "../graph/index.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
+import { sessionSignalLedger } from "../signal/session-signal-ledger.ts";
 import type { ResolvedFunction, ResolvedGraph } from "../types.ts";
 
 export const stateRegistry = {
@@ -14,6 +15,7 @@ export const stateRegistry = {
     this.functions = new FunctionSessionState();
     this.graph = new GraphSessionState();
     this.functionRuntime.resetAll();
+    sessionSignalLedger.resetAll();
     this.roleFunctions.clear();
     this.roleGraphs.clear();
   },
