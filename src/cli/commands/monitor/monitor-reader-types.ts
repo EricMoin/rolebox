@@ -175,6 +175,10 @@ export interface GraphNodeSnapshot {
   retryCount?: number;
   /** Loop group this node belongs to, if any */
   loopGroupId?: string;
+  /** ID of the dispatch task spawned for this node (set when node enters running) */
+  dispatchTaskId?: string;
+  /** Session ID of the dispatch task spawned for this node */
+  dispatchSessionId?: string;
 }
 
 /** Cumulative graph-level budget consumption projection. */

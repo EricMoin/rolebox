@@ -16,6 +16,7 @@ import {
   GraphToolSet,
 } from "../../src/graph/tools/graph-tools";
 import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools";
+import type { EngineState } from "../../src/types.engine-v2";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -362,6 +363,57 @@ describe("graph_status", () => {
     expect(short.length).toBeLessThanOrEqual(10);
     const tail = status(ts, graph_id, { max_chars: 10, tail: true });
     expect(tail.length).toBeLessThanOrEqual(10);
+  });
+
+  it("JSON output surfaces dispatch_session_id / dispatch_task_id for a dispatched node", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "dispatch" });
+    buildReviewTeamPlus(ts, graph_id);
+
+    // Stamp dispatch ids directly on the planner node's RUNTIME state (the raw
+    // EngineState, not the snapshot clone that status() returns).
+    const entry = ts["getEntry"](graph_id);
+    const rawState = (entry.runtime as unknown as { state: EngineState }).state;
+    const planner = rawState.nodes.get("planner")!;
+    planner.dispatchSessionId = "sess-planner-1";
+    planner.dispatchTaskId = "task-planner-1";
+
+    // JSON format (session scope) — nodeSummary() path.
+    const json = JSON.parse(ts.graph_status({ graph_id, format: "json" }));
+    const plannerNode = (json.nodes as Array<Record<string, unknown>>).find(
+      (n) => n.node_id === "planner",
+    )!;
+    expect(plannerNode.dispatch_session_id).toBe("sess-planner-1");
+    expect(plannerNode.dispatch_task_id).toBe("task-planner-1");
+
+    // Undispatched node (implementer) — keys must be absent.
+    const implNode = (json.nodes as Array<Record<string, unknown>>).find(
+      (n) => n.node_id === "implementer",
+    )!;
+    expect(implNode).not.toHaveProperty("dispatch_session_id");
+    expect(implNode).not.toHaveProperty("dispatch_task_id");
+  });
+
+  it("text (single-node) output surfaces dispatch_session_id / dispatch_task_id labels", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "dispatch-txt" });
+    buildReviewTeamPlus(ts, graph_id);
+
+    // Stamp dispatch ids directly on the raw engine state (not the clone).
+    const entry = ts["getEntry"](graph_id);
+    const rawState = (entry.runtime as unknown as { state: EngineState }).state;
+    const planner = rawState.nodes.get("planner")!;
+    planner.dispatchSessionId = "sess-planner-1";
+    planner.dispatchTaskId = "task-planner-1";
+
+    const text = ts.graph_status({ node_id: "planner" });
+    expect(text).toMatch(/dispatch_session_id: sess-planner-1/);
+    expect(text).toMatch(/dispatch_task_id: task-planner-1/);
+
+    // Undispatched node — no dispatch lines.
+    const implText = ts.graph_status({ node_id: "implementer" });
+    expect(implText).not.toMatch(/dispatch_session_id/);
+    expect(implText).not.toMatch(/dispatch_task_id/);
   });
 });
 

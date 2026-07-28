@@ -1162,6 +1162,12 @@ export class GraphToolSet {
             node_id: r.node.nodeId,
             status: r.node.status,
             agent: r.node.agent,
+            ...(r.node.dispatchSessionId
+              ? { dispatch_session_id: r.node.dispatchSessionId }
+              : {}),
+            ...(r.node.dispatchTaskId
+              ? { dispatch_task_id: r.node.dispatchTaskId }
+              : {}),
           })),
           budget,
         },
@@ -1634,6 +1640,8 @@ export class GraphToolSet {
     lines.push(`  loop_group: ${node.loopGroupId ?? "-"}`);
     lines.push(`  traversal_count: ${node.traversalCount}`);
     lines.push(`  retry_count: ${node.retryCount}`);
+    if (node.dispatchSessionId) lines.push(`  dispatch_session_id: ${node.dispatchSessionId}`);
+    if (node.dispatchTaskId) lines.push(`  dispatch_task_id: ${node.dispatchTaskId}`);
     if (node.errorReason) lines.push(`  error: ${node.errorReason}`);
     if (args.include_progress) {
       const prog = this.progressForNode(state, node);
@@ -2143,6 +2151,12 @@ export class GraphToolSet {
       loop_group: n.loopGroupId,
       traversal_count: n.traversalCount,
       retry_count: n.retryCount,
+      ...(n.dispatchSessionId
+        ? { dispatch_session_id: n.dispatchSessionId }
+        : {}),
+      ...(n.dispatchTaskId
+        ? { dispatch_task_id: n.dispatchTaskId }
+        : {}),
       error: n.errorReason,
       ...(progress && progress.recorded
         ? { progress: progress.payload, progress_last_signal_at: progress.lastSignalAt }

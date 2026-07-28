@@ -407,4 +407,68 @@ describe("graph_status cross-session filter scope (persisted / all)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("surfaces dispatch_session_id / dispatch_task_id on a dispatched node in cross-session JSON (scope=persisted)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "graph-status-xsession-dispatch-"));
+    try {
+      const state = buildXState("dispatched-session", {
+        id: "dispatched-node",
+        agent: "agent-d",
+        status: NodeStatus.Completed,
+        completedAt: T1,
+      });
+      // Stamp dispatch ids directly on the node before persisting.
+      const n = state.nodes.get("dispatched-node")!;
+      n.dispatchSessionId = "disp-sess-abc";
+      n.dispatchTaskId = "disp-task-xyz";
+
+      const store = new EnginePersistence(dir);
+      store.save(state);
+
+      const ts = createGraphToolSet({ stateDir: dir });
+      const out = ts.graph_status({ scope: "persisted", format: "json", query: "dispatched-node" });
+      const parsed = JSON.parse(out);
+      expect(parsed.nodes).toEqual([
+        {
+          graph_id: "dispatched-session",
+          node_id: "dispatched-node",
+          status: "completed",
+          agent: "agent-d",
+          dispatch_session_id: "disp-sess-abc",
+          dispatch_task_id: "disp-task-xyz",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits dispatch_session_id / dispatch_task_id from an undispatched node in cross-session JSON", () => {
+    const dir = mkdtempSync(join(tmpdir(), "graph-status-xsession-nodispatch-"));
+    try {
+      const state = buildXState("undispatched-session", {
+        id: "plain-node",
+        agent: "agent-p",
+        status: NodeStatus.Completed,
+        completedAt: T1,
+      });
+      // No dispatch ids set — leave them undefined.
+
+      const store = new EnginePersistence(dir);
+      store.save(state);
+
+      const ts = createGraphToolSet({ stateDir: dir });
+      const out = ts.graph_status({ scope: "persisted", format: "json", query: "plain-node" });
+      const parsed = JSON.parse(out);
+      const node = parsed.nodes[0] as Record<string, unknown>;
+      expect(node.graph_id).toBe("undispatched-session");
+      expect(node.node_id).toBe("plain-node");
+      // dispatch_session_id / dispatch_task_id keys must be ABSENT — not present
+      // as null or undefined values.
+      expect(node).not.toHaveProperty("dispatch_session_id");
+      expect(node).not.toHaveProperty("dispatch_task_id");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

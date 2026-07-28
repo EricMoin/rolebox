@@ -45,6 +45,8 @@ function projectEngineGraph(state: EngineState): EngineGraphSnapshot {
       completedAt: n.completedAt !== undefined ? epochToIso(n.completedAt) : undefined,
       retryCount: n.retryCount,
       loopGroupId: n.loopGroupId,
+      ...(n.dispatchTaskId ? { dispatchTaskId: n.dispatchTaskId } : {}),
+      ...(n.dispatchSessionId ? { dispatchSessionId: n.dispatchSessionId } : {}),
     };
     nodes.push(node);
     nodeStatusCounts[n.status] = (nodeStatusCounts[n.status] ?? 0) + 1;

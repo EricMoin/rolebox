@@ -31,10 +31,55 @@ function writeEngineFile(filename: string, contents: string): string {
  * serialized shape produced by `serializeEngineState` (see
  * `src/graph/engine/engine-persistence.ts`) so it round-trips through
  * `loadEngineStateFromJson`. `overrides` let tests mutate specific fields.
+ *
+ * `nodeOverrides` supplies per-node overrides keyed by node id (e.g.
+ * `{ n1: { dispatchSessionId: "sess-abc" } }`). When omitted, each node
+ * uses its default fixture shape.
  */
 function buildEngineFile(
   overrides: Record<string, unknown> = {},
+  nodeOverrides?: Record<string, Record<string, unknown>>,
 ): Record<string, unknown> {
+  const n1: Record<string, unknown> = {
+    nodeId: "n1",
+    agent: "emperor--jinyiwei--backend",
+    prompt: "build the thing",
+    needsApproval: false,
+    status: "running",
+    signalsObserved: { answer: {} },
+    sessionsSpawned: 1,
+    tokensConsumed: { inputTokens: 100, outputTokens: 50, cost: 0.001 },
+    upstreamResults: {},
+    joinStrategy: "all",
+    joinSatisfied: true,
+    traversalCount: 0,
+    startedAt: 1_700_000_000_000,
+    retryCount: 0,
+  };
+  const n2: Record<string, unknown> = {
+    nodeId: "n2",
+    agent: "emperor--jinyiwei--test",
+    prompt: "verify it",
+    needsApproval: false,
+    status: "completed",
+    signalsObserved: { answer: {}, revise_needed: {} },
+    sessionsSpawned: 2,
+    tokensConsumed: { inputTokens: 200, outputTokens: 100, cost: 0.002 },
+    upstreamResults: {},
+    joinStrategy: "all",
+    joinSatisfied: true,
+    loopGroupId: "lg1",
+    traversalCount: 3,
+    startedAt: 1_690_000_000_000,
+    completedAt: 1_695_000_000_000,
+    retryCount: 1,
+  };
+  if (nodeOverrides) {
+    for (const [id, patch] of Object.entries(nodeOverrides)) {
+      const target = id === "n1" ? n1 : id === "n2" ? n2 : undefined;
+      if (target) Object.assign(target, patch);
+    }
+  }
   return {
     version: 2,
     graphId: "demo-graph",
@@ -45,42 +90,7 @@ function buildEngineFile(
       nodes: [],
       edges: [],
     },
-    nodes: {
-      n1: {
-        nodeId: "n1",
-        agent: "emperor--jinyiwei--backend",
-        prompt: "build the thing",
-        needsApproval: false,
-        status: "running",
-        signalsObserved: { answer: {} },
-        sessionsSpawned: 1,
-        tokensConsumed: { inputTokens: 100, outputTokens: 50, cost: 0.001 },
-        upstreamResults: {},
-        joinStrategy: "all",
-        joinSatisfied: true,
-        traversalCount: 0,
-        startedAt: 1_700_000_000_000,
-        retryCount: 0,
-      },
-      n2: {
-        nodeId: "n2",
-        agent: "emperor--jinyiwei--test",
-        prompt: "verify it",
-        needsApproval: false,
-        status: "completed",
-        signalsObserved: { answer: {}, revise_needed: {} },
-        sessionsSpawned: 2,
-        tokensConsumed: { inputTokens: 200, outputTokens: 100, cost: 0.002 },
-        upstreamResults: {},
-        joinStrategy: "all",
-        joinSatisfied: true,
-        loopGroupId: "lg1",
-        traversalCount: 3,
-        startedAt: 1_690_000_000_000,
-        completedAt: 1_695_000_000_000,
-        retryCount: 1,
-      },
-    },
+    nodes: { n1, n2 },
     edges: {},
     loopGroups: {
       lg1: {
@@ -219,5 +229,42 @@ describe("readEngineGraphs", () => {
     const graphs = readEngineGraphs(stateDir());
     expect(graphs).toHaveLength(2);
     expect(graphs.map((g) => g.graphId).sort()).toEqual(["graph-a", "graph-b"]);
+  });
+
+  // ── dispatch id projection ────────────────────────────────────────────
+
+  it("projects dispatchSessionId / dispatchTaskId onto GraphNodeSnapshot when present", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    writeEngineFile(
+      "engine-dispatch.json",
+      JSON.stringify(
+        buildEngineFile({}, {
+          n1: { dispatchSessionId: "disp-sess-42", dispatchTaskId: "disp-task-99" },
+        }),
+      ),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    const n1 = g.nodes.find((n) => n.nodeId === "n1")!;
+    expect(n1.dispatchSessionId).toBe("disp-sess-42");
+    expect(n1.dispatchTaskId).toBe("disp-task-99");
+
+    // n2 has NO dispatch ids — keys must be absent.
+    const n2 = g.nodes.find((n) => n.nodeId === "n2")!;
+    expect(Object.keys(n2)).not.toContain("dispatchSessionId");
+    expect(Object.keys(n2)).not.toContain("dispatchTaskId");
+  });
+
+  it("omits dispatchSessionId / dispatchTaskId keys from an undispatched node", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    // Default fixture: neither n1 nor n2 carry dispatch ids.
+    writeEngineFile("engine-undispatched.json", JSON.stringify(buildEngineFile()));
+
+    const [g] = readEngineGraphs(stateDir());
+    for (const n of g.nodes) {
+      const node = n as unknown as Record<string, unknown>;
+      expect(node).not.toHaveProperty("dispatchSessionId");
+      expect(node).not.toHaveProperty("dispatchTaskId");
+    }
   });
 });
