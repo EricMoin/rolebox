@@ -18,8 +18,11 @@
  *      uniqueness, symmetric to node-id uniqueness)
  *   6. `needs_approval` nodes may only have non-`always` outgoing edges
  *   7. `data_passthrough` shape (non-negative `max_chars`)
- *   8. loop-group root check — WARNING when, after excluding revise
- *      back-edges, no node has in-degree zero (potential deadlock)
+ *   8. loop-group root check — ERROR when, after excluding revise
+ *      back-edges, no node has in-degree zero AND at least one loop
+ *      group exists (pure-cycle deadlock). WARNING when no roots exist
+ *      but no loop groups are declared. Additionally flags loop groups
+ *      whose member nodes have no incoming edges from outside the group.
  *
  * ## Cycle-containment semantics (check 4)
  *
@@ -84,7 +87,7 @@ export function validateGraphDeclaration(
   checkCycleContainment(graph, errors, warnings);
   checkApprovalNodeOutgoing(graph, errors);
   checkDataPassthrough(graph, errors);
-  checkLoopGroupRoots(graph, warnings);
+  checkLoopGroupRoots(graph, errors, warnings);
 
   return { valid: errors.length === 0, errors, warnings };
 }
@@ -236,19 +239,35 @@ function checkDataPassthrough(graph: GraphDocument, errors: string[]): void {
   }
 }
 
-// ── Rule 8: loop-group root detection (deadlock warning) ─────────────────
+// ── Rule 8: loop-group root detection (deadlock) ────────────────────────
 
 /**
- * Warn when, after filtering out revise back-edges, no node in the graph has
- * in-degree zero. A graph with no unblocked entry point may deadlock even
- * after the engine's revise-back-edge-aware root discovery.
+ * Detects deadlock conditions in graph root entry and loop-group reachability.
  *
- * This is a WARNING, not an error — self-contained loop groups can become
- * runnable via the engine's bootstrap logic or external triggers, so zero
- * roots is advisory rather than fatal.
+ * **Global root check (error):** when, after filtering out revise back-edges,
+ * no node has in-degree zero AND at least one loop group is declared, the
+ * graph has no entry point — a pure cycle that deadlocks the engine. This is
+ * promoted from a warning to an ERROR because a loop-group-only cycle cannot
+ * bootstrap without an external root.
+ *
+ * **Global root check (warning):** when no node has in-degree zero but NO
+ * loop group is declared, emit a non-fatal warning — the absence of loop
+ * groups means the engine has no structured recovery path, and deadlock is
+ * probable but not certain (external triggers could intervene).
+ *
+ * **Per-loop-group isolation check (error):** for each declared loop group,
+ * examine every member node. If every member node has in-degree ≥ 1 (after
+ * excluding revise back-edges) AND all incoming edges originate from within
+ * the same loop group, the group has no external entry — it is unreachable
+ * and will deadlock. Flag it as an error naming the loop group id.
+ *
+ * A member node with in-degree zero is a graph root and counts as having
+ * external entry for its loop group (the loop group is reachable from the
+ * rest of the graph via that root member).
  */
 function checkLoopGroupRoots(
   graph: GraphDocument,
+  errors: string[],
   warnings: string[],
 ): void {
   // Compute in-degree excluding revise back-edges.
@@ -262,11 +281,53 @@ function checkLoopGroupRoots(
   }
 
   const hasRoot = [...inDegree.values()].some((deg) => deg === 0);
-  if (!hasRoot) {
+  const hasLoopGroups = (graph.loop_groups ?? []).length > 0;
+
+  if (!hasRoot && hasLoopGroups) {
+    errors.push(
+      "the graph has no entry node (all nodes have at least one incoming edge) — " +
+        "pure cycles without an external root deadlock the engine",
+    );
+  } else if (!hasRoot) {
     warnings.push(
       "the graph has no unblocked entry point after excluding " +
         "revise back-edges and may deadlock",
     );
+  }
+
+  // Per-loop-group external entry check.
+  for (const group of graph.loop_groups ?? []) {
+    const memberSet = new Set(group.nodes);
+    let hasExternalEntry = false;
+
+    for (const nodeId of group.nodes) {
+      // A member with in-degree zero is a graph root — the loop group
+      // is reachable from outside via this root entry.
+      if ((inDegree.get(nodeId) ?? 0) === 0) {
+        hasExternalEntry = true;
+        break;
+      }
+
+      // Check whether any non-revise incoming edge originates
+      // from outside the loop group.
+      for (const edge of graph.edges) {
+        if (edge.to !== nodeId) continue;
+        if (isReviseBackEdge(edge)) continue;
+        if (!memberSet.has(edge.from)) {
+          hasExternalEntry = true;
+          break;
+        }
+      }
+      if (hasExternalEntry) break;
+    }
+
+    if (!hasExternalEntry) {
+      errors.push(
+        `loop group "${group.id}" has no external entry — ` +
+          "all incoming edges of member nodes originate from within the loop group; " +
+          "the group is unreachable and will deadlock",
+      );
+    }
   }
 }
 

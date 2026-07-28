@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { NodeRuntimeState, EngineState } from "../../src/types.engine-v2.ts";
-import type { DispatchTask, MaterializedResultRef } from "../../src/dispatch/types.ts";
+import type { DispatchTask, DispatchTaskStatus, MaterializedResultRef } from "../../src/dispatch/types.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
@@ -244,6 +244,11 @@ describe("signal semantics", () => {
 /** Fake dispatch that also stores a materialized result for `getTask`. */
 class ResultCaptureFake implements NodeDispatchPort {
   private result?: MaterializedResultRef;
+  /** Dispatch task status — defaults to "running" so the post-dispatch
+   *  race-condition guard (getTask re-read) sees a live task.  Tests that
+   *  simulate termination (e.g. via onNodeSignalEmitted) can set this to
+   *  "completed" before result capture is checked. */
+  status: DispatchTaskStatus = "running";
   setResult(ref: MaterializedResultRef): void {
     this.result = ref;
   }
@@ -256,7 +261,7 @@ class ResultCaptureFake implements NodeDispatchPort {
       sessionId: `sess-${node.nodeId}`,
       parentSessionId: "g-1",
       depth: 1,
-      status: "completed",
+      status: this.status,
       agent: node.agent,
       prompt: node.prompt,
       startedAt: new Date(),
@@ -277,7 +282,7 @@ class ResultCaptureFake implements NodeDispatchPort {
       sessionId: "sess-x",
       parentSessionId: "g-1",
       depth: 1,
-      status: "completed",
+      status: this.status,
       agent: "fake",
       prompt: "fake",
       startedAt: new Date(),

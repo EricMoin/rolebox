@@ -139,7 +139,7 @@ function isCancellable(node: NodeRuntimeState): boolean {
  * is a loop-group member pulls in its loop group's full `nodes[]` member set
  * (a loop is an indivisible bounded cycle). Deduplicates.
  */
-function expandLoopMembers(state: EngineState, requested: readonly string[]): string[] {
+export function expandLoopMembers(state: EngineState, requested: readonly string[]): string[] {
   const expanded: string[] = [];
   const seen = new Set<string>();
   for (const id of requested) {
@@ -240,7 +240,10 @@ export function cancelNodes(
 
   for (const id of scope) {
     const node = state.nodes.get(id);
-    if (!node) continue; // unknown id — ignored
+    if (!node) {
+      skipped.push(id); // unknown id — reported, not silently dropped
+      continue;
+    }
     if (!isCancellable(node)) {
       skipped.push(id);
       continue;

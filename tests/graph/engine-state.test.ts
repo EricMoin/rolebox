@@ -209,14 +209,46 @@ describe("provision", () => {
     const state = createEngineState(decl, "g-revise");
     provision(state);
 
-    // Node a has no non-revise incoming edges → root → Ready + frontier
+    // Both the revise back-edge (b→a) and the intra-loop-group always
+    // edge (a→b) are excluded from in-degree → both nodes are roots.
     const a = state.nodes.get("a")!;
     expect(a.status).toBe(NodeStatus.Ready);
     expect(isInFrontier(state, "a")).toBe(true);
 
-    // Node b has a → b (always) → has an incoming edge → Pending
     const b = state.nodes.get("b")!;
-    expect(b.status).toBe(NodeStatus.Pending);
+    expect(b.status).toBe(NodeStatus.Ready);
+    expect(isInFrontier(state, "b")).toBe(true);
+  });
+
+  it("roots nodes in a pure always-cycle loop group (A ⇄ B, both always edges)", () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "pure-always-cycle",
+      nodes: [
+        { id: "a", agent: "a1", prompt: "p1" },
+        { id: "b", agent: "a2", prompt: "p2" },
+      ],
+      edges: [
+        { from: "a", to: "b", type: "always" },
+        { from: "b", to: "a", type: "always" },
+      ],
+      loop_groups: [
+        { id: "ab-loop", nodes: ["a", "b"], max_traversals: 3 },
+      ],
+    };
+    const state = createEngineState(decl, "g-pure-cycle");
+    provision(state);
+
+    // Both intra-loop-group always edges are excluded from in-degree
+    // computation so at least one node is discovered as a root.
+    const roots = getRootNodeIds(state);
+    expect(roots.length).toBeGreaterThanOrEqual(1);
+    expect(roots).toContain("a");
+    expect(roots).toContain("b");
+
+    // Both nodes should be Ready since all incoming edges are intra-loop.
+    expect(state.nodes.get("a")!.status).toBe(NodeStatus.Ready);
+    expect(state.nodes.get("b")!.status).toBe(NodeStatus.Ready);
   });
 });
 

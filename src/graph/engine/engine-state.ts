@@ -206,11 +206,54 @@ export function registerNode(
 
 // ── Provisioning (topology bootstrap) ──────────────────────────────────────
 
+/**
+ * Build a NodeId → LoopGroupId map from the graph declaration's loop_groups.
+ *
+ * Returns `null` when no loop groups are declared so callers can skip the
+ * intra-group edge check without evaluating every edge against an empty map.
+ */
+function buildLoopGroupMap(state: EngineState): Map<string, string> | null {
+  const groups = state.graphDeclaration.loop_groups;
+  if (!groups || groups.length === 0) return null;
+  const map = new Map<string, string>();
+  for (const group of groups) {
+    for (const nodeId of group.nodes) {
+      map.set(nodeId, group.id);
+    }
+  }
+  return map;
+}
+
+/**
+ * Return `true` when `edge` is a type-`always` connection whose both
+ * endpoints belong to the same declared loop group.  These intra-group
+ * always-edges form the bounded cycle backbone and must not count as external
+ * in-edges blocking root discovery — otherwise a loop group whose members are
+ * connected only by `always` edges (e.g. A ⇄ B) would have no node with
+ * in-degree zero and the graph would deadlock.
+ *
+ * Signal-routed edges within a loop group (e.g. `impl → review` on `answer`)
+ * are NOT excluded — they represent forward dependencies that must be honored.
+ * Revise back-edges are already excluded separately by {@link isReviseBackEdge}.
+ */
+function isIntraLoopGroupAlwaysEdge(
+  edge: EdgeDeclaration,
+  loopGroupMap: Map<string, string> | null,
+): boolean {
+  if (edge.type !== "always") return false;
+  if (!loopGroupMap) return false;
+  const fromGroup = loopGroupMap.get(edge.from);
+  if (fromGroup === undefined) return false;
+  return fromGroup === loopGroupMap.get(edge.to);
+}
+
 /** Return the node IDs that have no incoming edges (graph roots). */
 export function getRootNodeIds(state: EngineState): string[] {
   const upstream = new Map<string, number>();
+  const loopGroupMap = buildLoopGroupMap(state);
   for (const edge of state.graphDeclaration.edges) {
     if (isReviseBackEdge(edge)) continue;
+    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
     upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
   }
   const roots: string[] = [];
@@ -232,8 +275,10 @@ export function getRootNodeIds(state: EngineState): string[] {
 export function provision(state: EngineState): void {
   const declaration = state.graphDeclaration;
   const upstream = new Map<string, number>();
+  const loopGroupMap = buildLoopGroupMap(state);
   for (const edge of declaration.edges) {
     if (isReviseBackEdge(edge)) continue;
+    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
     upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
   }
 

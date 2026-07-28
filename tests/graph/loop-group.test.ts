@@ -103,6 +103,29 @@ function convergeLoopGraph(): GraphDeclaration {
   };
 }
 
+/**
+ * Pure always-cycle: A ⇄ B with both edges of type `always` inside a bounded
+ * loop group.  This is the canonical "always-cycle bug" — before subtask 1
+ * neither node had in-degree zero (both always-edges counted) and the graph
+ * deadlocked at provision.  After subtask 1 intra-group always-edges are
+ * excluded from in-degree, so both nodes become ready.
+ */
+function alwaysCycleGraph(maxTraversals: number): GraphDeclaration {
+  return {
+    version: 2,
+    name: "always-cycle",
+    nodes: [
+      { id: "A", agent: "a0", prompt: "node A" },
+      { id: "B", agent: "a1", prompt: "node B" },
+    ],
+    edges: [
+      { from: "A", to: "B", type: "always" },
+      { from: "B", to: "A", type: "always" },
+    ],
+    loop_groups: [{ id: "lg", nodes: ["A", "B"], max_traversals: maxTraversals }],
+  };
+}
+
 // ── Rig ─────────────────────────────────────────────────────────────────────
 
 interface TestRig {
@@ -503,5 +526,140 @@ describe("loop-group executor — answer payload downgrade (defensive validation
 
     expect(report.outcome).toBe("converged");
     expect(report.traversals).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// always-cycle regression: intra-group always-edge exclusion (subtask 1 root
+// discovery fix) prevents provision deadlock, and the loop group is traversed
+// bounded by max_traversals.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("loop-group executor — always-cycle root discovery and bounded traversal", () => {
+  it("always-cycle provisions without deadlock: both nodes ready after intra-group edge exclusion", () => {
+    const { state } = buildEngine(alwaysCycleGraph(3));
+
+    // Both edges A⇄B are intra-group always edges → excluded from in-degree.
+    // Without the subtask 1 fix, both nodes would have in-degree 1 and stay
+    // pending, deadlocking the graph. After the fix, both have in-degree 0 and
+    // are marked ready.
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Ready);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Ready);
+
+    // The loop group is provisioned with the declared parameters.
+    const lg = state.loopGroups.get("lg")!;
+    expect(lg).toBeDefined();
+    expect(lg.maxTraversals).toBe(3);
+    expect(lg.traversalCount).toBe(0);
+
+    // Both nodes are tagged as loop-group members.
+    expect(state.nodes.get("A")!.loopGroupId).toBe("lg");
+    expect(state.nodes.get("B")!.loopGroupId).toBe("lg");
+  });
+
+  it("always-cycle dispatches both ready nodes and the first re-entry consumes a traversal", async () => {
+    const { state, engine, fake } = buildEngine(alwaysCycleGraph(3));
+
+    // dispatchReady dispatches both ready frontier nodes.
+    await engine.dispatchReady();
+    expect(fake.calls).toHaveLength(2);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // A answers first → A completed. B is still running, so no re-entry
+    // happens — always-edge A→B activates but B is already running.
+    await engine.onNodeSignalEmitted("A", "answer", "done-A");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+    // No traversal consumed yet — only a loop re-entry counts.
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0);
+
+    // B answers → always edge B→A re-enters A because A is Completed in a
+    // loop group (the loop re-entry edge: Completed + loopGroupId → Ready).
+    // This is a real loop re-entry driven by an `always` edge: one traversal
+    // is consumed and a round is recorded.
+    await engine.onNodeSignalEmitted("B", "answer", "done-B");
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Completed);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    // Traversal counter now 1 — the re-entry consumed a traversal.
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    // A was re-dispatched (third dispatch call: A again).
+    expect(fake.calls.length).toBeGreaterThanOrEqual(3);
+    // A round was recorded for this traversal.
+    const rounds = state.loopGroups.get("lg")!.rounds ?? [];
+    expect(rounds.length).toBe(1);
+    expect(rounds[0].traversalCount).toBe(1);
+    expect(rounds[0].nodeIds).toContain("A");
+  });
+
+  it("always-cycle bounded by max_traversals: answer-driven re-entry increments each round and escalates at cap", async () => {
+    const { state, engine, fake } = buildEngine(alwaysCycleGraph(3));
+
+    // dispatchReady dispatches both frontier nodes → A and B both Running.
+    await engine.dispatchReady();
+    expect(fake.calls).toHaveLength(2);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // Signal 1: A answers (B is still running, no re-entry).
+    await engine.onNodeSignalEmitted("A", "answer", "a1");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0);
+
+    // Signal 2: B answers → edge B→A re-enters A → traversal 0→1.
+    await engine.onNodeSignalEmitted("B", "answer", "b1");
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // Signal 3: A answers → edge A→B re-enters B → traversal 1→2.
+    await engine.onNodeSignalEmitted("A", "answer", "a2");
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(2);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // Signal 4: B answers → edge B→A re-enters A → traversal 2→3 (cap).
+    await engine.onNodeSignalEmitted("B", "answer", "b2");
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // Signal 5: A answers → tries to re-enter B → cap (3 ≥ 3) → B escalates.
+    await engine.onNodeSignalEmitted("A", "answer", "a3");
+    // Traversal counter unchanged at cap — no traversal consumed.
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
+    // B escalated instead of being re-entered; A remains completed.
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+
+    // rounds[] has three entries (one per consumed traversal).
+    const rounds = state.loopGroups.get("lg")!.rounds ?? [];
+    expect(rounds.length).toBe(3);
+    for (let i = 0; i < 3; i++) {
+      expect(rounds[i].traversalCount).toBe(i + 1);
+    }
+
+    // Graph reaches complete — no active nodes remain.
+    expect(state.phase).toBe(EnginePhase.Complete);
+  });
+
+  it("executeLoopStep on always-cycle revise surfaces the exhaustion payload", () => {
+    const { state } = buildEngine(alwaysCycleGraph(1));
+    const b = state.nodes.get("B")!;
+    b.status = NodeStatus.Completed;
+    // max_traversals=1, traversalCount already at cap.
+    state.loopGroups.get("lg")!.traversalCount = 1;
+
+    const report = executeLoopStep(state, b, "revise_needed", {
+      findings: ["unfinished"],
+    });
+
+    // Hard cap should fire: outcome is max_traversals_exhausted.
+    expect(report.outcome).toBe("max_traversals_exhausted");
+    expect(report.escalated).toContain("B");
+    expect(report.escalatePayload).toEqual({
+      reason: "max_traversals exhausted",
+      unresolved: ["unfinished"],
+      traversals: 1,
+    });
+    expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
   });
 });

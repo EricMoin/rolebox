@@ -33,7 +33,7 @@
  */
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
-import type { GraphBudgetState, EdgePayload } from "../../types.engine-v2.ts";
+import type { GraphBudgetState, EdgePayload, RoundHistoryEntry } from "../../types.engine-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
@@ -53,6 +53,8 @@ import {
   removeFromFrontier,
   canTransitionPhase,
   transitionPhase,
+  incrementLoopTraversal,
+  isLoopExhausted,
 } from "./engine-state.ts";
 import {
   markCompleted,
@@ -62,7 +64,7 @@ import {
   markNodeBlocked,
   canTransitionNode,
 } from "./node-lifecycle.ts";
-import { subscribeTaskTermination } from "./engine-recovery.ts";
+import { subscribeTaskTermination, mapDispatchStatusToSignal } from "./engine-recovery.ts";
 import { collectUpstreamResults } from "./join-evaluator.ts";
 import { applyDataMapping } from "./data-mapping-transform.ts";
 import {
@@ -70,7 +72,7 @@ import {
   propagateRevise,
 } from "./signal-propagation.ts";
 import { executeLoopStep } from "./loop-group-executor.ts";
-import { recordNodeArtifactsAndEvidence } from "./recorder.ts";
+import { recordNodeArtifactsAndEvidence, recordLoopRound } from "./recorder.ts";
 import { buildApprovalPayload } from "./approval-payload.ts";
 import {
   approveBlockedNode,
@@ -565,12 +567,59 @@ export class AdvanceEngine {
         // (node-lifecycle.ts §2, orchestration-patterns.md §1.6). Non-loop
         // `completed` nodes are never re-activated (they are terminal sinks).
         if (target.joinSatisfied) {
-          const reEnter = target.status === NodeStatus.Pending ||
-            (target.status === NodeStatus.Completed &&
-              target.loopGroupId !== undefined);
+          const isPendingActivation = target.status === NodeStatus.Pending;
+          const isLoopReentry = target.status === NodeStatus.Completed &&
+            target.loopGroupId !== undefined;
+          const reEnter = isPendingActivation || isLoopReentry;
           if (reEnter) {
-            markReady(target);
-            addToFrontier(state, edge.to);
+            let blockedByCap = false;
+            // Loop-group traversal accounting for always-edge cycles.
+            //
+            // Only `always`-edge-driven re-entries consume a traversal.
+            // `on_signal(revise_needed)` edges route through
+            // `executeLoopStep → propagateRevise` which owns the increment
+            // for revise-driven loops. `on_signal(answer)` edges are forward
+            // data flow — in revise-driven loops they re-enter the reviewer
+            // but that re-entry is the second half of an already-counted
+            // traversal round, so no increment is needed here. Only pure
+            // `always` cycles — where no revise back-edge exists to count
+            // the traversal — route through this path.
+            //
+            // Only intra-group edges count; cross-group edges never consume
+            // a traversal. Pending → Ready (normal forward activation) is
+            // never a loop re-entry.
+            if (isLoopReentry && node.loopGroupId === target.loopGroupId && edge.type === "always") {
+              const groupId = target.loopGroupId!;
+              if (!incrementLoopTraversal(state, groupId)) {
+                // Hard cap reached: escalate the target instead of re-entering.
+                // `completed → escalate` is valid per the lifecycle table
+                // (node-lifecycle.ts §2). The target escalates with reason
+                // `"max_traversals exhausted"`, matching the revise-driven
+                // exhaustion path so the graph's termination logic sees a
+                // consistent outcome. No traversal was consumed — the cap
+                // was already at maxTraversals from a prior re-entry.
+                markEscalated(target, "max_traversals exhausted");
+                blockedByCap = true;
+              } else {
+                // Traversal consumed: record a completed-round snapshot for
+                // diagnostics (graph_status include_history). The round number
+                // is 1-based and monotonic across the group's whole history.
+                const group = state.loopGroups.get(groupId)!;
+                const roundEntry: RoundHistoryEntry = {
+                  round: (group.rounds?.length ?? 0) + 1,
+                  traversalCount: group.traversalCount,
+                  nodeIds: [target.nodeId],
+                  status: node.status,
+                  startedAt: node.startedAt,
+                  completedAt: Date.now(),
+                };
+                recordLoopRound(state, groupId, roundEntry);
+              }
+            }
+            if (!blockedByCap) {
+              markReady(target);
+              addToFrontier(state, edge.to);
+            }
           }
         }
       }
@@ -835,6 +884,44 @@ export class AdvanceEngine {
     subscribeTaskTermination(this.state, this.dispatchPort, node, (nid, type, payload) => {
       this.signalBridge.record(this.state, nid, type, payload);
     });
+
+    // Post-registration race-condition guard: after the onTaskTerminated listener
+    // is attached, re-read the dispatched task's current status. If the task has
+    // ALREADY reached a terminal status (completed / error / timeout) before the
+    // listener was attached, the microtask-scheduled listener fire would miss it
+    // — derive the signal via mapDispatchStatusToSignal and feed it through
+    // signalBridge.record now so the node advances instead of hanging in
+    // `running` forever.
+    //
+    // Double-advance prevention: the guard checks that the node is still
+    // `running` and its `dispatchTaskId` still matches before recording the
+    // signal. If the microtask-scheduled listener fires first (theoretical),
+    // the node will no longer be `running` → guard skipped. If this guard fires
+    // first, the node transitions out of `running` → the listener's own guard
+    // (subscribeTaskTermination, engine-recovery.ts:240) rejects the stale
+    // callback. Both paths are mutually exclusive and idempotent.
+    //
+    // cancelled status must NOT be turned into a signal (handled by direct node
+    // cancellation via the cascade canceller or the listener's cancelled path).
+    if (this.dispatchPort.getTask) {
+      const currentStatus = this.dispatchPort.getTask(task.id);
+      if (
+        currentStatus &&
+        currentStatus.status !== "cancelled"
+      ) {
+        const current = this.state.nodes.get(node.nodeId);
+        if (
+          current &&
+          current.status === NodeStatus.Running &&
+          current.dispatchTaskId === task.id
+        ) {
+          const sig = mapDispatchStatusToSignal(currentStatus.status, currentStatus);
+          if (sig) {
+            this.signalBridge.record(this.state, node.nodeId, sig.type, sig.payload);
+          }
+        }
+      }
+    }
   }
 
   /**

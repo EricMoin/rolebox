@@ -356,6 +356,26 @@ export function executeLoopStep(
   const report = initReport(group);
 
   if (signalType === "answer") {
+    // ── synthetic answer guard ────────────────────────────────────────────────
+    //
+    // A payload with __inferred === true means the node completed normally but
+    // the framework synthesized the answer on its behalf — the subtask never
+    // called `signal()`. This is an unambiguous convergence point: the loop must
+    // exit and must NEVER be downgraded to revise_needed semantics (which would
+    // spin the loop) nor consume a traversal. A node that finished without
+    // signaling has nothing to revise.
+    //
+    // The hasUnresolvedPayload defensive validation is skipped for inferred
+    // signals because the marker object { __inferred: true } is structurally
+    // trivial — relying on it to incidentally return false is fragile. An
+    // explicit guard makes the intent durable even if hasUnresolvedPayload
+    // broadens its criteria in the future.
+    const isInferred =
+      payload &&
+      typeof payload === "object" &&
+      !Array.isArray(payload) &&
+      (payload as Record<string, unknown>).__inferred === true;
+
     // ── defensive payload validation ─────────────────────────────────────────
     //
     // An answer signal whose payload still indicates unresolved work
@@ -364,7 +384,8 @@ export function executeLoopStep(
     // The downgrade path mirrors the revise_needed branch exactly: stuck
     // detection (recordConvergenceOutput), hard-cap exhaustion check,
     // then propagateRevise for bounded-cycle continuation.
-    if (hasUnresolvedPayload(payload)) {
+    // Skipped for synthetic answers (isInferred guard above).
+    if (!isInferred && hasUnresolvedPayload(payload)) {
       const verdictObj = payload as Record<string, unknown>;
       const verdict = verdictObj["verdict"];
       report.downgradeReason = `answer payload contained unresolved items${

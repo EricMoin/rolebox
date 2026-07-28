@@ -243,9 +243,11 @@ describe("imperative construction round-trip", () => {
   it("rejects duplicate loop group ids", () => {
     const ts = createGraphToolSet();
     const { graph_id } = ts.graph_create({ name: "dloop" });
-    // Two-node cycle to satisfy structural cycle containment.
+    // Two-node cycle with external entry to satisfy structural validation.
+    ts.graph_add_node({ graph_id, id: "entry", agent: "agent-entry", prompt: "seed" });
     ts.graph_add_node({ graph_id, id: "a", agent: "agent-a", prompt: "p" });
     ts.graph_add_node({ graph_id, id: "b", agent: "agent-b", prompt: "p" });
+    ts.graph_add_edge({ graph_id, from: "entry", to: "a", type: "always" });
     ts.graph_add_edge({ graph_id, from: "a", to: "b", type: "always" });
     ts.graph_add_edge({ graph_id, from: "b", to: "a", type: "always" });
     ts.graph_add_loop({ graph_id, id: "lg", nodes: ["a", "b"], max_traversals: 3 });

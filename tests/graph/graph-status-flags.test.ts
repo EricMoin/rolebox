@@ -59,10 +59,12 @@ function buildChain(ts: GraphToolSet, graphId: string): void {
   ts.graph_add_edge({ graph_id: graphId, from: "planner", to: "reporter", type: "always" });
 }
 
-/** A genuine 2-node cycle wrapped in a loop group (id "lg", max 4 traversals). */
+/** A 2-node cycle wrapped in a loop group (id "lg", max 4 traversals) with an external entry node. */
 function buildLoop(ts: GraphToolSet, graphId: string): void {
+  ts.graph_add_node({ graph_id: graphId, id: "entry", agent: "agent-entry", prompt: "seed" });
   ts.graph_add_node({ graph_id: graphId, id: "a", agent: "agent-a", prompt: "p" });
   ts.graph_add_node({ graph_id: graphId, id: "b", agent: "agent-b", prompt: "p" });
+  ts.graph_add_edge({ graph_id: graphId, from: "entry", to: "a", type: "always" });
   ts.graph_add_edge({ graph_id: graphId, from: "a", to: "b", type: "always" });
   ts.graph_add_edge({ graph_id: graphId, from: "b", to: "a", type: "always" });
   ts.graph_add_loop({ graph_id: graphId, id: "lg", nodes: ["a", "b"], max_traversals: 4 });

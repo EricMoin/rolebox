@@ -15,7 +15,7 @@ import {
   cancelPendingUpstreams,
   type CancelDispatchPort,
 } from "../../src/graph/engine/cascade-canceller.ts";
-import { cancelNodes } from "../../src/graph/engine/cancellation.ts";
+import { cancelNodes, expandLoopMembers } from "../../src/graph/engine/cancellation.ts";
 
 // ── Fake cancel seam ────────────────────────────────────────────────────────
 
@@ -548,6 +548,68 @@ describe("cancelNodes — untouched nodes (completed / blocked / terminal)", () 
     cancelNodes(state, ["B"], { cascade: true }, port);
 
     expect(state.nodes.get("B")!.errorReason).toContain("cancelled by scoped cascade");
+  });
+});
+
+describe("expandLoopMembers — unit tests", () => {
+  function loopGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "expand-test",
+      nodes: [
+        { id: "R", agent: "a1", prompt: "p1" },
+        { id: "X", agent: "a2", prompt: "p2" },
+        { id: "Z", agent: "a3", prompt: "p3" },
+      ],
+      edges: [
+        { from: "R", to: "X", type: "always" },
+      ],
+      loop_groups: [{ id: "lg1", nodes: ["R", "X"], max_traversals: 3 }],
+    };
+  }
+
+  it("expands a loop-member target to the full loop member set", () => {
+    const state = createEngineState(loopGraph(), "g-exp");
+    provision(state);
+
+    const result = expandLoopMembers(state, ["R"]);
+    expect(result).toEqual(["R", "X"]);
+  });
+
+  it("returns non-loop members as-is", () => {
+    const state = createEngineState(loopGraph(), "g-exp2");
+    provision(state);
+
+    const result = expandLoopMembers(state, ["Z"]);
+    expect(result).toEqual(["Z"]);
+  });
+
+  it("deduplicates when multiple loop members from the same group are requested", () => {
+    const state = createEngineState(loopGraph(), "g-exp3");
+    provision(state);
+
+    const result = expandLoopMembers(state, ["R", "X"]);
+    expect(result).toEqual(["R", "X"]);
+  });
+
+  it("handles missing loop declaration gracefully — treats as non-loop member", () => {
+    const state = createEngineState(loopGraph(), "g-exp4");
+    provision(state);
+    // Remove the loop declaration from the graph while the node still
+    // carries its loopGroupId (set during provision).
+    state.graphDeclaration.loop_groups = undefined;
+
+    const result = expandLoopMembers(state, ["R"]);
+    // R has loopGroupId but no matching declaration → treated as non-loop member.
+    expect(result).toEqual(["R"]);
+  });
+
+  it("handles unknown node IDs — returned as-is (no loopGroupId to expand)", () => {
+    const state = createEngineState(loopGraph(), "g-exp5");
+    provision(state);
+
+    const result = expandLoopMembers(state, ["nonexistent"]);
+    expect(result).toEqual(["nonexistent"]);
   });
 });
 
