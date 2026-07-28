@@ -189,7 +189,7 @@ describe("loop-group executor — max_traversals exhaustion", () => {
         "revise_needed",
         { findings: [`round ${guard}`], verdict: "fix more" },
       );
-      if (state.nodes.get("review")!.status === NodeStatus.Escalate) {
+      if (state.nodes.get("review")!.status === NodeStatus.Done) {
         escalated = true;
         break;
       }
@@ -201,7 +201,7 @@ describe("loop-group executor — max_traversals exhaustion", () => {
     // Three traversals consumed before the cap forced the escalation.
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
     // The convergence node escalated with the exhaustion reason.
-    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
     expect(state.nodes.get("review")!.errorReason).toBe("max_traversals exhausted");
     // impl was NOT re-entered after exhaustion — no further loop round.
     expect(state.nodes.get("impl")!.status).toBe(NodeStatus.Completed);
@@ -229,6 +229,46 @@ describe("loop-group executor — max_traversals exhaustion", () => {
       traversals: 1,
     });
     expect(state.nodes.get("review")!.errorReason).toBe("max_traversals exhausted");
+  });
+
+  it("max_traversals exhaustion terminates node as done, not escalate", async () => {
+    const { state, engine } = buildEngine(reviewLoopGraph(2));
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("entry", "answer", "seed");
+    await engine.onNodeSignalEmitted("impl", "answer", "v1");
+
+    // Round 1: revise → traversal 0→1, impl re-entered and re-dispatched.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 1"],
+    });
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    expect(state.nodes.get("impl")!.status).toBe(NodeStatus.Running);
+    await engine.onNodeSignalEmitted("impl", "answer", "v2");
+
+    // Round 2: revise → traversal 1→2, impl re-entered and re-dispatched.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 2"],
+    });
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(2);
+    expect(state.nodes.get("impl")!.status).toBe(NodeStatus.Running);
+    await engine.onNodeSignalEmitted("impl", "answer", "v3");
+
+    // Third revise exceeds cap (2 ≥ 2) → exhaustion, NOT escalate.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 3"],
+    });
+
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("review")!.status).not.toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("review")!.errorReason).toBe(
+      "max_traversals exhausted",
+    );
+    // Per-group traversal pinned at 2 — off-by-one in either direction fails.
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(2);
+    // impl was NOT re-entered a third time — traversalCount stays at 2.
+    expect(state.nodes.get("impl")!.traversalCount).toBe(2);
+    expect(state.nodes.get("impl")!.status).toBe(NodeStatus.Completed);
   });
 });
 
@@ -327,7 +367,7 @@ describe("loop-group executor — stuck detection", () => {
     await engine.onNodeSignalEmitted("impl", "answer", "v2");
     await engine.onNodeSignalEmitted("review", "revise_needed", { findings: ["no progress"] });
 
-    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
     expect(state.nodes.get("review")!.errorReason).toBe("stuck");
     // No additional traversal was consumed by the stuck exit (stayed at 1).
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
@@ -625,8 +665,8 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
     await engine.onNodeSignalEmitted("A", "answer", "a3");
     // Traversal counter unchanged at cap — no traversal consumed.
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
-    // B escalated instead of being re-entered; A remains completed.
-    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    // B capped instead of being re-entered; A remains completed.
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
     expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
 
@@ -661,5 +701,45 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
       traversals: 1,
     });
     expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// per-node traversal counting
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("per-node traversal counting", () => {
+  it("per-node traversalCount increments on each loop re-entry", async () => {
+    const { state, engine } = buildEngine(reviewLoopGraph(5));
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("entry", "answer", "seed");
+    await engine.onNodeSignalEmitted("impl", "answer", "v1");
+
+    // Drive 3 revise cycles. Each revise re-enters impl and increments both
+    // the per-group traversalCount and the per-node impl.traversalCount.
+    // Round 1.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["round 1"],
+    });
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    expect(state.nodes.get("impl")!.traversalCount).toBe(1);
+    await engine.onNodeSignalEmitted("impl", "answer", "r1");
+
+    // Round 2.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["round 2"],
+    });
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(2);
+    expect(state.nodes.get("impl")!.traversalCount).toBe(2);
+    await engine.onNodeSignalEmitted("impl", "answer", "r2");
+
+    // Round 3 — per-node and per-group counts must agree (the invariant that
+    // subtask 3 restored).
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["round 3"],
+    });
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
+    expect(state.nodes.get("impl")!.traversalCount).toBe(3);
   });
 });

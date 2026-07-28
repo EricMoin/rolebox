@@ -247,6 +247,29 @@ function isIntraLoopGroupAlwaysEdge(
   return fromGroup === loopGroupMap.get(edge.to);
 }
 
+/**
+ * Compute the effective in-degree for every node from the graph declaration's
+ * edges, applying the same filtering rules as {@link provision}:
+ *
+ * - `revise_needed` back-edges are excluded (they are feedback, not
+ *   upstream dependencies).
+ * - Intra-loop-group `always` edges are excluded (they form the bounded-cycle
+ *   backbone and must not block root discovery).
+ *
+ * This is a shared helper called by both `provision()` (bootstrap) and
+ * `adoptPriorNodeStates()` (post-adoption reconciliation), so the two sites
+ * can never drift apart on filtering semantics.
+ */
+export function computeInDegrees(state: EngineState): Map<string, number> {
+  const upstream = new Map<string, number>();
+  const loopGroupMap = buildLoopGroupMap(state);
+  for (const edge of state.graphDeclaration.edges) {
+    if (isReviseBackEdge(edge)) continue;
+    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
+    upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
+  }
+  return upstream;
+}
 /** Return the node IDs that have no incoming edges (graph roots). */
 export function getRootNodeIds(state: EngineState): string[] {
   const upstream = new Map<string, number>();
@@ -273,14 +296,8 @@ export function getRootNodeIds(state: EngineState): string[] {
  * pure topology bootstrap — no edges are evaluated, no joins resolved.
  */
 export function provision(state: EngineState): void {
+  const upstream = computeInDegrees(state);
   const declaration = state.graphDeclaration;
-  const upstream = new Map<string, number>();
-  const loopGroupMap = buildLoopGroupMap(state);
-  for (const edge of declaration.edges) {
-    if (isReviseBackEdge(edge)) continue;
-    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
-    upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
-  }
 
   for (const config of declaration.nodes) {
     const node = registerNode(state, config);

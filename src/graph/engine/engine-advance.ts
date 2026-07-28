@@ -58,6 +58,7 @@ import {
 } from "./engine-state.ts";
 import {
   markCompleted,
+  markDone,
   markReady,
   markRunning,
   markEscalated,
@@ -598,9 +599,13 @@ export class AdvanceEngine {
                 // exhaustion path so the graph's termination logic sees a
                 // consistent outcome. No traversal was consumed — the cap
                 // was already at maxTraversals from a prior re-entry.
-                markEscalated(target, "max_traversals exhausted");
+                markDone(target, "max_traversals exhausted");
                 blockedByCap = true;
               } else {
+                // Per-node traversal count for loop re-entry diagnostics
+                // (graph_status). Incremented once per re-entry alongside
+                // the per-group counter in incrementLoopTraversal().
+                target.traversalCount += 1;
                 // Traversal consumed: record a completed-round snapshot for
                 // diagnostics (graph_status include_history). The round number
                 // is 1-based and monotonic across the group's whole history.
@@ -944,6 +949,7 @@ export class AdvanceEngine {
     for (const node of state.nodes.values()) {
       switch (node.status) {
         case NodeStatus.Completed: counts.completed += 1; break;
+        case NodeStatus.Done: counts.completed += 1; break;
         case NodeStatus.Escalate: counts.escalate += 1; break;
         case NodeStatus.Timeout: counts.timeout += 1; break;
         case NodeStatus.Blocked:
@@ -1231,6 +1237,13 @@ export class AdvanceEngine {
   retryNode(nodeId: string, opts?: RetryNodeOptions): Promise<RetryReport> {
     return this._runCriticalSection(async () => {
       const report = resetNodeForRetry(this.state, nodeId, opts);
+      // 5. Reset terminal dedupe guards — `resetNodeForRetry` re-opens a
+      //    terminal graph phase (Complete → Executing). Without this reset,
+      //    the one-shot guards from the prior completion block the legitimate
+      //    `[GRAPH COMPLETE]` / `[GRAPH BLOCKED]` that should fire when the
+      //    retried chain quiesces again (stale dedupe guard B2).
+      this._firedTerminalComplete = false;
+      this._firedTerminalBlocked = false;
       await this._dispatchReadyNodes();
       this._checkTermination();
       let reDispatched = 0;

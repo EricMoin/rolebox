@@ -168,8 +168,8 @@ describe("propagateRevise (unit)", () => {
 
     const report = propagateRevise(state, review, { findings: ["still broken"] });
 
-    // The revise node flips completed → escalate with the exhaustion reason.
-    expect(review.status).toBe(NodeStatus.Escalate);
+    // The revise node flips completed → done with the exhaustion reason.
+    expect(review.status).toBe(NodeStatus.Done);
     expect(review.errorReason).toBe("max_traversals exhausted");
     expect(report.escalated).toEqual(["review"]);
     expect(report.reason).toBe("max_traversals exhausted");

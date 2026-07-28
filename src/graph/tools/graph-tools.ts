@@ -919,17 +919,26 @@ export class GraphToolSet {
       await runtime.adoptPrior(priorState, { replayAnswers: true });
     }
 
-    await runtime.run();
-
     // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is supplied
     // with `retry:true` or `modify_prompt`, re-open and re-dispatch that node on
     // the just-run runtime instead of reporting it as pending. This backs the
     // design's `dispatch_retry` replacement (MERGE row 4).
+    //
+    // B1 (ordering bug fix): skip `runtime.run()` on the retry path. After
+    // `adoptPrior` loads previously-terminal nodes, `run()` sees a quiescent
+    // graph, fires a premature COMPLETE notification, then `retryNode` re-opens
+    // the phase to `executing` — the stale notification lands after the retry
+    // is already running. `adoptPrior(replayAnswers)` already dispatches nodes
+    // made ready by answer replay, and `retryNode` handles the retry target's
+    // dispatch + termination check, so nothing is left undispatched by skipping
+    // `run()`.
     let retryReport: Awaited<ReturnType<EngineRuntime["retryNode"]>> | undefined;
     if (args.node_id && (args.retry || args.modify_prompt)) {
       retryReport = await runtime.retryNode(args.node_id, {
         modifyPrompt: args.modify_prompt,
       });
+    } else {
+      await runtime.run();
     }
 
     // Update the registry runtime so subsequent graph_status reads live state.

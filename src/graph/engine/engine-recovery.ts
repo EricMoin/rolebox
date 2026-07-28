@@ -51,7 +51,7 @@ import type {
   EngineState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
-import { releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
+import { computeInDegrees, releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
 import { bindNodeState } from "./recorder.ts";
 import type { SignalType } from "./signal-bridge.ts";
@@ -459,6 +459,34 @@ export function adoptPriorNodeStates(
       if (!target.frontier.includes(nodeId)) target.frontier.push(nodeId);
     } else {
       removeFromFrontier(target, nodeId);
+    }
+  }
+
+  // ── Post-adoption in-degree reconciliation ──────────────────────────────
+  // H2: adoptPriorNodeStates overwrites provision()'s correct `Pending`
+  // assignment with a stale prior `Ready`, then re-adds the node to the
+  // frontier (lines above).  When edges are added AFTER nodes (the normal
+  // construction-tool order), `provision()` is called before the edges exist,
+  // so everything starts `Ready`; `graph_add_edge` later calls `buildEngine()`
+  // → `provision()` again which correctly demotes the downstream node to
+  // `Pending`, but `adoptPrior()` then promotes it back to `Ready` from the
+  // stale prior state.  This pass undoes that promotion.
+  //
+  // Recompute in-degree from the CURRENT edges using the identical filter
+  // rules as provision() (via computeInDegrees — same function, cannot drift).
+  // For every node adopted as Ready whose effective in-degree is now > 0,
+  // demote it to Pending and yank it from the frontier.  Completed, running,
+  // blocked, done, escalate, timeout, and cancelled nodes are left untouched
+  // (adopting prior progress for those is load-bearing).
+  {
+    const upstream = computeInDegrees(target);
+    for (const [nodeId, node] of target.nodes) {
+      if (node.status !== NodeStatus.Ready) continue;
+      const incoming = upstream.get(nodeId) ?? 0;
+      if (incoming > 0) {
+        node.status = NodeStatus.Pending;
+        removeFromFrontier(target, nodeId);
+      }
     }
   }
 

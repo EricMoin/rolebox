@@ -54,7 +54,7 @@ import { propagateEscalate, propagateRevise } from "./signal-propagation.ts";
 import { cancelPendingUpstreams, type CancelDispatchPort } from "./cascade-canceller.ts";
 import { evaluateJoin } from "./join-evaluator.ts";
 import { isLoopExhausted } from "./engine-state.ts";
-import { markEscalated } from "./node-lifecycle.ts";
+import { markDone } from "./node-lifecycle.ts";
 import { recordLoopRound } from "./recorder.ts";
 
 // ── Outcomes ────────────────────────────────────────────────────────────────
@@ -394,7 +394,7 @@ export function executeLoopStep(
 
       // ── stuck early-exit (mirrors revise_needed path) ────────────────────
       if (recordConvergenceOutput(state, groupId, payload)) {
-        markEscalated(node, "stuck");
+        markDone(node, "stuck");
         report.outcome = "stuck";
         report.escalated.push(node.nodeId);
         report.escalatePayload = {
@@ -408,7 +408,7 @@ export function executeLoopStep(
 
       // ── hard-cap early-exit (mirrors revise_needed path) ──────────────────
       if (isLoopExhausted(state, groupId)) {
-        markEscalated(node, "max_traversals exhausted");
+        markDone(node, "max_traversals exhausted");
         report.outcome = "max_traversals_exhausted";
         report.escalated.push(node.nodeId);
         report.escalatePayload = {
@@ -468,7 +468,7 @@ export function executeLoopStep(
   if (signalType === "revise_needed") {
     // ── stuck early-exit (§4.3) ────────────────────────────────────────────
     if (recordConvergenceOutput(state, groupId, payload)) {
-      markEscalated(node, "stuck");
+      markDone(node, "stuck");
       report.outcome = "stuck";
       report.escalated.push(node.nodeId);
       report.escalatePayload = {
@@ -482,7 +482,7 @@ export function executeLoopStep(
 
     // ── hard-cap early-exit (§1.6) ─────────────────────────────────────────
     if (isLoopExhausted(state, groupId)) {
-      markEscalated(node, "max_traversals exhausted");
+      markDone(node, "max_traversals exhausted");
       report.outcome = "max_traversals_exhausted";
       report.escalated.push(node.nodeId);
       report.escalatePayload = {

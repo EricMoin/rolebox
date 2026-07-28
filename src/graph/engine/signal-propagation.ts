@@ -50,6 +50,7 @@ import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import { addToFrontier, incrementLoopTraversal } from "./engine-state.ts";
 import {
   canTransitionNode,
+  markDone,
   markEscalated,
   markReady,
 } from "./node-lifecycle.ts";
@@ -194,7 +195,7 @@ export function propagateRevise(
   }
 
   if (!incrementLoopTraversal(state, groupId)) {
-    escalateNode(node, "max_traversals exhausted");
+    markDone(node, "max_traversals exhausted");
     report.reason = "max_traversals exhausted";
     report.escalated.push(node.nodeId);
     return report;
@@ -216,6 +217,7 @@ export function propagateRevise(
 
     target.prompt = mergeRevisionFeedback(target.prompt, round, payload);
     markReady(target);
+    target.traversalCount += 1;
     addToFrontier(state, edge.to);
     report.revisedUpstream.push(edge.to);
   }
