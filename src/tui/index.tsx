@@ -30,11 +30,12 @@ import {
   triggerToggleHelp,
 } from "./state";
 import { createEventBridge } from "./events";
+import { resolveProjectRoot } from "../cli/commands/monitor/monitor-reader.ts";
 
 // ── TUI Plugin ──────────────────────────────────────────────────────────
 
 const roleboxTuiPlugin: TuiPlugin = async (api, _options, _meta) => {
-  const workspaceDir = api.state.path.directory;
+  const workspaceDir = resolveProjectRoot(api.state.path.directory);
 
   // Create live event bridge for sub-250ms UI updates.
   // Subscribes to opencode host events + fast-polls rolebox state files,

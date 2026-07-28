@@ -735,3 +735,112 @@ describe("engineNodeGlyph", () => {
     expect(engineNodeGlyph("mystery")).toBe("\u25cf");
   });
 });
+
+// ── Scope supplement (engine-graph dispatch session IDs) ────────────────
+// When engine-graph nodes carry dispatchSessionId, state.tsx adds those IDs
+// to the sessionScope before passing it to the logic layer. These tests
+// verify that the consumption side (computeFilteredActivity, computeHealth)
+// correctly handles the supplemented scope.
+
+describe("scope supplement through computeFilteredActivity", () => {
+  it("shows tasks from engine-graph dispatch sessions when scope is supplemented (size > 1)", () => {
+    const tasks: TaskSnapshot[] = [
+      makeTask({ id: "t1", status: "running", sessionId: "sess-1", startedAt: "2024-01-01T00:00:01Z" }),
+      // This task belongs to a dispatch session discovered from engine-graph node.
+      makeTask({ id: "t2", status: "running", sessionId: "disp-sess-abc", startedAt: "2024-01-01T00:00:02Z" }),
+    ];
+    const result = computeFilteredActivity({
+      snapshot: makeSnapshot({
+        tasks,
+        engineGraphs: [
+          makeEngineGraph({
+            nodes: [{
+              nodeId: "n1", agent: "test-agent", status: "running",
+              startedAt: new Date().toISOString(),
+              dispatchSessionId: "disp-sess-abc",
+            }],
+          }),
+        ],
+      }),
+      stateDirPresent: true,
+      // Scope was supplemented by state.tsx with the dispatch session ID.
+      sessionScope: new Set(["sess-1", "disp-sess-abc"]),
+      currentSessionId: "sess-1",
+      filterText: "",
+    });
+    // Both tasks are visible — scope.size === 2, so the size===1 fallback did
+    // not fire. The supplemented dispatch ID correctly unscopes the task.
+    expect(result.tasks).toHaveLength(2);
+    expect(result.tasks.map((t) => t.id).sort()).toEqual(["t1", "t2"]);
+  });
+
+  it("engine graphs are surfaced even when scope is not supplemented (they bypass scope)", () => {
+    // Engine graphs carry no session-level scope — they are always surfaced
+    // (only the text filter applies). This is the existing contract.
+    const engineGraphs: EngineGraphSnapshot[] = [
+      makeEngineGraph({
+        graphId: "graph-dispatched",
+        nodes: [{
+          nodeId: "n-dispatched", agent: "agent-d", status: "running",
+          startedAt: new Date().toISOString(),
+          dispatchSessionId: "disp-sess-xyz",
+        }],
+      }),
+    ];
+    const result = computeFilteredActivity({
+      snapshot: makeSnapshot({ engineGraphs }),
+      stateDirPresent: true,
+      // Bare scope — only the current session. No engine-graph dispatch IDs
+      // have been added yet (simulating the "before supplement" state).
+      sessionScope: new Set(["sess-1"]),
+      currentSessionId: "sess-1",
+      filterText: "",
+    });
+    // Engine graphs are still surfaced — they bypass session scope filtering.
+    expect(result.engineGraphs).toHaveLength(1);
+    expect(result.engineGraphs[0].graphId).toBe("graph-dispatched");
+    expect(result.engineGraphs[0].nodes[0].dispatchSessionId).toBe("disp-sess-xyz");
+  });
+
+  it("computeHealth detects activity from engine-graph dispatch sessions when scope is supplemented", () => {
+    const tasks: TaskSnapshot[] = [
+      makeTask({ id: "t1", status: "running", sessionId: "disp-sess-runner", startedAt: "2024-01-01T00:00:01Z" }),
+    ];
+    const loops: LoopSnapshot[] = [
+      makeLoop({ originSessionId: "disp-sess-runner", phase: "running" }),
+    ];
+    const result = computeHealth({
+      phase: "ready",
+      stateDirPresent: true,
+      consecutiveFailures: 0,
+      snapshot: makeSnapshot({ tasks, loops }),
+      // Scope supplemented with the dispatch session ID — tasks/loops are in scope.
+      sessionScope: new Set(["sess-1", "disp-sess-runner"]),
+      currentSessionId: "sess-1",
+    });
+    // Activity in the dispatch session is detected because the scope was
+    // supplemented. Without the supplement, this would return IDLE.
+    expect(result).toBe("ACTIVE");
+  });
+
+  it("computeHealth returns IDLE when task is outside bare scope (size === 1, fallback NOT yet applied)", () => {
+    // This tests the state BEFORE the size===1 fallback in state.tsx fires.
+    // With only {sess-1} in scope, tasks from other sessions are invisible.
+    const tasks: TaskSnapshot[] = [
+      makeTask({ id: "t1", status: "running", sessionId: "sess-other", startedAt: "2024-01-01T00:00:01Z" }),
+    ];
+    const result = computeHealth({
+      phase: "ready",
+      stateDirPresent: true,
+      consecutiveFailures: 0,
+      snapshot: makeSnapshot({ tasks }),
+      // Bare scope — no supplement from engine-graph dispatch IDs.
+      // The size===1 fallback in state.tsx has not yet fired (this is the
+      // consumption-side view), so sess-other is out of scope.
+      sessionScope: new Set(["sess-1"]),
+      currentSessionId: "sess-1",
+    });
+    // No activity in scope => IDLE.
+    expect(result).toBe("IDLE");
+  });
+});
