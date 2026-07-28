@@ -391,6 +391,92 @@ describe("validateGraphDeclaration — structural checks", () => {
     const errors = errorsFor(graph);
     expect(errors.some((e) => e.includes("max_chars") && e.includes("non-negative"))).toBe(true);
   });
+
+  // ── rule 8 — loop-group root detection ──────────────────────────────────
+
+  it("rule 8 — warns when no node has in-degree zero after excluding revise back-edges", () => {
+    const graph = baseGraph();
+    // a↔b cycle with both edges type:"always" → neither is filtered
+    graph.edges = [edge("a", "b"), edge("b", "a")];
+    const result = validateGraphDeclaration(graph);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(true);
+  });
+
+  it("rule 8 — no warning when a revise back-edge is filtered, exposing a root", () => {
+    const graph = baseGraph();
+    // a→b (always) + b→a (revise_needed) → filter b→a, a has in-degree 0
+    graph.edges = [
+      edge("a", "b"),
+      { from: "b", to: "a", type: "on_signal", signal_filter: ["revise_needed"] },
+    ];
+    const result = validateGraphDeclaration(graph);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
+  });
+
+  it("rule 8 — no warning when there is a root node outside a mutual-always cycle", () => {
+    // Three nodes: root→a→b, b→a (always). Root has in-degree 0.
+    const graph = {
+      version: 2 as const,
+      name: "test",
+      nodes: [
+        { id: "root", agent: "ag", prompt: "p" },
+        ...baseGraph().nodes,
+      ],
+      edges: [
+        edge("root", "a"),
+        edge("a", "b"),
+        edge("b", "a"),
+      ],
+    };
+    const result = validateGraphDeclaration(graph);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
+  });
+
+  it("rule 8 — no warning on a simple acyclic graph", () => {
+    const result = validateGraphDeclaration(baseGraph());
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
+  });
+
+  it("validator warns when a back-edge-filtered graph has zero roots", () => {
+    // All-always cycle: no edge is a revise back-edge → no root after filtering → warning.
+    const alwaysCycle = {
+      version: 2 as const,
+      name: "always-cycle",
+      nodes: [
+        { id: "a", agent: "ag", prompt: "p" },
+        { id: "b", agent: "ag", prompt: "p" },
+      ],
+      edges: [
+        edge("a", "b"),
+        edge("b", "a"),
+      ],
+    };
+    const r1 = validateGraphDeclaration(alwaysCycle);
+    expect(r1.valid).toBe(true);
+    expect(r1.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(true);
+
+    // Revise-back-edge cycle: b → a is filtered → a has in-degree 0 → no warning.
+    const reviseCycle = {
+      version: 2 as const,
+      name: "revise-cycle",
+      nodes: [
+        { id: "a", agent: "ag", prompt: "p" },
+        { id: "b", agent: "ag", prompt: "p" },
+      ],
+      edges: [
+        edge("a", "b"),
+        { from: "b", to: "a", type: "on_signal" as const, signal_filter: ["revise_needed"] },
+      ],
+    };
+    const r2 = validateGraphDeclaration(reviseCycle);
+    expect(r2.valid).toBe(true);
+    expect(r2.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

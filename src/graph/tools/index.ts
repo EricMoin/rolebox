@@ -343,7 +343,7 @@ function createGraphRunTool(
   return defineTool({
     description:
       "Non-blocking — dispatches ready root nodes and returns immediately " +
-      "with phase and active_nodes. End your turn after graph_run; the " +
+      "with phase, active_nodes, and pending_nodes. End your turn after graph_run; the " +
       "engine emits a [GRAPH COMPLETE] system-reminder when all nodes " +
       "finish, or [GRAPH BLOCKED] when a node awaits approval. On the " +
       "next turn, read results once via graph_status(graph_id, " +

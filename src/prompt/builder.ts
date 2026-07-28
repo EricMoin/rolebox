@@ -162,7 +162,7 @@ Model each delegated task as a graph node. Use graph_create to start a graph, th
 graph_add_node(graph_id=..., id=..., agent=<sub-agent id>, prompt="...") to register a
 worker node, then graph_run(graph_id=..., node_id=...) to launch it.
 graph_run is non-blocking — it dispatches ready nodes and returns immediately
-(phase + active_nodes). End your turn after graph_run. The engine emits a
+(phase + active_nodes + pending_nodes). End your turn after graph_run. The engine emits a
 [GRAPH COMPLETE] system-reminder when all nodes finish (or [GRAPH BLOCKED]
 when a node awaits approval). On the next turn, read results once via
 graph_status(graph_id=..., include_output=true). Poll graph_status only as a

@@ -57,6 +57,7 @@ import {
   evaluateJoin,
   joinSatisfied,
   getUpstreamNodeIds,
+  isReviseBackEdge,
 } from "./join-evaluator.ts";
 
 // ── Report ──────────────────────────────────────────────────────────────────
@@ -141,10 +142,12 @@ function mergeRevisionFeedback(
  * graph-model.md §5.2, orchestration-patterns.md §1.6). `always` edges are
  * forward data-flow, not revision back-edges; `on_condition` edges are not
  * signal-routed and are out of scope for revision re-entry.
+ *
+ * Delegates to the shared {@link isReviseBackEdge} predicate in join-evaluator
+ * so all in-degree logic stays consistent across modules.
  */
 function activatesOnRevise(edge: EdgeDeclaration): boolean {
-  if (edge.type !== "on_signal") return false;
-  return (edge.signal_filter ?? []).includes("revise_needed");
+  return isReviseBackEdge(edge);
 }
 
 /**

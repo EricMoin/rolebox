@@ -22,7 +22,7 @@
  */
 
 import { JoinStrategy } from "../../constants.ts";
-import type { JoinConfig } from "../../types.graph-v2.ts";
+import type { EdgeDeclaration, JoinConfig } from "../../types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import type { EdgePayload, FanInContext } from "../../types.engine-v2.ts";
 
@@ -83,16 +83,42 @@ export function getJoinStrategy(
 // ── Upstream topology ───────────────────────────────────────────────────────
 
 /**
+ * Whether an edge is a revision back-edge: an `on_signal` edge whose filter
+ * names `revise_needed`. These edges route revision feedback backward within
+ * a loop group and must be excluded from in-degree computations that determine
+ * graph roots (otherwise a loop's entry node whose only incoming edge is a
+ * revise back-edge would never be discovered as a root, deadlocking the graph).
+ *
+ * Design references:
+ * - `.rolebox/design/graph-model.md` §5.2 (signal-routed edges)
+ * - `.rolebox/design/orchestration-patterns.md` §1.6 (bounded-cycle loop groups)
+ */
+export function isReviseBackEdge(edge: EdgeDeclaration): boolean {
+  if (edge.type !== "on_signal") return false;
+  return (edge.signal_filter ?? []).includes("revise_needed");
+}
+
+/**
  * Distinct node IDs that feed `node` via its incoming edges.
  *
  * This is a pure topological fact derived from the graph declaration — every
  * edge with `to === node.nodeId` contributes its `from` source. A node with no
  * incoming edges returns an empty set (a graph root, satisfied immediately).
+ *
+ * @param opts.excludeReviseBackEdges — when true, `revise_needed` back-edges
+ *   are skipped and do not count as upstream sources. Default `false`
+ *   preserves byte-identical behavior for all existing callers (cascade-cancel,
+ *   approval-handler, signal-propagation).
  */
-export function getUpstreamNodeIds(state: EngineState, node: NodeRuntimeState): string[] {
+export function getUpstreamNodeIds(
+  state: EngineState,
+  node: NodeRuntimeState,
+  opts?: { excludeReviseBackEdges?: boolean },
+): string[] {
   const upstream = new Set<string>();
   for (const edge of state.graphDeclaration.edges) {
     if (edge.to === node.nodeId) {
+      if (opts?.excludeReviseBackEdges && isReviseBackEdge(edge)) continue;
       upstream.add(edge.from);
     }
   }
@@ -177,7 +203,21 @@ export function evaluateJoin(
   node: NodeRuntimeState,
 ): JoinVerdict {
   const strategy = getJoinStrategy(state, node);
-  const upstream = getUpstreamNodeIds(state, node);
+
+  // On the first traversal of a loop group (traversalCount === 0), exclude
+  // revise back-edges from the upstream set so the entry node's join can be
+  // satisfied by external upstreams alone. Later traversals — and all
+  // non-loop nodes — count every upstream, including back-edges, since
+  // those rounds traverse the completed→ready re-entry path in
+  // engine-advance.ts and must wait for the back-edge signal.
+  const group = node.loopGroupId !== undefined
+    ? state.loopGroups.get(node.loopGroupId)
+    : undefined;
+  const isFirstLoopTraversal = group !== undefined && group.traversalCount === 0;
+
+  const upstream = getUpstreamNodeIds(state, node, {
+    excludeReviseBackEdges: isFirstLoopTraversal,
+  });
   const label = `join for node "${node.nodeId}"`;
 
   // A node with no upstream edges has nothing to wait on — immediately ready.

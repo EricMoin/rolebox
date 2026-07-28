@@ -17,6 +17,9 @@
  *   5. loop-group node references must be declared nodes (+ loop-group id
  *      uniqueness, symmetric to node-id uniqueness)
  *   6. `needs_approval` nodes may only have non-`always` outgoing edges
+ *   7. `data_passthrough` shape (non-negative `max_chars`)
+ *   8. loop-group root check — WARNING when, after excluding revise
+ *      back-edges, no node has in-degree zero (potential deadlock)
  *
  * ## Cycle-containment semantics (check 4)
  *
@@ -81,6 +84,7 @@ export function validateGraphDeclaration(
   checkCycleContainment(graph, errors, warnings);
   checkApprovalNodeOutgoing(graph, errors);
   checkDataPassthrough(graph, errors);
+  checkLoopGroupRoots(graph, warnings);
 
   return { valid: errors.length === 0, errors, warnings };
 }
@@ -196,6 +200,25 @@ function checkApprovalNodeOutgoing(
   }
 }
 
+// ── Revise back-edge predicate (mirrors engine's isReviseBackEdge) ───────
+
+/**
+ * Whether an edge is a revision back-edge: an `on_signal` edge whose
+ * `signal_filter` names `revise_needed`. These edges route revision feedback
+ * backward within a loop group and must be excluded from in-degree
+ * computations that determine graph roots — otherwise a loop's entry node
+ * whose only incoming edge is a revise back-edge would never be discovered
+ * as a root, deadlocking the graph.
+ *
+ * Implemented inline against `EdgeDeclaration` rather than importing the
+ * engine's `isReviseBackEdge` from `src/graph/engine/` to avoid a layering
+ * violation (validators live in `src/graph/`, above the engine module).
+ */
+function isReviseBackEdge(edge: EdgeDeclaration): boolean {
+  if (edge.type !== "on_signal") return false;
+  return (edge.signal_filter ?? []).includes("revise_needed");
+}
+
 // ── Rule 7: data_passthrough shape ───────────────────────────────────────
 
 function checkDataPassthrough(graph: GraphDocument, errors: string[]): void {
@@ -210,6 +233,40 @@ function checkDataPassthrough(graph: GraphDocument, errors: string[]): void {
           `must be a non-negative number (got ${dm.maxChars})`,
       );
     }
+  }
+}
+
+// ── Rule 8: loop-group root detection (deadlock warning) ─────────────────
+
+/**
+ * Warn when, after filtering out revise back-edges, no node in the graph has
+ * in-degree zero. A graph with no unblocked entry point may deadlock even
+ * after the engine's revise-back-edge-aware root discovery.
+ *
+ * This is a WARNING, not an error — self-contained loop groups can become
+ * runnable via the engine's bootstrap logic or external triggers, so zero
+ * roots is advisory rather than fatal.
+ */
+function checkLoopGroupRoots(
+  graph: GraphDocument,
+  warnings: string[],
+): void {
+  // Compute in-degree excluding revise back-edges.
+  const inDegree = new Map<string, number>();
+  for (const node of graph.nodes) {
+    inDegree.set(node.id, 0);
+  }
+  for (const edge of graph.edges) {
+    if (isReviseBackEdge(edge)) continue;
+    inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
+  }
+
+  const hasRoot = [...inDegree.values()].some((deg) => deg === 0);
+  if (!hasRoot) {
+    warnings.push(
+      "the graph has no unblocked entry point after excluding " +
+        "revise back-edges and may deadlock",
+    );
   }
 }
 

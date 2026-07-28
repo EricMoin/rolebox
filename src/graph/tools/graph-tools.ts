@@ -404,7 +404,10 @@ export interface GraphAddLoopResult {
 export interface GraphRunResult {
   graph_id: string;
   phase: string;
+  /** Nodes that are genuinely active: Running, Blocked, or Ready (dispatch-imminent). Excludes Pending. */
   active_nodes: string[];
+  /** Nodes that are Pending — not yet dispatched, awaiting upstream completion. */
+  pending_nodes: string[];
   dry_run?: boolean;
   validation?: { valid: boolean; errors: string[]; warnings: string[] };
   /** Present when a node retry was requested (`node_id` + `retry`/`modify_prompt`). */
@@ -867,6 +870,7 @@ export class GraphToolSet {
         graph_id: args.graph_id,
         phase: validation.valid ? "validating" : "invalid",
         active_nodes: [],
+        pending_nodes: [],
         dry_run: true,
         validation,
       };
@@ -932,14 +936,21 @@ export class GraphToolSet {
     this.registry.set(args.graph_id, { ...entry, runtime });
 
     const state = runtime.status();
-    const active = [...state.nodes.values()]
-      .filter((n) => ACTIVE_STATUSES.has(n.status))
-      .map((n) => n.nodeId);
+    const active: string[] = [];
+    const pending: string[] = [];
+    for (const n of state.nodes.values()) {
+      if (GRAPH_RUN_ACTIVE_STATUSES.has(n.status)) {
+        active.push(n.nodeId);
+      } else if (n.status === NodeStatus.Pending) {
+        pending.push(n.nodeId);
+      }
+    }
 
     return {
       graph_id: args.graph_id,
       phase: state.phase,
       active_nodes: active,
+      pending_nodes: pending,
       ...(retryReport
         ? {
             retry: {
@@ -2272,9 +2283,11 @@ export class GraphToolSet {
   }
 }
 
-/** Statuses that count as an "active" node for graph_run's active_nodes list. */
-const ACTIVE_STATUSES: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
-  NodeStatus.Pending,
+/** Statuses that count as genuinely "active" for graph_run's active_nodes list.
+ *  Excludes Pending — a pending node has not been dispatched yet and is not
+ *  "active" in any meaningful sense (it may never become active if the graph
+ *  deadlocks). Pending nodes appear in the separate `pending_nodes` field. */
+const GRAPH_RUN_ACTIVE_STATUSES: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
   NodeStatus.Ready,
   NodeStatus.Running,
   NodeStatus.Blocked,

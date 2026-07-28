@@ -315,6 +315,42 @@ describe("evaluateJoin (discriminated verdict)", () => {
     expect(sink.joinSatisfied).toBe(true);
     expect(evaluateJoin(state, sink).kind).toBe("satisfied");
   });
+
+  it("first-traversal join ignores revise back-edge upstream", () => {
+    // Graph: external → sink (always), a → sink (revise_needed back-edge).
+    // Loop group {a, sink} with traversalCount 0.
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "revise-back-edge-join",
+      nodes: [
+        { id: "external", agent: "ext", prompt: "p-ext" },
+        { id: "a", agent: "a1", prompt: "p-a" },
+        { id: "sink", agent: "sink-agent", prompt: "p-sink" },
+      ],
+      edges: [
+        { from: "external", to: "sink", type: "always" },
+        { from: "a", to: "sink", type: "on_signal", signal_filter: ["revise_needed"] },
+      ],
+      loop_groups: [
+        { id: "review-cycle", nodes: ["a", "sink"], max_traversals: 3 },
+      ],
+    };
+    const state = createEngineState(decl, "g-join-revise");
+    provision(state);
+
+    const sink = state.nodes.get("sink")!;
+
+    // Traversal 0: revise back-edge from a is excluded → only external is upstream.
+    // Record answer only from the external source.
+    collectUpstreamResults(state, sink, answerPayload("external"));
+    expect(evaluateJoin(state, sink).kind).toBe("satisfied");
+
+    // Bump traversalCount to 1 (simulate loop re-entry).
+    // Both upstreams now count: external answered, a hasn't → waiting.
+    const group = state.loopGroups.get("review-cycle")!;
+    group.traversalCount = 1;
+    expect(evaluateJoin(state, sink).kind).toBe("waiting");
+  });
 });
 
 // ── collectUpstreamResults ──────────────────────────────────────────────────
