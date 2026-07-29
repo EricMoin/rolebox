@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { NodeStatus } from "../../src/constants.ts";
+import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type {
@@ -88,8 +88,10 @@ function makeToolset(stayRunning?: Set<string>) {
   return { ts: new GraphToolSet(deps), fake };
 }
 
-const dispatches = (fake: CompletingDispatch, nodeId: string) =>
-  fake.calls.filter((c) => c.nodeId === nodeId).length;
+const dispatches = (
+  fake: { calls: { nodeId: string; prompt: string }[] },
+  nodeId: string,
+) => fake.calls.filter((c) => c.nodeId === nodeId).length;
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -173,6 +175,140 @@ describe("graph_run idempotent re-run (adoptPrior)", () => {
     await settle();
     expect(dispatches(fake, "A")).toBe(1);
 
+    const r = await ts.graph_run({
+      graph_id: g.graph_id,
+      node_id: "A",
+      retry: true,
+      modify_prompt: "REVISION",
+    });
+    await settle();
+    expect(r.retry?.node_id).toBe("A");
+    expect(dispatches(fake, "A")).toBe(2);
+    expect(fake.calls.at(-1)!.prompt.startsWith("REVISION")).toBe(true);
+  });
+});
+
+// ── Controllable dispatch (holds nodes running until released) ──────────────
+
+/**
+ * A dispatch seam whose tasks stay `running` until `release(nodeId)` fires their
+ * termination. Also counts `onTaskTerminated` registrations per taskId so tests
+ * can detect an ORPHANED runtime — a second engine building over a mid-flight
+ * graph re-subscribes the same taskId (regCount > 1); the in-flight guard must
+ * leave exactly one subscription.
+ */
+class ControllableDispatch implements NodeDispatchPort {
+  calls: { nodeId: string; prompt: string }[] = [];
+  private subs = new Map<string, TaskTerminatedCallback>();
+  private tasks = new Map<string, DispatchTask>();
+  /** per taskId: how many onTaskTerminated registrations occurred. */
+  regCount = new Map<string, number>();
+  /** nodeIds whose tasks wait for release() before completing. */
+  private held = new Set<string>();
+  private seq = 0;
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    this.calls.push({ nodeId: node.nodeId, prompt: node.prompt });
+    const id = `task-${node.nodeId}-${++this.seq}`;
+    const task: DispatchTask = {
+      id,
+      sessionId: `sess-${id}`,
+      parentSessionId: "g",
+      depth: 1,
+      status: "running",
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+    this.tasks.set(id, task);
+    if (!this.held.has(node.nodeId)) {
+      setTimeout(() => {
+        task.status = "completed";
+        this.subs.get(id)?.(id, "completed");
+      }, 0);
+    }
+    return Promise.resolve(task);
+  }
+
+  onTaskTerminated(taskId: string, cb: TaskTerminatedCallback): TaskTerminatedCallback {
+    this.subs.set(taskId, cb);
+    this.regCount.set(taskId, (this.regCount.get(taskId) ?? 0) + 1);
+    return cb;
+  }
+
+  getTask(taskId: string): DispatchTask | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /** Keep a node's task running (never self-completes). */
+  hold(nodeId: string): void {
+    this.held.add(nodeId);
+  }
+
+  /** Complete every in-flight task for the node, firing its termination. */
+  release(nodeId: string): void {
+    for (const [taskId, task] of this.tasks) {
+      if (taskId.startsWith(`task-${nodeId}-`)) {
+        task.status = "completed";
+        this.subs.get(taskId)?.(taskId, "completed");
+      }
+    }
+  }
+}
+
+// ── graph_run concurrent in-flight guard ────────────────────────────────────
+
+describe("graph_run concurrent in-flight guard", () => {
+  it("reuses the live runtime on a redundant graph_run mid-flight (no duplicate dispatch, no orphaned runtime)", async () => {
+    const fake = new ControllableDispatch();
+    fake.hold("S");
+    const ts = new GraphToolSet({ dispatch: fake });
+    const g = ts.graph_create({ name: "in-flight" });
+    ts.graph_add_node({ graph_id: g.graph_id, id: "S", agent: "s", prompt: "pS" });
+
+    await ts.graph_run({ graph_id: g.graph_id });
+    await settle();
+    // S is held running → the graph is mid-flight (phase executing).
+    expect(dispatches(fake, "S")).toBe(1);
+
+    // Redundant graph_run while still executing → the in-flight guard reuses the
+    // live runtime and returns its CURRENT status WITHOUT re-dispatching.
+    const r2 = await ts.graph_run({ graph_id: g.graph_id });
+    expect(r2.phase).toBe(EnginePhase.Executing);
+    expect(r2.active_nodes).toContain("S");
+    expect(r2.pending_nodes).toEqual([]);
+    expect(dispatches(fake, "S")).toBe(1); // NOT re-dispatched
+
+    // No orphaned runtime: exactly ONE termination subscription for S's task.
+    // A fresh engine rebuild would re-subscribe the same taskId → regCount 2.
+    const totalRegs = [...fake.regCount.values()].reduce((a, b) => a + b, 0);
+    expect(totalRegs).toBe(1);
+
+    // The REUSED live runtime is still functional: releasing the held task lets
+    // it advance to completion (no lost dispatch listener / EngineState).
+    fake.release("S");
+    await settle();
+    const r3 = await ts.graph_run({ graph_id: g.graph_id });
+    expect(r3.phase).toBe(EnginePhase.Complete);
+    expect(dispatches(fake, "S")).toBe(1);
+  });
+
+  it("does not short-circuit a targeted node retry mid-flight", async () => {
+    const fake = new ControllableDispatch();
+    const ts = new GraphToolSet({ dispatch: fake });
+    const g = ts.graph_create({ name: "retry-inflight" });
+    ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id: g.graph_id });
+    await settle();
+    expect(dispatches(fake, "A")).toBe(1);
+
+    // Targeted retry must continue to work even though the graph is running.
     const r = await ts.graph_run({
       graph_id: g.graph_id,
       node_id: "A",

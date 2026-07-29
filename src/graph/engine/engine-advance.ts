@@ -37,8 +37,14 @@ import type { GraphBudgetState, EdgePayload, RoundHistoryEntry } from "../../typ
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
-import type { BudgetCheckResult } from "../../dispatch/budget/budget-tracker.ts";
-import { shouldPersist, clearDirty, markDirty } from "./engine-persistence.ts";
+import type { BudgetCheckResult, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
+import {
+  shouldPersist,
+  clearDirty,
+  clearNonCriticalDirty,
+  shouldPersistNonCritical,
+  markDirty,
+} from "./engine-persistence.ts";
 import {
   type DispatchParentContext,
   type TaskTerminatedCallback,
@@ -79,7 +85,11 @@ import {
   type TerminationContext,
 } from "./engine-termination.ts";
 import { executeLoopStep } from "./loop-group-executor.ts";
-import { recordNodeArtifactsAndEvidence, recordLoopRound } from "./recorder.ts";
+import {
+  recordNodeArtifactsAndEvidence,
+  recordLoopRound,
+  deriveNodeArtifacts,
+} from "./recorder.ts";
 import { buildApprovalPayload } from "./approval-payload.ts";
 import {
   approveBlockedNode,
@@ -98,6 +108,7 @@ import type {
   SignalType,
   SignalBridge,
 } from "./signal-bridge.ts";
+import { recordSignalToLedger } from "./signal-bridge.ts";
 import type { SignalLedgerSource } from "../../types.engine-v2.ts";
 import type { GraphEventRecorder } from "./graph-events.ts";
 
@@ -142,6 +153,16 @@ export interface NodeDispatchPort {
     taskId: string,
     callback: TaskTerminatedCallback,
   ): void;
+  /**
+   * Cumulative token/cost usage for a single dispatched session (keyed by the
+   * dispatch session ID). OPTIONAL-ADDITIVE — a port without it simply cannot
+   * report per-node usage, so the engine degrades to the pre-Phase-7 behavior
+   * (zero consumption). Structurally satisfied by {@link DispatchBridge}
+   * (`dispatch-bridge.ts:getSessionUsage`); consumed by
+   * `engine-recovery.ts:captureNodeUsage` to populate `node.tokensConsumed` at
+   * task termination.
+   */
+  getSessionUsage?(sessionId: string): UsageRecord;
 }
 
 /**
@@ -221,6 +242,21 @@ export interface AdvanceEngineOptions {
    */
   persistState?: (state: EngineState) => void;
   /**
+   * Optional debounced-persistence seam (Q2 Option A, non-critical tier). When
+   * a critical section produced ONLY non-critical mutations (signal-ledger
+   * history, budget / tokensConsumed counters), the `finally` block routes the
+   * write through this debounced seam instead of the synchronous
+   * {@link persistState}. Absent → non-critical-only sections skip persistence
+   * (the in-memory engine still runs).
+   */
+  schedulePersistState?: (state: EngineState) => void;
+  /**
+   * Optional flush seam for the debounced tier. Invoked when the engine reaches
+   * a terminal phase (`complete`) so no pending debounced write is lost. Absent
+   * → no-op (in-memory engine).
+   */
+  flushPersistState?: () => void;
+  /**
    * Optional node-completion notification seam (subtask 1). Invoked exactly
    * once per terminating / notable transition — `answer → completed`,
    * `revise_needed → completed` (reviewer finished), `escalate`,
@@ -291,6 +327,8 @@ export class AdvanceEngine {
   private readonly parentContext: DispatchParentContext;
   private readonly conditionResolver?: EdgeConditionResolver;
   private readonly persistState?: (state: EngineState) => void;
+  private readonly schedulePersistState?: (state: EngineState) => void;
+  private readonly flushPersistState?: () => void;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
   private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
@@ -306,6 +344,8 @@ export class AdvanceEngine {
     this.budgetPort = opts.budget;
     this.conditionResolver = opts.conditionResolver;
     this.persistState = opts.persistState;
+    this.schedulePersistState = opts.schedulePersistState;
+    this.flushPersistState = opts.flushPersistState;
     this.onNodeCompletion = opts.onNodeCompletion;
     this.graphEvents = opts.graphEvents;
     this.onGraphTerminal = opts.onGraphTerminal;
@@ -450,15 +490,30 @@ export class AdvanceEngine {
       return await work();
     } finally {
       releaseAdvancingLock(this.state);
-      // Write-through persistence point (Phase 3): only persist when the state
-      // has been mutated during this critical section (isDirty flag). This
-      // avoids redundant writes on no-op sections. The flag is cleared after a
-      // successful persist. The seam is optional: when absent (no persistence
-      // configured) this is a no-op. See Q2 Option A and engine-persistence.ts
-      // dirty-flag helpers (shouldPersist / clearDirty).
-      if (shouldPersist(this.state)) {
-        this.persistState?.(this.state);
+      // Two-tier persistence point (Q2 Option A): only persist when the state
+      // was mutated during this critical section. Critical mutations (node
+      // lifecycle, phase, frontier, checkpoints, approval) write through
+      // synchronously; a section that mutated ONLY non-critical churn
+      // (signal-ledger history, budget / tokensConsumed) is routed through the
+      // debounced seam. The flags are cleared after the write is handed off. The
+      // seams are optional: when absent (no persistence configured) this is a
+      // no-op. See engine-persistence.ts dirty-flag helpers.
+      if (shouldPersist(this.state) || shouldPersistNonCritical(this.state)) {
+        if (shouldPersist(this.state)) {
+          this.persistState?.(this.state);
+        } else {
+          this.schedulePersistState?.(this.state);
+        }
         clearDirty(this.state);
+        clearNonCriticalDirty(this.state);
+      }
+      // flush-on-terminate: when the engine reaches a terminal phase (complete),
+      // drain any pending debounced non-critical write so the on-disk state is
+      // complete. On the critical path the synchronous save already cancelled
+      // the debounce, so this is a no-op; it matters only for a terminal section
+      // whose write went through the debounced tier.
+      if (this.state.phase === EnginePhase.Complete) {
+        this.flushPersistState?.();
       }
       await this._drainDeferred();
     }
@@ -541,86 +596,11 @@ export class AdvanceEngine {
         executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
       }
       const basePayload = this._buildEdgePayload(node, signalType, signalPayload);
-      for (const edge of state.graphDeclaration.edges) {
-        if (edge.from !== nodeId) continue;
-        if (!this._edgeActivates(edge, signalType, node)) continue;
-
-        const target = getNode(state, edge.to);
-        // Step 4: apply the edge's data_passthrough transform (truncation /
-        // exclusion) to a per-edge clone, then record the upstream result and
-        // recompute the join strategy. A per-edge transform lets two edges
-        // leaving the same source deliver differently-shaped payloads.
-        const payload = applyDataMapping(basePayload, edge.data_passthrough);
-        collectUpstreamResults(state, target, payload);
-        // Step 5: a satisfied downstream becomes ready + in frontier.
-        //
-        // Beyond the normal `pending → ready` activation, a **loop-group**
-        // convergence node that is `completed` (it finished a prior
-        // `revise_needed` review round) re-enters `ready` when its join
-        // re-satisfies — this is the `completed → ready` loop re-entry edge
-        // (node-lifecycle.ts §2, orchestration-patterns.md §1.6). Non-loop
-        // `completed` nodes are never re-activated (they are terminal sinks).
-        if (target.joinSatisfied) {
-          const isPendingActivation = target.status === NodeStatus.Pending;
-          const isLoopReentry = target.status === NodeStatus.Completed &&
-            target.loopGroupId !== undefined;
-          const reEnter = isPendingActivation || isLoopReentry;
-          if (reEnter) {
-            let blockedByCap = false;
-            // Loop-group traversal accounting for always-edge cycles.
-            //
-            // Only `always`-edge-driven re-entries consume a traversal.
-            // `on_signal(revise_needed)` edges route through
-            // `executeLoopStep → propagateRevise` which owns the increment
-            // for revise-driven loops. `on_signal(answer)` edges are forward
-            // data flow — in revise-driven loops they re-enter the reviewer
-            // but that re-entry is the second half of an already-counted
-            // traversal round, so no increment is needed here. Only pure
-            // `always` cycles — where no revise back-edge exists to count
-            // the traversal — route through this path.
-            //
-            // Only intra-group edges count; cross-group edges never consume
-            // a traversal. Pending → Ready (normal forward activation) is
-            // never a loop re-entry.
-            if (isLoopReentry && node.loopGroupId === target.loopGroupId && edge.type === "always") {
-              const groupId = target.loopGroupId!;
-              if (!incrementLoopTraversal(state, groupId)) {
-                // Hard cap reached: escalate the target instead of re-entering.
-                // `completed → escalate` is valid per the lifecycle table
-                // (node-lifecycle.ts §2). The target escalates with reason
-                // `"max_traversals exhausted"`, matching the revise-driven
-                // exhaustion path so the graph's termination logic sees a
-                // consistent outcome. No traversal was consumed — the cap
-                // was already at maxTraversals from a prior re-entry.
-                markDone(this.state, target, "max_traversals exhausted");
-                blockedByCap = true;
-              } else {
-                // Per-node traversal count for loop re-entry diagnostics
-                // (graph_status). Incremented once per re-entry alongside
-                // the per-group counter in incrementLoopTraversal().
-                target.traversalCount += 1;
-                // Traversal consumed: record a completed-round snapshot for
-                // diagnostics (graph_status include_history). The round number
-                // is 1-based and monotonic across the group's whole history.
-                const group = state.loopGroups.get(groupId)!;
-                const roundEntry: RoundHistoryEntry = {
-                  round: (group.rounds?.length ?? 0) + 1,
-                  traversalCount: group.traversalCount,
-                  nodeIds: [target.nodeId],
-                  status: node.status,
-                  startedAt: node.startedAt,
-                  completedAt: Date.now(),
-                };
-                recordLoopRound(state, groupId, roundEntry);
-              }
-            }
-            if (!blockedByCap) {
-              markReady(this.state, target);
-              addToFrontier(state, edge.to);
-            }
-          }
-        }
-      }
+      // Shared forward-activation: edge activation, per-edge data mapping,
+      // upstream result collection, join-satisfied re-entry, and loop-group
+      // traversal accounting. Deduplicated with _forwardAnswerOnApproval so
+      // the approval-resume path stays in parity with the live-signal path.
+      this._forwardActivation(node, signalType, basePayload);
     }
 
     // Step 6: dispatch ready frontier nodes via the dispatch bridge.
@@ -788,7 +768,7 @@ export class AdvanceEngine {
       fromNode: source.nodeId,
       fromSignal: signalType,
       result,
-      artifacts: [],
+      artifacts: source.artifacts ?? deriveNodeArtifacts(source),
       budgetConsumed: {
         tokens: tc.inputTokens + tc.outputTokens,
         cost: tc.cost,
@@ -922,10 +902,13 @@ export class AdvanceEngine {
         ) {
           const sig = mapDispatchStatusToSignal(currentStatus.status, currentStatus);
           if (sig) {
-            // Record the signal directly so _latestTerminating() can find it
-            // when the deferred completion is drained. This mirrors the recovery
-            // path (engine-recovery.ts reconcileEngine → deferred signals).
-            node.signalsObserved[sig.type] = sig.payload;
+            // Record the signal through the shared ledger write path so the
+            // ledger history/lastSignalAt stay complete for this race-guard
+            // synthetic signal, matching live-worker signals. `_latestTerminating()`
+            // still finds it on node.signalsObserved when the deferred completion
+            // is drained. This mirrors the recovery path (engine-recovery.ts
+            // reconcileEngine → deferred signals).
+            recordSignalToLedger(this.state, node.nodeId, sig.type, sig.payload, "race_guard");
             queuePendingCompletion(this.state, node.nodeId);
           }
         }
@@ -1031,7 +1014,9 @@ export class AdvanceEngine {
     markNodeBlocked(this.state, node);
     removeFromFrontier(this.state, node.nodeId);
     // Assemble the human-facing decision context from the frozen upstream state.
-    node.signalsObserved["approval_payload"] = buildApprovalPayload(this.state, node);
+    // Routed through the shared helper (writes node.signalsObserved; a non-signal
+    // stash like approval_payload does NOT enter the ledger history).
+    recordSignalToLedger(this.state, node.nodeId, "approval_payload", buildApprovalPayload(this.state, node));
     markDirty(this.state);
   }
 
@@ -1048,15 +1033,17 @@ export class AdvanceEngine {
   approveNode(nodeId: string, payload?: unknown): Promise<void> {
     return this._runCriticalSection(async () => {
       const node = getNode(this.state, nodeId);
+      // Capture the dispatch task's materialized result (if available) BEFORE
+      // building the EdgePayload, so recordNodeArtifactsAndEvidence (invoked
+      // inside approveBlockedNode) can derive the node's genuine artifacts into
+      // the downstream merged_artifacts.
+      this._captureNodeResult(node);
       const edgePayload = approveBlockedNode(
         this.state,
         node,
         payload,
       );
       if (edgePayload) {
-        // Capture the dispatch task's materialized result (if available)
-        // after the node transitions blocked → completed.
-        this._captureNodeResult(node);
         this._forwardAnswerOnApproval(nodeId, edgePayload);
         // Subtask 1: notify exactly once — `blocked → completed` on
         // approval-resume. Guarded on `edgePayload` (null = not actually
@@ -1202,27 +1189,109 @@ export class AdvanceEngine {
    * approval resume instead of a live worker signal.
    */
   private _forwardAnswerOnApproval(nodeId: string, payload: EdgePayload): void {
+    const source = getNode(this.state, nodeId);
+    // Shared forward-activation: identical to the live-signal answer path,
+    // including loop-group traversal accounting + round recording (which the
+    // prior approval path omitted). Driven by an approval resume instead of a
+    // live worker signal.
+    this._forwardActivation(source, "answer", payload);
+  }
+
+  /**
+   * Shared forward-activation for an `answer` signal: walk the source's
+   * outbound edges, apply edge activation, per-edge data mapping, collect
+   * upstream results, and re-enter satisfied downstream joins into `ready`.
+   * Includes loop-group traversal accounting (intra-group `always`-edge
+   * re-entries) + round recording.
+   *
+   * Used by BOTH the live-signal path ({@link _advance} answer block) and the
+   * approval-resume path ({@link _forwardAnswerOnApproval}) so the two never
+   * drift. The approval path previously omitted the loop traversal increment
+   * and round recording — this shared method brings it into parity.
+   */
+  private _forwardActivation(
+    source: NodeRuntimeState,
+    signalType: SignalType,
+    basePayload: EdgePayload,
+  ): void {
     const state = this.state;
-    const source = getNode(state, nodeId);
     for (const edge of state.graphDeclaration.edges) {
-      if (edge.from !== nodeId) continue;
-      if (!this._edgeActivates(edge, "answer", source)) continue;
+      if (edge.from !== source.nodeId) continue;
+      if (!this._edgeActivates(edge, signalType, source)) continue;
 
       const target = getNode(state, edge.to);
-      // Apply per-edge data_passthrough transform (mirrors _advance answer
-      // path ~545) so each downstream edge sees an independently-shaped
-      // payload. A per-edge clone prevents a single payload from being shared
-      // (and consequently cross-contaminated) across multiple edges.
-      const transformed = applyDataMapping(payload, edge.data_passthrough);
-      collectUpstreamResults(state, target, transformed);
+      // Step 4: apply the edge's data_passthrough transform (truncation /
+      // exclusion) to a per-edge clone, then record the upstream result and
+      // recompute the join strategy. A per-edge transform lets two edges
+      // leaving the same source deliver differently-shaped payloads.
+      const payload = applyDataMapping(basePayload, edge.data_passthrough);
+      collectUpstreamResults(state, target, payload);
+      // Step 5: a satisfied downstream becomes ready + in frontier.
+      //
+      // Beyond the normal `pending → ready` activation, a **loop-group**
+      // convergence node that is `completed` (it finished a prior
+      // `revise_needed` review round) re-enters `ready` when its join
+      // re-satisfies — this is the `completed → ready` loop re-entry edge
+      // (node-lifecycle.ts §2, orchestration-patterns.md §1.6). Non-loop
+      // `completed` nodes are never re-activated (they are terminal sinks).
       if (target.joinSatisfied) {
-        const reEnter =
-          target.status === NodeStatus.Pending ||
-          (target.status === NodeStatus.Completed &&
-            target.loopGroupId !== undefined);
+        const isPendingActivation = target.status === NodeStatus.Pending;
+        const isLoopReentry = target.status === NodeStatus.Completed &&
+          target.loopGroupId !== undefined;
+        const reEnter = isPendingActivation || isLoopReentry;
         if (reEnter) {
-          markReady(this.state, target);
-          addToFrontier(state, edge.to);
+          let blockedByCap = false;
+          // Loop-group traversal accounting for always-edge cycles.
+          //
+          // Only `always`-edge-driven re-entries consume a traversal.
+          // `on_signal(revise_needed)` edges route through
+          // `executeLoopStep → propagateRevise` which owns the increment
+          // for revise-driven loops. `on_signal(answer)` edges are forward
+          // data flow — in revise-driven loops they re-enter the reviewer
+          // but that re-entry is the second half of an already-counted
+          // traversal round, so no increment is needed here. Only pure
+          // `always` cycles — where no revise back-edge exists to count
+          // the traversal — route through this path.
+          //
+          // Only intra-group edges count; cross-group edges never consume
+          // a traversal. Pending → Ready (normal forward activation) is
+          // never a loop re-entry.
+          if (isLoopReentry && source.loopGroupId === target.loopGroupId && edge.type === "always") {
+            const groupId = target.loopGroupId!;
+            if (!incrementLoopTraversal(state, groupId)) {
+              // Hard cap reached: escalate the target instead of re-entering.
+              // `completed → escalate` is valid per the lifecycle table
+              // (node-lifecycle.ts §2). The target escalates with reason
+              // `"max_traversals exhausted"`, matching the revise-driven
+              // exhaustion path so the graph's termination logic sees a
+              // consistent outcome. No traversal was consumed — the cap
+              // was already at maxTraversals from a prior re-entry.
+              markDone(this.state, target, "max_traversals exhausted");
+              blockedByCap = true;
+            } else {
+              // Per-node traversal count for loop re-entry diagnostics
+              // (graph_status). Incremented once per re-entry alongside
+              // the per-group counter in incrementLoopTraversal().
+              target.traversalCount += 1;
+              // Traversal consumed: record a completed-round snapshot for
+              // diagnostics (graph_status include_history). The round number
+              // is 1-based and monotonic across the group's whole history.
+              const group = state.loopGroups.get(groupId)!;
+              const roundEntry: RoundHistoryEntry = {
+                round: (group.rounds?.length ?? 0) + 1,
+                traversalCount: group.traversalCount,
+                nodeIds: [target.nodeId],
+                status: source.status,
+                startedAt: source.startedAt,
+                completedAt: Date.now(),
+              };
+              recordLoopRound(state, groupId, roundEntry);
+            }
+          }
+          if (!blockedByCap) {
+            markReady(this.state, target);
+            addToFrontier(state, edge.to);
+          }
         }
       }
     }

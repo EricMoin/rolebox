@@ -52,6 +52,12 @@ import { markDirty } from "./engine-persistence.ts";
  * from real data: the node's own id, the actual `to` status, and a genuine
  * epoch-ms timestamp.
  *
+ * In parallel, the same record is APPENDED to
+ * `EngineState.checkpointHistory[nodeId]` (an ordered, additive list), so every
+ * transition a node passes through is retained for traceability — not just the
+ * latest one. Both fields are written from the same real data; neither is ever
+ * fabricated.
+ *
  * When `state` is falsy (standalone unit construction without an engine), this
  * is a no-op — no checkpoint is invented for a state that does not exist.
  */
@@ -68,6 +74,13 @@ export function recordCheckpointForNode(
     state.checkpoints = {};
   }
   state.checkpoints[node.nodeId] = record;
+  // Append to the ordered per-node history (append-only traceability).
+  if (!state.checkpointHistory) {
+    state.checkpointHistory = {};
+  }
+  const history = state.checkpointHistory[node.nodeId] ?? [];
+  history.push(record);
+  state.checkpointHistory[node.nodeId] = history;
   state.updatedAt = at;
   markDirty(state);
 }

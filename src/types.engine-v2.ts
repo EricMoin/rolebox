@@ -46,7 +46,7 @@ export type BudgetEventSink = (
  * Runtime state of the graph execution engine.
  *
  * This is the top-level state container persisted across sessions.
- * It replaces GraphExecutionState (src/graph/state.ts:10-21) and subsumes
+ * It replaces GraphExecutionState (now in src/graph/collaboration-state.ts) and subsumes
  * the graph session state, loop coordinator state, and dispatch task tracking
  * into a single unified structure.
  */
@@ -59,7 +59,21 @@ export interface EngineState {
   graphDeclaration: GraphDeclaration;
   /** Per-node runtime state, keyed by node ID */
   nodes: Map<string, NodeRuntimeState>;
-  /** Per-edge runtime state (active data payloads), keyed by "from->to" */
+  /**
+   * RESERVED — per-edge runtime state (active data payloads), keyed by
+   * "from->to".
+   *
+   * This field is currently UNUSED at runtime. It is initialized empty in
+   * {@link createEngineState} (engine-state.ts) and only ever populated during
+   * hydration from a persisted file (deserializeEngineState, engine-persistence.ts).
+   * No runtime code writes to it, so in practice it round-trips the persisted
+   * `file.edges` map verbatim and is carried through `snapshotEngineState`.
+   *
+   * It is retained (not removed) so the persisted schema and
+   * {@link ENGINE_PERSISTENCE_VERSION} stay unchanged. Do NOT start using it for
+   * live edge-payload tracking without first deciding whether it should be
+   * persisted — its current role is purely a schema-compatibility placeholder.
+   */
   edges: Map<string, EdgePayload>;
   /** Per-loop-group runtime state */
   loopGroups: Map<string, LoopGroupRuntimeState>;
@@ -76,13 +90,25 @@ export interface EngineState {
   /** Re-entrancy guard — only one advancement critical section at a time */
   advancingLock: boolean;
   /**
-   * Runtime-only (non-persisted) dirty flag. Set to `true` by any state
-   * mutation so that {@link _runCriticalSection} avoids redundant
-   * `persistState?.` writes when no mutations occurred in a section.
-   * Cleared immediately after a successful persist. Defaults to `false`
-   * for fresh and deserialized states (never resurrected from persistence).
+   * Runtime-only (non-persisted) dirty flag. Set to `true` by any **critical**
+   * mutation — node lifecycle status changes, phase changes, frontier updates,
+   * checkpoint records, approval state — so that {@link _runCriticalSection}
+   * issues a synchronous write-through persist when the section mutated the
+   * durable graph state. Cleared immediately after a successful persist.
+   * Defaults to `false` for fresh and deserialized states (never resurrected
+   * from persistence). See the two-tier policy in engine-persistence.ts (Q2
+   * Option A).
    */
   isDirty: boolean;
+  /**
+   * Runtime-only (non-persisted) dirty flag for **non-critical** churn —
+   * signal-ledger history updates and budget / per-node tokensConsumed
+   * counters. When a critical section produced ONLY non-critical mutations, the
+   * section schedules a debounced (non-blocking) write instead of a synchronous
+   * one. Defaults to `false` for fresh and deserialized states. Never
+   * resurrected from persistence (same rule as {@link isDirty}).
+   */
+  isNonCriticalDirty: boolean;
   /** Completions deferred during a critical section (drained on unlock) */
   pendingCompletions: string[];
 
@@ -95,6 +121,20 @@ export interface EngineState {
    * identically; it never carries fabricated values.
    */
   checkpoints?: Record<string, CheckpointRecord>;
+
+  /**
+   * Optional append-only per-node checkpoint history: an ordered list of
+   * lifecycle-transition snapshots keyed by node ID, in the order transitions
+   * occurred (earliest first). Backs the `graph_status` `include_checkpoint`
+   * flag with full traceability — unlike {@link checkpoints} (which retains
+   * only the latest snapshot), this preserves every recorded transition.
+   *
+   * OPTIONAL-ADDITIVE — absent until a checkpoint is recorded (subtask 7).
+   * The engine and persistence layer treat its absence and an empty record
+   * identically; it never carries fabricated values. The existing
+   * {@link checkpoints} record is kept alongside it for backward compat.
+   */
+  checkpointHistory?: Record<string, CheckpointRecord[]>;
 
   /**
    * Optional phase-transition event sink. Wired by the engine runtime at
@@ -350,9 +390,15 @@ export interface SignalLedgerEntry {
 /**
  * Discriminator for the origin of a signal recorded in the per-node ledger
  * history. Helps graph_status consumers distinguish live worker signals from
- * recovery-side reconciliation, engine-deferred drain, and race-guard paths.
+ * recovery-side reconciliation, engine-deferred drain, race-guard paths, and
+ * synthetic human-approval signals.
  */
-export type SignalLedgerSource = "dispatch" | "recovery" | "deferred" | "race_guard";
+export type SignalLedgerSource =
+  | "dispatch"
+  | "recovery"
+  | "deferred"
+  | "race_guard"
+  | "approval";
 
 /**
  * A single timestamped signal event in the per-node ledger history.

@@ -23,7 +23,7 @@
 
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { DispatchInput, DispatchTask } from "../../dispatch/types.ts";
-import type { BudgetTracker } from "../../dispatch/budget/budget-tracker.ts";
+import type { BudgetTracker, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
 import type { NodeRuntimeState } from "../../types.engine-v2.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -149,6 +149,20 @@ export class DispatchBridge {
   /** Access the shared budget tracker (read-only budget queries live in `budget-bridge.ts`). */
   getBudgetTracker(): BudgetTracker {
     return this.manager.getBudgetTracker();
+  }
+
+  /**
+   * Cumulative token/cost usage for a single dispatched session (keyed by the
+   * dispatch session ID). Delegates to the budget tracker's per-session ledger.
+   *
+   * This is the per-node usage surface: a node's `dispatchSessionId` identifies
+   * exactly one dispatched session, so the engine reads this at task termination
+   * to populate `node.tokensConsumed` (the Phase-7 per-node consumption gap).
+   * Returns a zeroed `UsageRecord` when the tracker has no record for the
+   * session (e.g. usage was never sampled or the session was reset).
+   */
+  getSessionUsage(sessionId: string): UsageRecord {
+    return this.manager.getBudgetTracker().getSessionUsage(sessionId);
   }
 
   /**

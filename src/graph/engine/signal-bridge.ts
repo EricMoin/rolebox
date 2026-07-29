@@ -22,7 +22,7 @@
  */
 
 import type { EngineState, SignalLedgerEvent, SignalLedgerSource } from "../../types.engine-v2.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markNonCriticalDirty } from "./engine-persistence.ts";
 
 // ── Signal-type vocabulary (imported from src/signal/signal-constants.ts) ────
 
@@ -32,9 +32,10 @@ import {
   PAUSING_SIGNALS,
   HANDOFF_SIGNALS,
   INFO_SIGNALS,
+  ALL_SIGNAL_TYPES,
   type SignalType,
 } from "../../signal/signal-constants.ts";
-export { SIGNAL_TYPES, TERMINATING_SIGNALS, PAUSING_SIGNALS, HANDOFF_SIGNALS, INFO_SIGNALS, type SignalType };
+export { SIGNAL_TYPES, TERMINATING_SIGNALS, PAUSING_SIGNALS, HANDOFF_SIGNALS, INFO_SIGNALS, ALL_SIGNAL_TYPES, type SignalType };
 
 // ── Callback interface (injection point for subtask 6) ──────────────────────
 
@@ -51,6 +52,80 @@ export type NodeSignalEmittedListener = (
   type: SignalType,
   payload: unknown,
 ) => void;
+
+// ── Shared ledger-write helper ──────────────────────────────────────────────
+
+/**
+ * Record a signal into the per-node ledger WITHOUT firing terminating
+ * listeners. This is the single ledger-write path for the engine's synthetic
+ * signal producers (the approval handler and the engine-advance race-guard
+ * deferral) so `SignalLedgerEntry.history` / `lastSignalAt` stay complete for
+ * every signal the engine records — matching live-worker signals that flow
+ * through {@link SignalBridge.record}.
+ *
+ * - Writes `node.signalsObserved[type] = value` (payload normalized to `null`
+ *   when absent, mirroring `SignalBridge.record` semantics).
+ * - Updates the graph-level `signalLedger` entry (signals, lastSignalAt,
+ *   ordered history) — the single ledger-write path that
+ *   {@link SignalBridge.record} delegates to.
+ * - Does NOT fire terminating listeners: firing is the control-flow concern
+ *   owned by {@link SignalBridge.record}. Synthetic producers must not trigger
+ *   re-entrant advancement, so they route through this pure helper instead.
+ *
+ * For non-signal context stashes (e.g. `approval_payload`) the node write is
+ * performed but no ledger event is synthesized — the history backs real
+ * signals only, per the `SignalLedgerEntry` contract in types.engine-v2.ts.
+ *
+ * @param state    Engine state (used for the graph-level `signalLedger` write).
+ * @param nodeId   The node the signal is recorded for.
+ * @param type     Signal type (or a non-signal stash key, e.g. `approval_payload`).
+ * @param payload  Optional signal payload.
+ * @param source   Origin discriminator for the ledger event.
+ */
+export function recordSignalToLedger(
+  state: EngineState,
+  nodeId: string,
+  type: string,
+  payload?: unknown,
+  source: SignalLedgerSource = "dispatch",
+): void {
+  const now = Date.now();
+  const value = payload !== undefined ? payload : null;
+
+  const node = state.nodes.get(nodeId);
+  if (node) {
+    node.signalsObserved[type] = value;
+  }
+
+  // Only real signals enter the ledger history. Non-signal context stashes
+  // (e.g. `approval_payload`) are written to node.signalsObserved but never
+  // synthesized as ledger events.
+  if (ALL_SIGNAL_TYPES.has(type)) {
+    const event: SignalLedgerEvent = { signal: type, payload: value, atMs: now, source };
+    const existing = state.signalLedger.get(nodeId);
+    if (existing) {
+      existing.signals[type] = value;
+      existing.lastSignalAt = now;
+      if (existing.history) {
+        existing.history.push(event);
+      } else {
+        existing.history = [event];
+      }
+    } else {
+      state.signalLedger.set(nodeId, {
+        signals: { [type]: value },
+        lastSignalAt: now,
+        history: [event],
+      });
+    }
+  }
+
+  state.updatedAt = now;
+  // Signal-ledger history is non-critical churn (telemetry) — route through
+  // the debounced tier. When the signal also drives a node lifecycle
+  // transition, that transition marks the state critically dirty (sync write).
+  markNonCriticalDirty(state);
+}
 
 // ── SignalBridge ────────────────────────────────────────────────────────────
 
@@ -102,39 +177,11 @@ export class SignalBridge {
     payload?: unknown,
     source: SignalLedgerSource = "dispatch",
   ): boolean {
-    const now = Date.now();
-    const value = payload !== undefined ? payload : null;
-
-    const node = state.nodes.get(nodeId);
-    if (node) {
-      node.signalsObserved[type] = value;
-    }
-
-    // Build the timestamped history event. Payload is normalized to `null`
-    // when absent, mirroring the `signals` field behavior just below.
-    const event: SignalLedgerEvent = { signal: type, payload: value, atMs: now, source };
-
-    // Keep the graph-level signal ledger in sync (lastSignalAt timestamp +
-    // ordered history). The `history` array is OPTIONAL-ADDITIVE — it is
-    // created on first signal and appended to on every subsequent emission.
-    const existing = state.signalLedger.get(nodeId);
-    if (existing) {
-      existing.signals[type] = value;
-      existing.lastSignalAt = now;
-      if (existing.history) {
-        existing.history.push(event);
-      } else {
-        existing.history = [event];
-      }
-    } else {
-      state.signalLedger.set(nodeId, {
-        signals: { [type]: value },
-        lastSignalAt: now,
-        history: [event],
-      });
-    }
-    state.updatedAt = now;
-    markDirty(state);
+    // Single ledger-write path — the pure helper writes the node's
+    // signalsObserved and the graph-level signalLedger (signals, lastSignalAt,
+    // history). This method then owns the control-flow half: firing terminating
+    // listeners.
+    recordSignalToLedger(state, nodeId, type, payload, source);
 
     if (!TERMINATING_SIGNALS.has(type)) {
       return false;

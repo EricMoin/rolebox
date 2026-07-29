@@ -11,6 +11,10 @@ import {
   AdvanceEngine,
   type NodeDispatchPort,
 } from "../../src/graph/engine/engine-advance.ts";
+import {
+  approveBlockedNode,
+  rejectBlockedNode,
+} from "../../src/graph/engine/approval-handler.ts";
 
 // ── Controllable fake dispatch port (mirrors signal-propagation.test.ts) ──
 class FakeDispatch implements NodeDispatchPort {
@@ -55,6 +59,31 @@ function buildState(): EngineState {
   const state = createEngineState(graph(), "g-1");
   provision(state);
   return state;
+}
+
+// ── Fixtures for synthetic-signal ledger tests ─────────────────────────────
+
+/** A single needs_approval gate node. */
+function gateGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "gate",
+    nodes: [{ id: "P", agent: "a2", prompt: "Review and decide.", needs_approval: true }],
+    edges: [],
+  };
+}
+
+/** A dispatch port whose task is already terminal immediately after dispatch. */
+class RaceGuardDispatch implements NodeDispatchPort {
+  executeNode(
+    node: NodeRuntimeState,
+    _parentContext: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    return Promise.resolve(makeTask(node.nodeId));
+  }
+  getTask(taskId: string): DispatchTask | undefined {
+    return { ...makeTask("A"), id: taskId, status: "completed" };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -157,5 +186,71 @@ describe("engine signal delivery — history dual-write (integration)", () => {
 
     // B never emitted → no ledger entry / history for it.
     expect(state.signalLedger.get("B")).toBeUndefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Synthetic-signal paths — approve / reject / race-guard record ledger history
+// ═══════════════════════════════════════════════════════════════════════════
+describe("synthetic signals — ledger history completeness", () => {
+  it("approveBlockedNode records an 'answer' entry with source 'approval'", () => {
+    const state = createEngineState(gateGraph(), "g-1");
+    provision(state);
+    const p = state.nodes.get("P")!;
+    p.status = NodeStatus.Blocked;
+
+    const payload = approveBlockedNode(state, p, "accepted");
+    expect(payload).not.toBeNull();
+
+    expect(p.signalsObserved["answer"]).toBe("accepted");
+    const entry = state.signalLedger.get("P");
+    expect(entry).toBeDefined();
+    expect(entry!.history!.length).toBe(1);
+    expect(entry!.history![0].signal).toBe("answer");
+    expect(entry!.history![0].payload).toBe("accepted");
+    expect(entry!.history![0].source).toBe("approval");
+    expect(entry!.lastSignalAt).toBe(entry!.history![0].atMs);
+  });
+
+  it("rejectBlockedNode records a 'revise_needed' entry with source 'approval'", () => {
+    const state = createEngineState(gateGraph(), "g-1");
+    provision(state);
+    const p = state.nodes.get("P")!;
+    p.status = NodeStatus.Blocked;
+
+    const report = rejectBlockedNode(state, p, "redo it");
+    expect(report.kind).toBe("escalate"); // no loop group
+
+    expect(p.signalsObserved["revise_needed"]).toBe("redo it");
+    const entry = state.signalLedger.get("P");
+    expect(entry).toBeDefined();
+    expect(entry!.history!.length).toBe(1);
+    expect(entry!.history![0].signal).toBe("revise_needed");
+    expect(entry!.history![0].payload).toBe("redo it");
+    expect(entry!.history![0].source).toBe("approval");
+    expect(entry!.lastSignalAt).toBe(entry!.history![0].atMs);
+  });
+
+  it("dispatch race-guard records a deferred signal with source 'race_guard'", async () => {
+    const state = createEngineState(graph(), "g-1");
+    provision(state);
+    const fake = new RaceGuardDispatch();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: fake,
+    });
+
+    // Node A's task is already terminal when the engine dispatches it → the
+    // post-registration race guard records the deferred signal and completes it.
+    await engine.dispatchReady();
+
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    const entry = state.signalLedger.get("A");
+    expect(entry).toBeDefined();
+    expect(entry!.history!.length).toBe(1);
+    expect(entry!.history![0].signal).toBe("answer");
+    expect(entry!.history![0].source).toBe("race_guard");
+    expect(entry!.lastSignalAt).toBe(entry!.history![0].atMs);
   });
 });

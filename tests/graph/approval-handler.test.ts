@@ -1,9 +1,17 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
-import type { DispatchTask } from "../../src/dispatch/types.ts";
+import type {
+  DispatchTask,
+  DispatchTaskStatus,
+  MaterializedResultRef,
+} from "../../src/dispatch/types.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 import {
   AdvanceEngine,
   type NodeDispatchPort,
@@ -52,6 +60,32 @@ function makeTask(nodeId: string): DispatchTask {
     progress: { lastUpdate: new Date(), toolCalls: 0 },
     priority: 0,
   };
+}
+
+/** Fake dispatch that stores a materialized result so `getTask` can surface it
+ *  to `_captureNodeResult` on the approval path. */
+class ResultCaptureFake extends FakeDispatch {
+  private result?: MaterializedResultRef;
+  status: DispatchTaskStatus = "running";
+  setResult(ref: MaterializedResultRef): void {
+    this.result = ref;
+  }
+  getTask(_taskId: string): DispatchTask | undefined {
+    if (!this.result) return undefined;
+    return {
+      id: _taskId,
+      sessionId: "sess-x",
+      parentSessionId: "g-1",
+      depth: 1,
+      status: this.status,
+      agent: "fake",
+      prompt: "fake",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+      result: { ...this.result },
+    };
+  }
 }
 
 interface Rig {
@@ -146,6 +180,37 @@ describe("approve (engine path)", () => {
     // D's join re-satisfies on the forward answer flow → dispatched.
     expect(rig.state.nodes.get("D")!.status).toBe(NodeStatus.Running);
     expect(rig.state.nodes.get("D")!.upstreamResults.get("P")!.fromSignal).toBe("answer");
+  });
+
+  it("approve-path EdgePayload carries the node's artifacts into downstream merged_artifacts", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "graph-approve-artifacts-"));
+    const sidecar = join(tmpDir, "p-result.txt");
+    writeFileSync(sidecar, "Approval result", "utf8");
+    try {
+      const fake = new ResultCaptureFake();
+      fake.setResult({
+        sidecarPath: sidecar,
+        totalChars: 16,
+        hadFence: true,
+        materializedAt: Date.now(),
+      });
+      const rig = buildEngine(gateGraph(), fake);
+      await pauseAtGate(rig);
+      expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+
+      await rig.engine.approveNode("P", "accepted");
+
+      // The approval node's genuine artifact is recorded and carried on the
+      // answer EdgePayload routed downstream.
+      const p = rig.state.nodes.get("P")!;
+      expect(p.artifacts).toEqual([sidecar]);
+      const payload = rig.state.nodes.get("D")!.upstreamResults.get("P")!;
+      expect(payload.artifacts).toEqual([sidecar]);
+      const fanIn = mergeFanInContext(rig.state.nodes.get("D")!.upstreamResults);
+      expect(fanIn.merged_artifacts).toEqual([sidecar]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("approveBlockedNode returns the downstream EdgePayload and marks completed", () => {

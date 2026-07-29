@@ -14,6 +14,7 @@ import {
   type NodeDispatchPort,
   type NodeCompletionEvent,
 } from "../../src/graph/engine/engine-advance.ts";
+import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 
 // ── Controllable fake dispatch port ────────────────────────────────────────
 
@@ -395,6 +396,49 @@ describe("result capture from dispatch task", () => {
     expect(node.status).toBe(NodeStatus.Completed);
     // node.result keeps the pre-populated ref (not overwritten).
     expect(node.result!.sidecarPath).toBe(sidecar);
+  });
+
+  it("carries the node's materialized sidecar path through EdgePayload.artifacts into merged_artifacts", async () => {
+    const { state, engine, fake } = buildEngineWithCapture(
+      linearGraph(),
+      sampleResult,
+    );
+
+    await engine.dispatchReady();
+    // A answers with a materialized result sidecar → recordNodeArtifactsAndEvidence
+    // populates A.artifacts before _buildEdgePayload runs.
+    await engine.onNodeSignalEmitted("A", "answer", { summary: "done" });
+
+    const aNode = state.nodes.get("A")!;
+    expect(aNode.status).toBe(NodeStatus.Completed);
+    expect(aNode.artifacts).toEqual([sidecar]);
+
+    // The downstream EdgePayload routed to B carries the sidecar path.
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.artifacts).toEqual([sidecar]);
+
+    // mergeFanInContext accumulates payload.artifacts into merged_artifacts.
+    const fanIn = mergeFanInContext(
+      state.nodes.get("B")!.upstreamResults,
+    );
+    expect(fanIn.merged_artifacts).toEqual([sidecar]);
+  });
+
+  it("leaves EdgePayload.artifacts empty when the node has no materialized result", async () => {
+    const { state, engine } = buildEngineWithCapture(
+      linearGraph(),
+      null, // no result set on the fake
+    );
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "ok");
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.artifacts).toEqual([]);
+    const fanIn = mergeFanInContext(
+      state.nodes.get("B")!.upstreamResults,
+    );
+    expect(fanIn.merged_artifacts).toEqual([]);
   });
 
   it("fires onNodeCompletion seam even when dispatch task has no result", async () => {

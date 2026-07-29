@@ -47,12 +47,14 @@ import {
   ADVANCING_LOCK_TIMEOUT_MS,
 } from "../../loop/constants.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
+import type { UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
 import type {
   EngineState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
+import { markNonCriticalDirty } from "./engine-persistence.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -94,6 +96,15 @@ export interface DispatchRecoveryPort {
     taskId: string,
     callback: TaskTerminatedCallback,
   ): void;
+  /**
+   * Cumulative token/cost usage for a single dispatched session (keyed by the
+   * dispatch session ID). OPTIONAL-ADDITIVE — a port without it simply cannot
+   * report per-node usage, so the engine degrades to the pre-Phase-7 behavior
+   * (zero consumption). Structurally satisfied by {@link DispatchBridge}
+   * (`dispatch-bridge.ts:getSessionUsage`). Consumed by {@link captureNodeUsage}
+   * to populate `node.tokensConsumed` at task termination.
+   */
+  getSessionUsage?(sessionId: string): UsageRecord;
 }
 
 /** A dispatch status mapped to a terminating engine signal (answer | escalate). */
@@ -206,6 +217,63 @@ export function mapDispatchStatusToSignal(
   }
 }
 
+// ── Per-node usage capture (Phase-7 per-node consumption) ───────────────────
+
+/**
+ * Record a node's per-session token/cost consumption into `node.tokensConsumed`
+ * from the dispatch layer's budget tracker.
+ *
+ * Background: `node.tokensConsumed` was historically only ever assigned by
+ * `adoptPriorNodeStates` (copying a prior run), so a freshly executed node
+ * always reported zero per-node consumption. The dispatch subsystem tracks
+ * usage per dispatched session (`BudgetTracker.getSessionUsage(sessionId)`,
+ * keyed by the node's `dispatchSessionId`), so this helper reads that record at
+ * task termination and writes it onto the node.
+ *
+ * Semantics (minimal honest path):
+ * - **Replace, not accumulate.** The node's `tokensConsumed` is set to the
+ *   terminating session's usage. This is idempotent across the live-seam,
+ *   race-guard, and recovery paths (which may both observe the same
+ *   termination), so it cannot double-count. The residual gap — a node that
+ *   re-dispatches multiple sessions (retry / loop re-entry) reflects only the
+ *   LAST session's usage, not the cumulative total — is documented in
+ *   `docs/graph-engine-architecture.md`.
+ * - **Zero-guard.** When the tracker reports all-zero usage (the session was
+ *   never sampled, or usage was reset), the node's existing value is left
+ *   untouched rather than clobbered to zero — so an adopted prior value is not
+ *   erased by a transient zero read.
+ * - **Best-effort.** A throwing or absent `getSessionUsage` is a no-op that
+ *   never corrupts node advancement.
+ *
+ * @param state  Engine state (used to mark the mutation dirty for persistence).
+ * @param node   The node whose `dispatchSessionId` identifies the session.
+ * @param port   The dispatch port exposing `getSessionUsage` (optional).
+ */
+export function captureNodeUsage(
+  state: EngineState,
+  node: NodeRuntimeState,
+  port: DispatchRecoveryPort,
+): void {
+  if (!port.getSessionUsage) return;
+  const sessionId = node.dispatchSessionId;
+  if (!sessionId) return;
+  try {
+    const usage = port.getSessionUsage(sessionId);
+    if (!usage) return;
+    if (usage.inputTokens === 0 && usage.outputTokens === 0 && usage.cost === 0) {
+      return; // zero-guard — never clobber an adopted/prior value with a zero read
+    }
+    node.tokensConsumed.inputTokens = usage.inputTokens;
+    node.tokensConsumed.outputTokens = usage.outputTokens;
+    node.tokensConsumed.cost = usage.cost;
+    // Per-node token counters are non-critical churn — route through the
+    // debounced tier rather than forcing a synchronous write.
+    markNonCriticalDirty(state);
+  } catch {
+    // best-effort — a throwing tracker must never corrupt node advancement
+  }
+}
+
 // ── Re-subscription (live seam + recovery share this) ───────────────────────
 
 /**
@@ -243,6 +311,10 @@ export function subscribeTaskTermination(
     if (!current) return;
     if (current.dispatchTaskId !== completedTaskId) return; // superseded task
     if (current.status !== NodeStatus.Running) return; // already advanced / cancelled
+    // Record the terminated task's token/cost consumption (Phase-7 gap) before
+    // the node advances. Idempotent replace — safe across the live-seam /
+    // race-guard double-observation of the same termination.
+    captureNodeUsage(state, current, port);
     if (status === "cancelled") {
       markCancelled(state, current, "dispatch task cancelled");
       return;
@@ -311,6 +383,9 @@ export function reconcileEngine(
     }
 
     if (TERMINAL_DISPATCH_STATUSES.has(task.status)) {
+      // Record the finished-during-restart task's consumption (Phase-7 gap)
+      // before the deferred signal is emitted. Idempotent replace.
+      captureNodeUsage(state, node, port);
       if (task.status === "cancelled") {
         markCancelled(state, node, "dispatch task cancelled during restart");
       } else {
@@ -392,6 +467,10 @@ export function hydrateEngineState(
   target.updatedAt = source.updatedAt;
   target.advancingLock = source.advancingLock;
   target.pendingCompletions = source.pendingCompletions;
+  // Runtime-only dirty flags are never adopted from a persisted source — a
+  // recovered state starts clean (critical and non-critical both false).
+  target.isDirty = false;
+  target.isNonCriticalDirty = false;
   target.checkpoints = source.checkpoints
     ? Object.fromEntries(
         Object.entries(source.checkpoints).map(([id, r]) => [id, { ...r }])
@@ -512,7 +591,11 @@ export function adoptPriorNodeStates(
   }
 
   target.updatedAt = Date.now();
+  // Node-state adoption is a critical transition — the caller persists
+  // synchronously. Reset the non-critical flag (its churn is included in that
+  // write) so the recovered runtime starts clean.
   target.isDirty = true;
+  target.isNonCriticalDirty = false;
 }
 
 /**

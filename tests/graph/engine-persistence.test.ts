@@ -396,6 +396,16 @@ function populateAdditiveFields(state: EngineState): void {
     B: { nodeId: "B", status: NodeStatus.Ready, at: 150 },
   };
 
+  // EngineState.checkpointHistory (include_checkpoint — append-only traceability)
+  state.checkpointHistory = {
+    A: [
+      { nodeId: "A", status: NodeStatus.Ready, at: 100 },
+      { nodeId: "A", status: NodeStatus.Running, at: 150 },
+      { nodeId: "A", status: NodeStatus.Completed, at: 200, note: "ok" },
+    ],
+    B: [{ nodeId: "B", status: NodeStatus.Ready, at: 150 }],
+  };
+
   // NodeRuntimeState.artifacts / evidence (include_artifacts / include_evidence)
   const a = state.nodes.get("A")!;
   a.artifacts = ["/out/a.ts", "/out/a.md"];
@@ -440,6 +450,7 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     expect(parsed.version).toBe(2);
     // The old-shaped file genuinely lacks the new fields.
     expect(parsed.checkpoints).toBeUndefined();
+    expect(parsed.checkpointHistory).toBeUndefined();
     expect(parsed.nodes.A.artifacts).toBeUndefined();
     expect(parsed.nodes.A.evidence).toBeUndefined();
     expect(parsed.loopGroups.lg1.rounds).toBeUndefined();
@@ -451,6 +462,7 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     const l = loaded!;
     // New fields default to undefined — not fabricated.
     expect(l.checkpoints).toBeUndefined();
+    expect(l.checkpointHistory).toBeUndefined();
     expect(l.nodes.get("A")!.artifacts).toBeUndefined();
     expect(l.nodes.get("A")!.evidence).toBeUndefined();
     expect(l.loopGroups.get("lg1")!.rounds).toBeUndefined();
@@ -476,6 +488,16 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     expect(loaded.checkpoints).toEqual({
       A: { nodeId: "A", status: NodeStatus.Completed, at: 200, note: "ok" },
       B: { nodeId: "B", status: NodeStatus.Ready, at: 150 },
+    });
+
+    // Append-only checkpoint history survives in order (traceability).
+    expect(loaded.checkpointHistory).toEqual({
+      A: [
+        { nodeId: "A", status: NodeStatus.Ready, at: 100 },
+        { nodeId: "A", status: NodeStatus.Running, at: 150 },
+        { nodeId: "A", status: NodeStatus.Completed, at: 200, note: "ok" },
+      ],
+      B: [{ nodeId: "B", status: NodeStatus.Ready, at: 150 }],
     });
 
     // Per-node artifacts / evidence survive (including the empty evidence array).
@@ -649,12 +671,13 @@ describe("dirty-flag batching: optimization fires on idle sections", () => {
   });
 });
 
-describe("dirty-flag batching: durability preserved for signal-only mutations", () => {
-  it("signalBridge.record() sets isDirty so a critical section persists signal ledger", async () => {
+describe("two-tier persistence: signal-only mutations are non-critical (debounced)", () => {
+  it("signalBridge.record() sets isNonCriticalDirty (not isDirty) and routes through schedulePersistState", async () => {
     const state = createEngineState(singleNodeDeclaration(), "g-sig-1");
     provision(state);
 
-    let persistCount = 0;
+    let criticalPersistCount = 0;
+    let debouncedScheduleCount = 0;
     const signalBridge = new SignalBridge();
 
     const engine = new AdvanceEngine({
@@ -662,23 +685,137 @@ describe("dirty-flag batching: durability preserved for signal-only mutations", 
       signalBridge,
       dispatch: new FakeDispatch(),
       persistState: () => {
-        persistCount++;
+        criticalPersistCount++;
+      },
+      schedulePersistState: () => {
+        debouncedScheduleCount++;
       },
     });
 
     // Dispatch the root first so the node is running and frontier is empty.
     await engine.dispatchReady();
-    expect(persistCount).toBe(1);
+    expect(criticalPersistCount).toBe(1);
 
-    // Record a non-terminating signal — this writes to signalLedger and
-    // node.signalsObserved. With the fix in subtask 7 revision, this sets
-    // state.isDirty = true.
+    // Record a non-terminating signal — writes signalLedger history +
+    // node.signalsObserved. Under Q2 Option A this is NON-critical churn:
+    // it sets isNonCriticalDirty (not the critical isDirty).
     signalBridge.record(state, "A", "progress" as SignalType, { step: 1 });
-    expect(state.isDirty).toBe(true);
+    expect(state.isDirty).toBe(false);
+    expect(state.isNonCriticalDirty).toBe(true);
 
-    // Now run an idle section. Nothing is ready, BUT isDirty was set by
-    // the signal record above → the critical section's finally must persist.
+    // An idle section sees ONLY non-critical churn → schedules a debounced
+    // write instead of a synchronous one. The critical seam is NOT invoked.
     await engine.dispatchReady();
-    expect(persistCount).toBe(2);
+    expect(criticalPersistCount).toBe(1);
+    expect(debouncedScheduleCount).toBe(1);
+    // The non-critical flag is cleared after being handed to the debounce.
+    expect(state.isNonCriticalDirty).toBe(false);
+  });
+});
+
+// ── Q2 Option A: two-tier persistence wiring ─────────────────────────────────
+//
+// Three behaviors must hold:
+//   (1) debounced non-critical write coalescing;
+//   (2) critical transitions still write synchronously;
+//   (3) flush-on-terminate leaves the on-disk state complete.
+
+describe("two-tier persistence (Q2 Option A)", () => {
+  it("(1) debounced non-critical writes coalesce: only the most recent state is flushed", () => {
+    const localDir = mkdtempSync(join(tmpdir(), "engine-persist-coalesce-"));
+    try {
+      const localStore = new EnginePersistence(localDir);
+      // First non-critical mutation schedules the debounce.
+      const s1 = buildRichState();
+      localStore.scheduleSave(s1);
+      // A second non-critical mutation coalesces into the same debounce window —
+      // the debounce timer is not restarted and the most recent state wins.
+      const s2 = buildRichState();
+      s2.budget = {
+        sessionsSpawned: 9,
+        totalInputTokens: 90,
+        totalOutputTokens: 50,
+        totalCost: 1.5,
+      };
+      localStore.scheduleSave(s2);
+
+      // Debounced: nothing written until flush() / the timer fires.
+      expect(existsSync(engineStatePath(localDir, "graph-1"))).toBe(false);
+
+      localStore.flush();
+      expect(existsSync(engineStatePath(localDir, "graph-1"))).toBe(true);
+
+      // The flushed write reflects the most recent state (coalesced, not doubled).
+      const loaded = localStore.load("graph-1")!;
+      expect(loaded.budget.sessionsSpawned).toBe(9);
+      expect(loaded.budget.totalCost).toBe(1.5);
+    } finally {
+      rmSync(localDir, { recursive: true, force: true });
+    }
+  });
+
+  it("(2) critical transitions still write synchronously (never the debounce)", async () => {
+    const state = createEngineState(singleNodeDeclaration(), "g-crit-sync-1");
+    provision(state);
+
+    let criticalCount = 0;
+    let scheduleCount = 0;
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: new FakeDispatch(),
+      persistState: () => {
+        criticalCount++;
+      },
+      schedulePersistState: () => {
+        scheduleCount++;
+      },
+    });
+
+    // dispatchReady runs a critical section with critical mutations (idle →
+    // executing, root ready → running) — these write through synchronously.
+    await engine.dispatchReady();
+    expect(criticalCount).toBe(1);
+    expect(scheduleCount).toBe(0);
+    // The state itself reflects the critical transition.
+    expect(state.phase).toBe(EnginePhase.Executing);
+  });
+
+  it("(3) flush-on-terminate leaves the on-disk state complete", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-persist-flush-term-"));
+    try {
+      const store = new EnginePersistence(dir);
+      const state = createEngineState(singleNodeDeclaration(), "g-flush-term-1");
+      provision(state);
+      const signalBridge = new SignalBridge();
+      const engine = new AdvanceEngine({
+        state,
+        signalBridge,
+        dispatch: new FakeDispatch(),
+        persistState: (s) => store.save(s),
+        schedulePersistState: (s) => store.scheduleSave(s),
+        flushPersistState: () => store.flush(),
+      });
+
+      // Dispatch the root → running (critical save).
+      await engine.dispatchReady();
+      // Non-critical churn recorded outside any critical section.
+      signalBridge.record(state, "A", "progress" as SignalType, { step: 1 });
+      expect(state.isNonCriticalDirty).toBe(true);
+
+      // Complete the graph: answer → running → completed → termination → complete.
+      await engine.onNodeSignalEmitted("A", "answer", "done");
+      expect(state.phase).toBe(EnginePhase.Complete);
+
+      // flush-on-terminate guarantees the on-disk state is complete — including
+      // the pending non-critical churn recorded above.
+      const loaded = store.load("g-flush-term-1");
+      expect(loaded).not.toBeNull();
+      expect(loaded!.phase).toBe(EnginePhase.Complete);
+      expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+      expect(loaded!.signalLedger.get("A")!.signals.progress).toEqual({ step: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

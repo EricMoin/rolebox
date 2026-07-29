@@ -886,6 +886,45 @@ export class GraphToolSet {
       );
     }
 
+    // Per-graph in-flight guard (concurrency fix): when the registry entry's
+    // runtime is ALREADY executing with running/ready nodes, a concurrent
+    // `graph_run` (no node_id) must NOT build a fresh engine. Building one would
+    // orphan the live runtime's in-flight `onTaskTerminated` dispatch listeners
+    // (engine-recovery.ts subscribeTaskTermination) and its EngineState — the
+    // second runtime would supersede the first while the first's tasks are still
+    // mid-flight, silently dropping completion routing. Instead, REUSE the live
+    // runtime and return its current status (phase / active_nodes / pending_nodes)
+    // WITHOUT re-dispatching — an idempotent re-run.
+    //
+    // The adoptPrior + replayAnswers rebuild path below remains for the legitimate
+    // rebuild-after-complete case (phase is Idle/Complete here → guard skipped),
+    // and targeted retry (`node_id` + `retry`/`modify_prompt`) is exempt so it
+    // keeps working.
+    const liveStatus = entry.runtime.status();
+    const hasInFlightNode = [...liveStatus.nodes.values()].some(
+      (n) =>
+        n.status === NodeStatus.Running || n.status === NodeStatus.Ready,
+    );
+    const isMidFlight =
+      liveStatus.phase === EnginePhase.Executing && hasInFlightNode;
+    if (isMidFlight && !args.node_id) {
+      const active: string[] = [];
+      const pending: string[] = [];
+      for (const n of liveStatus.nodes.values()) {
+        if (GRAPH_RUN_ACTIVE_STATUSES.has(n.status)) {
+          active.push(n.nodeId);
+        } else if (n.status === NodeStatus.Pending) {
+          pending.push(n.nodeId);
+        }
+      }
+      return {
+        graph_id: args.graph_id,
+        phase: liveStatus.phase,
+        active_nodes: active,
+        pending_nodes: pending,
+      };
+    }
+
     // Subtask 3: wire the configured graph-notify completion seam into the
     // runtime graph_run builds (absent → the engine's default no-op seam).
     // `invokingSessionId` (the graph tool's execution session) is forwarded so
@@ -1821,18 +1860,35 @@ export class GraphToolSet {
   }
 
   /**
-   * Extract per-node lifecycle checkpoints from `EngineState.checkpoints`
-   * (`Record<nodeId, CheckpointRecord>`), scoped to a node when `nodeId` is
-   * given. Absent until a checkpoint is recorded (subtask 2).
+   * Extract per-node lifecycle checkpoints from `EngineState.checkpointHistory`
+   * (`Record<nodeId, CheckpointRecord[]>` — the ordered, append-only list),
+   * scoped to a node when `nodeId` is given. When a node has no recorded history
+   * yet, falls back to `EngineState.checkpoints` (`Record<nodeId, CheckpointRecord>`)
+   * for backward compat so the latest snapshot still surfaces. Absent until a
+   * checkpoint is recorded (subtask 2 / subtask 7).
    */
   private checkpointEntries(
     state: EngineState,
     nodeId?: string,
   ): Array<{ node_id: string; checkpoints: CheckpointRecord[] }> {
     const out: Array<{ node_id: string; checkpoints: CheckpointRecord[] }> = [];
-    for (const [id, cp] of Object.entries(state.checkpoints ?? {})) {
+    const ids = new Set([
+      ...Object.keys(state.checkpoints ?? {}),
+      ...Object.keys(state.checkpointHistory ?? {}),
+    ]);
+    for (const id of ids) {
       if (nodeId !== undefined && id !== nodeId) continue;
-      out.push({ node_id: id, checkpoints: [cp] });
+      const history = state.checkpointHistory?.[id];
+      // Prefer the ordered history when present; else fall back to the single
+      // latest checkpoint (backward compat with the pre-history `checkpoints` record).
+      const cps =
+        history && history.length > 0
+          ? [...history]
+          : state.checkpoints?.[id]
+            ? [state.checkpoints[id]]
+            : [];
+      if (cps.length === 0) continue;
+      out.push({ node_id: id, checkpoints: cps });
     }
     return out;
   }

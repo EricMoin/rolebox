@@ -35,7 +35,7 @@ import type {
 } from "../../types.engine-v2.ts";
 import { resolveJoinStrategy, isReviseBackEdge } from "./join-evaluator.ts";
 import { markReady } from "./node-lifecycle.ts";
-import { markDirty } from "./engine-persistence.ts";
+import { markDirty, markNonCriticalDirty } from "./engine-persistence.ts";
 
 // ── Event sinks (write-side graph event log) ────────────────────────────────
 //
@@ -87,7 +87,9 @@ export function applyBudgetDelta(
   b.totalOutputTokens += delta.outputTokens ?? 0;
   b.totalCost += delta.cost ?? 0;
   state.updatedAt = Date.now();
-  markDirty(state);
+  // Budget counters are non-critical churn (telemetry) — route through the
+  // debounced tier, not the synchronous write-through path.
+  markNonCriticalDirty(state);
   // Emit a budget-update event to the write-side log (no-op when no sink is
   // wired on the state). Never lets a recorder failure corrupt the budget update.
   try {
@@ -163,6 +165,7 @@ export function createEngineState(
     updatedAt: now,
     advancingLock: false,
     isDirty: false,
+    isNonCriticalDirty: false,
     pendingCompletions: [],
   };
 }

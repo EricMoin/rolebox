@@ -275,6 +275,31 @@ describe("propagateEscalate (unit)", () => {
     expect(state.nodes.get("C")!.upstreamResults.get("B")!.fromSignal).toBe("escalate");
   });
 
+  it("escalate-path EdgePayload carries the source node's recorded artifacts", () => {
+    const state = buildState(convergeGraph("all"));
+    const node = state.nodes.get("B")!;
+    node.artifacts = ["/work/artifact-b.ts"]; // e.g. a reviewer that escalated post-result
+    markEscalated(state, node, "branch B failed");
+
+    propagateEscalate(state, node, { reason: "branch B failed" });
+
+    // The escalate EdgePayload routed into C's upstreamResults preserves the
+    // source node's artifacts rather than hardcoding an empty list.
+    const payload = state.nodes.get("C")!.upstreamResults.get("B")!;
+    expect(payload.artifacts).toEqual(["/work/artifact-b.ts"]);
+  });
+
+  it("escalate-path EdgePayload leaves artifacts empty when the node has none", () => {
+    const state = buildState(convergeGraph("all"));
+    const node = state.nodes.get("B")!;
+    markEscalated(state, node, "branch B failed");
+
+    propagateEscalate(state, node, { reason: "branch B failed" });
+
+    const payload = state.nodes.get("C")!.upstreamResults.get("B")!;
+    expect(payload.artifacts).toEqual([]);
+  });
+
   it("absorbs the escalation when the convergence join is still satisfiable (no false complete)", () => {
     const state = buildState(convergeGraph("any"));
     const c = state.nodes.get("C")!;

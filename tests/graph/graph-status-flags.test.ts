@@ -326,8 +326,17 @@ describe("graph_status backed flags return genuine engine data", () => {
     buildChain(ts, graph_id);
     const node = liveState(ts, graph_id).nodes.get("reporter")!;
     node.artifacts = ["/work/report.md"];
-    liveState(ts, graph_id).checkpoints = {
-      reporter: { nodeId: "reporter", status: NodeStatus.Completed, at: 1000 },
+    // Append-only checkpoint history (subtask 7) is the include_checkpoint
+    // source: an ordered, multi-entry list per node. Assigning fresh objects
+    // replaces planner's provisioning history + latest checkpoint so the
+    // assertion is deterministic (only reporter is present).
+    const st = liveState(ts, graph_id);
+    st.checkpoints = {};
+    st.checkpointHistory = {
+      reporter: [
+        { nodeId: "reporter", status: NodeStatus.Ready, at: 500 },
+        { nodeId: "reporter", status: NodeStatus.Completed, at: 1000 },
+      ],
     };
 
     const parsed = JSON.parse(
@@ -336,8 +345,15 @@ describe("graph_status backed flags return genuine engine data", () => {
     expect(parsed.artifacts_evidence).toEqual([
       { node_id: "reporter", artifacts: ["/work/report.md"] },
     ]);
+    // Checkpoints render as the ordered history list (multi-entry), scoped per node.
     expect(parsed.checkpoints).toEqual([
-      { node_id: "reporter", checkpoints: [{ nodeId: "reporter", status: NodeStatus.Completed, at: 1000 }] },
+      {
+        node_id: "reporter",
+        checkpoints: [
+          { nodeId: "reporter", status: NodeStatus.Ready, at: 500 },
+          { nodeId: "reporter", status: NodeStatus.Completed, at: 1000 },
+        ],
+      },
     ]);
     // Nodes without the requested arrays are omitted honestly from artifacts_evidence.
     expect(parsed.artifacts_evidence).toHaveLength(1);

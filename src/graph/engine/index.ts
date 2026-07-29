@@ -414,10 +414,23 @@ function snapshotEngineState(state: EngineState): EngineState {
     // reference-sharing the snapshot already uses for loop `rounds` and signal
     // `history`. Absent until a checkpoint is recorded (subtask 2).
     checkpoints: state.checkpoints ? { ...state.checkpoints } : undefined,
+    // C-WIRE (subtask 7): carry the append-only per-node checkpoint history into
+    // the snapshot so `include_checkpoint` surfaces the full ordered trace. Same
+    // immutable-snapshot reference-sharing as `checkpoints`; arrays are shallow-
+    // cloned so the outer record is fresh while the immutable records are shared.
+    checkpointHistory: state.checkpointHistory
+      ? Object.fromEntries(
+          Object.entries(state.checkpointHistory).map(([id, records]) => [
+            id,
+            [...records],
+          ]),
+        )
+      : undefined,
     startedAt: state.startedAt,
     updatedAt: state.updatedAt,
     advancingLock: state.advancingLock,
     isDirty: state.isDirty,
+    isNonCriticalDirty: state.isNonCriticalDirty,
     pendingCompletions: [...state.pendingCompletions],
   };
 }
@@ -499,6 +512,12 @@ class EngineRuntimeImpl implements EngineRuntime {
       parentContext: opts.parentContext,
       conditionResolver: opts.conditionResolver ?? defaultConditionResolver,
       persistState: this.persistence ? (s) => this.persistence!.save(s) : undefined,
+      schedulePersistState: this.persistence
+        ? (s) => this.persistence!.scheduleSave(s)
+        : undefined,
+      flushPersistState: this.persistence
+        ? () => this.persistence!.flush()
+        : undefined,
       onNodeCompletion: this.onNodeCompletion,
       graphEvents: this.graphEvents,
       onGraphTerminal: this.onGraphTerminal,
@@ -626,6 +645,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     rebuildFrontier(this.state);
     await this.advance.dispatchReady();
     this.persistence?.save(this.state);
+    // flush-on-terminate: the runtime was rebuilt from persisted state — drain
+    // any pending debounced non-critical write so no churn is lost on replace.
+    this.persistence?.flush();
   }
 
   async adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void> {
@@ -663,6 +685,9 @@ class EngineRuntimeImpl implements EngineRuntime {
 
     if (!opts?.replayAnswers) {
       this.persistence?.save(this.state);
+      // flush-on-terminate: runtime replaced by adoption — drain any pending
+      // debounced non-critical write so the on-disk state is complete.
+      this.persistence?.flush();
       return;
     }
 
@@ -691,6 +716,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     }
 
     this.persistence?.save(this.state);
+    // flush-on-terminate: runtime replaced by adoption — drain any pending
+    // debounced non-critical write so the on-disk state is complete.
+    this.persistence?.flush();
   }
 
   status(): EngineState {
@@ -744,6 +772,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     }
 
     this.persistence?.save(this.state);
+    // flush-on-terminate: the graph reached `complete` (cancel teardown) — drain
+    // any pending debounced non-critical write so the on-disk state is complete.
+    this.persistence?.flush();
   }
 
   async approveNode(nodeId: string, payload?: unknown): Promise<void> {

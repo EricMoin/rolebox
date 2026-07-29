@@ -24,10 +24,12 @@ import {
   reconcileEngine,
   rebuildFrontier,
   clearStaleCriticalSection,
+  captureNodeUsage,
   EngineLockSweeper,
   ORPHAN_REASON,
   type ReconcileReport,
 } from "../../src/graph/engine/engine-recovery.ts";
+import type { UsageRecord } from "../../src/dispatch/budget/budget-tracker.ts";
 import type { SignalType } from "../../src/graph/engine/signal-bridge.ts";
 import { sessionSignalLedger } from "../../src/signal/session-signal-ledger.ts";
 
@@ -229,6 +231,7 @@ describe("subscribeTaskTermination", () => {
     status: NodeRuntimeState["status"],
     taskId = "task-A",
     customTask?: DispatchTask,
+    sessionUsage?: UsageRecord,
   ): {
     state: EngineState;
     emitted: Array<[string, SignalType, unknown]>;
@@ -238,6 +241,7 @@ describe("subscribeTaskTermination", () => {
     const node = state.nodes.get("A")!;
     node.status = status;
     node.dispatchTaskId = taskId;
+    node.dispatchSessionId = "sess-A";
     const emitted: Array<[string, SignalType, unknown]> = [];
     const listeners: Array<(id: string, st: string) => void> = [];
     const port = {
@@ -246,6 +250,7 @@ describe("subscribeTaskTermination", () => {
         (id === taskId ? makeTask(taskId, "running") : undefined),
       onTaskTerminated: (_id: string, cb: (id: string, st: string) => void) =>
         listeners.push(cb),
+      getSessionUsage: () => sessionUsage ?? { inputTokens: 0, outputTokens: 0, cost: 0 },
     };
     subscribeTaskTermination(state, port as never, node, (n, t, p) =>
       emitted.push([n, t, p]),
@@ -267,6 +272,37 @@ describe("subscribeTaskTermination", () => {
     const { fire, emitted } = subscribe(NodeStatus.Completed);
     fire("completed");
     expect(emitted).toEqual([]);
+  });
+
+  it("records per-node token/cost consumption when the dispatch reports usage (Phase-7)", () => {
+    const { fire, state } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      undefined,
+      { inputTokens: 200, outputTokens: 80, cost: 0.03 },
+    );
+    fire("completed");
+    expect(state.nodes.get("A")!.tokensConsumed).toEqual({
+      inputTokens: 200,
+      outputTokens: 80,
+      cost: 0.03,
+    });
+    expect(state.isDirty).toBe(true);
+  });
+
+  it("leaves tokensConsumed at zero when the dispatch reports no usage (zero-guard)", () => {
+    const { fire, state } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      undefined,
+      { inputTokens: 0, outputTokens: 0, cost: 0 },
+    );
+    fire("completed");
+    expect(state.nodes.get("A")!.tokensConsumed).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cost: 0,
+    });
   });
 
   it("cancels the node directly (no signal) when the task is cancelled", () => {
@@ -345,12 +381,72 @@ describe("subscribeTaskTermination", () => {
   });
 });
 
+// ── captureNodeUsage (Phase-7 per-node consumption) ─────────────────────────
+
+describe("captureNodeUsage", () => {
+  function usageState(): { state: EngineState; node: NodeRuntimeState } {
+    const state = buildState(singleNodeGraph(), "usage");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchSessionId = "sess-A";
+    return { state, node };
+  }
+
+  const usage: UsageRecord = { inputTokens: 120, outputTokens: 45, cost: 0.0123 };
+
+  it("populates node.tokensConsumed from the dispatch session usage at termination", () => {
+    const { state, node } = usageState();
+    const port = { getSessionUsage: () => usage };
+    captureNodeUsage(state, node, port as never);
+    expect(node.tokensConsumed).toEqual(usage);
+    expect(state.isDirty).toBe(true);
+  });
+
+  it("is a no-op when the port does not expose getSessionUsage", () => {
+    const { state, node } = usageState();
+    node.tokensConsumed = { inputTokens: 7, outputTokens: 3, cost: 0.01 };
+    captureNodeUsage(state, node, {} as never);
+    expect(node.tokensConsumed).toEqual({ inputTokens: 7, outputTokens: 3, cost: 0.01 });
+  });
+
+  it("is a no-op when the node has no dispatch session id", () => {
+    const { state, node } = usageState();
+    node.dispatchSessionId = undefined;
+    const port = { getSessionUsage: () => usage };
+    captureNodeUsage(state, node, port as never);
+    expect(node.tokensConsumed).toEqual({ inputTokens: 0, outputTokens: 0, cost: 0 });
+  });
+
+  it("does NOT clobber an adopted prior value with a zero usage read (zero-guard)", () => {
+    const { state, node } = usageState();
+    node.tokensConsumed = { inputTokens: 100, outputTokens: 50, cost: 0.5 };
+    const port = { getSessionUsage: () => ({ inputTokens: 0, outputTokens: 0, cost: 0 }) };
+    captureNodeUsage(state, node, port as never);
+    expect(node.tokensConsumed).toEqual({ inputTokens: 100, outputTokens: 50, cost: 0.5 });
+  });
+
+  it("is a no-op when getSessionUsage throws (best-effort, never corrupts advancement)", () => {
+    const { state, node } = usageState();
+    const port = {
+      getSessionUsage: () => {
+        throw new Error("tracker down");
+      },
+    };
+    captureNodeUsage(state, node, port as never);
+    expect(node.tokensConsumed).toEqual({ inputTokens: 0, outputTokens: 0, cost: 0 });
+  });
+});
+
 // ── reconcileEngine (per-node reconciliation) ───────────────────────────────
 
 describe("reconcileEngine", () => {
   function runReconcile(
     task: DispatchTask | undefined,
-    opts: { taskId?: string; status?: NodeRuntimeState["status"] } = {},
+    opts: {
+      taskId?: string;
+      status?: NodeRuntimeState["status"];
+      sessionUsage?: UsageRecord;
+    } = {},
   ): {
     state: EngineState;
     report: ReconcileReport;
@@ -360,10 +456,12 @@ describe("reconcileEngine", () => {
     const node = state.nodes.get("A")!;
     node.status = opts.status ?? NodeStatus.Running;
     node.dispatchTaskId = opts.taskId ?? (task ? "task-A" : undefined);
+    node.dispatchSessionId = "sess-A";
     const subTasks: string[] = [];
     const port = {
       getTask: (_id: string) => task,
       onTaskTerminated: (id: string) => subTasks.push(id),
+      getSessionUsage: () => opts.sessionUsage ?? { inputTokens: 0, outputTokens: 0, cost: 0 },
     };
     const report = reconcileEngine(
       state,
@@ -397,6 +495,18 @@ describe("reconcileEngine", () => {
     expect(report.deferred).toHaveLength(1);
     expect(report.deferred[0]).toMatchObject({ nodeId: "A", type: "answer" });
     expect(report.timedOut).toEqual([]);
+  });
+
+  it("records per-node consumption for a task that finished during restart (Phase-7)", () => {
+    const { state, report } = runReconcile(makeTask("task-A", "completed"), {
+      sessionUsage: { inputTokens: 300, outputTokens: 120, cost: 0.05 },
+    });
+    expect(report.deferred[0].type).toBe("answer");
+    expect(state.nodes.get("A")!.tokensConsumed).toEqual({
+      inputTokens: 300,
+      outputTokens: 120,
+      cost: 0.05,
+    });
   });
 
   it("running node that errored during restart → escalate deferred (with error)", () => {

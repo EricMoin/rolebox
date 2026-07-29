@@ -201,6 +201,25 @@ describe("checkpoints (EngineState.checkpoints)", () => {
     expect(state.checkpoints!["A"]).toBeDefined();
     expect(state.checkpoints!["A"].status).toBe("ready");
   });
+
+  it("appends an ordered multi-entry checkpointHistory across lifecycle transitions", async () => {
+    const { state, engine } = buildEngine(chainGraph());
+    // A: pending → ready (provision) → running (dispatch) → completed (answer).
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", { result: "ok" });
+
+    const history = state.checkpointHistory!["A"];
+    expect(history).toBeDefined();
+    // >=2 lifecycle transitions retained, in transition order.
+    expect(history.length).toBeGreaterThanOrEqual(2);
+    expect(history[history.length - 1].status).toBe(NodeStatus.Completed);
+    // The latest entry mirrors the backward-compat `checkpoints` snapshot.
+    expect(state.checkpoints!["A"]).toEqual(history[history.length - 1]);
+    // Ordered: timestamps are non-decreasing.
+    for (let i = 1; i < history.length; i++) {
+      expect(history[i].at).toBeGreaterThanOrEqual(history[i - 1].at);
+    }
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

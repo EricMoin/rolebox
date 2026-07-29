@@ -60,6 +60,7 @@ import {
   getUpstreamNodeIds,
   isReviseBackEdge,
 } from "./join-evaluator.ts";
+import { deriveNodeArtifacts } from "./recorder.ts";
 
 // ── Report ──────────────────────────────────────────────────────────────────
 
@@ -383,7 +384,9 @@ function recordEscalate(
     fromNode: source.nodeId,
     fromSignal: "escalate",
     result: extractReason(payload),
-    artifacts: [],
+    // For escalate the node may not have a materialized result — deriveNodeArtifacts
+    // legitimately returns [] in that case; do not hardcode an empty list.
+    artifacts: source.artifacts ?? deriveNodeArtifacts(source),
     budgetConsumed: {
       tokens: 0,
       cost: 0,

@@ -10,15 +10,26 @@
  *
  * Scope:
  * - `save(state)` — write-through, synchronous, atomic (`.tmp` + `renameSync`).
- *   Called from the advancement critical section's `finally` block for
- *   crash-safe persistence of critical transitions (node lifecycle, graph
- *   phase, frontier).
+ *   The durability path for **critical** transitions (node lifecycle, graph
+ *   phase, frontier, checkpoint records, approval state), invoked from the
+ *   advancement critical section's `finally` block.
+ * - `scheduleSave(state)` — debounced (500ms) write path for **non-critical**
+ *   churn only: signal-ledger history updates and budget / per-node
+ *   tokensConsumed counters. Multiple rapid mutations coalesce into a single
+ *   atomic write.
+ * - `flush()` — force-drain a pending debounced write. Runs when the engine
+ *   reaches a terminal phase (`complete`) or the runtime is torn
+ *   down / replaced, so no debounced write is lost.
  * - `load(graphId)` — read + validate; returns `null` for a missing file or a
  *   schema-version mismatch (clean start / migration point), mirroring
  *   `TaskStateStore.load()` (`src/dispatch/persistence/task-store.ts:125`).
- * - `scheduleSave(state)` — debounced (500ms) write for non-critical updates
- *   (budget samples, signal-ledger churn). Per implementation-roadmap Q2
- *   Option A: critical transitions write through; noisy updates coalesce.
+ *
+ * Two-tier durability policy (Q2 Option A): critical mutations write through
+ * synchronously so a crash never loses node/phase/frontier progress; non-critical
+ * churn (signal history, budget/token counters) is debounced to avoid a sync
+ * write on every high-frequency update. A critical `save` always cancels any
+ * pending debounced write (the sync write already contains the latest state),
+ * so the two tiers stay consistent.
  *
  * Design reference:
  * - `.rolebox/design/engine-state-machine.md` §4 (persistence model, atomic
@@ -92,6 +103,41 @@ export function shouldPersist(state: EngineState): boolean {
   return state.isDirty;
 }
 
+/**
+ * Mark the engine state as carrying **non-critical** churn (signal-ledger
+ * history updates, budget / per-node tokensConsumed counters). Unlike
+ * {@link markDirty}, this does NOT require a synchronous write-through — the
+ * advancement critical section's `finally` block routes a section whose only
+ * mutations were non-critical through the debounced write path instead.
+ *
+ * The official choke-point for non-critical mutations — callers never set
+ * `state.isNonCriticalDirty` directly. The field is omitted from the
+ * serialization DTO so a deserialized (recovered) state always starts clean.
+ */
+export function markNonCriticalDirty(state: EngineState): void {
+  state.isNonCriticalDirty = true;
+}
+
+/**
+ * Clear the non-critical dirty flag after the mutation has been accounted for
+ * (either coalesced into a synchronous write or handed to the debounced path).
+ * Called in the advancement critical section's `finally` block alongside
+ * {@link clearDirty}.
+ */
+export function clearNonCriticalDirty(state: EngineState): void {
+  state.isNonCriticalDirty = false;
+}
+
+/**
+ * Whether the engine state has unpersisted **non-critical** churn. When
+ * `true` and the critical {@link shouldPersist} flag is `false`, the
+ * advancement critical section's `finally` block schedules a debounced write
+ * instead of a synchronous one.
+ */
+export function shouldPersistNonCritical(state: EngineState): boolean {
+  return state.isNonCriticalDirty;
+}
+
 // ── Serialization DTO types ─────────────────────────────────────────────────
 
 /**
@@ -149,6 +195,9 @@ export interface EnginePersistenceFile {
   pendingCompletions: string[];
   // OPTIONAL-ADDITIVE (subtask 1): absent in files authored before this field.
   checkpoints?: Record<string, CheckpointRecord>;
+  // OPTIONAL-ADDITIVE (subtask 7): append-only per-node checkpoint history.
+  // Absent in files authored before this field — deserialize defaults to absent.
+  checkpointHistory?: Record<string, CheckpointRecord[]>;
 }
 
 // ── Clone helpers (defensive deep-enough copies) ───────────────────────────
@@ -188,6 +237,17 @@ function cloneCheckpoints(
   const out: Record<string, CheckpointRecord> = {};
   for (const [id, record] of Object.entries(c)) {
     out[id] = { ...record };
+  }
+  return out;
+}
+
+function cloneCheckpointHistory(
+  c: Record<string, CheckpointRecord[]> | undefined,
+): Record<string, CheckpointRecord[]> | undefined {
+  if (!c) return undefined;
+  const out: Record<string, CheckpointRecord[]> = {};
+  for (const [id, records] of Object.entries(c)) {
+    out[id] = records.map((r) => ({ ...r }));
   }
   return out;
 }
@@ -248,6 +308,7 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     advancingLock: state.advancingLock,
     pendingCompletions: [...state.pendingCompletions],
     checkpoints: cloneCheckpoints(state.checkpoints),
+    checkpointHistory: cloneCheckpointHistory(state.checkpointHistory),
   };
 }
 
@@ -301,8 +362,13 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     advancingLock: file.advancingLock,
     pendingCompletions: [...file.pendingCompletions],
     checkpoints: cloneCheckpoints(file.checkpoints),
-    // isDirty is runtime-only — a recovered state always starts clean.
+    // OPTIONAL-ADDITIVE (subtask 7): absent in files authored before this field.
+    // Deserialization tolerates the absence and leaves it undefined (no fabrication).
+    checkpointHistory: cloneCheckpointHistory(file.checkpointHistory),
+    // isDirty / isNonCriticalDirty are runtime-only — a recovered state always
+    // starts clean.
     isDirty: false,
+    isNonCriticalDirty: false,
   } as EngineState;
 }
 
@@ -340,7 +406,9 @@ export function engineStatePath(directory: string, graphId: string): string {
  * Writes are synchronous and atomic (`.tmp` + `renameSync`), the same crash-safe
  * pattern as `task-store.ts:101-108`. `save` never throws — a failed write is
  * logged as a warning and the engine continues in memory (write-through must
- * not break the advancement critical section).
+ * not break the advancement critical section). Two-tier policy: critical
+ * transitions use the synchronous {@link save}; non-critical churn uses the
+ * debounced {@link scheduleSave} and is drained by {@link flush}.
  */
 export class EnginePersistence {
   private readonly directory: string;
@@ -355,6 +423,10 @@ export class EnginePersistence {
    * Write-through save of the current engine state. Synchronous and atomic.
    * Intended for the advancement critical section's `finally` block so that
    * critical transitions (node lifecycle, phase, frontier) survive a crash.
+   *
+   * A critical `save` also cancels any pending debounced write — the sync write
+   * already contains the latest state, so coalescing the non-critical churn into
+   * it is safe (see the two-tier policy in the class header).
    */
   save(state: EngineState): void {
     this._cancelDebounce();
@@ -362,9 +434,13 @@ export class EnginePersistence {
   }
 
   /**
-   * Debounced save (500ms) for non-critical updates. Multiple rapid mutations
-   * are coalesced into a single atomic write. A final `save`/`flush` is still
-   * required to guarantee durability before process exit.
+   * Debounced save (500ms) for **non-critical** updates — signal-ledger history
+   * updates and budget / per-node tokensConsumed counters. Multiple rapid
+   * mutations are coalesced into a single atomic write of the most recent
+   * state. A final {@link save} / {@link flush} is still required to guarantee
+   * durability before process exit (flush-on-terminate is wired into the
+   * engine when a section reaches a terminal phase or the runtime is
+   * torn down / replaced).
    */
   scheduleSave(state: EngineState): void {
     this._writeOnFlush = state; // coalesce to the most recent state
@@ -377,7 +453,12 @@ export class EnginePersistence {
     }, NON_CRITICAL_DEBOUNCE_MS);
   }
 
-  /** Force-flush any pending debounced write immediately (process-exit safety). */
+  /**
+   * Force-drain a pending debounced write synchronously. Companion to
+   * {@link scheduleSave} — runs when the engine reaches a terminal phase
+   * (`complete`) or the runtime is disposed / replaced so no debounced
+   * non-critical write is lost. A no-op when no debounced write is pending.
+   */
   flush(): void {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);

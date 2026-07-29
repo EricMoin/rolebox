@@ -50,6 +50,11 @@ import {
 } from "./join-evaluator.ts";
 import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
+import { recordSignalToLedger } from "./signal-bridge.ts";
+import {
+  deriveNodeArtifacts,
+  recordNodeArtifactsAndEvidence,
+} from "./recorder.ts";
 
 // ── Report shapes ───────────────────────────────────────────────────────────
 
@@ -124,7 +129,14 @@ export function approveBlockedNode(
         ? raw
         : "approved";
 
-  node.signalsObserved.answer = answerOutput;
+  // Record the synthetic `answer` signal through the shared ledger write path
+  // (observability only — no listener firing, which would re-enter the
+  // advancement critical section). The caller drives the forward answer flow.
+  recordSignalToLedger(state, node.nodeId, "answer", answerOutput, "approval");
+  // Ensure the node's genuinely produced artifacts are recorded before the
+  // EdgePayload is built, so the downstream merged_artifacts carry them (same
+  // data-flow gap as _buildEdgePayload — subtask C-RECORD).
+  recordNodeArtifactsAndEvidence(state, node);
   markCompleted(state, node);
 
   const tc = node.tokensConsumed;
@@ -134,7 +146,7 @@ export function approveBlockedNode(
     result: typeof answerOutput === "string"
       ? answerOutput
       : JSON.stringify(answerOutput ?? ""),
-    artifacts: [],
+    artifacts: node.artifacts ?? deriveNodeArtifacts(node),
     budgetConsumed: {
       tokens: tc.inputTokens + tc.outputTokens,
       cost: tc.cost,
@@ -176,7 +188,10 @@ export function rejectBlockedNode(
   }
 
   const reasonText = typeof reason === "string" && reason.trim() ? reason.trim() : "rejected";
-  node.signalsObserved.revise_needed = reasonText;
+  // Record the synthetic `revise_needed` signal through the shared ledger write
+  // path (observability only — no listener firing, which would re-enter the
+  // advancement critical section). The caller drives the re-entry / escalate.
+  recordSignalToLedger(state, node.nodeId, "revise_needed", reasonText, "approval");
 
   if (!node.loopGroupId) {
     markEscalated(state, node, reasonText);
