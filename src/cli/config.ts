@@ -1,7 +1,8 @@
 import { dump } from "js-yaml";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { getConfigDir } from "./paths.ts";
+import { ensureWritableDir } from "./fs-utils.ts";
 import { parseConfigFromYaml, parseLockFileFromYaml } from "./schemas.ts";
 import type { RoleboxConfig, LockFile, LockEntry } from "./types.ts";
 
@@ -23,9 +24,9 @@ export function getLockPath(): string {
   return join(getConfigDir(), "rolebox.lock");
 }
 
-/** Ensure config directory exists */
+/** Ensure config directory exists (and is writable) */
 export function ensureConfigDir(): void {
-  mkdirSync(getConfigDir(), { recursive: true });
+  ensureWritableDir(getConfigDir());
 }
 
 /**

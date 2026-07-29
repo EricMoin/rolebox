@@ -1,9 +1,10 @@
 // NOTE: Uses XDG_DATA_HOME env var to control paths instead of mock.module
 // to avoid Bun v1.3.14's mock.module cross-file persistence issue.
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { hasTar } from "../helpers/tar";
 
 function setMockDataDir(dir: string) {
   process.env.XDG_DATA_HOME = dir;
@@ -334,7 +335,7 @@ describe("downloadRole", () => {
     ).rejects.toThrow("HTTP 500");
   });
 
-  it("downloads and extracts a role tarball successfully", async () => {
+  it.skipIf(!hasTar())("downloads and extracts a role tarball successfully", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-download-test-"));
     const fixtureDir = join(tmpDir, "fixture");
     // GitHub tarballs have one top-level dir: owner-repo-commithash/
@@ -372,7 +373,7 @@ describe("downloadRole", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("invokes tar without --include flag during extraction", async () => {
+  it.skipIf(!hasTar())("invokes tar without --include flag during extraction", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-args-test-"));
     const fixtureDir = join(tmpDir, "fixture");
     const topDir = join(fixtureDir, "example-myrepo-a1b2c3d");
@@ -429,7 +430,7 @@ describe("downloadRole", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("throws when tar binary is not found", async () => {
+  it.skipIf(!hasTar())("throws when tar binary is not found", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-notar-test-"));
     const fixtureDir = join(tmpDir, "fixture");
     const topDir = join(fixtureDir, "example-myrepo-a1b2c3d");
@@ -461,7 +462,99 @@ describe("downloadRole", () => {
           spawnSync: () => ({ status: -1, error: new Error("ENOENT: tar not found") }) as any,
         }
       )
-    ).rejects.toThrow("tar binary not found");
+      ).rejects.toThrow("tar binary not found");
+
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("aborts the download with a timeout error when the fetch stalls", async () => {
+    // A fetch that never resolves, but rejects when the AbortController fires.
+    globalThis.fetch = mock((_url: any, init?: any) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+    });
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/myrepo" },
+        "code-reviewer",
+        "1.0.0",
+        undefined,
+        undefined,
+        { timeoutMs: 50, maxRetries: 0 }
+      )
+    ).rejects.toThrow(/timed out downloading role/);
+  });
+
+  it("treats a truncated body as an explicit error (bytes read < Content-Length)", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+        controller.close();
+      },
+    });
+    // 10 actual bytes, but the header claims 1000 — a truncated/partial body.
+    const mockResponse: any = {
+      status: 200,
+      ok: true,
+      headers: { get: (name: string) => (name.toLowerCase() === "content-length" ? "1000" : null) },
+      body: stream,
+    };
+    globalThis.fetch = mock(() => Promise.resolve(mockResponse));
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/myrepo" },
+        "code-reviewer",
+        "1.0.0"
+      )
+    ).rejects.toThrow(/truncated download/);
+  });
+
+  it("cleans up the rolebox-out-* temp dir on download failure", async () => {
+    const t = tmpdir();
+    const before = new Set(readdirSync(t).filter((d) => d.startsWith("rolebox-out-")));
+    globalThis.fetch = mock(() => { throw new Error("connection reset"); });
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/myrepo" },
+        "code-reviewer",
+        "1.0.0",
+        undefined,
+        undefined,
+        { maxRetries: 0 }
+      )
+    ).rejects.toThrow(/network error/i);
+
+    const leaked = readdirSync(t).filter((d) => d.startsWith("rolebox-out-") && !before.has(d));
+    expect(leaked).toHaveLength(0);
+  });
+
+  it.skipIf(!hasTar())("rejects archives whose entries escape the extract directory (zip-slip)", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-zipslip-"));
+    const fixtureDir = join(tmpDir, "fixture");
+    const topDir = join(fixtureDir, "top");
+    mkdirSync(join(topDir, "roles", "code-reviewer"), { recursive: true });
+    writeFileSync(join(topDir, "roles", "code-reviewer", "role.yaml"), "name: code-reviewer\n");
+    // A symlink that escapes the extraction tree — realpath must catch it.
+    symlinkSync("/etc/passwd", join(topDir, "evil-link"));
+
+    const archivePath = join(tmpDir, "test.tar.gz");
+    const tarProc = Bun.spawn(["tar", "czf", archivePath, "-C", fixtureDir, "top"]);
+    expect(await tarProc.exited).toBe(0);
+
+    const archiveBytes = readFileSync(archivePath);
+    globalThis.fetch = mock(() => Promise.resolve(new Response(archiveBytes, { status: 200 })));
+
+    await expect(
+      downloadRole(
+        { name: "community", url: "https://github.com/example/myrepo" },
+        "code-reviewer",
+        "1.0.0"
+      )
+    ).rejects.toThrow(/zip-slip|path traversal|resolves outside/);
 
     rmSync(tmpDir, { recursive: true, force: true });
   });

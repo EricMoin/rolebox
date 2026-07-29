@@ -11,33 +11,20 @@ const listDataDir = mkdtempSync(join(tmpdir(), "rolebox-list-data-"));
 process.env.XDG_CONFIG_HOME = listConfigDir;
 process.env.XDG_DATA_HOME = listDataDir;
 
-mock.module("../../../src/cli/paths", () => {
-  function getDataDir(): string {
-    const xdg = process.env.XDG_DATA_HOME;
-    if (xdg) return join(xdg, "rolebox");
-    return join(homedir(), ".local", "share", "rolebox");
-  }
-  function getConfigDir(): string {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "rolebox");
-    return join(homedir(), ".config", "rolebox");
-  }
-  function getRolesDir(): string {
-    return join(getDataDir(), "roles");
-  }
-  function getRolePath(registry: string, roleId: string, version: string): string {
-    return join(getRolesDir(), registry, `${roleId}@${version}`);
-  }
-  function getSyncTarget(target: string): string {
-    if (target === "opencode") {
-      const xdg = process.env.XDG_CONFIG_HOME;
-      if (xdg) return join(xdg, "opencode", "rolebox");
-      return join(homedir(), ".config", "opencode", "rolebox");
-    }
-    throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
-  }
-  return { getDataDir, getConfigDir, getRolesDir, getRolePath, getSyncTarget };
-});
+import { createPathsMockPayload } from "../../helpers/paths-mock";
+
+mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+  extra: {
+    getSyncTarget: (target: string) => {
+      if (target === "opencode") {
+        const xdg = process.env.XDG_CONFIG_HOME;
+        if (xdg) return join(xdg, "opencode", "rolebox");
+        return join(homedir(), ".config", "opencode", "rolebox");
+      }
+      throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
+    },
+  },
+}));
 
 afterAll(() => {
   rmSync(listConfigDir, { recursive: true, force: true });

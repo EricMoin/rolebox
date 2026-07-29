@@ -6,6 +6,7 @@ export interface RegistryManifest {
     version: string;
     description: string;
     tags: string[];
+    integrity?: string;
   }>;
 }
 

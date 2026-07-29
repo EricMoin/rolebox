@@ -24,12 +24,23 @@ const pGetConfigDir = () => {
   return join(homedir(), ".config", "rolebox");
 };
 
+// Pre-load the real paths module so the mock spreads its full export surface
+// (including assertSafePathSegment / getRolePath). A limited mock that omits
+// these symbols shadows the real module globally and breaks any later test
+// that needs real roleId sanitization — bun keys mocks by resolved specifier
+// with no un-mock API.
+const e2eRealPaths = await import(
+  "../../src/cli/paths.ts?e2e-real=" + Date.now() + "-" + Math.random()
+);
+
 mock.module("../../src/cli/paths", () => ({
+  ...e2eRealPaths,
+  // Override only path-root functions so install/update/sync write under
+  // the per-test tmp dirs (XDG_* env vars redirect these at file level).
+  // getRolePath / getRolesDir / assertSafePathSegment are left real so
+  // roleId sanitization is never bypassed.
   getDataDir: pGetDataDir,
   getConfigDir: pGetConfigDir,
-  getRolesDir: () => join(pGetDataDir(), "roles"),
-  getRolePath: (r: string, id: string, v: string) =>
-    join(pGetDataDir(), "roles", r, `${id}@${v}`),
   getSyncTarget: (t: string) => {
     if (t === "opencode") {
       const xdg = process.env.XDG_CONFIG_HOME;

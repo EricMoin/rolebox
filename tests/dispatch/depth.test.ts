@@ -13,6 +13,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { createPathsMockPayload } from "../helpers/paths-mock";
 import { tmpdir } from "node:os";
 import { mock } from "bun:test";
 import { clearSentFinalNotifies, clearParentQueues } from "../../src/dispatch/notification";
@@ -164,7 +165,7 @@ describe("T5: depth survives serialize→recover", () => {
       try { rmSync(dir, { recursive: true, force: true }); } catch {}
     };
 
-    mock.module("../../src/cli/paths", () => ({
+    mock.module("../../src/cli/paths", () => createPathsMockPayload({
       getDataDir: () => dir,
     }));
 
@@ -191,7 +192,7 @@ describe("T5: depth survives serialize→recover", () => {
       try { rmSync(dir, { recursive: true, force: true }); } catch {}
     };
 
-    mock.module("../../src/cli/paths", () => ({
+    mock.module("../../src/cli/paths", () => createPathsMockPayload({
       getDataDir: () => dir,
     }));
 

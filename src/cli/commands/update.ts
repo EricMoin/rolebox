@@ -1,11 +1,18 @@
 import { defineCommand } from "citty";
 import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
 import { fetchRegistryManifest, downloadRole, computeIntegrity } from "../registry-client.ts";
+import { DownloadProgress } from "../download-progress.ts";
 import { getRolePath } from "../paths.ts";
 import type { LockEntry } from "../types.ts";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
-import { moveDir } from "../fs-utils.ts";
+import { existsSync, rmSync } from "node:fs";
+import { moveDir, ensureWritableDir } from "../fs-utils.ts";
 import { join } from "node:path";
+
+export interface UpdateOptions {
+  quiet?: boolean;       // suppress non-error output
+  verbose?: boolean;     // emit per-phase detail
+  noProgress?: boolean;  // force degraded line-based progress
+}
 
 /**
  * Simple semver comparison: "1.0.0" < "1.1.0" < "2.0.0"
@@ -21,7 +28,13 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-export async function update(specificRole: string | undefined, noCache: boolean): Promise<void> {
+export async function update(specificRole: string | undefined, noCache: boolean, opts: UpdateOptions = {}): Promise<void> {
+  const progress = new DownloadProgress({
+    quiet: opts.quiet,
+    verbose: opts.verbose,
+    noProgress: opts.noProgress,
+  });
+  const out = (msg: string) => { if (!opts.quiet) console.log(msg); };
   const config = loadConfig();
   const lock = loadLock();
 
@@ -34,9 +47,9 @@ export async function update(specificRole: string | undefined, noCache: boolean)
 
   if (rolesToUpdate.length === 0) {
     if (specificRole) {
-      console.log(`Role '${specificRole}' is not installed.`);
+      out(`Role '${specificRole}' is not installed.`);
     } else {
-      console.log("No roles installed. Nothing to update.");
+      out("No roles installed. Nothing to update.");
     }
     return;
   }
@@ -49,12 +62,15 @@ export async function update(specificRole: string | undefined, noCache: boolean)
     }
 
     let manifest;
+    progress.phaseStart("resolving", entry.role);
     try {
       manifest = await fetchRegistryManifest(registryConfig, undefined, { noCache });
     } catch (err) {
+      progress.phaseFail("resolving", { asset: `${entry.role}@${entry.version}`, reason: (err as Error).message, attempt: 1, maxAttempts: 1 });
       console.warn(`Warning: could not fetch registry '${entry.registry}': ${(err as Error).message}. Check your network connection, or verify the registry URL with: rolebox registry list`);
       continue;
     }
+    progress.phaseComplete("resolving");
 
     const roleInfo = manifest.roles[entry.role];
     if (!roleInfo) {
@@ -70,16 +86,52 @@ export async function update(specificRole: string | undefined, noCache: boolean)
     }
 
     try {
-      const extractedDir = await downloadRole(registryConfig, entry.role, latestVersion);
-      const targetDir = getRolePath(entry.registry, entry.role, latestVersion);
-      mkdirSync(join(targetDir, ".."), { recursive: true });
+      // Download + extract + verify into a TEMP location FIRST. The existing
+      // version is never removed until the new artifact is fully downloaded,
+      // extracted, integrity-checked, and atomically swapped into place
+      // (rollback safety). On failure, the previously-installed version stays.
+      const extractedDir = await downloadRole(registryConfig, entry.role, latestVersion, undefined, undefined, { progress });
 
-      if (existsSync(targetDir)) {
-        rmSync(targetDir, { recursive: true, force: true });
+      // Compute + verify integrity on the temp artifact BEFORE swapping it in.
+      const integrity = await computeIntegrity(extractedDir);
+      const expectedIntegrity = roleInfo.integrity;
+      if (expectedIntegrity) {
+        // Manifest-declared digest available: the computed digest MUST match.
+        if (integrity !== expectedIntegrity) {
+          throw new Error(`integrity check failed for role "${entry.role}@${latestVersion}": expected ${expectedIntegrity}, computed ${integrity}; refusing to update`);
+        }
+      } else {
+        // No expected integrity value exists in the manifest. The computed
+        // digest is recorded in the lock as a best-effort pin; it cannot be
+        // verified against anything without a declared value.
+        if (opts.verbose) {
+          out(`Computed integrity for ${entry.role}@${latestVersion} (no expected value in manifest): ${integrity}`);
+        }
       }
-      moveDir(extractedDir, targetDir);
 
-      const integrity = await computeIntegrity(targetDir);
+      const targetDir = getRolePath(entry.registry, entry.role, latestVersion);
+      progress.phaseStart("installing", targetDir);
+      ensureWritableDir(join(targetDir, ".."));
+
+      // Atomic swap: stage into a sibling dir, then rename over the target so
+      // the previously-installed version is replaced atomically rather than
+      // deleted before the new one is ready.
+      const staging = join(join(targetDir, ".."), `.${entry.role}@${latestVersion}.staging-${process.pid}-${Date.now()}`);
+      try {
+        moveDir(extractedDir, staging);
+        if (existsSync(targetDir)) {
+          rmSync(targetDir, { recursive: true, force: true });
+        }
+        moveDir(staging, targetDir);
+      } catch (err) {
+        // The previously-installed version (if any) is left intact; report
+        // partial state clearly.
+        try { rmSync(staging, { recursive: true, force: true }); } catch { /* best-effort */ }
+        throw new Error(
+          `failed to place the updated version for "${entry.role}@${latestVersion}"; the previously-installed version is left intact: ${(err as Error).message}`,
+        );
+      }
+      progress.phaseComplete("installing");
 
       addToLock({
         role: entry.role,
@@ -89,7 +141,9 @@ export async function update(specificRole: string | undefined, noCache: boolean)
         integrity,
       });
 
-      console.log(`✓ Updated ${entry.role} from ${entry.version} to ${latestVersion}`);
+      progress.phaseStart("done", `${entry.role}@${latestVersion}`);
+      progress.phaseComplete("done", `${entry.role}@${latestVersion}`);
+      out(`✓ Updated ${entry.role} from ${entry.version} to ${latestVersion}`);
       updated++;
     } catch (err) {
       console.warn(`Warning: failed to update '${entry.role}': ${(err as Error).message}`);
@@ -99,9 +153,9 @@ export async function update(specificRole: string | undefined, noCache: boolean)
   const parts: string[] = [];
   if (updated > 0) parts.push(`Updated ${updated} roles`);
   if (upToDate > 0) parts.push(`${upToDate} already up to date`);
-  console.log(parts.join(". ") + ".");
+  out(parts.join(". ") + ".");
   if (updated > 0) {
-    console.log("Run `rolebox sync opencode` to deploy changes");
+    out("Run `rolebox sync opencode` to deploy changes");
   }
 }
 
@@ -121,8 +175,27 @@ export default defineCommand({
       alias: ["no-cache"],
       description: "Bypass registry cache",
     },
+    quiet: {
+      type: "boolean",
+      alias: ["q"],
+      description: "Suppress non-error output",
+    },
+    verbose: {
+      type: "boolean",
+      alias: ["v"],
+      description: "Show per-phase detail",
+    },
+    noProgress: {
+      type: "boolean",
+      alias: ["no-progress"],
+      description: "Disable progress bars",
+    },
   },
   async run({ args }) {
-    await update(args.role, args.noCache ?? false);
+    await update(args.role, args.noCache ?? false, {
+      quiet: args.quiet,
+      verbose: args.verbose,
+      noProgress: args.noProgress,
+    });
   },
 });

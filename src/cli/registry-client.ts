@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync, renameSync, realpathSync, lstatSync } from "node:fs";
+import { join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -8,6 +8,23 @@ import { getDataDir } from "./paths.ts";
 import { parseRegistryManifestFromYaml } from "./schemas.ts";
 import type { RegistryManifest } from "./types.ts";
 import { DEFAULT_GIT_BRANCH, REGISTRY_CACHE_TTL_MS } from "../constants.ts";
+import type { DownloadProgress, Phase } from "./download-progress.ts";
+
+// Defaults for the hardened download path. Both are overridable per-call via
+// {@link DownloadRoleOptions} so tests can exercise timeout / retry cheaply.
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 30_000;
+const DEFAULT_DOWNLOAD_MAX_RETRIES = 2;
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(() => resolve(), ms);
+  });
+}
+
+/** Exponential backoff between retry attempts: attempt 1 → 300ms, 2 → 600ms. */
+function backoffMs(attempt: number): number {
+  return 300 * Math.pow(2, attempt - 1);
+}
 
 // ── GitHub URL Parsing ────────────────────────────────────────────
 
@@ -150,6 +167,25 @@ export interface DownloadRoleProcess {
 }
 
 /**
+ * Optional progress reporter for {@link downloadRole}.
+ *
+ * Added as an optional trailing parameter (via {@link DownloadRoleOptions}) so
+ * the exported signature stays backward-compatible: existing callers that omit
+ * it get silent, buffer-based streaming and no phase/byte reporting.
+ */
+export interface DownloadRoleOptions {
+  /** Progress reporter; when supplied, the response body is streamed and
+   *  byte counts are reported via `update`, with phase lifecycle reporting for
+   *  downloading / verifying / extracting. */
+  progress?: DownloadProgress;
+  /** Per-attempt download timeout in ms. Defaults to {@link DEFAULT_DOWNLOAD_TIMEOUT_MS}. */
+  timeoutMs?: number;
+  /** Number of retries on transient network error (total attempts = retries + 1).
+   *  Defaults to {@link DEFAULT_DOWNLOAD_MAX_RETRIES}. */
+  maxRetries?: number;
+}
+
+/**
  * Download a role from a GitHub registry tarball and extract it.
  */
 export async function downloadRole(
@@ -157,10 +193,20 @@ export async function downloadRole(
   roleId: string,
   _version: string,
   ref?: string,
-  deps?: DownloadRoleProcess
+  deps?: DownloadRoleProcess,
+  options?: DownloadRoleOptions
 ): Promise<string> {
   const runSpawn = deps?.spawn ?? spawn;
   const runSpawnSync = deps?.spawnSync ?? spawnSync;
+  const progress = options?.progress;
+  const asset = `${roleId}@${_version}`;
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+  const maxRetries = options?.maxRetries ?? DEFAULT_DOWNLOAD_MAX_RETRIES;
+  const maxAttempts = maxRetries + 1;
+  const fail = (phase: Phase, reason: string, attempt = 1, attempts = 1) => {
+    progress?.phaseFail(phase, { asset, reason, attempt, maxAttempts: attempts });
+  };
+
   const { owner, repo } = parseGitHubUrl(registry.url);
   const branch = ref || DEFAULT_GIT_BRANCH;
   const url = `https://api.github.com/repos/${owner}/${repo}/tarball/${branch}`;
@@ -170,43 +216,141 @@ export async function downloadRole(
     headers["Authorization"] = `token ${process.env.GITHUB_TOKEN}`;
   }
 
-  // Create temporary directories
+  // Create temporary directories.
+  //
+  // BOTH tmpDir and outputDir are cleaned up on every exit path. The existing
+  // finally covered only tmpDir; outputDir (the `rolebox-out-*` dir) leaked on
+  // any failure before the final rename. We track `committed` so the success
+  // path's returned outputDir is NOT removed, while every failure path removes
+  // both.
   const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-"));
   const archivePath = join(tmpDir, "archive.tar.gz");
   const extractDir = join(tmpDir, "extracted");
   const outputDir = mkdtempSync(join(tmpdir(), "rolebox-out-"));
-
-  // Download tarball
-  let response: Response;
-  try {
-    response = await fetch(url, { headers, redirect: "follow" });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`network error downloading role "${roleId}": ${msg}`);
-  }
-
-  if (response.status === 404) {
-    throw new Error(`role "${roleId}" not found in registry "${registry.name}"`);
-  }
-
-  if (!response.ok) {
-    throw new Error(`failed to download role "${roleId}": HTTP ${response.status}`);
-  }
-
-  // Write archive to disk
-  const buffer = Buffer.from(await response.arrayBuffer());
-  writeFileSync(archivePath, buffer);
-
-  // Extract, verify, and move to stable location
-  mkdirSync(extractDir, { recursive: true });
+  let committed = false;
 
   try {
-    // Verify tar is available on PATH before attempting extraction
-    const tarCheck = runSpawnSync("tar", ["--version"], { stdio: "ignore" });
-    if (tarCheck.status !== 0 && tarCheck.error) {
-      throw new Error("tar binary not found — please install tar");
+    // ── Download tarball with timeout + bounded retry ────────────────
+    // Each attempt gets its own AbortController; the timeout is kept alive
+    // through body streaming so a stalled body also aborts. Network errors
+    // (fetch rejection) and timeouts are retried up to `maxRetries` times with
+    // exponential backoff, reported via the progress module as attempt N/M.
+    // Non-retryable HTTP statuses (404, other non-2xx) fail immediately.
+    progress?.phaseStart("downloading", asset);
+    let response: Response | undefined;
+    let downloadError: Error | undefined;
+    let downloadController: AbortController | undefined;
+    let downloadTimer: ReturnType<typeof setTimeout> | undefined;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        response = await fetch(url, { headers, redirect: "follow", signal: controller.signal });
+      } catch (err) {
+        clearTimeout(timer);
+        const aborted = controller.signal.aborted;
+        const msg = err instanceof Error ? err.message : String(err);
+        downloadError = aborted
+          ? new Error(`timed out downloading role "${roleId}" from ${url} after ${Math.round(timeoutMs / 1000)}s`)
+          : new Error(`network error downloading role "${roleId}": ${msg}`);
+      }
+
+      if (response !== undefined) {
+        // Fetch succeeded. Keep the controller/timer alive for body streaming.
+        downloadController = controller;
+        downloadTimer = timer;
+
+        if (response.status === 404) {
+          clearTimeout(timer);
+          fail("downloading", `role "${roleId}" not found in registry "${registry.name}"`, attempt, maxAttempts);
+          throw new Error(`role "${roleId}" not found in registry "${registry.name}"`);
+        }
+        if (!response.ok) {
+          clearTimeout(timer);
+          fail("downloading", `HTTP ${response.status}`, attempt, maxAttempts);
+          throw new Error(`failed to download role "${roleId}": HTTP ${response.status}`);
+        }
+        break;
+      }
+
+      // Fetch failed (network or timeout). Retry with backoff, or throw on the
+      // final attempt.
+      const err = downloadError!;
+      if (attempt < maxAttempts) {
+        progress?.phaseFail("downloading", { asset, reason: err.message, attempt, maxAttempts });
+        await delay(backoffMs(attempt));
+      } else {
+        fail("downloading", err.message, attempt, maxAttempts);
+        throw err;
+      }
     }
 
+    if (response === undefined || downloadController === undefined || downloadTimer === undefined) {
+      throw downloadError ?? new Error(`failed to download role "${roleId}"`);
+    }
+
+    // Stream the body to disk, reporting bytes as they arrive. Fall back to
+    // arrayBuffer if the response has no streamable body. Surface Content-Length
+    // via progress and treat a truncated body (bytes read < Content-Length) as
+    // an explicit error rather than a silent success.
+    const total = Number(response.headers.get("content-length")) || 0;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            received += value.byteLength;
+            progress?.update({ received, total });
+          }
+        }
+      } catch (err) {
+        clearTimeout(downloadTimer);
+        if (downloadController.signal.aborted) {
+          const msg = `timed out downloading role "${roleId}" from ${url} after ${Math.round(timeoutMs / 1000)}s`;
+          fail("downloading", msg);
+          throw new Error(msg);
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        fail("downloading", msg);
+        throw new Error(`network error downloading role "${roleId}": ${msg}`);
+      }
+      clearTimeout(downloadTimer);
+      if (total > 0 && received < total) {
+        const msg = `truncated download for role "${roleId}": expected ${total} bytes (Content-Length) but received ${received}; refusing to use the incomplete archive`;
+        fail("downloading", msg);
+        throw new Error(msg);
+      }
+      writeFileSync(archivePath, Buffer.concat(chunks));
+    } else {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (total > 0 && buffer.byteLength < total) {
+        const msg = `truncated download for role "${roleId}": expected ${total} bytes (Content-Length) but received ${buffer.byteLength}; refusing to use the incomplete archive`;
+        fail("downloading", msg);
+        throw new Error(msg);
+      }
+      writeFileSync(archivePath, buffer);
+    }
+    progress?.phaseComplete("downloading");
+
+    // Extract, verify, and move to stable location
+    mkdirSync(extractDir, { recursive: true });
+
+    // Verify tar is available on PATH before attempting extraction
+    progress?.phaseStart("verifying", asset);
+    const tarCheck = runSpawnSync("tar", ["--version"], { stdio: "ignore" });
+    if (tarCheck.status !== 0 && tarCheck.error) {
+      fail("verifying", "tar binary not found — please install tar");
+      throw new Error("tar binary not found — please install tar");
+    }
+    progress?.phaseComplete("verifying");
+
+    progress?.phaseStart("extracting", asset);
     let exitCode: number | null;
     try {
       exitCode = await new Promise<number | null>((resolve, reject) => {
@@ -217,26 +361,128 @@ export async function downloadRole(
         proc.on("close", resolve);
       });
     } catch (err) {
-      throw new Error(`extraction failed for role "${roleId}": ${(err as Error).message}`);
+      const msg = `extraction failed for role "${roleId}": ${(err as Error).message}`;
+      fail("extracting", msg);
+      throw new Error(msg);
     }
 
     if ((exitCode ?? 1) !== 0) {
-      throw new Error(`extraction failed for role "${roleId}": tar exited with code ${exitCode ?? 1}`);
+      // On Windows, bsdtar can fail creating symlinks without Developer Mode or
+      // elevated privilege even though the archive's regular files were
+      // extracted. Degrade to a copy (the files are present; symlinks are
+      // missing/broken) with a clear warning instead of hard-failing — but only
+      // if the role dir actually landed. Otherwise this is a real failure.
+      const degradedRoleDir = join(extractDir, "roles", roleId);
+      if (process.platform === "win32" && existsSync(degradedRoleDir)) {
+        console.warn(
+          `Warning: tar reported failure (exit ${exitCode}) extracting role "${roleId}" on Windows; this is usually caused by symlink creation requiring elevated privileges (Developer Mode). Degrading to a copy of the extracted files; symlinks may be missing or materialized as regular files.`,
+        );
+      } else {
+        const msg = `extraction failed for role "${roleId}": tar exited with code ${exitCode ?? 1}`;
+        fail("extracting", msg);
+        throw new Error(msg);
+      }
     }
+
+    // Zip-slip / path-traversal safety: verify that no extracted entry resolves
+    // outside extractDir (covers `..` traversal, absolute paths, and symlinks
+    // escaping the tree). Fails with an actionable error instead of trusting tar.
+    assertExtractionWithinDir(extractDir, roleId);
 
     const roleDir = join(extractDir, "roles", roleId);
     if (!existsSync(roleDir)) {
-      throw new Error(`extraction failed for role "${roleId}": role directory not found at ${roleDir}`);
+      const msg = `extraction failed for role "${roleId}": role directory not found at ${roleDir}`;
+      fail("extracting", msg);
+      throw new Error(msg);
     }
 
     // Move role directory to stable output location before tmpDir cleanup
     rmSync(outputDir, { recursive: true, force: true });
     renameSync(roleDir, outputDir);
+    committed = true;
+    progress?.phaseComplete("extracting");
 
     return outputDir;
   } finally {
-    // Always clean up temporary extraction workspace
+    // Always clean up the temporary extraction workspace. Additionally remove
+    // the `rolebox-out-*` outputDir on every FAILURE path — only the committed
+    // (successfully renamed) outputDir survives.
     rmSync(tmpDir, { recursive: true, force: true });
+    if (!committed) {
+      rmSync(outputDir, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Walk `dir` and return every entry as a path relative to `dir`.
+ */
+function collectEntries(dir: string): string[] {
+  const out: string[] = [];
+  function walk(d: string, rel: string) {
+    let entries: string[];
+    try {
+      entries = readdirSync(d);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(d, entry);
+      const r = rel ? join(rel, entry) : entry;
+      out.push(r);
+      let st;
+      try {
+        st = lstatSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(full, r);
+    }
+  }
+  walk(dir, "");
+  return out;
+}
+
+/**
+ * Reject archives whose entries escape the extraction directory (zip-slip /
+ * path traversal). Uses `realpathSync` so symlinks pointing outside the tree are
+ * caught, not just `..` / absolute path names.
+ *
+ * On Windows, broken symlinks (a byproduct of tar failing to create symlinks
+ * without privileges) degrade to a warning + skip rather than a hard failure;
+ * on other platforms a broken symlink is treated as a corrupt archive.
+ */
+function assertExtractionWithinDir(extractDir: string, roleId: string): void {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(extractDir);
+  } catch {
+    return; // extract dir missing/unreadable; the caller's role-dir check reports it
+  }
+  const rootPrefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+
+  for (const rel of collectEntries(extractDir)) {
+    const full = join(extractDir, rel);
+    let real: string;
+    try {
+      real = realpathSync(full);
+    } catch {
+      // Broken symlink or unreadable entry.
+      if (process.platform === "win32") {
+        console.warn(
+          `Warning: entry "${rel}" in role "${roleId}" is a broken symlink; on Windows symlink creation may require elevated privileges. Skipping entry (degraded extraction).`,
+        );
+        continue;
+      }
+      throw new Error(
+        `extraction failed for role "${roleId}": entry "${rel}" is a broken symlink; refusing to use a corrupt archive`,
+      );
+    }
+    if (real !== realRoot && !real.startsWith(rootPrefix)) {
+      throw new Error(
+        `extraction failed for role "${roleId}": entry "${rel}" resolves outside the extract directory (${real}); refusing unsafe archive (zip-slip / path traversal)`,
+      );
+    }
   }
 }
 

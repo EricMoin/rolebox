@@ -10,43 +10,30 @@ const statusDataDir = mkdtempSync(join(tmpdir(), "rolebox-status-data-"));
 process.env.XDG_CONFIG_HOME = statusConfigDir;
 process.env.XDG_DATA_HOME = statusDataDir;
 
-mock.module("../../../src/cli/paths", () => {
-  function getDataDir(): string {
-    const xdg = process.env.XDG_DATA_HOME;
-    if (xdg) return join(xdg, "rolebox");
-    return join(homedir(), ".local", "share", "rolebox");
-  }
-  function getConfigDir(): string {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "rolebox");
-    return join(homedir(), ".config", "rolebox");
-  }
-  function getRolesDir(): string {
-    return join(getDataDir(), "roles");
-  }
-  function getRolePath(registry: string, roleId: string, version: string): string {
-    return join(getRolesDir(), registry, `${roleId}@${version}`);
-  }
-  function getSyncTarget(target: string): string {
-    if (target === "opencode") {
+import { createPathsMockPayload } from "../../helpers/paths-mock";
+
+mock.module("../../../src/cli/paths", () => createPathsMockPayload({
+  extra: {
+    getSyncTarget: (target: string) => {
+      if (target === "opencode") {
+        const xdg = process.env.XDG_CONFIG_HOME;
+        if (xdg) return join(xdg, "opencode", "rolebox");
+        return join(homedir(), ".config", "opencode", "rolebox");
+      }
+      throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
+    },
+    getOpencodeConfigPath: () => {
       const xdg = process.env.XDG_CONFIG_HOME;
-      if (xdg) return join(xdg, "opencode", "rolebox");
-      return join(homedir(), ".config", "opencode", "rolebox");
-    }
-    throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
-  }
-  function getOpencodeConfigPath(): string {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "opencode", "opencode.jsonc");
-    return join(homedir(), ".config", "opencode", "opencode.jsonc");
-  }
-  function getOpencodeSkillsDir(): string {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "opencode", "skills");
-    return join(homedir(), ".config", "opencode", "skills");
-  }
-  return { getDataDir, getConfigDir, getRolesDir, getRolePath, getSyncTarget, getOpencodeConfigPath, getOpencodeSkillsDir };
-});
+      if (xdg) return join(xdg, "opencode", "opencode.jsonc");
+      return join(homedir(), ".config", "opencode", "opencode.jsonc");
+    },
+    getOpencodeSkillsDir: () => {
+      const xdg = process.env.XDG_CONFIG_HOME;
+      if (xdg) return join(xdg, "opencode", "skills");
+      return join(homedir(), ".config", "opencode", "skills");
+    },
+  },
+}));
 
 afterAll(() => {
   rmSync(statusConfigDir, { recursive: true, force: true });

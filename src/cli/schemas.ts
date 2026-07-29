@@ -38,7 +38,7 @@ export function parseRegistryManifest(data: unknown): RegistryManifest {
     throw new Error("Registry manifest: 'roles' must be an object");
   }
 
-  const roles: Record<string, { version: string; description: string; tags: string[] }> = {};
+  const roles: Record<string, { version: string; description: string; tags: string[]; integrity?: string }> = {};
 
   for (const [roleId, roleEntry] of Object.entries(data.roles)) {
     if (!isRecord(roleEntry)) {
@@ -57,11 +57,22 @@ export function parseRegistryManifest(data: unknown): RegistryManifest {
       throw new Error(`Registry manifest: role '${roleId}' must have an array of strings 'tags'`);
     }
 
-    roles[roleId] = {
+    // Optional manifest-declared integrity digest (e.g. "sha256-<hex>"). When
+    // present, install/update verify the computed digest against it; when
+    // absent, the computed digest is surfaced and recorded without a check.
+    const role: { version: string; description: string; tags: string[]; integrity?: string } = {
       version: roleEntry.version,
       description: roleEntry.description,
       tags: roleEntry.tags,
     };
+    if (roleEntry.integrity !== undefined) {
+      if (!isString(roleEntry.integrity)) {
+        throw new Error(`Registry manifest: role '${roleId}' 'integrity' must be a string if present`);
+      }
+      role.integrity = roleEntry.integrity;
+    }
+
+    roles[roleId] = role;
   }
 
   return { name: data.name, description: data.description, url: data.url, roles };

@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach, beforeAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,7 +10,20 @@ const mockDownloadRole = mock();
 const mockResolveVersion = mock();
 const mockComputeIntegrity = mock();
 
-import { parseRoleSpec } from "../../../src/cli/commands/install";
+// Preload the REAL registry-client and paths modules via fresh (cache-busted)
+// imports. mock.module factories must be sync (an async factory deadlocks bun's
+// resolver under full-suite concurrency), so the real namespaces are loaded
+// here and returned by the sync factories below. Spreading the real
+// registry-client keeps its full export surface (so a later file that imports
+// e.g. parseGitHubUrl never hits a missing symbol) while stubbing only the
+// install-path functions. paths is returned verbatim (the XDG_* env vars set in
+// beforeEach already redirect the install dirs).
+const realRegistryClient = await import(
+  "../../../src/cli/registry-client.ts?install-real=" + Date.now() + "-" + Math.random()
+);
+const realPaths = await import(
+  "../../../src/cli/paths.ts?install-real=" + Date.now() + "-" + Math.random()
+);
 
 const sampleManifest: RegistryManifest = {
   name: "oh-my-role",
@@ -43,23 +56,14 @@ beforeEach(() => {
   process.env.XDG_DATA_HOME = tmpDataDir;
 
   mock.module("../../../src/cli/registry-client", () => ({
+    ...realRegistryClient,
     fetchRegistryManifest: mockFetchManifest,
     downloadRole: mockDownloadRole,
     resolveVersion: mockResolveVersion,
     computeIntegrity: mockComputeIntegrity,
   }));
 
-  mock.module("../../../src/cli/paths", () => ({
-    getDataDir: () => join(tmpDataDir, "rolebox"),
-    getConfigDir: () => join(tmpConfigDir, "rolebox"),
-    getRolesDir: () => join(tmpDataDir, "rolebox", "roles"),
-    getRolePath: (registry: string, roleId: string, version: string) =>
-      join(tmpDataDir, "rolebox", "roles", registry, `${roleId}@${version}`),
-    getSyncTarget: (target: string) => {
-      if (target === "opencode") return join(tmpConfigDir, "opencode", "rolebox");
-      throw new Error(`Unknown sync target: "${target}"`);
-    },
-  }));
+  mock.module("../../../src/cli/paths", () => realPaths);
 
   const unimplemented = (name: string) => () => { throw new Error(`${name} called without mock implementation`); };
   mockFetchManifest.mockImplementation(unimplemented("fetchRegistryManifest"));
@@ -74,6 +78,10 @@ afterEach(() => {
   rmSync(tmpConfigDir, { recursive: true, force: true });
   rmSync(tmpDataDir, { recursive: true, force: true });
   try { rmSync(tmpExtractedDir, { recursive: true, force: true }); } catch { /* already gone */ }
+  // Restore the real modules so any later test file (e.g. install-realtime.test.ts)
+  // sees the real downloadRole / computeIntegrity rather than this file's stubs.
+  mock.module("../../../src/cli/registry-client", () => realRegistryClient);
+  mock.module("../../../src/cli/paths", () => realPaths);
 });
 
 function createMockExtractedDir(roleId: string): string {
@@ -84,7 +92,11 @@ function createMockExtractedDir(roleId: string): string {
 }
 
 async function importInstall() {
-  return await import("../../../src/cli/commands/install");
+  // Cache-bust so the command module re-evaluates against the mocks registered
+  // in beforeEach rather than a stale cached instance from another file.
+  return await import(
+    "../../../src/cli/commands/install.ts?t=" + Date.now() + "-" + Math.random()
+  );
 }
 
 function setupBasicMocks(version = "1.0.0", integrity = "sha256-abc123") {
@@ -107,6 +119,12 @@ function captureLogs(fn: () => Promise<void>): { logs: string[]; run: () => Prom
 }
 
 describe("parseRoleSpec", () => {
+  let parseRoleSpec: (spec: string) => any;
+  beforeAll(async () => {
+    const mod = await importInstall();
+    parseRoleSpec = mod.parseRoleSpec;
+  });
+
   it("parses plain role name", () => {
     expect(parseRoleSpec("software-architect")).toEqual({
       roleId: "software-architect",
@@ -223,6 +241,34 @@ describe("install", () => {
     expect(parsed.roles).toHaveLength(1);
     expect(parsed.roles[0].version).toBe("2.0.0");
     expect(parsed.roles[0].integrity).toBe("sha256-def456");
+  });
+
+  it("rolls back: a failed new-version install leaves the previous version intact", async () => {
+    setupBasicMocks("1.0.0", "sha256-abc123");
+
+    const { install } = await importInstall();
+    await install("software-architect@1.0.0");
+
+    const oldPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "software-architect@1.0.0");
+    expect(existsSync(oldPath)).toBe(true);
+
+    // Now the new-version download fails.
+    mockResolveVersion.mockImplementation(() => "2.0.0");
+    mockDownloadRole.mockImplementation(async () => {
+      throw new Error("download failed (simulated network error)");
+    });
+
+    await expect(install("software-architect@2.0.0")).rejects.toThrow(/download failed/);
+
+    // Previous version intact; no partial new version; lock unchanged.
+    expect(existsSync(oldPath)).toBe(true);
+    const newPath = join(tmpDataDir, "rolebox", "roles", "oh-my-role", "software-architect@2.0.0");
+    expect(existsSync(newPath)).toBe(false);
+
+    const lockPath = join(tmpConfigDir, "rolebox", "rolebox.lock");
+    const parsed = load(readFileSync(lockPath, "utf-8")) as any;
+    expect(parsed.roles).toHaveLength(1);
+    expect(parsed.roles[0].version).toBe("1.0.0");
   });
 
   it("installs with explicit version from spec", async () => {

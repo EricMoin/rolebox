@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
 import type { LockEntry } from "../../../src/cli/types";
+import { createPathsMockPayload } from "../../helpers/paths-mock";
 
 let configTmp: string;
 let dataTmp: string;
@@ -30,16 +31,19 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = configTmp;
   process.env.XDG_DATA_HOME = dataTmp;
 
-  // Override stale mock.module from other test files (e.g. install.test.ts)
-  mock.module("../../../src/cli/paths", () => ({
+  // Re-register paths with the full real export surface (including
+  // assertSafePathSegment / getRolePath) via the shared helper so a
+  // limited-export mock from another test file cannot silently bypass
+  // roleId path-traversal sanitization. Only getDataDir/getConfigDir
+  // and getSyncTarget are overridden; everything else stays real.
+  mock.module("../../../src/cli/paths", () => createPathsMockPayload({
     getDataDir: () => join(dataTmp, "rolebox"),
     getConfigDir: () => join(configTmp, "rolebox"),
-    getRolesDir: () => join(dataTmp, "rolebox", "roles"),
-    getRolePath: (registry: string, roleId: string, version: string) =>
-      join(dataTmp, "rolebox", "roles", registry, `${roleId}@${version}`),
-    getSyncTarget: (target: string) => {
-      if (target === "opencode") return join(configTmp, "opencode", "rolebox");
-      throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
+    extra: {
+      getSyncTarget: (target: string) => {
+        if (target === "opencode") return join(configTmp, "opencode", "rolebox");
+        throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
+      },
     },
   }));
 

@@ -8,7 +8,24 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Cross-platform matrix (audit F5.1): run the full typecheck + TUI build +
+    # test suite on all three supported platforms. The install/update path
+    # (paths.ts win32 branches, tar extraction, symlink handling) is
+    # platform-sensitive and must be exercised on every OS.
+    #
+    # Note on Unix-only tests: several tests build a real tarball fixture and
+    # run it through the real `tar` extraction (tests/cli/registry-client.test.ts,
+    # tests/cli/download-progress-streaming.test.ts,
+    # tests/cli/commands/install-realtime.test.ts). They are guarded by
+    # `it.skipIf(!hasTar())` via tests/helpers/tar.ts, so on a host without a
+    # usable `tar` (a minimal Windows image, for example) they SKIP GRACEFULLY
+    # instead of failing the build. Windows runners ship bsdtar as `tar.exe`,
+    # so these tests typically run; if a tar variant diverges, the test reports
+    # it rather than masking it.
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -25,4 +42,11 @@ jobs:
         run: bun run build:tui
 
       - name: Run tests
+        # Plain `bun test` (no --isolate), matching the package.json "test"
+        # script. The suite is written to be pollution-safe under the standard
+        # single-process runner: tests that need the real modules load them via
+        # a fresh (cache-busted) import and re-register real-module mocks before
+        # dynamically importing the command under test, so cross-file mock.module
+        # leakage cannot break a later file. See tests/cli/paths.test.ts and
+        # tests/cli/commands/install-realtime.test.ts for the pattern.
         run: bun test

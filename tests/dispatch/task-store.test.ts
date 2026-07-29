@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { shortHash } from "../../src/utils/state-paths";
 import type { DispatchTask } from "../../src/dispatch/types";
 
+import { createPathsMockPayload } from "../helpers/paths-mock";
+
 let currentDataDir = "";
 
-mock.module("../../src/cli/paths", () => ({
+mock.module("../../src/cli/paths", () => createPathsMockPayload({
   getDataDir: () => currentDataDir,
 }));
 
