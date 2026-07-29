@@ -1,4 +1,30 @@
-import type { CollaborationConfig, FlowEdge } from "../types.ts";
+/**
+ * Collaboration → v2 Graph Declaration bridge.
+ *
+ * Centralizes the cross-subsystem boundary between the legacy `collaboration:`
+ * config surface and the v2 imperative graph model:
+ *
+ *   - `convertCollaborationToGraphDeclaration` — converts a legacy v1
+ *     `collaboration:` config into a lossless v2 `GraphDeclaration`.
+ *   - `autoConvertCollaboration` — bridges the legacy `collaboration:` import
+ *     path to v2 by delegating to the converter and logging a deprecation
+ *     notice.
+ *   - `graphDeclarationToResolvedGraph` — derives the legacy v1 `ResolvedGraph`
+ *     shape that the resolver's downstream prompt/state builders consume.
+ *
+ * These three functions now live here (this module, `src/graph/collaboration-bridge.ts`),
+ * relocating what previously lived on the legacy v1 `src/graph/converter.ts` and
+ * `src/graph/parser.ts` delete-target modules. Those modules are now thin re-export
+ * shims and later removed. See the graph decommission doc, Stage 3.
+ */
+
+import type {
+  CollaborationConfig,
+  FlowEdge,
+  LoopGroup,
+  ResolvedGraph,
+  TerminationConfig,
+} from "../types.ts";
 import type {
   EdgeDeclaration,
   GraphDeclaration,
@@ -11,9 +37,14 @@ import { expandTemplate } from "./templates.ts";
 import { parseFlow, mergeEdges } from "./edge-parser.ts";
 import { hasCycle, isExitEdge } from "./graph-utils.ts";
 import { detectLoopGroups } from "./loop-detector.ts";
-import { createSubLogger } from "../logger.ts";
+import { validateGraph } from "./collaboration-validator.ts";
+import { createSubLogger, rootLogger } from "../logger.ts";
 
-const log = createSubLogger("graph-converter");
+const converterLog = createSubLogger("graph-converter");
+const parserLog = createSubLogger("graph-parser");
+
+/** Fallback iteration cap applied to detected cycles when the config is silent. */
+const DEFAULT_MAX_ITERATIONS = 3;
 
 /**
  * Options that parameterize a collaboration → graph-declaration conversion.
@@ -29,9 +60,6 @@ export interface ConvertOptions {
   /** Human-readable name assigned to the resulting graph declaration. */
   name: string;
 }
-
-/** Fallback iteration cap applied to detected cycles when the config is silent. */
-const DEFAULT_MAX_ITERATIONS = 3;
 
 /**
  * Convert a legacy `collaboration:` config (v1) into a lossless v2
@@ -119,6 +147,110 @@ export function convertCollaborationToGraphDeclaration(
   };
 }
 
+/**
+ * Auto-convert a legacy `collaboration:` config to a v2 `GraphDeclaration`.
+ *
+ * `collaboration:` is a legacy import path. When a role config carries it,
+ * this bridge transparently reinterprets the config under the v2
+ * imperative `graph_*` / `graph:` schema by delegating to
+ * `convertCollaborationToGraphDeclaration` and returning its lossless v2
+ * declaration. A deprecation warning is logged so downstream tooling can
+ * flag and migrate the config.
+ *
+ * @param collab - the legacy `collaboration:` block from the role config.
+ * @param opts - routing/identity for the produced declaration:
+ *   - `parentAgentId`: dispatchable subagent id of the orchestrating (parent) role.
+ *   - `roleName`: human-readable name assigned to the graph declaration
+ *     (mapped to the converter's `name` field).
+ * @returns a v2 `GraphDeclaration` equivalent to what an explicit
+ *   `convertCollaborationToGraphDeclaration` call would produce.
+ */
+export function autoConvertCollaboration(
+  collab: CollaborationConfig,
+  opts: { parentAgentId: string; roleName: string },
+): GraphDeclaration {
+  // Routed through the live `rootLogger` proxy (not the module `log`) so the
+  // deprecation is observable to any transport attached to the root logger —
+  // it is a cross-cutting migration notice, not a graph-parser-scoped detail.
+  rootLogger.warn(
+    "collaboration: is a legacy import path and is being auto-converted to the v2 imperative graph_* / graph: schema",
+  );
+  return convertCollaborationToGraphDeclaration(collab, {
+    parentAgentId: opts.parentAgentId,
+    name: opts.roleName,
+  });
+}
+
+/**
+ * Derive a legacy v1 `ResolvedGraph` from a v2 `GraphDeclaration`.
+ *
+ * Reverses `convertCollaborationToGraphDeclaration` for the fields the legacy
+ * prompt/state builders consume, honoring the `PARENT_NODE` approval-node
+ * semantics (`needs_approval: true` terminal node). Returns `null` when the
+ * reconstruction fails v1 validation (only when `availableSubagentNames` is
+ * given).
+ *
+ * @param decl - a v2 graph declaration, typically from `autoConvertCollaboration`.
+ * @param opts - `availableSubagentNames` optionally enables the v1 validation gate.
+ * @returns the reconstructed legacy `ResolvedGraph`, or `null` on validation failure.
+ */
+export function graphDeclarationToResolvedGraph(
+  decl: GraphDeclaration,
+  opts: { availableSubagentNames?: string[] } = {},
+): ResolvedGraph | null {
+  const edges: FlowEdge[] = decl.edges.map((e) => ({
+    from: e.from,
+    to: e.to,
+    ...(e.label ? { label: e.label } : {}),
+  }));
+
+  const nodes = decl.nodes
+    .filter((n) => n.id !== PARENT_NODE)
+    .map((n) => n.id);
+
+  const exitEdges = edges.filter(isExitEdge);
+  const loopGroups: LoopGroup[] = detectLoopGroups(edges);
+
+  const maxIterations =
+    typeof decl.max_iterations === "number" && Number.isFinite(decl.max_iterations)
+      ? Math.max(0, decl.max_iterations)
+      : loopGroups.length > 0
+        ? (loopGroups[0].maxIterations ?? DEFAULT_MAX_ITERATIONS)
+        : hasCycle(edges)
+          ? DEFAULT_MAX_ITERATIONS
+          : 0;
+
+  const resolvedGraph: ResolvedGraph = {
+    edges,
+    nodes,
+    maxIterations,
+    exitEdges,
+    ...(decl.template !== undefined ? { template: decl.template } : {}),
+    loopGroups,
+    // Converter-produced declarations only ever carry v1-shaped conditions, so
+    // narrowing the wider v2 TerminationDecl to the v1 TerminationConfig is safe.
+    ...(decl.termination
+      ? { termination: { config: decl.termination as unknown as TerminationConfig, loopGroups } }
+      : {}),
+  };
+
+  if (opts.availableSubagentNames) {
+    const { valid, warnings } = validateGraph(
+      resolvedGraph,
+      opts.availableSubagentNames,
+    );
+    if (!valid) {
+      parserLog.warn(`validation failed: ${warnings.join("; ")}`);
+      return null;
+    }
+    for (const warning of warnings) {
+      parserLog.info(warning);
+    }
+  }
+
+  return resolvedGraph;
+}
+
 // ─── Private helpers ─────────────────────────────────────────────────────
 
 /**
@@ -134,7 +266,7 @@ function deriveFlowEdges(collab: CollaborationConfig): FlowEdge[] {
     try {
       templateEdges = expandTemplate(collab.topology, agents);
     } catch (err) {
-      log.warn(
+      converterLog.warn(
         `expandTemplate failed for topology "${collab.topology}": ${
           err instanceof Error ? err.message : String(err)
         } — falling back to explicit flow edges only`,
@@ -162,8 +294,8 @@ function distinctAgentIds(edges: FlowEdge[]): string[] {
 }
 
 /**
- * Resolve the effective iteration cap, matching parser.ts:82-89:
- * explicit non-negative value wins; otherwise 3 when a cycle exists; else 0.
+ * Resolve the effective iteration cap: explicit non-negative value wins;
+ * otherwise 3 when a cycle exists; else 0.
  */
 function computeMaxIterations(
   collab: CollaborationConfig,

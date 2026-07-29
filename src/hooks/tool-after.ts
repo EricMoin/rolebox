@@ -1,5 +1,5 @@
-import { graphSessionState, advanceGraphForDispatch } from "../graph/index.ts";
-import { extractDispatchTarget } from "../graph/advance.ts";
+import { graphSessionState } from "../graph/collaboration-state.ts";
+import { advanceGraphForDispatch, extractDispatchTarget } from "../graph/collaboration-advance.ts";
 import { extractResultBlock, normalizeResult, hashResult } from "../graph/result-capture.ts";
 import { functionSessionState } from "../function/session-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";

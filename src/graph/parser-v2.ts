@@ -33,7 +33,10 @@
  * example), src/types.graph-v2.ts, src/constants.ts (JoinStrategy).
  */
 
+import { readFileSync } from "node:fs";
 import yaml from "js-yaml";
+import { createSubLogger } from "../logger.ts";
+import { validateGraphDeclaration } from "./validator-v2.ts";
 import type {
   GraphDeclaration,
   NodeConfig,
@@ -445,4 +448,60 @@ function asStringArray(value: unknown): string[] | undefined {
     if (s !== null) out.push(s);
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Graph Engine v2 — import a graph declaration from a serialized YAML/JSON file
+// ─────────────────────────────────────────────────────────────────────────
+
+const log = createSubLogger("graph-parser");
+
+/**
+ * Load a graph declaration from a serialized YAML/JSON file on disk.
+ *
+ * Reads the file, deserializes it via the v2 parser (`parseGraph` in this
+ * module — YAML and JSON are both accepted), then runs structural validation
+ * (`validateGraphDeclaration` in ./validator-v2.ts). Returns the validated
+ * `GraphDeclaration`, or `null` when the file is unreadable, fails to
+ * deserialize, or fails structural validation.
+ *
+ * @param filePath - absolute or relative path to a `.yaml`/`.yml`/`.json` graph file.
+ * @returns the validated v2 graph declaration, or `null` on any failure.
+ */
+export function importGraphFromFile(filePath: string): GraphDeclaration | null {
+  let source: string;
+  try {
+    source = readFileSync(filePath, "utf-8");
+  } catch (err) {
+    log.warn(
+      `cannot read graph file "${filePath}": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+
+  const parsed = parseGraph(source);
+  if (!parsed.ok) {
+    log.warn(
+      `graph file "${filePath}" failed to parse: ${parsed.errors.join("; ")}`,
+    );
+    return null;
+  }
+
+  const document: GraphDocument = parsed.graph;
+  const validation = validateGraphDeclaration(document);
+  for (const warning of validation.warnings) {
+    log.info(warning);
+  }
+  if (!validation.valid) {
+    log.warn(
+      `graph file "${filePath}" failed validation: ${validation.errors.join("; ")}`,
+    );
+    return null;
+  }
+
+  // Structural validation guarantees `version === 2`, which is exactly a
+  // GraphDeclaration. Narrow the optional-version document to the declared type.
+  return document as GraphDeclaration;
 }

@@ -13,18 +13,16 @@
  * when no `collaboration:` block is present.
  *
  * The conversion itself is reference-aligned with the legacy collaboration
- * parser (src/graph/converter.ts) — node count, edge direction, and loop cap
- * (`max_traversals == max_iterations`) are preserved exactly. Only the
- * serialized document structure changes.
+ * parser (now in src/graph/collaboration-bridge.ts) — node count, edge
+ * direction, and loop cap (`max_traversals == max_iterations`) are preserved
+ * exactly. Only the serialized document structure changes.
  */
 
 import { defineCommand } from "citty";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import yaml from "js-yaml";
-import {
-  convertCollaborationToGraphDeclaration,
-} from "../../graph/converter.ts";
+import { convertCollaborationToGraphDeclaration } from "../../graph/collaboration-bridge.ts";
 import { serializeGraphDeclaration } from "../../graph/serialize.ts";
 import type { CollaborationConfig } from "../../types.ts";
 

@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import {
   graphSessionState,
   buildGraphStateBlock,
-} from "../../src/graph/state";
+} from "../../src/graph/collaboration-state";
 import {
   advanceGraphForDispatch,
   extractDispatchTarget,
   setAdvanceJudge,
-} from "../../src/graph/advance";
+} from "../../src/graph/collaboration-advance";
 import type { ResolvedGraph, FlowEdge, TerminationConfig } from "../../src/types";
 import type { JudgeFn } from "../../src/graph/termination-async";
 

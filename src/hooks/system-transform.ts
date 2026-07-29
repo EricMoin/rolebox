@@ -1,6 +1,6 @@
 import { applyParams } from "../function/file-resolver.ts";
 import { functionSessionState } from "../function/session-state.ts";
-import { graphSessionState, buildGraphStateBlock } from "../graph/index.ts";
+import { graphSessionState, buildGraphStateBlock } from "../graph/collaboration-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { evaluateGateAndTransitions } from "../function/phase-machine.ts";

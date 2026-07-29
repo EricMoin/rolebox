@@ -4,7 +4,7 @@ import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
-import { graphSessionState } from "../../src/graph/index.ts";
+import { graphSessionState } from "../../src/graph/collaboration-state.ts";
 import { GRAPH_COMPLETE_MARKER, GRAPH_BLOCKED_MARKER, isDispatchNotification } from "../../src/dispatch/notification.ts";
 
 // ── Cleanup between tests ───────────────────────────────────────────────────

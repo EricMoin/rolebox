@@ -19,7 +19,7 @@ import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, existsSyn
 import { tmpdir } from "node:os";
 import yaml from "js-yaml";
 import { migrate } from "../../../src/cli/commands/migrate";
-import { convertCollaborationToGraphDeclaration } from "../../../src/graph/converter";
+import { convertCollaborationToGraphDeclaration } from "../../../src/graph/collaboration-bridge";
 import { parseGraph } from "../../../src/graph/parser-v2";
 import { PARENT_NODE } from "../../../src/constants";
 import type { CollaborationConfig } from "../../../src/types";

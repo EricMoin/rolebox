@@ -3,7 +3,7 @@ import { evaluateAsync, type JudgeFn } from "../../src/graph/termination-async.t
 import { hashResult, normalizeResult } from "../../src/graph/result-capture.ts";
 import type {
   GraphExecutionState,
-} from "../../src/graph/state.ts";
+} from "../../src/graph/collaboration-state.ts";
 import type { ResolvedGraph, ResolvedTermination, TerminationConfig, FlowEdge } from "../../src/types.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────

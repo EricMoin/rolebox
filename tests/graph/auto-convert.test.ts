@@ -1,7 +1,7 @@
 /**
  * Graph Execution Engine v2 — Subtask 2: `collaboration:` auto-conversion.
  *
- * Verifies `autoConvertCollaboration` (src/graph/parser.ts):
+ * Verifies `autoConvertCollaboration` (src/graph/collaboration-bridge.ts):
  *   (a) returns the SAME v2 `GraphDeclaration` as an explicit
  *       `convertCollaborationToGraphDeclaration` call — the auto-convert
  *       bridge delegates losslessly to the subtask-1 converter;
@@ -25,8 +25,8 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import {
   autoConvertCollaboration,
   graphDeclarationToResolvedGraph,
-} from "../../src/graph/parser";
-import { convertCollaborationToGraphDeclaration } from "../../src/graph/converter";
+} from "../../src/graph/collaboration-bridge";
+import { convertCollaborationToGraphDeclaration } from "../../src/graph/collaboration-bridge";
 import { getRootLogger } from "../../src/logger";
 import type { ILogObj } from "tslog";
 import type { CollaborationConfig } from "../../src/types";

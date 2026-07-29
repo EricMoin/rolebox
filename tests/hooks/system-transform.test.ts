@@ -4,7 +4,7 @@ import { HookState } from "../../src/hooks/state.ts";
 import type { HookDeps } from "../../src/hooks/deps.ts";
 import type { ResolvedFunction } from "../../src/types.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
-import { graphSessionState } from "../../src/graph/index.ts";
+import { graphSessionState } from "../../src/graph/collaboration-state.ts";
 
 // ── Cleanup ─────────────────────────────────────────────────────────────────
 

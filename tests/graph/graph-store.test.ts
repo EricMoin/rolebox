@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { shortHash } from "../../src/utils/state-paths";
-import type { GraphExecutionState } from "../../src/graph/state";
+import type { GraphExecutionState } from "../../src/graph/collaboration-state";
 
 let currentDataDir = "";
 
@@ -11,7 +11,7 @@ mock.module("../../src/cli/paths", () => ({
   getDataDir: () => currentDataDir,
 }));
 
-import { GraphStore } from "../../src/graph/graph-store";
+import { GraphStore } from "../../src/graph/collaboration-store";
 
 function makeState(overrides?: Partial<GraphExecutionState>): GraphExecutionState {
   return {
@@ -43,7 +43,7 @@ function makeSessions(): Map<string, { agentId: string; state: GraphExecutionSta
 
 function stateFilePath(dir: string): string {
   const hash = shortHash(dir);
-  return join(dir, ".rolebox", "state", `graph-${hash}.json`);
+  return join(dir, ".rolebox", "state", `collaboration-${hash}.json`);
 }
 
 const dirs: string[] = [];

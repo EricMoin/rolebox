@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { createSubLogger } from "../logger.ts";
 import { shortHash } from "../utils/state-paths.ts";
-import type { GraphExecutionState } from "./state.ts";
+import type { GraphExecutionState } from "./collaboration-state.ts";
 import { truncateResult } from "./result-capture.ts";
 
 export interface SerializedGraphSession {
@@ -124,7 +124,7 @@ export class GraphStore {
   }
 
   private getStatePath(): string {
-    return join(this.directory, ".rolebox", "state", `graph-${this.dirHash}.json`);
+    return join(this.directory, ".rolebox", "state", `collaboration-${this.dirHash}.json`);
   }
 
   private serialize(

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { validateGraph } from "../../src/graph/validator";
+import { validateGraph } from "../../src/graph/collaboration-validator";
 import type { ResolvedGraph, FlowEdge } from "../../src/types";
 
 function makeGraph(overrides?: Partial<ResolvedGraph>): ResolvedGraph {

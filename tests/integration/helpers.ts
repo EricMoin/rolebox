@@ -27,7 +27,7 @@ import { tmpdir as osTmpdir } from "node:os";
 import { mock } from "bun:test";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap, pendingCorrections } from "../../src/core/composition.ts";
-import { graphSessionState } from "../../src/graph/state.ts";
+import { graphSessionState } from "../../src/graph/collaboration-state.ts";
 import { roleFunctionsMap } from "../../src/resolver/registry.ts";
 import type { ResolvedRole, ResolvedSubAgent, ResolvedGraph } from "../../src/types.ts";
 import { RoleMode } from "../../src/constants.ts";

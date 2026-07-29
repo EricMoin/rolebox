@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { graphSessionState } from "../../src/graph/state";
+import { graphSessionState } from "../../src/graph/collaboration-state";
 import type { ResolvedGraph, FlowEdge } from "../../src/types";
 
 // ── Fixture builders ──────────────────────────────────────────────────────

@@ -12,9 +12,9 @@ import type { PluginInput } from "@opencode-ai/plugin";
 import type { Config } from "@opencode-ai/sdk";
 
 import { discoverRoles } from "../../src/loader/role-loader";
-import { autoConvertCollaboration, graphDeclarationToResolvedGraph } from "../../src/graph/parser";
-import { graphSessionState, buildGraphStateBlock } from "../../src/graph/state";
-import { advanceGraphForDispatch } from "../../src/graph/advance";
+import { autoConvertCollaboration, graphDeclarationToResolvedGraph } from "../../src/graph/collaboration-bridge";
+import { graphSessionState, buildGraphStateBlock } from "../../src/graph/collaboration-state";
+import { advanceGraphForDispatch } from "../../src/graph/collaboration-advance";
 import { buildSubagentRoleBlock } from "../../src/graph/prompt-builder";
 import type { ResolvedGraph, GraphNodeRole } from "../../src/types";
 import RoleboxModule from "../../src/index";

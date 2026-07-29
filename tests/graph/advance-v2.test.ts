@@ -3,8 +3,8 @@ import {
   advanceGraphForDispatch,
   setAdvanceJudge,
   MAX_CORRECTIONS,
-} from "../../src/graph/advance";
-import { graphSessionState } from "../../src/graph/state";
+} from "../../src/graph/collaboration-advance";
+import { graphSessionState } from "../../src/graph/collaboration-state";
 import type { ResolvedGraph } from "../../src/types";
 import type { JudgeFn } from "../../src/graph/termination-async";
 

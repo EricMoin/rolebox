@@ -2,7 +2,7 @@ import type { ResolvedRole, ResolvedFunction, ResolvedGraph } from "../types.ts"
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { hookState } from "../hooks/state.ts";
 import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
-import { graphSessionState } from "../graph/index.ts";
+import { graphSessionState } from "../graph/collaboration-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { sessionSignalLedger } from "../signal/session-signal-ledger.ts";
 import { createSubLogger } from "../logger.ts";

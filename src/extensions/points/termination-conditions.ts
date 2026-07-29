@@ -2,7 +2,7 @@ import type { ExtensionPoint } from "../extension-point.ts";
 import type { ExtensionEntry, TerminationParserModule } from "../types.ts";
 import { loadExtensionModule } from "../loader.ts";
 import { createSubLogger } from "../../logger.ts";
-import { registerTerminationParser } from "../../graph/parser.ts";
+import { registerTerminationParser } from "../../graph/termination-parser.ts";
 
 const log = createSubLogger("ext:point:termination-conditions");
 

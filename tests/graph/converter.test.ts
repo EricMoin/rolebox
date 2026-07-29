@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { convertCollaborationToGraphDeclaration } from "../../src/graph/converter";
-import { graphDeclarationToResolvedGraph } from "../../src/graph/parser";
+import { convertCollaborationToGraphDeclaration } from "../../src/graph/collaboration-bridge";
+import { graphDeclarationToResolvedGraph } from "../../src/graph/collaboration-bridge";
 import { PARENT_NODE } from "../../src/constants";
 import { expandTemplate } from "../../src/graph/templates";
 import { parseFlow, mergeEdges } from "../../src/graph/edge-parser";

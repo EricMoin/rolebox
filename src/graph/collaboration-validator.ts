@@ -1,3 +1,14 @@
+/**
+ * Collaboration graph validator — validates a legacy `collaboration:` v1
+ * `ResolvedGraph` against a set of available agents.
+ *
+ * This is the v2-owned home for the v1 `validateGraph` logic (relocated from
+ * `./validator.ts` during the legacy v1 graph decommission). `./validator.ts`
+ * is now a thin re-export shim (temporary scaffolding) so existing importers
+ * keep resolving during the transition; it will be physically deleted in a
+ * later approved subtask.
+ */
+
 import type { ResolvedGraph, FlowEdge } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
 import { hasCycle, isExitEdge } from "./graph-utils.ts";
@@ -216,5 +227,3 @@ function validateTermination(
     }
   }
 }
-
-

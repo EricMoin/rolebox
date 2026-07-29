@@ -1,6 +1,6 @@
 import { parseFunctionActivation } from "../function/parser.ts";
 import { functionSessionState } from "../function/session-state.ts";
-import { graphSessionState } from "../graph/index.ts";
+import { graphSessionState } from "../graph/collaboration-state.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
 import { runActivateObserve, runMessageObserve } from "../function/observe.ts";
 import { collectAllFunctions, appendCorrection } from "./context.ts";

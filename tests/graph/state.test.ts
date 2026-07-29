@@ -3,7 +3,7 @@ import {
   GraphSessionState,
   graphSessionState,
   buildGraphStateBlock,
-} from "../../src/graph/state";
+} from "../../src/graph/collaboration-state";
 import type { ResolvedGraph, FlowEdge } from "../../src/types";
 
 function makeGraph(overrides?: Partial<ResolvedGraph>): ResolvedGraph {
@@ -689,7 +689,7 @@ describe("GraphSessionState — frontier model", () => {
 
       // Need to mock getDataDir — use a fresh module-scoped mock
       // Since we can't easily re-mock in bun, test via direct store usage
-      const { GraphStore } = await import("../../src/graph/graph-store");
+      const { GraphStore } = await import("../../src/graph/collaboration-store");
       const store = new GraphStore(tmpDir);
 
       const gs = new GraphSessionState();
@@ -734,7 +734,7 @@ describe("GraphSessionState — frontier model", () => {
 
       const tmpDir = mkdtempSync(join(tmpdir(), "graph-recover-test-"));
 
-      const { GraphStore } = await import("../../src/graph/graph-store");
+      const { GraphStore } = await import("../../src/graph/collaboration-store");
       const store = new GraphStore(tmpDir);
 
       const edges: FlowEdge[] = [

@@ -1,6 +1,6 @@
 import type {
   GraphExecutionState,
-} from "./state.ts";
+} from "./collaboration-state.ts";
 import type {
   ResolvedGraph,
   LoopCondition,

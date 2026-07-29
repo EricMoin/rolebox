@@ -1,5 +1,5 @@
-import { graphSessionState } from "./state.ts";
-import type { AdvanceResult } from "./state.ts";
+import { graphSessionState } from "./collaboration-state.ts";
+import type { AdvanceResult } from "./collaboration-state.ts";
 import { evaluateAsync } from "./termination-async.ts";
 import type { JudgeFn } from "./termination-async.ts";
 import type { ResolvedGraph } from "../types.ts";

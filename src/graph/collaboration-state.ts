@@ -1,7 +1,7 @@
 import type { ResolvedGraph, TerminationReason } from "../types.ts";
 import { PARENT_NODE } from "../constants.ts";
 import { isExitEdge } from "./graph-utils.ts";
-import { GraphStore } from "./graph-store.ts";
+import { GraphStore } from "./collaboration-store.ts";
 import { createSubLogger } from "../logger.ts";
 import { evaluateSync } from "./termination.ts";
 

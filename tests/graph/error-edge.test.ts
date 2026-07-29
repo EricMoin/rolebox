@@ -6,7 +6,7 @@
  * to existing tests.
  */
 import { describe, it, expect } from "bun:test";
-import { validateGraph } from "../../src/graph/validator";
+import { validateGraph } from "../../src/graph/collaboration-validator";
 import { parseFlow, parseStringEdge, parseObjectEdge } from "../../src/graph/edge-parser";
 import { isExitEdge, hasCycle } from "../../src/graph/graph-utils";
 import type { FlowEdge, ResolvedGraph } from "../../src/types";

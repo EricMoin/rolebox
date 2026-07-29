@@ -3,8 +3,7 @@ import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { Config } from "@opencode-ai/plugin";
 import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-bridge.ts";
-import { graphSessionState } from "../../graph/index.ts";
-import { setAdvanceJudge } from "../../graph/advance.ts";
+import { graphSessionState } from "../../graph/collaboration-state.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
 import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
 import { buildAgentConfig, transformPermission, type RoleboxAgentConfig } from "../../prompt/agent-config.ts";
@@ -77,9 +76,7 @@ export class HookService implements PluginService {
       }
     }
 
-    // Set advance judge (original line 283)
-
-    // --- Custom Hook Registry (original lines 288-308) ---
+    // --- Custom Hook Registry ---
     this.customHookRegistry = new CustomHookRegistry();
 
     const dispatchService = ctx.core.getService<DispatchService>("dispatch-service")!;

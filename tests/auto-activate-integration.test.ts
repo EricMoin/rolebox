@@ -6,7 +6,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap, pendingCorrections, userMessagedSessions, autoActivatedSessions, roleAutoActivateMap, roleLockedMap } from "../src/core/composition";
 import { functionSessionState } from "../src/function/session-state";
 import { functionRuntime } from "../src/function/runtime-state";
-import { graphSessionState } from "../src/graph/state";
+import { graphSessionState } from "../src/graph/collaboration-state";
 import type { ResolvedRole, ResolvedFunction } from "../src/types";
 import { RoleMode } from "../src/constants";
 

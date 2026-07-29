@@ -12,9 +12,9 @@ import { describe, it, expect } from "bun:test";
 import {
   autoConvertCollaboration,
   graphDeclarationToResolvedGraph,
-} from "../../src/graph/parser";
-import { buildGraphStateBlock } from "../../src/graph/state";
-import type { GraphExecutionState } from "../../src/graph/state";
+} from "../../src/graph/collaboration-bridge";
+import { buildGraphStateBlock } from "../../src/graph/collaboration-state";
+import type { GraphExecutionState } from "../../src/graph/collaboration-state";
 import {
   buildCollaborationBlock,
   buildSubagentRoleBlock,

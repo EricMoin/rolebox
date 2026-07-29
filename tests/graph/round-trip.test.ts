@@ -28,7 +28,7 @@ import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGraphToolSet, GraphToolSet } from "../../src/graph/tools/graph-tools";
-import { importGraphFromFile } from "../../src/graph/parser";
+import { importGraphFromFile } from "../../src/graph/parser-v2";
 import { serializeGraphDeclaration } from "../../src/graph/serialize";
 import type { GraphDeclaration } from "../../src/types.graph-v2";
 

@@ -30,7 +30,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 
 // ── PluginCore & composition ─────────────────────────────────────────────
 import { createPluginHooks, pendingCorrections } from "../../src/core/composition.ts";
-import { graphSessionState } from "../../src/graph/index.ts";
+import { graphSessionState } from "../../src/graph/collaboration-state.ts";
 import { functionSessionState } from "../../src/function/session-state.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { roleFunctionsMap } from "../../src/resolver/registry.ts";
