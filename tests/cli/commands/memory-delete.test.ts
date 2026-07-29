@@ -9,6 +9,10 @@ import { MemoryStore } from "../../../src/memory/store";
 let tmpDir: string;
 let origCwd: typeof process.cwd;
 let origExit: typeof process.exit;
+let origPrompt: PromptFn | undefined;
+let origIsTTY: boolean | undefined;
+
+type PromptFn = (message?: string, _default?: string) => string | null;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "memory-delete-"));
@@ -16,12 +20,24 @@ beforeEach(() => {
   origCwd = process.cwd;
   process.cwd = (() => tmpDir) as typeof process.cwd;
   origExit = process.exit;
+  // Stub the blocking `prompt()` global so tests never read real stdin.
+  origPrompt = globalThis.prompt as PromptFn | undefined;
+  globalThis.prompt = (() => null) as PromptFn;
+  // Simulate an interactive terminal so the command's non-TTY guard passes.
+  origIsTTY = (process.stdin as { isTTY?: boolean }).isTTY;
+  Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 });
 
 afterEach(() => {
   process.cwd = origCwd;
   process.exit = origExit;
   process.exitCode = undefined;
+  if (origPrompt === undefined) {
+    delete (globalThis as { prompt?: PromptFn }).prompt;
+  } else {
+    globalThis.prompt = origPrompt as PromptFn;
+  }
+  Object.defineProperty(process.stdin, "isTTY", { value: origIsTTY, configurable: true });
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -136,7 +152,7 @@ describe("memory delete", () => {
     // The prompt message is printed before any stdin read
     expect(stdout.some((l) => l.includes(`Delete memory ${entryId}? (y/N)`))).toBe(true);
 
-    // With no stdin input, prompt() returns null → falls to "" → not y/yes → "Cancelled."
+    // The stubbed prompt() returns null → falls to "" → not y/yes → "Cancelled."
     // Entry should still exist
     expect(stdout.some((l) => l.includes("Cancelled."))).toBe(true);
     expect(stdout.some((l) => l.includes("Deleted"))).toBe(false);
@@ -144,6 +160,28 @@ describe("memory delete", () => {
     const store = await MemoryStore.create(tmpDir);
     try {
       expect(store.read(entryId)).not.toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("without --yes with a 'y' answer deletes the entry", async () => {
+    const entryId = await insertEntry();
+
+    globalThis.prompt = (() => "y") as PromptFn;
+
+    const { deleteCommand } = await importDelete();
+    const { stdout } = await captureLogs(() =>
+        invoke(deleteCommand, { id: entryId, yes: false, _: [entryId] }),
+    );
+
+    expect(stdout.some((l) => l.includes(`Delete memory ${entryId}? (y/N)`))).toBe(true);
+    expect(stdout.some((l) => l.includes(`Deleted: ${entryId}`))).toBe(true);
+    expect(stdout.some((l) => l.includes("Cancelled."))).toBe(false);
+
+    const store = await MemoryStore.create(tmpDir);
+    try {
+      expect(store.read(entryId)).toBeNull();
     } finally {
       store.close();
     }

@@ -31,6 +31,14 @@ export const deleteCommand = defineCommand({
     try {
       // Confirm unless --yes
       if (!args.yes) {
+        // Refuse to block on a non-interactive stdin read; require --yes instead.
+        if (!process.stdin.isTTY) {
+          console.error(
+            "Error: Confirmation requires an interactive terminal. Re-run with --yes to skip the prompt.",
+          );
+          process.exitCode = 1;
+          return;
+        }
         console.log(`Delete memory ${args.id}? (y/N)`);
         // Use a synchronous read from stdin for confirmation
         const answer = (prompt("") ?? "").toLowerCase();
