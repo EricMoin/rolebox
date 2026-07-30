@@ -13,6 +13,7 @@
 
 /** @jsxImportSource @opentui/solid */
 import { createSignal, createMemo, createEffect, onCleanup, createRoot, Show, For, ErrorBoundary, type JSX } from "solid-js";
+import type { TuiSlotContext } from "@opencode-ai/plugin/tui";
 import { existsSync } from "node:fs";
 import { stateDirFor } from "../utils/state-paths";
 import { readMonitorSnapshot, readTaskDetail } from "../cli/commands/monitor/monitor-reader";
@@ -107,7 +108,7 @@ const DETAIL_SCROLL_STEP = 500;
  */
 export function createSidebarRenderer(workspaceDir: string) {
   return (
-    ctx: { theme: { current: ThemeColors } },
+    ctx: TuiSlotContext,
     props: { session_id: string },
   ) =>
     createRoot((dispose) => {
@@ -140,7 +141,7 @@ export function createSidebarRenderer(workspaceDir: string) {
       let lastGood: MonitorSnapshot | null = null;
       let canceled = false;
 
-      const tc = () => ctx.theme.current;
+      const tc = () => ctx.theme.current as unknown as ThemeColors;
 
       // ── Helper: read task detail with workspaceDir ──
       function readDetail(taskId: string, offset = 0): void {
@@ -285,7 +286,7 @@ export function createSidebarRenderer(workspaceDir: string) {
         setFilterMode(next);
         if (!next) {
           setFilterText("");
-          setFilterStatuses(new Set());
+          setFilterStatuses(new Set<string>());
           setFilterSessionId(null);
         }
       };
@@ -428,7 +429,7 @@ export function createSidebarRenderer(workspaceDir: string) {
         const loops = snap.loops.filter((l) => {
           if (!(scope.has(l.originSessionId) || l.originSessionId === currentSessionId)) return false;
           if (filterSessionId() !== null && l.originSessionId !== filterSessionId()) return false;
-          return filterMatch(l.fnName);
+          return filterMatch((l as { fnName?: string }).fnName);
         });
 
         // Engine graphs — no sessionId to match, so only the text filter applies
@@ -466,7 +467,7 @@ export function createSidebarRenderer(workspaceDir: string) {
             <text><span fg={norm}>{"  running: "}</span><span fg={info}>{String(dispatchSummary.running)}</span></text>
             <text><span fg={norm}>{"  pending: "}</span><span fg={warn}>{String(dispatchSummary.pending)}</span></text>
             <text><span fg={norm}>{"  completed: "}</span><span fg={rgbaToCSS(c.success)}>{String(dispatchSummary.completed)}</span></text>
-            <text><span fg={norm}>{"  errors: "}</span><span fg={err}>{String(dispatchSummary.errors)}</span></text>
+            <text><span fg={norm}>{"  errors: "}</span><span fg={err}>{String(dispatchSummary.error)}</span></text>
           </box>
         );
       }
