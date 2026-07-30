@@ -14,18 +14,11 @@ import { tmpdir } from "node:os";
 import type { DownloadRoleProcess } from "../../src/cli/registry-client";
 import type { DownloadProgress } from "../../src/cli/download-progress";
 import { hasTar } from "../helpers/tar";
+import { downloadRole } from "../../src/cli/registry-client";
 
-// The REAL downloadRole is loaded via a cache-busted dynamic import: bun keys
-// mock.module by resolved module path (no un-mock API), so a limited mock
-// registered by another test file could shadow the real registry-client for the
-// rest of the single-process run and hand this file a stubbed downloadRole.
-// Loading the real module fresh bypasses the mock registry entirely.
-async function loadDownloadRole() {
-  const real = await import(
-    "../../src/cli/registry-client.ts?stream-real=" + Date.now() + "-" + Math.random()
-  );
-  return real.downloadRole as typeof import("../../src/cli/registry-client").downloadRole;
-}
+// The real downloadRole is imported statically. Under `bun test --isolate` each
+// test file gets its own module registry, so this always resolves to the real
+// registry-client regardless of mocks registered by other test files.
 
 const originalFetch = globalThis.fetch;
 
@@ -98,7 +91,6 @@ describe("downloadRole progress streaming", () => {
       globalThis.fetch = mock(() => Promise.resolve(resp));
 
       const { progress, updates, phases } = makeRecorder();
-      const downloadRole = await loadDownloadRole();
       const resultDir = await downloadRole(
         { name: "community", url: "https://github.com/example/myrepo" },
         "code-reviewer",
@@ -141,7 +133,6 @@ describe("downloadRole progress streaming", () => {
       globalThis.fetch = mock(() => Promise.resolve(resp));
 
       const { progress, updates, phases } = makeRecorder();
-      const downloadRole = await loadDownloadRole();
       const resultDir = await downloadRole(
         { name: "community", url: "https://github.com/example/myrepo" },
         "code-reviewer",

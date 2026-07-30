@@ -1,23 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, spyOn, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { rmSync, mkdirSync, existsSync, symlinkSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// Ensure the REAL paths module (with getRolePath sanitization) is what the
-// uninstall command sees. Other test files register limited mock.module entries
-// for src/cli/paths; bun keys mocks by the resolved module path and offers no
-// un-mock API, so a limited mock can shadow the real module for the rest of the
-// single-process run. Loading the real module via a fresh (cache-busted) import
-// and re-registering it with a SYNC mock factory (an async factory would
-// deadlock bun's resolver under full-suite concurrency) bypasses the limited
-// mock. This runs before the uninstall command is dynamically imported below.
-const realPaths = await import(
-  "../../../src/cli/paths.ts?uninstall-real=" + Date.now() + "-" + Math.random()
-);
-
 async function importUninstall() {
-  // Cache-bust so the command module re-evaluates against the real-module
-  // paths mock registered in beforeEach rather than a stale cached instance.
+  // Cache-bust so each call re-evaluates the command module against the mocks
+  // registered in beforeEach rather than reusing a previously cached instance.
   return await import(
     "../../../src/cli/commands/uninstall.ts?t=" + Date.now() + "-" + Math.random()
   );
@@ -27,11 +15,6 @@ let tmpConfigDir: string;
 let tmpDataDir: string;
 
 beforeEach(() => {
-  // Re-register the REAL paths module (with getRolePath sanitization) right
-  // before each test so a limited paths mock registered by another file's
-  // beforeEach cannot shadow it when this test dynamically imports uninstall().
-  mock.module("../../../src/cli/paths", () => realPaths);
-
   tmpConfigDir = mkdtempSync(join(tmpdir(), "rolebox-uninstall-config-"));
   tmpDataDir = mkdtempSync(join(tmpdir(), "rolebox-uninstall-data-"));
   process.env.XDG_CONFIG_HOME = tmpConfigDir;

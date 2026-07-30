@@ -7,6 +7,14 @@ import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
 import type { RegistryManifest } from "../../src/cli/types";
+// Pre-load the real paths module so the mock spreads its full export surface
+// (including assertSafePathSegment / getRolePath). This file's own mock.module
+// for "../../src/cli/paths" shadows any import of that specifier (bun keys
+// mocks by resolved specifier), so the real module is reached via a distinct,
+// non-cache-busted query-string specifier. The specifier is bound to a const so
+// tsc does not try to resolve the query-string form as a static module.
+const e2eRealPathsSpecifier = "../../src/cli/paths.ts?e2e-real";
+const e2eRealPaths = await import(e2eRealPathsSpecifier);
 
 const e2eModConfig = mkdtempSync(join(tmpdir(), "rolebox-e2e-mod-config-"));
 const e2eModData = mkdtempSync(join(tmpdir(), "rolebox-e2e-mod-data-"));
@@ -23,15 +31,6 @@ const pGetConfigDir = () => {
   if (xdg) return join(xdg, "rolebox");
   return join(homedir(), ".config", "rolebox");
 };
-
-// Pre-load the real paths module so the mock spreads its full export surface
-// (including assertSafePathSegment / getRolePath). A limited mock that omits
-// these symbols shadows the real module globally and breaks any later test
-// that needs real roleId sanitization — bun keys mocks by resolved specifier
-// with no un-mock API.
-const e2eRealPaths = await import(
-  "../../src/cli/paths.ts?e2e-real=" + Date.now() + "-" + Math.random()
-);
 
 mock.module("../../src/cli/paths", () => ({
   ...e2eRealPaths,

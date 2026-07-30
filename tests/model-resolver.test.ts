@@ -37,13 +37,7 @@
  *       initModelResolver call
  */
 
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-
-// Bun v1.3.14: override any stale mock.module(".../cli/model-utils", ...) leaked
-// from sync.test.ts (which mocks scanAvailableModels → () => []).
-mock.module("../src/cli/model-utils", () => ({
-  ...require("../src/cli/model-utils"),
-}));
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 
 import {
   mkdtempSync,

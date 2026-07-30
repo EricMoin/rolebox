@@ -7,50 +7,28 @@
 // network boundary.
 //
 // ═══════════════════════════════════════════════════════════════════════
-// IMPORTANT — uncovered integration seam
+// Scope note
 // ═══════════════════════════════════════════════════════════════════════
 //
-// This file does NOT drive the install() command function directly.
-// The install() → downloadRole() → tar xzf → integrity check → atomic swap
-// → lock commit chain is NOT exercised end-to-end through install().
+// This file drives downloadRole / computeIntegrity / atomic-swap directly
+// against real artifacts; it does NOT drive the install() command function
+// end-to-end. Under `bun test --isolate` each test file has its own module
+// registry, so the real registry-client / paths / fs-utils modules imported
+// below resolve to the on-disk source regardless of mocks registered by other
+// test files (e.g. install.test.ts).
 //
-// Why: bun test runs install.test.ts BEFORE this file (regardless of
-// command-line order — bun sorts test files alphabetically and "install."
-// (with a dot) sorts before "install-realtime." (with a hyphen) in
-// practice). install.test.ts's beforeEach registers mock.module stubs for
-// src/cli/registry-client that replace downloadRole/computeIntegrity with
-// throw-on-call stubs. Bun keys mock.module registrations by the resolved
-// module-path string and these registrations persist across test files
-// within the same process — there is no mock.module un-mock API (empirically
-// confirmed, and documented as such in bun's test runner). Moreover,
-// re-registering the same mock.module specifier in this file's beforeEach
-// does not reliably replace the stub registration: the original stub
-// factory remains active, and the cache-busted dynamic import of install()
-// still resolves against it. Experimental attempts to fix this via
-// afterEach restoration in install.test.ts and progress-wiring.test.ts
-// also failed — the mock.module registry appears to retain the first
-// registration for each specifier rather than replacing it.
+// Covered end-to-end:
+//   • downloadRole() → tar xzf with a real tarball (tests 1 & 2)
+//   • computeIntegrity() on a real extracted tree
+//   • Atomic swap + rollback with a real extracted artifact
+//     (test 3 — manually exercises the same moveDir / getRolePath /
+//     ensureWritableDir calls that install() uses)
 //
-// What IS covered end-to-end:
-//   • downloadRole() → tar xzf with real tarball (tests 1 & 2 below)
-//   • computeIntegrity() on real extracted tree
-//   • Atomic swap + rollback logic with a real extracted artifact
-//     (test 3 below — manually exercises the same moveDir / getRolePath /
-//     ensureWritableDir calls that install() uses at lines 132-153)
-//
-// What is NOT covered end-to-end:
-//   • The install() function itself, because by the time this file's tests
-//     run, install.test.ts's mock.module for registry-client is locked in
-//     and the cache-busted dynamic import of install() cannot resolve the
-//     real downloadRole import against a clean module graph.
-//
-// This gap is test-infrastructure-limited (bun mock.module semantics), not
-// logic-limited — the atomic-swap logic IS tested below with real artifacts,
-// and the install() stub wiring IS tested in install.test.ts (albeit with
-// mocked downloadRole). The only thing missing is proving that these two
-// compose correctly in-process, which would require a separate bun process
-// (effectively --isolate) or a different test runner with mock cleanup.
-// ═══════════════════════════════════════════════════════════════════════
+// Not covered end-to-end:
+//   • The install() → downloadRole composition; install() itself is driven
+//     only via install.test.ts's stub wiring. The atomic-swap logic IS tested
+//     below with real artifacts, and the install() stub wiring IS tested in
+//     install.test.ts.
 //
 // Unix-centric: depends on a real `tar` on PATH (used both to build the
 // fixture via `tar czf` and to extract via `tar xzf`). SKIPS GRACEFULLY on
@@ -60,20 +38,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { hasTar } from "../../helpers/tar";
-
-// Pre-load the REAL registry-client and paths modules via cache-busted
-// imports. These are called DIRECTLY (bypassing mock.module), so they always
-// resolve against the real on-disk source regardless of mock.module
-// registrations from other test files.
-const realRegistryClient = await import(
-  "../../../src/cli/registry-client.ts?irt-real=" + Date.now() + "-" + Math.random()
-);
-const realPaths = await import(
-  "../../../src/cli/paths.ts?irt-real=" + Date.now() + "-" + Math.random()
-);
-const realFsUtils = await import(
-  "../../../src/cli/fs-utils.ts?irt-real=" + Date.now() + "-" + Math.random()
-);
+import * as realRegistryClient from "../../../src/cli/registry-client";
+import * as realPaths from "../../../src/cli/paths";
+import * as realFsUtils from "../../../src/cli/fs-utils";
 
 const originalFetch = globalThis.fetch;
 
@@ -150,9 +117,7 @@ describe("install with the real download/extraction path", () => {
         return Promise.resolve(new Response(manifestYaml, { status: 200 }));
       });
 
-      // Call downloadRole directly from the pre-loaded real module to bypass
-      // any stale mock.module bindings (see the "uncovered integration seam"
-      // comment at the top of this file).
+      // Call downloadRole directly from the real module.
       const { spawn, spawnSync } = await import("node:child_process");
       const resultDir = await realRegistryClient.downloadRole(
         { name: "oh-my-role", url: "https://github.com/example/myrepo" },
@@ -213,13 +178,10 @@ describe("install with the real download/extraction path", () => {
     async () => {
       // This test manually exercises the same atomic-swap + rollback logic
       // that install() uses at lines 132-153 of src/cli/commands/install.ts,
-      // but with a real extracted tarball (not stubs). The full install()
-      // chain cannot be called directly because mock.module contamination
-      // from install.test.ts stubs the registry-client imports (see the
-      // "uncovered integration seam" comment at the top of this file).
-      // However, the atomic swap logic is independently tested here with
-      // real filesystem operations — the same moveDir / getRolePath /
-      // ensureWritableDir / rmSync calls that install() performs.
+      // but with a real extracted tarball (not stubs). The atomic swap logic
+      // is independently tested here with real filesystem operations — the
+      // same moveDir / getRolePath / ensureWritableDir / rmSync calls that
+      // install() performs.
       const { spawn, spawnSync } = await import("node:child_process");
 
       // Phase 1: Download and extract a real tarball → extractedDir.

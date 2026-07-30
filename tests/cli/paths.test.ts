@@ -3,18 +3,10 @@ import { mkdtempSync, chmodSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// This file exercises the REAL paths module. Because bun keys mock.module by
-// the resolved module path and provides no un-mock API, other test files that
-// register a limited mock for src/cli/paths can shadow the real module for the
-// rest of the single-process run. A static import here would therefore be
-// order-dependent and could resolve to a stale limited mock that omits the
-// symbols this file needs (getPlatform / setPlatformForTest /
-// assertSafePathSegment). Loading the real module via a fresh (cache-busted)
-// dynamic import bypasses the mock registry entirely, making this file robust
-// under the standard `bun test` runner.
-const paths = await import(
-  "../../src/cli/paths.ts?real=" + Date.now() + "-" + Math.random()
-);
+// This file exercises the REAL paths module. Under `bun test --isolate` each
+// test file has its own module registry, so a static import resolves to the
+// real module regardless of mock.module calls registered by other test files.
+import * as paths from "../../src/cli/paths.ts";
 const {
   getDataDir,
   getConfigDir,

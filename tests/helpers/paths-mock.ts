@@ -2,35 +2,38 @@
 // need to redirect data/config dirs to temp locations.
 //
 // Background: bun keys `mock.module` registrations by the resolved module path
-// and has NO un-mock API (mock.restore() does not revert module mocks).  A
-// limited-export mock registered by one test file can therefore shadow the REAL
-// module for every subsequent test file in the single-process run.  If the
-// limited mock omits `assertSafePathSegment` / `getRolePath`, any later test
-// that calls `getRolePath()` will get the mock's implementation — which
-// typically does NOT sanitize its arguments, silently bypassing roleId path
-// traversal protection.
+// and has NO un-mock API (mock.restore() does not revert module mocks).  The
+// test suite runs under `bun test --isolate`, so each test FILE gets a fresh
+// global object and module registry — a mock registered by one file can no
+// longer shadow the real module for a later file, making cross-file mock.module
+// leakage structurally impossible.
 //
-// This helper loads the REAL paths module once via a fresh (cache-busted) import
-// and returns a sync factory that spreads its full export surface, so the mock
-// always includes `assertSafePathSegment`, `getRolePath`, `getRolesDir`,
-// `getPlatform`, `setPlatformForTest`, and every other real export.  Callers
-// override ONLY the functions they need to redirect (typically `getDataDir` /
-// `getConfigDir`).
+// This helper statically imports the REAL paths module and returns a sync
+// factory that spreads its full export surface, so the mock always includes
+// `assertSafePathSegment`, `getRolePath`, `getRolesDir`, `getPlatform`,
+// `setPlatformForTest`, and every other real export.  A limited-export mock
+// that drops `assertSafePathSegment` / `getRolePath` would silently bypass
+// roleId path traversal protection, so the full-surface spread is a required
+// safety guard.  Callers override ONLY the functions they need to redirect
+// (typically `getDataDir` / `getConfigDir`).
+//
+// No cache-busting is needed: under `--isolate` the registry is per-file, and a
+// consuming file's `mock.module(...)` runs in its body AFTER its imports are
+// evaluated, so this helper's static import always resolves to the real module.
 //
 // Usage (file level):
-//   import { createPathsMock } from "../../helpers/paths-mock";
-//   mock.module("../../../src/cli/paths", () => createPathsMock({
+//   import { createPathsMockPayload } from "../../helpers/paths-mock";
+//   mock.module("../../../src/cli/paths", () => createPathsMockPayload({
 //     getDataDir: () => dataDir,
 //     getConfigDir: () => configDir,
 //     extra: { getSyncTarget: ..., },
 //   }));
 
-// Pre-load the REAL paths module once.  The cache-busting query string ensures
-// this import bypasses any mock.module registry that may already be active for
-// `src/cli/paths` — it always resolves to the real on-disk module.
-const _REAL_PATHS = await import(
-  "../../src/cli/paths.ts?paths-mock-helper=" + Date.now() + "-" + Math.random()
-);
+// Statically import the REAL paths module.  Because a consuming file's
+// `mock.module(...)` runs after its imports are evaluated, this always resolves
+// to the real on-disk module even when a mock for `src/cli/paths` is registered
+// later in the same file.
+import * as _REAL_PATHS from "../../src/cli/paths.ts";
 
 export interface PathsMockOpts {
   /** Override for getDataDir. */

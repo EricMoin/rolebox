@@ -12,18 +12,11 @@ const mockComputeIntegrity = mock();
 
 import { DownloadProgress } from "../../../src/cli/download-progress";
 
-// Preload the REAL registry-client and paths modules via fresh (cache-busted)
-// imports. mock.module factories must be sync (async factories deadlock bun's
-// resolver under full-suite concurrency), so the real namespaces are loaded
-// here and returned by the sync factories below. The registry-client mock
-// spreads the real module's full export surface so a later file never hits a
-// missing symbol; paths is returned verbatim (XDG_* env vars redirect dirs).
-const realRegistryClient = await import(
-  "../../../src/cli/registry-client.ts?progress-real=" + Date.now() + "-" + Math.random()
-);
-const realPaths = await import(
-  "../../../src/cli/paths.ts?progress-real=" + Date.now() + "-" + Math.random()
-);
+// The real registry-client is needed so the beforeEach stub can spread its full
+// export surface while overriding only the install-path functions with the mocks
+// below. Under `bun test --isolate` the module registry is per-file, so a static
+// import resolves to the real on-disk module — no cache-busting required.
+import * as realRegistryClient from "../../../src/cli/registry-client.ts";
 
 const sampleManifest: RegistryManifest = {
   name: "oh-my-role",
@@ -58,8 +51,6 @@ beforeEach(() => {
     computeIntegrity: mockComputeIntegrity,
   }));
 
-  mock.module("../../../src/cli/paths", () => realPaths);
-
   const unimplemented = (name: string) => () => { throw new Error(`${name} called without mock implementation`); };
   mockFetchManifest.mockImplementation(unimplemented("fetchRegistryManifest"));
   mockDownloadRole.mockImplementation(unimplemented("downloadRole"));
@@ -73,9 +64,6 @@ afterEach(() => {
   rmSync(tmpConfigDir, { recursive: true, force: true });
   rmSync(tmpDataDir, { recursive: true, force: true });
   try { rmSync(tmpExtractedDir, { recursive: true, force: true }); } catch { /* already gone */ }
-  // Restore the real modules so any later test file sees real deps.
-  mock.module("../../../src/cli/registry-client", () => realRegistryClient);
-  mock.module("../../../src/cli/paths", () => realPaths);
 });
 
 function createMockExtractedDir(roleId: string): string {
@@ -93,8 +81,8 @@ function setupBasicMocks(version = "1.0.0") {
 }
 
 async function importInstall() {
-  // Cache-bust so the command re-evaluates against the mocks registered in
-  // beforeEach rather than a stale cached instance from another file.
+  // Cache-bust so each call re-evaluates the command module against the mocks
+  // registered in beforeEach rather than reusing a previously cached instance.
   return await import(
     "../../../src/cli/commands/install.ts?t=" + Date.now() + "-" + Math.random()
   );
