@@ -37,7 +37,8 @@
     "build:tui": "bun run scripts/build-tui.ts",
     "prepublishOnly": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun run test:core && bun run test:tui",
+    "test:core": "bun test --isolate --path-ignore-patterns=tests/tui",
     "test:tui": "bun test tests/tui/",
     "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\""
   },

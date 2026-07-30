@@ -41,12 +41,66 @@ jobs:
       - name: Build TUI module (bundle + declarations)
         run: bun run build:tui
 
-      - name: Run tests
-        # Plain `bun test` (no --isolate), matching the package.json "test"
-        # script. The suite is written to be pollution-safe under the standard
-        # single-process runner: tests that need the real modules load them via
-        # a fresh (cache-busted) import and re-register real-module mocks before
-        # dynamically importing the command under test, so cross-file mock.module
-        # leakage cannot break a later file. See tests/cli/paths.test.ts and
-        # tests/cli/commands/install-realtime.test.ts for the pattern.
-        run: bun test
+      - name: Run tests (isolated core suite)
+        # Each test file runs in its own module registry under `--isolate`,
+        # which is what makes cross-file mock.module leakage structurally
+        # impossible. The tests/tui/ leg is carved out into its own step below:
+        # @opentui/core performs a top-level await during import that fails
+        # under `--isolate` (a third-party limitation we cannot fix by editing
+        # our tests). A separate invocation is a separate process, so it gets
+        # isolation via the process boundary anyway. Do NOT re-merge the legs.
+        run: bun test --isolate --path-ignore-patterns=tests/tui
+
+      - name: Run TUI tests (non-isolated)
+        # @opentui/core's top-level await fails under `--isolate`; this leg runs
+        # without it. Keep this separate from the isolated step above.
+        run: bun test tests/tui/
+
+      - name: Order-independence regression guard (forward)
+        # REGRESSION GUARD — do NOT delete or merge as redundant. These two files
+        # historically failed together depending on execution order, caused by
+        # bun's cross-file `mock.module` leakage: a mock registered by one file
+        # shadowed the real module for a later file. Under `--isolate` each test
+        # file gets its own module registry, so the pair must pass in either
+        # order. Running it both ways is the structural proof the leakage is gone
+        # and guards against reintroducing shared-registry pollution.
+        run: bun test --isolate tests/graph/graph-store.test.ts tests/cli/registry-client.test.ts
+
+      - name: Order-independence regression guard (reverse)
+        # Same pair with arguments reversed — both directions must pass. Keep
+        # this step next to the forward step above.
+        run: bun test --isolate tests/cli/registry-client.test.ts tests/graph/graph-store.test.ts
+
+      - name: Randomized-order core suite (full-suite order-independence fuzz)
+        # Run the ENTIRE core suite under a random test order to catch any order-
+        # dependent failure beyond the known pair. Runs only on ubuntu-latest:
+        # the order-dependence defect class (bun module-registry / singleton
+        # ordering) is platform-independent, and the deterministic suite already
+        # exercises platform-specific paths/tar on all three OSes. Running this
+        # ~160s leg on all three OSes would triple its compute cost for no extra
+        # coverage of the defect class.
+        if: matrix.os == 'ubuntu-latest'
+        run: bun test --isolate --randomize --path-ignore-patterns=tests/tui
+
+      - name: Randomized-order TUI suite (order-independence fuzz)
+        # Non-isolated tui leg under random order. Same platform rationale as the
+        # randomized core step above (ubuntu-latest only).
+        if: matrix.os == 'ubuntu-latest'
+        run: bun test tests/tui/ --randomize
+
+      - name: Assert clean working tree (no stray artifacts)
+        # Fail CI if any test step left the working tree dirty. Catches stray
+        # artifact writes — notably the relative `cache/` tree the historical bug
+        # produced in the repo root. Placed LAST so it covers every test step
+        # above (main suite, order-independence proofs, randomized leg).
+        # `shell: bash` keeps a single implementation across all three matrix
+        # OSes (Windows runners ship Git Bash).
+        shell: bash
+        run: |
+          dirty=$(git status --porcelain --untracked-files=all)
+          if [ -n "$dirty" ]; then
+            echo "::error::Working tree dirty after test run — stray artifact writes:"
+            printf '%s\n' "$dirty"
+            exit 1
+          fi
+          echo "Clean working tree after test run."
