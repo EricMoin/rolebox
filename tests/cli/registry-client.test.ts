@@ -1,5 +1,8 @@
-// NOTE: Uses XDG_DATA_HOME env var to control paths instead of mock.module
-// to avoid Bun v1.3.14's mock.module cross-file persistence issue.
+// NOTE: Cache isolation for fetchRegistryManifest is achieved with per-test
+// temp dirs via XDG_DATA_HOME, not mock.module. The suite runs under
+// `bun test --isolate`, so each file gets a fresh module registry and getDataDir()
+// always resolves through the real src/cli/paths module, honoring XDG_DATA_HOME.
+// Cross-file mock.module leakage is structurally impossible.
 import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -221,10 +224,12 @@ describe("fetchRegistryManifest", () => {
 
   it("caches manifest and uses cache within TTL", async () => {
     const callCount = { value: 0 };
-    const mockResponse = new Response(validYaml, { status: 200 });
+    // Build a fresh Response per fetch call — a Response body can only be
+    // consumed once, so a single hoisted Response would fail this test for the
+    // wrong reason if the cache ever missed on the second call.
     globalThis.fetch = mock(() => {
       callCount.value++;
-      return Promise.resolve(mockResponse);
+      return Promise.resolve(new Response(validYaml, { status: 200 }));
     });
 
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-cache-"));
@@ -633,5 +638,3 @@ describe("integration", () => {
     expect(Object.keys(result.roles).length).toBeGreaterThan(0);
   });
 });
-
-
