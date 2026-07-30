@@ -59,7 +59,7 @@ import { markDirty } from "./engine-persistence.ts";
 const VALID_NODE_TRANSITIONS: Record<NodeStatus, readonly NodeStatus[]> = {
   // Normal path
   pending: [NodeStatus.Ready, NodeStatus.Cancelled, NodeStatus.Escalate],
-  ready: [NodeStatus.Running, NodeStatus.Cancelled],
+  ready: [NodeStatus.Running, NodeStatus.Cancelled, NodeStatus.Escalate],
   running: [
     NodeStatus.Completed,
     NodeStatus.Escalate,

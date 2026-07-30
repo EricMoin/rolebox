@@ -107,6 +107,14 @@ describe("error and cancel paths", () => {
     expect(canTransitionNode(NodeStatus.Pending, NodeStatus.Cancelled)).toBe(true);
     expect(canTransitionNode(NodeStatus.Ready, NodeStatus.Cancelled)).toBe(true);
   });
+
+  it("ready → escalate is a legal transition (budget pre-check escalates an undispatched node)", () => {
+    expect(canTransitionNode(NodeStatus.Ready, NodeStatus.Escalate)).toBe(true);
+    const node = makeNode({ status: NodeStatus.Ready });
+    markEscalated(NO_STATE, node, "graph budget exhausted");
+    expect(node.status).toBe(NodeStatus.Escalate);
+    expect(node.errorReason).toBe("graph budget exhausted");
+  });
 });
 
 // ── Convenience helpers ──────────────────────────────────────────────────
