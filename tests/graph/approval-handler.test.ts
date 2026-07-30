@@ -291,7 +291,10 @@ describe("reject (engine path)", () => {
 
 /**
  * Two sources feed the approval gate P; the S2 branch also fans into X → Y,
- * and both sources fan into Z (an `any`-join survivor candidate).
+ * and both sources fan into Z. Z uses an `any` join: it fires on the first
+ * source alone. The D3 answer-path cascade must NOT retire the still-running
+ * S2 on Z's first-source activation, because S2 is still needed by P and X —
+ * the shared-upstream guard (cascade-canceller.ts) keeps it running.
  */
 function partialGraph(): GraphDeclaration {
   return {

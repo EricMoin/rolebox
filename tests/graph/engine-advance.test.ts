@@ -13,6 +13,7 @@ import {
   AdvanceEngine,
   type NodeDispatchPort,
   type NodeCompletionEvent,
+  type GraphBudgetPort,
 } from "../../src/graph/engine/engine-advance.ts";
 import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 
@@ -457,5 +458,37 @@ describe("result capture from dispatch task", () => {
     expect(captured!.nodeId).toBe("A");
     expect(captured!.signalType).toBe("answer");
     expect(captured!.payload).toEqual({ ok: true });
+  });
+});
+
+// ── Budget pre-check: ready node escalated before dispatch ─────────────────
+
+describe("budget pre-check escalates an undispatched ready node", () => {
+  it("escalates the ready node without throwing and reaches terminal phase", async () => {
+    const state = createEngineState(standaloneNode("A", "a1"), "g-budget");
+    provision(state);
+    const bridge = new SignalBridge();
+    const fake = new FakeDispatch();
+    const budget: GraphBudgetPort = {
+      checkGraphBudget: () => ({ exceeded: true, reason: "graph budget exhausted" }),
+    };
+    const engine = new AdvanceEngine({ state, signalBridge: bridge, dispatch: fake, budget });
+
+    // Previously markEscalated on a ready node threw
+    // "Invalid node transition: ready -> escalate", leaving the node stuck in
+    // `ready` (neither dispatched nor escalated). Now it must not throw.
+    await engine.dispatchReady();
+
+    const node = state.nodes.get("A")!;
+    expect(node.status).toBe(NodeStatus.Escalate);
+    expect(node.errorReason).toBe("graph budget exhausted");
+    // The node was dropped from the frontier (no lingering ready entry).
+    expect(state.frontier.includes("A")).toBe(false);
+    // No dispatch was attempted for the escalated node.
+    expect(fake.calls.length).toBe(0);
+    // Single-node graph with its only node escalated → no active nodes remain
+    // → the graph reaches the terminal `complete` phase.
+    expect(state.phase).toBe(EnginePhase.Complete);
+    expect(state.advancingLock).toBe(false);
   });
 });

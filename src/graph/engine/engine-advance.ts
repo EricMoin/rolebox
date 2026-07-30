@@ -77,11 +77,13 @@ import {
   mapDispatchStatusToSignal,
   isDispatchTaskLive,
 } from "./engine-recovery.ts";
-import { collectUpstreamResults } from "./join-evaluator.ts";
+import { collectUpstreamResults, evaluateJoin } from "./join-evaluator.ts";
 import { applyDataMapping } from "./data-mapping-transform.ts";
+import { cancelPendingUpstreams } from "./cascade-canceller.ts";
 import {
   propagateEscalate,
   propagateRevise,
+  type SignalPropagationReport,
 } from "./signal-propagation.ts";
 import {
   checkGraphTermination,
@@ -581,7 +583,24 @@ export class AdvanceEngine {
       if (loopMember) {
         executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
       } else {
-        this._propagateEscalate(node, signalPayload);
+        const report = this._propagateEscalate(node, signalPayload);
+        // Non-loop mirror of loop-group-executor's §3.3 cascade: every
+        // join-failed NON-loop convergence node's still-pending upstreams are
+        // no longer needed and must be retired so they stop consuming dispatch
+        // budget. Loop-group members are skipped — their cascade is owned by
+        // executeLoopStep, and the revise back-edge topology makes a blind
+        // cascade here unsafe (it would wrongly retire the still-needed
+        // back-edge source).
+        for (const escalatedId of report.escalated) {
+          const target = state.nodes.get(escalatedId);
+          if (!target || target.loopGroupId !== undefined) continue;
+          cancelPendingUpstreams(
+            state,
+            target,
+            evaluateJoin(state, target),
+            this.dispatchPort,
+          );
+        }
       }
     } else if (signalType === "revise_needed") {
       if (loopMember) {
@@ -593,18 +612,26 @@ export class AdvanceEngine {
 
     // Steps 3-5: forward data flow on `answer`.
     if (signalType === "answer") {
-      // Loop convergence: record the `converged` early-exit and retire any
-      // no-longer-needed pending upstreams (the loop ends on the happy path —
-      // only forward edges run).
+      // Loop convergence: a loop member's answer step decides whether forward
+      // data flow runs. Only a `converged` answer flows forward (the loop exits
+      // on the happy path — forward edges run). A downgraded answer (revising /
+      // stuck / max_traversals_exhausted) or an escalating step already handled
+      // propagation / re-entry, so forward activation is skipped — otherwise
+      // downstream nodes (e.g. the sink along the reviewer's `answer` edge)
+      // would be wrongly activated while the loop is still churning.
+      let forwardActivate = true;
       if (loopMember) {
-        executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
+        const report = executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
+        forwardActivate = report.outcome === "converged";
       }
-      const basePayload = this._buildEdgePayload(node, signalType, signalPayload);
-      // Shared forward-activation: edge activation, per-edge data mapping,
-      // upstream result collection, join-satisfied re-entry, and loop-group
-      // traversal accounting. Deduplicated with _forwardAnswerOnApproval so
-      // the approval-resume path stays in parity with the live-signal path.
-      this._forwardActivation(node, signalType, basePayload);
+      if (forwardActivate) {
+        const basePayload = this._buildEdgePayload(node, signalType, signalPayload);
+        // Shared forward-activation: edge activation, per-edge data mapping,
+        // upstream result collection, join-satisfied re-entry, and loop-group
+        // traversal accounting. Deduplicated with _forwardAnswerOnApproval so
+        // the approval-resume path stays in parity with the live-signal path.
+        this._forwardActivation(node, signalType, basePayload);
+      }
     }
 
     // Step 6: dispatch ready frontier nodes via the dispatch bridge.
@@ -834,6 +861,9 @@ export class AdvanceEngine {
       if (check.exceeded) {
         if (node.status === NodeStatus.Ready) {
           markEscalated(this.state, node, check.reason ?? "graph budget exhausted");
+          // The node is escalated, not dispatched — drop it from the frontier so
+          // it is not left lingering as a ready entry (see budget pre-check).
+          removeFromFrontier(state, node.nodeId);
         }
         return;
       }
@@ -986,8 +1016,8 @@ export class AdvanceEngine {
   private _propagateEscalate(
     node: NodeRuntimeState,
     signalPayload: unknown,
-  ): void {
-    propagateEscalate(this.state, node, signalPayload);
+  ): SignalPropagationReport {
+    return propagateEscalate(this.state, node, signalPayload);
   }
 
   /**
@@ -1234,6 +1264,10 @@ export class AdvanceEngine {
     const state = this.state;
     for (const edge of state.graphDeclaration.edges) {
       if (edge.from !== source.nodeId) continue;
+      // Skip self-loop edges: a single-point always self-loop must never
+      // re-enter itself (defense-in-depth — the validator normally rejects such
+      // graphs, but one built bypassing validation could otherwise spin forever).
+      if (edge.to === source.nodeId) continue;
       if (!this._edgeActivates(edge, signalType, source)) continue;
 
       const target = getNode(state, edge.to);
@@ -1252,6 +1286,22 @@ export class AdvanceEngine {
       // (node-lifecycle.ts §2, orchestration-patterns.md §1.6). Non-loop
       // `completed` nodes are never re-activated (they are terminal sinks).
       if (target.joinSatisfied) {
+        // D3: retire any still-pending sibling upstreams now that the fan-in
+        // join has resolved (any/quorum satisfied). cancelPendingUpstreams
+        // no-ops on a `waiting` verdict and skips already-resolved sources, so
+        // linear flows and always-cycle loop re-entry are unaffected. Gated to
+        // NON-loop targets: a loop convergence node's upstream set includes its
+        // revise back-edge (getUpstreamNodeIds counts it), so a blind cascade
+        // here would wrongly retire the still-needed back-edge source. Loop
+        // cancellation is owned by executeLoopStep (§3.3, escalate path).
+        if (target.loopGroupId === undefined) {
+          cancelPendingUpstreams(
+            state,
+            target,
+            evaluateJoin(state, target),
+            this.dispatchPort,
+          );
+        }
         const isPendingActivation = target.status === NodeStatus.Pending;
         const isLoopReentry = target.status === NodeStatus.Completed &&
           target.loopGroupId !== undefined;

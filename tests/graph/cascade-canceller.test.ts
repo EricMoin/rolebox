@@ -316,6 +316,90 @@ describe("cancelPendingUpstreams — contract", () => {
   });
 });
 
+// ── shared-upstream guard ───────────────────────────────────────────────────
+
+/**
+ * Shared-upstream: X and S both feed the convergence node C; S ALSO feeds an
+ * independent downstream D. Because D still needs S, the cascade canceller
+ * must NOT retire S when C's join resolves — otherwise D is starved.
+ */
+function sharedGraph(strategy: "all" | "any"): GraphDeclaration {
+  return {
+    version: 2,
+    name: "shared",
+    nodes: [
+      { id: "X", agent: "a1", prompt: "x" },
+      { id: "S", agent: "a2", prompt: "s" },
+      { id: "C", agent: "a3", prompt: "c", join: { strategy } },
+      { id: "D", agent: "a4", prompt: "d" },
+    ],
+    edges: [
+      { from: "X", to: "C", type: "always" },
+      { from: "S", to: "C", type: "always" },
+      { from: "S", to: "D", type: "always" },
+    ],
+  };
+}
+
+function sharedRig(strategy: "all" | "any"): {
+  state: EngineState;
+  c: NodeRuntimeState;
+  port: FakeCancelPort;
+} {
+  const state = createEngineState(sharedGraph(strategy), "g-shared");
+  provision(state);
+  setRunning(state, "X", "task-X");
+  setRunning(state, "S", "task-S");
+  return {
+    state,
+    c: state.nodes.get("C")!,
+    port: new FakeCancelPort(),
+  };
+}
+
+describe("cancelPendingUpstreams — shared-upstream guard", () => {
+  it("satisfied verdict: keeps an upstream still needed by another downstream", () => {
+    const { state, c, port } = sharedRig("any");
+    // X answers → C's any-join is satisfied while S is still running.
+    collectUpstreamResults(state, c, payload("X"));
+    expect(evaluateJoin(state, c).kind).toBe("satisfied");
+
+    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), port);
+
+    // S must NOT be cancelled — D (fed only by S) still needs it.
+    expect(report.cancelled).toEqual([]);
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+    expect(port.calls).toEqual([]);
+  });
+
+  it("failed verdict: keeps an upstream still needed by another downstream", () => {
+    const { state, c, port } = sharedRig("all");
+    // X escalates → C's all-join fails while S is still running.
+    collectUpstreamResults(state, c, payload("X", "escalate"));
+    expect(evaluateJoin(state, c).kind).toBe("failed");
+
+    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), port);
+
+    // S must NOT be cancelled — D (fed only by S) still needs it.
+    expect(report.cancelled).toEqual([]);
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+    expect(port.calls).toEqual([]);
+  });
+
+  it("cancels an upstream whose every other downstream has already resolved", () => {
+    const { state, c, port } = sharedRig("any");
+    // D already completed → it no longer needs S, so S is safe to retire.
+    state.nodes.get("D")!.status = NodeStatus.Completed;
+    collectUpstreamResults(state, c, payload("X")); // any-join satisfied
+
+    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), port);
+
+    expect(report.cancelled).toEqual(["S"]);
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Done);
+    expect(port.calls).toEqual(["task-S"]);
+  });
+});
+
 // ── cancelNodes — scoped / cascade primitive ────────────────────────────────
 
 /**

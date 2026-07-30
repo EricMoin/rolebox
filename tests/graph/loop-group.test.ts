@@ -743,3 +743,69 @@ describe("per-node traversal counting", () => {
     expect(state.nodes.get("impl")!.traversalCount).toBe(3);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// D2 regression — a loop member's non-converged answer must NOT forward-
+// activate downstream nodes (the loop step already handled propagation).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("engine-advance — answer downgrade skips forward activation (D2)", () => {
+  it("review answer {verdict:'revise'} re-enters impl but leaves sink Pending", async () => {
+    const { state, engine } = buildEngine(reviewLoopGraph(3));
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("entry", "answer", "seed");
+    await engine.onNodeSignalEmitted("impl", "answer", "v1");
+
+    // review answers with an unresolved verdict → the loop executor downgrades
+    // it to revise semantics (outcome "revising"), re-entering impl.
+    await engine.onNodeSignalEmitted("review", "answer", {
+      verdict: "revise",
+      findings: ["still needs work"],
+    });
+
+    // Revise re-entry happened: impl was re-marked ready and re-dispatched.
+    expect(state.nodes.get("impl")!.status).toBe(NodeStatus.Running);
+    // One traversal consumed by the downgrade (revise semantics).
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    // Forward activation must be skipped: sink is NOT activated (regression —
+    // before the fix the review→sink on_signal(answer) edge wrongly fired).
+    expect(state.nodes.get("sink")!.status).toBe(NodeStatus.Pending);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// D7b regression — a single-point always self-loop must never self-re-enter.
+// Built directly via createEngineState+provision (bypasses the validator).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("engine-advance — single-node always self-loop does not self-re-enter (D7b)", () => {
+  it("answers once, dispatch count stays 1, phase reaches Complete", async () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "self-loop",
+      nodes: [{ id: "A", agent: "a0", prompt: "node A" }],
+      edges: [{ from: "A", to: "A", type: "always" }],
+      loop_groups: [{ id: "lg", nodes: ["A"], max_traversals: 3 }],
+    };
+    const { state, engine, fake } = buildEngine(decl);
+
+    // A is a root: the intra-group always self-edge is excluded from in-degree.
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Ready);
+
+    await engine.dispatchReady();
+    expect(fake.calls).toHaveLength(1);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // A answers once.
+    await engine.onNodeSignalEmitted("A", "answer", "done");
+
+    // No self re-entry: dispatch count stays 1, A does not return to Running.
+    expect(fake.calls).toHaveLength(1);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    // No traversal consumed (the self-loop edge was skipped).
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0);
+    // The graph completes — no active nodes remain.
+    expect(state.phase).toBe(EnginePhase.Complete);
+  });
+});

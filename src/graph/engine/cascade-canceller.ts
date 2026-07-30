@@ -40,6 +40,7 @@
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import {
+  evaluateJoin,
   getUpstreamNodeIds,
   type JoinVerdict,
 } from "./join-evaluator.ts";
@@ -141,6 +142,16 @@ export function cancelPendingUpstreams(
     const upstream = state.nodes.get(sourceId);
     if (!upstream || !isCancellable(upstream)) continue;
 
+    // Shared-upstream guard: skip a candidate that is still needed by a sibling
+    // downstream convergence node. Cancelling it would starve that sibling —
+    // its join is still unresolved (`waiting`) and it may yet consume this
+    // source's signal. Only retire the source when every downstream target other
+    // than the currently-resolved convergence node has already resolved
+    // (satisfied or failed) — or when it only feeds this convergence node.
+    if (hasUnsatisfiedDownstream(state, sourceId, node.nodeId)) {
+      continue;
+    }
+
     // Retire the node's lifecycle: running | ready | pending → cancelled → done.
     markCancelled(state, upstream, `cancelled by join cascade at convergence node "${node.nodeId}"`);
     markDone(state, upstream);
@@ -169,5 +180,57 @@ function isCancellable(node: NodeRuntimeState): boolean {
     node.status === NodeStatus.Pending ||
     node.status === NodeStatus.Ready ||
     node.status === NodeStatus.Running
+  );
+}
+
+/**
+ * Shared-upstream guard: whether `sourceId` is still needed by a downstream
+ * convergence node OTHER than the one currently being resolved
+ * (`resolvedConvergeNodeId`).
+ *
+ * A source must not be cancelled while a sibling downstream still depends on
+ * its signal. `sourceId` feeds that sibling (an edge `sourceId → sibling`
+ * exists), so the sibling is still waiting on it precisely when its join has
+ * not yet resolved — `evaluateJoin` returns `waiting` — AND the sibling is
+ * still an active (non-terminal) node. When every other downstream of the
+ * source is already satisfied or failed (or there is no other downstream), the
+ * source can be safely retired.
+ *
+ * Note: the non-loop fan-in cascade in `engine-advance.ts` is gated to
+ * non-loop targets by its caller; this guard is an additional safety net that
+ * also applies uniformly to the loop-group escalate cascade. The existing
+ * "only cascade for non-loop target" gating is preserved and untouched.
+ */
+function hasUnsatisfiedDownstream(
+  state: EngineState,
+  sourceId: string,
+  resolvedConvergeNodeId: string,
+): boolean {
+  for (const edge of state.graphDeclaration.edges) {
+    if (edge.from !== sourceId) continue;
+    // The convergence node whose join already resolved no longer needs this
+    // source — it is the very reason the cascade is running.
+    if (edge.to === resolvedConvergeNodeId) continue;
+    const downstream = state.nodes.get(edge.to);
+    if (!downstream || !isActive(downstream)) continue;
+    if (evaluateJoin(state, downstream).kind === "waiting") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a node is still active (non-terminal) and therefore capable of
+ * consuming an upstream signal. Terminal states (`completed`, `done`,
+ * `escalate`, `cancelled`, `timeout`) are resolved — they no longer need
+ * upstream signals, so a shared source feeding them is safe to retire.
+ */
+function isActive(node: NodeRuntimeState): boolean {
+  return (
+    node.status === NodeStatus.Pending ||
+    node.status === NodeStatus.Ready ||
+    node.status === NodeStatus.Running ||
+    node.status === NodeStatus.Blocked
   );
 }

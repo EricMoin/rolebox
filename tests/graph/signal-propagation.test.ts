@@ -331,7 +331,7 @@ describe("propagateEscalate (unit)", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("propagateEscalate (engine integration)", () => {
-  it("propagates a leaf escalate to the convergence node and does not misjudge completion for a satisfiable join", async () => {
+  it("absorbs a partial-failure escalate at a still-waiting any-join, then activates on the surviving answer", async () => {
     const { state, engine } = buildEngine(convergeGraph("any"));
 
     await engine.dispatchReady();
@@ -339,15 +339,15 @@ describe("propagateEscalate (engine integration)", () => {
     expect(fakeStatuses(state)).toContainEqual(["A", NodeStatus.Running]);
     expect(fakeStatuses(state)).toContainEqual(["B", NodeStatus.Running]);
 
-    // A answers first → C (any join) is satisfied and dispatched → running.
-    await engine.onNodeSignalEmitted("A", "answer", "from-A");
-    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Running);
-
-    // B escalates → propagates to C, but C's any-join is already satisfied
-    // (A answered) → the escalation is absorbed. C must NOT be escalated and
-    // the graph must NOT spuriously complete while C is still running.
+    // B escalates while C's any-join is still waiting (A pending, none answered)
+    // → the partial failure is absorbed; C must NOT escalate or complete.
     await engine.onNodeSignalEmitted("B", "escalate", { reason: "B exploded" });
     expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Pending);
+
+    // A answers → C activates on the surviving answer; partial failure absorbed,
+    // and the graph must NOT spuriously complete while C is running.
+    await engine.onNodeSignalEmitted("A", "answer", "from-A");
     expect(state.nodes.get("C")!.status).toBe(NodeStatus.Running);
     expect(state.phase).toBe(EnginePhase.Executing);
   });
@@ -389,7 +389,146 @@ describe("propagateEscalate (engine integration)", () => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Non-loop fan-in cascade cancellation (D3 regression)
+//
+// cancelPendingUpstreams has its only automatic call in the loop escalate
+// branch (loop-group-executor.ts). The NON-loop escalate and answer paths must
+// ALSO retire still-pending sibling upstreams once a fan-in join resolves, so
+// they stop consuming dispatch budget. These tests pin that behavior.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Fake dispatch that also records cascade-cancel calls (cancelTask seam). */
+class FakeDispatchWithCancel extends FakeDispatch {
+  cancelCalls: string[] = [];
+  cancelTask(taskId: string): Promise<boolean> {
+    this.cancelCalls.push(taskId);
+    return Promise.resolve(true);
+  }
+}
+
+describe("non-loop fan-in cascade cancellation", () => {
+  it("escalate path: cancels the still-pending sibling when a join-all convergence node escalates", async () => {
+    const { state, engine, fake } = buildEngine(
+      convergeGraph("all"),
+      new FakeDispatchWithCancel(),
+    );
+    const fakeCancel = fake as unknown as FakeDispatchWithCancel;
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("R", "answer", "root");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // A escalates while B is still running → C (all-join) fails and escalates;
+    // B is no longer needed and must be retired by the cascade canceller.
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "A exploded" });
+
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    expect(fakeCancel.cancelCalls).toContain("task-B");
+  });
+
+  it("answer path: cancels the still-pending sibling when an any-join converges", async () => {
+    const { state, engine, fake } = buildEngine(
+      convergeGraph("any"),
+      new FakeDispatchWithCancel(),
+    );
+    const fakeCancel = fake as unknown as FakeDispatchWithCancel;
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("R", "answer", "root");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // A answers first → C's any-join is satisfied → C activates; B (still
+    // running, never to be consumed) is retired by the cascade canceller.
+    await engine.onNodeSignalEmitted("A", "answer", "from-A");
+
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    expect(fakeCancel.cancelCalls).toContain("task-B");
+  });
+});
+
 /** Snapshot the (nodeId → status) pairs for a running engine's live state. */
 function fakeStatuses(state: EngineState): [string, NodeStatus][] {
   return [...state.nodes.entries()].map(([id, n]) => [id, n.status]);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// D3 shared-upstream guard regression
+//
+// A shared upstream that feeds BOTH a converging node and an independent
+// downstream that still needs it must NOT be retired by the cascade canceller.
+// Otherwise the downstream is starved. These tests pin the guard on both the
+// answer path (join satisfied) and the escalate path (join failed).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * R fans out to X and S. Both X and S feed the convergence node C; S also feeds
+ * an independent downstream D. D (fed only by S) still needs S, so the cascade
+ * canceller must preserve S when C's join resolves.
+ */
+function sharedUpstreamGraph(strategy: "all" | "any"): GraphDeclaration {
+  return {
+    version: 2,
+    name: "shared-upstream",
+    nodes: [
+      { id: "R", agent: "a0", prompt: "root" },
+      { id: "X", agent: "a1", prompt: "x" },
+      { id: "S", agent: "a2", prompt: "s" },
+      { id: "C", agent: "a3", prompt: "c", join: { strategy } },
+      { id: "D", agent: "a4", prompt: "d" },
+    ],
+    edges: [
+      { from: "R", to: "X", type: "always" },
+      { from: "R", to: "S", type: "always" },
+      { from: "X", to: "C", type: "on_signal", signal_filter: ["answer"] },
+      { from: "S", to: "C", type: "on_signal", signal_filter: ["answer"] },
+      { from: "S", to: "D", type: "always" },
+    ],
+  };
+}
+
+describe("non-loop fan-in cascade cancellation — shared-upstream guard", () => {
+  it("answer path: keeps a shared upstream still needed by another downstream", async () => {
+    const { state, engine } = buildEngine(
+      sharedUpstreamGraph("any"),
+      new FakeDispatchWithCancel(),
+    );
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("R", "answer", "root");
+    expect(state.nodes.get("X")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+
+    // X answers → C's any-join satisfied → the cascade runs, but S must be kept
+    // because D (fed only by S) still needs it.
+    await engine.onNodeSignalEmitted("X", "answer", "from-X");
+
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Running); // activated
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running); // NOT cancelled
+    expect(state.nodes.get("D")!.status).toBe(NodeStatus.Pending); // still waiting
+  });
+
+  it("escalate path: keeps a shared upstream still needed by another downstream", async () => {
+    const { state, engine } = buildEngine(
+      sharedUpstreamGraph("all"),
+      new FakeDispatchWithCancel(),
+    );
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("R", "answer", "root");
+    expect(state.nodes.get("X")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+
+    // X escalates → C's all-join fails → the cascade runs, but S must be kept
+    // because D (fed only by S) still needs it.
+    await engine.onNodeSignalEmitted("X", "escalate", { reason: "X exploded" });
+
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running); // NOT cancelled
+    expect(state.nodes.get("D")!.status).toBe(NodeStatus.Pending); // still waiting
+  });
+});
