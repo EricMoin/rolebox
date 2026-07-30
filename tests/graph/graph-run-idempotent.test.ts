@@ -18,7 +18,7 @@
  *   replayed `answer` forward flow.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach } from "bun:test";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
@@ -31,6 +31,8 @@ import {
   GraphToolSet,
   type GraphToolSetDeps,
 } from "../../src/graph/tools/graph-tools.ts";
+import { clearParentQueues, GRAPH_COMPLETE_MARKER } from "../../src/dispatch/notification.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 
 // ── Fake dispatch that completes tasks and answers getTask ─────────────────
 
@@ -319,5 +321,165 @@ describe("graph_run concurrent in-flight guard", () => {
     expect(r.retry?.node_id).toBe("A");
     expect(dispatches(fake, "A")).toBe(2);
     expect(fake.calls.at(-1)!.prompt.startsWith("REVISION")).toBe(true);
+  });
+});
+
+// ── Completed-graph re-run → terminal-notification regression ───────────────
+//
+// Regression for the "completed graph duplicate graph_run" bug: a redundant
+// `graph_run` (no node_id) on an already-COMPLETE graph used to rebuild a fresh
+// engine (graph-tools.ts `graph_run`), which creates a new per-instance
+// `_terminationCtx` (engine-advance.ts) and a fresh graph-terminal notifier with
+// a clean dedupe epoch (graph-notify.ts `notified` Set). Every such re-run
+// therefore re-fired `[GRAPH COMPLETE]`. The fix short-circuits a completed-idle
+// graph so the terminal notifier fires exactly once.
+
+class NotifyingDispatch implements NodeDispatchPort {
+  calls: { nodeId: string; prompt: string }[] = [];
+  private subs = new Map<string, TaskTerminatedCallback>();
+  private tasks = new Map<string, DispatchTask>();
+  private seq = 0;
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    this.calls.push({ nodeId: node.nodeId, prompt: node.prompt });
+    const id = `task-${node.nodeId}-${++this.seq}`;
+    const task: DispatchTask = {
+      id,
+      sessionId: `sess-${id}`,
+      parentSessionId: "g",
+      depth: 1,
+      status: "running",
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+    this.tasks.set(id, task);
+    return Promise.resolve(task);
+  }
+
+  onTaskTerminated(taskId: string, cb: TaskTerminatedCallback): TaskTerminatedCallback {
+    this.subs.set(taskId, cb);
+    return cb;
+  }
+
+  getTask(taskId: string): DispatchTask | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /** Complete the most recently dispatched task, firing its termination. */
+  completeLatest(): void {
+    let latestId: string | undefined;
+    for (const id of this.tasks.keys()) latestId = id;
+    if (!latestId) throw new Error("no dispatched task to complete");
+    const task = this.tasks.get(latestId)!;
+    task.status = "completed";
+    this.subs.get(latestId)?.(latestId, "completed");
+  }
+}
+
+class TerminalSessionClient implements ISessionClient {
+  prompts: Array<{ id: string; text: string; noReply?: boolean }> = [];
+
+  async prompt(
+    id: string,
+    options: { parts: Array<{ type: string; text: string }>; noReply?: boolean; agent?: string },
+  ): Promise<{ id: string } | null> {
+    this.prompts.push({
+      id,
+      text: options.parts.map((p) => p.text).join("\n"),
+      noReply: options.noReply,
+    });
+    return { id };
+  }
+
+  async list(): Promise<never> { throw new Error("not implemented"); }
+  async get(): Promise<never> { throw new Error("not implemented"); }
+  async messages(): Promise<never> { throw new Error("not implemented"); }
+  async children(): Promise<never> { throw new Error("not implemented"); }
+  async todo(): Promise<never> { throw new Error("not implemented"); }
+  async diff(): Promise<never> { throw new Error("not implemented"); }
+  async fork(): Promise<never> { throw new Error("not implemented"); }
+  async status(): Promise<never> { throw new Error("not implemented"); }
+  async promptSync(): Promise<never> { throw new Error("not implemented"); }
+  async create(): Promise<never> { throw new Error("not implemented"); }
+  async abort(): Promise<never> { throw new Error("not implemented"); }
+}
+
+const EMPEROR = "emperor-complete-rerun";
+
+function countTerminalCompletes(client: TerminalSessionClient): number {
+  return client.prompts.filter((p) => p.text.includes(GRAPH_COMPLETE_MARKER)).length;
+}
+
+describe("graph_run redundant re-run of a completed graph (terminal notification)", () => {
+  beforeEach(() => {
+    clearParentQueues();
+  });
+
+  it("fires [GRAPH COMPLETE] exactly once; a redundant graph_run adds none", async () => {
+    const client = new TerminalSessionClient();
+    const dispatch = new NotifyingDispatch();
+    const ts = new GraphToolSet({
+      dispatch,
+      graphNotify: { sessionClient: client, emperorSessionId: EMPEROR },
+    });
+
+    const g = ts.graph_create({ name: "completed-rerun" });
+    ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id: g.graph_id });
+    dispatch.completeLatest();
+    await settle();
+    expect(countTerminalCompletes(client)).toBe(1);
+    expect(dispatches(dispatch, "A")).toBe(1);
+
+    // Redundant re-run of the now-completed graph (no node_id).
+    const r = await ts.graph_run({ graph_id: g.graph_id });
+    await settle();
+
+    // No new terminal notification, no re-dispatch, phase stays Complete.
+    expect(countTerminalCompletes(client)).toBe(1);
+    expect(dispatches(dispatch, "A")).toBe(1);
+    expect(r.phase).toBe(EnginePhase.Complete);
+    expect(r.active_nodes).toEqual([]);
+    expect(r.pending_nodes).toEqual([]);
+  });
+
+  it("retry of a completed node still fires exactly one new COMPLETE", async () => {
+    const client = new TerminalSessionClient();
+    const dispatch = new NotifyingDispatch();
+    const ts = new GraphToolSet({
+      dispatch,
+      graphNotify: { sessionClient: client, emperorSessionId: EMPEROR },
+    });
+
+    const g = ts.graph_create({ name: "retry-notify" });
+    ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id: g.graph_id });
+    dispatch.completeLatest();
+    await settle();
+    expect(countTerminalCompletes(client)).toBe(1);
+    expect(dispatches(dispatch, "A")).toBe(1);
+
+    // Targeted retry must still re-dispatch and fire exactly one more COMPLETE.
+    const r = await ts.graph_run({
+      graph_id: g.graph_id,
+      node_id: "A",
+      retry: true,
+      modify_prompt: "REVISION",
+    });
+    dispatch.completeLatest();
+    await settle();
+
+    expect(r.retry?.node_id).toBe("A");
+    expect(dispatches(dispatch, "A")).toBe(2);
+    expect(countTerminalCompletes(client)).toBe(2);
+    expect(dispatch.calls.at(-1)!.prompt.startsWith("REVISION")).toBe(true);
   });
 });

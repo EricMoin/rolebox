@@ -291,4 +291,89 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
 
     expect(client.prompts).toHaveLength(0);
   });
+
+  it("keeps notifiers wired after a mid-flight graph_add_node rebuild (sticky session id)", async () => {
+    const client = new FakeSessionClient();
+    const dispatch = new FakeDispatchSeam();
+    const ts = createGraphToolSet({
+      dispatch,
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: (invokingSessionId) => invokingSessionId,
+      },
+    });
+
+    const graphId = buildSingleNodeGraph(ts);
+    // First run: wire the notifier via the passed session id and complete node A.
+    await ts.graph_run({ graph_id: graphId }, "emperor-live-session");
+    dispatch.completeLatest();
+    await flush();
+    const afterFirstRun = client.prompts.length;
+    expect(afterFirstRun).toBeGreaterThan(0);
+
+    // Mid-flight structure mutation WITHOUT a session id. The fix makes commit()
+    // reuse the graph-stored session id so the rebuilt runtime keeps its
+    // notification seams wired (pre-fix this silently replaced the registry
+    // runtime with a deaf engine whose notifiers resolved to no-ops).
+    ts.graph_add_node({
+      graph_id: graphId,
+      id: "B",
+      agent: "emperor--jinyiwei--backend",
+      prompt: "validate",
+    });
+
+    // Second run WITHOUT a session id — the sticky (stored) session id must be
+    // used to rebuild the engine with a working notifier. Pre-fix this produced
+    // a no-op seam and dropped all notifications for node B's completion.
+    await ts.graph_run({ graph_id: graphId });
+    dispatch.completeLatest();
+    await flush();
+
+    // The rebuilt runtime still delivers notifications (not a no-op seam).
+    expect(client.prompts.length).toBeGreaterThan(afterFirstRun);
+    // Every reminder targets the resolved emperor session (identity resolver).
+    for (const p of client.prompts) {
+      expect(p.id).toBe("emperor-live-session");
+    }
+    // A terminal COMPLETE reminder reached the session client.
+    expect(client.prompts.some((p) => p.text.includes(GRAPH_COMPLETE_MARKER))).toBe(true);
+  });
+
+  it("uses the graph_create-captured session id when construction precedes graph_run", async () => {
+    const client = new FakeSessionClient();
+    const dispatch = new FakeDispatchSeam();
+    const ts = createGraphToolSet({
+      dispatch,
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: (invokingSessionId) => invokingSessionId,
+      },
+    });
+
+    // graph_create captures the session id onto the registry entry.
+    const { graph_id: graphId } = ts.graph_create(
+      { name: "create-capture" },
+      "emperor-create-session",
+    );
+    // graph_add_node WITHOUT a session id — the create-captured id is used.
+    ts.graph_add_node({
+      graph_id: graphId,
+      id: "A",
+      agent: "emperor--jinyiwei--ui",
+      prompt: "do the thing",
+    });
+    // graph_run WITHOUT a session id — the captured id flows through the
+    // sticky resolver to the engine's notifier.
+    await ts.graph_run({ graph_id: graphId });
+    dispatch.completeLatest();
+    await flush();
+
+    expect(client.prompts).toHaveLength(2);
+    expect(client.prompts[0].id).toBe("emperor-create-session");
+    expect(client.prompts[0].text).toContain(GRAPH_COMPLETION_MARKER);
+    expect(client.prompts[0].text).toContain("graph: create-capture");
+    expect(client.prompts[0].text).toContain("node: A");
+    expect(client.prompts[1].id).toBe("emperor-create-session");
+    expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
+  });
 });

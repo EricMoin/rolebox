@@ -188,9 +188,11 @@ function createGraphCreateTool(
       name: z.string().min(1).describe("Human-readable graph name for logging."),
       budget: graphBudgetSchema.describe("Graph-level resource limits."),
     },
-    async execute(args) {
+    async execute(args, context) {
       try {
-        return json(toolset.graph_create(args));
+        // Capture the invoking session id so the graph-notify emperor-session
+        // resolver is wired on the very first engine construction.
+        return json(toolset.graph_create(args, context?.sessionID));
       } catch (err) {
         return `graph_create failed: ${(err as Error).message}`;
       }
@@ -231,9 +233,9 @@ function createGraphAddNodeTool(
         .optional()
         .describe("Auto-retry count on escalate."),
     },
-    async execute(args) {
+    async execute(args, context) {
       try {
-        return json(toolset.graph_add_node(args));
+        return json(toolset.graph_add_node(args, context?.sessionID));
       } catch (err) {
         return `graph_add_node failed: ${(err as Error).message}`;
       }
@@ -280,9 +282,9 @@ function createGraphAddEdgeTool(
         .describe("Truncation limit for passed context (accepted for shape compat)."),
       retry: retrySchema.describe("Auto-retry count when the source node emits escalate."),
     },
-    async execute(args) {
+    async execute(args, context) {
       try {
-        return json(toolset.graph_add_edge(args));
+        return json(toolset.graph_add_edge(args, context?.sessionID));
       } catch (err) {
         return `graph_add_edge failed: ${(err as Error).message}`;
       }
@@ -326,9 +328,9 @@ function createGraphAddLoopTool(
             "alternative path (a separate graph per round). Omit for default.",
         ),
     },
-    async execute(args) {
+    async execute(args, context) {
       try {
-        return json(toolset.graph_add_loop(args));
+        return json(toolset.graph_add_loop(args, context?.sessionID));
       } catch (err) {
         return `graph_add_loop failed: ${(err as Error).message}`;
       }

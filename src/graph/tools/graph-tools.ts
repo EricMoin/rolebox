@@ -136,6 +136,16 @@ import {
 interface GraphEntry {
   declaration: GraphDeclaration;
   runtime: EngineRuntime;
+  /**
+   * Sticky invoking-session id captured at `graph_create` (or the first
+   * `graph_run` / construction tool call that carried one). Drives the
+   * graph-notify emperor-session resolver on every engine (re)build, so a
+   * mid-flight structure mutation (e.g. `graph_add_node` after `graph_run`)
+   * keeps working notification seams. Absent → the resolver falls back to the
+   * freshly-supplied session id per call. See the notifier-resolution contract
+   * in {@link GraphToolSet.commit}.
+   */
+  invokingSessionId?: string;
 }
 
 /**
@@ -638,7 +648,11 @@ export class GraphToolSet {
    * validate node mid-flight), the prior runtime's per-node progress is
    * adopted into the rebuilt engine so completed / running nodes are never
    * reset back to `ready` and re-dispatched on the next `graph_run`. */
-  private commit(graphId: string, candidate: GraphDeclaration): void {
+  private commit(
+    graphId: string,
+    candidate: GraphDeclaration,
+    invokingSessionId?: string,
+  ): void {
     const validation = validateGraphDeclaration(candidate);
     if (!validation.valid) {
       throw new Error(
@@ -647,7 +661,13 @@ export class GraphToolSet {
       );
     }
     const prior = this.registry.get(graphId);
-    const runtime = this.buildEngine(candidate, graphId);
+    // Sticky notifier session: prefer the graph-captured (stored) invoking
+    // session id, falling back to the freshly-supplied one (a construction
+    // tool called before any graph_create/graph_run captured a session). This
+    // keeps the emperor-session resolver consistent across mid-flight rebuilds
+    // so `completionHandler`/`terminalHandler` never degrade to a no-op.
+    const sessionId = prior?.invokingSessionId ?? invokingSessionId;
+    const runtime = this.buildEngine(candidate, graphId, sessionId);
     if (prior) {
       const priorState = prior.runtime.status();
       const hasProgress = [...priorState.nodes.values()].some(
@@ -661,7 +681,11 @@ export class GraphToolSet {
         void runtime.adoptPrior(priorState);
       }
     }
-    this.registry.set(graphId, { declaration: candidate, runtime });
+    this.registry.set(graphId, {
+      declaration: candidate,
+      runtime,
+      ...(sessionId ? { invokingSessionId: sessionId } : {}),
+    });
   }
 
   private static shallowCloneDeclaration(d: GraphDeclaration): GraphDeclaration {
@@ -677,7 +701,7 @@ export class GraphToolSet {
 
   // ── graph_create ───────────────────────────────────────────────────────────
 
-  graph_create(args: GraphCreateArgs): GraphCreateResult {
+  graph_create(args: GraphCreateArgs, invokingSessionId?: string): GraphCreateResult {
     const { name, budget } = args;
     if (!name || name.trim() === "") {
       throw new Error('graph_create: "name" is required and must be non-empty.');
@@ -701,7 +725,9 @@ export class GraphToolSet {
       seq += 1;
     }
 
-    this.commit(graphId, declaration);
+    // Capture the invoking session id onto the registry entry so every
+    // subsequent construction/run uses it for the graph-notify resolver.
+    this.commit(graphId, declaration, invokingSessionId);
     return {
       graph_id: graphId,
       name: name.trim(),
@@ -711,7 +737,7 @@ export class GraphToolSet {
 
   // ── graph_add_node ─────────────────────────────────────────────────────────
 
-  graph_add_node(args: GraphAddNodeArgs): GraphAddNodeResult {
+  graph_add_node(args: GraphAddNodeArgs, invokingSessionId?: string): GraphAddNodeResult {
     const entry = this.getEntry(args.graph_id);
     if (entry.declaration.nodes.some((n) => n.id === args.id)) {
       throw new Error(
@@ -743,13 +769,13 @@ export class GraphToolSet {
 
     const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
     candidate.nodes.push(node);
-    this.commit(args.graph_id, candidate);
+    this.commit(args.graph_id, candidate, invokingSessionId);
     return { node_id: args.id, graph_id: args.graph_id, created: true };
   }
 
   // ── graph_add_edge ─────────────────────────────────────────────────────────
 
-  graph_add_edge(args: GraphAddEdgeArgs): GraphAddEdgeResult {
+  graph_add_edge(args: GraphAddEdgeArgs, invokingSessionId?: string): GraphAddEdgeResult {
     const entry = this.getEntry(args.graph_id);
     const type: EdgeType = args.type ?? "always";
 
@@ -798,14 +824,14 @@ export class GraphToolSet {
 
     const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
     candidate.edges.push(edge);
-    this.commit(args.graph_id, candidate);
+    this.commit(args.graph_id, candidate, invokingSessionId);
 
     return { edge_id: `${args.from}->${args.to}`, from: args.from, to: args.to, type };
   }
 
   // ── graph_add_loop ─────────────────────────────────────────────────────────
 
-  graph_add_loop(args: GraphAddLoopArgs): GraphAddLoopResult {
+  graph_add_loop(args: GraphAddLoopArgs, invokingSessionId?: string): GraphAddLoopResult {
     const entry = this.getEntry(args.graph_id);
     if ((entry.declaration.loop_groups ?? []).some((g) => g.id === args.id)) {
       throw new Error(
@@ -845,7 +871,7 @@ export class GraphToolSet {
     const groups = [...(candidate.loop_groups ?? [])];
     groups.push(loop);
     candidate.loop_groups = groups;
-    this.commit(args.graph_id, candidate);
+    this.commit(args.graph_id, candidate, invokingSessionId);
 
     return {
       loop_id: args.id,
@@ -886,6 +912,12 @@ export class GraphToolSet {
       );
     }
 
+    // Sticky notifier session: prefer the graph-captured (stored) invoking
+    // session id, falling back to the freshly-supplied one. When graph_run
+    // receives a fresh session id, the stored value is updated below so
+    // subsequent mid-flight rebuilds (construction tools) keep working seams.
+    const sessionId = entry.invokingSessionId ?? invokingSessionId;
+
     // Per-graph in-flight guard (concurrency fix): when the registry entry's
     // runtime is ALREADY executing with running/ready nodes, a concurrent
     // `graph_run` (no node_id) must NOT build a fresh engine. Building one would
@@ -917,6 +949,12 @@ export class GraphToolSet {
           pending.push(n.nodeId);
         }
       }
+      // Update the sticky session id even on an idempotent mid-flight re-run so
+      // the stored value stays current for any later rebuild.
+      this.registry.set(args.graph_id, {
+        ...entry,
+        ...(invokingSessionId ? { invokingSessionId } : {}),
+      });
       return {
         graph_id: args.graph_id,
         phase: liveStatus.phase,
@@ -925,12 +963,46 @@ export class GraphToolSet {
       };
     }
 
+    // Completed-graph short-circuit (idempotent re-run of a finished graph).
+    // When the registry entry's runtime has ALREADY reached phase Complete and
+    // no node is left in an unsettled state (Ready/Running/Blocked/Pending), a
+    // redundant `graph_run` (no node_id) must NOT rebuild a fresh engine. The
+    // rebuild path below would create a new per-instance `_terminationCtx`
+    // (engine-advance.ts) and a fresh graph-terminal notifier with a clean
+    // dedupe epoch (graph-notify.ts `notified` Set), so every redundant re-run
+    // re-fires `[GRAPH COMPLETE]`. Instead, return the current status (phase
+    // Complete with empty active/pending) without rebuilding or re-dispatching.
+    // Targeted retry (node_id + retry/modify_prompt) is exempt — it must
+    // re-dispatch and fire exactly one new COMPLETE (verified in
+    // terminal-notification-reopen.test.ts). The mid-flight guard above already
+    // covers the Executing case.
+    const hasUnsettledNode = [...liveStatus.nodes.values()].some(
+      (n) =>
+        GRAPH_RUN_ACTIVE_STATUSES.has(n.status) || n.status === NodeStatus.Pending,
+    );
+    const isCompletedIdle =
+      liveStatus.phase === EnginePhase.Complete && !hasUnsettledNode;
+    if (isCompletedIdle && !args.node_id) {
+      // Update the sticky session id even on an idempotent completed re-run so
+      // the stored value stays current for any later rebuild.
+      this.registry.set(args.graph_id, {
+        ...entry,
+        ...(invokingSessionId ? { invokingSessionId } : {}),
+      });
+      return {
+        graph_id: args.graph_id,
+        phase: liveStatus.phase,
+        active_nodes: [],
+        pending_nodes: [],
+      };
+    }
+
     // Subtask 3: wire the configured graph-notify completion seam into the
     // runtime graph_run builds (absent → the engine's default no-op seam).
-    // `invokingSessionId` (the graph tool's execution session) is forwarded so
-    // the emperor-session resolver can target the orchestrator at runtime.
-    const completion = this.completionHandler(invokingSessionId);
-    const terminal = this.terminalHandler(invokingSessionId);
+    // `sessionId` (the graph-captured / invoking execution session) is forwarded
+    // so the emperor-session resolver can target the orchestrator at runtime.
+    const completion = this.completionHandler(sessionId);
+    const terminal = this.terminalHandler(sessionId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
@@ -980,8 +1052,13 @@ export class GraphToolSet {
       await runtime.run();
     }
 
-    // Update the registry runtime so subsequent graph_status reads live state.
-    this.registry.set(args.graph_id, { ...entry, runtime });
+    // Update the registry runtime so subsequent graph_status reads live state,
+    // and persist the sticky session id when graph_run carried a fresh one.
+    this.registry.set(args.graph_id, {
+      ...entry,
+      runtime,
+      ...(invokingSessionId ? { invokingSessionId } : {}),
+    });
 
     const state = runtime.status();
     const active: string[] = [];
