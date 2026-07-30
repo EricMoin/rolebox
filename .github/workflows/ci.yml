@@ -33,7 +33,10 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
-        run: bun install
+        # --frozen-lockfile makes install deterministic in CI: it never rewrites
+        # bun.lock (so it cannot dirty the working tree) and fails loudly if the
+        # committed lockfile is ever out of sync with package.json.
+        run: bun install --frozen-lockfile
 
       - name: Type check (full project)
         run: bun run typecheck
