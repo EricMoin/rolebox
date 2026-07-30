@@ -12,6 +12,16 @@
 import { EnginePhase, NodeStatus } from "../../constants.ts";
 import type { EngineState } from "../../types.engine-v2.ts";
 import { canTransitionPhase, transitionPhase } from "./engine-state.ts";
+import { markEscalated } from "./node-lifecycle.ts";
+
+/**
+ * Reason applied to every pending node when a runtime graph deadlock is
+ * detected. A deadlocked graph has pending node(s) with no running/ready
+ * upstream to ever satisfy them, no blocked gate to resolve them, no terminal
+ * error to surface, and no deferred completion still to drain.
+ */
+const DEADLOCK_REASON =
+  "graph deadlock: no active upstream can satisfy pending node(s)";
 
 /**
  * A graph-terminal event emitted via the optional onGraphTerminal callback
@@ -78,8 +88,13 @@ export function checkGraphTermination(
 
   // Tally node statuses for the optional terminal-event summary.
   const counts = { completed: 0, escalate: 0, timeout: 0, blocked: 0, running: 0 };
+  // Scheduler-active nodes — `running` or `ready` — are nodes the engine will
+  // progress on its own (a running node resolves via a signal; a ready node
+  // is dispatched). Pending nodes are NOT scheduler-active: they merely wait
+  // on upstream results and, on their own, can never advance the graph.
   let hasSchedulerActive = false;
   let hasBlocked = false;
+  let hasPending = false;
   for (const node of state.nodes.values()) {
     switch (node.status) {
       case NodeStatus.Completed: counts.completed += 1; break;
@@ -95,24 +110,57 @@ export function checkGraphTermination(
         hasSchedulerActive = true;
         break;
       case NodeStatus.Ready:
-      case NodeStatus.Pending:
         hasSchedulerActive = true;
+        break;
+      case NodeStatus.Pending:
+        hasPending = true;
         break;
       default: break;
     }
   }
 
-  const hasAnyActive = hasSchedulerActive || hasBlocked;
+  const hasAnyActive = hasSchedulerActive || hasBlocked || hasPending;
 
   // Standard completion path: no active node remains.
   if (!hasAnyActive && canTransitionPhase(state, EnginePhase.Complete)) {
     transitionPhase(state, EnginePhase.Complete);
     fireGraphTerminal(state, onGraphTerminal, counts, false, ctx);
   } else if (!hasSchedulerActive && hasBlocked) {
-    // Quiescent-blocked: no running/ready/pending nodes remain but ≥1
-    // blocked node exists. The graph is paused, waiting on a human.
-    // Do NOT transition the phase — executing stays executing.
+    // Quiescent-blocked: no running/ready nodes remain but ≥1 blocked node
+    // exists. The graph is paused, waiting on a human. Do NOT transition the
+    // phase. Pending nodes below a blocked gate are NOT deadlocked — the gate
+    // will feed them on approval, and the blocked terminal event fires here.
     fireGraphTerminal(state, onGraphTerminal, counts, true, ctx);
+  } else if (
+    hasPending &&
+    !hasSchedulerActive &&
+    !hasBlocked &&
+    counts.escalate === 0 &&
+    counts.timeout === 0 &&
+    state.pendingCompletions.length === 0
+  ) {
+    // Runtime deadlock guard: pending node(s) exist with no running/ready
+    // upstream to ever satisfy them, no blocked gate to resolve them, no
+    // terminal error to surface (an escalated/timeout node means the graph is
+    // in an error state awaiting orchestrator attention — never force-complete
+    // that), and no deferred completion still to drain. This is an
+    // unsatisfiable graph (e.g. an unrooted always-cycle, or an unprotected
+    // cycle reachable only through a satisfied root that cannot feed it).
+    //
+    // Escalate every pending node (`pending → escalate` is a legal transition,
+    // node-lifecycle.ts) so the graph quiesces, then transition to complete and
+    // fire the terminal event. Without this the engine would sit in `executing`
+    // forever and [GRAPH COMPLETE] would never fire.
+    for (const node of state.nodes.values()) {
+      if (node.status === NodeStatus.Pending) {
+        markEscalated(state, node, DEADLOCK_REASON);
+        counts.escalate += 1;
+      }
+    }
+    if (canTransitionPhase(state, EnginePhase.Complete)) {
+      transitionPhase(state, EnginePhase.Complete);
+      fireGraphTerminal(state, onGraphTerminal, counts, false, ctx);
+    }
   }
 }
 

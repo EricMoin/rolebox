@@ -203,12 +203,16 @@ describe("on_condition edge activation (createEngine default wiring)", () => {
     await engine.onNodeSignalEmitted("A", "answer", "result-A");
 
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
-    // B never activated — still pending, never dispatched.
+    // B never activated — the conditional edge didn't fire, so B was never
+    // dispatched.
     expect(fake.calls.map((c) => c.nodeId)).toEqual(["A"]);
-    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Pending);
-    // B stays Pending (its join was never satisfied), which keeps the graph
-    // executing — the engine only completes when no active/pending node remains.
-    expect(state.phase).toBe(EnginePhase.Executing);
+    // B's join was never satisfied and no running/ready/blocked upstream or
+    // deferred completion can ever satisfy it → the runtime deadlock guard
+    // escalates B and terminates the graph (was previously an infinite hang in
+    // `executing`).
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.errorReason).toContain("graph deadlock");
+    expect(state.phase).toBe(EnginePhase.Complete);
   });
 
   it("honors a caller-supplied resolver override", async () => {

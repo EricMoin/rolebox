@@ -90,6 +90,48 @@ function linearGraph(): GraphDeclaration {
   };
 }
 
+/**
+ * Unrooted always-cycle: a ⇄ b with NO loop group. Every node has in-degree
+ * ≥1 and there is no `always`-edge exclusion (no loop group), so provision
+ * leaves both nodes pending and the frontier empty — a runtime deadlock.
+ */
+function unrootedCycleGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "unrooted-cycle",
+    nodes: [
+      { id: "a", agent: "a1", prompt: "p1" },
+      { id: "b", agent: "a2", prompt: "p2" },
+    ],
+    edges: [
+      { from: "a", to: "b", type: "always" },
+      { from: "b", to: "a", type: "always" },
+    ],
+  };
+}
+
+/**
+ * Unprotected always-cycle reachable from a root: root → A, A ⇄ B, NO loop
+ * group. `root` is the sole graph root; A's join needs both `root` and `B`,
+ * and B is only fed by A — an unsatisfiable cycle once root completes.
+ */
+function rootCycleGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "root-cycle",
+    nodes: [
+      { id: "root", agent: "r", prompt: "pr" },
+      { id: "A", agent: "a1", prompt: "p1" },
+      { id: "B", agent: "a2", prompt: "p2" },
+    ],
+    edges: [
+      { from: "root", to: "A", type: "always" },
+      { from: "A", to: "B", type: "always" },
+      { from: "B", to: "A", type: "always" },
+    ],
+  };
+}
+
 interface Rig {
   state: EngineState;
   engine: AdvanceEngine;
@@ -309,6 +351,82 @@ describe("onGraphTerminal BLOCKED", () => {
     // Re-emit the same signal — dedupe gate blocks second fire.
     await engine.onNodeSignalEmitted("G", "need_approval", "please review");
     expect(events).toHaveLength(1);
+  });
+});
+
+// ── Runtime deadlock termination ────────────────────────────────────────────
+//
+// An unsatisfiable graph — one whose pending node(s) can never be satisfied by
+// a running/ready upstream, a blocked gate, or a deferred completion — would
+// otherwise leave the engine stuck in `executing` forever ([GRAPH COMPLETE]
+// never fires). The deadlock guard escalates every pending node and terminates
+// the graph as `complete`.
+
+describe("runtime deadlock termination", () => {
+  it("deadlock-terminates an unrooted always-cycle after dispatchReady", async () => {
+    const events: GraphTerminalEvent[] = [];
+    const { engine, state } = buildEngine(unrootedCycleGraph(), events);
+
+    // No roots → frontier empty, all nodes pending → no dispatch possible.
+    await engine.dispatchReady();
+
+    expect(state.phase).toBe(EnginePhase.Complete);
+    expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("b")!.status).toBe(NodeStatus.Escalate);
+    // Deadlock termination is a completion, not a block.
+    expect(events).toHaveLength(1);
+    expect(events[0].isBlocked).toBe(false);
+    expect(events[0].nodeStatusSummaries.escalate).toBe(2);
+    expect(events[0].nodeStatusSummaries.completed).toBe(0);
+  });
+
+  it("deadlock-terminates an unprotected cycle reachable from a root after root answer", async () => {
+    const events: GraphTerminalEvent[] = [];
+    const { engine, state } = buildEngine(rootCycleGraph(), events);
+
+    await engine.dispatchReady(); // dispatch the sole root
+    expect(state.nodes.get("root")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Pending);
+
+    // root answers → A's join (root + B) is unsatisfiable (B is only fed by A)
+    // → after root completes there is no active upstream → deadlock detected.
+    await engine.onNodeSignalEmitted("root", "answer", "seed");
+
+    expect(state.phase).toBe(EnginePhase.Complete);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(events).toHaveLength(1);
+    expect(events[0].isBlocked).toBe(false);
+    expect(events[0].nodeStatusSummaries.escalate).toBe(2);
+    expect(events[0].nodeStatusSummaries.completed).toBe(1); // root completed
+  });
+
+  it("does NOT deadlock-terminate a graph with an escalated node and a pending downstream", async () => {
+    const events: GraphTerminalEvent[] = [];
+    const { engine, state } = buildEngine(linearGraph(), events);
+
+    await engine.dispatchReady();
+    // A escalates; B is a single-input downstream that stays pending. The
+    // graph is in an ERROR state (an escalate is present) — the deadlock guard
+    // must NOT force-complete it. Phase stays executing.
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom" });
+
+    expect(state.phase).toBe(EnginePhase.Executing);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Pending);
+    expect(events).toHaveLength(0);
+  });
+
+  it("does NOT deadlock-terminate a graph that still has a running node", async () => {
+    const events: GraphTerminalEvent[] = [];
+    const { engine, state } = buildEngine(linearGraph(), events);
+
+    await engine.dispatchReady(); // A running, B pending
+    // A answers → B becomes ready + running → a scheduler-active node remains.
+    await engine.onNodeSignalEmitted("A", "answer", "A-result");
+
+    expect(state.phase).toBe(EnginePhase.Executing);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+    expect(events).toHaveLength(0);
   });
 });
 
