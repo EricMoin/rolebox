@@ -9,8 +9,8 @@
  * rolebox agent system is doing right now:
  *
  *   - Which role has a function active (role | function turn N)
- *   - Which agents have been dispatched and their status (▸ running, ● queued, ✗ error)
- *   - Graph execution progress (nodes with ✓/▸/● status)
+ *   - Which agents have been dispatched and their status (• running, · queued, ✗ error)
+ *   - Graph execution progress (nodes with ✓/•/· status)
  *   - Loop round progress (N/M + bar)
  *
  * No section headers for absent things. No abstract counts. Just the

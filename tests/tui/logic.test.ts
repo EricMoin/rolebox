@@ -735,7 +735,7 @@ describe("truncate", () => {
 
 describe("engineNodeGlyph", () => {
   it("maps running to the running glyph", () => {
-    expect(engineNodeGlyph("running")).toBe("\u25b8"); // ▸
+    expect(engineNodeGlyph("running")).toBe("\u2022"); // •
   });
 
   it("maps completed and done to the done glyph", () => {
@@ -744,12 +744,12 @@ describe("engineNodeGlyph", () => {
   });
 
   it("maps pending and ready to the pending glyph", () => {
-    expect(engineNodeGlyph("pending")).toBe("\u25cf"); // ●
-    expect(engineNodeGlyph("ready")).toBe("\u25cf");
+    expect(engineNodeGlyph("pending")).toBe("\u00b7"); // ·
+    expect(engineNodeGlyph("ready")).toBe("\u00b7");
   });
 
   it("maps blocked to the gated glyph", () => {
-    expect(engineNodeGlyph("blocked")).toBe("\u23f8"); // ⏸
+    expect(engineNodeGlyph("blocked")).toBe("\u00b7"); // ·
   });
 
   it("maps timeout to the timeout glyph", () => {
@@ -765,7 +765,7 @@ describe("engineNodeGlyph", () => {
   });
 
   it("falls back to the pending glyph for unknown statuses", () => {
-    expect(engineNodeGlyph("mystery")).toBe("\u25cf");
+    expect(engineNodeGlyph("mystery")).toBe("\u00b7");
   });
 });
 

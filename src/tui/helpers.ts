@@ -40,19 +40,18 @@ export const DIM_ITALIC = DIM | ITALIC;
 
 // ── Glyphs ───────────────────────────────────────────────────────────────
 
-export const G_RUNNING  = "\u25b8"; // ▸
-export const G_PENDING  = "\u25cf"; // ●
+export const G_RUNNING  = "\u2022"; // •
+export const G_PENDING  = "\u00b7"; // ·
 export const G_ERROR    = "\u2717"; // ✗
 export const G_DONE     = "\u2713"; // ✓
 export const G_CANCEL   = "\u25cb"; // ○
 export const G_TIMEOUT  = "\u25c7"; // ◇
-export const G_FN       = "\u2192"; // →
-export const G_GATED    = "\u23f8"; // ⏸
+export const G_GATED    = "\u00b7"; // ·
 export const G_BAR_ON   = "\u25a0"; // ■
 export const G_BAR_OFF  = "\u25a1"; // □
-export const G_SUB      = "\u2514\u2500"; // └─
+export const G_SUB      = "\u00b7"; // ·
 export const G_RULE     = "\u2500"; // ─
-export const G_STALLED     = "⚠"; // ⚠
+export const G_STALLED     = "!"; // !
 
 // ── Compact glyphs (for inline/dense layouts) ─────────────────────────
 export const G_RUNNING_COMPACT = "\u00b7"; // ·

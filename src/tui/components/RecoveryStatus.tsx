@@ -8,10 +8,12 @@
  */
 
 /** @jsxImportSource @opentui/solid */
+import type { RGBA } from "@opentui/core";
 import type { ThemeColors } from "../helpers.ts";
 import {
-  rgbaToCSS, BOLD, DIM, G_SUB,
+  rgbaToCSS, BOLD, DIM, G_SUB, truncate,
 } from "../helpers.ts";
+import { SIDEBAR_WIDTH, INDENT, VALUE_BUDGET, valueBudget } from "../layout.ts";
 import type {
   MonitorSnapshot,
 } from "../../cli/commands/monitor/monitor-reader.ts";
@@ -35,31 +37,26 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
 
   const parts: unknown[] = [];
 
-  // Summary line
+  // Summary rows — one `label: value` fact per row.
   const rateColor = successRate >= 80 ? c.success : successRate >= 50 ? c.warning : c.error;
 
-  const summaryParts = [
-    <span fg={rgbaToCSS(c.text)}>{String(totalAttempts)}</span>,
-    <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" attempts"}</span>,
-    <span>{"  "}</span>,
-    <span fg={rgbaToCSS(c.success)}>{String(successes)}</span>,
-    <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" recovered"}</span>,
-  ];
-  if (aborted > 0) {
-    summaryParts.push(<span>{"  "}</span>);
-    summaryParts.push(<span fg={rgbaToCSS(c.warning)}>{String(aborted)}</span>);
-    summaryParts.push(<span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" aborted"}</span>);
-  }
-  if (exhausted > 0) {
-    summaryParts.push(<span>{"  "}</span>);
-    summaryParts.push(<span fg={rgbaToCSS(c.textMuted)}>{String(exhausted)}</span>);
-    summaryParts.push(<span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" exhausted"}</span>);
-  }
-  summaryParts.push(<span>{"  "}</span>);
-  summaryParts.push(<span fg={rgbaToCSS(rateColor)}>{String(successRate) + "%"}</span>);
-  summaryParts.push(<span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" rate"}</span>);
+  const summaryRow = (label: string, value: string, color: RGBA) => {
+    const prefix = `${label}: `;
+    const cells = valueBudget(SIDEBAR_WIDTH, INDENT.length + prefix.length);
+    const display = cells > 0 ? truncate(value, cells) : "";
+    return (
+      <text>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + prefix}</span>
+        <span fg={rgbaToCSS(color)}>{display}</span>
+      </text>
+    );
+  };
 
-  parts.push(<text>{summaryParts}</text>);
+  parts.push(summaryRow("attempts", String(totalAttempts), c.text));
+  parts.push(summaryRow("recovered", String(successes), c.success));
+  if (aborted > 0) parts.push(summaryRow("aborted", String(aborted), c.warning));
+  if (exhausted > 0) parts.push(summaryRow("exhausted", String(exhausted), c.textMuted));
+  parts.push(summaryRow("rate", String(successRate) + "%", rateColor));
 
   // By category
   const catKeys = Object.keys(recovery.byCategory);
@@ -72,8 +69,8 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
       const rate = entry.attempts > 0 ? Math.round((entry.successes / entry.attempts) * 100) : 0;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"    " + cat.padEnd(20)}</span>
-          <span fg={rgbaToCSS(c.info)}>{String(entry.attempts) + "/" + String(entry.successes)}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + truncate(cat, VALUE_BUDGET)}</span>
+          <span fg={rgbaToCSS(c.info)}>{" " + String(entry.attempts) + "/" + String(entry.successes)}</span>
           <span fg={rgbaToCSS(c.textMuted)}>{" " + String(rate) + "%"}</span>
         </text>,
       );
@@ -91,8 +88,8 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
       const rate = entry.attempts > 0 ? Math.round((entry.successes / entry.attempts) * 100) : 0;
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"    " + strat.padEnd(20)}</span>
-          <span fg={rgbaToCSS(c.info)}>{String(entry.attempts) + "/" + String(entry.successes)}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + truncate(strat, VALUE_BUDGET)}</span>
+          <span fg={rgbaToCSS(c.info)}>{" " + String(entry.attempts) + "/" + String(entry.successes)}</span>
           <span fg={rgbaToCSS(c.textMuted)}>{" " + String(rate) + "%"}</span>
         </text>,
       );
@@ -112,8 +109,8 @@ export function renderRecoveryStatus(props: { c: ThemeColors; snap: MonitorSnaps
     for (const err of sorted) {
       parts.push(
         <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"    " + err.type.padEnd(30)}</span>
-          <span fg={rgbaToCSS(c.warning)}>{String(err.count)}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + truncate(err.type, VALUE_BUDGET)}</span>
+          <span fg={rgbaToCSS(c.warning)}>{" " + String(err.count)}</span>
         </text>,
       );
     }

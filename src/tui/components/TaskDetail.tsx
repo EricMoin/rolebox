@@ -16,8 +16,12 @@ import type { TaskSnapshot, TaskDetail } from "../../cli/commands/monitor/monito
 import {
   rgbaToCSS, BOLD, DIM, DIM_ITALIC,
   G_RUNNING, G_PENDING, G_ERROR, G_DONE, G_CANCEL, G_TIMEOUT, G_STALLED,
-  agentLeaf, shortSessionId, formatDuration, formatTimeAgo,
+  agentLeaf, shortSessionId, formatDuration, formatTimeAgo, truncate,
 } from "../helpers.ts";
+import {
+  SIDEBAR_WIDTH, RULE_WIDTH_NARROW, INDENT, GLYPH_CELLS, VALUE_BUDGET,
+  valueBudget, labelValue,
+} from "../layout.ts";
 
 // ── Props ────────────────────────────────────────────────────────────────
 
@@ -101,12 +105,34 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
   const windowEnd = Math.min(offset + (detail.limit ?? 500), totalChars);
   const pct = totalChars > 0 ? Math.round((windowEnd / totalChars) * 100) : 0;
 
-  // Sidecar result line: show resultPreview if available
-  const previewLine = task.resultPreview
-    ? task.resultPreview.length > 80
-      ? task.resultPreview.slice(0, 80) + "\u2026"
-      : task.resultPreview
-    : null;
+  // Sidecar result line: show resultPreview if available (truncated to sidebar width)
+  const previewLine = task.resultPreview ? truncate(task.resultPreview, SIDEBAR_WIDTH) : null;
+
+  // Row budgets derived from layout primitives — no hardcoded widths.
+  const secondaryBudget = valueBudget(SIDEBAR_WIDTH, INDENT.length);
+
+  // Primary label:value row — dimmed lowercase label + colored, truncated value.
+  const row = (label: string, value: string, color: string) => {
+    const prefix = `${label}: `;
+    const cells = valueBudget(SIDEBAR_WIDTH, prefix.length);
+    const display = cells > 0 ? truncate(value, cells) : "";
+    return (
+      <text>
+        <span fg={muted} attributes={DIM}>{prefix}</span>
+        <span fg={color}>{display}</span>
+      </text>
+    );
+  };
+
+  // Secondary dimmed indented row — composed via labelValue, capped at VALUE_BUDGET.
+  const secondary = (label: string, value: string) => {
+    const totalBudget = Math.min(secondaryBudget, label.length + 2 + VALUE_BUDGET);
+    return (
+      <text>
+        <span fg={muted} attributes={DIM}>{INDENT + labelValue(label, value, totalBudget)}</span>
+      </text>
+    );
+  };
 
   return (
     <scrollbox
@@ -119,69 +145,50 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
     >
       {/* ── Header ── */}
       <text>
-        <span fg={info} attributes={BOLD} on:click={() => props.onClose?.()}>{"[\u2190 Back] "}</span>
+        <span fg={info} attributes={BOLD} on:click={() => props.onClose?.()}>{"[Back] "}</span>
         <span attributes={BOLD} fg={norm}>{"  Task Detail"}</span>
       </text>
 
       {/* Separator */}
-      <text fg={border}>{"\u2500".repeat(28)}</text>
+      <text fg={border}>{"\u2500".repeat(RULE_WIDTH_NARROW)}</text>
 
-      {/* Status line */}
+      {/* Status: glyph + agent (primary) */}
       <text>
         <span fg={sg.color}>{sg.glyph + " "}</span>
-        <span fg={norm}>{agentName}</span>
-        <span fg={muted} attributes={DIM}>{"  " + durStr}</span>
-        {task.status === "running" && livenessStr && (
-          <span fg={muted} attributes={DIM}>{"  " + livenessStr}</span>
-        )}
+        <span fg={norm}>{truncate(agentName, valueBudget(SIDEBAR_WIDTH, GLYPH_CELLS + 1))}</span>
       </text>
 
+      {/* Status: duration (secondary, dimmed) */}
+      {secondary("duration", durStr)}
+
+      {/* Status: liveness (secondary, dimmed, only while running) */}
+      {task.status === "running" && livenessStr && secondary("liveness", livenessStr)}
+
       {/* ID */}
-      <text>
-        <span fg={muted} attributes={DIM}>{"id: "}</span>
-        <span fg={norm}>{task.id}</span>
-      </text>
+      {row("id", task.id, norm)}
 
       {/* Description */}
       <Show when={task.description}>
-        <text>
-          <span fg={muted} attributes={DIM}>{"desc: "}</span>
-          <span fg={norm}>{task.description}</span>
-        </text>
+        {row("desc", task.description ?? "", norm)}
       </Show>
 
       {/* Session ID */}
       <Show when={task.sessionId}>
-        <text>
-          <span fg={muted} attributes={DIM}>{"session: "}</span>
-          <span fg={norm}>{shortSessionId(task.sessionId)}</span>
-        </text>
+        {row("session", shortSessionId(task.sessionId ?? ""), norm)}
       </Show>
 
-      {/* Status / depth / mode */}
-      <text>
-        <span fg={muted} attributes={DIM}>{"status: "}</span>
-        <span fg={norm}>{task.status}</span>
-        <span fg={muted} attributes={DIM}>{"  depth: "}</span>
-        <span fg={norm}>{String(task.depth)}</span>
-        <span fg={muted} attributes={DIM}>{"  mode: "}</span>
-        <span fg={norm}>{task.mode}</span>
-      </text>
+      {/* Status / depth / mode — each on its own label:value row */}
+      {row("status", task.status, norm)}
+      {row("depth", String(task.depth), norm)}
+      {row("mode", task.mode, norm)}
 
-      {/* Tool calls + output */}
-      <text>
-        <span fg={muted} attributes={DIM}>{"tools: "}</span>
-        <span fg={toolCount > 0 ? info : muted}>{String(toolCount)}</span>
-        <span fg={muted} attributes={DIM}>{"  output: "}</span>
-        <span fg={hasOutput ? success : muted}>{hasOutput ? "yes" : "no"}</span>
-      </text>
+      {/* Tool calls + output — each on its own label:value row */}
+      {row("tools", String(toolCount), toolCount > 0 ? info : muted)}
+      {row("output", hasOutput ? "yes" : "no", hasOutput ? success : muted)}
 
       {/* Error details */}
       <Show when={task.error}>
-        <text>
-          <span fg={err} attributes={BOLD}>{"error: "}</span>
-          <span fg={err}>{task.error}</span>
-        </text>
+        {row("error", task.error ?? "", err)}
       </Show>
 
       {/* ── Sidecar result preview (from snapshot) ── */}
@@ -216,7 +223,7 @@ export function renderTaskDetailPanel(props: TaskDetailPanelProps) {
 
       {/* ── Scroll indicator ── */}
       <text>{" "}</text>
-      <text fg={border}>{"\u2500".repeat(28)}</text>
+      <text fg={border}>{"\u2500".repeat(RULE_WIDTH_NARROW)}</text>
       <text>
         <span fg={muted} attributes={DIM}>{"chars "}</span>
         <span fg={info}>{String(windowStart)}\u2013{String(windowEnd)}</span>

@@ -10,8 +10,8 @@ import type { RGBA } from "@opentui/core";
 import type { ThemeColors } from "../helpers.ts";
 import {
   rgbaToCSS, BOLD, DIM, DIM_ITALIC,
-  INDENT, truncate,
-  G_SUB, G_FN, G_GATED, G_RUNNING, G_PENDING, G_DONE,
+  truncate,
+  G_SUB, G_RUNNING, G_PENDING, G_DONE,
   G_ERROR, G_BAR_ON, G_BAR_OFF, G_STALLED,
   G_RUNNING_COMPACT, G_DONE_COMPACT,
   MAX_DISPATCH_ROWS, MAX_FN_ROWS, MAX_GRAPH_ROWS, MAX_LOOP_ROWS,
@@ -19,6 +19,7 @@ import {
   agentLeaf, shortSessionId, formatDuration, formatTimeAgo, barSegments, statusVisual,
   engineNodeGlyph,
 } from "../helpers.ts";
+import { SIDEBAR_WIDTH, INDENT, VALUE_BUDGET, labelValue } from "../layout.ts";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
@@ -40,22 +41,46 @@ export function renderFunctionLine(props: { c: ThemeColors; fn: ActiveFunction }
   const isGated = fn.phase !== "active" && fn.phase !== "complete";
 
   return (
-    <text>
-      {agent !== null ? (
-        <>
-          <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{agent}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" "}</span>
-        </>
-      ) : null}
-      <span fg={rgbaToCSS(isGated ? c.warning : c.info)}>{(isGated ? G_GATED : G_FN) + " " + name}</span>
+    <>
+      <text>
+        {agent !== null ? (
+          <>
+            <span fg={rgbaToCSS(c.primary)} attributes={BOLD}>{agent}</span>
+            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" "}</span>
+          </>
+        ) : null}
+        <span fg={rgbaToCSS(isGated ? c.warning : c.info)}>{name}</span>
+      </text>
       {fn.continuationCount > 0 && (
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" cont " + fn.continuationCount}</span>
+        <text>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>
+            {INDENT + labelValue("cont", String(fn.continuationCount), VALUE_BUDGET)}
+          </span>
+        </text>
       )}
-    </text>
+    </>
   );
 }
 
 // ── Dispatch row component ───────────────────────────────────────────────
+
+/** Render a dimmed, indented secondary row for a dispatch / fn line. */
+function dimRow(c: ThemeColors, opts: {
+  label?: string | null;
+  value: string;
+  budget?: number;
+  attr?: number;
+  fg?: RGBA;
+}) {
+  const { label = null, value, budget = VALUE_BUDGET, attr = DIM, fg } = opts;
+  const text = label !== null ? labelValue(label, value, budget) : truncate(value, budget);
+  const color = fg ?? c.textMuted;
+  return (
+    <text>
+      <span fg={rgbaToCSS(color)} attributes={attr}>{INDENT + text}</span>
+    </text>
+  );
+}
 
 export function renderDispatchRow(props: {
   c: ThemeColors;
@@ -72,11 +97,20 @@ export function renderDispatchRow(props: {
   const sv = statusVisual(task.status, c);
   const agent = agentLeaf(task.agent ?? "");
   const sel = props.selected ?? false;
+  const isRunning = task.status === "running";
 
-  // Checkpoint badge
-  const cpBadge = props.hasCheckpoints ? (
-    <span fg={rgbaToCSS(c.secondary)} attributes={BOLD}>{" [CP]"}</span>
-  ) : null;
+  // Primary row: status glyph + agent name. Bold for running, normal otherwise;
+  // selection is conveyed via the info color.
+  const primaryAttr = isRunning ? BOLD : 0;
+  const primaryRow = (
+    <text>
+      <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={primaryAttr}>{sv.glyph}</span>
+      <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={primaryAttr}>{" " + agent}</span>
+    </text>
+  );
+
+  // Dimmed, indented secondary rows, in display order.
+  const secondary: unknown[] = [];
 
   if (task.status === "running") {
     const snapTime = props.snapTimestamp ? new Date(props.snapTimestamp).getTime() : Date.now();
@@ -99,79 +133,54 @@ export function renderDispatchRow(props: {
 
     const noOutputYet = task.hasProducedOutput === false && elapsed > 10_000;
 
-    return (
-      <text>
-        <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
-        <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
-        {task.sessionId && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
-        )}
-        <span>{" "}</span>
-        {isStalled ? (
-          <span fg={rgbaToCSS(sel ? c.info : c.warning)} attributes={BOLD}>{dur + activitySuffix}</span>
-        ) : (
-          <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{dur + (activitySuffix ?? "")}</span>
-        )}
-        {cpBadge}
-        {desc && <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{"  " + desc}</span>}
-        {noOutputYet && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM_ITALIC}>{" (no output yet)"}</span>}
-        {props.progress && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" \u00b7 " + truncate(props.progress.latest_stage + (props.progress.message ? ": " + props.progress.message : ""), 50)}</span>
-        )}
-      </text>
-    );
-  }
-
-  if (task.status === "pending") {
-    return (
-      <text>
-        <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
-        <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
-        {task.sessionId && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
-        )}
-        <span>{" "}</span>
-        {cpBadge}
-        <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{"queued"}</span>
-      </text>
-    );
-  }
-
-  if (task.status === "error") {
+    // duration + liveness
+    secondary.push(dimRow(c, {
+      label: "dur",
+      value: dur + (activitySuffix ?? ""),
+      fg: isStalled ? c.warning : undefined,
+    }));
+    // description (truncated to the sidebar value budget)
+    if (desc) {
+      secondary.push(dimRow(c, { label: "desc", value: desc }));
+    }
+    // progress stage
+    if (props.progress) {
+      const stageVal = props.progress.latest_stage + (props.progress.message ? ": " + props.progress.message : "");
+      secondary.push(dimRow(c, { label: "stage", value: stageVal }));
+    }
+    // no-output-yet note
+    if (noOutputYet) {
+      secondary.push(dimRow(c, { value: "(no output yet)", attr: DIM_ITALIC }));
+    }
+  } else if (task.status === "pending") {
+    secondary.push(dimRow(c, { label: "status", value: "queued" }));
+  } else if (task.status === "error") {
     const reason = (task.description ?? task.error ?? "").trim();
-    return (
-      <>
-        <text>
-          <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
-          <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
-          {task.sessionId && (
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
-          )}
-          <span>{" "}</span>
-          {cpBadge}
-        </text>
-        {reason && (
-          <text>
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}{reason}</span>
-          </text>
-        )}
-      </>
-    );
+    if (reason) {
+      secondary.push(dimRow(c, {
+        label: "error",
+        value: reason,
+        budget: SIDEBAR_WIDTH - INDENT.length,
+      }));
+    }
+  } else {
+    // timeout
+    secondary.push(dimRow(c, { label: "dur", value: formatDuration(task.durationMs) }));
   }
 
-  // timeout
-  const dur = formatDuration(task.durationMs);
+  // Shared secondary rows: [CP] checkpoint marker, then session id.
+  if (props.hasCheckpoints) {
+    secondary.push(dimRow(c, { value: "[CP]", fg: c.secondary }));
+  }
+  if (task.sessionId) {
+    secondary.push(dimRow(c, { label: "session", value: shortSessionId(task.sessionId) }));
+  }
+
   return (
-    <text>
-      <span fg={rgbaToCSS(sel ? c.info : sv.color)} attributes={sel ? BOLD : 0}>{sv.glyph}</span>
-      <span fg={rgbaToCSS(sel ? c.info : c.text)} attributes={sel ? BOLD : 0}>{" " + agent}</span>
-      {task.sessionId && (
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + shortSessionId(task.sessionId)}</span>
-      )}
-      <span>{" "}</span>
-      {cpBadge}
-      <span fg={rgbaToCSS(sel ? c.info : c.textMuted)} attributes={(sel ? BOLD : DIM)}>{dur}</span>
-    </text>
+    <>
+      {primaryRow}
+      {secondary}
+    </>
   );
 }
 
@@ -188,9 +197,8 @@ export function renderGraphActivity(props: {
   // agentId might be a session ID; if so, shorten it
   const rawAgent = graph.agentId ?? "(unknown)";
   const orch = rawAgent.startsWith("ses_") ? shortSessionId(rawAgent) : rawAgent;
-  const iter = graph.iterationCount > 0 ? " iter " + graph.iterationCount : "";
 
-  // Build node status: completed → ✓, frontier → ● (or ▸ if matching a running task)
+  // Build node status: completed → ✓, frontier → · (or • if matching a running task)
   const allNodes = [...graph.completed, ...graph.frontier];
   const runningAgents = new Set(
     snap.tasks
@@ -203,29 +211,24 @@ export function renderGraphActivity(props: {
       <text>
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"graph · "}</span>
         <span fg={rgbaToCSS(c.text)}>{orch}</span>
-        {iter && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{iter}</span>}
-        {graph.terminationReason && graph.status !== "active" && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + graph.terminationReason}</span>
-        )}
       </text>
+      {graph.iterationCount > 0 && dimRow(c, { label: "iter", value: String(graph.iterationCount) })}
+      {graph.terminationReason && graph.status !== "active" && dimRow(c, { label: "term", value: graph.terminationReason })}
       {allNodes.length > 0 && (
-        <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
-          <For each={allNodes}>{(node, i) => {
-            const nodeLeaf = agentLeaf(node);
-            const isDone = graph.completed.includes(node);
-            const isRunning = !isDone && runningAgents.has(nodeLeaf);
-            const glyph = isDone ? G_DONE : isRunning ? G_RUNNING : G_PENDING;
-            const color = isDone ? c.success : isRunning ? c.info : c.warning;
-            return (
-              <>
-                {i() > 0 && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>}
-                <span fg={rgbaToCSS(color)}>{glyph + " "}</span>
-                <span fg={rgbaToCSS(isDone ? c.textMuted : c.text)} attributes={isDone ? DIM : 0}>{nodeLeaf}</span>
-              </>
-            );
-          }}</For>
-        </text>
+        <For each={allNodes}>{(node) => {
+          const nodeLeaf = agentLeaf(node);
+          const isDone = graph.completed.includes(node);
+          const isRunning = !isDone && runningAgents.has(nodeLeaf);
+          const glyph = isDone ? G_DONE : isRunning ? G_RUNNING : G_PENDING;
+          const color = isDone ? c.success : isRunning ? c.info : c.warning;
+          return (
+            <text>
+              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}</span>
+              <span fg={rgbaToCSS(color)}>{glyph + " "}</span>
+              <span fg={rgbaToCSS(isDone ? c.textMuted : c.text)} attributes={isDone ? DIM : 0}>{truncate(nodeLeaf, VALUE_BUDGET)}</span>
+            </text>
+          );
+        }}</For>
       )}
     </>
   );
@@ -284,8 +287,7 @@ export function renderEngineGraphActivity(props: {
   const { sessionsSpawned, totalInputTokens, totalOutputTokens, totalCost } = graph.budget;
   const budgetLine =
     sessionsSpawned > 0 || totalInputTokens > 0 || totalCost > 0
-      ? `  \u00b7 ` +
-        `${sessionsSpawned}s \u00b7 ` +
+      ? `${sessionsSpawned}s \u00b7 ` +
         `${Math.round(totalInputTokens / 1000)}k/\u00a0${Math.round(totalOutputTokens / 1000)}k tok \u00b7 ` +
         `$${totalCost.toFixed(2)}`
       : null;
@@ -301,17 +303,12 @@ export function renderEngineGraphActivity(props: {
         <span fg={rgbaToCSS(phase.color)}>{phase.glyph + " "}</span>
         <span fg={rgbaToCSS(c.text)}>{gid + " "}</span>
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{effectivePhase}</span>
-        {liveSignal && liveSignal !== "" && (
-          <span fg={rgbaToCSS(c.secondary)}>{"  sig " + liveSignal}</span>
-        )}
-        {budgetLine !== null && (
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{budgetLine}</span>
-        )}
       </text>
+      {liveSignal && liveSignal !== "" && dimRow(c, { label: "sig", value: liveSignal, fg: c.secondary })}
+      {budgetLine !== null && dimRow(c, { label: "budget", value: budgetLine, budget: SIDEBAR_WIDTH - INDENT.length })}
       {shown.length > 0 && (
-        <text>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>
-          <For each={shown}>{(node, i) => {
+        <>
+          <For each={shown}>{(node) => {
             const glyph = engineNodeGlyph(node.status);
             const color = engineNodeColor(node.status, c);
             const done = node.status === "completed" || node.status === "done";
@@ -321,11 +318,11 @@ export function renderEngineGraphActivity(props: {
               ? " \u00b7 " + formatTimeAgo(Math.max(0, Date.now() - new Date(node.startedAt).getTime()))
               : "";
             return (
-              <>
-                {i() > 0 && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>}
+              <text>
+                <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}</span>
                 <span fg={rgbaToCSS(color)}>{glyph + " "}</span>
                 <span fg={rgbaToCSS(done ? c.textMuted : c.text)} attributes={done ? DIM : 0}>
-                  {agentLeaf(node.agent)}
+                  {truncate(agentLeaf(node.agent), VALUE_BUDGET)}
                 </span>
                 {node.signalType && !done && (
                   <span fg={rgbaToCSS(c.secondary)}>{":" + node.signalType}</span>
@@ -333,13 +330,11 @@ export function renderEngineGraphActivity(props: {
                 {liveness !== "" && (
                   <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{liveness}</span>
                 )}
-              </>
+              </text>
             );
           }}</For>
-          {hidden > 0 && (
-            <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + hidden + " more"}</span>
-          )}
-        </text>
+          {hidden > 0 && dimRow(c, { value: "+" + hidden + " more" })}
+        </>
       )}
     </>
   );
@@ -373,14 +368,19 @@ export function renderLoopActivity(props: { c: ThemeColors; loop: LoopSnapshot }
   const { filled, empty } = barSegments(loop.current, loop.total);
 
   return (
-    <text>
-      <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"loop · "}</span>
-      <span fg={rgbaToCSS(glyphColor)}>{glyph + " "}</span>
-      <span fg={rgbaToCSS(c.text)}>{agent + " "}</span>
-      <span fg={rgbaToCSS(c.text)}>{loop.current + "/" + loop.total + " "}</span>
-      <span fg={rgbaToCSS(c.info)}>{G_BAR_ON.repeat(filled)}</span>
-      <span fg={rgbaToCSS(c.borderSubtle)}>{G_BAR_OFF.repeat(empty)}</span>
-    </text>
+    <>
+      <text>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"loop · "}</span>
+        <span fg={rgbaToCSS(glyphColor)}>{glyph + " "}</span>
+        <span fg={rgbaToCSS(c.text)}>{agent}</span>
+      </text>
+      <text>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT}</span>
+        <span fg={rgbaToCSS(c.text)}>{loop.current + "/" + loop.total + " "}</span>
+        <span fg={rgbaToCSS(c.info)}>{G_BAR_ON.repeat(filled)}</span>
+        <span fg={rgbaToCSS(c.borderSubtle)}>{G_BAR_OFF.repeat(empty)}</span>
+      </text>
+    </>
   );
 }
 

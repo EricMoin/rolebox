@@ -13,6 +13,7 @@ import type { ThemeColors } from "../helpers.ts";
 import {
   rgbaToCSS, BOLD, DIM, G_SUB,
 } from "../helpers.ts";
+import { SIDEBAR_WIDTH, INDENT, valueBudget, labelValue } from "../layout.ts";
 import type {
   MonitorSnapshot,
 } from "../../cli/commands/monitor/monitor-reader.ts";
@@ -69,6 +70,16 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
 
   const parts: unknown[] = [];
 
+  // Dimmed secondary row — one `label: value` fact per row.
+  const dimRow = (label: string, value: string) => {
+    const budget = valueBudget(SIDEBAR_WIDTH, INDENT.length);
+    return (
+      <text>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + labelValue(label, value, budget)}</span>
+      </text>
+    );
+  };
+
   // ── Counters ──
   const counterKeys = Object.keys(metrics.counters);
   if (counterKeys.length > 0) {
@@ -117,12 +128,12 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
         <text>
           <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + name}</span>
           {labelTags(labels, c)}
-          <span fg={rgbaToCSS(c.info)}>{" avg=" + avg + "ms"}</span>
-          <span fg={rgbaToCSS(c.info)}>{" p50=" + p50 + "ms"}</span>
-          <span fg={rgbaToCSS(c.info)}>{" p95=" + p95 + "ms"}</span>
-          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" n=" + h.count}</span>
         </text>,
       );
+      parts.push(dimRow("avg", avg + "ms"));
+      parts.push(dimRow("p50", p50 + "ms"));
+      parts.push(dimRow("p95", p95 + "ms"));
+      parts.push(dimRow("n", String(h.count)));
     }
   }
 
@@ -142,10 +153,14 @@ export function renderMetricsPanel(props: { c: ThemeColors; snap: MonitorSnapsho
       parts.push(
         <text>
           <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  " + ts}</span>
-          {counterVals && <span fg={rgbaToCSS(c.info)}>{" " + counterVals}</span>}
-          {gaugeVals && <span fg={rgbaToCSS(c.warning)}>{" " + gaugeVals}</span>}
         </text>,
       );
+      if (counterVals) {
+        parts.push(dimRow("counters", counterVals));
+      }
+      if (gaugeVals) {
+        parts.push(dimRow("gauges", gaugeVals));
+      }
     }
   }
 

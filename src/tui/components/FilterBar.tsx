@@ -16,8 +16,12 @@
 /** @jsxImportSource @opentui/solid */
 import { For } from "solid-js";
 import type { ThemeColors } from "../helpers.ts";
-import { rgbaToCSS, BOLD, DIM, UNDERLINE } from "../helpers.ts";
+import {
+  rgbaToCSS, BOLD, DIM, UNDERLINE,
+  G_RUNNING, G_PENDING, G_ERROR, G_TIMEOUT,
+} from "../helpers.ts";
 import { shortSessionId } from "../helpers.ts";
+import { INDENT } from "../layout.ts";
 
 // ── Status filter definitions ────────────────────────────────────────────
 
@@ -28,10 +32,10 @@ export interface StatusFilterDef {
 }
 
 export const STATUS_FILTERS: StatusFilterDef[] = [
-  { key: "running", label: "running", glyph: "\u25b8" },  // ▸
-  { key: "pending", label: "pending", glyph: "\u25cf" },  // ●
-  { key: "error",   label: "error",   glyph: "\u2717" },  // ✗
-  { key: "timeout", label: "timeout", glyph: "\u25c7" },  // ◇
+  { key: "running", label: "running", glyph: G_RUNNING },
+  { key: "pending", label: "pending", glyph: G_PENDING },
+  { key: "error",   label: "error",   glyph: G_ERROR },
+  { key: "timeout", label: "timeout", glyph: G_TIMEOUT },
 ];
 
 // ── Props ────────────────────────────────────────────────────────────────
@@ -66,26 +70,23 @@ function renderStatusToggle(
   def: StatusFilterDef,
   isActive: boolean,
   onToggleStatus?: (status: string) => void,
-  showComma?: boolean,
 ) {
   const info = rgbaToCSS(c.info);
   const muted = rgbaToCSS(c.textMuted);
-
-  const prefix = showComma ? ", " : " ";
   const statusKey = def.key;
 
   if (isActive) {
     // Active: bracketed + bold + colored — looks like a pressed button
     return (
       <span fg={info} attributes={BOLD} on:click={() => onToggleStatus?.(statusKey)}>
-        {prefix + "[" + def.glyph + " " + def.label + "]"}
+        {"[" + def.glyph + " " + def.label + "]"}
       </span>
     );
   }
   // Inactive: dimmed glyph + label (clickable)
   return (
     <span fg={muted} attributes={DIM | UNDERLINE} on:click={() => onToggleStatus?.(statusKey)}>
-      {prefix + def.glyph + " " + def.label}
+      {def.glyph + " " + def.label}
     </span>
   );
 }
@@ -126,67 +127,81 @@ export function renderFilterBar(props: FilterBarProps) {
         </span>
       </text>
 
-      {/* Line 2: Search + status + session (inline compact) */}
+      {/* Search — its own row */}
       <text>
         <span fg={muted} attributes={DIM}>{"  search: "}</span>
         <span fg={norm}>{filterText.length > 0 ? filterText : "\u2026"}</span>
-        <span fg={muted}>{"  |  "}</span>
-        <span fg={muted} attributes={DIM}>{"status:"}</span>
-        <For each={STATUS_FILTERS}>
-          {(def, i) => renderStatusToggle(c, def, activeStatuses.has(def.key), props.onToggleStatus, i() > 0)}
-        </For>
-        <span fg={muted}>{"  |  "}</span>
-        <span fg={muted} attributes={DIM}>{"session:"}</span>
-        {/* Current session as short ID (no "current" label) */}
+      </text>
+
+      {/* Status toggles — one per row */}
+      <text fg={muted} attributes={DIM}>{"  status:"}</text>
+      <For each={STATUS_FILTERS}>
+        {(def) => (
+          <text>
+            <span fg={muted} attributes={DIM}>{INDENT}</span>
+            {renderStatusToggle(c, def, activeStatuses.has(def.key), props.onToggleStatus)}
+          </text>
+        )}
+      </For>
+
+      {/* Session selectors — one per row */}
+      <text fg={muted} attributes={DIM}>{"  session:"}</text>
+      <text>
+        <span fg={muted} attributes={DIM}>{INDENT}</span>
         {sessionFilterId === null || sessionFilterId === currentSessionId ? (
           <span
             fg={info} attributes={BOLD}
             on:click={() => props.onSelectSession?.(currentSessionId)}
           >
-            {" [" + shortSessionId(currentSessionId) + "]"}
+            {"[" + shortSessionId(currentSessionId) + "]"}
           </span>
         ) : (
           <span
             fg={dim} attributes={DIM | UNDERLINE}
             on:click={() => props.onSelectSession?.(currentSessionId)}
           >
-            {"  " + shortSessionId(currentSessionId)}
+            {shortSessionId(currentSessionId)}
           </span>
         )}
-        {/* Other available sessions */}
-        <For each={otherSessions}>
-          {(sid) =>
-            sessionFilterId === sid ? (
+      </text>
+      <For each={otherSessions}>
+        {(sid) => (
+          <text>
+            <span fg={muted} attributes={DIM}>{INDENT}</span>
+            {sessionFilterId === sid ? (
               <span
                 fg={info} attributes={BOLD}
                 on:click={() => props.onSelectSession?.(sid)}
               >
-                {" [" + shortSessionId(sid) + "]"}
+                {"[" + shortSessionId(sid) + "]"}
               </span>
             ) : (
               <span
                 fg={dim} attributes={DIM | UNDERLINE}
                 on:click={() => props.onSelectSession?.(sid)}
               >
-                {"  " + shortSessionId(sid)}
+                {shortSessionId(sid)}
               </span>
-            )
-          }
-        </For>
-        {/* All-sessions toggle */}
+            )}
+          </text>
+        )}
+      </For>
+      {/* All-sessions toggle */}
+      <text>
+        <span fg={muted} attributes={DIM}>{INDENT}</span>
         {sessionFilterId !== null ? (
           <span
             fg={info} attributes={BOLD}
             on:click={() => props.onSelectSession?.(null)}
           >
-            {" [all]"}
+            {"[all]"}
           </span>
         ) : (
           <span
             fg={dim} attributes={DIM | UNDERLINE}
             on:click={() => props.onSelectSession?.(null)}
           >
-            {"  all"}
+            {"all"}
           </span>
         )}
       </text>

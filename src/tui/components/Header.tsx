@@ -7,7 +7,8 @@
 /** @jsxImportSource @opentui/solid */
 import type { RGBA } from "@opentui/core";
 import type { ThemeColors } from "../helpers.ts";
-import { rgbaToCSS, BOLD, DIM, G_RULE, RULE_WIDTH, LEN_VERSION, truncate } from "../helpers.ts";
+import { rgbaToCSS, BOLD, DIM, G_RULE, LEN_VERSION, truncate } from "../helpers.ts";
+import { RULE_WIDTH_NARROW } from "../layout.ts";
 
 export interface HeaderActionHandlers {
   onRefresh?: () => void;
@@ -30,5 +31,5 @@ export function renderHeader(props: { c: ThemeColors; version: string } & Header
 
 export function renderRule(props: { c: ThemeColors }) {
   const c = props.c;
-  return <text fg={rgbaToCSS(c.borderSubtle)} attributes={DIM}>{G_RULE.repeat(RULE_WIDTH)}</text>;
+  return <text fg={rgbaToCSS(c.borderSubtle)} attributes={DIM}>{G_RULE.repeat(RULE_WIDTH_NARROW)}</text>;
 }

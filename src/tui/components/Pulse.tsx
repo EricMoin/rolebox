@@ -7,7 +7,8 @@
 /** @jsxImportSource @opentui/solid */
 import type { RGBA } from "@opentui/core";
 import type { ThemeColors, HealthState } from "../helpers.ts";
-import { rgbaToCSS, BOLD, DIM, DIM_ITALIC, G_RUNNING, G_PENDING, G_ERROR } from "../helpers.ts";
+import { rgbaToCSS, BOLD, DIM, DIM_ITALIC, G_RUNNING, G_PENDING, G_ERROR, G_SUB } from "../helpers.ts";
+import { INDENT } from "../layout.ts";
 
 // ── Health display ───────────────────────────────────────────────────────
 
@@ -39,25 +40,27 @@ export function renderPulse(props: {
   if (!hd) return null;
 
   return (
-    <text>
-      <span fg={rgbaToCSS(hd.color)} attributes={hd.glyphBold ? BOLD : 0}>{hd.glyph}</span>
-      <span fg={rgbaToCSS(hd.color)} attributes={hd.labelBold ? BOLD : 0}>{" " + hd.label + "  "}</span>
+    <>
+      <text>
+        <span fg={rgbaToCSS(hd.color)} attributes={hd.glyphBold ? BOLD : 0}>{hd.glyph}</span>
+        <span fg={rgbaToCSS(hd.color)} attributes={hd.labelBold ? BOLD : 0}>{" " + hd.label}</span>
+      </text>
       {showConcurrency && (
-        <>
-
-          <span fg={rgbaToCSS(c.info)}>{String(active)}</span>
+        <text>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{INDENT + "concurrency: "}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{String(active)}</span>
           <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"/"}</span>
-          <span fg={rgbaToCSS(c.text)}>{String(limit)}</span>
+          <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{String(limit)}</span>
           {queued > 0 && (
             <>
-              <span fg={rgbaToCSS(c.text)}>{" "}</span>
-              <span fg={rgbaToCSS(c.warning)}>{String(queued)}</span>
+              <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{" " + G_SUB + " "}</span>
+              <span fg={rgbaToCSS(c.warning)} attributes={DIM}>{String(queued)}</span>
               <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"q"}</span>
             </>
           )}
-        </>
+        </text>
       )}
-    </text>
+    </>
   );
 }
 
