@@ -6,7 +6,15 @@ import { tmpdir } from "node:os";
 // This file exercises the REAL paths module. Under `bun test --isolate` each
 // test file has its own module registry, so a static import resolves to the
 // real module regardless of mock.module calls registered by other test files.
-import * as paths from "../../src/cli/paths.ts";
+//
+// To ALSO stay correct when the suite runs in a shared process (plain `bun test`
+// WITHOUT `--isolate`), the real module is loaded via a cache-busted
+// query-string specifier (`?real`). A prior test file's `mock.module("...paths")`
+// registration would otherwise shadow a bare static import and break these
+// ROLEBOX_* / win32 branch assertions. The distinct specifier is never covered
+// by a mock keyed to the bare path (same technique as tests/cli/e2e.test.ts).
+const _REAL_PATHS_SPECIFIER = "../../src/cli/paths.ts?real";
+const paths = await import(_REAL_PATHS_SPECIFIER);
 const {
   getDataDir,
   getConfigDir,

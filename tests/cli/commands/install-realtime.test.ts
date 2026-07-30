@@ -17,6 +17,14 @@
 // below resolve to the on-disk source regardless of mocks registered by other
 // test files (e.g. install.test.ts).
 //
+// To ALSO stay correct in a shared-process run (plain `bun test` WITHOUT
+// `--isolate`), the real modules are loaded via cache-busted query-string
+// specifiers (`?real`). A prior test file's `mock.module("...registry-client", ...)`
+// (e.g. install.test.ts registers an unimplemented `downloadRole`) would
+// otherwise shadow a bare static import and make `downloadRole` throw. The
+// distinct specifiers are never covered by mocks keyed to the bare paths
+// (same technique as tests/cli/e2e.test.ts).
+//
 // Covered end-to-end:
 //   • downloadRole() → tar xzf with a real tarball (tests 1 & 2)
 //   • computeIntegrity() on a real extracted tree
@@ -38,9 +46,17 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { hasTar } from "../../helpers/tar";
-import * as realRegistryClient from "../../../src/cli/registry-client";
-import * as realPaths from "../../../src/cli/paths";
-import * as realFsUtils from "../../../src/cli/fs-utils";
+
+// Load the REAL modules via cache-busted query-string specifiers so a prior
+// test file's `mock.module(...)` (keyed to the bare path) cannot shadow them in
+// a shared-process `bun test` run. Each distinct `?real` specifier resolves to
+// the on-disk module even when a mock for the bare specifier is registered.
+const _REAL_REGISTRY_CLIENT_SPECIFIER = "../../../src/cli/registry-client.ts?real";
+const _REAL_PATHS_SPECIFIER = "../../../src/cli/paths.ts?real";
+const _REAL_FS_UTILS_SPECIFIER = "../../../src/cli/fs-utils.ts?real";
+const realRegistryClient = await import(_REAL_REGISTRY_CLIENT_SPECIFIER);
+const realPaths = await import(_REAL_PATHS_SPECIFIER);
+const realFsUtils = await import(_REAL_FS_UTILS_SPECIFIER);
 
 const originalFetch = globalThis.fetch;
 
