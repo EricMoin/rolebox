@@ -30,6 +30,7 @@ import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { DEFAULT_CONFIG, type DispatchManagerConfig } from "../../src/dispatch/config.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import { createMockClient, cleanupTestState } from "./helpers.ts";
+import { hasOpencode } from "../helpers/opencode";
 
 // ── Server-level setup ──────────────────────────────────────────────────────
 
@@ -38,12 +39,13 @@ let client: OpencodeClient;
 
 beforeAll(async () => {
   cleanupTestState();
+  if (!hasOpencode()) return;
   server = await createOpencodeServer({ port: 0, timeout: 15_000 });
   client = createOpencodeClient({ baseUrl: server.url });
 });
 
 afterAll(() => {
-  server.close();
+  if (server) server.close();
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -113,7 +115,7 @@ function createUniqueMockClient(): OpencodeClient {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-describe("concurrency integration — real ConcurrencyManager", () => {
+describe.skipIf(!hasOpencode())("concurrency integration — real ConcurrencyManager", () => {
   /**
    * (a) Slot limit is respected under real load.
    *

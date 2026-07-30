@@ -10,6 +10,7 @@ import { createMockClient, parentContext } from "./helpers";
 import { metrics } from "../../src/dispatch/persistence/metrics";
 import { writeResultSidecar, resultSidecarPath } from "../../src/dispatch/completion/result-extractor";
 import { MAX_CONSECUTIVE_FETCH_FAILURES } from "../../src/dispatch/config";
+import { TimeoutError } from "../../src/dispatch/core/with-timeout";
 
 const fastConfig = {
   staleTimeoutMs: 500,
@@ -5089,9 +5090,9 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   describe("evaluateAndComplete consecutive fetch failures", () => {
     it("single fetch failure increments counter but does NOT escalate to error", async () => {
-      // Mock session.messages() with a never-resolving promise to trigger TimeoutError
+      // Mock session.messages() to reject with TimeoutError (simulates a fetch failure)
       const client = createMockClient({
-        sessionMessages: () => new Promise<never>(() => {}),
+        sessionMessages: () => Promise.reject(new TimeoutError(20, "test")),
       });
       const manager = new DispatchManager(client, {
         ...fastConfig,
@@ -5118,7 +5119,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it(`${MAX_CONSECUTIVE_FETCH_FAILURES} consecutive failures escalate to error`, async () => {
       const client = createMockClient({
-        sessionMessages: () => new Promise<never>(() => {}),
+        sessionMessages: () => Promise.reject(new TimeoutError(20, "test")),
       });
       const manager = new DispatchManager(client, {
         ...fastConfig,
@@ -5155,7 +5156,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         sessionMessages: () => {
           callCount++;
           if (callCount <= failuresBeforeSuccess) {
-            return new Promise<never>(() => {}); // never resolves → TimeoutError
+            return Promise.reject(new TimeoutError(20, "test")); // reject immediately → TimeoutError
           }
           // Successful response
           return Promise.resolve([]);

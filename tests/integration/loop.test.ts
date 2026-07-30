@@ -28,6 +28,7 @@ import { DEFAULT_CONFIG } from "../../src/dispatch/config.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import { LoopCoordinator, DispatchAdapter } from "../../src/loop/index.ts";
 import { cleanupTestState } from "./helpers.ts";
+import { hasOpencode } from "../helpers/opencode";
 
 // ── Server-level setup ──────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ let tmpDir: string;
 
 beforeAll(async () => {
   cleanupTestState();
+  if (!hasOpencode()) return;
   tmpDir = mkdtempSync(path.join(tmpdir(), "loop-int-"));
   server = await createOpencodeServer({ port: 0, timeout: 300_000 }); // 5 min server idle timeout
   // Inject directory so the SDK interceptor adds ?directory= to all GET/HEAD
@@ -45,7 +47,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  server.close();
+  if (server) server.close();
   try {
     rmSync(tmpDir, { recursive: true, force: true });
   } catch {
@@ -164,7 +166,7 @@ async function createRealLoopCoordinator(opts?: {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-describe("loop coordinator — real dispatch push-chain", () => {
+describe.skipIf(!hasOpencode())("loop coordinator — real dispatch push-chain", () => {
   it("completes a 2-round loop through the real push-chain (register → kickoff → dispatch → terminated → advance → finalize)", async () => {
     const { coordinator, manager } = await createRealLoopCoordinator();
 

@@ -162,7 +162,7 @@ describe("autoDetectServers", () => {
     expect(Array.isArray(result)).toBe(true);
   });
 
-  it("detects typescript when package.json is present", () => {
+  it.skipIf(!isServerAvailable("typescript"))("detects typescript when package.json is present", () => {
     // rolebox project has package.json, so typescript should be detected
     const result = autoDetectServers(process.cwd());
     expect(result).toContain("typescript");

@@ -1,6 +1,7 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { EventEmitter } from "node:events";
 import { LspClientManager } from "../../src/lsp/client-manager.ts";
+import { isServerAvailable } from "../../src/lsp/servers.ts";
 import type { Diagnostic } from "../../src/lsp/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ describe("constructor", () => {
     expect(mgr.messageIdCounter).toBe(0);
   });
 
-  it("detects typescript in the rolebox project directory", () => {
+  it.skipIf(!isServerAvailable("typescript"))("detects typescript in the rolebox project directory", () => {
     const mgr = new LspClientManager(process.cwd());
     expect(mgr.detectedLanguages).toContain("typescript");
   });

@@ -49,6 +49,9 @@ import {
 import { createOpencodeServer, createOpencodeClient } from "@opencode-ai/sdk";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 
+// ── opencode binary availability ─────────────────────────────────────────
+import { hasOpencode } from "../helpers/opencode";
+
 // ── Types ────────────────────────────────────────────────────────────────
 import type { ResolvedFunction, ResolvedGraph } from "../../src/types.ts";
 import type { Hooks } from "@opencode-ai/plugin";
@@ -368,7 +371,7 @@ describe("E2E hook pipeline (mock client)", () => {
 //  Tests: Real-Server Hook Pipeline
 // ══════════════════════════════════════════════════════════════════════════
 
-describe("E2E hook pipeline (real server)", () => {
+describe.skipIf(!hasOpencode())("E2E hook pipeline (real server)", () => {
   let server: { url: string; close(): void };
   let realClient: OpencodeClient;
   let tmpDir: string;

@@ -25,6 +25,7 @@ import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { DEFAULT_CONFIG } from "../../src/dispatch/config.ts";
 import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session.ts";
 import { cleanupTestState } from "./helpers.ts";
+import { hasOpencode } from "../helpers/opencode";
 
 // ── Server-level setup ──────────────────────────────────────────────────────
 
@@ -34,6 +35,7 @@ let tmpDir: string;
 
 beforeAll(async () => {
   cleanupTestState();
+  if (!hasOpencode()) return;
   // Start a real opencode server. Port 0 = random available port.
   server = await createOpencodeServer({ port: 0, timeout: 15_000 });
   client = createOpencodeClient({ baseUrl: server.url });
@@ -41,7 +43,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  server.close();
+  if (server) server.close();
   try {
     rmSync(tmpDir, { recursive: true, force: true });
   } catch {
@@ -121,7 +123,7 @@ async function getSessionResult(sessionId: string): Promise<string> {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-describe("dispatch integration — real platform API", () => {
+describe.skipIf(!hasOpencode())("dispatch integration — real platform API", () => {
   it("creates a real session on the opencode platform", async () => {
     const sessionId = await createParentSession();
     expect(sessionId).toBeTruthy();
