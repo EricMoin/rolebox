@@ -84,6 +84,7 @@ export function validateGraphDeclaration(
   checkEdgeEndpoints(graph, errors);
   checkLoopGroupIdUniqueness(graph, errors);
   checkLoopGroupNodeRefs(graph, errors);
+  checkLoopGroupOverlap(graph, errors);
   checkCycleContainment(graph, errors, warnings);
   checkApprovalNodeOutgoing(graph, errors);
   checkDataPassthrough(graph, errors);
@@ -176,6 +177,42 @@ function checkLoopGroupNodeRefs(
   }
 }
 
+// ── Rule 5c: loop-group membership must be disjoint (fatal) ───────────────
+
+/**
+ * Reject any node that appears in more than one declared loop group.
+ *
+ * The engine assigns each member node a single `loopGroupId` by iterating loop
+ * groups in declaration order and overwriting the previous value (last-wins) —
+ * `buildLoopGroupMap` (engine-state.ts:220-230) and `provisionLoopGroups`
+ * (engine-state.ts:349-353). A node declared in two groups therefore silently
+ * binds to only the last one, losing its membership in the first. That silent
+ * overwrite is a structural ambiguity, so we surface it as a fatal error here
+ * rather than letting the engine resolve it implicitly.
+ */
+function checkLoopGroupOverlap(graph: GraphDocument, errors: string[]): void {
+  const owner = new Map<string, string>(); // nodeId → first group that owns it
+  const conflicts = new Map<string, string[]>(); // nodeId → owning group ids
+  for (const group of graph.loop_groups ?? []) {
+    for (const nodeId of group.nodes) {
+      if (owner.has(nodeId)) {
+        const list = conflicts.get(nodeId) ?? [];
+        if (list.length === 0) list.push(owner.get(nodeId)!);
+        list.push(group.id);
+        conflicts.set(nodeId, list);
+      } else {
+        owner.set(nodeId, group.id);
+      }
+    }
+  }
+  for (const [nodeId, groupIds] of conflicts) {
+    errors.push(
+      `node "${nodeId}" appears in multiple loop groups ` +
+        `[${groupIds.join(", ")}] — a node may belong to at most one loop group`,
+    );
+  }
+}
+
 // ── Rule 6: needs_approval nodes — no type:"always" outgoing edges ───────
 
 function checkApprovalNodeOutgoing(
@@ -220,6 +257,58 @@ function checkApprovalNodeOutgoing(
 function isReviseBackEdge(edge: EdgeDeclaration): boolean {
   if (edge.type !== "on_signal") return false;
   return (edge.signal_filter ?? []).includes("revise_needed");
+}
+
+// ── Intra-loop-group always-edge predicate (mirrors engine) ───────────────
+
+/**
+ * Build a NodeId → LoopGroupId map from the graph declaration's loop_groups.
+ *
+ * Uses last-wins semantics (a later group overwrites an earlier group for the
+ * same node id), exactly mirroring the engine's `buildLoopGroupMap`
+ * (engine-state.ts:220-230). Overlapping membership is rejected by
+ * `checkLoopGroupOverlap` (Rule 9), so this last-wins behavior only serves as a
+ * defensive default for callers that run without the overlap check.
+ *
+ * Implemented inline against `GraphDocument` rather than importing the engine's
+ * `buildLoopGroupMap` from `src/graph/engine/` to avoid a layering violation
+ * (validators live in `src/graph/`, above the engine module — see the note on
+ * `isReviseBackEdge` above).
+ */
+function buildLoopGroupMap(graph: GraphDocument): Map<string, string> | null {
+  const groups = graph.loop_groups;
+  if (!groups || groups.length === 0) return null;
+  const map = new Map<string, string>();
+  for (const group of groups) {
+    for (const nodeId of group.nodes) {
+      map.set(nodeId, group.id);
+    }
+  }
+  return map;
+}
+
+/**
+ * Whether an edge is a type-`always` connection whose both endpoints belong to
+ * the same declared loop group. Mirrors the engine's `isIntraLoopGroupAlwaysEdge`
+ * (engine-state.ts:244-253): these intra-group always-edges form the bounded
+ * cycle backbone and must not count as external in-edges blocking root
+ * discovery — otherwise a loop group whose members are connected only by
+ * `always` edges (e.g. A ⇄ B) would have no node with in-degree zero and the
+ * graph would deadlock.
+ *
+ * Signal-routed edges within a loop group are NOT excluded (they represent
+ * forward dependencies that must be honored), and revise back-edges are already
+ * excluded separately by `isReviseBackEdge`.
+ */
+function isIntraLoopGroupAlwaysEdge(
+  edge: EdgeDeclaration,
+  loopGroupMap: Map<string, string> | null,
+): boolean {
+  if (edge.type !== "always") return false;
+  if (!loopGroupMap) return false;
+  const fromGroup = loopGroupMap.get(edge.from);
+  if (fromGroup === undefined) return false;
+  return fromGroup === loopGroupMap.get(edge.to);
 }
 
 // ── Rule 7: data_passthrough shape ───────────────────────────────────────
@@ -270,13 +359,17 @@ function checkLoopGroupRoots(
   errors: string[],
   warnings: string[],
 ): void {
-  // Compute in-degree excluding revise back-edges.
+  // Compute in-degree excluding revise back-edges and intra-loop-group always
+  // edges — exactly matching the engine's computeInDegrees/getRootNodeIds
+  // (engine-state.ts:268-294) so root discovery can never diverge.
+  const loopGroupMap = buildLoopGroupMap(graph);
   const inDegree = new Map<string, number>();
   for (const node of graph.nodes) {
     inDegree.set(node.id, 0);
   }
   for (const edge of graph.edges) {
     if (isReviseBackEdge(edge)) continue;
+    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
     inDegree.set(edge.to, (inDegree.get(edge.to) ?? 0) + 1);
   }
 

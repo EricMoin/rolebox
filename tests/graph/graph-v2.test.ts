@@ -480,8 +480,10 @@ describe("validateGraphDeclaration — structural checks", () => {
 
   // ── rule 8 — deadlock ERROR for pure cycles with loop groups ───────────
 
-  it("rule 8 — ERROR when a pure cycle has a loop group but no external root (valid: false)", () => {
-    // A→B always, B→A always, both in a loop group, no external root.
+  it("rule 8 — an always-cycle inside a loop group is now valid (intra-group always-edges excluded from in-degree)", () => {
+    // A→B always, B→A always, both in a loop group, no external root. Both
+    // always-edges are intra-loop-group always-edges → excluded from in-degree,
+    // so both nodes are roots and the graph does not deadlock.
     const graph: GraphDocument = {
       version: 2,
       name: "pure-cycle-loop",
@@ -498,8 +500,8 @@ describe("validateGraphDeclaration — structural checks", () => {
       ],
     };
     const result = validateGraphDeclaration(graph);
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("no entry node") && e.includes("deadlock"))).toBe(true);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 
   it("rule 8 — loop group with external entry (root outside) is valid", () => {
@@ -527,10 +529,11 @@ describe("validateGraphDeclaration — structural checks", () => {
     expect(result.errors).toEqual([]);
   });
 
-  it("rule 8 — ERROR when a loop group member has no external entry (isolated group)", () => {
-    // root → x (independent chain), AND a separate isolated loop group [a, b]
-    // that has no incoming edges from outside the group. root exists globally,
-    // but the loop group itself is unreachable.
+  it("rule 8 — a loop group whose members are connected only by intra-group always-edges is not flagged (they are roots)", () => {
+    // root → x (independent chain), AND a separate loop group [a, b] whose only
+    // edges are intra-group always-edges. After the intra-group always-edge
+    // exclusion (D5), a and b both have in-degree 0 → they are graph roots, so
+    // the loop group is reachable and not flagged.
     const graph: GraphDocument = {
       version: 2,
       name: "isolated-loop",
@@ -550,9 +553,9 @@ describe("validateGraphDeclaration — structural checks", () => {
       ],
     };
     const result = validateGraphDeclaration(graph);
-    // Global root exists (root has in-degree 0), so no global deadlock error,
-    // but the loop group itself has no external entry → per-group error.
-    expect(result.errors.some((e) => e.includes('loop group "isolated-lg"') && e.includes("no external entry"))).toBe(true);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.errors.some((e) => e.includes('loop group "isolated-lg"') && e.includes("no external entry"))).toBe(false);
     expect(result.errors.some((e) => e.includes("no entry node"))).toBe(false);
   });
 

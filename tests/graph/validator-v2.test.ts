@@ -3,10 +3,10 @@ import { validateGraphDeclaration } from "../../src/graph/validator-v2";
 import type { GraphDocument } from "../../src/graph/parser-v2";
 
 describe("validateGraphDeclaration — checkLoopGroupRoots", () => {
-  it("rejects a pure-cycle deadlock when no node has in-degree zero after excluding revise back-edges", () => {
+  it("accepts an always-cycle declared inside a loop group (intra-group always-edges excluded from in-degree)", () => {
     const graph: GraphDocument = {
       version: 2,
-      name: "pure-cycle-deadlock",
+      name: "always-cycle-in-loop",
       nodes: [
         { id: "a", agent: "test-agent", prompt: "test" },
         { id: "b", agent: "test-agent", prompt: "test" },
@@ -22,15 +22,37 @@ describe("validateGraphDeclaration — checkLoopGroupRoots", () => {
 
     const result = validateGraphDeclaration(graph);
 
+    // Both a→b and b→a are intra-loop-group always-edges, so neither counts
+    // toward in-degree; both nodes become roots and the graph is not a deadlock.
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects a node that appears in more than one loop group (fatal overlap)", () => {
+    const graph: GraphDocument = {
+      version: 2,
+      name: "overlapping-loop-groups",
+      nodes: [
+        { id: "a", agent: "test-agent", prompt: "test" },
+        { id: "b", agent: "test-agent", prompt: "test" },
+      ],
+      edges: [
+        { from: "a", to: "b", type: "always" },
+        { from: "b", to: "a", type: "always" },
+      ],
+      loop_groups: [
+        { id: "lg1", nodes: ["a", "b"], max_traversals: 3 },
+        { id: "lg2", nodes: ["a", "b"], max_traversals: 3 },
+      ],
+    };
+
+    const result = validateGraphDeclaration(graph);
+
     expect(result.valid).toBe(false);
-    expect(result.errors.length).toBeGreaterThan(0);
-    const rootError = result.errors.find(
-      (msg) =>
-        msg.includes("no entry node") ||
-        msg.includes("pure cycle") ||
-        msg.includes("deadlock"),
+    const overlapError = result.errors.find(
+      (msg) => msg.includes("multiple loop groups") && msg.includes('node "a"'),
     );
-    expect(rootError).toBeDefined();
+    expect(overlapError).toBeDefined();
   });
 
   it("accepts a review-loop graph where the revise back-edge is excluded from in-degree", () => {
