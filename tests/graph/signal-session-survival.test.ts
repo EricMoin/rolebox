@@ -26,31 +26,49 @@ function minimalTask(status: "completed", overrides?: Partial<DispatchTask>): Di
 // Test 1 — revise_needed survives the pipeline
 // ═══════════════════════════════════════════════════════════════════════════
 describe("revise_needed survival through pipeline", () => {
-  // Use a unique sessionID per test case to avoid cross-test pollution.
-  const sessionID = "sess-survive-revise";
+  // Each test uses its OWN sessionID and records exactly the signals it
+  // asserts on, so no test reads state written by a sibling test. This makes
+  // the block order-independent under `bun test --randomize` (intra-file
+  // test-order shuffling). The module-level sessionSignalLedger is a shared
+  // singleton, so per-test unique session IDs + self-contained records are the
+  // only way to avoid hidden inter-test data dependencies.
+  const recordSession = "sess-survive-revise-record";
+  const readSession = "sess-survive-revise-read";
+  const mapSession = "sess-survive-revise-map";
+  const directSession = "sess-survive-revise-direct";
 
   beforeAll(() => {
     sessionSignalLedger.resetAll();
   });
 
   afterAll(() => {
-    sessionSignalLedger.clearSession(sessionID);
+    sessionSignalLedger.clearSession(recordSession);
+    sessionSignalLedger.clearSession(readSession);
+    sessionSignalLedger.clearSession(mapSession);
+    sessionSignalLedger.clearSession(directSession);
   });
 
   it("records revise_needed into sessionSignalLedger (simulating bare subagent signal-tool)", () => {
     // Simulate signal-tool running in a session with NO active functions
     // (the "bare" subagent case). It still records at session level.
-    sessionSignalLedger.record(sessionID, "revise_needed", {
+    sessionSignalLedger.record(recordSession, "revise_needed", {
       findings: ["output mismatch", "missing verification"],
       severity: "medium",
     });
 
     // Verify the signal is recorded and retrievable.
-    expect(sessionSignalLedger.hasSignal(sessionID, "revise_needed")).toBe(true);
+    expect(sessionSignalLedger.hasSignal(recordSession, "revise_needed")).toBe(true);
   });
 
   it("getTerminating returns revise_needed with the correct payload", () => {
-    const term = sessionSignalLedger.getTerminating(sessionID);
+    // Self-contained: record the exact signal this test asserts on into its own
+    // session, so it does not depend on a sibling test having recorded it.
+    sessionSignalLedger.record(readSession, "revise_needed", {
+      findings: ["output mismatch", "missing verification"],
+      severity: "medium",
+    });
+
+    const term = sessionSignalLedger.getTerminating(readSession);
     expect(term).not.toBeNull();
     expect(term!.type).toBe("revise_needed");
     expect(term!.payload).toEqual({
@@ -60,14 +78,20 @@ describe("revise_needed survival through pipeline", () => {
   });
 
   it("mapDispatchStatusToSignal preserves revise_needed (not hardcoded answer)", () => {
+    // Self-contained: record the signal this test reads into its own session.
+    sessionSignalLedger.record(mapSession, "revise_needed", {
+      findings: ["output mismatch", "missing verification"],
+      severity: "medium",
+    });
+
     // Step 1: Get the terminating signal from the session ledger.
-    const term = sessionSignalLedger.getTerminating(sessionID)!;
+    const term = sessionSignalLedger.getTerminating(mapSession)!;
 
     // Step 2: Build a task the way completion-evaluator would:
     //   task.terminatingSignal = getTerminatingSignal(taskId, task.sessionId) ?? undefined;
     // Then status="completed" + terminatingSignal populated.
     const task = minimalTask("completed", {
-      sessionId: sessionID,
+      sessionId: mapSession,
       terminatingSignal: { type: term.type, payload: term.payload },
     });
 
@@ -84,7 +108,7 @@ describe("revise_needed survival through pipeline", () => {
   it("a revise_needed task's signal payload is preserved through mapDispatchStatusToSignal", () => {
     // Direct construction (bypass the ledger) — verify the mapping itself.
     const task = minimalTask("completed", {
-      sessionId: sessionID,
+      sessionId: directSession,
       terminatingSignal: {
         type: "revise_needed",
         payload: { issue: "bad formatting" },
