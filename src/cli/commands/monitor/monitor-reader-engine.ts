@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 
+import { EnginePhase, NodeStatus } from "../../../constants.ts";
 import { loadEngineStateFromJson } from "../../../graph/engine/engine-persistence.ts";
 import type { EngineState } from "../../../types.engine-v2.ts";
 import { listStateFiles } from "./monitor-reader-utils.ts";
@@ -73,9 +74,19 @@ function projectEngineGraph(state: EngineState): EngineGraphSnapshot {
   const startedIso = epochToIso(state.startedAt) ?? new Date(0).toISOString();
   const updatedIso = epochToIso(state.updatedAt) ?? new Date(0).toISOString();
 
+  // A graph with any node in `running` status is never surfaced as idle: a
+  // node may be actively executing (e.g. running a shell command) while the
+  // engine's persisted phase momentarily reads idle (no advancement in
+  // flight). Derive the phase as `executing` so the monitor never presents a
+  // false idle/running flicker while work is genuinely in progress.
+  const effectivePhase: EnginePhase =
+    (nodeStatusCounts[NodeStatus.Running] ?? 0) > 0
+      ? EnginePhase.Executing
+      : state.phase;
+
   return {
     graphId: state.graphId,
-    phase: state.phase,
+    phase: effectivePhase,
     nodeCount: state.nodes.size,
     nodeStatusCounts,
     nodes,

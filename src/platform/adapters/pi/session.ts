@@ -68,6 +68,25 @@ function workspaceDirFromPath(absPath: string): string {
 }
 
 /**
+ * Return true when a message contains any tool part whose state is
+ * 'pending' or 'running' — i.e. an active tool/shell command.
+ *
+ * Mirrors the tool-part state vocabulary in src/session/types.ts
+ * (ToolPart.state.status: "pending" | "running" | "completed" | "error").
+ * Used by status() to avoid deriving a false 'idle' while a node executes
+ * shell commands, regardless of the message's `time.completed`.
+ */
+export function hasInFlightToolPart(msg?: Message): boolean {
+  if (!msg?.parts) return false;
+  return msg.parts.some((p) => {
+    if (p.type !== "tool") return false;
+    const tool = p as { state?: { status?: string } };
+    const status = tool.state?.status;
+    return status === "pending" || status === "running";
+  });
+}
+
+/**
  * ISessionClient adapter for the Pi platform.
  *
  * Supports read-only session operations via filesystem scanning
@@ -558,6 +577,14 @@ export class PiSessionAdapter implements ISessionClient {
 
     const lastMsg = messages[messages.length - 1];
     const lastInfo = lastMsg?.info;
+
+    // If the last message still contains an in-flight tool/shell command, the
+    // session is actively executing — report busy regardless of that message's
+    // completed time. This removes the false 'idle' derivation while a node
+    // runs shell commands.
+    if (hasInFlightToolPart(lastMsg)) {
+      return { type: "busy" };
+    }
 
     // If the last message has completed time, session is likely finished.
     if (lastInfo?.time?.completed) {

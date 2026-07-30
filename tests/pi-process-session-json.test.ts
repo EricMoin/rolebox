@@ -429,6 +429,62 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect(signal).toEqual({ type: "not_ready" });
   });
 
+  // ── status() in-flight-tool guard (bug #2: no false idle while a node
+  // ── executes shell commands) ────────────────────────────────────────────
+
+  it("status() returns busy when the last message has a running tool part", async () => {
+    const record = await createRecord(adapter);
+
+    // Feed everything up to (but excluding) tool_execution_end: the adopted
+    // tool part stays mid-execution (running) — status() must report busy so
+    // the node is never surfaced idle while the shell command is in flight.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        AGENT_START_EVENT,
+        MESSAGE_START_EVENT,
+        ...MESSAGE_UPDATE_EVENTS,
+        MESSAGE_END_EVENT,
+        TOOL_EXECUTION_START_EVENT,
+      ),
+    );
+
+    const status = await adapter.status(record.id);
+    expect(status).toEqual({ type: "busy" });
+  });
+
+  it("status() returns busy when the last message has an in-flight toolCall before execution starts", async () => {
+    const record = await createRecord(adapter);
+
+    // message_end's toolCall content builds a tool part with status "running"
+    // before tool_execution_start ever fires. status() must report busy in
+    // that window too — never a false idle while a node's shell command is
+    // queued/executing.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        AGENT_START_EVENT,
+        MESSAGE_START_EVENT,
+        ...MESSAGE_UPDATE_EVENTS,
+        MESSAGE_END_EVENT,
+      ),
+    );
+
+    const status = await adapter.status(record.id);
+    expect(status).toEqual({ type: "busy" });
+  });
+
+  it("status() returns idle when the last message tool part is completed", async () => {
+    const record = await createRecord(adapter);
+
+    feedJsonl(adapter, record, SUCCESS_STREAM);
+
+    const status = await adapter.status(record.id);
+    expect(status).toEqual({ type: "idle" });
+  });
+
   // ── turn_end early completion (pi 0.81.1 never exits json -p children) ──
 
   /** turn_end — the completion signal, mirroring the live 0.81.1 payload. */

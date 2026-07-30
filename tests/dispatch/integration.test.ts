@@ -186,6 +186,51 @@ describe("integration: event-driven completion flow", () => {
     expect(task.status).toBe("error");
     expect(task.error).toBe("Session deleted");
   });
+
+  it("a stale idle status with an in-flight tool cancels the idle debounce (task not completed)", async () => {
+    const { DispatchManager } = await import("../../src/dispatch/core/manager");
+    const { createMockClient, parentContext } = await import("./helpers");
+
+    const client = createMockClient({
+      sessionCreate: () =>
+        Promise.resolve({ id: "ses_inflight_tool" }),
+      sessionPromptAsync: () =>
+        Promise.resolve({ id: "prompt-1" }),
+      sessionMessages: () =>
+        Promise.resolve([
+          { info: { role: "assistant", id: "a1" }, parts: [{ type: "tool", state: "running" }] },
+        ]),
+      sessionStatus: () =>
+        Promise.resolve({ type: "idle" }),
+    });
+
+    const manager = new DispatchManager(client, {
+      maxConcurrent: 5,
+      taskTtlMs: 100,
+    });
+
+    const task = await manager.launch(
+      { subagent: "helper", prompt: "do work", run_in_background: true },
+      parentContext(),
+    );
+    expect(task.status).toBe("running");
+
+    const mgr = manager as any;
+    const sessionId = task.sessionId;
+    (mgr.tasks.get(task.id) as any).startedAt = new Date(Date.now() - 10000);
+
+    // Arm an idle debounce (e.g. from a prior idle). A stale idle status that
+    // arrives while the last assistant message still has a running tool must
+    // cancel it so the task is NOT completed while the tool is active.
+    mgr.watchdog.startDebounce(task.id);
+    expect(mgr.watchdog.isDebouncing(task.id)).toBe(true);
+
+    await manager.handleSessionStatus(sessionId, "idle");
+
+    expect(mgr.watchdog.isDebouncing(task.id)).toBe(false);
+    expect(task.status).toBe("running");
+    expect(mgr.eventState.get(task.id).hasProducedOutput).toBe(true);
+  });
 });
 
 // ── Integration: Per-parent fairness + backpressure ──────────────────

@@ -217,6 +217,31 @@ export function mapDispatchStatusToSignal(
   }
 }
 
+/**
+ * Whether a dispatch task is currently STILL LIVE (running / pending /
+ * awaiting_approval) per the dispatch port's authoritative `getTask` read.
+ *
+ * Backs the transient-error guard in {@link subscribeTaskTermination} and the
+ * `_dispatchNode` race-guard (`engine-advance.ts`): when a dispatch termination
+ * reports a status of `error`, the engine re-checks liveness before committing
+ * the node to `escalate`. A transient execution error must never latch a node as
+ * a terminal error while the underlying session continues — so if the
+ * authoritative read shows the task is still live, the reported `error` is
+ * treated as stale and the escalate is skipped (the node stays running).
+ *
+ * A missing `getTask` port, a vanished task, or a throwing read all resolve to
+ * `false` (NOT live) — the conservative "genuine terminal" default — so a
+ * reported error that cannot be re-confirmed as live still escalates.
+ */
+export function isDispatchTaskLive(
+  port: DispatchRecoveryPort,
+  taskId: string,
+): boolean {
+  if (!port.getTask) return false;
+  const task = safeGetTask(port, taskId);
+  return !!task && LIVE_DISPATCH_STATUSES.has(task.status);
+}
+
 // ── Per-node usage capture (Phase-7 per-node consumption) ───────────────────
 
 /**
@@ -295,6 +320,14 @@ export function captureNodeUsage(
  *
  * When the dispatch task reports `cancelled`, the node is cancelled directly
  * (`running → cancelled`) — there is no terminating signal to record.
+ *
+ * Transient-error guard (subtask 4): a reported `error` is re-checked against
+ * the dispatch port's authoritative `getTask` read via {@link isDispatchTaskLive}.
+ * If the task is still live (running / pending / awaiting_approval), the `error`
+ * is treated as stale — a transient execution error must not latch the node as a
+ * terminal error while the underlying session continues — so the escalate is
+ * skipped, the node stays `running`, and the listener is re-subscribed so a
+ * genuine later termination still advances it.
  */
 export function subscribeTaskTermination(
   state: EngineState,
@@ -317,6 +350,21 @@ export function subscribeTaskTermination(
     captureNodeUsage(state, current, port);
     if (status === "cancelled") {
       markCancelled(state, current, "dispatch task cancelled");
+      return;
+    }
+    // Transient-error guard: a reported `error` may be stale — the underlying
+    // session could have recovered and the task returned to a live status
+    // (running / pending / awaiting_approval). Re-check via the dispatch port
+    // before committing the node to `escalate`. When the task is still live,
+    // skip the escalate (keep the node running) and re-subscribe so a genuine
+    // later termination still advances the node.
+    if (status === "error" && isDispatchTaskLive(port, completedTaskId)) {
+      logWarn(
+        `engine-recovery: dispatch reported error for task ${completedTaskId} ` +
+        `(node ${nodeId}) but the task is still live — skipping escalate, ` +
+        `keeping node running`,
+      );
+      subscribeTaskTermination(state, port, current, emitSignal);
       return;
     }
     const task = safeGetTask(port, completedTaskId);

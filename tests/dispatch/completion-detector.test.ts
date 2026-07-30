@@ -270,6 +270,62 @@ describe("detectCompletion", () => {
     expect(result).toEqual({ type: "completed" });
   });
 
+  // ── Tool-in-flight guard precedes idle/error/completed decisions ──────
+
+  it("returns not_ready when a tool part has state pending under absent status", () => {
+    const result = detectCompletion(
+      [
+        msg({ finish: "end_turn" }, [
+          { type: "tool", state: "pending" },
+        ]),
+      ],
+      undefined,
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready when a tool part has state running under absent status", () => {
+    const result = detectCompletion(
+      [
+        msg({ finish: "end_turn" }, [
+          { type: "tool", state: "running" },
+        ]),
+      ],
+      undefined,
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready for an in-flight tool even when the last assistant message carries an error (guard precedes error decision)", () => {
+    const result = detectCompletion(
+      [
+        msg({ error: "transient provider hiccup" }, [
+          { type: "tool", state: "running" },
+        ]),
+      ],
+      idle(),
+      eventState(),
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready for an in-flight tool with object state { status: 'pending' } (Pi adapter shape)", () => {
+    const result = detectCompletion(
+      [
+        msg({ finish: "end_turn" }, [
+          { type: "tool", state: { status: "pending" } } as unknown as { type: string; state?: string; text?: string },
+        ]),
+      ],
+      idle(),
+      eventState(),
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
   // ── Stability Gating ──────────────────────────────────────────────
 
   it("returns stabilizing when stability gating is not skipped (default)", () => {

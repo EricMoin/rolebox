@@ -5,6 +5,7 @@ import {
   computeHealth,
   getActiveTasks,
   computeFilteredActivity,
+  deriveEnginePhase,
 } from "../../src/tui/logic";
 import type {
   MonitorSnapshot,
@@ -615,6 +616,38 @@ describe("computeFilteredActivity", () => {
       filterText: "",
     });
     expect(result.engineGraphs).toEqual([]);
+  });
+});
+
+// ── deriveEnginePhase ────────────────────────────────────────────────────
+
+describe("deriveEnginePhase", () => {
+  it("returns executing when any node is running, even if phase is idle", () => {
+    expect(deriveEnginePhase({
+      phase: "idle",
+      nodeStatusCounts: { running: 1, completed: 2 },
+    })).toBe("executing");
+  });
+
+  it("returns executing when running > 0 regardless of the persisted phase", () => {
+    expect(deriveEnginePhase({
+      phase: "complete",
+      nodeStatusCounts: { running: 1, completed: 3 },
+    })).toBe("executing");
+  });
+
+  it("renders a running engine graph snapshot as executing, not idle", () => {
+    const graph = makeEngineGraph({ phase: "idle", nodeStatusCounts: { running: 1 } });
+    expect(deriveEnginePhase(graph)).toBe("executing");
+  });
+
+  it("returns the persisted phase when no node is running", () => {
+    expect(deriveEnginePhase({ phase: "idle", nodeStatusCounts: { completed: 4 } })).toBe("idle");
+    expect(deriveEnginePhase({ phase: "complete", nodeStatusCounts: { completed: 4 } })).toBe("complete");
+  });
+
+  it("treats a missing running count as zero", () => {
+    expect(deriveEnginePhase({ phase: "idle", nodeStatusCounts: {} })).toBe("idle");
   });
 });
 

@@ -27,6 +27,7 @@ import type {
   GraphSessionSnapshot,
   EngineGraphSnapshot,
 } from "../../cli/commands/monitor/monitor-reader.ts";
+import { deriveEnginePhase } from "../logic.ts";
 import { renderProgressIndicator } from "./ProgressIndicator.tsx";
 
 // ── Function line component ──────────────────────────────────────────────
@@ -271,7 +272,10 @@ export function renderEngineGraphActivity(props: {
   graphSignals?: ReadonlyMap<string, string>;
 }) {
   const { c, graph } = props;
-  const phase = enginePhaseVisual(graph.phase, c);
+  // A graph with any running node is never shown idle (a node may be executing
+  // a shell command while the engine's persisted phase momentarily reads idle).
+  const effectivePhase = deriveEnginePhase(graph);
+  const phase = enginePhaseVisual(effectivePhase, c);
   const gid = shortSessionId(graph.graphId);
 
   // Recent live signal (graph_signal / node signal) if one fired for this graph.
@@ -296,7 +300,7 @@ export function renderEngineGraphActivity(props: {
         <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"engine · "}</span>
         <span fg={rgbaToCSS(phase.color)}>{phase.glyph + " "}</span>
         <span fg={rgbaToCSS(c.text)}>{gid + " "}</span>
-        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{graph.phase}</span>
+        <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{effectivePhase}</span>
         {liveSignal && liveSignal !== "" && (
           <span fg={rgbaToCSS(c.secondary)}>{"  sig " + liveSignal}</span>
         )}
@@ -311,6 +315,11 @@ export function renderEngineGraphActivity(props: {
             const glyph = engineNodeGlyph(node.status);
             const color = engineNodeColor(node.status, c);
             const done = node.status === "completed" || node.status === "done";
+            // Running nodes surface real runtime status (liveness since start)
+            // rather than reading as a stale idle/placeholder.
+            const liveness = node.status === "running" && node.startedAt
+              ? " \u00b7 " + formatTimeAgo(Math.max(0, Date.now() - new Date(node.startedAt).getTime()))
+              : "";
             return (
               <>
                 {i() > 0 && <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  "}</span>}
@@ -320,6 +329,9 @@ export function renderEngineGraphActivity(props: {
                 </span>
                 {node.signalType && !done && (
                   <span fg={rgbaToCSS(c.secondary)}>{":" + node.signalType}</span>
+                )}
+                {liveness !== "" && (
+                  <span fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{liveness}</span>
                 )}
               </>
             );

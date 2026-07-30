@@ -72,7 +72,11 @@ import {
   markNodeBlocked,
   canTransitionNode,
 } from "./node-lifecycle.ts";
-import { subscribeTaskTermination, mapDispatchStatusToSignal } from "./engine-recovery.ts";
+import {
+  subscribeTaskTermination,
+  mapDispatchStatusToSignal,
+  isDispatchTaskLive,
+} from "./engine-recovery.ts";
 import { collectUpstreamResults } from "./join-evaluator.ts";
 import { applyDataMapping } from "./data-mapping-transform.ts";
 import {
@@ -894,6 +898,19 @@ export class AdvanceEngine {
         currentStatus &&
         currentStatus.status !== "cancelled"
       ) {
+        // Transient-error guard (subtask 4): the post-subscription read may
+        // report `error` while the task/session is actually still live. Re-check
+        // liveness via the dispatch port before queueing an escalate — a
+        // transient execution error must never latch the node as a terminal
+        // error while the underlying session continues. When the task is still
+        // live, skip the escalate (the node stays running; the subscribed
+        // listener or recovery will advance it on a genuine termination).
+        if (
+          currentStatus.status === "error" &&
+          isDispatchTaskLive(this.dispatchPort, task.id)
+        ) {
+          return;
+        }
         const current = this.state.nodes.get(node.nodeId);
         if (
           current &&

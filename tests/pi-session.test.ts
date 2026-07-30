@@ -303,6 +303,70 @@ describe("PiSessionAdapter — filesystem-backed reading", () => {
     expect(status).toBeNull();
   });
 
+  it("status() returns busy when the last message has a pending/running tool part despite completed time", async () => {
+    const toolSessionId = "session-tool-busy";
+
+    for (const toolStatus of ["pending", "running"] as const) {
+      const msg: object = {
+        info: {
+          id: "msg-1",
+          sessionID: toolSessionId,
+          role: "assistant",
+          time: { created: 1700000300000, completed: 1700000301000 },
+        },
+        parts: [
+          {
+            id: "p1",
+            sessionID: toolSessionId,
+            messageID: "msg-1",
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: { status: toolStatus, input: { command: "sleep 1" } },
+          },
+        ],
+      };
+      writeJsonlFile(join(wsDir, `${toolSessionId}.jsonl`), [msg]);
+
+      const status = await adapter.status(toolSessionId);
+      expect(status).toEqual({ type: "busy" });
+    }
+  });
+
+  it("status() returns idle when the last message has a completed tool part", async () => {
+    const toolSessionId = "session-tool-idle";
+    const msg: object = {
+      info: {
+        id: "msg-1",
+        sessionID: toolSessionId,
+        role: "assistant",
+        time: { created: 1700000300000, completed: 1700000301000 },
+      },
+      parts: [
+        {
+          id: "p1",
+          sessionID: toolSessionId,
+          messageID: "msg-1",
+          type: "tool",
+          callID: "call-1",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: { command: "ls" },
+            output: "src/\n",
+            title: "bash",
+            metadata: {},
+            time: { start: 1700000300000, end: 1700000301000 },
+          },
+        },
+      ],
+    };
+    writeJsonlFile(join(wsDir, `${toolSessionId}.jsonl`), [msg]);
+
+    const status = await adapter.status(toolSessionId);
+    expect(status).toEqual({ type: "idle" });
+  });
+
   // ── unsupported methods ─────────────────────────────────────────────────
 
   it("unsupported methods return null/false", async () => {

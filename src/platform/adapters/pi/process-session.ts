@@ -27,7 +27,7 @@ import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import type { ISessionClient } from "../../ports/session-client.ts";
 import type { IEventBridge } from "../../ports/event-bridge.ts";
-import { PiSessionAdapter } from "./session.ts";
+import { PiSessionAdapter, hasInFlightToolPart } from "./session.ts";
 import {
   appendEvent,
   cleanup as cleanupSidecar,
@@ -591,6 +591,14 @@ export class PiProcessSessionAdapter implements ISessionClient {
     }
 
     if (record.proc && record.exitCode === null) {
+      return { type: "busy" };
+    }
+
+    // Even when the process is no longer alive (exited or recovered), if the
+    // last accumulated message still contains an in-flight tool/shell command,
+    // the session is actively executing — report busy rather than idle.
+    const lastMsg = record.messages[record.messages.length - 1];
+    if (hasInFlightToolPart(lastMsg)) {
       return { type: "busy" };
     }
 

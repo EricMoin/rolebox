@@ -186,6 +186,34 @@ describe("readEngineGraphs", () => {
     expect(n2.loopGroupId).toBe("lg1");
   });
 
+  it("projects a graph whose persisted phase is idle as executing when a node is running", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    // Default fixture has n1 running; force the persisted graph phase to idle.
+    writeEngineFile("engine-running-idle.json", JSON.stringify(buildEngineFile({ phase: "idle" })));
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g.nodeStatusCounts.running).toBe(1);
+    // running > 0 must never surface as idle — derive executing instead.
+    expect(g.phase).toBe("executing");
+  });
+
+  it("keeps the persisted idle phase when no node is running", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    writeEngineFile(
+      "engine-idle-noop.json",
+      JSON.stringify(
+        buildEngineFile(
+          { phase: "idle" },
+          { n1: { status: "completed" }, n2: { status: "completed" } },
+        ),
+      ),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g.nodeStatusCounts.running ?? 0).toBe(0);
+    expect(g.phase).toBe("idle");
+  });
+
   it("flags hasCheckpoints false when the file carries no checkpoints key", () => {
     mkdirSync(stateDir(), { recursive: true });
     const file = buildEngineFile();

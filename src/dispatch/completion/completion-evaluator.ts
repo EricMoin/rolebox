@@ -1,4 +1,4 @@
-import type { SessionMessageSnapshot } from "../types.ts";
+import type { SessionMessageSnapshot, DispatchTask } from "../types.ts";
 import type { TaskLifecycleDeps } from "../core/lifecycle-shared.ts";
 import {
   transition,
@@ -8,7 +8,7 @@ import {
   notifyTerminated,
   resetRequestSessions,
 } from "../core/lifecycle-shared.ts";
-import { detectCompletion } from "./completion-detector.ts";
+import { detectCompletion, hasInflightToolPart } from "./completion-detector.ts";
 import { extractSessionErrorMessage } from "../core/error-utils.ts";
 import { infoLog, debugLog } from "../core/debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
@@ -23,6 +23,9 @@ import type { ProgressEvent } from "../types.progress.ts";
 import { buildReminder } from "../../prompt/reminder.ts";
 import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
 import { SYNTHETIC_ANSWER_SIGNAL } from "../../signal/signal-constants.ts";
+
+/** Timeout (ms) for each individual SDK call made during a liveness re-check. */
+const LIVENESS_CHECK_TIMEOUT_MS = 5_000;
 
 // ── Signal-type classification ──────────────────────────────────────
 
@@ -206,6 +209,135 @@ function markError(d: TaskLifecycleDeps, taskId: string, errorMsg: string): void
   finalizeCompletion(d, taskId);
 }
 
+/** True if the session has assistant output beyond this task's baseline message count. */
+async function hasRecentMessageActivity(
+  d: TaskLifecycleDeps,
+  task: DispatchTask,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    const msgs = await withTimeout(
+      d.client.messages(sessionId),
+      LIVENESS_CHECK_TIMEOUT_MS,
+      "liveness:messages",
+    );
+    const allMessages = (msgs ?? []) as SessionMessageSnapshot[];
+    const eventState = d.eventState.get(task.id);
+    const startIndex = eventState?.messageCountAtStart ?? 0;
+    const scoped = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
+    return scoped.some((m) => m.info.role === "assistant");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Re-verify a sub-agent session's liveness before committing a terminal
+ * `error` transition.
+ *
+ * `session.error` / `session.deleted` events and bursts of SDK fetch failures
+ * are frequently transient — the underlying sub-agent session may still be
+ * alive and producing output. Guarding the terminal transition with a liveness
+ * re-check prevents a transient execution error from latching the node as a
+ * terminal error while the session continues.
+ *
+ * Combines three signals:
+ *   - SessionMonitor.verifyExistence() → "exists" | "missing" | "unknown"
+ *   - client.status()                  → active (busy/retry/running) vs idle
+ *   - recent message activity          → is the session still producing output
+ *
+ * @returns `true`  when the session is genuinely gone or terminally failed
+ *                  (the caller should proceed with markError).
+ *          `false` when the session is still alive/active (the caller should
+ *                  log a transient note, reset the watchdog, keep the task
+ *                  `running`, and return WITHOUT terminal notification or
+ *                  monitoring unregistration).
+ */
+async function isSessionTerminal(
+  d: TaskLifecycleDeps,
+  taskId: string,
+  errorLabel: string,
+): Promise<boolean> {
+  const task = d.tasks.get(taskId);
+  if (!task || !task.sessionId) return true; // nothing to verify → conservative terminal
+
+  let existence: "exists" | "missing" | "unknown";
+  try {
+    existence = await withTimeout(
+      d.sessionMonitor.verifyExistence(d.client, task.sessionId),
+      LIVENESS_CHECK_TIMEOUT_MS,
+      "liveness:verifyExistence",
+    );
+  } catch {
+    existence = "unknown";
+  }
+
+  // Session genuinely gone — real terminal failure.
+  if (existence === "missing") {
+    debugLog("evaluate", taskId, `${errorLabel} — verifyExistence=missing, genuine terminal`);
+    return true;
+  }
+
+  // Session still exists. Determine whether it is actively working.
+  let statusType: string | null = null;
+  try {
+    const st = await withTimeout(
+      d.client.status(task.sessionId),
+      LIVENESS_CHECK_TIMEOUT_MS,
+      "liveness:status",
+    );
+    statusType = (st as { type?: string } | null)?.type ?? null;
+  } catch {
+    statusType = null;
+  }
+
+  // Active statuses mean the sub-agent is still working.
+  if (statusType === "busy" || statusType === "retry" || statusType === "running") {
+    infoLog("evaluate", taskId, `${errorLabel} — session alive & active (status=${statusType}), transient`);
+    return false;
+  }
+
+  // The session is still producing output.
+  if (await hasRecentMessageActivity(d, task, task.sessionId)) {
+    infoLog("evaluate", taskId, `${errorLabel} — session has recent message activity, transient`);
+    return false;
+  }
+
+  // No evidence of continued life: the session either does not exist or exists
+  // but is idle and has not produced any recent output. In both cases there is
+  // no "underlying session continuing" to protect, so the genuine-failure path
+  // is preserved.
+  debugLog("evaluate", taskId, `${errorLabel} — no active status and no recent output, genuine terminal`);
+  return true;
+}
+
+/**
+ * Guard a terminal error transition with a session-liveness re-check.
+ *
+ * When the underlying session is genuinely gone or terminally failed, the task
+ * is transitioned to `error`. When the session is still alive/active, a
+ * transient-error note is logged, the watchdog is reset, the task stays
+ * `running`, and no terminal notification or monitoring unregistration occurs.
+ *
+ * @returns `true` if the task transitioned to `error`; `false` if it was
+ *          kept running because the session is still alive.
+ */
+async function guardedMarkError(
+  d: TaskLifecycleDeps,
+  taskId: string,
+  errorMsg: string,
+  errorLabel: string,
+): Promise<boolean> {
+  if (await isSessionTerminal(d, taskId, errorLabel)) {
+    markError(d, taskId, errorMsg);
+    return true;
+  }
+  // Transient — session still alive. Keep the task running.
+  d.watchdog.resetWatchdog(taskId);
+  debugLog("evaluate", taskId, `${errorLabel} — transient, task stays running`);
+  return false;
+}
+
 /** Find the earliest start time among inflight children of the given session, or null if none. */
 function getOldestInflightChildStartedAt(d: TaskLifecycleDeps, sessionId: string): number | null {
   return d.oldestStartedAtByParent.get(sessionId) ?? null;
@@ -228,12 +360,12 @@ export async function evaluateAndComplete(
   }
 
   if (trigger === "error-event") {
-    markError(d, taskId, errorDetail ?? "Task error event received");
+    await guardedMarkError(d, taskId, errorDetail ?? "Task error event received", "error-event");
     return;
   }
 
   if (trigger === "deleted-event") {
-    markError(d, taskId, "Session deleted");
+    await guardedMarkError(d, taskId, "Session deleted", "deleted-event");
     return;
   }
 
@@ -248,7 +380,7 @@ export async function evaluateAndComplete(
       statusResult = await withTimeout(d.client.status(task.sessionId), fetchTimeoutMs, "session.status");
     } catch (e) {
       if (e instanceof TimeoutError) {
-        handleEvaluateFetchFailure(d, taskId, `fetch timed out after ${fetchTimeoutMs}ms`, fetchTimeoutMs);
+        await handleEvaluateFetchFailure(d, taskId, `fetch timed out after ${fetchTimeoutMs}ms`, fetchTimeoutMs);
         return;
       }
       throw e;
@@ -370,7 +502,7 @@ export async function evaluateAndComplete(
       }
     }
   } catch (err) {
-    handleEvaluateFetchFailure(d, taskId, `error fetching: ${err instanceof Error ? err.message : String(err)}`, 0);
+    await handleEvaluateFetchFailure(d, taskId, `error fetching: ${err instanceof Error ? err.message : String(err)}`, 0);
   }
 }
 
@@ -378,15 +510,16 @@ export async function evaluateAndComplete(
  * Handle a consecutive fetch failure in evaluateAndComplete.
  * Returns true iff escalation to error status occurred.
  */
-function handleEvaluateFetchFailure(d: TaskLifecycleDeps, taskId: string, failureLabel: string, _fetchTimeoutMs: number): boolean {
+async function handleEvaluateFetchFailure(d: TaskLifecycleDeps, taskId: string, failureLabel: string, _fetchTimeoutMs: number): Promise<boolean> {
   const es = d.eventState.get(taskId);
   if (!es) return false;
   es.consecutiveFetchFailures++;
   infoLog("evaluate", taskId, `${failureLabel} (failure #${es.consecutiveFetchFailures})`);
   if (es.consecutiveFetchFailures >= MAX_CONSECUTIVE_FETCH_FAILURES) {
-    markError(d, taskId, `Cannot verify task liveness — SDK fetch failed ${es.consecutiveFetchFailures} consecutive times`);
+    const errorMsg = `Cannot verify task liveness — SDK fetch failed ${es.consecutiveFetchFailures} consecutive times`;
+    const escalated = await guardedMarkError(d, taskId, errorMsg, "fetch-failure");
     d.persistState();
-    return true;
+    return escalated;
   }
   d.persistState();
   return false;
@@ -484,7 +617,7 @@ export async function handleSessionIdle(d: TaskLifecycleDeps, sessionId: string)
 }
 
 /** Handle session.status event — update event state and heartbeat. */
-export function handleSessionStatus(d: TaskLifecycleDeps, sessionId: string, statusType: string): void {
+export async function handleSessionStatus(d: TaskLifecycleDeps, sessionId: string, statusType: string): Promise<void> {
   const taskId = d.sessionToTask.get(sessionId);
   if (!taskId) return;
   const task = d.tasks.get(taskId);
@@ -496,14 +629,50 @@ export function handleSessionStatus(d: TaskLifecycleDeps, sessionId: string, sta
   eventState.lastEventAt = Date.now();
   d.watchdog.resetWatchdog(taskId);
 
+  // A busy/retry status means the session is actively working (typically
+  // executing a tool/shell command) — treat it as a progress heartbeat.
   if (statusType === "busy" || statusType === "retry") {
     eventState.lastProgressUpdate = Date.now();
     eventState.hasProducedOutput = true;
     d.watchdog.cancelDebounce(taskId);
     debugLog("event", taskId, `session.status=${statusType} — progress heartbeat, cancelled debounce`);
-  } else {
-    debugLog("event", taskId, `session.status=${statusType} — idle heartbeat (stale clock preserved)`);
+    return;
   }
+
+  // For idle (or other) statuses, a stale 'idle' must never complete a task
+  // while the last assistant message still has an in-flight (pending/running)
+  // tool part. If one is present, treat the status as a progress heartbeat:
+  // refresh the stale clock and cancel any armed idle debounce.
+  let hasInflightTool = false;
+  try {
+    const msgs = await withTimeout(
+      d.client.messages(sessionId),
+      d.config.materializeTimeoutMs ?? MATERIALIZE_TIMEOUT_MS,
+      "handleSessionStatus:session.messages",
+    );
+    const allMessages = (msgs ?? []) as SessionMessageSnapshot[];
+    const startIndex = eventState.messageCountAtStart ?? 0;
+    const scoped = startIndex > 0 ? allMessages.slice(startIndex) : allMessages;
+    for (let i = scoped.length - 1; i >= 0; i--) {
+      if (scoped[i].info.role === "assistant") {
+        hasInflightTool = hasInflightToolPart(scoped[i].parts);
+        break;
+      }
+    }
+  } catch {
+    // Non-fatal — if we cannot observe the message state, fall back to idle
+    hasInflightTool = false;
+  }
+
+  if (hasInflightTool) {
+    eventState.lastProgressUpdate = Date.now();
+    eventState.hasProducedOutput = true;
+    d.watchdog.cancelDebounce(taskId);
+    debugLog("event", taskId, `session.status=${statusType} — in-flight tool detected, progress heartbeat, cancelled debounce`);
+    return;
+  }
+
+  debugLog("event", taskId, `session.status=${statusType} — idle heartbeat (stale clock preserved)`);
 }
 
 /** Handle message.updated event — progress heartbeat. */

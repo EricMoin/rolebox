@@ -38,18 +38,52 @@ const TERMINAL_SESSION_STATUSES: ReadonlySet<string> = new Set([
   "interrupted",
 ]);
 
+// ── Tool In-Flight Helper ─────────────────────────────────────────────
+
+/**
+ * Normalize a tool part's state value, supporting both the string form
+ * (`state: "pending"`) used by opencode snapshots and the object form
+ * (`state: { status: "running" }`) produced by the Pi adapter, so an in-flight
+ * tool is never missed across adapters.
+ */
+function partStateValue(state: string | { status?: string } | undefined): string | undefined {
+  if (typeof state === "string") return state;
+  return state?.status;
+}
+
+/**
+ * True if any tool part is in-flight (state `pending` or `running`).
+ *
+ * The last assistant message carrying an in-flight tool means the model has
+ * produced a tool call that is still executing — the session is NOT idle and
+ * must not be reported complete (or error-latched) until the tool settles.
+ */
+export function hasInflightToolPart(
+  parts: Array<{ type: string; state?: string | { status?: string } }>,
+): boolean {
+  for (const part of parts) {
+    if (part.type !== "tool") continue;
+    const status = partStateValue(part.state);
+    if (status === "pending" || status === "running") return true;
+  }
+  return false;
+}
+
 // ── Core Detection ────────────────────────────────────────────────────
 
 /**
  * Evaluate whether a background task session has reached completion.
  *
  * The decision follows a fixed priority order:
- *   1. Session gone → defer to session monitor
+ *   1. Tool-execution-in-progress guard — pending/running tool on the last
+ *      assistant message → not ready. Evaluated first so a transient error or
+ *      a stale idle/terminal status never latches a terminal result while the
+ *      model's tool is still running.
  *   2. Session actively processing → not ready
  *   3. Session in terminal status (interrupted) → completed
- *   4. Session idle → check for assistant output
+ *   4. No assistant output → not ready
  *   5. Error detection on last assistant message
- *   6. Tool-execution-in-progress guard
+ *   6. finish "tool-calls" → not ready
  *   7. Stability gating (MIN_STABILITY_POLLS consecutive idle polls)
  *
  * @param messages  Chronological message snapshots from the sub-agent session
@@ -63,6 +97,23 @@ export function detectCompletion(
   pollState: TaskEventState,
   skipStabilityGating?: boolean,
 ): CompletionSignal {
+  // Find the LAST assistant message (reverse scan). Needed by the
+  // tool-in-flight guard, error detection, and finish-reason checks.
+  let lastAssistant: SessionMessageSnapshot | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].info.role === "assistant") {
+      lastAssistant = messages[i];
+      break;
+    }
+  }
+
+  // Tool-execution-in-progress guard — evaluated BEFORE the idle/error/
+  // completed decisions so a transient error or a stale idle/terminal status
+  // never latches a terminal result while the model's tool is still running.
+  if (lastAssistant && hasInflightToolPart(lastAssistant.parts)) {
+    return { type: "not_ready" };
+  }
+
   // Status-based gating applies ONLY when a status is present. An absent
   // status (undefined) means the session is missing from the directory-scoped
   // `session.status()` map — NOT that it is gone — so it is treated as
@@ -77,49 +128,29 @@ export function detectCompletion(
     }
   }
 
-  // For idle (or absent-status) sessions: verify we have assistant output
-
-  // 5. Find the LAST assistant message (reverse scan)
-  let lastAssistant: SessionMessageSnapshot | undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].info.role === "assistant") {
-      lastAssistant = messages[i];
-      break;
-    }
-  }
-
-  // 6. No assistant message found — hasn't started generating
+  // No assistant message found — hasn't started generating
   if (!lastAssistant) {
     return { type: "not_ready" };
   }
 
-  // 7. Error on the last assistant message
+  // Error on the last assistant message
   if (lastAssistant.info.error) {
     return { type: "error", message: extractAssistantError(lastAssistant.info.error) };
   }
 
-  // 8. Tool execution in progress (pending or running)
-  for (const part of lastAssistant.parts) {
-    if (part.type === "tool") {
-      if (part.state === "pending" || part.state === "running") {
-        return { type: "not_ready" };
-      }
-    }
-  }
-
-  // 9. If finish is explicitly "tool-calls", model expects tool execution → not ready
+  // If finish is explicitly "tool-calls", model expects tool execution → not ready
   if (lastAssistant.info.finish === "tool-calls") {
     return { type: "not_ready" };
   }
 
-  // 10. Session is idle, has assistant output, no pending tools.
-  //     Apply stability gating to avoid premature completion detection.
-  //     When skipStabilityGating=true (event-driven evaluation), bypass stability.
+  // Session is idle, has assistant output, no pending tools.
+  // Apply stability gating to avoid premature completion detection.
+  // When skipStabilityGating=true (event-driven evaluation), bypass stability.
   if (!skipStabilityGating) {
     return { type: "stabilizing" };
   }
 
-  // 11. All gates passed → task is complete
+  // All gates passed → task is complete
   return { type: "completed" };
 }
 

@@ -148,9 +148,14 @@ export function renderGraphs(snapshot: MonitorSnapshot): void {
   const lines: string[] = [];
 
   for (const g of graphs) {
-    const phaseGlyph = g.phase === "executing"
+    // A graph with any running node is never shown idle (a node may be
+    // executing a shell command while the persisted phase reads idle).
+    const effectivePhase = (g.nodeStatusCounts?.running ?? 0) > 0
+      ? "executing"
+      : g.phase;
+    const phaseGlyph = effectivePhase === "executing"
       ? cyan("\u25b8") // ▸
-      : g.phase === "complete"
+      : effectivePhase === "complete"
         ? green("\u2713") // ✓
         : yellow("\u25cf"); // ●
 

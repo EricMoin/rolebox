@@ -84,7 +84,7 @@ export class TaskLifecycleManager implements LifecycleBridge {
     return evaluatorHandleIdle(this.d, sessionId);
   }
 
-  handleSessionStatus(sessionId: string, statusType: string): void {
+  handleSessionStatus(sessionId: string, statusType: string): Promise<void> {
     return evaluatorHandleStatus(this.d, sessionId, statusType);
   }
 

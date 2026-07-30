@@ -379,6 +379,34 @@ describe("subscribeTaskTermination", () => {
     ]);
     sessionSignalLedger.clearSession(sessionId);
   });
+
+  it("does NOT emit escalate for a still-live/running task reporting a transient error (subtask 4)", () => {
+    // The listener fires with status 'error', but the dispatch port's
+    // authoritative getTask read shows the task is still running → the error is
+    // stale/transient: skip the escalate and keep the node running.
+    const liveTask = makeTask("task-A", "running");
+    const { fire, emitted, state } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      liveTask,
+    );
+    fire("error");
+    expect(emitted).toEqual([]); // no escalate for a transient/live task
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running); // node stays running
+  });
+
+  it("still escalates a genuinely errored task whose authoritative read is error (subtask 4 regression)", () => {
+    // The task is genuinely errored (getTask returns 'error'), so the liveness
+    // guard must NOT suppress the escalate.
+    const erroredTask = makeTask("task-A", "error", "boom");
+    const { fire, emitted } = subscribe(
+      NodeStatus.Running,
+      "task-A",
+      erroredTask,
+    );
+    fire("error");
+    expect(emitted).toEqual([["A", "escalate", { error: "boom" }]]);
+  });
 });
 
 // ── captureNodeUsage (Phase-7 per-node consumption) ─────────────────────────

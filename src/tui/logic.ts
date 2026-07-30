@@ -8,6 +8,7 @@
  * @module
  */
 
+import { EnginePhase, NodeStatus } from "../constants";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
@@ -98,6 +99,26 @@ export function computeHealth(params: HealthParams): HealthState | null {
   }
 
   return "IDLE";
+}
+
+// ── Engine-graph phase derivation ─────────────────────────────────────────
+
+/**
+ * Derive the effective engine lifecycle phase to display for a graph.
+ *
+ * A graph with any node in `running` status is never presented as idle: the
+ * underlying session is actively executing (e.g. a node running a shell
+ * command) even when the engine's persisted phase momentarily reads `idle`
+ * (no node advancement is happening while work is in flight). Surface it as
+ * `executing` instead of a stale `idle` to avoid false idle flicker.
+ */
+export function deriveEnginePhase(graph: {
+  phase: EnginePhase;
+  nodeStatusCounts: Record<string, number>;
+}): EnginePhase {
+  const running = graph.nodeStatusCounts[NodeStatus.Running] ?? 0;
+  if (running > 0) return EnginePhase.Executing;
+  return graph.phase;
 }
 
 // ── Active task filtering and sorting ────────────────────────────────────

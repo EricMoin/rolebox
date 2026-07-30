@@ -364,7 +364,7 @@ export class DispatchManager {
     return this.lifecycle.handleSessionIdle(sessionId);
   }
 
-  handleSessionStatus(sessionId: string, statusType: string): void {
+  handleSessionStatus(sessionId: string, statusType: string): Promise<void> {
     return this.lifecycle.handleSessionStatus(sessionId, statusType);
   }
 
