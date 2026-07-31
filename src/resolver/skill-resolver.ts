@@ -54,7 +54,14 @@ export async function resolveSkills(
     candidateTasks.push({ name, candidates: buildCandidates(name, roleDir, globalSkillsDir) });
   }
 
-  const allPatterns = candidateTasks.flatMap(t => t.candidates.map(c => c.pattern));
+  // fast-glob only officially supports forward-slash patterns. On win32 the
+  // join()-built candidate patterns use backslashes; passing them verbatim
+  // makes the static reader return backslash paths (no absolute:true -> no
+  // unixify), which then never equal the toPosixPath(candidate.pattern)
+  // comparison below. Normalize to forward slashes up front so matchedPaths
+  // comes back forward-slash and agrees with the existing comparison. On
+  // POSIX toPosixPath is a no-op, so behavior is unchanged there.
+  const allPatterns = candidateTasks.flatMap(t => t.candidates.map(c => toPosixPath(c.pattern)));
   const matchedPaths = await fg(allPatterns, { onlyFiles: true });
   const matchSet = new Set(matchedPaths);
 

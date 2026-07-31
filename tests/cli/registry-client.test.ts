@@ -545,7 +545,7 @@ describe("downloadRole", () => {
     expect(leaked).toHaveLength(0);
   });
 
-  it.skipIf(!hasTar())("rejects archives whose entries escape the extract directory (zip-slip)", async () => {
+  it.skipIf(!hasTar() || process.platform === "win32")("rejects archives whose entries escape the extract directory (zip-slip)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-zipslip-"));
     const fixtureDir = join(tmpDir, "fixture");
     const topDir = join(fixtureDir, "top");

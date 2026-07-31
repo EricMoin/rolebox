@@ -74,6 +74,38 @@ describe("win32 branch passes the correct type argument", () => {
       setPlatformForTest(undefined);
     }
   });
+
+  it("createDirSymlink normalizes POSIX forward slashes to native separators", () => {
+    setPlatformForTest("win32");
+    const calls: string[][] = [];
+    const spy = spyOn(fs, "symlinkSync");
+    spy.mockImplementation((target: string, link: string, type?: string) => {
+      calls.push([target, link, type ?? "undefined"]);
+    });
+    try {
+      createDirSymlink("C:/skills/a/b", "C:/rolebox/link");
+      expect(calls).toEqual([["C:\\skills\\a\\b", "C:\\rolebox\\link", "junction"]]);
+    } finally {
+      spy.mockRestore();
+      setPlatformForTest(undefined);
+    }
+  });
+
+  it("createFileSymlink normalizes POSIX forward slashes to native separators", () => {
+    setPlatformForTest("win32");
+    const calls: string[][] = [];
+    const spy = spyOn(fs, "symlinkSync");
+    spy.mockImplementation((target: string, link: string, type?: string) => {
+      calls.push([target, link, type ?? "undefined"]);
+    });
+    try {
+      createFileSymlink("C:/skills/a.txt", "C:/rolebox/link.txt");
+      expect(calls).toEqual([["C:\\skills\\a.txt", "C:\\rolebox\\link.txt", "file"]]);
+    } finally {
+      spy.mockRestore();
+      setPlatformForTest(undefined);
+    }
+  });
 });
 
 describe("isSymlink", () => {

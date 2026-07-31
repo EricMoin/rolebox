@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { existsSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { join, relative } from "node:path";
-import { tmpdir } from "node:os";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type {
@@ -43,18 +42,25 @@ function makeSource(signals: Record<string, unknown> = {}): NodeRuntimeState {
 
 // Temp artifact for the artifact_exists checks. These are created in beforeAll —
 // NOT at module scope — so no filesystem write runs during module
-// evaluation/collection. A module-scope write into cwd (or a hardcoded POSIX
-// path) can throw at import time on CI platforms where the working tree is not
-// freely writable or the path length/format differs (e.g. Windows). The
-// resolver resolves artifact_exists names relative to process.cwd(), so we keep
-// that contract by passing a RELATIVE path from cwd to the artifact; the artifact
-// itself now lives under the OS temp dir.
+// evaluation/collection. The resolver resolves artifact_exists names relative to
+// process.cwd() (src/graph/engine/condition-resolver.ts joins the name onto
+// process.cwd()). To exercise that contract we must hand it a name that is
+// GENUINELY relative to cwd on every platform:
+//   - The artifact must live under process.cwd() so that relative(cwd, presentFile)
+//     always yields a relative path, never an absolute one.
+//   - On win32, if the artifact lived in os.tmpdir() (as it did before), a
+//     cross-drive relative() returns an ABSOLUTE path (Node's documented behavior
+//     when from/to are on different drives), which breaks the resolver's
+//     join(process.cwd(), arg) reconstruction and fails in CI.
+// So we create the temp dir under cwd, guaranteeing same-drive / cwd-prefixed
+// paths and a platform-neutral relative() result (backslash separators on win32
+// are normalized correctly by path.join).
 let cwdArtifact: string;
 let presentFile: string;
 let missingFile: string; // never created
 
 beforeAll(() => {
-  cwdArtifact = mkdtempSync(join(tmpdir(), ".rb-cond-test-"));
+  cwdArtifact = mkdtempSync(join(process.cwd(), ".rb-cond-test-"));
   presentFile = join(cwdArtifact, "report.md");
   writeFileSync(presentFile, "present");
   missingFile = join(cwdArtifact, "nope.md"); // never created

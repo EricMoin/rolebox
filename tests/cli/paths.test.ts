@@ -53,14 +53,15 @@ afterEach(() => {
 });
 
 import { ensureWritableDir } from "../../src/cli/fs-utils";
+import { toPosixPath } from "../../src/utils/paths";
 
 describe("paths", () => {
-  it("getDataDir returns ~/.local/share/rolebox on macOS/Linux by default", () => {
+  it.skipIf(process.platform === "win32")("getDataDir returns ~/.local/share/rolebox on macOS/Linux by default", () => {
     const dir = getDataDir();
     expect(dir).toEndWith(".local/share/rolebox");
   });
 
-  it("getConfigDir returns ~/.config/rolebox on macOS/Linux by default", () => {
+  it.skipIf(process.platform === "win32")("getConfigDir returns ~/.config/rolebox on macOS/Linux by default", () => {
     const dir = getConfigDir();
     expect(dir).toEndWith(".config/rolebox");
   });
@@ -87,7 +88,9 @@ describe("paths", () => {
 
   it("getSyncTarget opencode returns path ending with opencode/rolebox", () => {
     const target = getSyncTarget("opencode");
-    expect(target).toEndWith("opencode/rolebox");
+    // Normalize separators so the assertion holds on win32 (backslashes) and
+    // POSIX (forward slashes) alike.
+    expect(toPosixPath(target)).toEndWith("opencode/rolebox");
   });
 
   it("getSyncTarget with unknown target throws", () => {

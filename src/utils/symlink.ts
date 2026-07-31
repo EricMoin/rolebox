@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { createSubLogger, formatError } from "../logger.ts";
 import { getPlatform } from "../cli/paths.ts";
 
@@ -25,7 +26,10 @@ function isWindows(): boolean {
 export function createDirSymlink(target: string, link: string): void {
   try {
     if (isWindows()) {
-      fs.symlinkSync(target, link, "junction");
+      // Junctions require an absolute native drive path. skill filePaths are
+      // POSIX-normalized, so dirname-derived targets carry forward slashes on
+      // win32; normalize to native separators before handing to libuv.
+      fs.symlinkSync(path.win32.resolve(target), path.win32.resolve(link), "junction");
     } else {
       fs.symlinkSync(target, link);
     }
@@ -54,7 +58,7 @@ export function createDirSymlink(target: string, link: string): void {
 export function createFileSymlink(target: string, link: string): void {
   try {
     if (isWindows()) {
-      fs.symlinkSync(target, link, "file");
+      fs.symlinkSync(path.win32.resolve(target), path.win32.resolve(link), "file");
     } else {
       fs.symlinkSync(target, link);
     }
