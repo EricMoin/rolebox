@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { execSync } from "node:child_process";
 import { createSubLogger } from "../logger.ts";
 import type { LspServerConfig } from "./types.ts";
 
@@ -140,17 +139,9 @@ export function getLanguageIdFromExtension(filePath: string): string | undefined
 
 function findCommandOnPath(command: string): string | null {
   const isWin = process.platform === "win32";
-  const whichCmd = isWin ? "where" : "which";
 
-  try {
-    const result = execSync(`${whichCmd} ${command} 2>/dev/null`, {
-      encoding: "utf-8",
-      timeout: 5000,
-    }).trim();
-    if (result) return result.split("\n")[0].trim();
-  } catch {
-    // Not found on PATH, check common install locations
-  }
+  const resolved = Bun.which(command);
+  if (resolved) return resolved;
 
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const commonPaths = [
