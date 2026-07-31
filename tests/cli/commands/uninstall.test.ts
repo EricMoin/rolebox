@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { rmSync, mkdirSync, existsSync, symlinkSync, writeFileSync, mkdtempSync } from "node:fs";
+import { rmSync, mkdirSync, existsSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createDirSymlink } from "../../helpers/symlink";
 
 async function importUninstall() {
   // Cache-bust so each call re-evaluates the command module against the mocks
@@ -92,7 +93,7 @@ describe("uninstall", () => {
 
     const targetPath = join(syncTargetDir(), "my-role");
     mkdirSync(syncTargetDir(), { recursive: true });
-    symlinkSync(rolePath, targetPath);
+    createDirSymlink(rolePath, targetPath);
 
     expect(existsSync(targetPath)).toBe(true);
 

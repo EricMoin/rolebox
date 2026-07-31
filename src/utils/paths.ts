@@ -6,6 +6,21 @@ import {
   type PlatformPaths,
 } from "../platform/paths.ts";
 
+// ── Path normalization ───────────────────────────────────────────
+
+/**
+ * Normalize a path to use forward slashes.
+ *
+ * On Windows, Node's path APIs and user-supplied paths often use backslashes,
+ * while fast-glob returns forward-slash paths. Comparisons and stored paths
+ * must agree, and Node's fs accepts forward slashes on win32 — so converting
+ * backslashes to forward slashes keeps every path readable and comparable on
+ * all platforms. A forward-slash path is returned unchanged.
+ */
+export function toPosixPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 // ── Internal platform path resolver ──────────────────────────────
 
 function resolvePaths(platformId?: string): PlatformPaths {

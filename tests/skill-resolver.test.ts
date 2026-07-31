@@ -1,8 +1,10 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { resolveSkills, loadSkillContent } from "../src/resolver/skill-resolver";
 import { parseFrontmatter } from "../src/resolver/frontmatter";
+import { toPosixPath } from "../src/utils/paths";
 
 let tmpRoots: string[] = [];
 
@@ -14,7 +16,7 @@ afterEach(() => {
 });
 
 function tmpDir(): string {
-  const dir = mkdtempSync("/tmp/rolebox-test-");
+  const dir = mkdtempSync(join(tmpdir(), "rolebox-test-"));
   tmpRoots.push(dir);
   return dir;
 }
@@ -72,7 +74,7 @@ describe("resolveSkills", () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-skill");
     expect(result[0].scope).toBe("rolebox");
-    expect(result[0].filePath).toContain("/skills/my-skill/SKILL.md");
+    expect(toPosixPath(result[0].filePath)).toContain("/skills/my-skill/SKILL.md");
   });
 
   it("finds role-local single-file skill (priority 2)", async () => {
@@ -86,7 +88,7 @@ describe("resolveSkills", () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-skill");
     expect(result[0].scope).toBe("rolebox");
-    expect(result[0].filePath).toContain("/skills/my-skill.md");
+    expect(toPosixPath(result[0].filePath)).toContain("/skills/my-skill.md");
   });
 
   it("finds global directory-based skill (priority 3)", async () => {
@@ -100,7 +102,7 @@ describe("resolveSkills", () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-skill");
     expect(result[0].scope).toBe("opencode");
-    expect(result[0].filePath).toContain("/my-skill/SKILL.md");
+    expect(toPosixPath(result[0].filePath)).toContain("/my-skill/SKILL.md");
   });
 
   it("finds global single-file skill (priority 4)", async () => {
@@ -114,7 +116,7 @@ describe("resolveSkills", () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-skill");
     expect(result[0].scope).toBe("opencode");
-    expect(result[0].filePath).toContain("/my-skill.md");
+    expect(toPosixPath(result[0].filePath)).toContain("/my-skill.md");
   });
 
   it("skips missing skills without error (returns empty array)", async () => {
@@ -173,7 +175,7 @@ describe("resolveSkills", () => {
     const result = await resolveSkills(["dup"], roleDir, globalDir);
 
     expect(result).toHaveLength(1);
-    expect(result[0].filePath).toContain("/skills/dup/SKILL.md");
+    expect(toPosixPath(result[0].filePath)).toContain("/skills/dup/SKILL.md");
     expect(result[0].scope).toBe("rolebox");
   });
 
@@ -213,17 +215,17 @@ describe("resolveSkills", () => {
     // skill-a: only in rolebox -> rolebox scope
     const a = result.find(s => s.name === "skill-a")!;
     expect(a.scope).toBe("rolebox");
-    expect(a.filePath).toContain("/skills/skill-a/SKILL.md");
+    expect(toPosixPath(a.filePath)).toContain("/skills/skill-a/SKILL.md");
 
     // skill-b: in BOTH -> rolebox wins (priority over global)
     const b = result.find(s => s.name === "skill-b")!;
     expect(b.scope).toBe("rolebox");
-    expect(b.filePath).toContain("/skills/skill-b/SKILL.md");
+    expect(toPosixPath(b.filePath)).toContain("/skills/skill-b/SKILL.md");
 
     // skill-c: only in global -> opencode scope
     const c = result.find(s => s.name === "skill-c")!;
     expect(c.scope).toBe("opencode");
-    expect(c.filePath).toContain("/skill-c/SKILL.md");
+    expect(toPosixPath(c.filePath)).toContain("/skill-c/SKILL.md");
   });
 
   it("reads description from SKILL.md frontmatter", async () => {

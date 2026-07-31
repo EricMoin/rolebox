@@ -1,9 +1,10 @@
 import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump } from "js-yaml";
 import type { LockEntry } from "../../../src/cli/types";
+import { createDirSymlink } from "../../helpers/symlink";
 
 const statusConfigDir = mkdtempSync(join(tmpdir(), "rolebox-status-config-"));
 const statusDataDir = mkdtempSync(join(tmpdir(), "rolebox-status-data-"));
@@ -88,7 +89,7 @@ function createRoleDir(registry: string, roleId: string, version: string): strin
 function createSyncSymlink(roleId: string, target: string): void {
   const syncDir = syncTarget();
   mkdirSync(syncDir, { recursive: true });
-  symlinkSync(target, join(syncDir, roleId));
+  createDirSymlink(target, join(syncDir, roleId));
 }
 
 function createOpencodeConfig(plugins: string[]): void {

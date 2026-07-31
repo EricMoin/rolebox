@@ -12,6 +12,7 @@ import {
   agentsDir,
   platformAgentsDir,
   platformAgentFilePath,
+  toPosixPath,
 } from "../../src/utils/paths.ts";
 
 const FAKE_HOME = "/Users/fakeuser";
@@ -111,5 +112,19 @@ describe("paths", () => {
     expect(platformAgentFilePath("x", "pi")).toBe(
       join(FAKE_HOME, ".pi", "agent", "skills", "x", "SKILL.md"),
     );
+  });
+});
+
+describe("toPosixPath", () => {
+  it("converts Windows backslashes to forward slashes", () => {
+    expect(toPosixPath("a\\b")).toBe("a/b");
+  });
+
+  it("leaves forward-slash paths unchanged", () => {
+    expect(toPosixPath("a/b")).toBe("a/b");
+  });
+
+  it("converts Windows drive paths", () => {
+    expect(toPosixPath("C:\\x\\y")).toBe("C:/x/y");
   });
 });

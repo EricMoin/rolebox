@@ -14,6 +14,13 @@ export function parseFrontmatter(content: string): {
   metadata: SkillMetadata;
   body: string;
 } {
+  // Normalize Windows CRLF line endings to LF. git's `core.autocrlf` on
+  // Windows checks out .md files with CRLF, which would otherwise break the
+  // literal `\n---` frontmatter-delimiter match and leave stray `\r` chars
+  // at the start of the extracted body (`body.startsWith("\n")` would not
+  // strip the leading blank line because the body begins with `\r`).
+  content = content.replace(/\r\n/g, "\n");
+
   const trimmed = content.trimStart();
 
   if (!trimmed.startsWith("---")) {

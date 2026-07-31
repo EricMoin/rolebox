@@ -5,6 +5,7 @@ import type { ReferenceEntry, ResolvedReference } from "../types.ts";
 import type { ReferenceScope } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import { readTextFile, fileExists } from "../utils/fs.ts";
+import { toPosixPath } from "../utils/paths.ts";
 
 const log = createSubLogger("reference-resolver");
 
@@ -20,8 +21,13 @@ const descriptionCache = new Map<string, Promise<string | undefined>>();
  * "theory/core-principles.md" → "theory/core-principles"
  */
 function deriveNameFromPath(relPath: string): string {
-  const ext = extname(relPath);
-  const withoutExt = ext ? relPath.slice(0, -ext.length) : relPath;
+  // Normalize to forward slashes first so the extension strip and the
+  // "references/" prefix regex behave identically on every platform (a
+  // Windows-style backslash path would otherwise skip both). The derived name
+  // is an identifier, so forward-slash separators are the correct contract.
+  const posixPath = toPosixPath(relPath);
+  const ext = extname(posixPath);
+  const withoutExt = ext ? posixPath.slice(0, -ext.length) : posixPath;
   // Strip leading "references/" prefix if present
   return withoutExt.replace(/^references\//, "");
 }
@@ -115,11 +121,17 @@ export async function discoverReferences(
   // Batch-read all discovered files with Promise.all using the cache
   const resolved = await Promise.all(
     matches.map(async (filePath) => {
-      const relativePath = relative(baseDir, filePath);
+      const relativePath = toPosixPath(relative(baseDir, filePath));
       const name = deriveNameFromPath(relativePath);
       const frontmatterDesc = await extractFrontmatterDescription(filePath);
       const description = frontmatterDesc ?? deriveDescriptionFromName(name);
-      return { name, filePath, description, scope, relativePath };
+      return {
+        name,
+        filePath: toPosixPath(filePath),
+        description,
+        scope,
+        relativePath,
+      };
     }),
   );
 
@@ -156,7 +168,7 @@ export async function resolveExplicitReferences(
       continue;
     }
 
-    const relativePath = relative(baseDir, filePath);
+    const relativePath = toPosixPath(relative(baseDir, filePath));
     const name = key;
     let description: string;
 
@@ -167,7 +179,13 @@ export async function resolveExplicitReferences(
       description = frontmatterDesc ?? deriveDescriptionFromName(name);
     }
 
-    resolved.push({ name, filePath, description, scope, relativePath });
+    resolved.push({
+      name,
+      filePath: toPosixPath(filePath),
+      description,
+      scope,
+      relativePath,
+    });
   }
 
   return resolved;
@@ -201,13 +219,17 @@ export async function resolveAllReferences(
   // Build a map keyed by absolute filePath for deduplication
   const byPath = new Map<string, ResolvedReference>();
 
+  // Key the map on the forward-slash-normalized filePath so discovered refs
+  // (fast-glob → forward slashes) and explicit refs (path.resolve → native
+  // separators) collapse to the same key on Windows. Without this, the same
+  // file would appear twice and the dedup would silently fail.
   for (const ref of discovered) {
-    byPath.set(ref.filePath, ref);
+    byPath.set(toPosixPath(ref.filePath), ref);
   }
 
   // Explicit entries override discovered ones (for description enrichment)
   for (const ref of explicit) {
-    byPath.set(ref.filePath, ref);
+    byPath.set(toPosixPath(ref.filePath), ref);
   }
 
   const merged = Array.from(byPath.values());

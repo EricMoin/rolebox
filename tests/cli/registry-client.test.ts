@@ -1,7 +1,10 @@
 // NOTE: Cache isolation for fetchRegistryManifest is achieved with per-test
-// temp dirs via XDG_DATA_HOME, not mock.module. The suite runs under
-// `bun test --isolate`, so each file gets a fresh module registry and getDataDir()
-// always resolves through the real src/cli/paths module, honoring XDG_DATA_HOME.
+// temp dirs, not mock.module. The suite runs under `bun test --isolate`, so each
+// file gets a fresh module registry and getDataDir() always resolves through the
+// real src/cli/paths module. Each test points the data dir at its OWN mkdtempSync
+// dir (per-test, not per-file) via BOTH XDG_DATA_HOME and ROLEBOX_DATA_DIR — the
+// latter carries the highest precedence in getDataDir() on every platform, so
+// cache isolation holds on Windows regardless of how XDG is handled.
 // Cross-file mock.module leakage is structurally impossible.
 import { describe, it, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, symlinkSync, readdirSync } from "node:fs";
@@ -11,6 +14,10 @@ import { hasTar } from "../helpers/tar";
 
 function setMockDataDir(dir: string) {
   process.env.XDG_DATA_HOME = dir;
+  // ROLEBOX_DATA_DIR is honored with the highest precedence in getDataDir() on
+  // every platform (src/cli/paths.ts), so pointing it at the fresh per-test dir
+  // gives belt-and-braces isolation that does not depend on XDG handling.
+  process.env.ROLEBOX_DATA_DIR = dir;
 }
 
 import {
@@ -60,6 +67,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   delete process.env.XDG_DATA_HOME;
   delete process.env.XDG_CONFIG_HOME;
+  delete process.env.ROLEBOX_DATA_DIR;
 });
 
 // ── parseGitHubUrl ─────────────────────────────────────────────────

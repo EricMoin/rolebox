@@ -24,13 +24,18 @@ __setLoggerForTest({
 
 let tmpDir: string;
 
+const ORIGINAL_HOME = process.env.HOME;
+const FIXED_HOME = "/home/test";
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-test-"));
   capturedLogs.length = 0;
+  process.env.HOME = FIXED_HOME;
 });
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
+  process.env.HOME = ORIGINAL_HOME;
 });
 
 async function writeRoleYaml(
@@ -193,7 +198,7 @@ describe("discoverRoles", () => {
   });
 
   it("resolves {env:HOME} patterns in role.yaml prompt", async () => {
-    const home = process.env.HOME!;
+    const home = FIXED_HOME;
     await writeRoleYaml(
       "home-aware",
       `name: Home Aware\ndescription: Knows home\nprompt: "Your home is {env:HOME}"\n`,
@@ -207,7 +212,7 @@ describe("discoverRoles", () => {
   });
 
   it("resolves env vars in prompt_file content", async () => {
-    const home = process.env.HOME!;
+    const home = FIXED_HOME;
     const roleDir = join(tmpDir, "env-reader");
     mkdirSync(roleDir, { recursive: true });
     await writeFile(
@@ -530,7 +535,7 @@ describe("discoverRoles", () => {
   });
 
   it("resolves env vars in subagent fields via resolveEnvVarsDeep", async () => {
-    const home = process.env.HOME!;
+    const home = FIXED_HOME;
     await writeRoleYaml(
       "parent",
       [

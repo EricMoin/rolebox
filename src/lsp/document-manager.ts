@@ -5,6 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createSubLogger } from "../logger.ts";
 import type { LspClientManager } from "./client-manager.ts";
 
@@ -74,13 +75,11 @@ export class LspDocumentManager {
   // -----------------------------------------------------------------------
 
   getUri(filePath: string): string {
+    // pathToFileURL emits a canonical RFC-8089 file URI on every platform:
+    // - Unix: file:///absolute/path/to/file.ts
+    // - Windows: file:///C:/Users/... (drive colon unencoded, backslashes -> '/')
     const absolute = path.resolve(filePath);
-    const encoded = absolute.split(path.sep).map((segment) => encodeURIComponent(segment)).join("/");
-
-    if (path.sep === "\\") {
-      return `file:///${encoded}`;
-    }
-    return `file://${encoded}`;
+    return pathToFileURL(absolute).toString();
   }
 
   isOpen(uri: string): boolean {

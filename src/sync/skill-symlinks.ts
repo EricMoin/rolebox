@@ -1,8 +1,9 @@
 import path from "node:path";
-import { mkdirSync, rmdirSync, readdirSync, unlinkSync, symlinkSync, lstatSync, existsSync, readlinkSync, rmSync } from "node:fs";
+import { mkdirSync, rmdirSync, readdirSync, unlinkSync, lstatSync, existsSync, readlinkSync, rmSync } from "node:fs";
 import type { ResolvedRole } from "../types.ts";
 import { SkillScope, ROLEBOX_SKILL_PREFIX, SKILL_MD } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
+import { createDirSymlink, createFileSymlink } from "../utils/symlink.ts";
 
 const log = createSubLogger("sync");
 
@@ -28,12 +29,12 @@ function createSkillEntry(entryPath: string, filePath: string): void {
   try {
     if (isDirectorySkill) {
       ensureSymlinkTarget(entryPath, path.dirname(filePath));
-      symlinkSync(path.dirname(filePath), entryPath);
+      createDirSymlink(path.dirname(filePath), entryPath);
     } else {
       mkdirSync(entryPath, { recursive: true });
       const innerPath = path.join(entryPath, SKILL_MD);
       ensureSymlinkTarget(innerPath, filePath);
-      symlinkSync(filePath, innerPath);
+      createFileSymlink(filePath, innerPath);
     }
   } catch (err) {
     log.warn("Failed to create skill symlink", { entryPath, filePath, error: formatError(err) });

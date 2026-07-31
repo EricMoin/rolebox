@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { resolveFunctions } from "../src/function/file-resolver";
 
 let tmpRoots: string[] = [];
@@ -13,7 +14,7 @@ afterEach(() => {
 });
 
 function tmpDir(): string {
-  const dir = mkdtempSync("/tmp/rolebox-test-");
+  const dir = mkdtempSync(join(tmpdir(), "rolebox-test-"));
   tmpRoots.push(dir);
   return dir;
 }

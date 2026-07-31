@@ -271,7 +271,7 @@ describe("GraphEventRecorder — total (never throws)", () => {
     const p1 = graphEventsPath("/ws", "my-graph");
     const p2 = graphEventsPath("/ws", "my-graph");
     expect(p1).toBe(p2);
-    expect(p1).toMatch(
+    expect(p1.replace(/\\/g, "/")).toMatch(
       /\.rolebox\/state\/graph-events-[0-9a-f]{12}\.ndjson$/,
     );
     // Different graph → different file fragment.

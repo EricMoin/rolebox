@@ -21,6 +21,7 @@ import type { Config } from "@opencode-ai/sdk";
 import { discoverRoles } from "../src/loader/role-loader";
 import { resolveSkills } from "../src/resolver/skill-resolver";
 import { buildAgentPrompt } from "../src/prompt/builder";
+import { toPosixPath } from "../src/utils/paths";
 import RoleboxModule from "../src/index";
 const RoleboxPlugin = RoleboxModule.server;
 
@@ -171,7 +172,7 @@ describe("End-to-end", () => {
       expect(skill.description).toContain(
         "Standard code review checklist",
       );
-      expect(skill.filePath).toContain("review-checklist/SKILL.md");
+      expect(toPosixPath(skill.filePath)).toContain("review-checklist/SKILL.md");
     });
 
     it("skips skills that cannot be found in any candidate location", async () => {
@@ -206,7 +207,7 @@ describe("End-to-end", () => {
       expect(skill.description).toContain(
         "Thorough research verification checklist",
       );
-      expect(skill.filePath).toContain("research-checklist/SKILL.md");
+      expect(toPosixPath(skill.filePath)).toContain("research-checklist/SKILL.md");
     });
   });
 

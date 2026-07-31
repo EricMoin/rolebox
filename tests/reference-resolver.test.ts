@@ -8,6 +8,7 @@ import {
   resolveExplicitReferences,
   resolveAllReferences,
 } from "../src/resolver/reference-resolver";
+import { toPosixPath } from "../src/utils/paths";
 
 let tmpDir: string;
 
@@ -92,7 +93,7 @@ describe("discoverReferences", () => {
     await writeRef("references/theory/visual.md", "# Visual");
 
     const result = await discoverReferences(tmpDir, "role");
-    expect(result[0].relativePath).toBe("references/theory/visual.md");
+    expect(toPosixPath(result[0].relativePath)).toBe("references/theory/visual.md");
   });
 });
 

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { createSubLogger } from "../logger.ts";
 import { acquireStateLock } from "../dispatch/concurrency/state-lock.ts";
 import { stateDirFor } from "../utils/state-paths.ts";
@@ -82,7 +82,7 @@ function doQuarantine(filePath: string, reason: string): null {
 
   // ISO-like timestamp safe for filenames (no colons)
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const baseName = filePath.split("/").pop() ?? "unknown";
+  const baseName = basename(filePath) ?? "unknown";
   const dest = join(quarantineDir, `${baseName}.${timestamp}.corrupt`);
 
   try {

@@ -17,7 +17,7 @@ import {
   DEFAULT_MAX_RESULT_CHARS,
 } from "../../src/dispatch/completion/result-extractor.ts";
 import * as fs from "node:fs";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ describe("spillToFile", () => {
 
   it("returns the absolute path", () => {
     const path = spillToFile("task-123", "data", testDir);
-    expect(path.startsWith("/")).toBe(true);
+    expect(isAbsolute(path)).toBe(true);
     expect(path).toBe(join(testDir, ".rolebox", "state", "results", "task-123.txt"));
   });
 
@@ -335,7 +335,7 @@ describe("sidecar helpers", () => {
 
   it("writeResultSidecar returns absolute path", () => {
     const path = writeResultSidecar("abs-path", "data", testDir);
-    expect(path.startsWith("/")).toBe(true);
+    expect(isAbsolute(path)).toBe(true);
     expect(fs.existsSync(path)).toBe(true);
   });
 

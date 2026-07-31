@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdir, writeFile, readFile, chmod } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -24,7 +24,9 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   try {
     return await fn(dir);
   } finally {
-    await Bun.spawnSync(["rm", "-rf", dir]);
+    // rmSync (node:fs) is used instead of shelling out to `rm -rf`, which does not
+    // exist in Windows cmd. This is a real portability fix, not a platform skip.
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -59,7 +61,10 @@ describe("atomicWriteFile", () => {
     });
   });
 
-  it("leaves original file intact if write fails (read-only directory)", async () => {
+  // chmod(0o444) is a no-op for the owner on Windows — write access is governed by
+  // ACLs, not POSIX mode bits — so writes to a "read-only" directory still succeed
+  // there and the failure path this test exercises can never occur. POSIX-only.
+  it.skipIf(process.platform === "win32")("leaves original file intact if write fails (read-only directory)", async () => {
     await withTempDir(async (dir) => {
       // Create a subdirectory and an existing file
       const subDir = join(dir, "sub");
@@ -113,7 +118,10 @@ describe("atomicWriteBatch", () => {
     });
   });
 
-  it("leaves all originals intact on partial failure", async () => {
+  // Same POSIX-only premise as the atomicWriteFile read-only test: chmod is a no-op
+  // on Windows, so the read-only directory never blocks writes there and the
+  // partial-failure path cannot be reached. Skipped on win32.
+  it.skipIf(process.platform === "win32")("leaves all originals intact on partial failure", async () => {
     await withTempDir(async (dir) => {
       // First two files go in a writable directory
       const subDirOk = join(dir, "ok");

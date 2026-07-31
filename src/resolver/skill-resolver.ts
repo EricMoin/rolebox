@@ -3,7 +3,7 @@ import fg from "fast-glob";
 import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "../types.ts";
 import { SkillScope, ReferenceScope } from "../constants.ts";
 import { resolveAllReferences } from "./reference-resolver.ts";
-import { skillDirPath, skillFilePath } from "../utils/paths.ts";
+import { skillDirPath, skillFilePath, toPosixPath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { readTextFile, fileExists } from "../utils/fs.ts";
@@ -70,8 +70,11 @@ export async function resolveSkills(
   for (const { name, candidates } of candidateTasks) {
     let found = false;
     for (const candidate of candidates) {
-      if (matchSet.has(candidate.pattern)) {
-        winners.push({ name, filePath: candidate.pattern, scope: candidate.scope });
+      // Normalize the join-built pattern to forward slashes so it agrees with
+      // fast-glob's always-forward-slash match set on Windows.
+      const pattern = toPosixPath(candidate.pattern);
+      if (matchSet.has(pattern)) {
+        winners.push({ name, filePath: pattern, scope: candidate.scope });
         found = true;
         break;
       }

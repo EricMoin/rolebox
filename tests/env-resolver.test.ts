@@ -19,9 +19,10 @@ afterAll(() => {
 
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_PATH = process.env.PATH;
+const FIXED_HOME = "/home/test";
 
 beforeEach(() => {
-  process.env.HOME = ORIGINAL_HOME;
+  process.env.HOME = FIXED_HOME;
   process.env.PATH = ORIGINAL_PATH;
   delete process.env.TEST_VAR;
   delete process.env.ANOTHER_VAR;
@@ -40,13 +41,13 @@ afterEach(() => {
 describe("resolveEnvVars", () => {
   it("replaces a single env var with its value", () => {
     const result = resolveEnvVars("{env:HOME}");
-    expect(result).toBe(ORIGINAL_HOME);
+    expect(result).toBe(FIXED_HOME);
   });
 
   it("replaces multiple env vars in one string", () => {
     process.env.TEST_VAR = "test_value";
     const result = resolveEnvVars("echo {env:HOME} and {env:TEST_VAR}");
-    expect(result).toBe(`echo ${ORIGINAL_HOME} and test_value`);
+    expect(result).toBe(`echo ${FIXED_HOME} and test_value`);
   });
 
   it("leaves missing env var placeholder as-is and warns", () => {
@@ -106,14 +107,14 @@ describe("resolveEnvVarsDeep", () => {
   it("resolves env vars in a flat object", () => {
     const obj = { home: "{env:HOME}", path: "{env:PATH}" };
     const result = resolveEnvVarsDeep(obj) as Record<string, string>;
-    expect(result.home).toBe(ORIGINAL_HOME);
+    expect(result.home).toBe(FIXED_HOME);
     expect(result.path).toBe(ORIGINAL_PATH);
   });
 
   it("resolves env vars in nested objects", () => {
     const obj = { outer: { inner: "{env:HOME}" }, sibling: "static" };
     const result = resolveEnvVarsDeep(obj) as Record<string, unknown>;
-    expect((result.outer as Record<string, string>).inner).toBe(ORIGINAL_HOME);
+    expect((result.outer as Record<string, string>).inner).toBe(FIXED_HOME);
     expect((result as Record<string, string>).sibling).toBe("static");
   });
 
@@ -121,7 +122,7 @@ describe("resolveEnvVarsDeep", () => {
     process.env.TEST_VAR = "array_val";
     const arr = ["{env:HOME}", "{env:TEST_VAR}", "plain"];
     const result = resolveEnvVarsDeep(arr) as string[];
-    expect(result[0]).toBe(ORIGINAL_HOME);
+    expect(result[0]).toBe(FIXED_HOME);
     expect(result[1]).toBe("array_val");
     expect(result[2]).toBe("plain");
   });
@@ -130,7 +131,7 @@ describe("resolveEnvVarsDeep", () => {
     process.env.TEST_VAR = "nested_array";
     const obj = { list: ["{env:HOME}", "{env:TEST_VAR}"] };
     const result = resolveEnvVarsDeep(obj) as Record<string, string[]>;
-    expect(result.list[0]).toBe(ORIGINAL_HOME);
+    expect(result.list[0]).toBe(FIXED_HOME);
     expect(result.list[1]).toBe("nested_array");
   });
 

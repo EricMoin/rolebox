@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type {
   ResolvedRole,
   ResolvedFunction,
@@ -73,7 +74,7 @@ function makeRole(id: string, overrides: Partial<ResolvedRole> = {}): ResolvedRo
  * A file path that definitely does NOT exist on disk.
  * Used for checkBrokenReferences "missing file" tests.
  */
-const MISSING_PATH = "/tmp/rolebox-test-nonexistent-file-xyzzy.test";
+const MISSING_PATH = join(tmpdir(), "rolebox-test-nonexistent-file-xyzzy.test");
 /** A file path that definitely DOES exist (the test file's own source). */
 const EXISTING_PATH = import.meta.dir
   ? join(import.meta.dir, "..", "..", "src", "asset", "asset-validators.ts")

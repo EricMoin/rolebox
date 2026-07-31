@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { existsSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
@@ -41,15 +41,27 @@ function makeSource(signals: Record<string, unknown> = {}): NodeRuntimeState {
   };
 }
 
-// Temp artifact for the artifact_exists checks — created inside cwd (the
-// resolver resolves names relative to process.cwd()).
-const cwdArtifact = mkdtempSync(join(process.cwd(), ".rb-cond-test-"));
-const presentFile = join(cwdArtifact, "report.md");
-writeFileSync(presentFile, "present");
-const missingFile = join(cwdArtifact, "nope.md"); // never created
+// Temp artifact for the artifact_exists checks. These are created in beforeAll —
+// NOT at module scope — so no filesystem write runs during module
+// evaluation/collection. A module-scope write into cwd (or a hardcoded POSIX
+// path) can throw at import time on CI platforms where the working tree is not
+// freely writable or the path length/format differs (e.g. Windows). The
+// resolver resolves artifact_exists names relative to process.cwd(), so we keep
+// that contract by passing a RELATIVE path from cwd to the artifact; the artifact
+// itself now lives under the OS temp dir.
+let cwdArtifact: string;
+let presentFile: string;
+let missingFile: string; // never created
+
+beforeAll(() => {
+  cwdArtifact = mkdtempSync(join(tmpdir(), ".rb-cond-test-"));
+  presentFile = join(cwdArtifact, "report.md");
+  writeFileSync(presentFile, "present");
+  missingFile = join(cwdArtifact, "nope.md"); // never created
+});
 
 afterAll(() => {
-  rmSync(cwdArtifact, { recursive: true, force: true });
+  if (cwdArtifact) rmSync(cwdArtifact, { recursive: true, force: true });
 });
 
 // ── Fake dispatch seam (injectable into createEngine) ───────────────────────

@@ -102,10 +102,14 @@ describe("paths", () => {
 
   it("getDataDir respects XDG_DATA_HOME", () => {
     const orig = process.env.XDG_DATA_HOME;
-    process.env.XDG_DATA_HOME = "/tmp/test-xdg";
+    // Use a tmpdir()-based path and join() for the expectation so the assertion
+    // holds on both POSIX (forward slashes) and Windows (backslashes). The old
+    // hardcoded "/tmp/test-xdg/rolebox" literal only matched the POSIX separator.
+    const xdg = join(tmpdir(), "test-xdg");
+    process.env.XDG_DATA_HOME = xdg;
     try {
       const dir = getDataDir();
-      expect(dir).toBe("/tmp/test-xdg/rolebox");
+      expect(dir).toBe(join(xdg, "rolebox"));
     } finally {
       if (orig) process.env.XDG_DATA_HOME = orig;
       else delete process.env.XDG_DATA_HOME;
@@ -188,6 +192,30 @@ describe("win32 branch resolution (simulated process.platform)", () => {
     process.env.ROLEBOX_CONFIG_DIR = "C:\\rolebox-config";
     expect(getConfigDir()).toBe("C:\\rolebox-config");
   });
+
+  it("getDataDir honors XDG_DATA_HOME on win32 (explicit XDG override beats LOCALAPPDATA)", () => {
+    setPlatformForTest("win32");
+    const xdgData = mkdtempSync(join(tmpdir(), "rolebox-xdg-data-"));
+    try {
+      process.env.LOCALAPPDATA = "C:\\Users\\test\\AppData\\Local";
+      process.env.XDG_DATA_HOME = xdgData;
+      expect(getDataDir()).toBe(join(xdgData, "rolebox"));
+    } finally {
+      rmSync(xdgData, { recursive: true, force: true });
+    }
+  });
+
+  it("getConfigDir honors XDG_CONFIG_HOME on win32 (explicit XDG override beats APPDATA)", () => {
+    setPlatformForTest("win32");
+    const xdgConfig = mkdtempSync(join(tmpdir(), "rolebox-xdg-config-"));
+    try {
+      process.env.APPDATA = "C:\\Users\\test\\AppData\\Roaming";
+      process.env.XDG_CONFIG_HOME = xdgConfig;
+      expect(getConfigDir()).toBe(join(xdgConfig, "rolebox"));
+    } finally {
+      rmSync(xdgConfig, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("getRolePath sanitization under a simulated platform", () => {
@@ -267,7 +295,13 @@ describe("assertSafePathSegment", () => {
   });
 });
 
-describe("ensureWritableDir (writability pre-check)", () => {
+// The negative assertion in this block relies on chmod(0o500) making a directory
+// read-only for the owner. On Windows, chmod is effectively a no-op for write
+// permission — access is governed by ACLs, not POSIX mode bits — so a "read-only"
+// directory is still writable by the owner and ensureWritableDir never throws.
+// That failure path cannot occur there, so the whole pre-check block is skipped on
+// win32. macOS/Linux behavior is unchanged (these tests still execute and pass).
+describe.skipIf(process.platform === "win32")("ensureWritableDir (writability pre-check)", () => {
   it("fails with a clear actionable message when the directory is not writable", () => {
     const dir = mkdtempSync(join(tmpdir(), "rolebox-ro-"));
     try {

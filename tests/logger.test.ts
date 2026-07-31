@@ -387,10 +387,23 @@ describe("resolveLogFilePath", () => {
   });
 
   it("falls back when ROLEBOX_LOG_FILE points to unwritable location", () => {
-    process.env.ROLEBOX_LOG_FILE = "/dev/null/nope/subdir/file.log";
-    const resolved = resolveLogFilePath();
-    expect(resolved).not.toBe("/dev/null/nope/subdir/file.log");
-    expect(resolved).not.toBeNull();
+    // /dev/null does not exist on Windows, so the old hardcoded target was
+    // POSIX-only. To preserve real coverage on every platform we build an
+    // unwritable target cross-platform: a regular FILE used as a parent directory
+    // makes mkdirSync(dirname(...)) throw ENOTDIR on all OSes (the same mechanism
+    // as the old /dev/null trick — the parent is not a directory). No skip needed.
+    const tmpDir = mkdtempSync(join(tmpdir(), "rolebox-unwritable-"));
+    try {
+      const blocker = join(tmpDir, "blocker");
+      writeFileSync(blocker, "blocker");
+      const logPath = join(blocker, "nope", "subdir", "file.log");
+      process.env.ROLEBOX_LOG_FILE = logPath;
+      const resolved = resolveLogFilePath();
+      expect(resolved).not.toBe(logPath);
+      expect(resolved).not.toBeNull();
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

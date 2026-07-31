@@ -1,12 +1,13 @@
 import { describe, it, expect, mock, beforeEach, afterEach, afterAll } from "bun:test";
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync,
-  readFileSync, readlinkSync, lstatSync, symlinkSync,
+  readFileSync, readlinkSync, lstatSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { dump, load } from "js-yaml";
 import type { RegistryManifest } from "../../src/cli/types";
+import { createDirSymlink } from "../helpers/symlink";
 // Pre-load the real paths module so the mock spreads its full export surface
 // (including assertSafePathSegment / getRolePath). This file's own mock.module
 // for "../../src/cli/paths" shadows any import of that specifier (bun keys
@@ -340,7 +341,13 @@ describe("CLI E2E", () => {
     it("sync cleans up broken symlinks", async () => {
       const targetDir = join(configDir, "opencode", "rolebox");
       mkdirSync(targetDir, { recursive: true });
-      symlinkSync("/nonexistent/dead/path", join(targetDir, "broken-link"));
+      // Dangling link: the target is an absolute path that does not exist.
+      // On Windows junctions require an absolute drive-path target, so build it
+      // from tmpdir (absolute on both platforms) rather than a POSIX literal.
+      createDirSymlink(
+        join(targetDir, "dead-target-does-not-exist"),
+        join(targetDir, "broken-link"),
+      );
 
       const { sync } = await import("../../src/cli/commands/sync");
       const c = captureOutput(async () => { await sync("opencode"); });

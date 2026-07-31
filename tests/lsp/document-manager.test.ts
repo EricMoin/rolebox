@@ -1,5 +1,6 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LspDocumentManager } from "../../src/lsp/document-manager.ts";
 import type { LspClientManager } from "../../src/lsp/client-manager.ts";
@@ -50,7 +51,10 @@ describe("getUri", () => {
     expect(uri).toContain("my%20project");
   });
 
-  it("produces a valid URI that includes the filename", () => {
+  it.skipIf(process.platform === "win32")("produces a valid URI that includes the filename", () => {
+    // The input is a POSIX-shaped absolute path. On Windows the same literal
+    // resolves drive-relative (e.g. file:///C:/absolute/path/to/test.ts), so the
+    // exact-match expectation is only meaningful on POSIX platforms.
     const uri = mgr.getUri("/absolute/path/to/test.ts");
     expect(uri).toBe("file:///absolute/path/to/test.ts");
   });
@@ -106,7 +110,7 @@ describe("sync", () => {
   let client: LspClientManager;
 
   beforeEach(() => {
-    tmpDir = mkdtempSync("/tmp/lsp-doc-test-");
+    tmpDir = mkdtempSync(join(tmpdir(), "lsp-doc-test-"));
     mgr = new LspDocumentManager();
     client = createMockClient();
   });
@@ -192,7 +196,9 @@ describe("close / closeAll", () => {
   });
 
   it("sends didClose for a single document", () => {
-    const uri = "file:///test.ts";
+    // Derive the key from the same getUri call close() uses internally so the
+    // lookup matches on every platform (POSIX vs Windows drive-relative paths).
+    const uri = mgr.getUri("/test.ts");
     mgr.openDocuments.set(uri, { version: 1, content: "hello", open: true });
 
     mgr.close("/test.ts", client);

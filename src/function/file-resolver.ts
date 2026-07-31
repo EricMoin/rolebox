@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { FunctionMetadata, ResolvedFunction } from "../types.ts";
 import { FunctionSource } from "../constants.ts";
 import { parseFrontmatter } from "../resolver/frontmatter.ts";
-import { functionPath } from "../utils/paths.ts";
+import { functionPath, toPosixPath } from "../utils/paths.ts";
 import type { FunctionCall } from "./parser.ts";
 import { createSubLogger } from "../logger.ts";
 import { readTextFile, fileExists } from "../utils/fs.ts";
@@ -68,7 +68,7 @@ export async function resolveFunctions(
         name: m.name ?? name,
         description: m.description ?? "",
         content: body,
-        filePath: candidates[i].path,
+        filePath: toPosixPath(candidates[i].path),
         source: candidates[i].source,
         params: m.params,
         phase: m.phase,

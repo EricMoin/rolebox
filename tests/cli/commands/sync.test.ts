@@ -7,13 +7,13 @@ import {
   existsSync,
   lstatSync,
   readlinkSync,
-  symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
 import type { LockEntry } from "../../../src/cli/types";
 import { createPathsMockPayload } from "../../helpers/paths-mock";
+import { createDirSymlink } from "../../helpers/symlink";
 
 let configTmp: string;
 let dataTmp: string;
@@ -168,7 +168,13 @@ describe("sync", () => {
 
     const targetDir = syncTarget();
     mkdirSync(targetDir, { recursive: true });
-    symlinkSync("/nonexistent/dead/path", join(targetDir, "broken-link"));
+    // Dangling link: the target is an absolute path that does not exist.
+    // On Windows junctions require an absolute drive-path target, so build it
+    // from tmpdir (absolute on both platforms) rather than a POSIX literal.
+    createDirSymlink(
+      join(targetDir, "dead-target-does-not-exist"),
+      join(targetDir, "broken-link"),
+    );
 
     const { sync } = await importSync();
     await sync("opencode");
@@ -194,7 +200,10 @@ describe("sync", () => {
     const targetDir = syncTarget();
     mkdirSync(targetDir, { recursive: true });
     const oldVersionPath = roleSourcePath("hub", "upgraded-role", "1.0.0");
-    symlinkSync(oldVersionPath, join(targetDir, "upgraded-role"));
+    // Dangling link: oldVersionPath was uninstalled and no longer exists. It is
+    // an absolute drive-path target on Windows, so createDirSymlink (junction)
+    // can build it as a dangling link without admin rights.
+    createDirSymlink(oldVersionPath, join(targetDir, "upgraded-role"));
 
     const { sync } = await importSync();
     await sync("opencode");
@@ -296,7 +305,7 @@ describe("sync", () => {
     mkdirSync(targetDir, { recursive: true });
     const manualSource = join(dataTmp, "manual-source");
     mkdirSync(manualSource, { recursive: true });
-    symlinkSync(manualSource, join(targetDir, "manual-symlink"));
+    createDirSymlink(manualSource, join(targetDir, "manual-symlink"));
 
     const { sync } = await importSync();
     await sync("opencode");

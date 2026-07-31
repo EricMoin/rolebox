@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { resolveFunctions, loadFunctionContent, applyParams } from "../src/function/file-resolver";
+import { toPosixPath } from "../src/utils/paths";
 import type { ResolvedFunction } from "../src/types";
 import type { FunctionCall } from "../src/function/parser";
 
@@ -15,7 +17,7 @@ afterEach(() => {
 });
 
 function tmpDir(): string {
-  const dir = mkdtempSync("/tmp/rolebox-test-");
+  const dir = mkdtempSync(join(tmpdir(), "rolebox-test-"));
   tmpRoots.push(dir);
   return dir;
 }
@@ -46,7 +48,7 @@ describe("resolveFunctions", () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-func");
     expect(result[0].source).toBe("role-local");
-    expect(result[0].filePath).toContain("/functions/my-func.md");
+    expect(toPosixPath(result[0].filePath)).toContain("/functions/my-func.md");
     expect(result[0].content).toBe("\nBody content");
   });
 
@@ -62,7 +64,7 @@ describe("resolveFunctions", () => {
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-func");
     expect(result[0].source).toBe("global");
-    expect(result[0].filePath).not.toContain("/functions/");
+    expect(toPosixPath(result[0].filePath)).not.toContain("/functions/");
     expect(result[0].content).toBe("\nGlobal body");
   });
 

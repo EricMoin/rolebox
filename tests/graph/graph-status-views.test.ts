@@ -593,7 +593,7 @@ describe("graph_status cross-session scope (persisted / all)", () => {
       const ts = createGraphToolSet({ stateDir: dir });
       const list = ts.graph_status({ scope: "persisted" });
       expect(list).toMatch(/No persisted graphs found/);
-      expect(list).toContain(".rolebox/state");
+      expect(list).toContain(join(".rolebox", "state"));
       // A grouped / filtered view on the empty store is honest-empty too.
       const grouped = ts.graph_status({ scope: "persisted", format: "json", group_by: "agent" });
       expect(grouped).toMatch(/No persisted graphs found/);

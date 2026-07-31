@@ -11,12 +11,12 @@ import {
   existsSync,
   mkdirSync,
   lstatSync,
-  symlinkSync,
   unlinkSync,
   readdirSync,
   statSync,
 } from "node:fs";
 import { join } from "node:path";
+import { createDirSymlink } from "../../utils/symlink.ts";
 
 export async function sync(target: string): Promise<void> {
   const syncTarget = getSyncTarget(target);
@@ -50,11 +50,11 @@ export async function sync(target: string): Promise<void> {
     }
 
     if (targetStat === null) {
-      symlinkSync(sourcePath, targetPath);
+      createDirSymlink(sourcePath, targetPath);
       synced++;
     } else if (targetStat.isSymbolicLink()) {
       unlinkSync(targetPath);
-      symlinkSync(sourcePath, targetPath);
+      createDirSymlink(sourcePath, targetPath);
       synced++;
     } else if (targetStat.isDirectory()) {
       console.warn(

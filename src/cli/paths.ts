@@ -43,12 +43,18 @@ export function getOpencodeSkillsDir(): string {
 
 /**
  * Returns the rolebox data directory.
- * Precedence: ROLEBOX_DATA_DIR env override, then %LOCALAPPDATA%/rolebox on Windows,
- * then XDG_DATA_HOME/rolebox (default: ~/.local/share/rolebox) on Unix.
+ * Precedence: ROLEBOX_DATA_DIR env override, then XDG_DATA_HOME/rolebox (all platforms),
+ * then %LOCALAPPDATA%/rolebox on Windows, then ~/.local/share/rolebox on Unix.
  */
 export function getDataDir(): string {
   const override = process.env.ROLEBOX_DATA_DIR;
   if (override) return override;
+
+  // XDG_DATA_HOME is honored on ALL platforms (including win32) so the data dir
+  // can be isolated consistently on Windows too. This sits below the
+  // ROLEBOX_DATA_DIR override and above the platform-specific branches.
+  const xdgData = process.env.XDG_DATA_HOME;
+  if (xdgData) return join(xdgData, "rolebox");
 
   if (getPlatform() === "win32") {
     return join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "rolebox");
@@ -70,12 +76,18 @@ export function getDataDir(): string {
 
 /**
  * Returns the rolebox config directory.
- * Precedence: ROLEBOX_CONFIG_DIR env override, then %APPDATA%/rolebox on Windows,
- * then XDG_CONFIG_HOME/rolebox (default: ~/.config/rolebox) on Unix.
+ * Precedence: ROLEBOX_CONFIG_DIR env override, then XDG_CONFIG_HOME/rolebox (all platforms),
+ * then %APPDATA%/rolebox on Windows, then ~/.config/rolebox on Unix.
  */
 export function getConfigDir(): string {
   const override = process.env.ROLEBOX_CONFIG_DIR;
   if (override) return override;
+
+  // XDG_CONFIG_HOME is honored on ALL platforms (including win32) so the config
+  // dir can be isolated consistently on Windows too. This sits below the
+  // ROLEBOX_CONFIG_DIR override and above the platform-specific branches.
+  const xdgConfig = process.env.XDG_CONFIG_HOME;
+  if (xdgConfig) return join(xdgConfig, "rolebox");
 
   if (getPlatform() === "win32") {
     return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "rolebox");

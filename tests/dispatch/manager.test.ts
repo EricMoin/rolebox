@@ -4681,7 +4681,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     const mgr = manager as any;
     const ref = await mgr.materializeResult(task.id);
 
-    expect(ref.sidecarPath).toContain(`state/results/${task.id}.txt`);
+    expect(ref.sidecarPath).toContain(join("state", "results", `${task.id}.txt`));
     expect(ref.totalChars).toBeGreaterThan(0);
     expect(ref.hadFence).toBe(true);
     expect(ref.fetchError).toBeUndefined();
