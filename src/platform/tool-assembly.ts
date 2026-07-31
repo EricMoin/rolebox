@@ -51,6 +51,14 @@ export interface BuildToolsOptions {
   subagentModelKey?: Map<string, string>;
   resolvedRoles: ResolvedRole[];
   directory: string;
+  /**
+   * Optional engine-state persistence dir, threaded through `createGraphTools`
+   * into every engine the graph tools construct. When set, engines persist
+   * their state under `stateDir/.rolebox/state` (write-through persistence
+   * seam in `createEngine`). Absent → engines run without persistence
+   * (backward compatible).
+   */
+  stateDir?: string;
   // Accepted for future use; not consulted in Phase 1 tool assembly.
   capabilities: PlatformCapabilities;
   extraTools?: Record<string, CanonicalToolDef>;
@@ -152,6 +160,7 @@ export function buildCanonicalTools(
   if (opts.dispatchManager) {
     Object.assign(tools, createGraphTools(opts.dispatchManager, {
       directory: opts.directory,
+      stateDir: opts.stateDir,
       graphNotify: opts.graphNotify,
     }));
   }

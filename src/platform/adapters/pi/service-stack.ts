@@ -24,6 +24,8 @@ import type { IHookProvider } from "../../ports/hook-provider.ts";
 import { PiToolFactory } from "./tool-factory.ts";
 import { PiSessionAdapter } from "./session.ts";
 import { z } from "zod";
+import type { DispatchManager } from "../../../dispatch/core/manager.ts";
+import type { ISessionClient } from "../../ports/session-client.ts";
 
 // ── Shared tool assembly ────────────────────────────────────────────────────
 
@@ -112,6 +114,9 @@ export class PiLightweightServiceStack implements IHookProvider {
   private _dispatchTools?: Record<string, CanonicalToolDef>;
   private _loopTools?: Record<string, CanonicalToolDef>;
   private _taskTools?: Record<string, CanonicalToolDef>;
+  private _dispatchManager?: DispatchManager;
+  private _graphNotifyClient?: ISessionClient;
+  private _stateDir: string;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -122,6 +127,9 @@ export class PiLightweightServiceStack implements IHookProvider {
     dispatchTools?: Record<string, CanonicalToolDef>,
     loopTools?: Record<string, CanonicalToolDef>,
     taskTools?: Record<string, CanonicalToolDef>,
+    dispatchManager?: DispatchManager,
+    graphNotifyClient?: ISessionClient,
+    stateDir: string = process.cwd(),
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
@@ -130,6 +138,9 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._dispatchTools = dispatchTools;
     this._loopTools = loopTools;
     this._taskTools = taskTools;
+    this._dispatchManager = dispatchManager;
+    this._graphNotifyClient = graphNotifyClient;
+    this._stateDir = stateDir;
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -165,15 +176,22 @@ export class PiLightweightServiceStack implements IHookProvider {
       sessionClient: this._sessionAdapter,
       directory: process.cwd(),
       capabilities: piCapabilities(),
+      // When a dispatch manager is provided (real dispatch system, e.g. graph
+      // orchestration on Pi), it gates registration of the eight graph_* tools
+      // inside buildCanonicalTools. Absent → graph tools are not assembled
+      // (backward compatible with the stub/override-only path).
+      dispatchManager: this._dispatchManager,
       // Subtask 3 (graph-notify source): thread the emperor session identity +
       // session client into the graph engine's completion AND graph-terminal
       // seams. The emperor/orchestrator session is the session whose execution
       // context drives graph_run — resolved at runtime by the graph tool's
       // context (tool assembly is session-agnostic). `graphParentContext` budget
       // scoping (sessionID: graphId) is untouched; the emperor session is carried
-      // ONLY for notification targeting.
+      // ONLY for notification targeting. The notification client defaults to the
+      // Pi session adapter (filesystem-backed, read-only) unless an external
+      // graph notify client is supplied.
       graphNotify: {
-        sessionClient: this._sessionAdapter,
+        sessionClient: this._graphNotifyClient ?? this._sessionAdapter,
         emperorSessionId: (invokingSessionId) => invokingSessionId,
       },
       dispatchToolsOverride,
@@ -186,6 +204,10 @@ export class PiLightweightServiceStack implements IHookProvider {
       taskToolsOverride: this._taskTools && Object.keys(this._taskTools).length > 0
         ? this._taskTools
         : undefined,
+      // Engine-state persistence dir, threaded through createGraphTools into
+      // every engine the graph tools construct (`.rolebox/state`). Defaults to
+      // process.cwd() at construction.
+      stateDir: this._stateDir,
     });
 
     // 3. Compile all tools to Pi's native format

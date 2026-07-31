@@ -496,8 +496,14 @@ export default async function (pi: any): Promise<void> {
     // Degradation: PiLightweightServiceStack.init() guards each override
     // with `.length > 0` — if a factory returned empty, the built-in stub
     // dispatch tools still register (dispatch only), and loop/task are
-    // simply omitted. The stacks' graph_* tools are registered by the
-    // shared tool-assembly layer separately.
+    // simply omitted.
+    //
+    // graph_* tools are NOT registered by a separate tool-assembly layer:
+    // buildCanonicalTools only assembles them when a dispatchManager is
+    // threaded into this stack. The construction below passes the live
+    // dispatchManager (gates the eight graph_* tools), notifyClient as the
+    // graph-notify session client (emperor/orchestrator notifications), and
+    // process.cwd() as the engine-state stateDir (`.rolebox/state`).
 
     // dispatch_*/loop_* tool registration DISABLED — orchestration is
     // graph-only (graph_* tools). Bare dispatch/loop calls would bypass the
@@ -522,6 +528,14 @@ export default async function (pi: any): Promise<void> {
       undefined, // dispatchTools disabled (graph-only orchestration)
       undefined, // loopTools disabled (graph_add_loop replaces loop_*)
       taskTools,
+      // Subtask 3: thread the live graph runtime into the stack. The
+      // dispatchManager gates registration of the eight graph_* tools inside
+      // buildCanonicalTools; notifyClient supplies the graph-notify session
+      // client for emperor/orchestrator completion notifications; stateDir
+      // (process.cwd()) persists engine state under `.rolebox/state`.
+      dispatchManager,
+      notifyClient,
+      process.cwd(),
     );
     await serviceStack.init();
 
