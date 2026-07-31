@@ -22,8 +22,10 @@
 import { defineTool } from "../../ports/tool-factory.ts";
 import type { IHookProvider } from "../../ports/hook-provider.ts";
 import { PiToolFactory } from "./tool-factory.ts";
+import type { ToolInterceptorHooks } from "./tool-interceptor.ts";
 import { PiSessionAdapter } from "./session.ts";
 import { z } from "zod";
+import { registerToolSchema, registerDeprecatedTool } from "../../../hooks/tool-before.ts";
 import type { DispatchManager } from "../../../dispatch/core/manager.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
 
@@ -114,9 +116,12 @@ export class PiLightweightServiceStack implements IHookProvider {
   private _dispatchTools?: Record<string, CanonicalToolDef>;
   private _loopTools?: Record<string, CanonicalToolDef>;
   private _taskTools?: Record<string, CanonicalToolDef>;
+  private _extraTools?: Record<string, CanonicalToolDef>;
   private _dispatchManager?: DispatchManager;
   private _graphNotifyClient?: ISessionClient;
   private _stateDir: string;
+  /** Hook wiring consumed by the tool-execution interceptor (subtask S9). */
+  private _interceptorHooks: ToolInterceptorHooks | undefined;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -127,20 +132,24 @@ export class PiLightweightServiceStack implements IHookProvider {
     dispatchTools?: Record<string, CanonicalToolDef>,
     loopTools?: Record<string, CanonicalToolDef>,
     taskTools?: Record<string, CanonicalToolDef>,
+    extraTools?: Record<string, CanonicalToolDef>,
     dispatchManager?: DispatchManager,
     graphNotifyClient?: ISessionClient,
     stateDir: string = process.cwd(),
+    interceptorHooks?: ToolInterceptorHooks,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
-    this._toolFactory = new PiToolFactory();
+    this._toolFactory = new PiToolFactory(interceptorHooks);
     this._sessionAdapter = new PiSessionAdapter(sessionDir);
     this._dispatchTools = dispatchTools;
     this._loopTools = loopTools;
     this._taskTools = taskTools;
+    this._extraTools = extraTools;
     this._dispatchManager = dispatchManager;
     this._graphNotifyClient = graphNotifyClient;
     this._stateDir = stateDir;
+    this._interceptorHooks = interceptorHooks;
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -204,11 +213,31 @@ export class PiLightweightServiceStack implements IHookProvider {
       taskToolsOverride: this._taskTools && Object.keys(this._taskTools).length > 0
         ? this._taskTools
         : undefined,
+      // Platform-extra tools (opencode-only surface adapted for Pi, e.g.
+      // memory_update, function_graph, skill_compose, context_assemble).
+      // Same `.length > 0` degradation guard as the other overrides: an empty
+      // record registers nothing rather than overriding the shared surface.
+      extraTools: this._extraTools && Object.keys(this._extraTools).length > 0
+        ? this._extraTools
+        : undefined,
       // Engine-state persistence dir, threaded through createGraphTools into
       // every engine the graph tools construct (`.rolebox/state`). Defaults to
       // process.cwd() at construction.
       stateDir: this._stateDir,
     });
+
+    // 2.5 Register tool schemas + deprecation markers into the shared hook
+    // registries (mirrors tool-service.ts:109-112). The S9 interceptor
+    // (inside PiToolFactory.execute) reads these to run strict zod
+    // validation and deprecated-tool warnings on every Pi tool invocation.
+    for (const [name, def] of Object.entries(allTools)) {
+      registerToolSchema(name, (def as { args: z.ZodRawShape }).args);
+      if (def.deprecated) {
+        const message =
+          typeof def.deprecated === "object" ? def.deprecated.message : undefined;
+        registerDeprecatedTool(name, message);
+      }
+    }
 
     // 3. Compile all tools to Pi's native format
     const compiled = this._toolFactory.compileAll(allTools);

@@ -13,14 +13,34 @@
  * @module
  */
 
+import { dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { load as loadYaml } from "js-yaml";
 import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.ts";
 import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
+import { createPiHookPipeline } from "./platform/adapters/pi/hook-pipeline.ts";
+import { runPiSystemTransform } from "./platform/adapters/pi/system-transform.ts";
+import { wirePiChatActivation } from "./platform/adapters/pi/chat-activation.ts";
 import { wireRoleSwitcher } from "./platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
 import { piCapabilities } from "./platform/capabilities.ts";
 import { createSubLogger, formatError } from "./logger.ts";
-import type { ResolvedFunction, ResolvedGraph, ResolvedSubAgent } from "./types.ts";
+import type {
+  ResolvedFunction,
+  ResolvedGraph,
+  ResolvedRole,
+  ResolvedSkill,
+  ResolvedSubAgent,
+} from "./types.ts";
+import { NotificationManager } from "./notifications/manager.ts";
+import type { NotificationConfig } from "./notifications/types.ts";
+import {
+  DEFAULT_NOTIFICATION_CONFIG,
+  parseNotificationConfig,
+  resolveEnvVarsInConfig,
+} from "./notifications/config.ts";
+import type { ISessionClient } from "./platform/ports/session-client.ts";
 import { PiProcessSessionAdapter } from "./platform/adapters/pi/process-session.ts";
 import { PiNotificationSessionClient } from "./platform/adapters/pi/notification-session.ts";
 import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
@@ -29,6 +49,10 @@ import { LoopStore } from "./loop/loop-store.ts";
 import { createDispatchTools } from "./dispatch/tools.ts";
 import { createLoopTools } from "./loop/loop-tools.ts";
 import { createTaskTools } from "./dispatch/query/task-tools.ts";
+import { createMemoryUpdateTool } from "./memory/tools.ts";
+import { createFunctionGraphTool } from "./function/function-graph.ts";
+import { createSkillComposeTool } from "./asset/skill-compose.ts";
+import { createContextAssembleTool } from "./dispatch/query/context-assemble.ts";
 import {
   createDispatchManager,
   buildSubagentLineage,
@@ -43,11 +67,309 @@ import {
 } from "./dispatch/notification.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
 import { recoverInterruptedGraphs } from "./graph/engine/engine-startup.ts";
+import {
+  createAllLspTools,
+  LspClientManager,
+  LspDocumentManager,
+} from "./lsp/index.ts";
 
 // ── Shared state maps ─────────────────────────────────────────────────────
 
 const roleFunctionsMap: Map<string, ResolvedFunction[]> = new Map();
 const roleGraphMap: Map<string, ResolvedGraph> = new Map();
+
+// ── Module-level logger ───────────────────────────────────────────────────
+//
+// Shared by the default export (extension entry point) and the exported
+// notification wiring helper below.
+
+const log = createSubLogger("pi-extension");
+
+// ── Notification manager exposure ─────────────────────────────────────────
+//
+// The Pi-side NotificationManager (constructed by wirePiNotifications) is
+// stored here and exposed via getPiNotificationManager() so a later
+// hook-pipeline subtask can consume the same instance (handleToolBefore /
+// handleChatMessage / dispatch completion hooks feed it).
+
+let piNotificationManager: NotificationManager | undefined;
+
+/**
+ * Get the currently wired Pi NotificationManager instance, if any.
+ * Returns `undefined` before `wirePiNotifications()` has run.
+ */
+export function getPiNotificationManager(): NotificationManager | undefined {
+  return piNotificationManager;
+}
+
+// ── Canonical event property helpers ──────────────────────────────────────
+//
+// Shared by the PiEventBridge → DispatchManager wiring (in the default
+// export) and the PiEventBridge → NotificationManager wiring below.
+
+/** Extract session ID from canonical event properties with fallback chain. */
+export function extractSessionId(
+  props: Record<string, unknown>,
+): string | undefined {
+  if (typeof props.sessionID === "string") return props.sessionID;
+  if (typeof props.sessionId === "string") return props.sessionId;
+  const info = props.info as Record<string, unknown> | undefined;
+  if (typeof info?.sessionID === "string") return info.sessionID;
+  if (typeof info?.sessionId === "string") return info.sessionId;
+  if (typeof info?.id === "string") return info.id;
+  return undefined;
+}
+
+/**
+ * Extract the acting role/agent id from canonical event properties.
+ * Used to select the per-role notification config for a session.
+ */
+export function extractEventAgent(
+  props: Record<string, unknown>,
+): string | undefined {
+  if (typeof props.agent === "string") return props.agent;
+  if (typeof props.agentID === "string") return props.agentID;
+  if (typeof props.agentId === "string") return props.agentId;
+  const info = props.info as Record<string, unknown> | undefined;
+  if (typeof info?.agent === "string") return info.agent;
+  return undefined;
+}
+
+// ── PiEventBridge → NotificationManager wiring ────────────────────────────
+//
+// Construct the shared NotificationManager and subscribe it to the canonical
+// bridge lifecycle events, mirroring the opencode NotificationService
+// (src/core/services/notification-service.ts):
+//
+//   session.idle      → manager.scheduleIdle(sid, agent)
+//   session.error     → manager.handleSessionError(sid, agent)
+//   session.deleted   → manager.handleSessionDeleted(sid)
+//   message.updated   → manager.handleMessageUpdated(sid, agent)
+//
+// Global config honors ROLEBOX_NOTIFICATIONS_CONFIG (path to a YAML
+// notification config file) and ROLEBOX_NOTIFICATIONS_ENABLED (disable
+// switch). Per-role configs come from each resolved role's
+// `config.notifications` block.
+
+export interface PiNotificationWireOptions {
+  eventBridge: PiEventBridge;
+  resolvedRoles: ResolvedRole[];
+  client: ISessionClient;
+  dir: string;
+}
+
+export interface PiNotificationWireResult {
+  /** The wired NotificationManager instance. */
+  manager: NotificationManager;
+  /**
+   * Remove all bridge subscriptions owned by this wiring. Does NOT dispose
+   * the manager — call `manager.dispose()` separately (the extension
+   * shutdown handler does both).
+   */
+  unsubscribe: () => void;
+}
+
+export function wirePiNotifications(
+  options: PiNotificationWireOptions,
+): PiNotificationWireResult {
+  const { eventBridge, resolvedRoles, client, dir } = options;
+
+  // ── Global config: env file path + enable/disable toggle ────────────
+  let globalNotifConfig: NotificationConfig = {
+    ...DEFAULT_NOTIFICATION_CONFIG,
+  };
+  const notifConfigPath = process.env.ROLEBOX_NOTIFICATIONS_CONFIG;
+  if (notifConfigPath && existsSync(notifConfigPath)) {
+    try {
+      const raw = readFileSync(notifConfigPath, "utf-8");
+      const parsed = loadYaml(raw);
+      globalNotifConfig = resolveEnvVarsInConfig(
+        parseNotificationConfig(parsed),
+      );
+    } catch (err) {
+      log.warn("Failed to parse notification config file", {
+        path: notifConfigPath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  const enabledFlag = process.env.ROLEBOX_NOTIFICATIONS_ENABLED;
+  if (enabledFlag === "false" || enabledFlag === "0") {
+    globalNotifConfig = { ...globalNotifConfig, enabled: false };
+  }
+
+  // ── Per-role configs from role.yaml `notifications:` blocks ─────────
+  const roleNotifConfigs = new Map<string, NotificationConfig>();
+  for (const role of resolvedRoles) {
+    if (role.config.notifications) {
+      const parsed = parseNotificationConfig(role.config.notifications);
+      roleNotifConfigs.set(role.id, resolveEnvVarsInConfig(parsed));
+    }
+  }
+
+  const manager = new NotificationManager({
+    globalConfig: globalNotifConfig,
+    roleConfigs: roleNotifConfigs,
+    client,
+    dir,
+  });
+  piNotificationManager = manager;
+
+  const unsubs: Array<() => void> = [
+    eventBridge.onType("session.idle", (event) => {
+      try {
+        const sid = extractSessionId(event.properties);
+        if (sid) manager.scheduleIdle(sid, extractEventAgent(event.properties));
+      } catch (err) {
+        log.debug("notif:session.idle handler error", {
+          error: formatError(err),
+        });
+      }
+    }),
+    eventBridge.onType("session.error", (event) => {
+      try {
+        const sid = extractSessionId(event.properties);
+        if (sid) {
+          manager.handleSessionError(sid, extractEventAgent(event.properties));
+        }
+      } catch (err) {
+        log.debug("notif:session.error handler error", {
+          error: formatError(err),
+        });
+      }
+    }),
+    eventBridge.onType("session.deleted", (event) => {
+      try {
+        const sid = extractSessionId(event.properties);
+        if (sid) manager.handleSessionDeleted(sid);
+      } catch (err) {
+        log.debug("notif:session.deleted handler error", {
+          error: formatError(err),
+        });
+      }
+    }),
+    eventBridge.onType("message.updated", (event) => {
+      try {
+        const sid = extractSessionId(event.properties);
+        if (sid) {
+          manager.handleMessageUpdated(sid, extractEventAgent(event.properties));
+        }
+      } catch (err) {
+        log.debug("notif:message.updated handler error", {
+          error: formatError(err),
+        });
+      }
+    }),
+  ];
+
+  return {
+    manager,
+    unsubscribe: () => {
+      for (const unsub of unsubs) {
+        try {
+          unsub();
+        } catch {
+          // best effort — never throw during teardown
+        }
+      }
+    },
+  };
+}
+
+// ── PiEventBridge → session.status synthesis wiring ──────────────────────────
+//
+// Pi emits no native session "busy/idle" status event, so we synthesize
+// canonical session.status events from the lifecycle signals that do exist:
+//
+//   pi.on("agent_start")   → session.status busy  (a turn is starting)
+//   pi.on("agent_settled") → session.status idle  (the turn is terminal)
+//   adapter turn_end       → session.status idle  (see process-session.ts
+//                            _completeTurn — additive to its session.idle)
+//
+// The sessionID is resolved from the raw event via extractSessionId()'s
+// fallback chain (sessionID / sessionId / info.sessionID / info.sessionId /
+// info.id). This wiring ONLY synthesizes — it does NOT route the synthesized
+// events to dispatchManager. Routing is owned by the PiHookPipeline (subtask
+// S6): its single `eventBridge.on()` subscription feeds every canonical event
+// into handleEvent, whose session.status case calls
+// dispatchManager.handleSessionStatus. Removing the old bridge subscription
+// here is what prevents the completion pipeline's progress-heartbeat path
+// (completion-evaluator.ts handleSessionStatus) from being double-handled.
+
+export interface PiStatusWireOptions {
+  pi: any;
+  eventBridge: PiEventBridge;
+  /** Retained for signature compatibility — the pipeline owns routing now. */
+  dispatchManager: {
+    handleSessionStatus(sessionId: string, statusType: string): Promise<void> | void;
+  };
+}
+
+export interface PiStatusWireResult {
+  /**
+   * Remove the bridge subscription owned by this wiring. With the S6
+   * pipeline architecture this is a no-op (there is no subscription to
+   * remove); the pi.on handlers have no Pi-side unsubscribe API and the
+   * synthesis events they emit become inert once the pipeline's bridge
+   * subscription is torn down.
+   */
+  unsubscribe: () => void;
+}
+
+export function wirePiSessionStatusEvents(
+  options: PiStatusWireOptions,
+): PiStatusWireResult {
+  const { pi, eventBridge } = options;
+
+  if (typeof pi.on === "function") {
+    // pi.on("agent_start") → session.status busy. A turn is starting:
+    // the session is actively working (model call, tool execution).
+    const onAgentStart = async (event: unknown, _ctx: unknown): Promise<void> => {
+      try {
+        const canonical = eventBridge.normalize(event);
+        const sessionID = extractSessionId(canonical.properties);
+        if (!sessionID) return;
+        await eventBridge.emit({
+          type: "session.status",
+          rawType: canonical.rawType,
+          properties: { ...canonical.properties, sessionID, status: "busy" },
+        });
+      } catch (err) {
+        log.debug("agent_start status handler error", {
+          error: formatError(err),
+        });
+      }
+    };
+    pi.on("agent_start", onAgentStart);
+
+    // pi.on("agent_settled") → session.status idle. Fires after the agent
+    // finishes with no retry/compaction pending — the turn is terminal.
+    const onAgentSettled = async (event: unknown, _ctx: unknown): Promise<void> => {
+      try {
+        const canonical = eventBridge.normalize(event);
+        const sessionID = extractSessionId(canonical.properties);
+        if (!sessionID) return;
+        await eventBridge.emit({
+          type: "session.status",
+          rawType: canonical.rawType,
+          properties: { ...canonical.properties, sessionID, status: "idle" },
+        });
+      } catch (err) {
+        log.debug("agent_settled status handler error", {
+          error: formatError(err),
+        });
+      }
+    };
+    pi.on("agent_settled", onAgentSettled);
+  }
+
+  return {
+    unsubscribe: () => {
+      // No bridge subscription to remove — synthesis only. Kept as a no-op
+      // so the shutdown path (bridgeUnsubscribers) stays uniform.
+    },
+  };
+}
 
 // ── Pi Extension entry point ──────────────────────────────────────────────
 
@@ -64,8 +386,6 @@ const roleGraphMap: Map<string, ResolvedGraph> = new Map();
  *             optional peer dependency).
  */
 export default async function (pi: any): Promise<void> {
-  const log = createSubLogger("pi-extension");
-
   try {
     // ── 1. Resolve directories (delegates to R5's PlatformPaths) ─────────
 
@@ -106,6 +426,42 @@ export default async function (pi: any): Promise<void> {
     }
 
     log.info("Agent registry synced");
+
+    // ── 2b. Skill path registration (roles + subagents) ──────────────────
+    //
+    // Surface every resolved skill directory to Pi's resource discovery
+    // so the `resources_discover` handler below can report it. Both
+    // role-local skills (`{roleDir}/skills/...`) and global skills
+    // (`{globalSkillsDir}/...`) are registered, keyed by the owning agent
+    // id (role id, and recursively each subagent id). The registrar's
+    // skillPaths map is keyed by agent id, so registering the same
+    // directory twice for the same agent is a no-op — getSkillPaths()
+    // never contains duplicate entries (de-duplication by construction).
+
+    let skillPathRegistrations = 0;
+    const registerAgentSkillPaths = (
+      agentId: string,
+      skills: ResolvedSkill[],
+    ): void => {
+      for (const skill of skills) {
+        registrar.registerSkillPath(agentId, dirname(skill.filePath));
+        skillPathRegistrations++;
+      }
+    };
+    const registerSubagentSkillPaths = (
+      subagents: ResolvedSubAgent[],
+    ): void => {
+      for (const sub of subagents) {
+        registerAgentSkillPaths(sub.id, sub.skills);
+        registerSubagentSkillPaths(sub.subagents);
+      }
+    };
+    for (const role of resolvedRoles) {
+      registerAgentSkillPaths(role.id, role.skills);
+      registerSubagentSkillPaths(role.subagents);
+    }
+
+    log.info("Skill paths registered", { skillPathRegistrations });
 
     // ── 3. Create platform adapters ─────────────────────────────────────
 
@@ -227,6 +583,13 @@ export default async function (pi: any): Promise<void> {
     let loopCoordinator!: LoopCoordinator;
     let loopStore!: LoopStore;
 
+    // ── LSP manager references (subtask S10, assigned before extraTools) ──
+    let lspClientManager!: LspClientManager;
+    let lspDocManager!: LspDocumentManager;
+
+    // ── Hook pipeline reference (assigned after the notification wiring) ──
+    let piHookPipeline: Awaited<ReturnType<typeof createPiHookPipeline>> | undefined;
+
     // ── Shutdown hooks ──────────────────────────────────────────────────
     //
     // Register process-level handlers to clean up child processes and
@@ -235,6 +598,27 @@ export default async function (pi: any): Promise<void> {
       log.debug("Pi extension shutdown — persisting notification dedup");
       persistNotifyDedupSync(getSentFinalNotifies());
       for (const unsub of bridgeUnsubscribers) unsub();
+      // Dispose the custom-hook registry owned by the hook pipeline (fires
+      // onDispose lifecycle hooks best-effort).
+      void piHookPipeline?.dispose();
+      // Dispose the NotificationManager: scheduler idle timers and throttle
+      // prune interval are cleared synchronously at the start of dispose(),
+      // then cached channels are released. Safe to call on shutdown paths.
+      void getPiNotificationManager()?.dispose();
+      // Dispose the LSP managers (subtask S10): close every open document
+      // (didClose notifications), then shut down all language-server child
+      // processes. Mirrors LspService.dispose() — best-effort, never throw
+      // during teardown.
+      if (lspClientManager && lspDocManager) {
+        try {
+          lspDocManager.closeAll(lspClientManager);
+        } catch {
+          // best effort — never throw during teardown
+        }
+        void lspClientManager.shutdownAll().catch(() => {
+          // best effort — never throw during teardown
+        });
+      }
       // Persist loop state synchronously and dispose coordinator.
       if (loopCoordinator) {
         loopCoordinator.dispose();
@@ -356,96 +740,25 @@ export default async function (pi: any): Promise<void> {
     }
 
 
-    // ── PiEventBridge → DispatchManager wiring ──────────────────────────
+    // ── session.status synthesis ────────────────────────────────────────
     //
-    // Subscribe to canonical Pi session lifecycle events and route them
-    // to dispatchManager handlers so Pi process sessions (spawned by
-    // PiProcessSessionAdapter) feed into the completion pipeline. Mirrors
-    // the pattern in hook-service.ts / hooks/event-handler.ts for opencode.
-
-    /** Extract session ID from canonical event properties with fallback chain. */
-    function extractSessionId(props: Record<string, unknown>): string | undefined {
-      if (typeof props.sessionID === "string") return props.sessionID;
-      if (typeof props.sessionId === "string") return props.sessionId;
-      const info = props.info as Record<string, unknown> | undefined;
-      if (typeof info?.sessionID === "string") return info.sessionID;
-      if (typeof info?.sessionId === "string") return info.sessionId;
-      if (typeof info?.id === "string") return info.id;
-      return undefined;
-    }
-
-    // session.idle — emitted by PiProcessSessionAdapter on process exit (subtask 1)
-    bridgeUnsubscribers.push(
-      eventBridge.onType("session.idle", async (event) => {
-        try {
-          const sid = extractSessionId(event.properties);
-          if (sid) await dispatchManager.handleSessionIdle(sid);
-        } catch (err) {
-          log.debug("bridge:session.idle handler error", { error: formatError(err) });
-        }
-      }),
-    );
-
-    // session.status — session state changes (busy/idle)
-    bridgeUnsubscribers.push(
-      eventBridge.onType("session.status", (event) => {
-        try {
-          const sid = extractSessionId(event.properties);
-          if (sid) {
-            const props = event.properties;
-            const statusVal = props.status;
-            const statusType =
-              typeof statusVal === "object" && statusVal !== null
-                ? ((statusVal as { type?: string }).type ?? String(statusVal))
-                : String(statusVal ?? "");
-            dispatchManager.handleSessionStatus(sid, statusType);
-          }
-        } catch (err) {
-          log.debug("bridge:session.status handler error", { error: formatError(err) });
-        }
-      }),
-    );
-
-    // message.updated — triggers inflight debounce resets
-    bridgeUnsubscribers.push(
-      eventBridge.onType("message.updated", (event) => {
-        try {
-          const sid = extractSessionId(event.properties);
-          if (sid) dispatchManager.handleMessageUpdated(sid);
-        } catch (err) {
-          log.debug("bridge:message.updated handler error", { error: formatError(err) });
-        }
-      }),
-    );
-
-    // session.error — session crash or notification failure
-    bridgeUnsubscribers.push(
-      eventBridge.onType("session.error", async (event) => {
-        try {
-          const sid = extractSessionId(event.properties);
-          if (sid) await dispatchManager.handleSessionError(sid, event.properties.error);
-        } catch (err) {
-          log.debug("bridge:session.error handler error", { error: formatError(err) });
-        }
-      }),
-    );
-
-    // session.deleted — session teardown (e.g., Pi session_shutdown)
-    bridgeUnsubscribers.push(
-      eventBridge.onType("session.deleted", async (event) => {
-        try {
-          const info = event.properties.info as { id?: string } | undefined;
-          const did = info?.id ?? extractSessionId(event.properties);
-          if (did) await dispatchManager.handleSessionDeleted(did);
-        } catch (err) {
-          log.debug("bridge:session.deleted handler error", { error: formatError(err) });
-        }
-      }),
-    );
+    // Synthetic busy/idle status events mapped from pi.on("agent_start") /
+    // pi.on("agent_settled") and the adapter's turn_end emission. This
+    // wiring only SYNTHESIZES canonical session.status events into the
+    // bridge — the routing to dispatchManager.handleSessionStatus is owned
+    // by the PiHookPipeline below (S6), whose session.status case keeps the
+    // completion pipeline's progress-heartbeat path alive on Pi.
+    const statusWiring = wirePiSessionStatusEvents({
+      pi,
+      eventBridge,
+      dispatchManager,
+    });
+    bridgeUnsubscribers.push(statusWiring.unsubscribe);
 
     // session.deleted (loop) — clean up worker-to-origin mappings when a
-    // session is deleted. Mirrors the dispatch cleanup handler above but
-    // targets the loop coordinator's internal tracking.
+    // session is deleted. Loop teardown is NOT part of handleEvent (the
+    // pipeline's session.deleted case handles dispatch + notifications
+    // only), so this subscription stays.
     bridgeUnsubscribers.push(
       eventBridge.onType("session.deleted", async (event) => {
         try {
@@ -461,7 +774,63 @@ export default async function (pi: any): Promise<void> {
       }),
     );
 
-    log.debug("PiEventBridge → DispatchManager wiring complete", {
+    // ── PiEventBridge → NotificationManager wiring ─────────────────────
+    //
+    // Construct the shared NotificationManager (config resolution from
+    // ROLEBOX_NOTIFICATIONS_CONFIG / ROLEBOX_NOTIFICATIONS_ENABLED and each
+    // role's `notifications:` block) and subscribe it to the canonical
+    // session lifecycle events. The instance is exposed via
+    // getPiNotificationManager() and consumed by the hook pipeline below;
+    // the bridge subscriptions are torn down by the shutdown handler
+    // through bridgeUnsubscribers, and the manager itself is disposed there
+    // too. (Its per-event subscriptions coexist with the pipeline's
+    // notificationManager calls — the scheduler/throttle guards make the
+    // redundant path a no-op, exactly like opencode's notification-service.)
+
+    const notifWiring = wirePiNotifications({
+      eventBridge,
+      resolvedRoles,
+      client: notifyClient,
+      dir: process.cwd(),
+    });
+    bridgeUnsubscribers.push(notifWiring.unsubscribe);
+
+    log.info("NotificationManager wired", {
+      subscriptions: 4, // session.idle / session.error / session.deleted / message.updated
+    });
+
+    // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────
+    //
+    // Replaces the five ad-hoc dispatchManager bridge handlers
+    // (session.idle / session.status / session.error / session.deleted /
+    // message.updated) that previously routed Pi lifecycle events straight
+    // to dispatchManager. The pipeline assembles the full HookDeps (session
+    // = notifyClient, role maps from resolvedRoles, dir = process.cwd(),
+    // the live dispatchManager + LoopCoordinator, a CustomHookRegistry
+    // populated from each role's `hooks.custom`, and the S3-wired
+    // NotificationManager) and subscribes a single general handler that
+    // funnels every canonical event through handleEvent
+    // (src/hooks/event-handler.ts). handleEvent itself dispatches to
+    // dispatchManager AND the notification manager, so keeping the old
+    // handlers would double-handle every lifecycle event. It also wires the
+    // functionRuntime / graphSessionState / sessionSignalLedger stores to
+    // process.cwd() and recovers them (hook-service.ts:59-66 pattern).
+
+    const hookPipeline = await createPiHookPipeline({
+      eventBridge,
+      session: notifyClient,
+      resolvedRoles,
+      roleFunctionsMap,
+      roleGraphMap,
+      dispatchManager,
+      loopManager: loopCoordinator,
+      notificationManager: getPiNotificationManager(),
+      dir: process.cwd(),
+    });
+    piHookPipeline = hookPipeline;
+    bridgeUnsubscribers.push(hookPipeline.unsubscribe);
+
+    log.info("PiHookPipeline wired — single handleEvent dispatch", {
       subscriptions: bridgeUnsubscribers.length,
     });
 
@@ -483,6 +852,27 @@ export default async function (pi: any): Promise<void> {
     if (seededAgent) {
       log.info("Seeded active agent from environment", { agent: seededAgent });
     }
+
+    // ── 4b. Pi chat-message activation wiring (subtask S8) ───────────────
+    //
+    // Detect user messages on Pi — pi.on("message_start") events whose
+    // message.role === "user", or the last JSONL user message of the
+    // invoking session as a restore fallback — and run the shared opencode
+    // handleChatMessage pipeline against them using the S6 hook pipeline's
+    // state + deps, so function activation (|fn| parsing, auto-activation,
+    // wake-event unblocking, session-agent registry) works on Pi exactly
+    // like the opencode chat.message hook. Synthetic injections are skipped
+    // exactly as chat-message.ts:26-29 (the shared pipeline applies the
+    // predicate on live events; the JSONL replay path applies it here).
+    const chatActivation = wirePiChatActivation({
+      pi,
+      state: hookPipeline.state,
+      deps: hookPipeline.deps,
+      activeAgent,
+    });
+    bridgeUnsubscribers.push(chatActivation.unsubscribe);
+
+    log.info("Pi chat activation wired — message_start → handleChatMessage");
 
     // ── 5. Tool registration via PiLightweightServiceStack ──────────────
     //
@@ -521,6 +911,36 @@ export default async function (pi: any): Promise<void> {
     // task_retry withheld: re-dispatches outside the graph engine.
     const { task_retry: _omittedTaskRetry, ...taskTools } = createTaskTools(dispatchManager, process.cwd());
 
+    // ── extraTools: opencode-side extras adapted for Pi ────────────────────
+    //
+    // Mirrors the opencode wiring at src/core/services/tool-service.ts:91-106,
+    // forwarding every tool that makes sense on Pi (asset_hot_reload remains
+    // opencode-only and intentionally omitted). The full lsp_* surface
+    // (subtask S10) rides the same channel: Pi constructs the two
+    // platform-agnostic LSP managers directly — LspClientManager(process.cwd())
+    // + LspDocumentManager, exactly as LspService.init() does — rather than
+    // running LspService itself (which needs a PluginCore that Pi cannot
+    // execute). Merged by PiLightweightServiceStack.init() into
+    // buildCanonicalTools({ extraTools }).
+    lspClientManager = new LspClientManager(process.cwd());
+    lspDocManager = new LspDocumentManager();
+
+    const extraTools = {
+      memory_update: createMemoryUpdateTool(),
+      function_graph: createFunctionGraphTool(resolvedRoles),
+      skill_compose: createSkillComposeTool(resolvedRoles),
+      context_assemble: createContextAssembleTool({
+        dispatchManager,
+        sessionClient: notifyClient,
+        resolvedRoles,
+        directory: process.cwd(),
+      }),
+      // LSP tools: the same 30+ tool surface opencode exposes via
+      // LspService.getTools() (lsp_diagnostics / lsp_hover /
+      // lsp_find_references / lsp_rename / lsp_servers, …).
+      ...createAllLspTools(lspClientManager, lspDocManager),
+    };
+
     const serviceStack = new PiLightweightServiceStack(
       pi,
       resolvedRoles,
@@ -528,6 +948,7 @@ export default async function (pi: any): Promise<void> {
       undefined, // dispatchTools disabled (graph-only orchestration)
       undefined, // loopTools disabled (graph_add_loop replaces loop_*)
       taskTools,
+      extraTools,
       // Subtask 3: thread the live graph runtime into the stack. The
       // dispatchManager gates registration of the eight graph_* tools inside
       // buildCanonicalTools; notifyClient supplies the graph-notify session
@@ -536,6 +957,12 @@ export default async function (pi: any): Promise<void> {
       dispatchManager,
       notifyClient,
       process.cwd(),
+      // Subtask 9 (tool-execution interceptor): thread the S6 hook pipeline's
+      // state + deps into the stack so every Pi tool execute runs the shared
+      // handleToolBefore pipeline — strict zod validation, deprecated-tool
+      // warnings, custom-hook before/after phases, and correction injection
+      // into the same pendingCorrections the system-transform reads.
+      { state: hookPipeline.state, deps: hookPipeline.deps },
     );
     await serviceStack.init();
 
@@ -662,7 +1089,7 @@ export default async function (pi: any): Promise<void> {
     // visible to the active agent's system prompt.
 
     if (typeof pi.on === "function") {
-      pi.on("before_agent_start", async (event: any, _ctx: unknown) => {
+      pi.on("before_agent_start", async (event: any, ctx: unknown) => {
         try {
           const agents = registrar.getRegisteredAgents();
           if (agents.length === 0) return;
@@ -707,7 +1134,35 @@ export default async function (pi: any): Promise<void> {
           const agentSection = lines.join("\n");
           const currentPrompt = typeof event.systemPrompt === "string" ? event.systemPrompt : "";
 
-          return { systemPrompt: currentPrompt + agentSection };
+          // ── S7: opencode system-transform pipeline (Pi adapter) ──────
+          //
+          // Run the shared handleSystemTransform pipeline (corrections,
+          // available_functions, memory, active_functions + gate/transition
+          // kernel, artifact consumption, graph-state block) against the Pi
+          // event shape, using the S6 hook pipeline's state (so corrections
+          // queued by handleChatMessage/tool hooks land in the next prompt)
+          // and deps (the shared role maps + custom-hook registry). The
+          // static role/loop guidance above is preserved as baseSection —
+          // the pipeline appends its blocks AFTER it. If no session id can
+          // be resolved (or the transform throws), fall back to the static
+          // prompt unchanged.
+          let augmentedPrompt: string | undefined;
+          if (piHookPipeline) {
+            augmentedPrompt = await runPiSystemTransform(
+              {
+                event,
+                ctx: (ctx ?? undefined) as Record<string, unknown> | undefined,
+                baseSection: agentSection,
+                activeAgent,
+              },
+              piHookPipeline.state,
+              piHookPipeline.deps,
+            );
+          }
+
+          return {
+            systemPrompt: augmentedPrompt ?? currentPrompt + agentSection,
+          };
         } catch (err) {
           log.debug("before_agent_start handler error", {
             error: formatError(err),

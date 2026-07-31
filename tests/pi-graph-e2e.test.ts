@@ -228,10 +228,10 @@ afterEach(() => {
 // ── Compiled-surface helpers ──────────────────────────────────────────────────
 
 /**
- * Build the stack exactly like the platform entry does: fake client (8th ctor
+ * Build the stack exactly like the platform entry does: fake client (9th ctor
  * arg = graphNotifyClient, so reminders route to it instead of the filesystem
- * PiSessionAdapter), stub manager (7th arg gates graph_* registration), tmp
- * stateDir (9th arg keeps engine-state writes out of the repo).
+ * PiSessionAdapter), stub manager (8th arg gates graph_* registration), tmp
+ * stateDir (10th arg keeps engine-state writes out of the repo).
  */
 function makeStack(
   client: FakeSessionClient,
@@ -249,6 +249,7 @@ function makeStack(
     undefined, // dispatchTools
     undefined, // loopTools
     undefined, // taskTools
+    undefined, // extraTools
     manager as unknown as DispatchManager,
     client,
     stateDir,

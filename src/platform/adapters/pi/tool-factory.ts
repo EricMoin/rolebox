@@ -16,6 +16,8 @@
 import { z, toJSONSchema } from "zod";
 import type { IToolFactory } from "../../ports/tool-factory.ts";
 import type { CanonicalToolDef, CanonicalToolContext, ToolResult } from "../../types.ts";
+import { interceptToolBefore } from "./tool-interceptor.ts";
+import type { ToolInterceptorHooks } from "./tool-interceptor.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -121,6 +123,13 @@ function toCanonicalContext(
  * a name (the record key), which is only available in compileAll().
  */
 export class PiToolFactory implements IToolFactory {
+  /** Optional hook wiring for the tool-execution interceptor (subtask S9). */
+  #hooks: ToolInterceptorHooks | undefined;
+
+  constructor(hooks?: ToolInterceptorHooks) {
+    this.#hooks = hooks;
+  }
+
   compile<Args extends z.ZodRawShape>(def: CanonicalToolDef<Args>): unknown {
     // compile() does not receive a tool name, which Pi requires for
     // registration. Use compileAll() when names are available, or
@@ -136,6 +145,9 @@ export class PiToolFactory implements IToolFactory {
     def: CanonicalToolDef<Args>,
   ): Record<string, unknown> {
     const jsonSchema = zodShapeToJsonSchema(def.args);
+    // Capture the interceptor wiring — the returned execute closure runs in
+    // the context of the tool object, not the factory, so `this` is unsafe.
+    const hooks = this.#hooks;
 
     return {
       name,
@@ -150,9 +162,22 @@ export class PiToolFactory implements IToolFactory {
         ctx: Record<string, unknown>,
       ): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
         const context = toCanonicalContext(toolCallId, signal, onUpdate, ctx);
+        // Subtask S9 — tool-execution interceptor: run the shared
+        // handleToolBefore pipeline (strict zod validation, deprecated
+        // warnings, custom-hook before/after phases, correction injection)
+        // BEFORE invoking the canonical def. Validation failures return an
+        // error string listing valid parameters instead of throwing into Pi.
+        const check = await interceptToolBefore(
+          name,
+          toolCallId,
+          (params ?? {}) as Record<string, unknown>,
+          context,
+          hooks,
+        );
+        if (!check.ok) return toPiResult(check.error);
         // Params arrive as Record<string, unknown> from Pi's runtime.
         // The schema guarantees shape compatibility — cast through unknown.
-        const result = await def.execute(params as any, context);
+        const result = await def.execute(check.args as any, context);
         return toPiResult(result);
       },
     };

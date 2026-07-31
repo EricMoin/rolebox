@@ -1622,6 +1622,21 @@ export class PiProcessSessionAdapter implements ISessionClient {
           error: err instanceof Error ? err.message : String(err),
         });
       });
+
+      // 3b. Emit session.status idle so the dispatch status pipeline
+      // (pi-extension.ts bridge → dispatchManager.handleSessionStatus)
+      // observes the turn-level idle transition too. Additive — the
+      // canonical session.idle emission above is unchanged.
+      void this.eventBridge.emit({
+        type: "session.status",
+        rawType: "pi.turn_end",
+        properties: { sessionID: id, status: "idle" },
+      }).catch((err: unknown) => {
+        this.log.debug("Failed to emit session.status for turn_end", {
+          id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     }
   }
 
