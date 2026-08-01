@@ -83,6 +83,18 @@ export async function handleEvent(
         });
         break;
       }
+      // Same discipline for graph executions owned by this session: while a
+      // graph node is mid-flight, the [GRAPH COMPLETE] termination reminder
+      // (graph-notify, noReply:false) is the ONLY wake-up source — auto-continue
+      // must NOT fire (it would spin-poll an unsatisfiable continue_until until
+      // the graph settles). Sessions without a wired graph toolset (optional
+      // field absent) keep existing behavior.
+      if (deps.graphTools?.hasInflightGraphsForSession(sid)) {
+        log.debug("suppressing auto-continue: session owns executing graph", {
+          sessionID: sid,
+        });
+        break;
+      }
       // Suppress function continuation for active loop origins during loop-owned
       // phases (summarizing, activating, finalizing). Worker continuation is
       // unaffected. NOTE: we use a flag instead of `break` so that the loop
@@ -209,6 +221,10 @@ export async function handleEvent(
         delete st.kv.__pendingContinuationReasons;
         if (!wantsContinue) continue;
 
+        // Snapshot cooldown before decideContinuation so a failed prompt send
+        // can roll back BOTH of its mutations (continuationCount increment and
+        // a possible cooldownUntilTurn arming) atomically.
+        const cooldownBeforeDecision = st.cooldownUntilTurn;
         const decision = decideContinuation({
           fnName: name, st, reason,
           cfg: { globalMaxTurns: 25, perFnMax: fn.continue_max ?? 5 },
@@ -229,6 +245,11 @@ export async function handleEvent(
             log.warn("Failed to send continuation prompt", { sessionID: sid, err });
             // Rollback the continuation count that decideContinuation incremented
             st.continuationCount -= 1;
+            // Restore the cooldown snapshot: decideContinuation may have armed a
+            // cooldown rule at the (now rolled-back) count. A transient prompt
+            // failure must not leave a stale cooldown that suppresses future
+            // continuations — keep continuationCount and cooldownUntilTurn consistent.
+            st.cooldownUntilTurn = cooldownBeforeDecision;
             // Do NOT mark dirty — no state change to persist on failure
           }
         }

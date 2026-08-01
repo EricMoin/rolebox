@@ -15,6 +15,11 @@ import { createFunctionGraphTool } from "../../function/function-graph.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 import { buildCanonicalTools } from "../../platform/tool-assembly.ts";
 import { defaultCapabilities } from "../../platform/capabilities.ts";
+import {
+  createGraphToolSet,
+  type GraphToolSet,
+  type GraphNotifySource,
+} from "../../graph/tools/index.ts";
 
 const log = createSubLogger("tool-service");
 
@@ -23,6 +28,14 @@ export class ToolService implements PluginService {
   readonly dependencies = ["dispatch-service", "loop-service", "lsp-service", "session-service", "hot-reload-service"];
 
   private tools: Record<string, any> = {};
+  /**
+   * The single GraphToolSet instance (subtask 2) backing BOTH the `graph_*`
+   * tools (threaded into buildCanonicalTools via the `graphTools` option) and
+   * the HookDeps `graphTools` in-flight query (consumed by hook-service via
+   * {@link getGraphToolSet}). Constructed once so both surfaces observe the
+   * same in-memory graph registry.
+   */
+  private graphToolSet?: GraphToolSet;
 
   async init(ctx: PluginContext): Promise<void> {
     // 1. Get dispatch tools from DispatchService
@@ -52,6 +65,25 @@ export class ToolService implements PluginService {
     if (!hotReloadService) throw new Error("hot-reload-service not found");
     const sessionClient = sessionService.getSessionClient();
 
+    // 3.7. Construct the single GraphToolSet (subtask 2) with the SAME deps
+    // the graph_* tools receive inside buildCanonicalTools — manager,
+    // directory, stateDir, graphNotify. stateDir is intentionally absent here
+    // exactly as it is for the graph tools in this assembly (engines run
+    // without engine-state persistence on opencode). The instance is threaded
+    // into buildCanonicalTools below via the `graphTools` option so the
+    // graph_* tools bind to it (no second toolset), and is exposed to
+    // hook-service through getGraphToolSet() for the HookDeps graphTools
+    // in-flight query.
+    const graphNotify: GraphNotifySource = {
+      sessionClient,
+      emperorSessionId: (invokingSessionId) => invokingSessionId,
+    };
+    this.graphToolSet = createGraphToolSet({
+      manager: dispatchManager,
+      directory: ctx.directory,
+      graphNotify,
+    });
+
     // 4. Assemble shared canonical tools + OpenCode-only extras
     this.tools = buildCanonicalTools({
       sessionClient,
@@ -70,10 +102,7 @@ export class ToolService implements PluginService {
       // known when a graph is actually run. `graphParentContext` budget scoping
       // (sessionID: graphId) is unaffected — the emperor session is carried ONLY
       // for notification targeting.
-      graphNotify: {
-        sessionClient,
-        emperorSessionId: (invokingSessionId) => invokingSessionId,
-      },
+      graphNotify,
       // dispatch_* tool registration DISABLED — orchestration is graph-only
       // (graph_create/graph_add_node/graph_run). Bare dispatch calls would
       // bypass graph budget accounting, approval gates, and loop caps.
@@ -88,6 +117,9 @@ export class ToolService implements PluginService {
         const { task_retry: _omitted, ...taskTools } = createTaskTools(dispatchManager, ctx.directory);
         return taskTools;
       })(),
+      // Subtask 2: bind the graph_* tools to the prebuilt toolset (single
+      // instance — same registry the HookDeps graphTools query reads).
+      graphTools: this.graphToolSet,
       extraTools: {
         // OpenCode-only memory update (write/recall/list are in the shared set)
         memory_update: createMemoryUpdateTool(),
@@ -118,5 +150,14 @@ export class ToolService implements PluginService {
 
   getTools(): Record<string, any> {
     return this.tools;
+  }
+
+  /**
+   * The single GraphToolSet instance (subtask 2) backing the graph_* tools and
+   * the HookDeps `graphTools` in-flight query. `undefined` only if init() has
+   * not run yet (or failed). hook-service reads this when assembling HookDeps.
+   */
+  getGraphToolSet(): GraphToolSet | undefined {
+    return this.graphToolSet;
   }
 }

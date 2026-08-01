@@ -104,6 +104,11 @@ export class HookService implements PluginService {
     const recoveryService = ctx.core.getService<RecoveryService>("recovery-service");
     const extensionService = ctx.core.getService<ExtensionService>("extension-service");
     const notificationService = ctx.core.getService<NotificationService>("notification-service");
+    // Subtask 2: tool-service owns the single GraphToolSet backing the graph_*
+    // tools; its getter supplies the HookDeps `graphTools` in-flight query so
+    // the auto-continue path can ask whether the invoking session still owns
+    // executing graphs before continuing (same registry as graph_run).
+    const toolService = ctx.core.getService<ToolService>("tool-service")!;
 
     const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
 
@@ -121,11 +126,11 @@ export class HookService implements PluginService {
       notificationManager: notificationService?.getNotificationManager(),
       extensionRegistry: extensionService?.getExtensionRegistry(),
       builtinConfig: recoveryService?.getBuiltinConfig(),
+      graphTools: toolService.getGraphToolSet(),
     };
+    log.debug("HookDeps assembled", { graphTools: Boolean(this.deps.graphTools) });
 
     // --- Build handlers ---
-    const toolService = ctx.core.getService<ToolService>("tool-service")!;
-
     const newHandlers = this.buildHandlers(toolService.getTools(), ctx.bus, resolvedRoles);
 
     // Update the stable wrapper in-place so opencode's reference stays valid

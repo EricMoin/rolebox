@@ -23,4 +23,13 @@ export interface HookDeps {
   notificationManager?: NotificationManager;
   extensionRegistry?: ExtensionRegistry;
   builtinConfig?: Record<string, boolean>;
+  /**
+   * Optional graph-toolset query surface (subtask 2): lets idle/continue
+   * handlers ask whether the invoking session still owns in-flight graphs
+   * before auto-continuing. Backed by the SAME GraphToolSet instance that
+   * powers the `graph_*` tools (assembled by tool-service on opencode /
+   * PiLightweightServiceStack on Pi). Optional for backward compatibility —
+   * absent on platforms/setups that do not assemble graph tools.
+   */
+  graphTools?: { hasInflightGraphsForSession(sessionID: string): boolean };
 }

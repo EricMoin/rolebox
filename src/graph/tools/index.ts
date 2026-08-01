@@ -131,6 +131,13 @@ const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType
  *        every engine the toolset constructs so graph node completions AND
  *        graph-terminal transitions route to graph-notify targeting the emperor
  *        session. More here in src/graph/tools/graph-tools.ts.
+ * @param opts.toolset - Optional prebuilt {@link GraphToolSet} (subtask 2).
+ *        When provided, the tools bind to THIS instance instead of
+ *        constructing a fresh one — letting a platform assembly layer (e.g.
+ *        tool-service / PiLightweightServiceStack) construct the toolset once
+ *        and reuse it for both the `graph_*` tools AND the HookDeps
+ *        `graphTools` query, so the two surfaces always observe the same
+ *        in-memory graph registry.
  * @returns A record of `graph_*` key → {@link CanonicalToolDef}.
  */
 export function createGraphTools(
@@ -139,9 +146,10 @@ export function createGraphTools(
     directory?: string;
     stateDir?: string;
     graphNotify?: GraphNotifySource;
+    toolset?: GraphToolSet;
   } = {},
 ): Record<string, CanonicalToolDef> {
-  const toolset: GraphToolSet = createGraphToolSet({
+  const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
     manager,
     directory: opts.directory,
     stateDir: opts.stateDir,
@@ -167,6 +175,13 @@ export type {
   GraphNotifySource,
   GraphNotifyConfig,
 } from "./graph-tools.ts";
+
+// Subtask 2: re-export the toolset factory + type so platform assembly layers
+// (tool-service.ts / PiLightweightServiceStack) can construct a single
+// GraphToolSet and thread it into buildCanonicalTools via the `graphTools`
+// option — one instance backing both the graph_* tools and the HookDeps
+// graphTools in-flight query.
+export { createGraphToolSet, type GraphToolSet } from "./graph-tools.ts";
 
 // ── Individual tool factories ───────────────────────────────────────────────
 

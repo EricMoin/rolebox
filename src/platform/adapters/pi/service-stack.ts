@@ -28,6 +28,10 @@ import { z } from "zod";
 import { registerToolSchema, registerDeprecatedTool } from "../../../hooks/tool-before.ts";
 import type { DispatchManager } from "../../../dispatch/core/manager.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
+import {
+  createGraphToolSet,
+  type GraphToolSet,
+} from "../../../graph/tools/index.ts";
 
 // ── Shared tool assembly ────────────────────────────────────────────────────
 
@@ -122,6 +126,18 @@ export class PiLightweightServiceStack implements IHookProvider {
   private _stateDir: string;
   /** Hook wiring consumed by the tool-execution interceptor (subtask S9). */
   private _interceptorHooks: ToolInterceptorHooks | undefined;
+  /**
+   * The single GraphToolSet instance (subtask 2) backing BOTH the `graph_*`
+   * tools (threaded into buildCanonicalTools via the `graphTools` option) and
+   * the HookDeps `graphTools` in-flight query (consumed by the Pi hook
+   * pipeline through {@link getGraphToolSet}). Constructed eagerly with the
+   * SAME deps the graph_* tools receive inside buildCanonicalTools — manager,
+   * directory (process.cwd()), stateDir and graphNotify — so both surfaces
+   * observe the same in-memory graph registry. Absent (undefined) when no
+   * dispatch manager is supplied, mirroring the graph_* gating in
+   * buildCanonicalTools.
+   */
+  private _graphToolSet: GraphToolSet | undefined;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -150,6 +166,22 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._graphNotifyClient = graphNotifyClient;
     this._stateDir = stateDir;
     this._interceptorHooks = interceptorHooks;
+    // Subtask 2: the graph tools only assemble when a dispatch manager is
+    // present (buildCanonicalTools gates the eight graph_* keys on it), so
+    // the shared toolset is constructed under the same gate. The graph-notify
+    // session client resolves exactly as in init() below (external client
+    // wins over the filesystem-backed session adapter).
+    if (dispatchManager) {
+      this._graphToolSet = createGraphToolSet({
+        manager: dispatchManager,
+        directory: process.cwd(),
+        stateDir,
+        graphNotify: {
+          sessionClient: graphNotifyClient ?? this._sessionAdapter,
+          emperorSessionId: (invokingSessionId) => invokingSessionId,
+        },
+      });
+    }
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -160,6 +192,16 @@ export class PiLightweightServiceStack implements IHookProvider {
   /** The PiToolFactory instance for external access. */
   get toolFactory(): PiToolFactory {
     return this._toolFactory;
+  }
+
+  /**
+   * The single GraphToolSet instance (subtask 2) backing the graph_* tools and
+   * the HookDeps `graphTools` in-flight query. `undefined` when no dispatch
+   * manager was supplied (no graph tools are registered either). The Pi hook
+   * pipeline reads this when assembling HookDeps.
+   */
+  getGraphToolSet(): GraphToolSet | undefined {
+    return this._graphToolSet;
   }
 
   /**
@@ -203,6 +245,10 @@ export class PiLightweightServiceStack implements IHookProvider {
         sessionClient: this._graphNotifyClient ?? this._sessionAdapter,
         emperorSessionId: (invokingSessionId) => invokingSessionId,
       },
+      // Subtask 2: bind the graph_* tools to the prebuilt toolset (single
+      // instance — same registry the HookDeps graphTools query reads). Absent
+      // when no dispatch manager was supplied (no graph tools are assembled).
+      graphTools: this._graphToolSet,
       dispatchToolsOverride,
       loopToolsOverride: this._loopTools && Object.keys(this._loopTools).length > 0
         ? this._loopTools

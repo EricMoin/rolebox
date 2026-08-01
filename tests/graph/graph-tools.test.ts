@@ -10,13 +10,22 @@
  * asserted via its error path; dry-run validation is covered in full.
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach } from "bun:test";
 import {
   createGraphToolSet,
   GraphToolSet,
+  type GraphToolSetDeps,
 } from "../../src/graph/tools/graph-tools";
 import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools";
 import type { EngineState } from "../../src/types.engine-v2";
+import type { NodeRuntimeState } from "../../src/types.engine-v2";
+import type { DispatchTask } from "../../src/dispatch/types";
+import type {
+  DispatchParentContext,
+  TaskTerminatedCallback,
+} from "../../src/graph/engine/dispatch-bridge";
+import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
+import { clearParentQueues } from "../../src/dispatch/notification";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -603,5 +612,119 @@ describe("graph_cancel", () => {
   it("throws for an unknown graph", () => {
     const ts = createGraphToolSet();
     expect(() => ts.graph_cancel({ graph_id: "nope" })).toThrow(/does not exist/);
+  });
+});
+
+// ── hasInflightGraphsForSession (session-level in-flight query) ────────────
+
+describe("hasInflightGraphsForSession", () => {
+  /**
+   * Fake dispatch seam that executes nodes, optionally keeping selected nodes
+   * running forever (their tasks never fire completion) so the engine stays in
+   * phase `executing`. Mirrors the CompletingDispatch pattern from
+   * graph-run-idempotent.test.ts.
+   */
+  class FakeDispatch implements NodeDispatchPort {
+    calls: { nodeId: string; prompt: string }[] = [];
+    private subs = new Map<string, TaskTerminatedCallback>();
+    private tasks = new Map<string, DispatchTask>();
+    private seq = 0;
+    constructor(private stayRunning: Set<string> = new Set()) {}
+
+    executeNode(
+      node: NodeRuntimeState,
+      _ctx: DispatchParentContext,
+    ): Promise<DispatchTask> {
+      this.calls.push({ nodeId: node.nodeId, prompt: node.prompt });
+      const id = `task-${node.nodeId}-${++this.seq}`;
+      const task: DispatchTask = {
+        id,
+        sessionId: `sess-${id}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      };
+      this.tasks.set(id, task);
+      if (!this.stayRunning.has(node.nodeId)) {
+        setTimeout(() => {
+          task.status = "completed";
+          this.subs.get(id)?.(id, "completed");
+        }, 0);
+      }
+      return Promise.resolve(task);
+    }
+
+    onTaskTerminated(
+      taskId: string,
+      cb: TaskTerminatedCallback,
+    ): TaskTerminatedCallback {
+      this.subs.set(taskId, cb);
+      return cb;
+    }
+
+    getTask(taskId: string): DispatchTask | undefined {
+      return this.tasks.get(taskId);
+    }
+  }
+
+  /** Allow setTimeout(0) completions to settle through the engine. */
+  const settle = () => new Promise((r) => setTimeout(r, 25));
+
+  /** Open a single-root graph with one node on a fake-dispatch tool set. */
+  function openSingleNode(
+    name: string,
+    stayRunning?: Set<string>,
+  ): { ts: GraphToolSet; graphId: string } {
+    const deps: GraphToolSetDeps = { dispatch: new FakeDispatch(stayRunning) };
+    const ts = new GraphToolSet(deps);
+    const { graph_id } = ts.graph_create({ name });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    return { ts, graphId: graph_id };
+  }
+
+  beforeEach(() => {
+    clearParentQueues();
+  });
+
+  it("returns true while a node is running on a graph owned by the session", async () => {
+    const { ts, graphId } = openSingleNode("inflight-true", new Set(["A"]));
+    await ts.graph_run({ graph_id: graphId }, "sess-S");
+    // Node A's task never completes → engine stays executing with A running.
+    expect(ts.hasInflightGraphsForSession("sess-S")).toBe(true);
+  });
+
+  it("returns false once all nodes complete", async () => {
+    const { ts, graphId } = openSingleNode("inflight-done");
+    await ts.graph_run({ graph_id: graphId }, "sess-S");
+    await settle();
+    const state = ts["getEntry"](graphId).runtime.status();
+    expect(state.phase).toBe("complete");
+    expect(ts.hasInflightGraphsForSession("sess-S")).toBe(false);
+  });
+
+  it("returns false for an unrelated session id while the graph is running", async () => {
+    const { ts, graphId } = openSingleNode("inflight-other", new Set(["A"]));
+    await ts.graph_run({ graph_id: graphId }, "sess-S");
+    expect(ts.hasInflightGraphsForSession("sess-OTHER")).toBe(false);
+  });
+
+  it("returns false for a graph the session owns but never ran (phase idle)", async () => {
+    const ts = new GraphToolSet({ dispatch: new FakeDispatch() });
+    const { graph_id } = ts.graph_create({ name: "inflight-idle" }, "sess-S");
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    expect(ts["getEntry"](graph_id).runtime.status().phase).toBe("idle");
+    expect(ts.hasInflightGraphsForSession("sess-S")).toBe(false);
+  });
+
+  it("returns false when no graph carries the session id", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "no-session" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    expect(ts.hasInflightGraphsForSession("sess-S")).toBe(false);
   });
 });

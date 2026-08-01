@@ -24,6 +24,7 @@ import { runPiSystemTransform } from "./platform/adapters/pi/system-transform.ts
 import { wirePiChatActivation } from "./platform/adapters/pi/chat-activation.ts";
 import { wireRoleSwitcher } from "./platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
+import type { ToolInterceptorHooks } from "./platform/adapters/pi/tool-interceptor.ts";
 import { piCapabilities } from "./platform/capabilities.ts";
 import { createSubLogger, formatError } from "./logger.ts";
 import type {
@@ -799,81 +800,6 @@ export default async function (pi: any): Promise<void> {
       subscriptions: 4, // session.idle / session.error / session.deleted / message.updated
     });
 
-    // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────
-    //
-    // Replaces the five ad-hoc dispatchManager bridge handlers
-    // (session.idle / session.status / session.error / session.deleted /
-    // message.updated) that previously routed Pi lifecycle events straight
-    // to dispatchManager. The pipeline assembles the full HookDeps (session
-    // = notifyClient, role maps from resolvedRoles, dir = process.cwd(),
-    // the live dispatchManager + LoopCoordinator, a CustomHookRegistry
-    // populated from each role's `hooks.custom`, and the S3-wired
-    // NotificationManager) and subscribes a single general handler that
-    // funnels every canonical event through handleEvent
-    // (src/hooks/event-handler.ts). handleEvent itself dispatches to
-    // dispatchManager AND the notification manager, so keeping the old
-    // handlers would double-handle every lifecycle event. It also wires the
-    // functionRuntime / graphSessionState / sessionSignalLedger stores to
-    // process.cwd() and recovers them (hook-service.ts:59-66 pattern).
-
-    const hookPipeline = await createPiHookPipeline({
-      eventBridge,
-      session: notifyClient,
-      resolvedRoles,
-      roleFunctionsMap,
-      roleGraphMap,
-      dispatchManager,
-      loopManager: loopCoordinator,
-      notificationManager: getPiNotificationManager(),
-      dir: process.cwd(),
-    });
-    piHookPipeline = hookPipeline;
-    bridgeUnsubscribers.push(hookPipeline.unsubscribe);
-
-    log.info("PiHookPipeline wired — single handleEvent dispatch", {
-      subscriptions: bridgeUnsubscribers.length,
-    });
-
-    // ── 5. Tool registration via PiLightweightServiceStack ──────────────
-    //
-    // Build real dispatch CanonicalToolDefs and pass them to the service
-    // stack instead of stub tools. All other tools (standalone, session,
-    // asset) are built as before.
-
-    // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
-    //
-    // Pi never populates `context.agent` on tool contexts. This shared ref is
-    // the single source of truth for "which rolebox agent is acting", read by
-    // the dispatch tool's direct-child gate and written by the role switcher.
-    // In a spawned subagent process it is seeded from ROLEBOX_ACTIVE_AGENT so
-    // nested dispatch can reach that subagent's own children.
-    const seededAgent = process.env.ROLEBOX_ACTIVE_AGENT?.trim() || null;
-    const activeAgent = createActiveAgentRef(seededAgent);
-    if (seededAgent) {
-      log.info("Seeded active agent from environment", { agent: seededAgent });
-    }
-
-    // ── 4b. Pi chat-message activation wiring (subtask S8) ───────────────
-    //
-    // Detect user messages on Pi — pi.on("message_start") events whose
-    // message.role === "user", or the last JSONL user message of the
-    // invoking session as a restore fallback — and run the shared opencode
-    // handleChatMessage pipeline against them using the S6 hook pipeline's
-    // state + deps, so function activation (|fn| parsing, auto-activation,
-    // wake-event unblocking, session-agent registry) works on Pi exactly
-    // like the opencode chat.message hook. Synthetic injections are skipped
-    // exactly as chat-message.ts:26-29 (the shared pipeline applies the
-    // predicate on live events; the JSONL replay path applies it here).
-    const chatActivation = wirePiChatActivation({
-      pi,
-      state: hookPipeline.state,
-      deps: hookPipeline.deps,
-      activeAgent,
-    });
-    bridgeUnsubscribers.push(chatActivation.unsubscribe);
-
-    log.info("Pi chat activation wired — message_start → handleChatMessage");
-
     // ── 5. Tool registration via PiLightweightServiceStack ──────────────
     //
     // Subtask 5: pass the REAL restored dispatch_*/loop_*/task_* tool sets
@@ -941,6 +867,15 @@ export default async function (pi: any): Promise<void> {
       ...createAllLspTools(lspClientManager, lspDocManager),
     };
 
+    // Subtask 2: the stack is constructed BEFORE the hook pipeline so its
+    // getGraphToolSet() (the single GraphToolSet backing the graph_* tools)
+    // can feed the pipeline's HookDeps assembly below — deps.graphTools and
+    // the graph_* tools observe the same in-memory graph registry. The
+    // pipeline must exist before the stack's interceptor hooks (subtask S9),
+    // so the stack receives a mutable carrier that is populated with the
+    // pipeline's state + deps right after the pipeline is built (before
+    // init() compiles the tools).
+    const interceptorHooks: ToolInterceptorHooks = {};
     const serviceStack = new PiLightweightServiceStack(
       pi,
       resolvedRoles,
@@ -957,13 +892,95 @@ export default async function (pi: any): Promise<void> {
       dispatchManager,
       notifyClient,
       process.cwd(),
-      // Subtask 9 (tool-execution interceptor): thread the S6 hook pipeline's
-      // state + deps into the stack so every Pi tool execute runs the shared
-      // handleToolBefore pipeline — strict zod validation, deprecated-tool
-      // warnings, custom-hook before/after phases, and correction injection
-      // into the same pendingCorrections the system-transform reads.
-      { state: hookPipeline.state, deps: hookPipeline.deps },
+      interceptorHooks,
     );
+
+    // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────
+    //
+    // Replaces the five ad-hoc dispatchManager bridge handlers
+    // (session.idle / session.status / session.error / session.deleted /
+    // message.updated) that previously routed Pi lifecycle events straight
+    // to dispatchManager. The pipeline assembles the full HookDeps (session
+    // = notifyClient, role maps from resolvedRoles, dir = process.cwd(),
+    // the live dispatchManager + LoopCoordinator, a CustomHookRegistry
+    // populated from each role's `hooks.custom`, and the S3-wired
+    // NotificationManager) and subscribes a single general handler that
+    // funnels every canonical event through handleEvent
+    // (src/hooks/event-handler.ts). handleEvent itself dispatches to
+    // dispatchManager AND the notification manager, so keeping the old
+    // handlers would double-handle every lifecycle event. It also wires the
+    // functionRuntime / graphSessionState / sessionSignalLedger stores to
+    // process.cwd() and recovers them (hook-service.ts:59-66 pattern).
+
+    const hookPipeline = await createPiHookPipeline({
+      eventBridge,
+      session: notifyClient,
+      resolvedRoles,
+      roleFunctionsMap,
+      roleGraphMap,
+      dispatchManager,
+      loopManager: loopCoordinator,
+      notificationManager: getPiNotificationManager(),
+      // Subtask 2: the shared GraphToolSet in-flight query (same instance
+      // backing the graph_* tools) — lets the auto-continue path observe
+      // executing graphs before continuing.
+      graphTools: serviceStack.getGraphToolSet(),
+      dir: process.cwd(),
+    });
+    piHookPipeline = hookPipeline;
+    bridgeUnsubscribers.push(hookPipeline.unsubscribe);
+
+    log.info("PiHookPipeline wired — single handleEvent dispatch", {
+      subscriptions: bridgeUnsubscribers.length,
+    });
+
+    // Subtask 9: populate the stack's interceptor-hooks carrier now that the
+    // pipeline exists (the stack was constructed before it so getGraphToolSet()
+    // could feed the HookDeps assembly). init() below compiles the tools with
+    // these — every Pi tool execute runs the shared handleToolBefore pipeline.
+    interceptorHooks.state = hookPipeline.state;
+    interceptorHooks.deps = hookPipeline.deps;
+
+    // ── 5. Tool registration via PiLightweightServiceStack ──────────────
+    //
+    // Build real dispatch CanonicalToolDefs and pass them to the service
+    // stack instead of stub tools. All other tools (standalone, session,
+    // asset) are built as before.
+
+    // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
+    //
+    // Pi never populates `context.agent` on tool contexts. This shared ref is
+    // the single source of truth for "which rolebox agent is acting", read by
+    // the dispatch tool's direct-child gate and written by the role switcher.
+    // In a spawned subagent process it is seeded from ROLEBOX_ACTIVE_AGENT so
+    // nested dispatch can reach that subagent's own children.
+    const seededAgent = process.env.ROLEBOX_ACTIVE_AGENT?.trim() || null;
+    const activeAgent = createActiveAgentRef(seededAgent);
+    if (seededAgent) {
+      log.info("Seeded active agent from environment", { agent: seededAgent });
+    }
+
+    // ── 4b. Pi chat-message activation wiring (subtask S8) ───────────────
+    //
+    // Detect user messages on Pi — pi.on("message_start") events whose
+    // message.role === "user", or the last JSONL user message of the
+    // invoking session as a restore fallback — and run the shared opencode
+    // handleChatMessage pipeline against them using the S6 hook pipeline's
+    // state + deps, so function activation (|fn| parsing, auto-activation,
+    // wake-event unblocking, session-agent registry) works on Pi exactly
+    // like the opencode chat.message hook. Synthetic injections are skipped
+    // exactly as chat-message.ts:26-29 (the shared pipeline applies the
+    // predicate on live events; the JSONL replay path applies it here).
+    const chatActivation = wirePiChatActivation({
+      pi,
+      state: hookPipeline.state,
+      deps: hookPipeline.deps,
+      activeAgent,
+    });
+    bridgeUnsubscribers.push(chatActivation.unsubscribe);
+
+    log.info("Pi chat activation wired — message_start → handleChatMessage");
+
     await serviceStack.init();
 
     // ── 6. Event wiring ─────────────────────────────────────────────────

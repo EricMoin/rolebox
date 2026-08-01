@@ -1088,6 +1088,33 @@ export class GraphToolSet {
     };
   }
 
+  // ── Session-level in-flight query ───────────────────────────────────────────
+
+  /**
+   * Whether the given session owns at least one graph whose engine is genuinely
+   * mid-flight: phase `executing` AND at least one node `ready` or `running`.
+   *
+   * `Blocked` nodes are deliberately EXCLUDED (hence the dedicated
+   * {@link GRAPH_INFLIGHT_NODE_STATUSES} predicate rather than reusing
+   * `GRAPH_RUN_ACTIVE_STATUSES`, which includes `Blocked`) — a `needs_approval`
+   * gate is a legitimate pause awaiting the human, so an auto-continue must
+   * freeze through the existing gated (approval) path instead of treating the
+   * graph as inflight work to contend with. A graph whose phase is `idle` (never
+   * run / finished) or whose executing engine has no unsettled node does NOT
+   * count. Absent invoking-session match, or no graphs at all → `false`.
+   */
+  hasInflightGraphsForSession(sessionID: string): boolean {
+    for (const entry of this.registry.values()) {
+      if (entry.invokingSessionId !== sessionID) continue;
+      const liveStatus = entry.runtime.status();
+      if (liveStatus.phase !== EnginePhase.Executing) continue;
+      for (const n of liveStatus.nodes.values()) {
+        if (GRAPH_INFLIGHT_NODE_STATUSES.has(n.status)) return true;
+      }
+    }
+    return false;
+  }
+
   // ── graph_status ───────────────────────────────────────────────────────────
 
   graph_status(args: GraphStatusArgs): string {
@@ -2448,6 +2475,16 @@ const GRAPH_RUN_ACTIVE_STATUSES: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
   NodeStatus.Ready,
   NodeStatus.Running,
   NodeStatus.Blocked,
+]);
+
+/** Statuses that count as genuinely "in-flight" for the session-level
+ *  {@link GraphToolSet.hasInflightGraphsForSession} query: a node that has been
+ *  dispatched (`running`) or is queued for dispatch (`ready`). Excludes Blocked
+ *  — a `needs_approval` gate waits on the human, so auto-continue must freeze
+ *  through the existing gated path instead of treating the graph as inflight. */
+const GRAPH_INFLIGHT_NODE_STATUSES: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
+  NodeStatus.Ready,
+  NodeStatus.Running,
 ]);
 
 /**

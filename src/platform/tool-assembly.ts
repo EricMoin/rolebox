@@ -42,7 +42,7 @@ import {
 // Graph Execution Engine v2 — Phase 4, Subtask 6. Additive registration of the
 // seven imperative graph_* tools. Import-only (no protected files touched).
 import { createGraphTools } from "../graph/tools/index.ts";
-import type { GraphNotifySource } from "../graph/tools/index.ts";
+import type { GraphNotifySource, GraphToolSet } from "../graph/tools/index.ts";
 
 export interface BuildToolsOptions {
   sessionClient?: ISessionClient;
@@ -76,6 +76,17 @@ export interface BuildToolsOptions {
    * untouched.
    */
   graphNotify?: GraphNotifySource;
+  /**
+   * Optional prebuilt {@link GraphToolSet} (subtask 2). When provided AND a
+   * dispatchManager is present, the graph_* tools bind to THIS instance
+   * instead of constructing a fresh toolset internally (via
+   * `createGraphTools({ toolset })`) — so the platform assembly layer that
+   * constructs the toolset once (tool-service / PiLightweightServiceStack)
+   * can expose the SAME instance through HookDeps.graphTools and the graph_*
+   * tools observe the same in-memory graph registry. Absent → the graph tools
+   * construct their own toolset (legacy behavior).
+   */
+  graphTools?: GraphToolSet;
 }
 
 export function buildCanonicalTools(
@@ -162,6 +173,10 @@ export function buildCanonicalTools(
       directory: opts.directory,
       stateDir: opts.stateDir,
       graphNotify: opts.graphNotify,
+      // Subtask 2: reuse the prebuilt toolset (single instance backing both
+      // the graph_* tools and the HookDeps graphTools query) when the
+      // platform assembly layer provided one.
+      toolset: opts.graphTools,
     }));
   }
 
