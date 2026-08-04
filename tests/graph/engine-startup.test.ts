@@ -4,6 +4,8 @@ import {
   rmSync,
   writeFileSync,
   mkdirSync,
+  existsSync,
+  readFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +18,11 @@ import {
   recoverInterruptedGraphs,
   type RecoveryStartupReport,
 } from "../../src/graph/engine/engine-startup.ts";
+import {
+  GraphEventRecorder,
+  graphEventsPath,
+  type GraphEventRecord,
+} from "../../src/graph/engine/graph-events.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
@@ -309,5 +316,128 @@ describe("recoverInterruptedGraphs", () => {
       stateDir: dir,
     });
     expect(report).toEqual({ scanned: 0, recovered: 0, failed: [] });
+  });
+});
+
+// ── Observer seams (monitor S10) ─────────────────────────────────────────────
+
+/** Read + parse every NDJSON line from a graph's event log ([] if absent). */
+function readEventLines(dir: string, graphId: string): GraphEventRecord[] {
+  const path = graphEventsPath(dir, graphId);
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf-8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l) as GraphEventRecord);
+}
+
+describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
+  it("a recovered engine wired with graphEvents continues writing node_completed lines", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    // The node's task finished during the restart window → recovery re-emits
+    // its (inferred) `answer` and completes the graph.
+    fake.setTask("task-A", "completed");
+    persistState(dir, "g-exec", singleNodeDecl("g-exec"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+      // Monitor (S10): the same GraphEventRecorder (same stateDir) the live
+      // engine used → the recovered engine CONTINUES the audit log.
+      graphEvents: new GraphEventRecorder(dir),
+    });
+
+    // Report semantics unchanged by the observer wiring.
+    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+
+    // The recovered engine wrote the node's terminal transition into the log.
+    const lines = readEventLines(dir, "g-exec");
+    const completed = lines.find((l) => l.event === "node_completed");
+    expect(completed).toBeDefined();
+    expect(completed!.graphId).toBe("g-exec");
+    expect(completed!.nodeId).toBe("A");
+    expect(completed!.signalType).toBe("answer");
+    expect(completed!.status).toBe(NodeStatus.Completed);
+    // And the lifecycle advanced to terminal — phase_change → complete.
+    expect(
+      lines.some((l) => l.event === "phase_change" && l.status === "complete"),
+    ).toBe(true);
+  });
+
+  it("forwards onNodeCompletion and onGraphTerminal onto the recovered engine", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    fake.setTask("task-A", "completed");
+    persistState(dir, "g-exec", singleNodeDecl("g-exec"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+
+    const completions: Array<{ graphId: string; nodeId: string; signalType: string }> = [];
+    const terminals: Array<{ graphId: string; phase: string; isBlocked: boolean }> = [];
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+      onNodeCompletion: (event) => {
+        completions.push({
+          graphId: event.graphId,
+          nodeId: event.nodeId,
+          signalType: event.signalType,
+        });
+      },
+      onGraphTerminal: (event) => {
+        terminals.push({
+          graphId: event.graphId,
+          phase: event.phase,
+          isBlocked: event.isBlocked,
+        });
+      },
+    });
+
+    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    // The recovered node's completion re-announced through the seam.
+    expect(completions).toContainEqual({
+      graphId: "g-exec",
+      nodeId: "A",
+      signalType: "answer",
+    });
+    // The graph reached COMPLETE and the terminal seam fired once.
+    expect(terminals).toEqual([
+      { graphId: "g-exec", phase: "complete", isBlocked: false },
+    ]);
+  });
+
+  it("without the new observer options the sweep behaves exactly as before", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    fake.setTask("task-A", "completed");
+    persistState(dir, "g-exec", singleNodeDecl("g-exec"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+      // No onNodeCompletion / onGraphTerminal / graphEvents → old behavior.
+    });
+
+    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    // No event log is produced (the recorder is only constructed when wired).
+    expect(existsSync(graphEventsPath(dir, "g-exec"))).toBe(false);
+    // The engine state itself still recovered to terminal.
+    expect(new EnginePersistence(dir).load("g-exec")!.phase).toBe(
+      EnginePhase.Complete,
+    );
   });
 });

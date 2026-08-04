@@ -122,6 +122,7 @@ import {
   filterNodes,
   groupCompletedNodes,
   limitNodes,
+  toEpochMs,
   type GroupByMode,
   type StatusQuery,
 } from "./status-queries.ts";
@@ -681,6 +682,12 @@ export class GraphToolSet {
         void runtime.adoptPrior(priorState);
       }
     }
+    // Monitor M4: dispose the PRIOR runtime before replacing the registry entry
+    // so its orphaned `onTaskTerminated` dispatch listeners (engine-recovery.ts
+    // subscribeTaskTermination) are unregistered from the dispatch seam — a
+    // mid-flight rebuild must never leave a stale runtime receiving (or
+    // leaking) completion callbacks for tasks the new engine now owns.
+    prior?.runtime.dispose?.();
     this.registry.set(graphId, {
       declaration: candidate,
       runtime,
@@ -1054,6 +1061,11 @@ export class GraphToolSet {
 
     // Update the registry runtime so subsequent graph_status reads live state,
     // and persist the sticky session id when graph_run carried a fresh one.
+    // Monitor M4: dispose the PRIOR runtime first so its orphaned
+    // `onTaskTerminated` dispatch listeners are unregistered before the new
+    // engine takes over the registry slot — a disposed runtime never receives
+    // (or leaks) stale dispatch→signal callbacks.
+    entry.runtime.dispose?.();
     this.registry.set(args.graph_id, {
       ...entry,
       runtime,
@@ -1301,30 +1313,33 @@ export class GraphToolSet {
     const capped = args.limit && args.limit > 0 ? rows.slice(0, args.limit) : rows;
 
     if (args.format === "json") {
-      return JSON.stringify(
-        {
-          scope,
-          graphs: states.map((s) => ({
-            graph_id: s.graphId,
-            phase: s.phase,
-            node_count: s.nodes.size,
-          })),
-          nodes: capped.map((r) => ({
-            graph_id: r.graphId,
-            node_id: r.node.nodeId,
-            status: r.node.status,
-            agent: r.node.agent,
-            ...(r.node.dispatchSessionId
-              ? { dispatch_session_id: r.node.dispatchSessionId }
-              : {}),
-            ...(r.node.dispatchTaskId
-              ? { dispatch_task_id: r.node.dispatchTaskId }
-              : {}),
-          })),
-          budget,
-        },
-        null,
-        2,
+      return this.paginate(
+        JSON.stringify(
+          {
+            scope,
+            graphs: states.map((s) => ({
+              graph_id: s.graphId,
+              phase: s.phase,
+              node_count: s.nodes.size,
+            })),
+            nodes: capped.map((r) => ({
+              graph_id: r.graphId,
+              node_id: r.node.nodeId,
+              status: r.node.status,
+              agent: r.node.agent,
+              ...(r.node.dispatchSessionId
+                ? { dispatch_session_id: r.node.dispatchSessionId }
+                : {}),
+              ...(r.node.dispatchTaskId
+                ? { dispatch_task_id: r.node.dispatchTaskId }
+                : {}),
+            })),
+            budget,
+          },
+          null,
+          2,
+        ),
+        args,
       );
     }
 
@@ -1379,10 +1394,9 @@ export class GraphToolSet {
       .map(([key, m]) => ({ key, count: m.count, nodes: m.nodes }));
 
     if (args.format === "json") {
-      return JSON.stringify(
-        { scope: args.scope, group_by: mode, graphs: states.length, buckets },
-        null,
-        2,
+      return this.paginate(
+        JSON.stringify({ scope: args.scope, group_by: mode, graphs: states.length, buckets }, null, 2),
+        args,
       );
     }
     const lines: string[] = [
@@ -1682,7 +1696,10 @@ export class GraphToolSet {
         // C-WIRE: merge structured flag data (round/checkpoint/artifacts/evidence/
         // stream) onto the snapshot. No-op when none are set (byte-identical).
         this.mergeFlagData(snapshot, state, args);
-        return JSON.stringify(snapshot, null, 2);
+        // Monitor M8/M9: every JSON output flows through paginate so
+        // max_chars/offset/tail apply, with an explicit truncation marker when
+        // content is dropped (see {@link paginate}).
+        return this.paginate(JSON.stringify(snapshot, null, 2), args);
       }
       case "tree":
         return this.appendFlagSections(
@@ -1713,14 +1730,17 @@ export class GraphToolSet {
   ): string {
     const buckets = groupCompletedNodes(this.visibleNodeMap(state, nodeFilter), args.group_by!);
     if (args.format === "json") {
-      return JSON.stringify(
-        {
-          group_by: args.group_by,
-          graph_id: state.graphId,
-          buckets: buckets.map((b) => ({ key: b.key, count: b.count, nodes: b.nodes })),
-        },
-        null,
-        2,
+      return this.paginate(
+        JSON.stringify(
+          {
+            group_by: args.group_by,
+            graph_id: state.graphId,
+            buckets: buckets.map((b) => ({ key: b.key, count: b.count, nodes: b.nodes })),
+          },
+          null,
+          2,
+        ),
+        args,
       );
     }
     const lines: string[] = [];
@@ -1784,6 +1804,17 @@ export class GraphToolSet {
     if (!node) {
       throw new Error(`graph_status: unknown node "${nodeId}" in graph "${state.graphId}".`);
     }
+    if (args.format === "json") {
+      // JSON node view (monitor M8): serialize the shared nodeSummary — which
+      // honors include_output by adding an `output` field with the node's
+      // materialized result text — and merge node-scoped C-WIRE observability
+      // data (checkpoints / artifacts / evidence / signal stream), mirroring the
+      // text render's appendFlagSections scoping. Paginated like every other
+      // JSON output so max_chars/offset/tail apply.
+      const summary = this.nodeSummary(state, node, args);
+      this.mergeFlagData(summary, state, { ...args, node_id: nodeId });
+      return this.paginate(JSON.stringify(summary, null, 2), args);
+    }
     const lines: string[] = [];
     lines.push(`Node "${nodeId}"`);
     lines.push(`  status: ${node.status}`);
@@ -1838,7 +1869,7 @@ export class GraphToolSet {
       const summary = this.loopSummary(state, loop, this.loopNodeIds(state, loopId));
       // C-WIRE: merge loop-scoped round history into the loop JSON when asked.
       this.mergeFlagData(summary, state, { ...args, loop_id: loopId });
-      return JSON.stringify(summary, null, 2);
+      return this.paginate(JSON.stringify(summary, null, 2), args);
     }
     const lines: string[] = [];
     lines.push(`Loop "${loopId}"`);
@@ -2032,19 +2063,20 @@ export class GraphToolSet {
    * Extract per-node timestamped signal-event histories from
    * `SignalLedgerEntry.history[]`, scoped to a node when `nodeId` is given.
    * When `args.since` is a valid ISO-8601 timestamp, events strictly before it
-   * are filtered out. Sorted ascending by `atMs`. An absent/empty `history`
-   * yields an empty event list — the caller surfaces the honest "no events" note.
+   * are filtered out; an INVALID `since` throws (aligned with the
+   * from_date/to_date filter surface). Sorted ascending by `atMs`. An
+   * absent/empty `history` yields an empty event list — the caller surfaces the
+   * honest "no events" note.
    */
   private signalStreamEntries(
     state: EngineState,
     args: GraphStatusArgs,
     nodeId?: string,
   ): Array<{ node_id: string; events: SignalLedgerEvent[] }> {
-    let sinceMs: number | undefined;
-    if (args.since !== undefined) {
-      const parsed = new Date(args.since).getTime();
-      sinceMs = Number.isNaN(parsed) ? undefined : parsed;
-    }
+    // Monitor L2: an invalid `since` THROWS (via the shared toEpochMs, the same
+    // throw pattern as from_date/to_date) instead of silently ignoring the bound
+    // — a garbage timestamp must never silently broaden a stream.
+    const sinceMs = args.since !== undefined ? toEpochMs(args.since) : undefined;
     const out: Array<{ node_id: string; events: SignalLedgerEvent[] }> = [];
     for (const [id, ledger] of state.signalLedger) {
       if (nodeId !== undefined && id !== nodeId) continue;
@@ -2329,7 +2361,18 @@ export class GraphToolSet {
         : {}),
       error: n.errorReason,
       ...(progress && progress.recorded
-        ? { progress: progress.payload, progress_last_signal_at: progress.lastSignalAt }
+        ? {
+            progress: progress.payload,
+            // Monitor L1: this timestamp is the node's LAST SIGNAL time of ANY
+            // type (`SignalLedgerEntry.lastSignalAt`), not a progress-specific
+            // stamp — named accordingly.
+            last_signal_at: progress.lastSignalAt,
+          }
+        : {}),
+      // Monitor M9: surface the node's materialized result text as an `output`
+      // field, only when include_output was requested.
+      ...(args.include_output && n.result
+        ? { output: GraphToolSet.resultText(n.result) }
         : {}),
     };
   }
@@ -2349,6 +2392,11 @@ export class GraphToolSet {
   private progressForNode(state: EngineState, node: NodeRuntimeState) {
     const recorded = node.signalsObserved["progress"] !== undefined;
     const payload = recorded ? node.signalsObserved["progress"] : undefined;
+    // Monitor L1: `lastSignalAt` is the node's LAST SIGNAL time of ANY type —
+    // the graph-level `SignalLedgerEntry.lastSignalAt` (updated by
+    // signal-bridge.ts:record on every signal, progress or not), NOT a
+    // progress-specific stamp. It rides along with the progress payload so a
+    // consumer gets a recency anchor, but it is named for what it actually is.
     const lastSignalAt = state.signalLedger.get(node.nodeId)?.lastSignalAt;
     return { recorded, payload, lastSignalAt };
   }
@@ -2393,16 +2441,25 @@ export class GraphToolSet {
     return `phase=${state.phase} ${parts}`;
   }
 
-  /** Apply max_chars / offset / tail pagination to a string output. */
+  /** Apply max_chars / offset / tail pagination to a string output.
+   *
+   * Monitor L3: when truncation actually drops content, a `…[truncated: N more
+   * chars]` marker is APPENDED to the tail of the returned text (N = the number
+   * of chars NOT included in the result), so a consumer can tell the output was
+   * cut and by how much. The marker is emitted for both tail mode (head
+   * dropped) and head mode (tail dropped) — the returned slice is always
+   * `max_chars` chars, the marker rides after it. No truncation → no marker
+   * (byte-identical to legacy output). */
   private paginate(text: string, args: GraphStatusArgs): string {
     const maxChars = args.max_chars ?? DEFAULT_MAX_CHARS;
     if (maxChars <= 0 || text.length <= maxChars) {
       return args.offset ? text.slice(args.offset) : text;
     }
-    if (args.tail) {
-      return text.slice(Math.max(0, text.length - maxChars));
-    }
-    return text.slice(args.offset ?? 0, (args.offset ?? 0) + maxChars);
+    const slice = args.tail
+      ? text.slice(Math.max(0, text.length - maxChars))
+      : text.slice(args.offset ?? 0, (args.offset ?? 0) + maxChars);
+    const dropped = text.length - slice.length;
+    return `${slice}\n…[truncated: ${dropped} more chars]`;
   }
 
   /**

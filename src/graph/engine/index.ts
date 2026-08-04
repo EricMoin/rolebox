@@ -55,6 +55,7 @@ import {
 import {
   DispatchBridge,
   type DispatchParentContext,
+  type TaskTerminatedCallback,
 } from "./dispatch-bridge.ts";
 import defaultConditionResolver from "./condition-resolver.ts";
 import {
@@ -82,6 +83,7 @@ import {
   reconcileEngine,
   rebuildFrontier,
   EngineLockSweeper,
+  NodeStalenessWatcher,
   type DispatchRecoveryPort,
   type ReconcileReport,
 } from "./engine-recovery.ts";
@@ -138,11 +140,6 @@ export interface EngineRuntime {
   recover(): Promise<void>;
 
   /**
-   * Return a read-only snapshot of the current {@link EngineState}. The
-   * snapshot's collections (`nodes`, `edges`, `frontier`, ...) are freshly
-   * allocated clones — mutating them does not affect the live engine.
-   */
-  /**
    * Adopt a prior engine run's per-node progress into this (freshly built)
    * runtime. Used by the imperative `graph_*` toolset, which rebuilds a fresh
    * engine from the declaration after every construction step and on every
@@ -157,6 +154,17 @@ export interface EngineRuntime {
    */
   adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void>;
 
+  /**
+   * Return a read-only snapshot of the current {@link EngineState}. The
+   * snapshot's collections (`nodes`, `edges`, `frontier`, `signalLedger`,
+   * `loopGroups`, ...) are freshly allocated deep-enough clones — mutating
+   * them does not affect the live engine.
+   *
+   * Caveat (monitor M7): the snapshot is taken synchronously without acquiring
+   * the advancing lock, so while a critical section is in flight
+   * (`state.advancingLock === true`) it may reflect the middle of that
+   * section's mutations rather than a quiescent state.
+   */
   status(): EngineState;
 
   /**
@@ -254,6 +262,16 @@ export interface EngineRuntime {
     nodeIds: string[],
     options?: CancelScopeOptions,
   ): CancelScopeReport;
+
+  /**
+   * Dispose the engine runtime (monitor M4). Unregisters every
+   * task-terminated listener this engine registered with the dispatch seam
+   * (`removeTaskTerminatedListener`) so a disposed runtime never receives (or
+   * leaks) stale dispatch→signal callbacks, and stops the opt-in staleness
+   * watcher (monitor M3) so a disposed runtime never keeps ticking. Idempotent
+   * — a second dispose is a no-op.
+   */
+  dispose(): void;
 }
 
 /** Options for {@link EngineRuntime.adoptPrior}. */
@@ -323,6 +341,20 @@ export interface CreateEngineOptions {
    * unbounded `setInterval` (see failure-resilience.md §5.6).
    */
   sweeperIntervalMs?: number;
+
+  /**
+   * Optional staleness deadline for `running` nodes (monitor M3). When provided
+   * (> 0), the runtime instantiates a {@link NodeStalenessWatcher} (ticking at
+   * {@link sweeperIntervalMs} when set, else the watcher's default interval)
+   * and a `running` node that exceeds its staleness deadline is marked
+   * `timeout`, surfaced through the completion seam + durable event log
+   * (`notifyNodeTimeout`), and its failure propagated via an `escalate` ledger
+   * signal (parity with the recovery orphan path — a timed-out upstream must
+   * not silently stall a join). Started alongside the lock sweeper in
+   * `recover()` and on `run()`, stopped by `cancel()` / `dispose()`. Defaults
+   * to off — engine behavior is unchanged without it.
+   */
+  nodeStaleTimeoutMs?: number;
 
   /**
    * Optional node-completion notification seam (subtask 1). Wired into the
@@ -398,13 +430,33 @@ function snapshotEngineState(state: EngineState): EngineState {
         { ...p, artifacts: [...p.artifacts], budgetConsumed: { ...p.budgetConsumed } },
       ]),
     ),
-    loopGroups: new Map(state.loopGroups),
+    loopGroups: new Map(
+      [...state.loopGroups].map(([id, g]) => [
+        id,
+        {
+          ...g,
+          termination: g.termination ? { ...g.termination } : undefined,
+          // Monitor (M7): `rounds` is an append-only array — deep-enough clone
+          // it (fresh entry objects, mirroring engine-persistence.ts:221-227) so
+          // a snapshot consumer's in-place push/mutation can never alias the
+          // live loop-group history.
+          rounds: g.rounds ? g.rounds.map((r) => ({ ...r })) : undefined,
+        },
+      ]),
+    ),
     frontier: [...state.frontier],
     budget: { ...state.budget },
     signalLedger: new Map(
       [...state.signalLedger].map(([id, e]) => [
         id,
-        { ...e, signals: { ...e.signals } },
+        {
+          ...e,
+          signals: { ...e.signals },
+          // Monitor (M7): same deep-enough clone for the per-node signal-event
+          // history (mirrors engine-persistence.ts:229-235) — mutating a
+          // snapshot's `history` must never affect the live ledger.
+          history: e.history ? e.history.map((h) => ({ ...h })) : undefined,
+        },
       ]),
     ),
     // C-WIRE: the per-node checkpoint store is an optional-additive field and
@@ -466,6 +518,14 @@ class EngineRuntimeImpl implements EngineRuntime {
   private readonly persistence?: EnginePersistence;
   private readonly sweeper: EngineLockSweeper;
   private readonly sweeperIntervalMs?: number;
+  /**
+   * Opt-in stale-node watcher (monitor M3). Absent unless
+   * `nodeStaleTimeoutMs` is configured — engine behavior is unchanged without
+   * it. A `running` node past its staleness deadline is marked `timeout` and
+   * its failure surfaced/propagated via the {@link onStaleNodeTimeout}
+   * handler. Started on `run()`/`recover()`, stopped by `cancel()`/`dispose()`.
+   */
+  private readonly staleWatcher?: NodeStalenessWatcher;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
   private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
@@ -533,6 +593,67 @@ class EngineRuntimeImpl implements EngineRuntime {
       onRelease: () => this.persistence?.save(this.state),
     });
     this.sweeperIntervalMs = opts.sweeperIntervalMs;
+
+    // 7. Stale-node watcher (monitor M3). Opt-in via `nodeStaleTimeoutMs` —
+    //    a `running` node that exceeds its staleness deadline is marked
+    //    `timeout` and its failure surfaced through the completion seam +
+    //    durable event log, then propagated via an `escalate` ledger signal
+    //    (parity with the recovery orphan path). Like the lock sweeper it is
+    //    manually tickable and never auto-starts a timer — `start()` is
+    //    opt-in so tests never leak an interval.
+    if (opts.nodeStaleTimeoutMs !== undefined && opts.nodeStaleTimeoutMs > 0) {
+      this.staleWatcher = new NodeStalenessWatcher({
+        nodeStaleTimeoutMs: opts.nodeStaleTimeoutMs,
+        intervalMs: opts.sweeperIntervalMs,
+        onTimeout: this.onStaleNodeTimeout.bind(this),
+      });
+    }
+  }
+
+  /**
+   * Monitor (M3) stale-node handler. Called by the {@link staleWatcher} for
+   * every `running` node it marked `timeout` (the watcher itself performed the
+   * `markTimedOut` transition):
+   *
+   * 1. Surface the timeout through the completion seam + durable event log via
+   *    {@link AdvanceEngine.notifyNodeTimeout} (status-guarded, so it fires
+   *    exactly once, and — since the S5 fix — writes the `node_completed`
+   *    event even when no notifier is registered).
+   * 2. Record an `escalate` signal so the failure propagates to downstream
+   *    joins (a timed-out upstream must not silently stall a fan-in), matching
+   *    the recovery orphan path's escalate re-emission.
+   *
+   * Fire-and-forget: the watcher ticks from a timer, so the (async) escalation
+   * is driven without awaiting — the advance engine's re-entrancy guard
+   * serializes it against any in-flight critical section.
+   */
+  private onStaleNodeTimeout(nodeId: string, errorReason: string): void {
+    this.advance.notifyNodeTimeout(nodeId);
+    void this.advance.onNodeSignalEmitted(
+      nodeId,
+      "escalate",
+      { error: errorReason },
+      "recovery",
+    );
+  }
+
+  /**
+   * Monitor (M6): surface every node currently in the `timeout` status through
+   * the completion seam + durable event log. `notifyNodeTimeout` is
+   * status-guarded (fires exactly once per timeout node) and — since the S5
+   * fix — writes the `node_completed` graphEvents line even when no
+   * `onNodeCompletion` notifier is registered, so this never double-notifies a
+   * node and never depends on the optional notifier seam. Used by `recover()`
+   * paths that cannot (or did not) complete a full reconcile pass: the
+   * no-getTask path (no way to apply timeout semantics) and the
+   * reconcile-failure catch path (nodes timed out before the throw).
+   */
+  private _notifyRecoveredTimeouts(): void {
+    for (const node of this.state.nodes.values()) {
+      if (node.status === NodeStatus.Timeout) {
+        this.advance.notifyNodeTimeout(node.nodeId);
+      }
+    }
   }
 
   provision(): EngineState {
@@ -547,6 +668,10 @@ class EngineRuntimeImpl implements EngineRuntime {
     if (!this.provisioned) {
       this.provision();
     }
+    // Monitor (M3): start the opt-in staleness watcher so a live run never
+    // hangs on a `running` node whose worker stopped advancing. A no-op when
+    // not configured (default behavior unchanged).
+    this.staleWatcher?.start(this.state);
     // dispatchReady transitions `idle → executing` and dispatches the ready
     // roots inside a single advancement critical section.
     await this.advance.dispatchReady();
@@ -586,17 +711,25 @@ class EngineRuntimeImpl implements EngineRuntime {
     this.provisioned = true;
     clearStaleCriticalSection(this.state);
 
-    // Restart the stale-lock sweeper (§5.1 step 6 / §5.6). An interval is only
-    // started when the consumer opted in — manual ticking otherwise.
+    // Restart the stale-lock sweeper (§5.1 step 6 / §5.6) and the opt-in
+    // stale-node watcher (monitor M3, resumed executions must not hang on a
+    // dead worker either). An interval is only started when the consumer opted
+    // in — manual ticking otherwise.
     if (this.sweeperIntervalMs && this.sweeperIntervalMs > 0) {
       this.sweeper.start(this.state);
     }
+    this.staleWatcher?.start(this.state);
 
     // Reconcile running nodes against the dispatch system (requires getTask).
     const port = this.dispatchPort as DispatchRecoveryPort;
     if (!port.getTask) {
       // No way to reconcile — adopt the state and re-dispatch any ready nodes
       // whose tasks were never launched (blocked / approval-resume cases).
+      // Monitor (M6): WITHOUT getTask this path cannot apply timeout semantics
+      // (it has no way to read a vanished running task's status), so it only
+      // surfaces nodes whose `timeout` status was ALREADY recorded (e.g. in
+      // the persisted state) through the completion seam + durable event log.
+      this._notifyRecoveredTimeouts();
       rebuildFrontier(this.state);
       await this.advance.dispatchReady();
       return;
@@ -619,6 +752,10 @@ class EngineRuntimeImpl implements EngineRuntime {
       logWarn(
         `engine-recover: reconcile failed for graph "${this.state.graphId}": ${String(err)}`,
       );
+      // Monitor (M6): reconcileEngine may have timed out some nodes before it
+      // threw — surface every node now in the `timeout` status through the
+      // completion seam + durable event log (one notification per node).
+      this._notifyRecoveredTimeouts();
       rebuildFrontier(this.state);
       await this.advance.dispatchReady();
       return;
@@ -735,8 +872,12 @@ class EngineRuntimeImpl implements EngineRuntime {
    */
   async cancel(): Promise<void> {
     this.sweeper.stop();
+    // Monitor (M3): a cancelled graph must not keep ticking the opt-in
+    // staleness watcher.
+    this.staleWatcher?.stop();
 
     // Cancel in-flight dispatch tasks (best-effort), then cancel the nodes.
+    const reason = "cancelled by engine.cancel()";
     for (const node of this.state.nodes.values()) {
       if (node.status === NodeStatus.Running && node.dispatchTaskId) {
         try {
@@ -751,19 +892,40 @@ class EngineRuntimeImpl implements EngineRuntime {
           node.status === NodeStatus.Pending) &&
         canTransitionNode(node.status, NodeStatus.Cancelled)
       ) {
-        markCancelled(this.state, node, "cancelled by engine.cancel()");
+        markCancelled(this.state, node, reason);
         markDone(this.state, node);
+        // Monitor (H4): cancellation is a lifecycle transition performed
+        // OUTSIDE the signal-driven advancement — surface each cancelled node
+        // through the same completion seam + durable event log as
+        // signal-driven transitions (`notifyNodeTerminal`), so a cancel emits
+        // the per-node `node_completed` line + notifier event.
+        this.advance.notifyNodeTerminal(
+          node.nodeId,
+          "cancelled",
+          reason,
+          NodeStatus.Done,
+        );
       }
     }
     this.state.frontier = [];
 
-    // Advance idle → executing → complete so the graph ends terminal.
+    // Advance idle → executing so the termination check can evaluate the now
+    // quiescent graph (checkGraphTermination no-ops outside `executing`).
     if (
       this.state.phase === EnginePhase.Idle &&
       canTransitionPhase(this.state, EnginePhase.Executing)
     ) {
       transitionPhase(this.state, EnginePhase.Executing);
     }
+    // Monitor (H4): every cancellable node is now retired to `done`, so the
+    // normal termination check drives executing → complete and fires
+    // `onGraphTerminal` ([GRAPH COMPLETE]) through the standard seam instead
+    // of a silent manual transition.
+    this.advance.checkTermination();
+    // Fallback: when the termination check did not migrate the phase (e.g. a
+    // persisted terminal-notification guard already claimed the event, or a
+    // blocked node kept the graph from quiescing), keep the manual transition
+    // so the cancelled graph still ends terminal.
     if (
       this.state.phase === EnginePhase.Executing &&
       canTransitionPhase(this.state, EnginePhase.Complete)
@@ -805,7 +967,49 @@ class EngineRuntimeImpl implements EngineRuntime {
     nodeIds: string[],
     options?: CancelScopeOptions,
   ): CancelScopeReport {
-    return cancelScopedNodes(this.state, nodeIds, options, this.dispatchPort);
+    return cancelScopedNodes(
+      this.state,
+      nodeIds,
+      options,
+      this.dispatchPort,
+      (nodeId, reason) => {
+        // Monitor (H4): a scoped cancellation retires nodes outside the
+        // signal-driven advancement — route each through the same completion
+        // seam + durable event log as signal-driven transitions so the monitor
+        // observes the per-node `node_completed` line + notifier event.
+        this.advance.notifyNodeTerminal(
+          nodeId,
+          "cancelled",
+          reason,
+          NodeStatus.Done,
+        );
+      },
+    );
+  }
+
+  dispose(): void {
+    // Monitor (M4): unregister every task-terminated listener this engine
+    // registered during dispatch (`getTerminationSubscriptions` returns the
+    // exact `{ taskId, callback }` pairs handed to the port) so a disposed
+    // runtime never receives — or leaks — stale dispatch→signal callbacks.
+    // `removeTaskTerminatedListener` is optional on the port seam: a port
+    // without it degrades to best-effort teardown.
+    for (const sub of this.advance.getTerminationSubscriptions()) {
+      this.dispatchPort.removeTaskTerminatedListener?.(sub.taskId, sub.callback);
+    }
+    // Clear the engine's own subscription ledger. The accessor returns a
+    // defensive copy, so the ledger itself is cleared through the private
+    // field — a disposed runtime keeps no handles to stale callbacks and a
+    // re-run re-registers fresh ones (a second dispose is then a no-op).
+    (this.advance as unknown as {
+      _terminationSubscriptions: Array<{
+        taskId: string;
+        callback: TaskTerminatedCallback;
+      }>;
+    })._terminationSubscriptions = [];
+    // Monitor (M3): stop the opt-in staleness watcher — a disposed runtime
+    // must not keep ticking.
+    this.staleWatcher?.stop();
   }
 }
 
@@ -856,6 +1060,7 @@ export {
   cancelNodes,
   type CancelScopeOptions,
   type CancelScopeReport,
+  type CancelNodeNotifier,
 } from "./cancellation.ts";
 export {
   buildApprovalPayload,

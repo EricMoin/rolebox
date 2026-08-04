@@ -43,6 +43,14 @@
  *    `traversalCount`, and `retryCount` accumulate across retries so budget and
  *    loop accounting stay honest; only the per-run execution artifacts
  *    (status, signals, result, dispatch ids, join state) are cleared.
+ * 4. **The graph-level signal ledger is synced.** The per-node
+ *    `signalsObserved` reset alone would leave the dual-write
+ *    `state.signalLedger` entry (signals, lastSignalAt, history) carrying
+ *    PRE-retry events, so `resetNodeForRetry` also drops the ledger entry for
+ *    the target and every reset downstream node — restoring the invariant
+ *    "per-node signalsObserved ⇔ graph-level ledger" and keeping `graph_status`
+ *    `stream` / `since` / `include_history` / `progress` views free of stale
+ *    signal events from the previous run.
  *
  * Design reference: `.rolebox/design/tool-merge-map.md` §2.2 `graph_run`.
  */
@@ -107,6 +115,25 @@ function resetNodeRun(node: NodeRuntimeState): void {
   node.completedAt = undefined;
 }
 
+/**
+ * Synchronize the graph-level signal ledger with a per-node run reset.
+ *
+ * `resetNodeRun` clears the node's per-node `signalsObserved`, but the
+ * dual-write `state.signalLedger` entry (signals, lastSignalAt, history)
+ * written by `signal-bridge.ts:record` would otherwise survive untouched —
+ * after a retry the ledger would still carry the PRE-retry `history` /
+ * `lastSignalAt`, misleading `graph_status` `stream` / `since` /
+ * `include_history` / `progress` views into showing stale events from the
+ * previous run as if they belonged to the fresh one. Deleting the entry
+ * restores the invariant "per-node signalsObserved ⇔ graph-level ledger" for
+ * the reset run; the entry is lazily re-created by `signal-bridge.ts:record`
+ * when the node emits again. A simple clear is chosen over a retry-relocation
+ * record — no existing test depends on ledger history surviving a retry.
+ */
+function clearSignalLedgerEntry(state: EngineState, nodeId: string): void {
+  state.signalLedger.delete(nodeId);
+}
+
 // ── Pure reset primitive ────────────────────────────────────────────────────
 
 /**
@@ -126,6 +153,10 @@ function resetNodeRun(node: NodeRuntimeState): void {
  *     upstreams (a manual retry forces a re-run).
  *  3. Re-open a terminal graph phase (`complete → executing`) so advancement and
  *     termination checks keep working (see header note 2).
+ *  4. **Sync the graph-level signal ledger** (header note 4): for the target and
+ *     every reset downstream node, drop its `state.signalLedger` entry so no
+ *     pre-retry `history` / `lastSignalAt` leaks into `graph_status`
+ *     `stream` / `since` / `include_history` / `progress` views of the retry run.
  *
  * Never dispatches and never acquires the advancement lock — callers (the advance
  * engine's critical section) own that.
@@ -159,6 +190,7 @@ export function resetNodeForRetry(
     const node = state.nodes.get(id);
     if (!node) continue;
     resetNodeRun(node);
+    clearSignalLedgerEntry(state, id);
     const downstreamPrevStatus = node.status;
     node.status = NodeStatus.Pending;
     recordCheckpointForNode(state, node, downstreamPrevStatus, NodeStatus.Pending, Date.now());
@@ -167,6 +199,7 @@ export function resetNodeForRetry(
 
   // 2. Reset the target: clean run artifacts, prepend modify_prompt, re-ready.
   resetNodeRun(target);
+  clearSignalLedgerEntry(state, nodeId);
   if (opts?.modifyPrompt && opts.modifyPrompt.trim().length > 0) {
     target.prompt = `${opts.modifyPrompt.trim()}\n\n${target.prompt}`;
   }

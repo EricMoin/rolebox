@@ -198,6 +198,10 @@ export interface EnginePersistenceFile {
   // OPTIONAL-ADDITIVE (subtask 7): append-only per-node checkpoint history.
   // Absent in files authored before this field — deserialize defaults to absent.
   checkpointHistory?: Record<string, CheckpointRecord[]>;
+  // OPTIONAL-ADDITIVE (monitor M10): cross-restart termination-notification
+  // dedup flags. Absent in files authored before this field — deserialize
+  // leaves it undefined (no fabricated default object).
+  terminalNotified?: { complete: boolean; blocked: boolean };
 }
 
 // ── Clone helpers (defensive deep-enough copies) ───────────────────────────
@@ -241,7 +245,13 @@ function cloneCheckpoints(
   return out;
 }
 
-function cloneCheckpointHistory(
+/**
+ * Deep-enough clone of the append-only per-node checkpoint history map.
+ *
+ * Exported (H3) so `hydrate` / `adopt` paths outside this module can reuse the
+ * same defensive-copy semantics instead of reimplementing per-record spread.
+ */
+export function cloneCheckpointHistory(
   c: Record<string, CheckpointRecord[]> | undefined,
 ): Record<string, CheckpointRecord[]> | undefined {
   if (!c) return undefined;
@@ -309,6 +319,12 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     pendingCompletions: [...state.pendingCompletions],
     checkpoints: cloneCheckpoints(state.checkpoints),
     checkpointHistory: cloneCheckpointHistory(state.checkpointHistory),
+    // OPTIONAL-ADDITIVE (monitor M10): cross-restart termination-notification
+    // dedup flags are durable graph state — cloned, never aliased. Absent →
+    // undefined (files authored before the field existed).
+    terminalNotified: state.terminalNotified
+      ? { ...state.terminalNotified }
+      : undefined,
   };
 }
 
@@ -365,6 +381,11 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     // OPTIONAL-ADDITIVE (subtask 7): absent in files authored before this field.
     // Deserialization tolerates the absence and leaves it undefined (no fabrication).
     checkpointHistory: cloneCheckpointHistory(file.checkpointHistory),
+    // OPTIONAL-ADDITIVE (monitor M10): absent in files authored before this
+    // field. Tolerated — stays undefined, no default object is fabricated.
+    terminalNotified: file.terminalNotified
+      ? { ...file.terminalNotified }
+      : undefined,
     // isDirty / isNonCriticalDirty are runtime-only — a recovered state always
     // starts clean.
     isDirty: false,
@@ -405,10 +426,11 @@ export function engineStatePath(directory: string, graphId: string): string {
  *
  * Writes are synchronous and atomic (`.tmp` + `renameSync`), the same crash-safe
  * pattern as `task-store.ts:101-108`. `save` never throws — a failed write is
- * logged as a warning and the engine continues in memory (write-through must
- * not break the advancement critical section). Two-tier policy: critical
- * transitions use the synchronous {@link save}; non-critical churn uses the
- * debounced {@link scheduleSave} and is drained by {@link flush}.
+ * logged as a warning and reported via the boolean return so the caller can
+ * gate `clearDirty` on the outcome (M5); a write failure never silently drops
+ * the pending state. Two-tier policy: critical transitions use the synchronous
+ * {@link save}; non-critical churn uses the debounced {@link scheduleSave} and
+ * is drained by {@link flush}.
  */
 export class EnginePersistence {
   private readonly directory: string;
@@ -427,10 +449,14 @@ export class EnginePersistence {
    * A critical `save` also cancels any pending debounced write — the sync write
    * already contains the latest state, so coalescing the non-critical churn into
    * it is safe (see the two-tier policy in the class header).
+   *
+   * Returns `true` when the state reached disk, `false` on a failed write
+   * (never throws). Callers that gate `clearDirty` on the outcome use this to
+   * keep the dirty flag set so a later section retries the persist.
    */
-  save(state: EngineState): void {
+  save(state: EngineState): boolean {
     this._cancelDebounce();
-    this._write(state);
+    return this._write(state);
   }
 
   /**
@@ -441,6 +467,10 @@ export class EnginePersistence {
    * durability before process exit (flush-on-terminate is wired into the
    * engine when a section reaches a terminal phase or the runtime is
    * torn down / replaced).
+   *
+   * If the debounce timer's write fails, the pending state is RETAINED so the
+   * next {@link flush} / {@link save} retries it — a failed debounced write is
+   * never silently dropped (M5).
    */
   scheduleSave(state: EngineState): void {
     this._writeOnFlush = state; // coalesce to the most recent state
@@ -449,7 +479,12 @@ export class EnginePersistence {
       this.debounceTimer = undefined;
       const s = this._writeOnFlush;
       this._writeOnFlush = undefined;
-      if (s) this._write(s);
+      if (!s) return;
+      if (!this._write(s)) {
+        // Write failed — keep the pending state so the next flush()/save()
+        // retries it instead of losing the mutation.
+        this._writeOnFlush = s;
+      }
     }, NON_CRITICAL_DEBOUNCE_MS);
   }
 
@@ -458,15 +493,25 @@ export class EnginePersistence {
    * {@link scheduleSave} — runs when the engine reaches a terminal phase
    * (`complete`) or the runtime is disposed / replaced so no debounced
    * non-critical write is lost. A no-op when no debounced write is pending.
+   *
+   * Returns `true` when there was nothing pending or the drain write reached
+   * disk, `false` when the drain write failed — in which case the pending
+   * state is RETAINED for a later retry (M5).
    */
-  flush(): void {
+  flush(): boolean {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;
     }
     const s = this._writeOnFlush;
     this._writeOnFlush = undefined;
-    if (s) this._write(s);
+    if (!s) return true; // nothing pending — nothing to fail
+    const ok = this._write(s);
+    if (!ok) {
+      // Retain the pending state so a later flush()/save() can retry it.
+      this._writeOnFlush = s;
+    }
+    return ok;
   }
 
   /**
@@ -501,8 +546,15 @@ export class EnginePersistence {
     this._writeOnFlush = undefined;
   }
 
-  /** Serialize → mkdir → write `.tmp` → unlink existing → rename. Never throws. */
-  private _write(state: EngineState): void {
+  /**
+   * Serialize → mkdir → write `.tmp` → unlink existing → rename.
+   *
+   * Returns `true` on success, `false` on failure. Never throws — write-through
+   * must not break the advancement critical section, so a failed write degrades
+   * gracefully in memory, is surfaced through the boolean (no longer silently
+   * swallowed, M5), and is left to the caller to retry.
+   */
+  private _write(state: EngineState): boolean {
     const filePath = engineStatePath(this.directory, state.graphId);
     const stateDir = join(filePath, "..");
     try {
@@ -516,9 +568,12 @@ export class EnginePersistence {
         // No existing file — fine.
       }
       renameSync(tmp, filePath);
+      return true;
     } catch (err) {
-      // write-through must never break the engine: degrade gracefully in memory.
+      // write-through must never break the engine: degrade gracefully in memory,
+      // but report the failure so callers can gate clearDirty / retry (M5).
       logWarn(`engine-persist: save failed for graph "${state.graphId}": ${String(err)}`);
+      return false;
     }
   }
 }

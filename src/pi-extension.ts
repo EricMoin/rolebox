@@ -69,6 +69,11 @@ import {
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
 import { recoverInterruptedGraphs } from "./graph/engine/engine-startup.ts";
 import {
+  GraphEventRecorder,
+  createGraphNotifier,
+  createGraphTerminalNotifier,
+} from "./graph/engine/index.ts";
+import {
   createAllLspTools,
   LspClientManager,
   LspDocumentManager,
@@ -722,14 +727,51 @@ export default async function (pi: any): Promise<void> {
       graphRecoveryValue !== "off" &&
       graphRecoveryValue !== "0" &&
       graphRecoveryValue !== "false";
+
+    // Monitor (S10): a recovered engine must stay observable — re-announce
+    // terminal transitions ([GRAPH COMPLETE] / [GRAPH BLOCKED]) and continue
+    // its write-side event log (`graph-events-{hash}.ndjson`). The recorder is
+    // built over the SAME stateDir (`process.cwd()`) the engine-state store
+    // uses, so each graph's audit log keeps accumulating across the restart
+    // (the hash-derived filename is stable per graphId). The notifier session
+    // client (`notifyClient`, constructed above) IS available at this point;
+    // the emperor session id is resolved from the Pi extension context when one
+    // is active. If the client or a resolvable session were unavailable here,
+    // we degrade honestly to the event log only (no injected reminders) — the
+    // notifier factories are additionally no-op-safe without a session.
+    const graphRecoveryStateDir = process.cwd();
+    const recoveredEmperorSessionId = (
+      pi as {
+        ctx?: { sessionManager?: { getSessionId?: () => string } };
+      }
+    )?.ctx?.sessionManager?.getSessionId?.();
+
     const graphRecoveryReport = await recoverInterruptedGraphs({
       // The engine persists under `{workspace}/.rolebox/state`, so the scan
       // root is the workspace the plugin runs in (the same `process.cwd()`
       // the loop dispatch adapter above uses for its own state store).
-      directory: process.cwd(),
+      directory: graphRecoveryStateDir,
       manager: dispatchManager,
-      stateDir: process.cwd(),
+      stateDir: graphRecoveryStateDir,
       enabled: graphRecoveryEnabled,
+      // Durable event log continuation — always wired (no session needed).
+      graphEvents: new GraphEventRecorder(graphRecoveryStateDir),
+      // Session notification re-announcement. notifyClient is available at this
+      // point (constructed above); when an emperor session can be resolved from
+      // the Pi context, wire both notifier seams so a recovered graph re-
+      // announces node completions and graph-terminal transitions. Without a
+      // resolvable session the notifiers would be strict no-ops by design, so
+      // the honest degradation is the event log only.
+      ...(notifyClient && recoveredEmperorSessionId
+        ? {
+            onNodeCompletion: createGraphNotifier(notifyClient, {
+              emperorSessionId: recoveredEmperorSessionId,
+            }),
+            onGraphTerminal: createGraphTerminalNotifier(notifyClient, {
+              emperorSessionId: recoveredEmperorSessionId,
+            }),
+          }
+        : {}),
     });
     if (graphRecoveryReport.recovered > 0 || graphRecoveryReport.failed.length > 0) {
       log.info("Interrupted graph engines recovered", {

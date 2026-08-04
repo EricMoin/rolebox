@@ -160,6 +160,19 @@ export interface NodeDispatchPort {
     callback: TaskTerminatedCallback,
   ): void;
   /**
+   * Remove a previously-registered task-terminated listener. Optional — a port
+   * without it simply cannot clean up its subscriptions (leak-free teardown is
+   * then the caller's concern). Structurally satisfied by {@link DispatchBridge}
+   * (which delegates to `DispatchManager.removeTaskTerminatedListener`).
+   * Consumed by the engine's subscription accessor
+   * ({@link AdvanceEngine.getTerminationSubscriptions}) so a teardown path
+   * (monitor M4 / S7 dispose) can unregister every listener this engine wired.
+   */
+  removeTaskTerminatedListener?(
+    taskId: string,
+    callback: TaskTerminatedCallback,
+  ): void;
+  /**
    * Cumulative token/cost usage for a single dispatched session (keyed by the
    * dispatch session ID). OPTIONAL-ADDITIVE — a port without it simply cannot
    * report per-node usage, so the engine degrades to the pre-Phase-7 behavior
@@ -245,8 +258,14 @@ export interface AdvanceEngineOptions {
    * transitions write through immediately; noisy (non-critical) updates are
    * debounced elsewhere. When absent, the engine runs without persistence
    * (in-memory only), preserving the role-agnostic primitive's constructibility.
+   *
+   * Returns `true` when the state reached durable storage, `false` on a failed
+   * write (never throws) — the engine only clears its dirty flag on success
+   * (monitor M5), so a failed save is retried by the next mutating critical
+   * section instead of silently dropped. A `void` return (or an absent seam)
+   * is treated as success — backward-compatible with no-op test seams.
    */
-  persistState?: (state: EngineState) => void;
+  persistState?: (state: EngineState) => boolean | void;
   /**
    * Optional debounced-persistence seam (Q2 Option A, non-critical tier). When
    * a critical section produced ONLY non-critical mutations (signal-ledger
@@ -254,8 +273,16 @@ export interface AdvanceEngineOptions {
    * write through this debounced seam instead of the synchronous
    * {@link persistState}. Absent → non-critical-only sections skip persistence
    * (the in-memory engine still runs).
+   *
+   * Returns `false` on a definite write failure (the debounced store retains
+   * the pending state and retries it); the engine keeps its non-critical dirty
+   * flag set in that case so a later section re-hands the churn to the seam
+   * (monitor M5, non-critical tier). A `void` return is treated as success —
+   * `EnginePersistence.scheduleSave` is the legacy void-returning seam, whose
+   * failure retry is owned internally by the debounced store's pending
+   * retention.
    */
-  schedulePersistState?: (state: EngineState) => void;
+  schedulePersistState?: (state: EngineState) => boolean | void;
   /**
    * Optional flush seam for the debounced tier. Invoked when the engine reaches
    * a terminal phase (`complete`) so no pending debounced write is lost. Absent
@@ -332,8 +359,8 @@ export class AdvanceEngine {
   private readonly budgetPort?: GraphBudgetPort;
   private readonly parentContext: DispatchParentContext;
   private readonly conditionResolver?: EdgeConditionResolver;
-  private readonly persistState?: (state: EngineState) => void;
-  private readonly schedulePersistState?: (state: EngineState) => void;
+  private readonly persistState?: (state: EngineState) => boolean | void;
+  private readonly schedulePersistState?: (state: EngineState) => boolean | void;
   private readonly flushPersistState?: () => void;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
@@ -342,6 +369,17 @@ export class AdvanceEngine {
     terminalComplete: false,
     terminalBlocked: false,
   };
+  /**
+   * Every `onTaskTerminated` subscription this engine registered via
+   * {@link subscribeTaskTermination} during `_dispatchNode` (monitor M4),
+   * as the exact `{ taskId, callback }` pair handed to the dispatch port.
+   * Consumed by {@link getTerminationSubscriptions} so a teardown path
+   * (S7 dispose) can unregister each listener and never leak one.
+   */
+  private readonly _terminationSubscriptions: Array<{
+    taskId: string;
+    callback: TaskTerminatedCallback;
+  }> = [];
 
   constructor(opts: AdvanceEngineOptions) {
     this.state = opts.state;
@@ -452,6 +490,21 @@ export class AdvanceEngine {
     return this.signalBridge.onNodeSignalEmitted(listener);
   }
 
+  /**
+   * The task-termination subscriptions this engine has registered during
+   * `_dispatchNode` (monitor M4). Returns a defensive copy so a teardown path
+   * (S7 dispose) can iterate it and unregister every listener via
+   * `dispatch.removeTaskTerminatedListener(taskId, callback)` without mutating
+   * the engine's internal ledger. Each `callback` is the exact value that was
+   * handed to `port.onTaskTerminated`.
+   */
+  getTerminationSubscriptions(): Array<{
+    taskId: string;
+    callback: TaskTerminatedCallback;
+  }> {
+    return [...this._terminationSubscriptions];
+  }
+
   // ── Re-entrancy guard (coordinator.ts:397-404 + 450-462 pattern) ──────────
 
   /**
@@ -506,12 +559,25 @@ export class AdvanceEngine {
       // no-op. See engine-persistence.ts dirty-flag helpers.
       if (shouldPersist(this.state) || shouldPersistNonCritical(this.state)) {
         if (shouldPersist(this.state)) {
-          this.persistState?.(this.state);
+          // Monitor M5: only clear the dirty flag when the write-through save
+          // actually reached durable storage. A failed save (boolean `false`
+          // from the seam; a void return is treated as success) leaves
+          // `isDirty` set so the NEXT mutating critical section retries the
+          // persist instead of silently dropping the mutation.
+          const ok = this.persistState?.(this.state);
+          if (ok !== false) {
+            clearDirty(this.state);
+          }
         } else {
-          this.schedulePersistState?.(this.state);
+          // Non-critical tier (monitor M5, same policy): the debounced seam
+          // reports a definite failure via `false`; the engine keeps the
+          // non-critical dirty flag set so the churn is re-handed on a later
+          // section (the store also retains its pending state internally).
+          const ok = this.schedulePersistState?.(this.state);
+          if (ok !== false) {
+            clearNonCriticalDirty(this.state);
+          }
         }
-        clearDirty(this.state);
-        clearNonCriticalDirty(this.state);
       }
       // flush-on-terminate: when the engine reaches a terminal phase (complete),
       // drain any pending debounced non-critical write so the on-disk state is
@@ -601,12 +667,22 @@ export class AdvanceEngine {
             this.dispatchPort,
           );
         }
+        // Monitor (M1b): escalate propagation escalated downstream convergence
+        // node(s) inside signal-propagation.ts — those markEscalated calls are
+        // lifecycle transitions, not signals, so surface each through the
+        // completion seam / event log exactly once.
+        this._notifyPropagatedEscalations(report, signalPayload);
       }
     } else if (signalType === "revise_needed") {
       if (loopMember) {
         executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
       } else {
-        this._propagateRevise(node, signalPayload);
+        // Monitor (M1b): a plain revise with nowhere to re-enter escalates
+        // (or a stuck / max-traversals-exhausted revision marks the reviewer
+        // done) inside signal-propagation.ts — surface the report's escalated
+        // node(s) through the completion seam exactly once.
+        const report = this._propagateRevise(node, signalPayload);
+        this._notifyPropagatedEscalations(report, signalPayload);
       }
     }
 
@@ -763,14 +839,17 @@ export class AdvanceEngine {
    * (subtask 1). Recovery marks a `running` node `timeout` directly inside
    * `reconcileEngine` (`engine-recovery.ts`) when its dispatch task vanished —
    * that transition happens outside the signal-driven `_applySignalTransition`,
-   * so recovery surfaces it through this public seam exactly once. A no-op when
-   * the node is not `timeout` or no callback is registered. No terminating
-   * signal drives a timeout, so the event uses the synthetic `timeout` marker
-   * with the node's recorded `errorReason` as payload.
+   * so recovery surfaces it through this public seam exactly once. No
+   * terminating signal drives a timeout, so the event uses the synthetic
+   * `timeout` marker with the node's recorded `errorReason` as payload.
+   *
+   * Monitor H2: the durable event log is written UNCONDITIONALLY — even when
+   * no `onNodeCompletion` notifier is registered — mirroring
+   * {@link _notifyCompletion} (the event is built and logged regardless of the
+   * notifier seam). Only the `onNodeCompletion` callback invocation is
+   * conditional. A no-op when the node is not `timeout`.
    */
   notifyNodeTimeout(nodeId: string): void {
-    const cb = this.onNodeCompletion;
-    if (!cb) return;
     const node = getNode(this.state, nodeId);
     if (node.status !== NodeStatus.Timeout) return;
     this._notifyCompletion(
@@ -779,6 +858,41 @@ export class AdvanceEngine {
       node.errorReason ?? "timed out",
       NodeStatus.Timeout,
     );
+  }
+
+  /**
+   * Public node-terminal notification entry point (monitor H4). Wraps the
+   * private {@link _notifyCompletion} so external control paths that mutate
+   * node lifecycle OUTSIDE the signal-driven advancement (e.g. graph
+   * cancellation, S7) can surface the node's terminal transition through the
+   * same completion seam + durable event log as signal-driven transitions.
+   *
+   * The caller supplies the transition facts (`signalType`, `payload`,
+   * `nodeStatus`) — the engine stays role-agnostic and only packages them.
+   * A no-op for an unknown node id.
+   */
+  notifyNodeTerminal(
+    nodeId: string,
+    signalType: string,
+    payload: unknown,
+    nodeStatus: NodeStatus,
+  ): void {
+    const node = this.state.nodes.get(nodeId);
+    if (!node) return;
+    this._notifyCompletion(node, signalType, payload, nodeStatus);
+  }
+
+  /**
+   * Public termination re-check (monitor H4). Wraps the private
+   * {@link _checkTermination} so external control paths (e.g. graph
+   * cancellation, S7) can re-evaluate graph termination after manual state
+   * mutation without entering a full advancement critical section. Fires the
+   * `onGraphTerminal` seam (deduped via the two-layer guards) and surfaces
+   * runtime-deadlock synthetic escalations through the completion seam, exactly
+   * like the signal-driven path.
+   */
+  checkTermination(): void {
+    this._checkTermination();
   }
 
   /**
@@ -864,6 +978,17 @@ export class AdvanceEngine {
           // The node is escalated, not dispatched — drop it from the frontier so
           // it is not left lingering as a ready entry (see budget pre-check).
           removeFromFrontier(state, node.nodeId);
+          // Monitor (M1a): the budget pre-check escalated a ready node that was
+          // never dispatched — surface it through the completion seam / durable
+          // event log exactly like a live `escalate` signal (markEscalated is a
+          // lifecycle transition, not a signal, so _applySignalTransition never
+          // sees it).
+          this._notifyCompletion(
+            node,
+            "escalate",
+            check.reason ?? "graph budget exhausted",
+            NodeStatus.Escalate,
+          );
         }
         return;
       }
@@ -895,9 +1020,26 @@ export class AdvanceEngine {
     // with the identical semantics. The listener fires asynchronously (the
     // manager's immediate-fire guard uses a microtask), so re-entrancy into the
     // advancing critical section is safe.
-    subscribeTaskTermination(this.state, this.dispatchPort, node, (nid, type, payload) => {
-      this.signalBridge.record(this.state, nid, type, payload, "dispatch");
-    });
+    // Monitor (M4): `subscribeTaskTermination` returns the exact callback it
+    // handed to `port.onTaskTerminated`. Register it into the engine's own
+    // subscription ledger (keyed by the dispatched task id) so a teardown path
+    // can unregister every listener this engine wired — exposed via
+    // {@link getTerminationSubscriptions} (S7 dispose iterates it and calls
+    // `port.removeTaskTerminatedListener(taskId, callback)`).
+    const terminationCb = subscribeTaskTermination(
+      this.state,
+      this.dispatchPort,
+      node,
+      (nid, type, payload) => {
+        this.signalBridge.record(this.state, nid, type, payload, "dispatch");
+      },
+    );
+    if (terminationCb) {
+      this._terminationSubscriptions.push({
+        taskId: task.id,
+        callback: terminationCb,
+      });
+    }
 
     // Post-registration race-condition guard: after the onTaskTerminated listener
     // is attached, re-read the dispatched task's current status. If the task has
@@ -971,9 +1113,31 @@ export class AdvanceEngine {
    * nodes remain but ≥1 blocked node exists. Fires `onGraphTerminal` with
    * `isBlocked=true` WITHOUT a phase transition. Each terminal type (complete /
    * blocked) fires at most once via separate dedupe guards.
+   *
+   * Monitor (M1c): the runtime-deadlock guard's synthetic escalations (pending
+   * nodes escalated with `DEADLOCK_REASON` inside checkGraphTermination) are
+   * surfaced through the completion seam via the `onSyntheticEscalate` hook —
+   * one `_notifyCompletion` per escalated node. Dedup: the deadlock guard only
+   * escalates `pending` nodes and only when no node is already escalated
+   * (`counts.escalate === 0`), so a node escalated by propagation (M1b) or a
+   * live signal is never double-notified; the status guard below is the
+   * defense-in-depth.
    */
   private _checkTermination(): void {
-    checkGraphTermination(this.state, this.onGraphTerminal, this._terminationCtx);
+    checkGraphTermination(
+      this.state,
+      this.onGraphTerminal,
+      this._terminationCtx,
+      (nodeId, reason) => {
+        const node = this.state.nodes.get(nodeId);
+        if (!node) return;
+        // Only a node the guard JUST escalated (`pending → escalate`) is
+        // notified — an already-terminal node cannot be re-escalated, and a
+        // node escalated by a live signal or propagation is not pending.
+        if (node.status !== NodeStatus.Escalate) return;
+        this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
+      },
+    );
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1021,6 +1185,42 @@ export class AdvanceEngine {
   }
 
   /**
+   * Surface every node a propagation pass escalated (monitor M1b).
+   *
+   * `propagateEscalate` / `propagateRevise` escalate nodes via the lifecycle
+   * `markEscalated` / `markDone` transitions inside signal-propagation.ts —
+   * those are not signals, so `_applySignalTransition` never sees them and the
+   * completion seam would otherwise stay silent. This helper replays the
+   * propagation report's `escalated` list through {@link _notifyCompletion}.
+   *
+   * Dedup: a node is only notified when it actually landed in a terminal
+   * escalated state this pass (`Escalate`, or `Done` for a stuck / exhausted
+   * revise). The escalating SOURCE node was already notified by
+   * `_applySignalTransition`, and an already-terminal node cannot be escalated
+   * again (escalate is terminal), so no node is double-notified here; the
+   * status guard is the defense-in-depth against any future overlap with the
+   * synthetic-escalation path ({@link _checkTermination}).
+   *
+   * The payload is the propagation's machine-readable reason when present
+   * (e.g. `max_traversals exhausted`), falling back to the original signal
+   * payload for a join-failure cascade.
+   */
+  private _notifyPropagatedEscalations(
+    report: SignalPropagationReport,
+    fallbackPayload: unknown,
+  ): void {
+    const payload = report.reason ?? fallbackPayload;
+    for (const id of report.escalated) {
+      const node = this.state.nodes.get(id);
+      if (!node) continue;
+      if (node.status !== NodeStatus.Escalate && node.status !== NodeStatus.Done) {
+        continue;
+      }
+      this._notifyCompletion(node, "escalate", payload, node.status);
+    }
+  }
+
+  /**
    * Back-propagate a `revise_needed` along the loop group's
    * `on_signal(revise_needed)` back-edges so upstream nodes re-enter `ready`,
    * bounded by the loop group's `max_traversals` (escalate when exhausted).
@@ -1034,8 +1234,8 @@ export class AdvanceEngine {
   private _propagateRevise(
     node: NodeRuntimeState,
     signalPayload: unknown,
-  ): void {
-    propagateRevise(this.state, node, signalPayload);
+  ): SignalPropagationReport {
+    return propagateRevise(this.state, node, signalPayload);
   }
 
   // ── Phase 3 approval lifecycle ────────────────────────────────────────────
@@ -1200,6 +1400,14 @@ export class AdvanceEngine {
       //    retried chain quiesces again (stale dedupe guard B2).
       this._terminationCtx.terminalComplete = false;
       this._terminationCtx.terminalBlocked = false;
+      // Monitor (M10): re-opening a terminal graph starts a NEW terminal
+      // epoch — the persisted cross-restart dedup flag must be cleared
+      // alongside the per-instance ctx guards so the retried chain's next
+      // terminal event fires (and the cleared flag is durable via markDirty).
+      if (this.state.terminalNotified) {
+        this.state.terminalNotified = undefined;
+        markDirty(this.state);
+      }
       await this._dispatchReadyNodes();
       this._checkTermination();
       let reDispatched = 0;
@@ -1227,6 +1435,14 @@ export class AdvanceEngine {
   resetTerminalDedupe(): void {
     this._terminationCtx.terminalComplete = false;
     this._terminationCtx.terminalBlocked = false;
+    // Monitor (M10): same epoch reset as `retryNode` — the persisted
+    // cross-restart dedup flag must not suppress the next legitimate terminal
+    // event after a non-retry re-open (e.g. extend after complete). Cleared
+    // durably via markDirty.
+    if (this.state.terminalNotified) {
+      this.state.terminalNotified = undefined;
+      markDirty(this.state);
+    }
   }
 
   /**

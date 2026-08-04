@@ -6,8 +6,9 @@
  *
  * A read-only seam over {@link DispatchManager}. The graph engine uses this
  * bridge as its *only* touchpoint into the dispatch subsystem. It wraps the
- * public methods (`launch`, `executeSync`, `onTaskTerminated`, `getResult`,
- * `cancelTask`, `getTasksByParent`, `getBudgetTracker`) with proper TS types
+ * public methods (`launch`, `executeSync`, `onTaskTerminated`,
+ * `removeTaskTerminatedListener`, `getResult`, `cancelTask`, `getTasksByParent`,
+ * `getBudgetTracker`) with proper TS types
  * so the engine never reaches into `DispatchManager` internals directly.
  *
  * Invariant: this module is an **import-only consumer** of the dispatch
@@ -123,6 +124,22 @@ export class DispatchBridge {
   }
 
   /**
+   * Remove a previously-registered task-terminated listener (monitor M4).
+   *
+   * Delegates to `DispatchManager.removeTaskTerminatedListener`
+   * (`src/dispatch/core/manager.ts`). Consumed by the engine's subscription
+   * accessor (`AdvanceEngine.getTerminationSubscriptions`) so a teardown path
+   * (S7 dispose) can unregister every listener this engine wired — closing the
+   * leak previously left by fire-once `onTaskTerminated` subscriptions.
+   */
+  removeTaskTerminatedListener(
+    taskId: string,
+    callback: TaskTerminatedCallback,
+  ): void {
+    this.manager.removeTaskTerminatedListener(taskId, callback);
+  }
+
+  /**
    * Look up a dispatched task's current status (for recovery reconciliation
    * and to read `task.error` on an errored task). Returns `undefined` for an
    * unknown task id.
@@ -188,6 +205,15 @@ export class DispatchBridge {
       run_in_background: true,
       description: description ?? `graph node ${node.nodeId}`,
       noParentInherit: true,
+      // Monitor M2: propagate the node's declared per-node budget timeout into
+      // the dispatch task input. `task-launcher.ts:444-445` consumes
+      // `input.timeout_ms` → `task.timeoutMs` (the background-task hard
+      // timeout), so a `graph_add_node`-declared `budget.timeout_ms` now
+      // actually bounds the dispatched task. Omitted when undefined (task
+      // falls back to the background default).
+      ...(node.budget?.timeout_ms !== undefined
+        ? { timeout_ms: node.budget.timeout_ms }
+        : {}),
     };
     return this.manager.launch(input, parentContext);
   }

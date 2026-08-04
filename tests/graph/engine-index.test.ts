@@ -6,11 +6,13 @@ import type {
   EngineState,
 } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
+import type { TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
 import {
   createEngine,
   type EngineRuntime,
   type DispatchParentContext,
   type NodeDispatchPort,
+  type NodeCompletionEvent,
 } from "../../src/graph/engine/index.ts";
 
 // ── Fake dispatch seam (injectable into createEngine) ───────────────────────
@@ -26,6 +28,76 @@ class FakeDispatch implements NodeDispatchPort {
     return Promise.resolve(makeTask(node.nodeId));
   }
 }
+
+/**
+ * Dispatch seam that completes every dispatched task (via a microtask-bound
+ * `setTimeout`) and fires its `onTaskTerminated` listener — drives real signal
+ * advancement through the public engine API so the per-node signal ledger
+ * history and loop-group rounds get populated end-to-end.
+ */
+class FiringDispatch implements NodeDispatchPort {
+  private subs = new Map<string, TaskTerminatedCallback>();
+  private tasks = new Map<string, DispatchTask>();
+  private seq = 0;
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    const id = `task-${node.nodeId}-${++this.seq}`;
+    const task = { ...makeTask(node.nodeId), id, sessionId: `sess-${id}` };
+    this.tasks.set(id, task);
+    setTimeout(() => {
+      task.status = "completed";
+      this.subs.get(id)?.(id, "completed");
+    }, 0);
+    return Promise.resolve(task);
+  }
+
+  onTaskTerminated(taskId: string, cb: TaskTerminatedCallback): TaskTerminatedCallback {
+    this.subs.set(taskId, cb);
+    return cb;
+  }
+
+  getTask(taskId: string): DispatchTask | undefined {
+    return this.tasks.get(taskId);
+  }
+}
+
+/**
+ * Dispatch seam that records every `onTaskTerminated` subscription and every
+ * `removeTaskTerminatedListener` call — verifies the M4 dispose teardown
+ * unregisters the engine's subscriptions from the port.
+ */
+class DisposableDispatch implements NodeDispatchPort {
+  subs = new Map<string, TaskTerminatedCallback>();
+  removals: string[] = [];
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    return Promise.resolve(makeTask(node.nodeId));
+  }
+
+  onTaskTerminated(taskId: string, cb: TaskTerminatedCallback): TaskTerminatedCallback {
+    this.subs.set(taskId, cb);
+    return cb;
+  }
+
+  removeTaskTerminatedListener(taskId: string, _cb: TaskTerminatedCallback): void {
+    this.removals.push(taskId);
+    this.subs.delete(taskId);
+  }
+
+  /** Simulate the dispatch subsystem completing a task (only if still registered). */
+  fireIfRegistered(taskId: string, status: string): void {
+    this.subs.get(taskId)?.(taskId, status);
+  }
+}
+
+/** Let chained setTimeout-driven task completions drain. */
+const settle = () => new Promise((r) => setTimeout(r, 50));
 
 function makeTask(nodeId: string): DispatchTask {
   return {
@@ -68,6 +140,29 @@ function linearGraph(): GraphDeclaration {
       { from: "A", to: "B", type: "always" },
       { from: "B", to: "C", type: "always" },
     ],
+  };
+}
+
+/**
+ * Pure always-cycle A ⇄ B inside a bounded loop group. Intra-group always
+ * edges are excluded from in-degree, so both nodes provision as roots; each
+ * answer-driven re-entry consumes a traversal and records a loop round, and
+ * the per-node signal ledger accumulates answer history — populating both
+ * monitor surfaces exercised by the snapshot isolation test (M7).
+ */
+function alwaysCycleGraph(maxTraversals = 3): GraphDeclaration {
+  return {
+    version: 2,
+    name: "always-cycle",
+    nodes: [
+      { id: "A", agent: "a0", prompt: "node A" },
+      { id: "B", agent: "a1", prompt: "node B" },
+    ],
+    edges: [
+      { from: "A", to: "B", type: "always" },
+      { from: "B", to: "A", type: "always" },
+    ],
+    loop_groups: [{ id: "lg", nodes: ["A", "B"], max_traversals: maxTraversals }],
   };
 }
 
@@ -199,6 +294,45 @@ describe("engine.status()", () => {
     expect(engine.status().phase).toBe(EnginePhase.Executing);
     expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
   });
+
+  it("deep-clones signalLedger history and loop-group rounds (in-place push does not affect an earlier snapshot) [M7]", async () => {
+    const fake = new FiringDispatch();
+    const engine = createEngine(alwaysCycleGraph(), { dispatch: fake });
+
+    // Drive the always-cycle to completion through the public API: answer
+    // signals accumulate per-node ledger history and each re-entry records a
+    // loop round.
+    await engine.run();
+    await settle();
+    await settle();
+    expect(engine.status().phase).toBe(EnginePhase.Complete);
+
+    const s1 = engine.status();
+    const histA = s1.signalLedger.get("A")!.history!;
+    const rounds = s1.loopGroups.get("lg")!.rounds!;
+    const histLen = histA.length;
+    const roundsLen = rounds.length;
+    expect(histLen).toBeGreaterThan(0);
+    expect(roundsLen).toBeGreaterThan(0);
+
+    // In-place mutation of the snapshot must never leak into the live engine:
+    // a shallow clone would share the same array and a fresh snapshot (s2)
+    // taken after the push would observe the tampered entries.
+    histA.push({ signal: "answer", payload: "tampered", atMs: 1, source: "dispatch" });
+    rounds.push({
+      round: 99,
+      traversalCount: 99,
+      nodeIds: [],
+      status: NodeStatus.Completed,
+      startedAt: 1,
+    });
+
+    const s2 = engine.status();
+    expect(s2.signalLedger.get("A")!.history).toHaveLength(histLen);
+    expect(s2.loopGroups.get("lg")!.rounds).toHaveLength(roundsLen);
+    expect(s2.signalLedger.get("A")!.history).not.toBe(s1.signalLedger.get("A")!.history);
+    expect(s2.loopGroups.get("lg")!.rounds).not.toBe(s1.loopGroups.get("lg")!.rounds);
+  });
 });
 
 // ── Phase-3 stubs: recover() / cancel() resolve without throwing ───────────
@@ -230,6 +364,34 @@ describe("engine.cancel()", () => {
     expect(snap.frontier).toEqual([]);
   });
 
+  it("re-emits a per-node cancelled completion event and fires [GRAPH COMPLETE] once [H4]", async () => {
+    const fake = new FakeDispatch();
+    const completions: NodeCompletionEvent[] = [];
+    let terminalFires = 0;
+    const engine = createEngine(linearGraph(), {
+      dispatch: fake,
+      onNodeCompletion: (e) => completions.push(e),
+      onGraphTerminal: () => {
+        terminalFires += 1;
+      },
+    });
+    await engine.run(); // A running, B/C pending
+
+    await engine.cancel();
+
+    const snap = engine.status();
+    expect(snap.phase).toBe(EnginePhase.Complete);
+    // Every retired node (A running, B/C pending) got exactly one `cancelled`
+    // completion event through the normal completion seam — a cancel is never
+    // invisible to the monitor.
+    const cancelled = completions.filter((e) => e.signalType === "cancelled");
+    expect(cancelled.map((e) => e.nodeId).sort()).toEqual(["A", "B", "C"]);
+    expect(cancelled.every((e) => e.nodeStatus === NodeStatus.Done)).toBe(true);
+    // The graph-terminal seam fired exactly once — checkTermination drove the
+    // quiescent graph to complete through the standard terminal path.
+    expect(terminalFires).toBe(1);
+  });
+
   it("recover() is a no-op without a persistence store (clean first run)", async () => {
     // No stateDir → recover() loads nothing and leaves the engine untouched.
     const fake = new FakeDispatch();
@@ -240,6 +402,55 @@ describe("engine.cancel()", () => {
     expect(snap.phase).toBe(EnginePhase.Idle);
     expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Ready); // untouched
     expect(fake.calls).toEqual([]); // recover never dispatched
+  });
+});
+
+// ── engine.dispose(): M4 subscription teardown ───────────────────────────────
+
+describe("engine.dispose()", () => {
+  it("unregisters every task-terminated subscription; the old callback no longer fires [M4]", async () => {
+    const fake = new DisposableDispatch();
+    const completions: NodeCompletionEvent[] = [];
+    const engine = createEngine(singleNodeGraph(), {
+      dispatch: fake,
+      onNodeCompletion: (e) => completions.push(e),
+    });
+    await engine.run(); // A dispatched → exactly one onTaskTerminated subscription
+
+    expect(fake.subs.size).toBe(1);
+
+    engine.dispose();
+    // The engine unregistered its subscription from the port...
+    expect(fake.subs.size).toBe(0);
+    expect(fake.removals).toEqual(["task-A"]);
+
+    // ...so a rogue dispatch completion after dispose is never delivered: no
+    // completion event fires and the node stays running.
+    fake.fireIfRegistered("task-A", "completed");
+    await settle();
+    expect(completions).toHaveLength(0);
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
+  });
+
+  it("is idempotent: a second dispose is a no-op [M4]", async () => {
+    const fake = new DisposableDispatch();
+    const engine = createEngine(singleNodeGraph(), { dispatch: fake });
+    await engine.run();
+    engine.dispose();
+    const removalsAfterFirst = fake.removals.length;
+    expect(removalsAfterFirst).toBe(1);
+
+    engine.dispose();
+    // The engine's subscription ledger was cleared — no further unregister
+    // calls are issued.
+    expect(fake.removals.length).toBe(removalsAfterFirst);
+  });
+
+  it("degrades gracefully when the dispatch port lacks removeTaskTerminatedListener", async () => {
+    const fake = new FakeDispatch(); // no onTaskTerminated surface at all
+    const engine = createEngine(singleNodeGraph(), { dispatch: fake });
+    await engine.run();
+    expect(() => engine.dispose()).not.toThrow();
   });
 });
 

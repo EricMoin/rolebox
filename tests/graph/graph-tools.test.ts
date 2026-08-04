@@ -364,14 +364,24 @@ describe("graph_status", () => {
     expect(parsed.nodes).toHaveLength(4);
   });
 
-  it("paginates output with max_chars / tail", () => {
+  it("paginates output with max_chars / tail (truncation carries a marker)", () => {
     const ts = createGraphToolSet();
     const { graph_id } = ts.graph_create({ name: "page" });
     buildReviewTeamPlus(ts, graph_id);
+    // Monitor L3: a truncated output is capped at max_chars PLUS an explicit
+    // "…[truncated: N more chars]" marker appended at the tail.
     const short = status(ts, graph_id, { max_chars: 10 });
-    expect(short.length).toBeLessThanOrEqual(10);
+    expect(short).toMatch(/…\[truncated: \d+ more chars\]$/);
+    // The untruncated content slice is exactly max_chars long; the marker
+    // carries the count of chars dropped from the tail.
+    const body = short.replace(/\n…\[truncated: \d+ more chars\]$/, "");
+    expect(body.length).toBe(10);
+    // tail:true keeps the LAST max_chars chars, marker reports the head dropped.
     const tail = status(ts, graph_id, { max_chars: 10, tail: true });
-    expect(tail.length).toBeLessThanOrEqual(10);
+    expect(tail).toMatch(/…\[truncated: \d+ more chars\]$/);
+    // No truncation when the output fits — byte-identical, no marker.
+    const full = status(ts, graph_id, {});
+    expect(full).not.toContain("…[truncated:");
   });
 
   it("JSON output surfaces dispatch_session_id / dispatch_task_id for a dispatched node", () => {

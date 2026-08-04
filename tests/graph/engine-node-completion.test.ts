@@ -134,17 +134,25 @@ describe("onNodeCompletion seam", () => {
     expect(events[0].nodeStatus).toBe(NodeStatus.Escalate);
   });
 
-  it("fires once for revise_needed completing the reviewer", async () => {
+  it("fires for revise_needed completing the reviewer, then the no-loop-group escalation (monitor M1b)", async () => {
     const events: NodeCompletionEvent[] = [];
     const { engine } = buildEngine(singleNode("A", "a1"), events);
 
     await engine.dispatchReady();
     await engine.onNodeSignalEmitted("A", "revise_needed", { findings: ["nits"] });
 
-    expect(events).toHaveLength(1);
+    // Subtask-1 event: the reviewer's pass completed.
     expect(events[0].signalType).toBe("revise_needed");
     expect(events[0].nodeStatus).toBe(NodeStatus.Completed);
     expect(events[0].payload).toEqual({ findings: ["nits"] });
+    // Monitor M1b: a plain revise with no loop group escalates the reviewer
+    // ("no loop group") inside signal-propagation.ts — that lifecycle
+    // escalation is not a signal, so the engine now surfaces it as a second
+    // completion event instead of leaving it silent.
+    expect(events).toHaveLength(2);
+    expect(events[1].signalType).toBe("escalate");
+    expect(events[1].nodeStatus).toBe(NodeStatus.Escalate);
+    expect(events[1].payload).toBe("no loop group");
   });
 
   it("fires once for blocked → completed on approval-resume", async () => {

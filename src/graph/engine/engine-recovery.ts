@@ -28,11 +28,21 @@
  * directly). Keeping the mapping here means the two entry points can never
  * drift apart.
  *
- * Finally, this module ships the stale-lock {@link EngineLockSweeper}, matching
+ * Finally, this module ships the stale-lock {@link EngineLockSweeper} and the
+ * stale-node {@link NodeStalenessWatcher} (monitor M3), matching
  * `src/loop/coordinator.ts:101-124` (engine-state-machine.md §3.4 / failure
- * resilience.md §5.6). The sweeper is **manually tickable** (`sweep`) and does
- * not start an unbounded `setInterval` on its own — `start()` is opt-in so
- * tests never leak a timer.
+ * resilience.md §5.6). Both are **manually tickable** and do not start an
+ * unbounded `setInterval` on their own — `start()` is opt-in so tests never
+ * leak a timer.
+ *
+ * Hydrate/adopt completeness (H3 / L7 / M10): `hydrateEngineState` and
+ * `adoptPriorNodeStates` carry the monitor-relevant graph state across
+ * recovery and rebuilds — the append-only `checkpointHistory` (H3), per-node
+ * `artifacts` / `evidence` and loop-group `convergenceFingerprint` (L7), and
+ * the cross-restart `terminalNotified` dedup flags (M10). `subscribeTaskTermination`
+ * returns its registered callback (M4) so callers can later
+ * `removeTaskTerminatedListener`; `reconcileEngine` surfaces the re-subscribed
+ * `{ taskId, callback }` pairs through an optional out-parameter.
  *
  * Design references:
  * - `.rolebox/design/engine-state-machine.md` §5.1 (recovery entry point),
@@ -54,7 +64,7 @@ import type {
 } from "../../types.engine-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
-import { markNonCriticalDirty } from "./engine-persistence.ts";
+import { cloneCheckpointHistory, markNonCriticalDirty } from "./engine-persistence.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -128,6 +138,23 @@ export interface ReconcileReport {
   timedOut: string[];
   /** Nodes that finished during the window → their terminating signal re-emitted. */
   deferred: DeferredSignal[];
+}
+
+/**
+ * Re-subscription handles surfaced to callers (monitor M4). Passed as an
+ * optional out-parameter to {@link reconcileEngine}; when supplied, every live
+ * re-subscription made by the pass is recorded here so the caller can later
+ * remove the listener (via `removeTaskTerminatedListener(taskId, callback)`)
+ * once the node is no longer running.
+ */
+export interface ReconcileSubscriptions {
+  /**
+   * Re-subscribed live tasks and the exact callbacks handed to
+   * `port.onTaskTerminated`. The callback is the value returned by
+   * {@link subscribeTaskTermination}, so it is safe to pass back to
+   * `removeTaskTerminatedListener`.
+   */
+  listeners: Array<{ taskId: string; callback: TaskTerminatedCallback }>;
 }
 
 /** The signal-drive callback used to advance the graph on a task termination. */
@@ -328,18 +355,24 @@ export function captureNodeUsage(
  * terminal error while the underlying session continues — so the escalate is
  * skipped, the node stays `running`, and the listener is re-subscribed so a
  * genuine later termination still advances it.
+ *
+ * Returns the exact callback handed to `port.onTaskTerminated` (monitor M4), so
+ * a caller that no longer needs the subscription can pass it to
+ * `removeTaskTerminatedListener(taskId, callback)`. Returns `undefined` when
+ * there is nothing to subscribe (no task id, or a port without the listener
+ * surface).
  */
 export function subscribeTaskTermination(
   state: EngineState,
   port: DispatchRecoveryPort,
   node: NodeRuntimeState,
   emitSignal: RecoveryEmitSignal,
-): void {
+): TaskTerminatedCallback | undefined {
   const taskId = node.dispatchTaskId;
-  if (!taskId || !port.onTaskTerminated) return;
+  if (!taskId || !port.onTaskTerminated) return undefined;
   const nodeId = node.nodeId;
 
-  port.onTaskTerminated(taskId, (completedTaskId, status) => {
+  const callback: TaskTerminatedCallback = (completedTaskId, status) => {
     const current = state.nodes.get(nodeId);
     if (!current) return;
     if (current.dispatchTaskId !== completedTaskId) return; // superseded task
@@ -371,7 +404,10 @@ export function subscribeTaskTermination(
     const sig = mapDispatchStatusToSignal(status, task);
     if (!sig) return;
     emitSignal(nodeId, sig.type, sig.payload);
-  });
+  };
+
+  port.onTaskTerminated(taskId, callback);
+  return callback;
 }
 
 // ── Per-node reconciliation ──────────────────────────────────────────────────
@@ -398,6 +434,7 @@ export function reconcileEngine(
   state: EngineState,
   port: DispatchRecoveryPort,
   emitSignal: RecoveryEmitSignal,
+  out?: ReconcileSubscriptions,
 ): ReconcileReport {
   const reSubscribed: string[] = [];
   const timedOut: string[] = [];
@@ -450,8 +487,13 @@ export function reconcileEngine(
     }
 
     // Still live → re-subscribe for future termination.
-    subscribeTaskTermination(state, port, node, emitSignal);
+    const callback = subscribeTaskTermination(state, port, node, emitSignal);
     reSubscribed.push(node.nodeId);
+    // Surface the { taskId, callback } pair so the caller can later
+    // removeTaskTerminatedListener (monitor M4) once the node stops running.
+    if (callback && out) {
+      out.listeners.push({ taskId, callback });
+    }
   }
 
   return { reSubscribed, timedOut, deferred };
@@ -524,6 +566,16 @@ export function hydrateEngineState(
         Object.entries(source.checkpoints).map(([id, r]) => [id, { ...r }])
       )
     : undefined;
+  // OPTIONAL-ADDITIVE (H3): the append-only per-node checkpoint history is
+  // deep-cloned exactly like `checkpoints` so the source and target never share
+  // record arrays. Absent → undefined (no fabricated value).
+  target.checkpointHistory = cloneCheckpointHistory(source.checkpointHistory);
+  // OPTIONAL-ADDITIVE (monitor M10): cross-restart termination-notification
+  // dedup flags are durable graph state — copied, never aliased. Absent →
+  // undefined.
+  target.terminalNotified = source.terminalNotified
+    ? { ...source.terminalNotified }
+    : undefined;
 }
 
 // ── Prior-state adoption (incremental graph rebuild) ────────────────────────
@@ -579,6 +631,10 @@ export function adoptPriorNodeStates(
     node.tokensConsumed = { ...prev.tokensConsumed };
     node.startedAt = prev.startedAt;
     node.completedAt = prev.completedAt;
+    // OPTIONAL-ADDITIVE (L7): per-node artifact/evidence references are carried
+    // across rebuilds — defensive copies, never aliased.
+    node.artifacts = prev.artifacts ? [...prev.artifacts] : undefined;
+    node.evidence = prev.evidence ? [...prev.evidence] : undefined;
 
     // Frontier correction: only genuinely-ready nodes stay dispatchable.
     if (node.status === NodeStatus.Ready) {
@@ -628,6 +684,20 @@ export function adoptPriorNodeStates(
   if (prior.checkpoints) {
     target.checkpoints = { ...prior.checkpoints, ...(target.checkpoints ?? {}) };
   }
+  // OPTIONAL-ADDITIVE (H3): merge the append-only checkpoint history with the
+  // same prior-first semantics as `checkpoints` — prior records survive a
+  // rebuild, and a target record (recorded after provisioning) wins key
+  // conflicts. Absent on both sides → no fabricated value beyond the merge.
+  target.checkpointHistory = {
+    ...cloneCheckpointHistory(prior.checkpointHistory),
+    ...(target.checkpointHistory ?? {}),
+  };
+  // OPTIONAL-ADDITIVE (monitor M10): carry the prior run's terminal-notification
+  // dedup flags so a rebuilt engine never re-notifies a graph whose terminal
+  // reminder was already delivered. Absent → undefined.
+  target.terminalNotified = prior.terminalNotified
+    ? { ...prior.terminalNotified }
+    : undefined;
 
   // Loop-group traversal counters (caps stay honest across rebuilds).
   for (const [groupId, prevGroup] of prior.loopGroups) {
@@ -635,6 +705,10 @@ export function adoptPriorNodeStates(
     if (!group) continue;
     group.traversalCount = prevGroup.traversalCount;
     group.consecutiveStale = prevGroup.consecutiveStale;
+    // OPTIONAL-ADDITIVE (L7): the stuck-exit convergence fingerprint is graph
+    // progress — carried across rebuilds so the stale-exit heuristic is not
+    // reset by a fresh provision.
+    group.convergenceFingerprint = prevGroup.convergenceFingerprint;
     if (prevGroup.rounds) group.rounds = [...prevGroup.rounds];
   }
 
@@ -744,6 +818,104 @@ export class EngineLockSweeper {
   }
 
   /** Stop the periodic sweep (no-op if never started). */
+  stop(): void {
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
+// ── Stale-node watcher (monitor M3) ─────────────────────────────────────────
+
+/** Options for {@link NodeStalenessWatcher}. */
+export interface NodeStalenessWatcherOptions {
+  /** Tick interval for `start()` (defaults to `SWEEPER_INTERVAL_MS`). */
+  intervalMs?: number;
+  /**
+   * How long a `running` node may stay live before it is marked `timeout`.
+   * A node with a declared per-node budget overrides this with
+   * `node.budget?.timeout_ms` (the declaration is authoritative).
+   */
+  nodeStaleTimeoutMs: number;
+  /**
+   * Called with the node id and error reason whenever a stale running node is
+   * marked `timeout` by {@link tick}.
+   */
+  onTimeout?: (nodeId: string, errorReason: string) => void;
+}
+
+/**
+ * Stale-node watcher (monitor M3) — detects `running` nodes whose worker has
+ * stopped advancing and marks them `timeout` so the graph never hangs on a node
+ * nobody is driving. Same shape as the stale-lock {@link EngineLockSweeper}:
+ * **manually tickable** (`tick` with an injectable clock for deterministic
+ * tests) and never starts a timer on its own — `start()` (the periodic
+ * `setInterval`) is opt-in, so tests never leak an interval.
+ *
+ * Deadline resolution per node:
+ * - a node with a declared per-node budget (`node.budget?.timeout_ms`) uses
+ *   that value as its staleness deadline — the declaration wins;
+ * - every other node uses the watcher-wide `nodeStaleTimeoutMs`;
+ * - a non-positive deadline means the node never goes stale (defensive — a
+ *   `0`/negative per-node override or watcher-wide value disables staleness).
+ *
+ * The engine's behavior is unchanged unless a consumer instantiates the
+ * watcher (default not instantiated) and drives it — `index.ts` (S7) wires
+ * the opt-in interval. Each tick marks stale nodes via
+ * {@link markTimedOut} (a normal `running → timeout` transition, so lifecycle
+ * checkpoints and the critical-dirty flag are recorded by the shared
+ * transition choke point).
+ */
+export class NodeStalenessWatcher {
+  private readonly intervalMs: number;
+  private readonly nodeStaleTimeoutMs: number;
+  private timer?: ReturnType<typeof setInterval>;
+
+  constructor(private readonly opts: NodeStalenessWatcherOptions) {
+    this.intervalMs = opts.intervalMs ?? SWEEPER_INTERVAL_MS;
+    this.nodeStaleTimeoutMs = opts.nodeStaleTimeoutMs;
+  }
+
+  /**
+   * One staleness tick. Marks every `running` node whose elapsed `startedAt`
+   * time meets or exceeds its staleness deadline as `timeout` (via
+   * {@link markTimedOut}), reporting each through the `onTimeout` callback.
+   *
+   * @returns The ids of the nodes that were timed out by this tick.
+   * @param now Optional clock for deterministic tests (defaults to `Date.now`).
+   */
+  tick(state: EngineState, now: number = Date.now()): string[] {
+    const timedOut: string[] = [];
+    for (const node of state.nodes.values()) {
+      if (node.status !== NodeStatus.Running) continue;
+      const deadline = node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs;
+      if (deadline <= 0) continue; // no staleness deadline — never stale
+      if (now - node.startedAt >= deadline) {
+        const reason = `node ran past its staleness timeout (${deadline}ms)`;
+        markTimedOut(state, node, reason);
+        timedOut.push(node.nodeId);
+        this.opts.onTimeout?.(node.nodeId, reason);
+      }
+    }
+    return timedOut;
+  }
+
+  /** Start the periodic tick. Opt-in — never auto-started. */
+  start(state: EngineState): void {
+    this.stop();
+    this.timer = setInterval(() => {
+      try {
+        this.tick(state);
+      } catch {
+        // A tick must never take down the process.
+      }
+    }, this.intervalMs);
+    // Don't keep the process alive just because a tick interval is pending.
+    (this.timer as (typeof this.timer) & { unref?: () => unknown })?.unref?.();
+  }
+
+  /** Stop the periodic tick (no-op if never started). */
   stop(): void {
     if (this.timer !== undefined) {
       clearInterval(this.timer);

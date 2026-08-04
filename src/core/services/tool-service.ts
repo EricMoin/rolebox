@@ -68,8 +68,20 @@ export class ToolService implements PluginService {
     // 3.7. Construct the single GraphToolSet (subtask 2) with the SAME deps
     // the graph_* tools receive inside buildCanonicalTools — manager,
     // directory, stateDir, graphNotify. stateDir is intentionally absent here
-    // exactly as it is for the graph tools in this assembly (engines run
-    // without engine-state persistence on opencode). The instance is threaded
+    // exactly as it is for the graph tools in this assembly.
+    //
+    // Platform contract (monitor S10): on the opencode platform the graph
+    // engine runs FULLY IN-MEMORY — engine state is never persisted to
+    // `.rolebox/state/engine-*.json`, so a graph's state does NOT cross
+    // sessions, there is no crash recovery sweep, and the durable
+    // graph-events ndjson log is not written either. Graph lifecycles are
+    // scoped to the process that created them; a plugin reload / process
+    // restart abandons any in-flight graph. This is the opposite of the Pi
+    // platform path (pi-extension.ts), which wires stateDir + the recovery
+    // sweep + the event recorder. Keep the two assemblies aligned: do NOT add
+    // stateDir here unless opencode gains engine-state persistence.
+    //
+    // The instance is threaded
     // into buildCanonicalTools below via the `graphTools` option so the
     // graph_* tools bind to it (no second toolset), and is exposed to
     // hook-service through getGraphToolSet() for the HookDeps graphTools
