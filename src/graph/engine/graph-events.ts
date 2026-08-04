@@ -33,7 +33,7 @@
  * overwrite.
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -51,12 +51,16 @@ import type { NodeCompletionEvent } from "./engine-advance.ts";
  *   (`answer` / `revise_needed` / `escalate` / `timeout`, carrying `nodeStatus`).
  * - `phase_change` — the engine lifecycle advanced `idle → executing → complete`.
  * - `budget_update` — graph-level cumulative budget counters were updated.
+ * - `notification_degraded` — a graph-notify seam could not resolve an emperor
+ *   session, so a notification was suppressed (F6 degradation marker, written
+ *   by the toolset's handler resolver).
  */
 export type GraphEventType =
   | "node_dispatched"
   | "node_completed"
   | "phase_change"
-  | "budget_update";
+  | "budget_update"
+  | "notification_degraded";
 
 /**
  * One JSON line in the event log. Optional fields (`?`) are omitted from the
@@ -111,6 +115,45 @@ export function graphEventsPath(directory: string, graphId: string): string {
     "state",
     `graph-events-${graphEventsHash(graphId)}.ndjson`,
   );
+}
+
+// ── Read side (read-only, total) ─────────────────────────────────────────────
+
+/**
+ * Read-only, total event-log reader for ONE graph. Reads the graph's durable
+ * event log (`.rolebox/state/graph-events-{hash}.ndjson`) and returns the
+ * parsed records in file order. Never throws: a missing file, an unreadable
+ * file, or a corrupt line degrades to an empty / partial result rather than an
+ * error — observability is never a control path (mirrors the recorder's total
+ * discipline). The per-graph path derivation already scopes the read to the
+ * requested graph; records whose `graphId` does not match are additionally
+ * skipped defensively.
+ */
+export function readGraphEventLog(
+  directory: string,
+  graphId: string,
+): GraphEventRecord[] {
+  const records: GraphEventRecord[] = [];
+  let raw: string;
+  try {
+    raw = readFileSync(graphEventsPath(directory, graphId), "utf-8");
+  } catch {
+    // No log yet (or unreadable) — clean empty result, never an error.
+    return records;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const record = JSON.parse(trimmed) as GraphEventRecord;
+      if (record && typeof record === "object" && record.graphId === graphId) {
+        records.push(record);
+      }
+    } catch {
+      // Corrupt line — skip honestly, never throw.
+    }
+  }
+  return records;
 }
 
 // ── Recorder ────────────────────────────────────────────────────────────────
@@ -197,6 +240,22 @@ export class GraphEventRecorder {
       graphId,
       event: "budget_update",
       budget,
+    });
+  }
+
+  /**
+   * Record that a graph notification seam degraded: the emperor session could
+   * not be resolved, so a graph-notify reminder was suppressed (F6). `kind`
+   * names the suppressed seam (`completion` / `terminal`) and rides in the
+   * record's generic `status` slot. Optional-additive — only written when a
+   * stateDir / recorder exists; absent stateDir → warning log only.
+   */
+  notificationDegraded(graphId: string, kind: "completion" | "terminal"): void {
+    this._append({
+      ts: Date.now(),
+      graphId,
+      event: "notification_degraded",
+      status: kind,
     });
   }
 

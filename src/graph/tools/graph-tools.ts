@@ -104,6 +104,7 @@ import {
   type NodeCompletionEvent,
   type GraphTerminalEvent,
   GraphEventRecorder,
+  readGraphEventLog,
   createGraphNotifier,
   createGraphTerminalNotifier,
   type GraphCompletionHandler,
@@ -112,6 +113,7 @@ import {
   type DispatchParentContext,
 } from "../engine/index.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
+import { createSubLogger } from "../../logger.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
 import { serializeGraphDeclaration } from "../serialize.ts";
 import {
@@ -130,6 +132,9 @@ import {
   scanPersistedStates,
   type PersistedStateScan,
 } from "./persisted-state.ts";
+
+// Module logger (exported so tests can spy on the degradation warnings, F6).
+export const log = createSubLogger("graph:tools");
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
@@ -201,6 +206,23 @@ export interface GraphToolSetDeps {
   directory?: string;
   /** Optional engine-state persistence dir (`.rolebox/state/...`). */
   stateDir?: string;
+  /**
+   * Optional per-node staleness deadline (ms) for every engine this toolset
+   * builds (F2). Defaults to {@link DEFAULT_NODE_STALE_TIMEOUT_MS} (15 min) —
+   * a `running` node whose worker stops advancing is marked `timeout` so a
+   * graph never hangs. A node's declared per-node `budget.timeout_ms`
+   * overrides it. Set to a non-positive value to disable the staleness
+   * watcher on these engines (opt-out).
+   */
+  nodeStaleTimeoutMs?: number;
+  /**
+   * Optional stale-lock sweep interval (ms) for every engine this toolset
+   * builds (F2). Defaults to {@link DEFAULT_SWEEPER_INTERVAL_MS} (60 s) — a
+   * stuck `advancingLock` is released periodically. Set to a non-positive
+   * value to disable the periodic sweep on these engines (manual ticking
+   * only — opt-out).
+   */
+  sweeperIntervalMs?: number;
   /**
    * Optional graph-notify source (subtask 3). When present, every engine this
    * toolset constructs — in `buildEngine` (used by all construction paths) and
@@ -479,6 +501,22 @@ export interface GraphApproveResult {
 const DEFAULT_MAX_CHARS = 16000;
 
 /**
+ * F2 production defaults applied to every engine this toolset builds (in
+ * `buildEngine` and `graph_run`) unless the caller supplies an override:
+ *
+ * - {@link DEFAULT_NODE_STALE_TIMEOUT_MS} — per-node staleness deadline. A
+ *   `running` node whose worker stops advancing is marked `timeout` so a
+ *   graph never hangs (monitor M3). A node's declared per-node
+ *   `budget.timeout_ms` overrides it (engine-recovery.ts, deadline resolution
+ *   is per-node).
+ * - {@link DEFAULT_SWEEPER_INTERVAL_MS} — periodic stale-lock sweep. A stuck
+ *   `advancingLock` is released so a hung critical section never deadlocks
+ *   the graph (failure-resilience.md §5.6).
+ */
+const DEFAULT_NODE_STALE_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_SWEEPER_INTERVAL_MS = 60_000;
+
+/**
  * `graph_status` flags in `.rolebox/design/tool-merge-map.md` §2.2 that have
  * **no backing data** in the current engine runtime shapes
  * (`src/types.engine-v2.ts` — `EngineState` / `NodeRuntimeState` /
@@ -534,9 +572,13 @@ export class GraphToolSet {
    * resolver is invoked with the invoking session id (`invokingSessionId`) when
    * provided, so the emperor session can be derived from the graph tool's
    * execution context at runtime. Returns `undefined` when no source is
-   * configured or the resolved emperor session is absent (no-op). Subtask 3.
+   * configured or the resolved emperor session is absent — in the latter case a
+   * degradation warning naming the graph is logged (and a durable
+   * `notification_degraded` marker recorded when a stateDir is configured) so
+   * the silent drop is observable (F6). Subtask 3.
    */
   private completionHandler(
+    graphId: string,
     invokingSessionId?: string,
   ): ((event: NodeCompletionEvent) => void) | undefined {
     const src = this.deps.graphNotify;
@@ -546,7 +588,15 @@ export class GraphToolSet {
       typeof src.emperorSessionId === "function"
         ? src.emperorSessionId(invokingSessionId)
         : src.emperorSessionId;
-    if (!emperorSessionId) return undefined;
+    if (!emperorSessionId) {
+      // F6: no silent no-op — name the graph + seam, and persist a marker when
+      // a stateDir is available so graph_status consumers can observe the drop.
+      log.warn(
+        `graph-tools: graph "${graphId}" completion notification degraded — no emperor session resolved; node-completion reminder suppressed`,
+      );
+      this.recordNotificationDegraded(graphId, "completion");
+      return undefined;
+    }
     return createGraphNotifier(src.sessionClient, {
       emperorSessionId,
       ...(src.agent ? { agent: src.agent } : {}),
@@ -560,8 +610,12 @@ export class GraphToolSet {
    * config form (`GraphNotifyConfig`) can produce a terminal handler; a prebuilt
    * `GraphCompletionHandler` fn cannot be deconstructed, so it yields
    * `undefined`. A fresh notifier = a fresh dedupe epoch per engine construction.
+   * When the resolved emperor session is absent, a degradation warning naming
+   * the graph is logged (plus a durable marker when a stateDir is configured)
+   * instead of silently degrading (F6).
    */
   private terminalHandler(
+    graphId: string,
     invokingSessionId?: string,
   ): ((event: GraphTerminalEvent) => void) | undefined {
     const src = this.deps.graphNotify;
@@ -572,11 +626,53 @@ export class GraphToolSet {
       typeof src.emperorSessionId === "function"
         ? src.emperorSessionId(invokingSessionId)
         : src.emperorSessionId;
-    if (!emperorSessionId) return undefined;
+    if (!emperorSessionId) {
+      log.warn(
+        `graph-tools: graph "${graphId}" terminal notification degraded — no emperor session resolved; graph-terminal reminder suppressed`,
+      );
+      this.recordNotificationDegraded(graphId, "terminal");
+      return undefined;
+    }
     return createGraphTerminalNotifier(src.sessionClient, {
       emperorSessionId,
       ...(src.agent ? { agent: src.agent } : {}),
     }) as (event: GraphTerminalEvent) => void;
+  }
+
+  /**
+   * Record a durable `notification_degraded` event when a stateDir is
+   * configured (F6, optional-additive — absent stateDir → warning log only).
+   * Written by the toolset itself because the notifier is never constructed in
+   * this path; the marker lands in the graph's event log (`.rolebox/state/
+   * graph-events-{hash}.ndjson`) so a graph_status consumer can surface
+   * "terminal notification degraded".
+   */
+  private recordNotificationDegraded(
+    graphId: string,
+    kind: "completion" | "terminal",
+  ): void {
+    if (!this.deps.stateDir) return;
+    new GraphEventRecorder(this.deps.stateDir).notificationDegraded(graphId, kind);
+  }
+
+  /**
+   * Read-only helper backing the graph_status degraded hint: read the graph's
+   * durable event log (`.rolebox/state/graph-events-{hash}.ndjson`) and return
+   * the deduped `status` values of any `notification_degraded` events
+   * (`"completion"` / `"terminal"`), in file order. Empty when no stateDir is
+   * configured, no log file exists, or no degraded event was recorded — and
+   * never throws, so a missing / corrupt log can never break a status query
+   * (total, observability-only, mirroring the recorder's own total discipline).
+   */
+  private notificationDegradedStatuses(graphId: string): string[] {
+    if (!this.deps.stateDir) return [];
+    const statuses: string[] = [];
+    for (const record of readGraphEventLog(this.deps.stateDir, graphId)) {
+      if (record.event === "notification_degraded" && record.status) {
+        if (!statuses.includes(record.status)) statuses.push(record.status);
+      }
+    }
+    return statuses;
   }
 
   /** Create a fresh, provisioned engine from a declaration (re-provision). */
@@ -589,15 +685,23 @@ export class GraphToolSet {
       manager: this.deps.manager,
       graphId,
       stateDir: this.deps.stateDir,
+      // F2: enable the stale-node watcher + stale-lock sweeper on every engine
+      // the toolset builds — mid-flight rebuilds (construction tools) keep the
+      // same guard as graph_run. Conservative production defaults unless the
+      // caller supplied an explicit override; per-node budget.timeout_ms beats
+      // the watcher deadline (engine-recovery.ts).
+      nodeStaleTimeoutMs:
+        this.deps.nodeStaleTimeoutMs ?? DEFAULT_NODE_STALE_TIMEOUT_MS,
+      sweeperIntervalMs: this.deps.sweeperIntervalMs ?? DEFAULT_SWEEPER_INTERVAL_MS,
     };
     // Subtask 3: wire the configured graph-notify completion seam (absent →
     // no-op). The emperor session is targeted ONLY for notification; the
     // graphParentContext budget scope (sessionID: graphId) is left unchanged.
-    const completion = this.completionHandler(invokingSessionId);
+    const completion = this.completionHandler(graphId, invokingSessionId);
     if (completion) {
       options.onNodeCompletion = completion;
     }
-    const terminal = this.terminalHandler(invokingSessionId);
+    const terminal = this.terminalHandler(graphId, invokingSessionId);
     if (terminal) {
       options.onGraphTerminal = terminal;
     }
@@ -1008,13 +1112,20 @@ export class GraphToolSet {
     // runtime graph_run builds (absent → the engine's default no-op seam).
     // `sessionId` (the graph-captured / invoking execution session) is forwarded
     // so the emperor-session resolver can target the orchestrator at runtime.
-    const completion = this.completionHandler(sessionId);
-    const terminal = this.terminalHandler(sessionId);
+    const completion = this.completionHandler(args.graph_id, sessionId);
+    const terminal = this.terminalHandler(args.graph_id, sessionId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
       parentContext: this.parentContext(args.graph_id),
       stateDir: this.deps.stateDir,
+      // F2: enable the stale-node watcher + stale-lock sweeper on the
+      // production graph_run runtime (the primary execution path). The
+      // staleness watcher is the secondary backstop for a hung graph — the
+      // per-node `budget.timeout_ms` (if declared) overrides this deadline.
+      nodeStaleTimeoutMs:
+        this.deps.nodeStaleTimeoutMs ?? DEFAULT_NODE_STALE_TIMEOUT_MS,
+      sweeperIntervalMs: this.deps.sweeperIntervalMs ?? DEFAULT_SWEEPER_INTERVAL_MS,
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
       ...(completion ? { onNodeCompletion: completion } : {}),
       ...(terminal ? { onGraphTerminal: terminal } : {}),
@@ -1679,6 +1790,10 @@ export class GraphToolSet {
     }
     switch (args.format ?? "summary") {
       case "json": {
+        // F6 observability: when the graph's durable event log carries
+        // `notification_degraded` markers, surface them on the snapshot. The
+        // conditional spread keeps the output byte-identical otherwise.
+        const degradedStatuses = this.notificationDegradedStatuses(state.graphId);
         const snapshot = {
           graph_id: state.graphId,
           phase: state.phase,
@@ -1692,6 +1807,12 @@ export class GraphToolSet {
               )
             : undefined,
           metrics: args.include_metrics ? this.metricsSummary(state) : undefined,
+          ...(degradedStatuses.length > 0
+            ? {
+                notification_degraded: true,
+                notification_degraded_statuses: degradedStatuses,
+              }
+            : {}),
         };
         // C-WIRE: merge structured flag data (round/checkpoint/artifacts/evidence/
         // stream) onto the snapshot. No-op when none are set (byte-identical).
@@ -1795,6 +1916,18 @@ export class GraphToolSet {
     if (args.include_metrics) {
       lines.push("");
       lines.push(`  Metrics — ${this.metricsSummary(state)}`);
+    }
+    // F6 observability: append an explicit hint when the graph's durable event
+    // log records a degraded notification seam (no emperor session resolved).
+    // Absent stateDir / log file / marker → nothing is appended (byte-compat).
+    const degradedStatuses = this.notificationDegradedStatuses(state.graphId);
+    if (degradedStatuses.length > 0) {
+      lines.push("");
+      for (const status of degradedStatuses) {
+        lines.push(
+          `  ⚠ notification degraded: ${status} notification could not reach the orchestrator (no emperor session resolved)`,
+        );
+      }
     }
     return this.paginate(lines.join("\n"), args);
   }

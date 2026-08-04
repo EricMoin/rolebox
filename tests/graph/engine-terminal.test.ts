@@ -31,6 +31,7 @@ import {
   AdvanceEngine,
   type NodeDispatchPort,
   type GraphTerminalEvent,
+  type EdgeConditionResolver,
 } from "../../src/graph/engine/engine-advance.ts";
 
 // ── Fake dispatch seam (injectable into AdvanceEngine) ─────────────────────
@@ -145,7 +146,7 @@ interface Rig {
 function buildEngine(
   decl: GraphDeclaration,
   events: GraphTerminalEvent[],
-  opts: { noSeam?: boolean } = {},
+  opts: { noSeam?: boolean; conditionResolver?: EdgeConditionResolver } = {},
 ): Rig {
   const state = createEngineState(decl, "g-1");
   provision(state);
@@ -154,6 +155,7 @@ function buildEngine(
     state,
     signalBridge: bridge,
     dispatch: new FakeDispatch(),
+    ...(opts.conditionResolver ? { conditionResolver: opts.conditionResolver } : {}),
     ...(opts.noSeam ? {} : { onGraphTerminal: (e) => events.push(e) }),
   });
   return { state, engine, events };
@@ -414,6 +416,50 @@ describe("runtime deadlock termination", () => {
     expect(state.phase).toBe(EnginePhase.Executing);
     expect(state.nodes.get("B")!.status).toBe(NodeStatus.Pending);
     expect(events).toHaveLength(0);
+  });
+
+  it("deadlock-terminates when a pending node's only incoming edges are all-false on_condition edges, even with an escalated sibling (F3)", async () => {
+    const events: GraphTerminalEvent[] = [];
+    // root → A (always); B is fed ONLY by all-false `on_condition` edges from
+    // A and root, so it can never become ready. A escalates — the strict
+    // deadlock guard (`counts.escalate === 0`) would never fire, but the F3
+    // predicate proves B is dead-ended and the graph completes instead of
+    // hanging in `executing` forever.
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "condition-dead-end-escalated",
+      nodes: [
+        { id: "root", agent: "r", prompt: "pr" },
+        { id: "A", agent: "a1", prompt: "p1" },
+        // "any" join: B would be satisfied by a single upstream answer — but
+        // neither source can ever deliver one (A is terminal, root's edge
+        // never fires), so B waits forever unless the deadlock guard rescues
+        // it. (A default "all" join would instead be escalated by escalate
+        // propagation, never reaching the guard.)
+        { id: "B", agent: "a2", prompt: "p2", join: { strategy: "any" } },
+      ],
+      edges: [
+        { from: "root", to: "A", type: "always" },
+        { from: "A", to: "B", type: "on_condition", condition: "cond" },
+        { from: "root", to: "B", type: "on_condition", condition: "cond" },
+      ],
+    };
+    const { engine, state } = buildEngine(decl, events, {
+      conditionResolver: () => false,
+    });
+
+    await engine.dispatchReady(); // dispatch root
+    // root answers → A's join satisfies → A dispatched (running).
+    await engine.onNodeSignalEmitted("root", "answer", "seed");
+    // A escalates; B stays pending — its only incoming edges can never fire.
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom" });
+
+    expect(state.phase).toBe(EnginePhase.Complete);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.errorReason).toContain("graph deadlock");
+    expect(events).toHaveLength(1);
+    expect(events[0].isBlocked).toBe(false);
+    expect(events[0].nodeStatusSummaries.escalate).toBeGreaterThanOrEqual(1);
   });
 
   it("does NOT deadlock-terminate a graph that still has a running node", async () => {

@@ -1031,7 +1031,17 @@ export class AdvanceEngine {
       this.dispatchPort,
       node,
       (nid, type, payload) => {
-        this.signalBridge.record(this.state, nid, type, payload, "dispatch");
+        // F1 bridge: route dispatch terminations through the public advance
+        // entry instead of the raw signalBridge.record seam. signalBridge.record
+        // only fires listeners for TERMINATING signals, so a HITL pause status
+        // (mapped to the pausing `need_approval` signal in engine-recovery.ts)
+        // was recorded but never advanced the node — it stayed `running`
+        // forever and [GRAPH BLOCKED] never fired. onNodeSignalEmitted keeps
+        // signalBridge.record as the exclusive ledger-write path (step 1) and
+        // additionally routes the pausing `need_approval` through
+        // `_advanceSignal` → the running → blocked transition. Fire-and-forget
+        // (void), matching the record-only callback's semantics today.
+        void this.onNodeSignalEmitted(nid, type, payload, "dispatch");
       },
     );
     if (terminationCb) {
@@ -1137,7 +1147,73 @@ export class AdvanceEngine {
         if (node.status !== NodeStatus.Escalate) return;
         this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
       },
+      // F3: the runtime-deadlock predicate. A pure state reader built from the
+      // edge topology + conditionResolver — a pending node is dead-ended when
+      // every one of its incoming edges can provably never activate, so the
+      // deadlock guard may fire even when an escalated/timed-out node exists.
+      (nodeId) => this._isPendingDeadEnded(nodeId),
     );
+  }
+
+  /**
+   * Whether a pending node is dead-ended: every one of its incoming edges is
+   * provably unable to activate, so the node can never become `ready` (F3).
+   *
+   * A pending node is dead-ended iff EVERY incoming edge is:
+   * (i)   an `on_condition` edge with no condition, no injected resolver, or a
+   *       resolver that returns false (the edge can never fire);
+   * (ii)  an `on_signal` edge whose `signal_filter` excludes the source's
+   *       recorded terminating signal while the source is terminal
+   *       (Completed / Done / Escalate / Timeout — the source can never emit
+   *       an in-filter signal again);
+   * (iii) sourced from a Cancelled node (a cancelled source never emits).
+   *
+   * An `always` edge NEVER counts as dead-ended, even from a terminal source:
+   * the graph is then in an error state awaiting orchestrator attention — an
+   * escalated node with a pending downstream via an `always` edge must keep
+   * the engine `executing` (engine-terminal.test.ts "does NOT deadlock-
+   * terminate a graph with an escalated node and a pending downstream").
+   *
+   * Pure state reader — never mutates. Unknown / unverifiable topology
+   * conservatively reports NOT dead-ended so the guard never force-completes
+   * a graph it cannot prove is stuck.
+   */
+  private _isPendingDeadEnded(nodeId: string): boolean {
+    const state = this.state;
+    const node = state.nodes.get(nodeId);
+    if (!node || node.status !== NodeStatus.Pending) return false;
+    const incoming = state.graphDeclaration.edges.filter((e) => e.to === nodeId);
+    if (incoming.length === 0) return false;
+    for (const edge of incoming) {
+      const source = state.nodes.get(edge.from);
+      // (iii) an edge sourced from a cancelled node can never fire.
+      if (source && source.status === NodeStatus.Cancelled) continue;
+      if (edge.type === "always") return false; // always edges never count
+      if (edge.type === "on_condition") {
+        // (i) a never-activatable on_condition edge.
+        if (!edge.condition || !this.conditionResolver) continue;
+        if (!source) return false; // missing source — cannot verify dead-end
+        if (!this.conditionResolver(edge.condition, source)) continue;
+        return false; // could still activate → not dead-ended
+      }
+      if (edge.type === "on_signal") {
+        // (ii) filter excludes the source's recorded terminating signal while
+        // the source is terminal.
+        if (
+          source &&
+          (source.status === NodeStatus.Completed ||
+            source.status === NodeStatus.Done ||
+            source.status === NodeStatus.Escalate ||
+            source.status === NodeStatus.Timeout)
+        ) {
+          const sig = this._latestTerminating(source);
+          if (!sig || !(edge.signal_filter ?? []).includes(sig.type)) continue;
+        }
+        return false; // source not terminal, or an in-filter signal → not dead-ended
+      }
+      return false; // unknown edge type — conservative
+    }
+    return true;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

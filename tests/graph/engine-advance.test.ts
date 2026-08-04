@@ -6,7 +6,7 @@ import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { NodeRuntimeState, EngineState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask, DispatchTaskStatus, MaterializedResultRef } from "../../src/dispatch/types.ts";
-import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
+import type { DispatchParentContext, TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
@@ -14,6 +14,7 @@ import {
   type NodeDispatchPort,
   type NodeCompletionEvent,
   type GraphBudgetPort,
+  type GraphTerminalEvent,
 } from "../../src/graph/engine/engine-advance.ts";
 import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 
@@ -490,5 +491,143 @@ describe("budget pre-check escalates an undispatched ready node", () => {
     // → the graph reaches the terminal `complete` phase.
     expect(state.phase).toBe(EnginePhase.Complete);
     expect(state.advancingLock).toBe(false);
+  });
+});
+
+// ── F1: dispatch-layer HITL termination bridges into the blocked transition ──
+
+/**
+ * Fake dispatch port that surfaces the `onTaskTerminated` seam (like the real
+ * DispatchBridge) so a test can fire a dispatch termination with a HITL status
+ * and observe the engine's running → blocked transition.
+ */
+class HITLDispatchFake implements NodeDispatchPort {
+  private listeners = new Map<string, TaskTerminatedCallback>();
+  status: DispatchTaskStatus = "running";
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    return Promise.resolve({
+      id: `task-${node.nodeId}`,
+      sessionId: `sess-${node.nodeId}`,
+      parentSessionId: "g-1",
+      depth: 1,
+      status: this.status,
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    });
+  }
+  onTaskTerminated(taskId: string, callback: TaskTerminatedCallback): void {
+    this.listeners.set(taskId, callback);
+  }
+  getTask(taskId: string): DispatchTask | undefined {
+    return {
+      id: taskId,
+      sessionId: `sess-${taskId}`,
+      parentSessionId: "g-1",
+      depth: 1,
+      status: this.status,
+      agent: "fake",
+      prompt: "fake",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+  }
+  /** Deliver a dispatch termination to the engine's subscribed listener. */
+  fire(taskId: string, status: string): void {
+    this.listeners.get(taskId)?.(taskId, status);
+  }
+}
+
+/** Single declared needs_approval gate node (no downstream). */
+function gateGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "gate",
+    nodes: [{ id: "P", agent: "a1", prompt: "p1", needs_approval: true }],
+    edges: [],
+  };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe("dispatch HITL termination (F1 bridge)", () => {
+  it("transitions a declared needs_approval node running → blocked and fires the blocked terminal event", async () => {
+    const state = createEngineState(gateGraph(), "g-hitl");
+    provision(state);
+    const bridge = new SignalBridge();
+    const fake = new HITLDispatchFake();
+    let terminal: GraphTerminalEvent | undefined;
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: fake,
+      onGraphTerminal: (e) => {
+        terminal = e;
+      },
+    });
+
+    await engine.dispatchReady();
+    expect(state.nodes.get("P")!.status).toBe(NodeStatus.Running);
+
+    // The dispatch completion evaluator pauses the task for a human decision
+    // and delivers the HITL status to the engine's onTaskTerminated listener
+    // (completion-evaluator.ts:99 → lifecycle-shared.ts:235-249 → the
+    // subscribeTaskTermination callback registered by _dispatchNode).
+    fake.fire("task-P", "need_approval");
+    await tick();
+
+    // The pausing need_approval signal drove running → blocked (not dropped).
+    expect(state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    expect(state.nodes.get("P")!.signalsObserved["need_approval"]).toEqual({
+      hitl: "need_approval",
+      taskId: "task-P",
+    });
+    // No active nodes remain (only the blocked gate) → the blocked terminal
+    // event fires exactly once with isBlocked=true; the graph stays executing,
+    // waiting on the human's approve/reject.
+    expect(terminal).toBeDefined();
+    expect(terminal!.isBlocked).toBe(true);
+    expect(terminal!.nodeStatusSummaries.blocked).toBe(1);
+    expect(state.phase).toBe(EnginePhase.Executing);
+    expect(state.advancingLock).toBe(false);
+    expect(state.pendingCompletions).toEqual([]);
+  });
+
+  it("keeps a NON-declared node running (record-only) on a stray HITL termination — guard NOT relaxed", async () => {
+    // (d): _pauseForApproval's `if (!node.needsApproval) return;` is
+    // intentionally untouched. A node that did not declare needs_approval keeps
+    // today's semantics: the signal is recorded but the node stays running and
+    // no blocked terminal event fires (resumes via approve/reject on the
+    // dispatch side).
+    const state = createEngineState(standaloneNode("A", "a1"), "g-hitl-stray");
+    provision(state);
+    const bridge = new SignalBridge();
+    const fake = new HITLDispatchFake();
+    let terminal: GraphTerminalEvent | undefined;
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: fake,
+      onGraphTerminal: (e) => {
+        terminal = e;
+      },
+    });
+
+    await engine.dispatchReady();
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    fake.fire("task-A", "need_approval");
+    await tick();
+
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("A")!.signalsObserved["need_approval"]).toBeDefined();
+    expect(terminal).toBeUndefined();
   });
 });

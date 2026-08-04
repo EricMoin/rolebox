@@ -672,6 +672,13 @@ class EngineRuntimeImpl implements EngineRuntime {
     // hangs on a `running` node whose worker stopped advancing. A no-op when
     // not configured (default behavior unchanged).
     this.staleWatcher?.start(this.state);
+    // F2: start the opt-in stale-lock sweeper on the PRIMARY execution path
+    // too (parity with recover()) so a stuck `advancingLock` never deadlocks
+    // a live run. A no-op when `sweeperIntervalMs` is absent — the sweeper
+    // then stays manual-tick-only and no interval is ever created.
+    if (this.sweeperIntervalMs && this.sweeperIntervalMs > 0) {
+      this.sweeper.start(this.state);
+    }
     // dispatchReady transitions `idle → executing` and dispatches the ready
     // roots inside a single advancement critical section.
     await this.advance.dispatchReady();
@@ -744,7 +751,14 @@ class EngineRuntimeImpl implements EngineRuntime {
         this.state,
         port,
         (nodeId, type, payload) => {
-          this.signalBridge.record(this.state, nodeId, type, payload, "recovery");
+          // F1 bridge (mirrors the deferred-drain call at :777): the reconcile
+          // emitSignal feeds through the public advance entry so a HITL status
+          // delivered to a re-subscribed listener (awaiting_approval /
+          // need_approval / blocked / need_clarification → the pausing
+          // `need_approval` signal) reaches the running → blocked transition
+          // instead of being recorded-and-dropped by signalBridge.record (which
+          // only fires terminating-signal listeners).
+          void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery");
         },
       );
     } catch (err) {
@@ -804,7 +818,15 @@ class EngineRuntimeImpl implements EngineRuntime {
           this.state,
           port,
           (nodeId, type, payload) => {
-            this.signalBridge.record(this.state, nodeId, type, payload, "recovery");
+            // F1 bridge (mirrors the recover() reconcile callback at :761 and
+            // the deferred-drain call at :828): the adopt-window reconcile
+            // emitSignal feeds through the public advance entry so a HITL
+            // status delivered to a re-subscribed listener (awaiting_approval /
+            // need_approval / blocked / need_clarification → the pausing
+            // `need_approval` signal) reaches the running → blocked transition
+            // instead of being recorded-and-dropped by signalBridge.record
+            // (which only fires terminating-signal listeners).
+            void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery");
           },
         );
         for (const id of report.timedOut) {
@@ -1010,6 +1032,10 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Monitor (M3): stop the opt-in staleness watcher — a disposed runtime
     // must not keep ticking.
     this.staleWatcher?.stop();
+    // F2: stop the opt-in stale-lock sweeper too (parity with cancel()) — a
+    // disposed runtime must not keep sweeping its periodic interval. No-op
+    // when the interval was never started.
+    this.sweeper.stop();
   }
 }
 
@@ -1095,6 +1121,7 @@ export {
   GraphEventRecorder,
   graphEventsHash,
   graphEventsPath,
+  readGraphEventLog,
   type GraphEventRecord,
   type GraphEventType,
 } from "./graph-events.ts";

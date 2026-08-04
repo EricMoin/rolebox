@@ -108,6 +108,18 @@ export interface TerminationContext {
  * surface the synthetic escalation instead of it being silent (monitor-audit
  * M1). A no-op when not supplied.
  *
+ * The optional `isPendingDeadEnded` predicate relaxes the runtime deadlock
+ * guard (F3): a pending node is "dead-ended" when every one of its incoming
+ * edges is provably unable to activate — a never-true `on_condition` edge, an
+ * `on_signal` edge whose filter excludes the source's recorded terminating
+ * signal once the source is terminal, or an edge sourced from a cancelled
+ * node. When supplied and it returns true for EVERY pending node, the guard
+ * fires even when an escalated/timed-out node is present; without this such a
+ * graph would hang in `executing` forever (the strict
+ * `counts.escalate === 0 && counts.timeout === 0` activation is preserved).
+ * The predicate must be a PURE state reader — the AdvanceEngine builds it
+ * from its edge topology + conditionResolver and never mutates state.
+ *
  * A throwing consumer must not corrupt the advancing critical section
  * (mirrors _notifyCompletion conventions). A no-op when no callback is
  * registered.
@@ -117,6 +129,7 @@ export function checkGraphTermination(
   onGraphTerminal: ((event: GraphTerminalEvent) => void) | undefined,
   ctx: TerminationContext,
   onSyntheticEscalate?: (nodeId: string, reason: string) => void,
+  isPendingDeadEnded?: (nodeId: string) => boolean,
 ): void {
   if (state.phase !== EnginePhase.Executing) return;
 
@@ -129,6 +142,7 @@ export function checkGraphTermination(
   let hasSchedulerActive = false;
   let hasBlocked = false;
   let hasPending = false;
+  const pendingNodeIds: string[] = [];
   for (const node of state.nodes.values()) {
     switch (node.status) {
       case NodeStatus.Completed: counts.completed += 1; break;
@@ -148,6 +162,7 @@ export function checkGraphTermination(
         break;
       case NodeStatus.Pending:
         hasPending = true;
+        pendingNodeIds.push(node.nodeId);
         break;
       default: break;
     }
@@ -189,17 +204,32 @@ export function checkGraphTermination(
     hasPending &&
     !hasSchedulerActive &&
     !hasBlocked &&
-    counts.escalate === 0 &&
-    counts.timeout === 0 &&
-    state.pendingCompletions.length === 0
+    state.pendingCompletions.length === 0 &&
+    (
+      // Strict activation: no terminal error to surface. An escalated/timeout
+      // node normally means the graph is in an error state awaiting
+      // orchestrator attention — never force-complete that.
+      (counts.escalate === 0 && counts.timeout === 0) ||
+      // F3 relaxed activation: even with an escalated/timed-out node present,
+      // the graph is provably deadlocked when the caller's predicate confirms
+      // every pending node is dead-ended (each incoming edge is a never-true
+      // `on_condition`, a filter-excluding `on_signal` from a terminal source,
+      // or an edge sourced from a cancelled node — see
+      // AdvanceEngine#_isPendingDeadEnded). Without this the never-activatable
+      // pending node would hang in `executing` forever.
+      (
+        isPendingDeadEnded !== undefined &&
+        pendingNodeIds.every((id) => isPendingDeadEnded(id))
+      )
+    )
   ) {
     // Runtime deadlock guard: pending node(s) exist with no running/ready
     // upstream to ever satisfy them, no blocked gate to resolve them, no
-    // terminal error to surface (an escalated/timeout node means the graph is
-    // in an error state awaiting orchestrator attention — never force-complete
-    // that), and no deferred completion still to drain. This is an
-    // unsatisfiable graph (e.g. an unrooted always-cycle, or an unprotected
-    // cycle reachable only through a satisfied root that cannot feed it).
+    // deferred completion still to drain, and either no terminal error to
+    // surface or a provably never-activatable pending set. This is an
+    // unsatisfiable graph (e.g. an unrooted always-cycle, an unprotected cycle
+    // reachable only through a satisfied root that cannot feed it, or a
+    // condition-gated downstream whose every incoming edge can never fire).
     //
     // Escalate every pending node (`pending → escalate` is a legal transition,
     // node-lifecycle.ts) so the graph quiesces, then transition to complete and

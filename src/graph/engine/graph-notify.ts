@@ -45,7 +45,8 @@ import type {
   GraphTerminalEvent,
 } from "./engine-advance.ts";
 
-const log = createSubLogger("graph:notify");
+// Exported so tests can spy on the notifier's own logger (F6).
+export const log = createSubLogger("graph:notify");
 
 // ── Options ─────────────────────────────────────────────────────────────────
 
@@ -298,10 +299,11 @@ export function buildGraphTerminalText(event: GraphTerminalEvent): string {
  * dropped. Per-loop-graph re-entry (separate `graph_run`) creates a fresh
  * notifier with a clean dedupe epoch.
  *
- * @returns a handler that is a no-op when disabled or when no emperor session is
- *   configured, drops idempotent replays, and otherwise enqueues the reminder
- *   (`client.prompt` failures retried with bounded exponential backoff, max
- *   `maxAttempts` total attempts).
+ * @returns a handler that is a no-op when disabled (silent), a no-op that logs
+ *   an explicit warning when no emperor session is configured (F6), drops
+ *   idempotent replays, and otherwise enqueues the reminder (`client.prompt`
+ *   failures retried with bounded exponential backoff, max `maxAttempts` total
+ *   attempts).
  */
 export function createGraphTerminalNotifier(
   client: ISessionClient,
@@ -317,7 +319,15 @@ export function createGraphTerminalNotifier(
 
   return async (event: GraphTerminalEvent): Promise<boolean> => {
     if (!enabled) return false;
-    if (!emperorSessionId) return false;
+    if (!emperorSessionId) {
+      // F6: surface the silent-drop. The engine still runs its default no-op
+      // terminal seam, but an operator must see WHY the orchestrator was never
+      // woken. The `!enabled` path above stays silent (deliberate opt-out).
+      log.warn(
+        `graph-notify: ${event.isBlocked ? "blocked" : "complete"} notification skipped — no emperor session resolved for graph ${event.graphId}`,
+      );
+      return false;
+    }
 
     // Dedupe key claimed BEFORE the first attempt — retries of the same
     // terminal event are one logical notification (see createGraphNotifier).

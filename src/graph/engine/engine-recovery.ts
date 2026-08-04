@@ -181,7 +181,15 @@ export type RecoveryEmitSignal = (
  * - `timeout`   → `escalate` (a timed-out worker is an unrecoverable failure).
  * - `cancelled` → `null` — a cancellation is not a terminating signal; the node
  *   is cancelled directly by the caller instead.
- * - any other status → `null` (non-terminal: running / pending / awaiting).
+ * - HITL statuses (`awaiting_approval` — the paused task's status — plus
+ *   `need_approval` / `blocked` / `need_clarification` — the signal types the
+ *   completion evaluator delivers) → the pausing `need_approval` signal. The
+ *   engine advances a declared `needs_approval` node `running → blocked` on it
+ *   (engine-advance.ts `_pauseForApproval`), so `[GRAPH BLOCKED]` fires instead
+ *   of the HITL termination being dropped at `subscribeTaskTermination`'s
+ *   `if (!sig) return;`. A node NOT declared `needs_approval` keeps today's
+ *   semantics (record-only; resumes when a human uses approve/reject).
+ * - any other status → `null` (non-terminal: running / pending).
  */
 export function mapDispatchStatusToSignal(
   status: string,
@@ -238,6 +246,20 @@ export function mapDispatchStatusToSignal(
       return {
         type: "escalate",
         payload: { error: "dispatch task timed out" },
+      };
+    // HITL pause statuses (F1 bridge): when the completion evaluator pauses a
+    // task for a human decision (completion-evaluator.ts:53 transitions it to
+    // `awaiting_approval` and :99 delivers the HITL signal type via
+    // notifyTerminated), map to the engine's pausing `need_approval` signal so
+    // `subscribeTaskTermination`'s `if (!sig) return;` never silently drops a
+    // HITL termination. `cancelled` / `running` / `pending` stay `null`.
+    case "awaiting_approval":
+    case "need_approval":
+    case "blocked":
+    case "need_clarification":
+      return {
+        type: "need_approval",
+        payload: { hitl: status, ...(task ? { taskId: task.id } : {}) },
       };
     default:
       return null; // cancelled + non-terminal statuses

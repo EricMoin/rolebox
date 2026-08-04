@@ -1,11 +1,13 @@
 import { describe, it, expect } from "bun:test";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
+import { ADVANCING_LOCK_TIMEOUT_MS } from "../../src/loop/constants.ts";
+import type { EngineLockSweeper } from "../../src/graph/engine/engine-recovery.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type {
   NodeRuntimeState,
   EngineState,
 } from "../../src/types.engine-v2.ts";
-import type { DispatchTask } from "../../src/dispatch/types.ts";
+import type { DispatchTask, DispatchTaskStatus } from "../../src/dispatch/types.ts";
 import type { TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
 import {
   createEngine,
@@ -264,6 +266,56 @@ describe("engine.run()", () => {
   });
 });
 
+// ── F2: run() starts the stale-lock sweeper on the primary path ─────────────
+
+describe("engine.run() — stale-lock sweeper (F2)", () => {
+  /** Reach into the runtime's private sweeper to read its interval state. */
+  function runtimeSweeper(engine: EngineRuntime): EngineLockSweeper {
+    return (engine as unknown as { sweeper: EngineLockSweeper }).sweeper;
+  }
+
+  function sweeperTimer(sweeper: EngineLockSweeper): ReturnType<typeof setInterval> | undefined {
+    return (sweeper as unknown as { timer?: ReturnType<typeof setInterval> }).timer;
+  }
+
+  it("starts the lock sweeper when sweeperIntervalMs > 0; a stale lock is released", async () => {
+    const fake = new FakeDispatch(); // tasks never complete → graph stays executing
+    const engine = createEngine(singleNodeGraph(), {
+      dispatch: fake,
+      sweeperIntervalMs: 60_000,
+    });
+    await engine.run();
+
+    // run() started the periodic sweep: the runtime's sweeper holds a live
+    // interval bound to this engine's state.
+    const sweeper = runtimeSweeper(engine);
+    expect(sweeperTimer(sweeper)).toBeDefined();
+
+    // The started sweeper actually releases a lock held past the timeout —
+    // drive the same sweep() the periodic interval calls, with an injected
+    // clock (first observation records; a later tick past the timeout frees).
+    const state = (engine as unknown as { state: EngineState }).state;
+    state.advancingLock = true;
+    expect(sweeper.sweep(state, 1_000)).toBe(false); // freshly-held — not stale
+    expect(sweeper.sweep(state, 1_000 + ADVANCING_LOCK_TIMEOUT_MS + 1)).toBe(true);
+    expect(state.advancingLock).toBe(false);
+
+    engine.dispose(); // stop the interval — no leaked timer
+  });
+
+  it("starts no sweeper timer when sweeperIntervalMs is absent (opt-in)", async () => {
+    const fake = new FakeDispatch();
+    const engine = createEngine(singleNodeGraph(), { dispatch: fake });
+    await engine.run();
+
+    // Without the option, run() never starts the periodic sweep — no interval
+    // is created, so nothing can leak.
+    expect(sweeperTimer(runtimeSweeper(engine))).toBeUndefined();
+
+    engine.dispose();
+  });
+});
+
 // ── status(): EngineState snapshot ──────────────────────────────────────────
 
 describe("engine.status()", () => {
@@ -479,5 +531,122 @@ describe("public exports from 'src/graph/engine/index.ts'", () => {
     expect(idA).toBeTruthy();
     expect(idB).toBeTruthy();
     expect(idA).not.toBe(idB);
+  });
+});
+
+// ── adoptPrior: HITL dispatch termination bridges into blocked (F1 seam) ────
+
+/**
+ * Fake dispatch port that surfaces the `onTaskTerminated` seam (like the real
+ * DispatchBridge) and answers `getTask` with a LIVE task — so `adoptPrior`'s
+ * reconcile pass re-subscribes an adopted `running` node's task, and a later
+ * dispatch termination with a HITL status is delivered through the recovery
+ * emitSignal. Mirrors the HITLDispatchFake pattern from engine-advance.test.ts.
+ */
+class AdoptHITLDispatch implements NodeDispatchPort {
+  private listeners = new Map<string, TaskTerminatedCallback>();
+  executeCount = 0;
+  status: DispatchTaskStatus = "running";
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    this.executeCount += 1;
+    return Promise.resolve({
+      id: `task-${node.nodeId}`,
+      sessionId: `sess-${node.nodeId}`,
+      parentSessionId: "g-1",
+      depth: 1,
+      status: this.status,
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    });
+  }
+  onTaskTerminated(taskId: string, callback: TaskTerminatedCallback): TaskTerminatedCallback {
+    this.listeners.set(taskId, callback);
+    return callback;
+  }
+  getTask(taskId: string): DispatchTask | undefined {
+    return {
+      id: taskId,
+      sessionId: `sess-${taskId}`,
+      parentSessionId: "g-1",
+      depth: 1,
+      status: this.status,
+      agent: "fake",
+      prompt: "fake",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+  }
+  /** Deliver a dispatch termination to the engine's (re-)subscribed listener. */
+  fire(taskId: string, status: string): void {
+    this.listeners.get(taskId)?.(taskId, status);
+  }
+}
+
+/** Single declared needs_approval gate node (no downstream). */
+function gateGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "gate",
+    nodes: [{ id: "P", agent: "a1", prompt: "p1", needs_approval: true }],
+    edges: [],
+  };
+}
+
+describe("adoptPrior HITL dispatch termination (F1 bridge)", () => {
+  it("transitions an adopted declared needs_approval node running → blocked when a HITL status arrives after adoption", async () => {
+    const fake = new AdoptHITLDispatch();
+
+    // Prior run: P is dispatched and still running — its task lives in the
+    // SHARED dispatch seam, which survives the engine rebuild (the realistic
+    // toolset flow: construction tool → adoptPrior(prior.runtime.status())).
+    const priorEngine = createEngine(gateGraph(), { dispatch: fake });
+    await priorEngine.run();
+    expect(priorEngine.status().nodes.get("P")!.status).toBe(NodeStatus.Running);
+    const prior = priorEngine.status();
+
+    // Rebuilt engine adopts the prior progress; the reconcile pass re-subscribes
+    // P's still-live task with the recovery emitSignal. run() afterwards mirrors
+    // graph_run's adoptPrior → dispatchReady sequence (idle → executing).
+    let terminalFires = 0;
+    const engine = createEngine(gateGraph(), {
+      dispatch: fake,
+      onGraphTerminal: () => {
+        terminalFires += 1;
+      },
+    });
+    await engine.adoptPrior(prior);
+    await engine.run();
+
+    // Adoption preserved the running node — it was NOT re-dispatched.
+    expect(engine.status().nodes.get("P")!.status).toBe(NodeStatus.Running);
+    expect(fake.executeCount).toBe(1); // only the prior run dispatched
+    priorEngine.dispose();
+
+    // A HITL status (need_approval) arriving AFTER adoption must drive the
+    // adopted node running → blocked via the F1 bridge — not be
+    // recorded-and-dropped by signalBridge.record (a pausing signal fires no
+    // terminating-signal listeners).
+    fake.fire("task-P", "need_approval");
+    await settle();
+
+    const snap = engine.status();
+    expect(snap.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    expect(snap.nodes.get("P")!.signalsObserved["need_approval"]).toEqual({
+      hitl: "need_approval",
+      taskId: "task-P",
+    });
+    // Quiescent-blocked (no running/ready nodes, one blocked gate) → the
+    // blocked terminal event fires; the graph keeps executing, waiting on the
+    // human's approve/reject.
+    expect(terminalFires).toBe(1);
+    expect(snap.phase).toBe(EnginePhase.Executing);
   });
 });

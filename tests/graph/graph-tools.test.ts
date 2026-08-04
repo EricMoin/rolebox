@@ -10,11 +10,15 @@
  * asserted via its error path; dry-run validation is covered in full.
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createGraphToolSet,
   GraphToolSet,
   type GraphToolSetDeps,
+  log as graphToolsLog,
 } from "../../src/graph/tools/graph-tools";
 import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools";
 import type { EngineState } from "../../src/types.engine-v2";
@@ -25,6 +29,10 @@ import type {
   TaskTerminatedCallback,
 } from "../../src/graph/engine/dispatch-bridge";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
+import type { EngineRuntime } from "../../src/graph/engine/index";
+import type { ISessionClient } from "../../src/platform/ports/session-client";
+import { graphEventsPath } from "../../src/graph/engine/graph-events";
+import { GraphEventRecorder } from "../../src/graph/engine/graph-events";
 import { clearParentQueues } from "../../src/dispatch/notification";
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -306,6 +314,114 @@ describe("graph_run", () => {
     const { graph_id } = ts.graph_create({ name: "run-nomgr" });
     buildReviewTeamPlus(ts, graph_id);
     await expect(ts.graph_run({ graph_id })).rejects.toThrow(/no dispatch manager/);
+  });
+});
+
+// ── graph_run — F2 staleness guard options (production defaults) ────────────
+
+describe("graph_run — F2 stale-node watcher + stale-lock sweeper options", () => {
+  /**
+   * Dispatch seam that never completes tasks — the engine stays in phase
+   * `executing` so the built runtime (with its started watcher/sweeper
+   * intervals) remains the registry's live runtime for inspection.
+   */
+  class IdleDispatch implements NodeDispatchPort {
+    executeNode(
+      node: NodeRuntimeState,
+      _ctx: DispatchParentContext,
+    ): Promise<DispatchTask> {
+      return Promise.resolve({
+        id: `task-${node.nodeId}`,
+        sessionId: `sess-${node.nodeId}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      });
+    }
+  }
+
+  function openGraph(
+    name: string,
+    deps?: GraphToolSetDeps,
+  ): { ts: GraphToolSet; graphId: string } {
+    const ts = new GraphToolSet(deps ?? { dispatch: new IdleDispatch() });
+    const { graph_id } = ts.graph_create({ name });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    return { ts, graphId: graph_id };
+  }
+
+  /** The runtime graph_run just built (registry entry replaced after run). */
+  function builtRuntime(ts: GraphToolSet, graphId: string): EngineRuntime {
+    return ts["getEntry"](graphId).runtime;
+  }
+
+  it("builds the graph_run runtime with the production staleness defaults", async () => {
+    const { ts, graphId } = openGraph("f2-defaults");
+    await ts.graph_run({ graph_id: graphId });
+
+    // The runtime built by graph_run instantiated the opt-in staleness
+    // watcher with the 15-min production deadline ticking at the 1-min
+    // sweep interval.
+    const runtime = builtRuntime(ts, graphId);
+    const watcher = (runtime as unknown as {
+      staleWatcher?: { nodeStaleTimeoutMs: number; intervalMs: number };
+    }).staleWatcher;
+    expect(watcher).toBeDefined();
+    expect(watcher!.nodeStaleTimeoutMs).toBe(15 * 60_000);
+    expect(watcher!.intervalMs).toBe(60_000);
+    // ...and carries the periodic stale-lock sweep interval option.
+    expect(
+      (runtime as unknown as { sweeperIntervalMs?: number }).sweeperIntervalMs,
+    ).toBe(60_000);
+
+    runtime.dispose(); // stop the started watcher/sweeper intervals (no leak)
+  });
+
+  it("honors explicit caller overrides via the toolset deps", async () => {
+    const { ts, graphId } = openGraph("f2-override", {
+      dispatch: new IdleDispatch(),
+      nodeStaleTimeoutMs: 5_000,
+      sweeperIntervalMs: 2_000,
+    });
+    await ts.graph_run({ graph_id: graphId });
+
+    const runtime = builtRuntime(ts, graphId);
+    const watcher = (runtime as unknown as {
+      staleWatcher?: { nodeStaleTimeoutMs: number; intervalMs: number };
+    }).staleWatcher;
+    expect(watcher!.nodeStaleTimeoutMs).toBe(5_000);
+    expect(watcher!.intervalMs).toBe(2_000);
+    expect(
+      (runtime as unknown as { sweeperIntervalMs?: number }).sweeperIntervalMs,
+    ).toBe(2_000);
+
+    runtime.dispose();
+  });
+
+  it("allows opting out of both guards with non-positive overrides", async () => {
+    const { ts, graphId } = openGraph("f2-optout", {
+      dispatch: new IdleDispatch(),
+      nodeStaleTimeoutMs: 0,
+      sweeperIntervalMs: 0,
+    });
+    await ts.graph_run({ graph_id: graphId });
+
+    const runtime = builtRuntime(ts, graphId);
+    // A non-positive staleness deadline → no watcher instantiated.
+    expect(
+      (runtime as unknown as { staleWatcher?: unknown }).staleWatcher,
+    ).toBeUndefined();
+    // A non-positive sweep interval → run() starts no periodic sweep.
+    expect(
+      (runtime as unknown as { sweeperIntervalMs?: number }).sweeperIntervalMs,
+    ).toBe(0);
+
+    runtime.dispose();
   });
 });
 
@@ -736,5 +852,191 @@ describe("hasInflightGraphsForSession", () => {
     const { graph_id } = ts.graph_create({ name: "no-session" });
     ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
     expect(ts.hasInflightGraphsForSession("sess-S")).toBe(false);
+  });
+});
+
+// ── graph-notify degradation (F6) ─────────────────────────────────────────
+
+describe("graph-notify degradation (F6)", () => {
+  /**
+   * Minimal ISessionClient — never dereferenced: when the emperor session
+   * resolves to falsy the notifier is NOT constructed (the degraded path under
+   * test), so the client is only present to satisfy the config shape.
+   */
+  class FakeSessionClient implements ISessionClient {
+    async prompt(): Promise<{ id: string } | null> {
+      return null;
+    }
+    async list(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async get(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async messages(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async children(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async todo(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async diff(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async fork(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async status(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async promptSync(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async create(): Promise<never> {
+      throw new Error("not implemented");
+    }
+    async abort(): Promise<never> {
+      throw new Error("not implemented");
+    }
+  }
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it("warns (naming graph + seam) and writes a durable marker when a stateDir is configured", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "graph-tools-degraded-"));
+    const ts = createGraphToolSet({
+      stateDir,
+      graphNotify: {
+        sessionClient: new FakeSessionClient(),
+        // Resolver always fails → both seams degrade (no notifier constructed).
+        emperorSessionId: () => undefined,
+      },
+    });
+    const warnSpy = jest.spyOn(graphToolsLog, "warn");
+
+    const { graph_id } = ts.graph_create({ name: "degraded-graph" }, "invoking-1");
+
+    // Both the node-completion and graph-terminal seams warn, naming the graph.
+    expect(warnSpy).toHaveBeenCalled();
+    const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(
+      messages.some(
+        (m) =>
+          m.includes("degraded-graph") &&
+          m.includes("completion notification degraded"),
+      ),
+    ).toBe(true);
+    expect(
+      messages.some(
+        (m) =>
+          m.includes("degraded-graph") &&
+          m.includes("terminal notification degraded"),
+      ),
+    ).toBe(true);
+
+    // Durable `notification_degraded` markers landed in the graph event log
+    // (`.rolebox/state/graph-events-{hash}.ndjson` under the stateDir).
+    const eventsPath = graphEventsPath(stateDir, graph_id);
+    expect(existsSync(eventsPath)).toBe(true);
+    const lines = readFileSync(eventsPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    const degraded = lines.filter((l) =>
+      l.includes('"event":"notification_degraded"'),
+    );
+    expect(degraded.length).toBeGreaterThan(0);
+    expect(degraded.some((l) => l.includes('"status":"completion"'))).toBe(true);
+    expect(degraded.some((l) => l.includes('"status":"terminal"'))).toBe(true);
+  });
+
+  it("warns without a durable marker when no stateDir is configured", () => {
+    const ts = createGraphToolSet({
+      graphNotify: {
+        sessionClient: new FakeSessionClient(),
+        emperorSessionId: () => undefined,
+      },
+    });
+    const warnSpy = jest.spyOn(graphToolsLog, "warn");
+
+    ts.graph_create({ name: "degraded-nostate" }, "invoking-1");
+
+    // Warning surfaces the graph name; the marker path is skipped (no stateDir).
+    expect(warnSpy).toHaveBeenCalled();
+    const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+    expect(messages.some((m) => m.includes("degraded-nostate"))).toBe(true);
+  });
+
+  it("graph_status surfaces the degraded marker — summary hint + json field", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "graph-tools-degraded-status-"));
+    const ts = createGraphToolSet({
+      stateDir,
+      graphNotify: {
+        sessionClient: new FakeSessionClient(),
+        // Resolver always fails → both seams degrade and write markers.
+        emperorSessionId: () => undefined,
+      },
+    });
+    const { graph_id } = ts.graph_create({ name: "degraded-status" }, "invoking-1");
+    ts.graph_add_node({ graph_id, id: "A", agent: "agent-a", prompt: "pA" });
+
+    // Summary render appends an explicit degraded hint naming each seam.
+    const summary = ts.graph_status({ graph_id });
+    expect(summary).toContain("⚠ notification degraded:");
+    expect(summary).toContain(
+      "completion notification could not reach the orchestrator (no emperor session resolved)",
+    );
+    expect(summary).toContain(
+      "terminal notification could not reach the orchestrator (no emperor session resolved)",
+    );
+
+    // JSON render adds the degraded boolean + the status list.
+    const json = JSON.parse(
+      ts.graph_status({ graph_id, format: "json" }),
+    ) as Record<string, unknown>;
+    expect(json.notification_degraded).toBe(true);
+    expect(json.notification_degraded_statuses).toEqual(["completion", "terminal"]);
+  });
+
+  it("graph_status output is unchanged when no degraded marker exists", () => {
+    // No stateDir and no graphNotify → no markers can ever be recorded, and the
+    // read helper short-circuits, so the output stays byte-compatible.
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "no-degraded" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "agent-a", prompt: "pA" });
+
+    const summary = ts.graph_status({ graph_id });
+    expect(summary).not.toContain("notification degraded");
+
+    const json = JSON.parse(
+      ts.graph_status({ graph_id, format: "json" }),
+    ) as Record<string, unknown>;
+    expect(json).not.toHaveProperty("notification_degraded");
+    expect(json).not.toHaveProperty("notification_degraded_statuses");
+  });
+
+  it("graph_status surfaces a degraded marker written directly to the event log", () => {
+    // Independent of the handler path: a `notification_degraded` line in the
+    // graph's event log (any writer) is what the render layer reads.
+    const stateDir = mkdtempSync(join(tmpdir(), "graph-tools-degraded-direct-"));
+    const ts = createGraphToolSet({ stateDir });
+    const { graph_id } = ts.graph_create({ name: "degraded-direct" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "agent-a", prompt: "pA" });
+    new GraphEventRecorder(stateDir).notificationDegraded(graph_id, "terminal");
+
+    const summary = ts.graph_status({ graph_id });
+    expect(summary).toContain(
+      "⚠ notification degraded: terminal notification could not reach the orchestrator (no emperor session resolved)",
+    );
+
+    const json = JSON.parse(
+      ts.graph_status({ graph_id, format: "json" }),
+    ) as Record<string, unknown>;
+    expect(json.notification_degraded).toBe(true);
+    expect(json.notification_degraded_statuses).toEqual(["terminal"]);
   });
 });

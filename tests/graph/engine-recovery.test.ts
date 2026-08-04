@@ -227,10 +227,41 @@ describe("mapDispatchStatusToSignal", () => {
     expect(mapDispatchStatusToSignal("cancelled")).toBeNull();
   });
 
-  it("non-terminal statuses → null", () => {
+  it("running / pending → null (non-terminal statuses)", () => {
     expect(mapDispatchStatusToSignal("running")).toBeNull();
     expect(mapDispatchStatusToSignal("pending")).toBeNull();
-    expect(mapDispatchStatusToSignal("awaiting_approval")).toBeNull();
+  });
+
+  it("HITL pause statuses → pausing need_approval signal (F1 bridge)", () => {
+    // The completion evaluator pauses a task for a human decision and delivers
+    // the HITL signal type (awaiting_approval is the task's status; the others
+    // are the session-ledger signal types) to the engine's onTaskTerminated
+    // listener. Each must map to the engine's pausing `need_approval` signal so
+    // subscribeTaskTermination's `if (!sig) return;` never drops it.
+    expect(mapDispatchStatusToSignal("awaiting_approval")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "awaiting_approval" },
+    });
+    expect(mapDispatchStatusToSignal("need_approval")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "need_approval" },
+    });
+    expect(mapDispatchStatusToSignal("blocked")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "blocked" },
+    });
+    expect(mapDispatchStatusToSignal("need_clarification")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "need_clarification" },
+    });
+  });
+
+  it("HITL status → need_approval signal carries the task id when a task is present", () => {
+    const task = makeTask("t-hitl", "awaiting_approval");
+    expect(mapDispatchStatusToSignal("awaiting_approval", task)).toEqual({
+      type: "need_approval",
+      payload: { hitl: "awaiting_approval", taskId: "t-hitl" },
+    });
   });
 });
 
@@ -276,6 +307,18 @@ describe("subscribeTaskTermination", () => {
     const { fire, emitted } = subscribe(NodeStatus.Running);
     fire("completed");
     expect(emitted).toEqual([["A", "answer", { __inferred: true }]]);
+  });
+
+  it("emits a need_approval signal (NOT dropped) when the listener fires a HITL status (F1)", () => {
+    // Before F1, a HITL pause status mapped to null and `if (!sig) return;`
+    // silently dropped it — the node stayed `running` forever and [GRAPH
+    // BLOCKED] never fired. Now the listener must emit the pausing
+    // `need_approval` signal (with the paused task id in the payload).
+    const { fire, emitted } = subscribe(NodeStatus.Running);
+    fire("need_approval");
+    expect(emitted).toEqual([
+      ["A", "need_approval", { hitl: "need_approval", taskId: "task-A" }],
+    ]);
   });
 
   it("does NOT emit for a node that is no longer running", () => {
