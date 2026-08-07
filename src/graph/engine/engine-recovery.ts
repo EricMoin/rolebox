@@ -547,6 +547,31 @@ export function rebuildFrontier(state: EngineState): string[] {
 // ── Hydrate (adopt a loaded persisted state in place) ────────────────────────
 
 /**
+ * Clear every node's `loopGroupId` that names a loop group the current graph
+ * declaration does not declare.
+ *
+ * Subtask-5 dangling-loop-group guard. A node whose `loopGroupId` points at a
+ * dropped group would otherwise be routed into {@link executeLoopStep} as a
+ * loop member, where a `revise_needed` is fabricated into a `converged`
+ * outcome — silently swallowed (no re-entry, no escalation, no traversal
+ * accounting; an unbounded loop or a lost revision) — and a convergence-tracker
+ * touch (`recordConvergenceOutput` / `resetConvergenceTracker`) throws on the
+ * missing group. The declaration is the source of truth for membership; a
+ * stale id is cleared so the node degrades to a plain non-loop node.
+ */
+function clearUndeclaredLoopGroupIds(state: EngineState): void {
+  const declared = new Set<string>();
+  for (const group of state.graphDeclaration.loop_groups ?? []) {
+    declared.add(group.id);
+  }
+  for (const node of state.nodes.values()) {
+    if (node.loopGroupId !== undefined && !declared.has(node.loopGroupId)) {
+      node.loopGroupId = undefined;
+    }
+  }
+}
+
+/**
  * Copy a loaded {@link EngineState} (from `engine-persistence.load`) into the
  * live state object the {@link AdvanceEngine} already references. Persistence
  * always saved this very object, so the loaded content is semantically
@@ -563,6 +588,13 @@ export function hydrateEngineState(
   target.nodes = source.nodes;
   target.edges = source.edges;
   target.loopGroups = source.loopGroups;
+  // Subtask-5 dangling-loop-group guard: a persisted state whose declaration
+  // dropped a loop group may still carry member nodes tagged with the stale
+  // loopGroupId (the node map is adopted wholesale). Clear any such tag — a
+  // dangling id would route the node into executeLoopStep, which fabricates
+  // `converged` for a revise_needed (silently swallowing the revision) or
+  // throws on the missing group's convergence tracker.
+  clearUndeclaredLoopGroupIds(target);
   target.frontier = source.frontier;
   target.budget = source.budget;
   // Deep-clone signalLedger (Map) to avoid shared-mutation between source/target.
@@ -665,6 +697,15 @@ export function adoptPriorNodeStates(
       removeFromFrontier(target, nodeId);
     }
   }
+
+  // Subtask-5 dangling-loop-group guard: the current declaration is the source
+  // of truth for membership. A node whose loopGroupId names a group the
+  // declaration no longer declares (dropped between the prior run and this
+  // rebuild) must not keep it — executeLoopStep would otherwise fabricate
+  // `converged` for a revise_needed signal (silently swallowing the revision —
+  // no re-entry, no escalation, no traversal accounting) or throw on the
+  // missing group's convergence tracker.
+  clearUndeclaredLoopGroupIds(target);
 
   // ── Post-adoption in-degree reconciliation ──────────────────────────────
   // H2: adoptPriorNodeStates overwrites provision()'s correct `Pending`

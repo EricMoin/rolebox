@@ -69,6 +69,7 @@ import {
   markReady,
   markRunning,
   markEscalated,
+  markTimedOut,
   markNodeBlocked,
   canTransitionNode,
 } from "./node-lifecycle.ts";
@@ -330,6 +331,22 @@ const TERMINATING_SEVERITY: readonly SignalType[] = [
   "answer",
 ];
 
+/**
+ * Detect the default throw-on-use dispatch stub (`index.ts:throwOnDispatch`).
+ * The stub carries the `isNoDispatchSeamStub` marker so `_dispatchNode` can
+ * rethrow ITS rejection — the "no dispatch seam" misconfiguration must surface
+ * to the caller of `run()` — while containing every genuine dispatch failure.
+ */
+function isNoDispatchSeamStub(port: NodeDispatchPort): boolean {
+  return (port as { isNoDispatchSeamStub?: boolean }).isNoDispatchSeamStub === true;
+}
+
+/** Minimal, dependency-free warning logger (no sub-logger import cycle). */
+function logWarn(message: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
 export type { GraphTerminalEvent } from "./engine-termination.ts";
 export type { TerminationContext } from "./engine-termination.ts";
 
@@ -485,7 +502,14 @@ export class AdvanceEngine {
   register(): () => void {
     const listener: NodeSignalEmittedListener = (nodeId, type, payload) => {
       // Recording already happened upstream (signalBridge.record step 1).
-      void this._advanceSignal(nodeId, type, payload);
+      // Subtask 2: the advance is contained (see _advanceSignal), but this
+      // promise is discarded fire-and-forget — attach a catch so a future
+      // regression can never surface an unhandled rejection from here.
+      void this._advanceSignal(nodeId, type, payload).catch((err) => {
+        logWarn(
+          `engine: signal-driven advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
+      });
     };
     return this.signalBridge.onNodeSignalEmitted(listener);
   }
@@ -525,8 +549,12 @@ export class AdvanceEngine {
       queuePendingCompletion(this.state, nodeId);
       return;
     }
-    return this._runCriticalSection(() =>
-      this._advance(nodeId, signalType, signalPayload),
+    return this._runCriticalSection(
+      () => this._advance(nodeId, signalType, signalPayload),
+      // Subtask 2: contain a throwing advance — log, escalate the affected
+      // node, and let the section resolve instead of rejecting (fire-and-forget
+      // advancement paths discard the promise with `void`).
+      (err) => this._containAdvanceError(nodeId, err),
     );
   }
 
@@ -538,7 +566,10 @@ export class AdvanceEngine {
    * section produced (e.g. a retry count). Existing `() => Promise<void>`
    * callers are unaffected.
    */
-  private async _runCriticalSection<T>(work: () => Promise<T>): Promise<T> {
+  private async _runCriticalSection<T>(
+    work: () => Promise<T>,
+    onError?: (err: unknown) => void,
+  ): Promise<T> {
     try {
       if (
         this.state.phase === EnginePhase.Idle &&
@@ -547,6 +578,34 @@ export class AdvanceEngine {
         transitionPhase(this.state, EnginePhase.Executing);
       }
       return await work();
+    } catch (err) {
+      // Subtask 2: a throwing critical-section body must never escape as a
+      // rejection — fire-and-forget advancement paths (the signalBridge
+      // listener in register(), the dispatch-termination callback, recovery's
+      // reconcile callbacks) discard the promise with `void`, so an escaped
+      // rejection would surface as an unhandled rejection. Log, hand the
+      // error to the caller's containment hook (escalate the affected node),
+      // and RESOLVE. Callers that must keep propagating — e.g. dispatchReady
+      // from run(), whose "no dispatch seam" rejection is a public contract
+      // (engine-index.test.ts "rejects run() with a clear error") — simply
+      // omit `onError`.
+      logWarn(
+        `engine: advancement critical section threw for graph "${this.state.graphId}": ${this._errorString(err)}`,
+      );
+      if (onError) {
+        try {
+          onError(err);
+        } catch (containErr) {
+          // containment must never rethrow out of the section
+          logWarn(
+            `engine: advancement error containment threw for graph "${this.state.graphId}": ${String(containErr)}`,
+          );
+        }
+        return undefined as T;
+      }
+      // No containment hook — propagate the rejection (e.g. dispatchReady from
+      // run(), whose "no dispatch seam" rejection is a public contract).
+      throw err;
     } finally {
       releaseAdvancingLock(this.state);
       // Two-tier persistence point (Q2 Option A): only persist when the state
@@ -601,12 +660,76 @@ export class AdvanceEngine {
   private async _drainDeferred(): Promise<void> {
     const drained = drainPendingCompletions(this.state);
     for (const nodeId of drained) {
-      const node = getNode(this.state, nodeId);
+      const node = this.state.nodes.get(nodeId);
+      if (!node) continue; // node vanished — skip (getNode would throw)
       const sig = this._latestTerminating(node);
       if (!sig) continue;
       // Lock is free here — each drained item re-acquires its own section.
-      await this._advanceSignal(nodeId, sig.type, sig.payload);
+      // Subtask 2: a drained advance must never reject the caller's critical
+      // section (a rejection here would override the section's resolution and
+      // surface as an unhandled rejection at the fire-and-forget call sites) —
+      // contain per node.
+      try {
+        await this._advanceSignal(nodeId, sig.type, sig.payload);
+      } catch (err) {
+        logWarn(
+          `engine: deferred-drain advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
+      }
     }
+  }
+
+  /**
+   * Contain a throwing advancement critical section for the affected node
+   * (subtask 2). Invoked via {@link _advanceSignal}'s onError hook so a
+   * `work()` exception — a throwing conditionResolver, a broken propagation
+   * invariant, a throwing recorder — surfaces as a terminal node failure
+   * instead of an unhandled rejection:
+   *
+   * - Escalate the node when its lifecycle permits (`running` / `ready` /
+   *   `pending` / `completed` / `blocked` → `escalate`), carrying the error
+   *   reason, and surface it through the completion seam like a live escalate.
+   * - Fall back to `timeout` when the node is stuck `running` and escalation
+   *   is somehow not legal (defense-in-depth for the "stuck running" case).
+   * - When the node is already terminal, just log — there is no transition
+   *   left to apply.
+   *
+   * Finally re-checks graph termination so the terminal transition (GRAPH
+   * COMPLETE / BLOCKED) is never silently dropped by the containment.
+   */
+  private _containAdvanceError(nodeId: string, err: unknown): void {
+    const node = this.state.nodes.get(nodeId);
+    const reason = `advance critical-section error: ${this._errorString(err)}`;
+    if (!node) {
+      logWarn(
+        `engine: cannot contain advancement error for unknown node "${nodeId}" in graph "${this.state.graphId}": ${reason}`,
+      );
+      return;
+    }
+    if (canTransitionNode(node.status, NodeStatus.Escalate)) {
+      markEscalated(this.state, node, reason);
+      removeFromFrontier(this.state, nodeId);
+      this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
+    } else if (canTransitionNode(node.status, NodeStatus.Timeout)) {
+      markTimedOut(this.state, node, reason);
+      this._notifyCompletion(node, "timeout", reason, NodeStatus.Timeout);
+    } else {
+      logWarn(
+        `engine: node "${nodeId}" in "${node.status}" after section error — cannot escalate (graph "${this.state.graphId}"): ${reason}`,
+      );
+    }
+    try {
+      this._checkTermination();
+    } catch (termErr) {
+      logWarn(
+        `engine: termination re-check after containment threw for graph "${this.state.graphId}": ${this._errorString(termErr)}`,
+      );
+    }
+  }
+
+  /** Best-effort error message from an unknown throw value. */
+  private _errorString(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
   }
 
   // ── Advancement core ──────────────────────────────────────────────────────
@@ -823,9 +946,28 @@ export class AdvanceEngine {
     const cb = this.onNodeCompletion;
     if (cb) {
       try {
-        cb(event);
-      } catch {
+        const ret = cb(event) as unknown;
+        // Subtask 2: the seam is typed `() => void`, but real notifiers
+        // (graph-notify.ts createGraphNotifier) return a promise — an async
+        // throw / rejection would otherwise surface as an unhandled rejection
+        // at the fire-and-forget advancement paths. Contain sync throws
+        // (catch below) AND async rejections (catch on the thenable).
+        if (
+          ret !== null &&
+          ret !== undefined &&
+          typeof (ret as PromiseLike<unknown>).then === "function"
+        ) {
+          void (ret as PromiseLike<unknown>).then(undefined, (e: unknown) => {
+            logWarn(
+              `engine: node-completion notifier rejected for node "${node.nodeId}" in graph "${this.state.graphId}": ${this._errorString(e)}`,
+            );
+          });
+        }
+      } catch (err) {
         // never let a notifier failure break graph advancement
+        logWarn(
+          `engine: node-completion notifier threw for node "${node.nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
       }
     }
     // Write-side durable log: record the terminal transition alongside the
@@ -1002,11 +1144,33 @@ export class AdvanceEngine {
     // `startedAt` was set by `markRunning`). Total — never breaks dispatch.
     this.graphEvents?.nodeDispatched(state.graphId, node.nodeId, node.agent, node.startedAt);
 
-    const task = await this.dispatchPort.executeNode(
-      node,
-      this.parentContext,
-      `graph node ${node.nodeId}`,
-    );
+    let task: DispatchTask;
+    try {
+      task = await this.dispatchPort.executeNode(
+        node,
+        this.parentContext,
+        `graph node ${node.nodeId}`,
+      );
+    } catch (err) {
+      // Preserve the "no dispatch seam" misconfiguration rejection: only the
+      // throwOnDispatch fallback stub (index.ts, marker-detected) rethrows so
+      // run() still rejects with /no dispatch seam/. All genuine dispatch
+      // failures are contained below.
+      if (isNoDispatchSeamStub(this.dispatchPort)) throw err;
+      const reason = `node dispatch failed: ${String(err)}`;
+      logWarn(
+        `engine: dispatch failed for node "${node.nodeId}" in graph "${this.state.graphId}": ${reason}`,
+      );
+      // Orphan-path parity (engine-recovery.ts:469-478): mark the node terminal
+      // (timeout) + record an escalate ledger signal so downstream joins fail
+      // fast via the deferred-drain re-advance (race-guard pattern at
+      // engine-advance.ts:1110-1111).
+      markTimedOut(this.state, node, reason);
+      recordSignalToLedger(this.state, node.nodeId, "escalate", { error: reason }, "race_guard");
+      queuePendingCompletion(this.state, node.nodeId);
+      this.notifyNodeTimeout(node.nodeId); // completion seam parity (index.ts:782-784)
+      return; // CONTINUE dispatching the remaining frontier — do not abort the pass
+    }
     node.dispatchTaskId = task.id;
     node.dispatchSessionId = task.sessionId;
     markDirty(state);
@@ -1040,8 +1204,16 @@ export class AdvanceEngine {
         // signalBridge.record as the exclusive ledger-write path (step 1) and
         // additionally routes the pausing `need_approval` through
         // `_advanceSignal` → the running → blocked transition. Fire-and-forget
-        // (void), matching the record-only callback's semantics today.
-        void this.onNodeSignalEmitted(nid, type, payload, "dispatch");
+        // (void), matching the record-only callback's semantics today —
+        // Subtask 2: attach a catch so a contained-advance regression can
+        // never surface an unhandled rejection from this fire-and-forget site.
+        void this.onNodeSignalEmitted(nid, type, payload, "dispatch").catch(
+          (err) => {
+            logWarn(
+              `engine: dispatch-termination advance failed for node "${nid}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+            );
+          },
+        );
       },
     );
     if (terminationCb) {
@@ -1193,7 +1365,18 @@ export class AdvanceEngine {
         // (i) a never-activatable on_condition edge.
         if (!edge.condition || !this.conditionResolver) continue;
         if (!source) return false; // missing source — cannot verify dead-end
-        if (!this.conditionResolver(edge.condition, source)) continue;
+        try {
+          if (!this.conditionResolver(edge.condition, source)) continue;
+        } catch (err) {
+          // Subtask 2: a throwing resolver can never activate its edge — the
+          // pending node IS dead-ended (the edge is provably never-firing).
+          // Without this the F3 guard could not quiesce a graph whose resolver
+          // already aborted advancement, leaving it hung in `executing`.
+          logWarn(
+            `engine: conditionResolver threw for condition "${edge.condition}" (node "${nodeId}", graph "${this.state.graphId}"): ${this._errorString(err)}`,
+          );
+          continue;
+        }
         return false; // could still activate → not dead-ended
       }
       if (edge.type === "on_signal") {

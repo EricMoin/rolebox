@@ -32,6 +32,32 @@ class FakeDispatch implements NodeDispatchPort {
 }
 
 /**
+ * Dispatch seam whose `executeNode` rejects — simulates a genuine dispatch
+ * failure (not the "no dispatch seam" misconfiguration stub). By default
+ * EVERY dispatch rejects; when a `rejectNodeIds` set is supplied, only those
+ * node ids reject and every other node dispatches successfully (mixed
+ * multi-root frontier).
+ */
+class RejectingDispatch implements NodeDispatchPort {
+  calls: { nodeId: string; agent: string; prompt: string }[] = [];
+
+  constructor(private readonly rejectNodeIds?: Set<string>) {}
+
+  executeNode(
+    node: NodeRuntimeState,
+    _parentContext: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    this.calls.push({ nodeId: node.nodeId, agent: node.agent, prompt: node.prompt });
+    const rejects =
+      this.rejectNodeIds === undefined || this.rejectNodeIds.has(node.nodeId);
+    if (rejects) {
+      return Promise.reject(new Error("simulated dispatch failure"));
+    }
+    return Promise.resolve(makeTask(node.nodeId));
+  }
+}
+
+/**
  * Dispatch seam that completes every dispatched task (via a microtask-bound
  * `setTimeout`) and fires its `onTaskTerminated` listener — drives real signal
  * advancement through the public engine API so the per-node signal ledger
@@ -255,6 +281,46 @@ describe("engine.run()", () => {
     expect(fake.calls.map((c) => c.nodeId).sort()).toEqual(["R1", "R2"]);
     expect(engine.status().phase).toBe(EnginePhase.Executing);
     expect(engine.status().nodes.get("S")!.status).toBe(NodeStatus.Pending);
+  });
+
+  it("contains a dispatch failure: the affected node is terminal, never running without a dispatchTaskId", async () => {
+    const rejecting = new RejectingDispatch();
+    const engine = createEngine(singleNodeGraph(), { dispatch: rejecting });
+
+    // The failure must be contained — run() resolves instead of throwing.
+    await engine.run();
+
+    const node = engine.status().nodes.get("A")!;
+    expect([NodeStatus.Timeout, NodeStatus.Escalate]).toContain(node.status);
+    expect(node.status).not.toBe(NodeStatus.Running);
+    expect(node.dispatchTaskId).toBeUndefined();
+    expect(node.errorReason).toMatch(/dispatch failed/);
+  });
+
+  it("keeps dispatching the remaining ready nodes after one node's dispatch failure", async () => {
+    const rejecting = new RejectingDispatch(new Set(["R1"]));
+    const graph: GraphDeclaration = {
+      version: 2,
+      name: "two-roots-no-downstream",
+      nodes: [
+        { id: "R1", agent: "a1", prompt: "r1" },
+        { id: "R2", agent: "a2", prompt: "r2" },
+      ],
+      edges: [],
+    };
+    const engine = createEngine(graph, { dispatch: rejecting });
+
+    await engine.run(); // resolves — R1's failure does not abort the pass
+
+    // Both roots were dispatched, in frontier (declaration) order.
+    expect(rejecting.calls.map((c) => c.nodeId)).toEqual(["R1", "R2"]);
+
+    const r1 = engine.status().nodes.get("R1")!;
+    const r2 = engine.status().nodes.get("R2")!;
+    expect([NodeStatus.Timeout, NodeStatus.Escalate]).toContain(r1.status);
+    expect(r1.dispatchTaskId).toBeUndefined();
+    expect(r2.status).toBe(NodeStatus.Running);
+    expect(r2.dispatchTaskId).toBeDefined();
   });
 
   it("auto-provisions when run() is called without an explicit provision()", async () => {

@@ -1142,6 +1142,104 @@ describe("M10 — terminalNotified hydration & adoption", () => {
   });
 });
 
+// ── Subtask 5: dangling loop-group adoption/hydration guard ─────────────────
+
+describe("subtask 5 — dangling loopGroupId cleared when the declaration drops the group", () => {
+  function loopDropPair(): { prior: EngineState; target: EngineState } {
+    const withLoop: GraphDeclaration = {
+      version: 2,
+      name: "loop-drop",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "B", to: "A", type: "always" }],
+      loop_groups: [{ id: "lg", nodes: ["A", "B"], max_traversals: 3 }],
+    };
+    const withoutLoop: GraphDeclaration = {
+      version: 2,
+      name: "loop-drop",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "B", to: "A", type: "always" }],
+    };
+    const prior = buildState(withLoop, "adopt-dangle");
+    // The prior run made real progress and carried the loop tag.
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+    const target = buildState(withoutLoop, "adopt-dangle");
+    return { prior, target };
+  }
+
+  it("adoptPriorNodeStates clears the adopted node's loopGroupId when the declaration dropped the group", () => {
+    const { prior, target } = loopDropPair();
+    // Fresh provision from the group-less declaration leaves no tag.
+    expect(prior.nodes.get("A")!.loopGroupId).toBe("lg");
+    expect(target.nodes.get("A")!.loopGroupId).toBeUndefined();
+    // Simulate the stale tag adoptPrior must heal (a prior/persisted copy that
+    // carried the group id over a rebuild whose declaration dropped the group).
+    target.nodes.get("A")!.loopGroupId = "lg";
+
+    adoptPriorNodeStates(target, prior);
+
+    // The dangling tag is cleared; the node degrades to a plain non-loop node.
+    expect(target.nodes.get("A")!.loopGroupId).toBeUndefined();
+    expect(target.nodes.get("B")!.loopGroupId).toBeUndefined();
+    // The runtime map has no group either (fresh provision from the drop).
+    expect(target.loopGroups.has("lg")).toBe(false);
+    // Legitimate prior progress is still adopted.
+    expect(target.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+  });
+
+  it("adoptPriorNodeStates preserves loopGroupId when the declaration still declares the group", () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "loop-keep",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+      loop_groups: [{ id: "lg", nodes: ["A"], max_traversals: 3 }],
+    };
+    const prior = buildState(decl, "adopt-keep");
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+    const target = buildState(decl, "adopt-keep");
+    adoptPriorNodeStates(target, prior);
+    expect(target.nodes.get("A")!.loopGroupId).toBe("lg");
+  });
+
+  it("hydrateEngineState clears a loopGroupId whose group the persisted declaration dropped", () => {
+    const droppedDecl: GraphDeclaration = {
+      version: 2,
+      name: "hyd-dangle",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+    };
+    const source = buildState(droppedDecl, "hyd-dangle");
+    // A persisted node tagged with a group the persisted declaration no longer
+    // declares (e.g. saved before a declaration mutation that dropped the group).
+    source.nodes.get("A")!.loopGroupId = "lg";
+
+    const target = createEngineState(droppedDecl, "hyd-dangle");
+    hydrateEngineState(target, source);
+
+    expect(target.nodes.get("A")!.loopGroupId).toBeUndefined();
+  });
+
+  it("hydrateEngineState preserves loopGroupId when the persisted declaration declares the group", () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "hyd-keep",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+      loop_groups: [{ id: "lg", nodes: ["A"], max_traversals: 3 }],
+    };
+    const source = buildState(decl, "hyd-keep");
+    const target = createEngineState(decl, "hyd-keep");
+    hydrateEngineState(target, source);
+    expect(target.nodes.get("A")!.loopGroupId).toBe("lg");
+  });
+});
+
 // ── M3: NodeStalenessWatcher (manually tickable — no unbounded interval) ────
 
 describe("NodeStalenessWatcher", () => {

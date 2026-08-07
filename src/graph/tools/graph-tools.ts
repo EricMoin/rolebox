@@ -782,8 +782,16 @@ export class GraphToolSet {
         // Fire-and-forget is unacceptable here (constructors are sync), but
         // adoption's async half is only the dispatch reconcile — which is
         // safe to run detached: it never re-dispatches, only re-attaches /
-        // re-emits already-finished work.
-        void runtime.adoptPrior(priorState);
+        // re-emits already-finished work. Subtask 2: a throwing adoptPrior
+        // must be contained (logged) — never an unhandled rejection from this
+        // fire-and-forget commit site.
+        void runtime.adoptPrior(priorState).catch((err: unknown) => {
+          log.warn(
+            `graph-tools: adoptPrior failed for graph "${graphId}": ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
       }
     }
     // Monitor M4: dispose the PRIOR runtime before replacing the registry entry
@@ -1135,39 +1143,61 @@ export class GraphToolSet {
         : {}),
     });
 
-    // Idempotent re-run: adopt the prior runtime's per-node progress into the
-    // fresh engine BEFORE dispatching. Without this, a second `graph_run` on
-    // the same graph (a common pattern when a model runs each node with its
-    // own graph_run call) rebuilds every node as `ready`/`pending` and
-    // re-dispatches nodes that already completed or are still running.
-    const priorState = entry.runtime.status();
-    const priorHasProgress = [...priorState.nodes.values()].some(
-      (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
-    );
-    if (priorHasProgress || priorState.phase !== EnginePhase.Idle) {
-      await runtime.adoptPrior(priorState, { replayAnswers: true });
-    }
-
-    // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is supplied
-    // with `retry:true` or `modify_prompt`, re-open and re-dispatch that node on
-    // the just-run runtime instead of reporting it as pending. This backs the
-    // design's `dispatch_retry` replacement (MERGE row 4).
-    //
-    // B1 (ordering bug fix): skip `runtime.run()` on the retry path. After
-    // `adoptPrior` loads previously-terminal nodes, `run()` sees a quiescent
-    // graph, fires a premature COMPLETE notification, then `retryNode` re-opens
-    // the phase to `executing` — the stale notification lands after the retry
-    // is already running. `adoptPrior(replayAnswers)` already dispatches nodes
-    // made ready by answer replay, and `retryNode` handles the retry target's
-    // dispatch + termination check, so nothing is left undispatched by skipping
-    // `run()`.
+    // Subtask 3 (failure atomicity): the adopt/retry/run block is the ONLY place
+    // a fresh engine can fail mid-flight (a throwing dispatch seam, an adoptPrior
+    // rejection, a retryNode failure). A throw here used to skip
+    // `entry.runtime.dispose?.()` + `registry.set(...)` below — leaking the
+    // partially-dispatched NEW engine (its registered `onTaskTerminated` dispatch
+    // listeners and wired completion/terminal notifiers keep firing ghost
+    // [GRAPH NODE COMPLETED] / [GRAPH COMPLETE] reminders for the failed run)
+    // while the registry kept the stale OLD runtime. The catch disposes the new
+    // runtime (its dispatch listeners unregistered via the M4 dispose path), the
+    // prior registry entry is left untouched (a retry re-dispatches from a
+    // consistent state), and the actionable error is rethrown. Invariants: no
+    // node is dispatched twice within a run, and no ghost terminal notification
+    // fires for a failed run.
     let retryReport: Awaited<ReturnType<EngineRuntime["retryNode"]>> | undefined;
-    if (args.node_id && (args.retry || args.modify_prompt)) {
-      retryReport = await runtime.retryNode(args.node_id, {
-        modifyPrompt: args.modify_prompt,
-      });
-    } else {
-      await runtime.run();
+    try {
+      // Idempotent re-run: adopt the prior runtime's per-node progress into the
+      // fresh engine BEFORE dispatching. Without this, a second `graph_run` on
+      // the same graph (a common pattern when a model runs each node with its
+      // own graph_run call) rebuilds every node as `ready`/`pending` and
+      // re-dispatches nodes that already completed or are still running.
+      const priorState = entry.runtime.status();
+      const priorHasProgress = [...priorState.nodes.values()].some(
+        (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
+      );
+      if (priorHasProgress || priorState.phase !== EnginePhase.Idle) {
+        await runtime.adoptPrior(priorState, { replayAnswers: true });
+      }
+
+      // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is
+      // supplied with `retry:true` or `modify_prompt`, re-open and re-dispatch
+      // that node on the just-run runtime instead of reporting it as pending.
+      // This backs the design's `dispatch_retry` replacement (MERGE row 4).
+      //
+      // B1 (ordering bug fix): skip `runtime.run()` on the retry path. After
+      // `adoptPrior` loads previously-terminal nodes, `run()` sees a quiescent
+      // graph, fires a premature COMPLETE notification, then `retryNode`
+      // re-opens the phase to `executing` — the stale notification lands after
+      // the retry is already running. `adoptPrior(replayAnswers)` already
+      // dispatches nodes made ready by answer replay, and `retryNode` handles
+      // the retry target's dispatch + termination check, so nothing is left
+      // undispatched by skipping `run()`.
+      if (args.node_id && (args.retry || args.modify_prompt)) {
+        retryReport = await runtime.retryNode(args.node_id, {
+          modifyPrompt: args.modify_prompt,
+        });
+      } else {
+        await runtime.run();
+      }
+    } catch (err) {
+      // Failure atomicity: the new engine never reaches the registry. Dispose
+      // it now so its registered dispatch listeners are unregistered (no ghost
+      // completion can fire for the failed run); the prior registry entry is
+      // left untouched and remains the consistent runtime for any retry.
+      runtime.dispose();
+      throw err;
     }
 
     // Update the registry runtime so subsequent graph_status reads live state,

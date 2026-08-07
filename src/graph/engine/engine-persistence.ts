@@ -520,7 +520,10 @@ export class EnginePersistence {
    * Returns `null` (clean start / caller should provision a fresh engine) when:
    * - the state file does not exist (ENOENT);
    * - the JSON is corrupt / not an object;
-   * - the schema version does not match `ENGINE_PERSISTENCE_VERSION`.
+   * - the schema version does not match `ENGINE_PERSISTENCE_VERSION`;
+   * - the file is structurally invalid / missing a required field (total
+   *   hydration — this method NEVER throws, so `recover()` can rely on `null`
+   *   meaning "no valid persisted state").
    */
   load(graphId: string): EngineState | null {
     const filePath = engineStatePath(this.directory, graphId);
@@ -531,7 +534,14 @@ export class EnginePersistence {
       // ENOENT — first run / never persisted. Clean start.
       return null;
     }
-    return loadEngineStateFromJson(raw, filePath);
+    try {
+      return loadEngineStateFromJson(raw, filePath);
+    } catch {
+      // Defensive containment: hydration must never throw past `load()`. A
+      // structurally invalid file surfaces as `null` (clean start), never as a
+      // crash that would make the graph permanently unrecoverable.
+      return null;
+    }
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -585,6 +595,15 @@ export class EnginePersistence {
  * or `null` when it is not a valid version-`2` engine state file. Shared by
  * {@link EnginePersistence.load} so the version/malformation gate is testable
  * without touching the filesystem.
+ *
+ * **Total hydration**: this function NEVER throws. A file that is corrupt JSON,
+ * a schema-version mismatch, missing a required field, or structurally invalid
+ * at any deeper level returns `null` (the documented corrupt-to-null contract
+ * in the class header — `load()` doc at `EnginePersistence.load`). A
+ * parseable-but-field-incomplete file must never make recovery throw, because
+ * that would leave the graph permanently unrecoverable (re-failing every
+ * restart). Missing required fields are treated as CORRUPT, not as a
+ * migration point — `ENGINE_PERSISTENCE_VERSION` stays `2`.
  */
 export function loadEngineStateFromJson(
   raw: string,
@@ -602,7 +621,36 @@ export function loadEngineStateFromJson(
   if (file.version !== ENGINE_PERSISTENCE_VERSION) return null;
   if (typeof file.graphId !== "string") return null;
   if (typeof file.phase !== "string") return null;
-  return deserializeEngineState(file as EnginePersistenceFile);
+  // Required-field gate — a parseable-but-structurally-incomplete file is
+  // treated as corrupt. Absent fields would make deserializeEngineState throw
+  // on Object.entries / array-spread (see the module finding); gating presence
+  // here keeps the corrupt-to-null contract total (never throws).
+  if (!hasRequiredShape(file)) return null;
+  try {
+    return deserializeEngineState(file as EnginePersistenceFile);
+  } catch {
+    // Deep structural invalidity (malformed nested shapes) is still corrupt —
+    // contained to `null`, never thrown past the loader.
+    return null;
+  }
+}
+
+/** Structural presence gate for the required fields of a v2 engine-state file. */
+function hasRequiredShape(file: Partial<EnginePersistenceFile>): boolean {
+  return (
+    isPlainObject(file.nodes) &&
+    isPlainObject(file.edges) &&
+    isPlainObject(file.loopGroups) &&
+    isPlainObject(file.signalLedger) &&
+    Array.isArray(file.frontier) &&
+    Array.isArray(file.pendingCompletions) &&
+    isPlainObject(file.budget)
+  );
+}
+
+/** A JSON object (non-null, non-array). */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 /** Minimal, dependency-free warning logger (no createSubLogger import cycle). */

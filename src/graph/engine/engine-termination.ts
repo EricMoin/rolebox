@@ -316,8 +316,38 @@ function fireGraphTerminal(
     isBlocked,
   };
   try {
-    cb(event);
-  } catch {
+    const ret = cb(event) as unknown;
+    // Subtask 2: the seam is typed `() => void`, but real terminal notifiers
+    // (graph-notify.ts createGraphTerminalNotifier) return a promise — an
+    // async throw / rejection would otherwise surface as an unhandled
+    // rejection at the fire-and-forget advancement paths. Contain sync throws
+    // (catch below) AND async rejections (catch on the thenable).
+    if (
+      ret !== null &&
+      ret !== undefined &&
+      typeof (ret as PromiseLike<unknown>).then === "function"
+    ) {
+      void (ret as PromiseLike<unknown>).then(undefined, (e: unknown) => {
+        logWarn(
+          `graph-terminal: notifier rejected for graph "${state.graphId}": ${errorString(e)}`,
+        );
+      });
+    }
+  } catch (err) {
     // Never let a notifier failure break graph advancement.
+    logWarn(
+      `graph-terminal: notifier threw for graph "${state.graphId}": ${errorString(err)}`,
+    );
   }
+}
+
+/** Minimal, dependency-free warning logger (no sub-logger import cycle). */
+function logWarn(message: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
+
+/** Best-effort error message from an unknown throw value. */
+function errorString(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

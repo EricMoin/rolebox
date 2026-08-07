@@ -496,7 +496,12 @@ function snapshotEngineState(state: EngineState): EngineState {
  * `provision()`/`status()` are usable for pure inspection), but `run()` has no
  * way to launch a node — it rejects with an actionable error.
  */
-const throwOnDispatch: NodeDispatchPort = {
+const throwOnDispatch: NodeDispatchPort & { isNoDispatchSeamStub?: boolean } = {
+  // Marker consumed by `isNoDispatchSeamStub` (engine-advance.ts) so
+  // `_dispatchNode` can rethrow THIS stub's rejection — the "no dispatch
+  // seam" misconfiguration surfaces to the `run()` caller — while containing
+  // every genuine dispatch failure.
+  isNoDispatchSeamStub: true,
   executeNode(): Promise<DispatchTask> {
     return Promise.reject(
       new Error(
@@ -629,12 +634,19 @@ class EngineRuntimeImpl implements EngineRuntime {
    */
   private onStaleNodeTimeout(nodeId: string, errorReason: string): void {
     this.advance.notifyNodeTimeout(nodeId);
+    // Subtask 2: fire-and-forget — the escalate advance is contained inside
+    // the advance engine, but attach a catch so a regression can never surface
+    // an unhandled rejection from this timer-driven site.
     void this.advance.onNodeSignalEmitted(
       nodeId,
       "escalate",
       { error: errorReason },
       "recovery",
-    );
+    ).catch((err) => {
+      logWarn(
+        `engine: stale-node escalate advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+      );
+    });
   }
 
   /**
@@ -709,7 +721,20 @@ class EngineRuntimeImpl implements EngineRuntime {
    */
   async recover(): Promise<void> {
     if (!this.persistence) return; // no persistence → nothing to recover
-    const loaded = this.persistence.load(this.state.graphId);
+    // Total hydration: `load()` never throws (corrupt / structurally-invalid
+    // files return `null`), but the load is contained anyway so a bad state
+    // file can never escape recovery as a throw — a permanently unrecoverable
+    // graph would otherwise re-fail on every restart. A load failure degrades
+    // to a clean no-op (fresh start), matching the corrupt-to-null contract.
+    let loaded: EngineState | null;
+    try {
+      loaded = this.persistence.load(this.state.graphId);
+    } catch (err) {
+      logWarn(
+        `engine-recover: state load failed for graph "${this.state.graphId}": ${String(err)}`,
+      );
+      return;
+    }
     if (!loaded) return; // clean start (first run / version mismatch)
 
     // Adopt the persisted state in place; clear the crashed process's stale
@@ -758,7 +783,16 @@ class EngineRuntimeImpl implements EngineRuntime {
           // `need_approval` signal) reaches the running → blocked transition
           // instead of being recorded-and-dropped by signalBridge.record (which
           // only fires terminating-signal listeners).
-          void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery");
+          // Subtask 2: fire-and-forget — the advance is contained, but attach
+          // a catch so a regression can never surface an unhandled rejection
+          // from this recovery reconcile site.
+          void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery").catch(
+            (err) => {
+              logWarn(
+                `engine-recover: reconcile emitSignal advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+              );
+            },
+          );
         },
       );
     } catch (err) {
@@ -826,7 +860,16 @@ class EngineRuntimeImpl implements EngineRuntime {
             // `need_approval` signal) reaches the running → blocked transition
             // instead of being recorded-and-dropped by signalBridge.record
             // (which only fires terminating-signal listeners).
-            void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery");
+            // Subtask 2: fire-and-forget — attach a catch so a regression can
+            // never surface an unhandled rejection from this adopt reconcile
+            // site.
+            void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery").catch(
+              (err) => {
+                logWarn(
+                  `engine-adopt: reconcile emitSignal advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+                );
+              },
+            );
           },
         );
         for (const id of report.timedOut) {

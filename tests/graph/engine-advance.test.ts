@@ -631,3 +631,117 @@ describe("dispatch HITL termination (F1 bridge)", () => {
     expect(terminal).toBeUndefined();
   });
 });
+
+// ── Subtask 2: fire-and-forget advancement containment ──────────────────────
+
+/**
+ * Install a capturing `unhandledRejection` listener. Bun delivers unhandled
+ * rejections to this listener (instead of crashing) so a test can assert none
+ * were produced. `detach` removes it — ALWAYS detach in a finally.
+ */
+function captureUnhandledRejections(): { list: unknown[]; detach: () => void } {
+  const list: unknown[] = [];
+  const handler = (reason: unknown) => {
+    list.push(reason);
+  };
+  process.on("unhandledRejection", handler);
+  return {
+    list,
+    detach: () => {
+      process.off("unhandledRejection", handler);
+    },
+  };
+}
+
+describe("subtask 2: fire-and-forget advancement containment", () => {
+  /** A →(on_condition "boom")→ B — the resolver is evaluated on A's answer. */
+  function throwingResolverGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "throwing-resolver",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "A", to: "B", type: "on_condition", condition: "boom" }],
+    };
+  }
+
+  it("contains a throwing notifier + conditionResolver in a signal-driven advance: no unhandled rejection, graph reaches terminal phase", async () => {
+    const state = createEngineState(throwingResolverGraph(), "g-boom");
+    provision(state);
+    const bridge = new SignalBridge();
+    const fake = new FakeDispatch();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: fake,
+      // A broken resolver must never crash the process or hang the graph —
+      // it aborts the forward pass, the section containment escalates the
+      // affected node, and the deadlock guard quiesces the downstream.
+      conditionResolver: () => {
+        throw new Error("resolver boom");
+      },
+      // An ASYNC throwing notifier rejects its returned promise — the seam is
+      // typed `() => void`, so the engine must contain the async rejection
+      // explicitly (a sync throw was already covered by "a throwing consumer
+      // does not corrupt the advancing critical section" above).
+      onNodeCompletion: async () => {
+        throw new Error("notifier boom");
+      },
+    });
+
+    const { list, detach } = captureUnhandledRejections();
+    try {
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "answer", "ok");
+      // Drain any rejection-handler microtasks attached by the containment.
+      await tick();
+      await tick();
+
+      // The two throwing seams produced NO unhandled rejection.
+      expect(list).toEqual([]);
+      // The affected node escalated (the failure is visible, not dropped).
+      expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
+      expect(state.nodes.get("A")!.errorReason).toMatch(/critical-section error/);
+      // The pending downstream was dead-ended (its only edge's resolver can
+      // never fire) → the deadlock guard escalated it → the graph quiesced.
+      expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+      // The graph still reached a terminal phase.
+      expect(state.phase).toBe(EnginePhase.Complete);
+      expect(state.advancingLock).toBe(false);
+    } finally {
+      detach();
+    }
+  });
+
+  it("contains an async-throwing notifier during escalate propagation (no unhandled rejection)", async () => {
+    const state = createEngineState(standaloneNode("A", "a1"), "g-notify-escalate");
+    provision(state);
+    const bridge = new SignalBridge();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: new FakeDispatch(),
+      onNodeCompletion: async () => {
+        throw new Error("notifier boom");
+      },
+    });
+
+    const { list, detach } = captureUnhandledRejections();
+    try {
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom" });
+      await tick();
+      await tick();
+
+      expect(list).toEqual([]);
+      // The escalation itself still landed (the notifier is observability,
+      // not a control path).
+      expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
+      expect(state.phase).toBe(EnginePhase.Complete);
+    } finally {
+      detach();
+    }
+  });
+});

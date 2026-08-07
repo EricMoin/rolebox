@@ -1040,3 +1040,98 @@ describe("graph-notify degradation (F6)", () => {
     expect(json.notification_degraded_statuses).toEqual(["terminal"]);
   });
 });
+
+// ── Subtask 2: commit-path adoptPrior containment ───────────────────────────
+
+/**
+ * Install a capturing `unhandledRejection` listener. Bun delivers unhandled
+ * rejections to this listener (instead of crashing) so a test can assert none
+ * were produced. `detach` removes it — ALWAYS detach in a finally.
+ */
+function captureUnhandledRejections(): { list: unknown[]; detach: () => void } {
+  const list: unknown[] = [];
+  const handler = (reason: unknown) => {
+    list.push(reason);
+  };
+  process.on("unhandledRejection", handler);
+  return {
+    list,
+    detach: () => {
+      process.off("unhandledRejection", handler);
+    },
+  };
+}
+
+describe("subtask 2: commit-path adoptPrior containment", () => {
+  /** Dispatch seam whose tasks stay running — establishes real progress. */
+  class IdleDispatch implements NodeDispatchPort {
+    executeNode(
+      node: NodeRuntimeState,
+      _ctx: DispatchParentContext,
+    ): Promise<DispatchTask> {
+      return Promise.resolve({
+        id: `task-${node.nodeId}`,
+        sessionId: `sess-${node.nodeId}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      });
+    }
+  }
+
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  it("contains a throwing adoptPrior in the commit path (logged, no unhandled rejection)", async () => {
+    const ts = new GraphToolSet({ dispatch: new IdleDispatch() });
+    const { graph_id } = ts.graph_create({ name: "adopt-throw" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a1", prompt: "pA" });
+
+    // Establish real progress: graph_run dispatches A → it stays `running`,
+    // so the next construction commit sees `hasProgress` and calls the fresh
+    // runtime's adoptPrior with the prior state.
+    await ts.graph_run({ graph_id });
+
+    // Force the freshly-built engine's adoptPrior to reject. The commit path
+    // invokes it fire-and-forget (`void runtime.adoptPrior(...)`), so the
+    // rejection must be contained there — never an unhandled rejection.
+    const entry = ts["getEntry"](graph_id);
+    const proto = Object.getPrototypeOf(entry.runtime) as {
+      adoptPrior: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = proto.adoptPrior;
+    proto.adoptPrior = async () => {
+      throw new Error("adoptPrior boom");
+    };
+
+    const { list, detach } = captureUnhandledRejections();
+    const warnSpy = jest.spyOn(graphToolsLog, "warn");
+    warnSpy.mockClear();
+    try {
+      // Trigger commit: add_node rebuilds the engine and adopts prior progress.
+      ts.graph_add_node({ graph_id, id: "B", agent: "a2", prompt: "pB" });
+      await tick();
+      await tick();
+
+      // The throwing adoptPrior produced NO unhandled rejection...
+      expect(list).toEqual([]);
+      // ...and was logged (the failure is visible, not silently dropped).
+      const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("adoptPrior failed"))).toBe(true);
+      // The commit itself completed despite the adoption failure: the new
+      // declaration (with B) is live in the registry.
+      const after = ts["getEntry"](graph_id).declaration;
+      expect(after.nodes.some((n) => n.id === "B")).toBe(true);
+    } finally {
+      proto.adoptPrior = original;
+      warnSpy.mockRestore();
+      detach();
+      // Stop any started watcher/sweeper intervals on the live runtime.
+      ts["getEntry"](graph_id).runtime.dispose?.();
+    }
+  });
+});

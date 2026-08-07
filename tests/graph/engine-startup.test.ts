@@ -223,7 +223,50 @@ describe("recoverInterruptedGraphs", () => {
     );
   });
 
-  it("a recover() failure in one graph does not abort a healthy sibling", async () => {
+  it("(c2) a parseable-but-field-incomplete v2 file is reported in failed[] and does not abort a valid sibling", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    fake.setTask("task-A", "completed");
+    // Valid sibling first (creates the store dir + a structurally-complete v2
+    // file we can reuse as the corrupt base), then a field-incomplete file.
+    persistState(dir, "g-valid", singleNodeDecl("g-valid"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+    const stateDir = stateDirFor(dir);
+    const validFile = JSON.parse(
+      readFileSync(join(stateDir, "engine-g-valid.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    // Strip a required field (`nodes`): the file is valid JSON, passes the
+    // version gate, but is structurally incomplete — previously this made
+    // deserializeEngineState throw a TypeError and the graph permanently
+    // unrecoverable.
+    const { nodes: _nodes, ...incomplete } = validFile;
+    writeFileSync(
+      join(stateDir, "engine-incomplete.json"),
+      JSON.stringify(incomplete),
+      "utf-8",
+    );
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+    });
+
+    // The incomplete file is captured in failed[] (corrupt-to-null contract),
+    // and the valid sibling still recovers — the sweep never aborts.
+    expect(report.scanned).toBe(2);
+    expect(report.recovered).toBe(1);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0]).toContain("engine-incomplete.json");
+    expect(new EnginePersistence(dir).load("g-valid")!.phase).toBe(
+      EnginePhase.Complete,
+    );
+  });
+
+  it("contains a dispatch failure during recovery without aborting a healthy sibling", async () => {
     const dir = makeTmpDir();
     const fake = new FakeManager();
     // Healthy graph: its task completed during the window → clean resume.
@@ -233,7 +276,11 @@ describe("recoverInterruptedGraphs", () => {
       nodeStatus: NodeStatus.Running,
       taskId: "task-A",
     });
-    // Failing graph: a ready root whose launch throws mid-recovery.
+    // Failing graph: a ready root whose launch throws mid-recovery. The
+    // dispatch failure is CONTAINED inside the advancement critical section
+    // (dispatch-failure containment) — the node is timed out instead of the
+    // throw escaping `recover()`, so the graph still resumes and the healthy
+    // sibling is unaffected.
     persistState(
       dir,
       "g-throw",
@@ -248,10 +295,12 @@ describe("recoverInterruptedGraphs", () => {
     });
 
     expect(report.scanned).toBe(2);
-    expect(report.recovered).toBe(1); // g-ok recovered
-    expect(report.failed).toHaveLength(1);
-    expect(report.failed[0]).toContain("g-throw");
+    expect(report.recovered).toBe(2); // g-throw's failure is contained, not aborted
+    expect(report.failed).toHaveLength(0);
     expect(new EnginePersistence(dir).load("g-ok")!.phase).toBe(
+      EnginePhase.Complete,
+    );
+    expect(new EnginePersistence(dir).load("g-throw")!.phase).toBe(
       EnginePhase.Complete,
     );
   });

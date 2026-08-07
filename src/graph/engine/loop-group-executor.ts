@@ -260,7 +260,69 @@ export function executeLoopStep(
   cancelPort?: CancelDispatchPort,
 ): LoopStepReport {
   const groupId = node.loopGroupId;
-  if (!groupId || !state.loopGroups.has(groupId)) {
+  if (groupId && !state.loopGroups.has(groupId)) {
+    // ── dangling loop-group guard (subtask 5) ────────────────────────────
+    //
+    // The node carries a loopGroupId whose group the current declaration no
+    // longer declares (a stale id that survived adopt/hydrate, or a directly
+    // constructed state). Executing loop semantics here would corrupt the run:
+    //
+    // - a `revise_needed` would be fabricated into `converged` and silently
+    //   swallowed — no re-entry, no escalation, no traversal accounting — an
+    //   unbounded loop or a lost revision;
+    // - a convergence-tracker touch (`recordConvergenceOutput` /
+    //   `resetConvergenceTracker`) would throw on the missing group.
+    //
+    // The node is effectively a non-member now: demote it (so this step and
+    // every later signal on it take the plain non-loop path, mirroring
+    // engine-advance's non-loop branches) and fall back to the non-loop
+    // propagation path:
+    //
+    // - `revise_needed` → propagateRevise — a plain revision with nowhere to
+    //   re-enter escalates the node (reason "no loop group");
+    // - `escalate` → propagateEscalate — worst-signal forward propagation;
+    // - `answer` → forward flow only (outcome `converged`), with no
+    //   convergence-tracker touch and no traversal accounting.
+    node.loopGroupId = undefined;
+
+    const report: LoopStepReport = {
+      outcome: "revising",
+      traversals: 0,
+      revisedUpstream: [],
+      escalated: [],
+      retried: [],
+      cancelled: [],
+      alreadyResolved: [],
+    };
+
+    if (signalType === "revise_needed") {
+      const prop = propagateRevise(state, node, payload);
+      report.propagation = prop;
+      report.revisedUpstream = prop.revisedUpstream;
+      report.escalated = [...prop.escalated];
+      report.outcome = prop.escalated.length > 0 ? "escalating" : "revising";
+      report.downgradeReason = `dangling loop group "${groupId}" — fell back to non-loop revise propagation`;
+      return report;
+    }
+
+    if (signalType === "escalate") {
+      const prop = propagateEscalate(state, node, payload);
+      report.propagation = prop;
+      report.retried = prop.retried;
+      report.escalated = [...prop.escalated];
+      report.outcome = "escalating";
+      report.downgradeReason = `dangling loop group "${groupId}" — fell back to non-loop escalate propagation`;
+      return report;
+    }
+
+    // answer — the node completed normally and the loop is gone: converge
+    // (forward flow only), never touching the missing group's tracker.
+    report.outcome = "converged";
+    report.downgradeReason = `dangling loop group "${groupId}" — converged as a non-loop node`;
+    return report;
+  }
+
+  if (!groupId) {
     // Guard: this module only orchestrates loop-group members. A caller that
     // routes a non-member here gets an explicit non-loop outcome rather than a
     // silent mis-execution.
