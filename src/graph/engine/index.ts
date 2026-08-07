@@ -32,6 +32,7 @@ import type { GraphDeclaration } from "../../types.graph-v2.ts";
 import { EnginePhase, NodeStatus } from "../../constants.ts";
 import type {
   EngineState,
+  NodeLivenessState,
   NodeRuntimeState,
   SignalLedgerSource,
 } from "../../types.engine-v2.ts";
@@ -43,6 +44,7 @@ import {
   AdvanceEngine,
   type AdvanceEngineOptions,
   type NodeDispatchPort,
+  type NodeLivenessFeed,
   type GraphBudgetPort,
   type EdgeConditionResolver,
   type NodeCompletionEvent,
@@ -83,9 +85,12 @@ import {
   reconcileEngine,
   rebuildFrontier,
   EngineLockSweeper,
+  NodeLivenessMonitor,
   NodeStalenessWatcher,
   type DispatchRecoveryPort,
+  type NodeStallEvent,
   type ReconcileReport,
+  type StallDetectionInfo,
 } from "./engine-recovery.ts";
 import { markCancelled, markDone, canTransitionNode } from "./node-lifecycle.ts";
 import {
@@ -264,6 +269,69 @@ export interface EngineRuntime {
   ): CancelScopeReport;
 
   /**
+   * Relay a session-level failure observation from the platform liveness feed
+   * into the engine (node-anomaly-detection subtask 4 — immediate-failure fast
+   * path). The runtime-level wiring point for the feed's session observations,
+   * placed beside the staleness-timeout handler {@link onStaleNodeTimeout} so
+   * both failure intakes funnel the affected node through the SAME downstream
+   * processing: the escalate ledger signal, escalate propagation (retry
+   * re-entry / cascade cancel), completion seam, and termination re-check —
+   * an abnormal node never blocks graph advancement.
+   *
+   * - `gone` (session.deleted) is authoritative: the `running` node escalates
+   *   immediately.
+   * - `error` (session.error) is re-checked against the dispatch system via
+   *   `isDispatchTaskLive`: a task that is still live (running / pending /
+   *   awaiting_approval) keeps the node running — transient-error protection —
+   *   and only a `session` heartbeat is recorded; a task that is genuinely not
+   *   live escalates like `gone`.
+   *
+   * A strict no-op for a non-running node, an unattached session (no
+   * `dispatchSessionId`), an engine without a feed, or an unknown node id. The
+   * returned promise resolves when the observation is processed and never
+   * rejects (escalate advances are contained inside the advance engine).
+   */
+  handleFeedSessionEvent(
+    nodeId: string,
+    kind: "error" | "gone",
+    reason?: string,
+  ): Promise<void>;
+
+  /**
+   * Record a session-activity heartbeat for a running node (subtask 6 — the
+   * runtime-level public wrapper beside {@link handleFeedSessionEvent}, so the
+   * platform liveness feed can heartbeat a node through the PUBLIC engine
+   * surface instead of reaching into the advance engine). Thin delegation to
+   * the advance engine's identical intake (engine-advance.ts
+   * `recordLivenessHeartbeat`), strictly guarded there: a heartbeat only lands
+   * on a node that is BOTH `running` AND actually dispatched by this engine
+   * (`dispatchTaskId` set — matching the launch that produced the session).
+   * A strict no-op otherwise: a completed / escalated / blocked / pending node
+   * is never revived into activity, and an unknown node id never throws.
+   *
+   * @param nodeId  The running node to heartbeat.
+   * @param source  The observation channel that produced the heartbeat
+   *                (`"tool"` / `"message"` / `"session"` / `"dispatch"` /
+   *                `"feed"` — see {@link NodeLivenessState.heartbeatSource}).
+   */
+  recordLivenessHeartbeat(
+    nodeId: string,
+    source: NodeLivenessState["heartbeatSource"],
+  ): void;
+
+  /**
+   * Reverse-lookup the node owning a live dispatch session (subtask 6 — the
+   * runtime-level public wrapper beside {@link handleFeedSessionEvent}). Thin
+   * delegation to the advance engine's identical `sessionId → nodeId` reverse
+   * index (engine-advance.ts `getNodeIdForSession`): backs the platform
+   * liveness feed's session-to-node resolution for the observations relayed
+   * through this runtime. Returns `undefined` for an unknown session or a
+   * session whose node has detached (terminal transition). Only meaningful
+   * when a {@link NodeLivenessFeed} is wired — the index is otherwise empty.
+   */
+  getNodeIdForSession(sessionId: string): string | undefined;
+
+  /**
    * Dispose the engine runtime (monitor M4). Unregisters every
    * task-terminated listener this engine registered with the dispatch seam
    * (`removeTaskTerminatedListener`) so a disposed runtime never receives (or
@@ -357,6 +425,28 @@ export interface CreateEngineOptions {
   nodeStaleTimeoutMs?: number;
 
   /**
+   * Optional soft-stall warn threshold (ms) for the heartbeat-based liveness
+   * monitor (node-anomaly-detection subtask 6). When `nodeStaleTimeoutMs` is
+   * configured (the monitor is instantiated beside the stale-node watcher), a
+   * heartbeat-fed `running` node that goes idle for `nodeStallWarnMs` is
+   * classified `stalling` and the {@link onNodeStall} seam fires once per stall
+   * episode. Defaults to `min(60_000, nodeStaleTimeoutMs / 2)` (the monitor's
+   * own default). Absent → engine behavior unchanged.
+   */
+  nodeStallWarnMs?: number;
+
+  /**
+   * Optional hard-stall grace (ms) past `nodeStallWarnMs` for the liveness
+   * monitor (node-anomaly-detection subtask 6). A `stalling` node that stays
+   * idle for `nodeStallWarnMs + nodeStallGraceMs` (capped by the per-node
+   * effective staleness deadline) is marked `timeout` and funnels through the
+   * SAME {@link onStaleNodeTimeout} handler as the wall-clock watcher (escalate
+   * ledger signal + completion seam). Defaults to 30_000 (the monitor's own
+   * default). Absent → engine behavior unchanged.
+   */
+  nodeStallGraceMs?: number;
+
+  /**
    * Optional node-completion notification seam (subtask 1). Wired into the
    * advance engine's identical seam; the engine fires it exactly once per
    * terminating / notable transition — `answer → completed`, `revise_needed →
@@ -385,6 +475,30 @@ export interface CreateEngineOptions {
    * (see {@link GraphTerminalEvent}).
    */
   onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  /**
+   * Optional node-stall notification seam (node-anomaly-detection subtask 5).
+   * Wired into the opt-in {@link NodeLivenessMonitor} instantiated alongside
+   * the stale-node watcher when `nodeStaleTimeoutMs` is configured; the monitor
+   * fires it once per soft-stall episode (`stalling`) for a heartbeat-fed
+   * `running` node. Defaults to a no-op, so engine behavior is unchanged
+   * without it. Notification logic (a notifier) never lives here — this is a
+   * role-agnostic DI seam like {@link CreateEngineOptions.onNodeCompletion}
+   * (see {@link NodeStallEvent}). Callback exceptions are swallowed (logged)
+   * so a monitor tick never breaks.
+   */
+  onNodeStall?: (event: NodeStallEvent) => void;
+  /**
+   * Optional node-liveness feed seam (node-anomaly-detection subtask 2). Wired
+   * into the advance engine's identical seam: when present, the engine records
+   * an initial `dispatch` heartbeat on every successfully launched node,
+   * maintains a `sessionId → nodeId` reverse index of running nodes, and
+   * registers / unregisters each node's session with the feed (`attach` on
+   * launch, `detach` on terminal transition). Absent → engine behavior
+   * unchanged. Session-level failure observations (subtask 4) are relayed into
+   * the engine through {@link EngineRuntime.handleFeedSessionEvent} — the
+   * immediate-failure fast path beside the staleness timeout handler.
+   */
+  livenessFeed?: NodeLivenessFeed;
 }
 
 // ── Engine identity ─────────────────────────────────────────────────────────
@@ -412,6 +526,11 @@ function cloneNode(n: NodeRuntimeState): NodeRuntimeState {
     upstreamResults: new Map(n.upstreamResults),
     tokensConsumed: { ...n.tokensConsumed },
     result: n.result ? { ...n.result } : undefined,
+    // C-WIRE (node-anomaly-detection subtask 1): the liveness carrier is a
+    // mutable object — clone it so a snapshot consumer's in-place heartbeat /
+    // stall mutation can never alias the live node's liveness state. Absent →
+    // undefined (no liveness recorded yet).
+    liveness: n.liveness ? { ...n.liveness } : undefined,
   };
 }
 
@@ -534,6 +653,17 @@ class EngineRuntimeImpl implements EngineRuntime {
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
   private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  private readonly onNodeStall?: (event: NodeStallEvent) => void;
+  /**
+   * Opt-in heartbeat-based liveness monitor (subtask 5). Absent unless
+   * `nodeStaleTimeoutMs` is configured (instantiated beside the
+   * {@link staleWatcher}) — engine behavior is unchanged without it. A
+   * heartbeat-fed `running` node that goes idle past the warn threshold fires
+   * the {@link onNodeStall} seam once per stall episode; hard stalls funnel
+   * through the same {@link onStaleNodeTimeout} handler as the wall-clock
+   * watcher. Started on `run()`/`recover()`, stopped by `cancel()`/`dispose()`.
+   */
+  private readonly livenessMonitor?: NodeLivenessMonitor;
   private provisioned = false;
 
   constructor(
@@ -569,6 +699,7 @@ class EngineRuntimeImpl implements EngineRuntime {
     this.onNodeCompletion = opts.onNodeCompletion;
     this.graphEvents = opts.graphEvents;
     this.onGraphTerminal = opts.onGraphTerminal;
+    this.onNodeStall = opts.onNodeStall;
     const advanceOpts: AdvanceEngineOptions = {
       state: this.state,
       signalBridge: this.signalBridge,
@@ -586,6 +717,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       onNodeCompletion: this.onNodeCompletion,
       graphEvents: this.graphEvents,
       onGraphTerminal: this.onGraphTerminal,
+      livenessFeed: opts.livenessFeed,
     };
     this.advance = new AdvanceEngine(advanceOpts);
     // The advance engine is the terminating-signal consumer.
@@ -610,6 +742,25 @@ class EngineRuntimeImpl implements EngineRuntime {
       this.staleWatcher = new NodeStalenessWatcher({
         nodeStaleTimeoutMs: opts.nodeStaleTimeoutMs,
         intervalMs: opts.sweeperIntervalMs,
+        onTimeout: this.onStaleNodeTimeout.bind(this),
+      });
+      // Subtask 5: heartbeat-based liveness monitor beside the wall-clock
+      // watcher (same opt-in window, same tick cadence). Soft stalls fire the
+      // role-agnostic `onNodeStall` seam once per episode; hard stalls funnel
+      // through the SAME onStaleNodeTimeout handler so both monitors share the
+      // timeout downstream (escalate ledger signal + completion seam).
+      this.livenessMonitor = new NodeLivenessMonitor({
+        nodeStaleTimeoutMs: opts.nodeStaleTimeoutMs,
+        intervalMs: opts.sweeperIntervalMs,
+        // Subtask 6: thread the optional stall thresholds through — absent →
+        // the monitor's own defaults (warn `min(60s, stale/2)`, grace 30s).
+        ...(opts.nodeStallWarnMs !== undefined
+          ? { stallWarnMs: opts.nodeStallWarnMs }
+          : {}),
+        ...(opts.nodeStallGraceMs !== undefined
+          ? { stallGraceMs: opts.nodeStallGraceMs }
+          : {}),
+        onStall: (nodeId, _reason, info) => this.onNodeStallFired(nodeId, info),
         onTimeout: this.onStaleNodeTimeout.bind(this),
       });
     }
@@ -650,6 +801,90 @@ class EngineRuntimeImpl implements EngineRuntime {
   }
 
   /**
+   * Subtask-5 stall seam intake. Called by the {@link livenessMonitor} for
+   * every `running` node that first entered the soft-stall (`stalling`)
+   * classification. Packages the detection facts captured at fire time into a
+   * {@link NodeStallEvent} (the agent is looked up from the live node) and
+   * forwards it to the role-agnostic `onNodeStall` DI seam. The callback is
+   * contained in try/catch — a throwing notifier must never break the monitor
+   * tick that is driving it.
+   */
+  private onNodeStallFired(nodeId: string, info?: StallDetectionInfo): void {
+    const node = this.state.nodes.get(nodeId);
+    const event: NodeStallEvent = {
+      graphId: this.state.graphId,
+      nodeId,
+      agent: node?.agent ?? "N/A",
+      idleMs: info?.idleMs ?? 0,
+      stallWarnMs: info?.stallWarnMs ?? 0,
+      stallWarnedAt:
+        info?.stallWarnedAt ?? node?.liveness?.stallWarnedAt ?? Date.now(),
+    };
+    try {
+      this.onNodeStall?.(event);
+    } catch (err) {
+      logWarn(
+        `engine: onNodeStall consumer threw for node "${nodeId}" in graph "${this.state.graphId}" — ` +
+          `swallowed so a monitor tick never breaks: ${String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Liveness fast-path wiring (node-anomaly-detection subtask 4). The
+   * runtime-level intake for session-level failure observations from the
+   * platform liveness feed, placed beside the staleness-timeout handler
+   * ({@link onStaleNodeTimeout}) so both failure intakes share the same
+   * downstream discipline. Forwards into the advance engine's
+   * {@link AdvanceEngine.handleFeedSessionEvent}, which:
+   *
+   * - applies the transient-error re-check for `error` (a still-live dispatch
+   *   task keeps the node running — heartbeat only);
+   * - otherwise escalates the node through the SAME downstream as the timeout
+   *   path — the escalate ledger signal, escalate propagation (retry gate
+   *   re-entry / cascade cancel), completion seam, and termination re-check —
+   *   so an abnormal node never blocks graph advancement.
+   *
+   * Fire-and-forget friendly: the returned promise never rejects (escalate
+   * advances are contained inside the advance engine's critical section), but
+   * the catch is defense-in-depth so a regression can never surface an
+   * unhandled rejection from this relay site.
+   */
+  handleFeedSessionEvent(
+    nodeId: string,
+    kind: "error" | "gone",
+    reason?: string,
+  ): Promise<void> {
+    return this.advance.handleFeedSessionEvent(nodeId, kind, reason).catch((err) => {
+      logWarn(
+        `engine: feed-session advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+      );
+    });
+  }
+
+  /**
+   * Subtask 6: runtime-level public wrapper — thin delegation to the advance
+   * engine's identical liveness intake (guarded there: running + dispatched
+   * only, so a terminal node is never revived). Mirrors the defensive style of
+   * {@link handleFeedSessionEvent}: a no-op for an unknown node id.
+   */
+  recordLivenessHeartbeat(
+    nodeId: string,
+    source: NodeLivenessState["heartbeatSource"],
+  ): void {
+    this.advance.recordLivenessHeartbeat(nodeId, source);
+  }
+
+  /**
+   * Subtask 6: runtime-level public wrapper — thin delegation to the advance
+   * engine's `sessionId → nodeId` reverse index (populated at launch when a
+   * liveness feed is wired, dropped on the node's terminal transition).
+   */
+  getNodeIdForSession(sessionId: string): string | undefined {
+    return this.advance.getNodeIdForSession(sessionId);
+  }
+
+  /**
    * Monitor (M6): surface every node currently in the `timeout` status through
    * the completion seam + durable event log. `notifyNodeTimeout` is
    * status-guarded (fires exactly once per timeout node) and — since the S5
@@ -684,6 +919,10 @@ class EngineRuntimeImpl implements EngineRuntime {
     // hangs on a `running` node whose worker stopped advancing. A no-op when
     // not configured (default behavior unchanged).
     this.staleWatcher?.start(this.state);
+    // Subtask 5: start the opt-in liveness monitor beside the watcher so a
+    // heartbeat-fed `running` node that stops advancing surfaces a stall
+    // notification. A no-op when not configured (default behavior unchanged).
+    this.livenessMonitor?.start(this.state);
     // F2: start the opt-in stale-lock sweeper on the PRIMARY execution path
     // too (parity with recover()) so a stuck `advancingLock` never deadlocks
     // a live run. A no-op when `sweeperIntervalMs` is absent — the sweeper
@@ -751,6 +990,9 @@ class EngineRuntimeImpl implements EngineRuntime {
       this.sweeper.start(this.state);
     }
     this.staleWatcher?.start(this.state);
+    // Subtask 5: start the opt-in liveness monitor beside the watcher —
+    // resumed executions must surface heartbeat stalls too.
+    this.livenessMonitor?.start(this.state);
 
     // Reconcile running nodes against the dispatch system (requires getTask).
     const port = this.dispatchPort as DispatchRecoveryPort;
@@ -940,6 +1182,12 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Monitor (M3): a cancelled graph must not keep ticking the opt-in
     // staleness watcher.
     this.staleWatcher?.stop();
+    // Subtask 6: a cancelled graph must not keep ticking the opt-in liveness
+    // monitor either (parity with the staleness watcher above and dispose()).
+    this.livenessMonitor?.stop();
+    // Subtask 5: stop the opt-in liveness monitor beside the watcher — a
+    // cancelled graph must not keep ticking its stall detection either.
+    this.livenessMonitor?.stop();
 
     // Cancel in-flight dispatch tasks (best-effort), then cancel the nodes.
     const reason = "cancelled by engine.cancel()";
@@ -1075,6 +1323,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Monitor (M3): stop the opt-in staleness watcher — a disposed runtime
     // must not keep ticking.
     this.staleWatcher?.stop();
+    // Subtask 5: stop the opt-in liveness monitor — a disposed runtime must
+    // not keep ticking its stall detection either.
+    this.livenessMonitor?.stop();
     // F2: stop the opt-in stale-lock sweeper too (parity with cancel()) — a
     // disposed runtime must not keep sweeping its periodic interval. No-op
     // when the interval was never started.
@@ -1154,12 +1405,16 @@ export {
   type RetryReport,
 } from "./node-retry.ts";
 export type { NodeDispatchPort } from "./engine-advance.ts";
+export type { NodeLivenessFeed } from "./engine-advance.ts";
 export type {
   NodeCompletionEvent,
 } from "./engine-advance.ts";
 export type {
   GraphTerminalEvent,
 } from "./engine-advance.ts";
+export type {
+  NodeStallEvent,
+} from "./engine-recovery.ts";
 export {
   GraphEventRecorder,
   graphEventsHash,
@@ -1182,9 +1437,11 @@ export type { DispatchParentContext } from "./dispatch-bridge.ts";
 
 export {
   createGraphNotifier,
+  createGraphStallNotifier,
   createGraphTerminalNotifier,
 } from "./graph-notify.ts";
 export type {
   GraphCompletionHandler,
+  GraphStallHandler,
   GraphTerminalHandler,
 } from "./graph-notify.ts";

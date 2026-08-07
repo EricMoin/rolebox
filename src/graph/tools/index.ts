@@ -30,6 +30,7 @@ import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
+import type { NodeLivenessFeed } from "../engine/index.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -147,6 +148,13 @@ export function createGraphTools(
     stateDir?: string;
     graphNotify?: GraphNotifySource;
     toolset?: GraphToolSet;
+    // Subtask 6 (node-liveness wiring): optional liveness-monitor stall
+    // thresholds + the node-liveness feed, threaded into the toolset's
+    // engines when the toolset is constructed HERE (a prebuilt `toolset`
+    // carries its own deps — this passthrough only applies when absent).
+    nodeStallWarnMs?: number;
+    nodeStallGraceMs?: number;
+    livenessFeed?: NodeLivenessFeed;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -154,6 +162,15 @@ export function createGraphTools(
     directory: opts.directory,
     stateDir: opts.stateDir,
     graphNotify: opts.graphNotify,
+    ...(opts.nodeStallWarnMs !== undefined
+      ? { nodeStallWarnMs: opts.nodeStallWarnMs }
+      : {}),
+    ...(opts.nodeStallGraceMs !== undefined
+      ? { nodeStallGraceMs: opts.nodeStallGraceMs }
+      : {}),
+    ...(opts.livenessFeed !== undefined
+      ? { livenessFeed: opts.livenessFeed }
+      : {}),
   });
 
   return {
@@ -535,6 +552,17 @@ function createGraphStatusTool(
         .describe(
           "Include the node's recorded evidence references from " +
             "NodeRuntimeState.evidence[]. Honest-empty like include_artifacts.",
+        ),
+      include_liveness: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include each node's recorded liveness state from " +
+            "NodeRuntimeState.liveness (lastActivityAt / heartbeatSource / " +
+            "stallStatus / stallWarnedAt / stallReason). OPTIONAL-ADDITIVE — " +
+            "only nodes WITH recorded liveness get the block; absent liveness " +
+            "renders nothing, never fabricated. Running nodes always render " +
+            "liveness regardless of this flag.",
         ),
       include_history: z
         .boolean()

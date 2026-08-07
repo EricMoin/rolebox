@@ -14,6 +14,7 @@ import {
   GRAPH_COMPLETION_MARKER,
   GRAPH_COMPLETE_MARKER,
   GRAPH_BLOCKED_MARKER,
+  GRAPH_STALL_MARKER,
   DISPATCH_NOTIFICATION_MARKERS,
   isDispatchNotification,
   buildNotificationText,
@@ -58,6 +59,11 @@ describe("T1 Spike — Dispatch notification discriminator", () => {
     expect(final).toContain(DISPATCH_ALL_COMPLETE_MARKER);
   });
 
+  it("isDispatchNotification returns true for graph-stall marker", () => {
+    const text = `<system-reminder>\n${GRAPH_STALL_MARKER}\nNode A stalled\n</system-reminder>`;
+    expect(isDispatchNotification(text)).toBe(true);
+  });
+
   it("markers array is exhaustive — all const values are in DISPATCH_NOTIFICATION_MARKERS", () => {
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(DISPATCH_COMPLETION_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(DISPATCH_ALL_COMPLETE_MARKER);
@@ -66,7 +72,8 @@ describe("T1 Spike — Dispatch notification discriminator", () => {
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_COMPLETION_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_COMPLETE_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_BLOCKED_MARKER);
-    expect(DISPATCH_NOTIFICATION_MARKERS.length).toBe(7);
+    expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_STALL_MARKER);
+    expect(DISPATCH_NOTIFICATION_MARKERS.length).toBe(8);
   });
 
   it("completion notification uses noReply:false (assert via text format)", () => {

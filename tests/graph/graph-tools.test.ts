@@ -999,7 +999,7 @@ describe("graph-notify degradation (F6)", () => {
       ts.graph_status({ graph_id, format: "json" }),
     ) as Record<string, unknown>;
     expect(json.notification_degraded).toBe(true);
-    expect(json.notification_degraded_statuses).toEqual(["completion", "terminal"]);
+    expect(json.notification_degraded_statuses).toEqual(["completion", "terminal", "stall"]);
   });
 
   it("graph_status output is unchanged when no degraded marker exists", () => {

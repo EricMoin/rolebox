@@ -52,6 +52,7 @@ import type {
   EngineState,
   GraphBudgetState,
   LoopGroupRuntimeState,
+  NodeLivenessState,
   NodeRuntimeState,
   SignalLedgerEntry,
 } from "../../types.engine-v2.ts";
@@ -175,6 +176,10 @@ export interface NodeRuntimeStateDTO {
   // OPTIONAL-ADDITIVE (subtask 1): JSON-primitive, absent → undefined.
   artifacts?: string[];
   evidence?: string[];
+  // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): heartbeat / stall
+  // carrier — JSON-primitive throughout, absent → undefined. Mirrors the
+  // artifacts/evidence pattern (files authored before the field lack it).
+  liveness?: NodeLivenessState;
 }
 
 /** Top-level on-disk schema (versioned). `Map` fields are plain `Record`s. */
@@ -280,6 +285,10 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
       result: n.result ? { ...n.result } : undefined,
       artifacts: n.artifacts ? [...n.artifacts] : undefined,
       evidence: n.evidence ? [...n.evidence] : undefined,
+      // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): clone the
+      // liveness carrier so the DTO never aliases the live state's object.
+      // Absent → undefined (files authored before the field existed).
+      liveness: n.liveness ? { ...n.liveness } : undefined,
       upstreamResults: ur,
     };
   }
@@ -344,6 +353,10 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
         ...(rest.tokensConsumed as NodeRuntimeState["tokensConsumed"]),
       },
       result: rest.result ? { ...rest.result } : undefined,
+      // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): carry the
+      // liveness carrier back as a fresh object (no shared reference with the
+      // parsed DTO). Absent → undefined — old v2 files stay loadable.
+      liveness: rest.liveness ? { ...rest.liveness } : undefined,
       upstreamResults,
     } as NodeRuntimeState);
   }

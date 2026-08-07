@@ -32,6 +32,7 @@ import {
   createGraphToolSet,
   type GraphToolSet,
 } from "../../../graph/tools/index.ts";
+import type { NodeLivenessFeed } from "../../../graph/engine/index.ts";
 
 // ── Shared tool assembly ────────────────────────────────────────────────────
 
@@ -138,6 +139,14 @@ export class PiLightweightServiceStack implements IHookProvider {
    * buildCanonicalTools.
    */
   private _graphToolSet: GraphToolSet | undefined;
+  /**
+   * Shared node-liveness feed (subtask 6). Threaded into every graph engine
+   * the stack's toolset builds so the engine records dispatch heartbeats,
+   * registers its sessions with the feed, and maintains the `sessionId →
+   * nodeId` reverse index the Pi liveness relay resolves through. Absent →
+   * engines run without liveness recording (backward compatible).
+   */
+  private _livenessFeed?: NodeLivenessFeed;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -153,6 +162,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     graphNotifyClient?: ISessionClient,
     stateDir: string = process.cwd(),
     interceptorHooks?: ToolInterceptorHooks,
+    livenessFeed?: NodeLivenessFeed,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
@@ -166,6 +176,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._graphNotifyClient = graphNotifyClient;
     this._stateDir = stateDir;
     this._interceptorHooks = interceptorHooks;
+    this._livenessFeed = livenessFeed;
     // Subtask 2: the graph tools only assemble when a dispatch manager is
     // present (buildCanonicalTools gates the eight graph_* keys on it), so
     // the shared toolset is constructed under the same gate. The graph-notify
@@ -180,6 +191,9 @@ export class PiLightweightServiceStack implements IHookProvider {
           sessionClient: graphNotifyClient ?? this._sessionAdapter,
           emperorSessionId: (invokingSessionId) => invokingSessionId,
         },
+        // Subtask 6: thread the shared node-liveness feed into the toolset's
+        // engines (absent → engine behavior unchanged).
+        ...(livenessFeed !== undefined ? { livenessFeed } : {}),
       });
     }
   }
@@ -270,6 +284,11 @@ export class PiLightweightServiceStack implements IHookProvider {
       // every engine the graph tools construct (`.rolebox/state`). Defaults to
       // process.cwd() at construction.
       stateDir: this._stateDir,
+      // Subtask 6: thread the shared node-liveness feed into the graph tools'
+      // engine construction (absent → engine behavior unchanged).
+      ...(this._livenessFeed !== undefined
+        ? { livenessFeed: this._livenessFeed }
+        : {}),
     });
 
     // 2.5 Register tool schemas + deprecation markers into the shared hook

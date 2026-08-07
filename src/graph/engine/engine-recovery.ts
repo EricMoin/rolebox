@@ -28,10 +28,11 @@
  * directly). Keeping the mapping here means the two entry points can never
  * drift apart.
  *
- * Finally, this module ships the stale-lock {@link EngineLockSweeper} and the
- * stale-node {@link NodeStalenessWatcher} (monitor M3), matching
+ * Finally, this module ships the stale-lock {@link EngineLockSweeper}, the
+ * stale-node {@link NodeStalenessWatcher} (monitor M3), and the heartbeat-based
+ * {@link NodeLivenessMonitor} (node-anomaly-detection subtask 3), matching
  * `src/loop/coordinator.ts:101-124` (engine-state-machine.md §3.4 / failure
- * resilience.md §5.6). Both are **manually tickable** and do not start an
+ * resilience.md §5.6). All are **manually tickable** and do not start an
  * unbounded `setInterval` on their own — `start()` is opt-in so tests never
  * leak a timer.
  *
@@ -959,6 +960,258 @@ export class NodeStalenessWatcher {
         markTimedOut(state, node, reason);
         timedOut.push(node.nodeId);
         this.opts.onTimeout?.(node.nodeId, reason);
+      }
+    }
+    return timedOut;
+  }
+
+  /** Start the periodic tick. Opt-in — never auto-started. */
+  start(state: EngineState): void {
+    this.stop();
+    this.timer = setInterval(() => {
+      try {
+        this.tick(state);
+      } catch {
+        // A tick must never take down the process.
+      }
+    }, this.intervalMs);
+    // Don't keep the process alive just because a tick interval is pending.
+    (this.timer as (typeof this.timer) & { unref?: () => unknown })?.unref?.();
+  }
+
+  /** Stop the periodic tick (no-op if never started). */
+  stop(): void {
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
+// ── Node liveness monitor (heartbeat-based stall detection) ─────────────────
+
+/**
+ * The immutable detection facts captured at the moment {@link NodeLivenessMonitor}
+ * fires its `onStall` callback. Passed as the optional third argument so a
+ * consumer (e.g. the engine's stall notifier seam) can render an actionable
+ * reminder without re-deriving monitor internals.
+ */
+export interface StallDetectionInfo {
+  /** Idle time (ms) since the node's last heartbeat at detection time. */
+  idleMs: number;
+  /** The soft-stall warn threshold (ms) used for this detection. */
+  stallWarnMs: number;
+  /** Epoch-ms timestamp stamping the start of this stall episode. */
+  stallWarnedAt: number;
+}
+
+/**
+ * A node-stall event emitted via the optional {@link NodeLivenessMonitorOptions
+ * .onStall} callback seam (node-anomaly-detection subtask 5). The engine
+ * packages only the immutable facts captured at detection time; notification /
+ * delivery (a notifier) is the consumer's concern and never lives in the
+ * monitor or the engine.
+ */
+export interface NodeStallEvent {
+  /** Owning graph id. */
+  graphId: string;
+  /** The node that entered the soft-stall (`stalling`) classification. */
+  nodeId: string;
+  /** The node's bound agent id. */
+  agent: string;
+  /** Idle time (ms) since the node's last heartbeat at detection time. */
+  idleMs: number;
+  /** The soft-stall warn threshold (ms) used for this detection. */
+  stallWarnMs: number;
+  /**
+   * Epoch-ms timestamp when this stall episode was first warned. Identifies
+   * the stall episode — a notifier's dedupe key folds it in so a recovery
+   * (fresh heartbeat → `healthy`) followed by a re-stall is a distinct episode
+   * and legally re-notifies, while an idempotent replay of the same episode is
+   * dropped.
+   */
+  stallWarnedAt: number;
+}
+
+/** Options for {@link NodeLivenessMonitor}. */
+export interface NodeLivenessMonitorOptions {
+  /** Tick interval for `start()` (defaults to `SWEEPER_INTERVAL_MS`). */
+  intervalMs?: number;
+  /**
+   * Watcher-wide staleness timeout — the hard cap on how long any `running`
+   * node may stay alive. The per-node effective deadline is
+   * `min(node.budget?.timeout_ms ?? this, this)` — a node's declared budget
+   * can shorten the window but never extend it past this value. A
+   * non-positive effective deadline disables liveness-based staleness for
+   * that node.
+   */
+  nodeStaleTimeoutMs: number;
+  /**
+   * Idle time since the last heartbeat at which a node is first classified
+   * `stalling` and `onStall` fires. Single-fire per stall episode — the
+   * callback does not repeat while the node stays `stalling`, and a fresh
+   * episode (after a heartbeat returns the node to `healthy`) warns again.
+   * Defaults to `min(60_000, nodeStaleTimeoutMs / 2)`.
+   */
+  stallWarnMs?: number;
+  /**
+   * Additional idle time past `stallWarnMs` before a stalling node is
+   * hard-stalled — marked `timeout` via {@link markTimedOut} and reported
+   * through `onTimeout` (the same signature as
+   * {@link NodeStalenessWatcherOptions.onTimeout}). Defaults to 30_000.
+   */
+  stallGraceMs?: number;
+  /**
+   * Called once when a running node first enters the soft-stall
+   * (`stalling`) classification. The optional third argument carries the
+   * {@link StallDetectionInfo} captured at fire time (idle / warn threshold /
+   * episode timestamp) so a consumer can render an actionable notification
+   * without re-deriving monitor internals. The monitor contains the call in
+   * try/catch — a throwing consumer is logged and swallowed so a tick never
+   * breaks.
+   */
+  onStall?: (nodeId: string, reason: string, info?: StallDetectionInfo) => void;
+  /**
+   * Called with the node id and error reason whenever a hard-stalled running
+   * node is marked `timeout` by {@link tick}.
+   */
+  onTimeout?: (nodeId: string, errorReason: string) => void;
+}
+
+/**
+ * Node liveness monitor — heartbeat-based stall detection layered on top of
+ * the wall-clock {@link NodeStalenessWatcher} (node-anomaly-detection subtask
+ * 3). Same shape as the watcher: **manually tickable** (`tick` with an
+ * injectable clock for deterministic tests) and never starts a timer on its
+ * own — `start()` (the periodic `setInterval`) is opt-in, so tests never leak
+ * an interval.
+ *
+ * Unlike the wall-clock watcher (which times a node out purely from
+ * `startedAt`), the monitor classifies a node from its **heartbeat feed**
+ * (`node.liveness.lastActivityAt`, written by subtask 2's
+ * `recordLivenessHeartbeat` / the platform liveness feed):
+ *
+ * - heartbeat fresh (`now - lastActivityAt < stallWarnMs`) → `healthy` — the
+ *   node's `stallStatus` is reset to `healthy`, clearing any soft-stall
+ *   classification;
+ * - soft stall (Tier 1) — idle `>= stallWarnMs` and `< stallWarnMs +
+ *   stallGraceMs` → the node is classified `stalling` with `stallWarnedAt`
+ *   stamped, and `onStall` fires **once** (guarded on the existing
+ *   `stallStatus`, so the warning never repeats within one episode);
+ * - hard stall (Tier 2) — idle `>= min(effectiveDeadline, stallWarnMs +
+ *   stallGraceMs)` → the node is marked `timeout` via the shared
+ *   {@link markTimedOut} (the normal `running → timeout` transition, so
+ *   lifecycle checkpoints and the critical-dirty flag are recorded by the
+ *   transition choke point) and reported through `onTimeout`.
+ *
+ * Fallback (Tier 3): a node WITHOUT a heartbeat feed (`liveness.lastActivityAt`
+ * absent) is skipped entirely — it keeps the pure wall-clock deadline of the
+ * unmodified {@link NodeStalenessWatcher}. Both monitors coexist; the engine's
+ * behavior is unchanged unless a consumer instantiates the monitor (default
+ * not instantiated) and drives it.
+ */
+export class NodeLivenessMonitor {
+  private readonly intervalMs: number;
+  private readonly nodeStaleTimeoutMs: number;
+  private readonly stallWarnMs: number;
+  private readonly stallGraceMs: number;
+  private timer?: ReturnType<typeof setInterval>;
+
+  constructor(private readonly opts: NodeLivenessMonitorOptions) {
+    this.intervalMs = opts.intervalMs ?? SWEEPER_INTERVAL_MS;
+    this.nodeStaleTimeoutMs = opts.nodeStaleTimeoutMs;
+    this.stallWarnMs =
+      opts.stallWarnMs ?? Math.min(60_000, this.nodeStaleTimeoutMs / 2);
+    this.stallGraceMs = opts.stallGraceMs ?? 30_000;
+  }
+
+  /**
+   * One liveness tick. Classifies every `running` node with a heartbeat feed
+   * (see the class docs for the healthy → stalling → stalled ladder) and
+   * hard-stalls nodes past their effective deadline via {@link markTimedOut}.
+   *
+   * @returns The ids of the nodes that were hard-stalled (timed out) by this tick.
+   * @param now Optional clock for deterministic tests (defaults to `Date.now`).
+   */
+  tick(state: EngineState, now: number = Date.now()): string[] {
+    const timedOut: string[] = [];
+    for (const node of state.nodes.values()) {
+      if (node.status !== NodeStatus.Running) continue;
+      const effectiveDeadline = Math.min(
+        node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs,
+        this.nodeStaleTimeoutMs,
+      );
+      if (effectiveDeadline <= 0) continue; // liveness staleness disabled
+      const lastActivityAt = node.liveness?.lastActivityAt;
+      if (lastActivityAt === undefined) continue; // no feed — wall-clock fallback (Tier 3)
+      const idle = now - lastActivityAt;
+      const hardStallAt = Math.min(
+        effectiveDeadline,
+        this.stallWarnMs + this.stallGraceMs,
+      );
+      if (idle >= hardStallAt) {
+        // Tier 2 — hard stall: budget or warn+grace elapsed with no heartbeat.
+        const reason =
+          `node heartbeat stalled past its liveness deadline ` +
+          `(idle ${idle}ms, deadline ${hardStallAt}ms)`;
+        markTimedOut(state, node, reason);
+        node.liveness = {
+          ...node.liveness,
+          stallStatus: "stalled",
+          stallWarnedAt: node.liveness!.stallWarnedAt ?? now,
+          stallReason: reason,
+        };
+        markNonCriticalDirty(state);
+        timedOut.push(node.nodeId);
+        this.opts.onTimeout?.(node.nodeId, reason);
+        continue;
+      }
+      if (idle >= this.stallWarnMs) {
+        // Tier 1 — soft stall: single-fire warning per stall episode.
+        if (node.liveness!.stallStatus !== "stalling") {
+          const reason =
+            `node heartbeat stalled for ${idle}ms ` +
+            `(soft-stall warn threshold ${this.stallWarnMs}ms)`;
+          node.liveness = {
+            ...node.liveness,
+            stallStatus: "stalling",
+            stallWarnedAt: now,
+            stallReason: reason,
+          };
+          markNonCriticalDirty(state);
+          // Subtask 5: pass the detection facts captured at fire time as the
+          // optional third argument. The call is contained — a throwing
+          // consumer (e.g. a misbehaving notifier) is logged and swallowed so
+          // a tick never breaks the monitor loop.
+          try {
+            this.opts.onStall?.(node.nodeId, reason, {
+              idleMs: idle,
+              stallWarnMs: this.stallWarnMs,
+              stallWarnedAt: now,
+            });
+          } catch (err) {
+            logWarn(
+              `engine-recovery: onStall consumer threw for node "${node.nodeId}" — ` +
+                `swallowed so a tick never breaks: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+        continue;
+      }
+      // Heartbeat fresh — healthy; reset any soft-stall classification.
+      if (
+        node.liveness!.stallStatus !== "healthy" ||
+        node.liveness!.stallWarnedAt !== undefined ||
+        node.liveness!.stallReason !== undefined
+      ) {
+        node.liveness = {
+          ...node.liveness,
+          stallStatus: "healthy",
+          stallWarnedAt: undefined,
+          stallReason: undefined,
+        };
+        markNonCriticalDirty(state);
       }
     }
     return timedOut;

@@ -1,0 +1,322 @@
+/**
+ * Graph Execution Engine v2 — Node liveness monitor (subtask 3 of the
+ * node-anomaly-detection feature).
+ *
+ * Pins {@link NodeLivenessMonitor} (heartbeat-based stall detection layered
+ * over the wall-clock {@link NodeStalenessWatcher}) with an injected clock:
+ *   1. Continuous heartbeats keep a node `healthy` and reset an active
+ *      `stalling` classification back to `healthy` — a node that is being
+ *      driven is never stalled.
+ *   2. Heartbeats stopping past `stallWarnMs` classify the node `stalling`,
+ *      stamp `stallWarnedAt`, and fire `onStall` EXACTLY once per episode —
+ *      repeated ticks inside the warning window do not re-fire, and a fresh
+ *      episode (after a heartbeat returns the node to healthy) warns again.
+ *   3. Reaching the grace window (`stallWarnMs + stallGraceMs`, capped by the
+ *      per-node effective deadline) hard-stalls the node: the shared
+ *      `markTimedOut` (running → timeout) + `onTimeout`.
+ *   4. A node WITHOUT a heartbeat feed (no `liveness.lastActivityAt`) is
+ *      skipped by the monitor — the unmodified wall-clock
+ *      {@link NodeStalenessWatcher} remains the fallback for it.
+ *   5. The per-node effective deadline (`min(budget.timeout_ms,
+ *      nodeStaleTimeoutMs)`) caps the hard-stall window, and a non-positive
+ *      deadline disables liveness staleness entirely.
+ */
+
+import { describe, it, expect } from "bun:test";
+
+import { NodeStatus } from "../../src/constants.ts";
+import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
+import type { NodeBudgetSpec } from "../../src/types.graph-v2.ts";
+import type {
+  EngineState,
+  NodeLivenessState,
+  NodeRuntimeState,
+} from "../../src/types.engine-v2.ts";
+import {
+  createEngineState,
+  provision,
+} from "../../src/graph/engine/engine-state.ts";
+import {
+  NodeLivenessMonitor,
+  NodeStalenessWatcher,
+  type NodeLivenessMonitorOptions,
+} from "../../src/graph/engine/engine-recovery.ts";
+
+// ── Fixtures ────────────────────────────────────────────────────────────────
+
+function singleNodeGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "single",
+    nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+    edges: [],
+  };
+}
+
+interface Rig {
+  state: EngineState;
+  node: NodeRuntimeState;
+}
+
+/**
+ * Provision a single-node graph with node A forced into `running`. The
+ * liveness carrier / per-node budget are injected by the caller — absent
+ * liveness means "no feed", which exercises the Tier-3 wall-clock fallback.
+ */
+function buildRunning(opts: {
+  liveness?: NodeLivenessState;
+  budget?: NodeBudgetSpec;
+  startedAt?: number;
+} = {}): Rig {
+  const state = createEngineState(singleNodeGraph(), "lm");
+  provision(state);
+  const node = state.nodes.get("A")!;
+  node.status = NodeStatus.Running;
+  node.startedAt = opts.startedAt ?? 0;
+  if (opts.budget) node.budget = opts.budget;
+  if (opts.liveness) node.liveness = opts.liveness;
+  return { state, node };
+}
+
+/** Default monitor over a 60s watcher-wide deadline (warn 30s, grace 30s). */
+function defaultMonitor(
+  extra: Partial<NodeLivenessMonitorOptions> = {},
+): NodeLivenessMonitor {
+  return new NodeLivenessMonitor({ nodeStaleTimeoutMs: 60_000, ...extra });
+}
+
+// ── Acceptance (a): continuous heartbeats never stall ───────────────────────
+
+describe("NodeLivenessMonitor — continuous heartbeats (a)", () => {
+  it("keeps a heartbeating node healthy and never fires onStall/onTimeout", () => {
+    const stalls: string[] = [];
+    const timeouts: string[] = [];
+    const monitor = defaultMonitor({
+      onStall: (id) => stalls.push(id),
+      onTimeout: (id) => timeouts.push(id),
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000, heartbeatSource: "feed" },
+    });
+
+    // Heartbeats keep the idle time under stallWarnMs (30s).
+    monitor.tick(state, 2_000); // idle 1s
+    monitor.tick(state, 20_000); // idle 19s
+    monitor.tick(state, 30_999); // idle 29_999 < 30_000
+
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.liveness!.stallStatus).toBe("healthy");
+    expect(node.liveness!.stallWarnedAt).toBeUndefined();
+    expect(stalls).toEqual([]);
+    expect(timeouts).toEqual([]);
+  });
+
+  it("resets a stalling classification back to healthy once heartbeats resume", () => {
+    const stalls: string[] = [];
+    const monitor = defaultMonitor({
+      onStall: (id, reason) => stalls.push(`${id}:${reason}`),
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000, heartbeatSource: "feed" },
+    });
+
+    // Heartbeats stop — first soft stall fires the warning.
+    monitor.tick(state, 31_000); // idle 30_000 ≥ warn
+    expect(node.liveness!.stallStatus).toBe("stalling");
+    expect(node.liveness!.stallWarnedAt).toBe(31_000);
+    expect(stalls).toHaveLength(1);
+
+    // A heartbeat arrives; the next tick classifies the node healthy again.
+    node.liveness = { lastActivityAt: 35_000, heartbeatSource: "message" };
+    monitor.tick(state, 36_000);
+    expect(node.liveness!.stallStatus).toBe("healthy");
+    expect(node.liveness!.stallWarnedAt).toBeUndefined();
+    expect(node.liveness!.stallReason).toBeUndefined();
+    expect(node.status).toBe(NodeStatus.Running); // never timed out
+
+    // Heartbeats stop again — a FRESH episode warns once more.
+    monitor.tick(state, 36_000 + 30_000); // idle 31_000 ≥ warn again
+    expect(node.liveness!.stallStatus).toBe("stalling");
+    expect(stalls).toHaveLength(2);
+  });
+});
+
+// ── Acceptance (b): soft stall — single-fire warning ─────────────────────────
+
+describe("NodeLivenessMonitor — soft stall (b)", () => {
+  it("fires onStall exactly once and classifies stalling when idle ≥ stallWarnMs", () => {
+    const stallIds: string[] = [];
+    const monitor = defaultMonitor({ onStall: (id) => stallIds.push(id) });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+    });
+
+    monitor.tick(state, 31_000); // idle 30_000 → warn once
+    expect(stallIds).toEqual(["A"]);
+    expect(node.liveness!.stallStatus).toBe("stalling");
+    expect(node.liveness!.stallWarnedAt).toBe(31_000);
+    expect(node.status).toBe(NodeStatus.Running); // soft stall only
+
+    // Repeated ticks inside the warn window do NOT re-fire the warning.
+    monitor.tick(state, 40_000); // idle 39_000
+    monitor.tick(state, 59_000); // idle 58_000 — just under warn+grace (60_000)
+    expect(stallIds).toEqual(["A"]);
+    expect(node.liveness!.stallStatus).toBe("stalling");
+    expect(node.liveness!.stallWarnedAt).toBe(31_000); // stamped once
+    expect(node.status).toBe(NodeStatus.Running);
+  });
+
+  it("defaults stallWarnMs to min(60_000, nodeStaleTimeoutMs / 2)", () => {
+    // nodeStaleTimeoutMs 100_000 → default warn = min(60_000, 50_000) = 50_000.
+    const r1 = buildRunning({ liveness: { lastActivityAt: 1_000 } });
+    const stalls1: string[] = [];
+    const m1 = new NodeLivenessMonitor({
+      nodeStaleTimeoutMs: 100_000,
+      onStall: (id) => stalls1.push(id),
+    });
+    m1.tick(r1.state, 50_999); // idle 49_999 < 50_000 → healthy
+    expect(stalls1).toEqual([]);
+    expect(r1.node.liveness!.stallStatus).toBe("healthy");
+    m1.tick(r1.state, 51_000); // idle 50_000 → stalling
+    expect(stalls1).toEqual(["A"]);
+    expect(r1.node.liveness!.stallStatus).toBe("stalling");
+
+    // nodeStaleTimeoutMs 200_000 → default warn = min(60_000, 100_000) = 60_000.
+    const r2 = buildRunning({ liveness: { lastActivityAt: 1_000 } });
+    const stalls2: string[] = [];
+    const m2 = new NodeLivenessMonitor({
+      nodeStaleTimeoutMs: 200_000,
+      onStall: (id) => stalls2.push(id),
+    });
+    m2.tick(r2.state, 60_999); // idle 59_999 < 60_000 → healthy
+    expect(stalls2).toEqual([]);
+    m2.tick(r2.state, 61_000); // idle 60_000 → stalling
+    expect(stalls2).toEqual(["A"]);
+  });
+});
+
+// ── Acceptance (c): hard stall — markTimedOut + onTimeout ───────────────────
+
+describe("NodeLivenessMonitor — hard stall (c)", () => {
+  it("marks the node timeout and fires onTimeout once idle ≥ warn + grace", () => {
+    const timeouts: Array<[string, string]> = [];
+    const monitor = defaultMonitor({
+      onTimeout: (id, reason) => timeouts.push([id, reason]),
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+    });
+
+    monitor.tick(state, 31_000); // stalling (warn)
+    expect(node.status).toBe(NodeStatus.Running);
+
+    const timedOut = monitor.tick(state, 61_000); // idle 60_000 ≥ warn+grace
+    expect(timedOut).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.errorReason).toContain("liveness");
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0][0]).toBe("A");
+    expect(timeouts[0][1]).toContain("liveness");
+    expect(node.liveness!.stallStatus).toBe("stalled");
+    expect(node.liveness!.stallReason).toContain("liveness");
+  });
+
+  it("caps the hard-stall window at the per-node effective deadline (budget wins)", () => {
+    const stalls: string[] = [];
+    const timeouts: string[] = [];
+    const monitor = defaultMonitor({
+      onStall: (id) => stalls.push(id),
+      onTimeout: (id) => timeouts.push(id),
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+      budget: { timeout_ms: 5_000 },
+    });
+
+    // effectiveDeadline = min(5_000, 60_000) = 5_000 < warn (30_000) — the
+    // node hard-stalls at its declared budget without ever soft-stalling.
+    expect(monitor.tick(state, 1_000 + 5_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.errorReason).toContain("deadline 5000ms");
+    expect(timeouts).toEqual(["A"]);
+    expect(stalls).toEqual([]);
+  });
+});
+
+// ── Acceptance (d): no-feed nodes keep the wall-clock fallback ───────────────
+
+describe("NodeLivenessMonitor — no-feed fallback (d)", () => {
+  it("skips a node without lastActivityAt; the wall-clock watcher still times it out", () => {
+    const { state, node } = buildRunning({ startedAt: 1_000 }); // NO liveness
+    const monitor = defaultMonitor({
+      onStall: () => {
+        throw new Error("must not warn a feed-less node");
+      },
+      onTimeout: () => {
+        throw new Error("must not hard-stall a feed-less node");
+      },
+    });
+
+    // Massive idle — the liveness monitor must not touch a node without a feed.
+    expect(monitor.tick(state, 1_000 + 1_000_000)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.liveness).toBeUndefined(); // never fabricated
+
+    // The unmodified wall-clock watcher remains the fallback (from startedAt).
+    const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 30_000 });
+    expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+  });
+});
+
+// ── Edge cases ──────────────────────────────────────────────────────────────
+
+describe("NodeLivenessMonitor — edge cases", () => {
+  it("never classifies non-running nodes, even with an ancient heartbeat", () => {
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+    });
+    node.status = NodeStatus.Ready; // provisioned default — not running
+    const monitor = defaultMonitor({
+      onStall: () => {
+        throw new Error("must not stall a non-running node");
+      },
+      onTimeout: () => {
+        throw new Error("must not time out a non-running node");
+      },
+    });
+    expect(monitor.tick(state, 1_000 + 1_000_000)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Ready);
+  });
+
+  it("treats a non-positive per-node deadline as liveness staleness disabled", () => {
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+      budget: { timeout_ms: 0 },
+    });
+    const monitor = defaultMonitor({
+      onTimeout: () => {
+        throw new Error("must not time out a disabled node");
+      },
+    });
+    expect(monitor.tick(state, 1_000 + 1_000_000)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+  });
+
+  it("treats a non-positive watcher-wide deadline as liveness staleness disabled", () => {
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+    });
+    const monitor = new NodeLivenessMonitor({ nodeStaleTimeoutMs: 0 });
+    expect(monitor.tick(state, 1_000 + 1_000_000)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+  });
+
+  it("start()/stop() manage the opt-in interval without leaking timers", () => {
+    const { state } = buildRunning({ liveness: { lastActivityAt: 1 } });
+    const monitor = defaultMonitor({ intervalMs: 1 });
+    monitor.start(state);
+    monitor.stop();
+    monitor.stop(); // idempotent
+  });
+});

@@ -38,12 +38,14 @@ import {
   GRAPH_COMPLETION_MARKER,
   GRAPH_COMPLETE_MARKER,
   GRAPH_BLOCKED_MARKER,
+  GRAPH_STALL_MARKER,
 } from "../../dispatch/notification.ts";
 import { buildReminder, type ReminderField } from "../../prompt/reminder.ts";
 import type {
   NodeCompletionEvent,
   GraphTerminalEvent,
 } from "./engine-advance.ts";
+import type { NodeStallEvent } from "./engine-recovery.ts";
 
 // Exported so tests can spy on the notifier's own logger (F6).
 export const log = createSubLogger("graph:notify");
@@ -371,6 +373,141 @@ export function createGraphTerminalNotifier(
       metrics.counter("graph_notify_failed_total").inc();
       log.warn(
         `Failed to notify emperor session ${emperorSessionId} about graph terminal ${event.graphId}`,
+        lastError instanceof Error ? lastError.message : String(lastError),
+      );
+      return false;
+    });
+  };
+}
+
+// ── Graph-Stall Notifier ─────────────────────────────────────────────────────
+
+/**
+ * The stall handler the factory returns. Satisfies the engine seam
+ * `(event: NodeStallEvent) => void` structurally; the resolved boolean tells
+ * the caller whether a notification was dispatched (`true`) or suppressed by
+ * opt-out / dedupe / missing session (`false`), which makes it awaitable in
+ * tests.
+ */
+export type GraphStallHandler = (event: NodeStallEvent) => Promise<boolean>;
+
+/**
+ * Per-run dedupe key for stall episodes: `graphId::nodeId::stallWarnedAt`.
+ * `stallWarnedAt` identifies the stall episode (it is stamped once per
+ * episode by the liveness monitor), so a recovery (fresh heartbeat) followed
+ * by a re-stall — a NEW `stallWarnedAt` — legally re-notifies, while an
+ * idempotent replay of the same episode is dropped.
+ */
+function stallDedupeKey(event: NodeStallEvent): string {
+  return `${event.graphId}::${event.nodeId}::${event.stallWarnedAt}`;
+}
+
+/**
+ * Format an idle duration (ms) as a compact human-readable string — the same
+ * style as {@link formatGraphDuration}: `<60s → "X.Xs"`, else `"Xm Ys"`;
+ * a negative value (clock skew) renders `"?"`.
+ */
+export function formatStallIdle(idleMs: number): string {
+  if (idleMs < 0) return "?";
+  if (idleMs < 60_000) return `${(idleMs / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(idleMs / 60_000);
+  const seconds = Math.floor((idleMs % 60_000) / 1000);
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+
+/**
+ * Build the `<system-reminder>` text for a stalling graph node via
+ * {@link buildReminder}. Contains graph id, node id, agent, idle duration, and
+ * the warn threshold. Uses {@link GRAPH_STALL_MARKER}, a member of
+ * {@link DISPATCH_NOTIFICATION_MARKERS}, so the chat.message hook classifies
+ * the injected text as a non-user turn.
+ */
+export function buildGraphStallText(event: NodeStallEvent): string {
+  return buildReminder({
+    marker: GRAPH_STALL_MARKER,
+    fields: [
+      { label: "graph", value: event.graphId },
+      { label: "node", value: event.nodeId },
+      { label: "agent", value: event.agent || "N/A" },
+      { label: "idle", value: formatStallIdle(event.idleMs) },
+      { label: "stallWarnMs", value: String(event.stallWarnMs) },
+    ],
+    action: `Use graph_status(graph_id="${event.graphId}", node_id="${event.nodeId}", include_output=true) to inspect the stalling node.`,
+  });
+}
+
+/**
+ * Create a graph node-stall notifier wired to the engine's `onNodeStall` seam.
+ *
+ * Follows the same session-client injection + dedupe + bounded-retry pattern as
+ * {@link createGraphNotifier}: the dedupe key is claimed BEFORE the first
+ * attempt, failures retry with bounded exponential backoff (max `maxAttempts`
+ * total attempts, `GRAPH_NOTIFY_MAX_ATTEMPTS` / `GRAPH_NOTIFY_BASE_DELAY_MS` /
+ * `GRAPH_NOTIFY_MAX_DELAY_MS`), and only exhaustion resolves `false` after a
+ * warn log naming the graph::node. Unlike the terminal notifier it injects
+ * with `noReply: true` — a stall is informational and silent (the orchestrator
+ * observes it without being woken), exactly like per-node completion.
+ *
+ * @returns a handler that is a no-op (resolves `false`) when disabled or when
+ *   no emperor session is configured, drops idempotent replays of the same
+ *   stall episode (resolves `false`), and otherwise enqueues the reminder to
+ *   the emperor session via the per-session serialized send queue.
+ */
+export function createGraphStallNotifier(
+  client: ISessionClient,
+  opts: GraphNotifierOptions = {},
+): GraphStallHandler {
+  const enabled = opts.enabled !== false;
+  const emperorSessionId = opts.emperorSessionId;
+  const maxAttempts = opts.maxAttempts ?? GRAPH_NOTIFY_MAX_ATTEMPTS;
+  const baseDelayMs = opts.baseDelayMs ?? GRAPH_NOTIFY_BASE_DELAY_MS;
+  const maxDelayMs = opts.maxDelayMs ?? GRAPH_NOTIFY_MAX_DELAY_MS;
+  // Per-run epoch: a fresh notifier starts a clean dedupe epoch.
+  const notified = new Set<string>();
+
+  return async (event: NodeStallEvent): Promise<boolean> => {
+    if (!enabled) return false;
+    if (!emperorSessionId) return false;
+
+    // The dedupe key is claimed BEFORE the first attempt: retries of the same
+    // stall episode are one logical notification, so they must not re-enter
+    // the dedupe epoch nor allow a concurrent duplicate send.
+    const key = stallDedupeKey(event);
+    if (notified.has(key)) return false;
+    notified.add(key);
+
+    const text = buildGraphStallText(event);
+    return enqueueNotify(emperorSessionId, async () => {
+      // Bounded retry loop, mirroring notifyParent (dispatch/notification.ts).
+      let lastError: unknown;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          await client.prompt(emperorSessionId, {
+            ...(opts.agent ? { agent: opts.agent } : {}),
+            parts: [{ type: "text", text }],
+            // Stall is informational — inject silently (noReply: true, same
+            // as per-node completion). The marker is still a member of
+            // DISPATCH_NOTIFICATION_MARKERS, so the re-entering chat.message
+            // hook does NOT reset the auto-continue counter.
+            noReply: true,
+          });
+          metrics.counter("graph_notify_sent_total").inc();
+          return true;
+        } catch (err) {
+          lastError = err;
+          if (attempt < maxAttempts - 1) {
+            metrics.counter("graph_notify_retry_total").inc();
+            const delay = Math.min(
+              baseDelayMs * Math.pow(2, attempt),
+              maxDelayMs,
+            );
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      }
+      metrics.counter("graph_notify_failed_total").inc();
+      log.warn(
+        `Failed to notify emperor session ${emperorSessionId} about graph node stall ${event.graphId}::${event.nodeId}`,
         lastError instanceof Error ? lastError.message : String(lastError),
       );
       return false;

@@ -34,7 +34,7 @@
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
 import type { GraphBudgetState, EdgePayload, RoundHistoryEntry } from "../../types.engine-v2.ts";
-import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
+import type { EngineState, NodeRuntimeState, NodeLivenessState } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
 import type { BudgetCheckResult, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
@@ -44,6 +44,7 @@ import {
   clearNonCriticalDirty,
   shouldPersistNonCritical,
   markDirty,
+  markNonCriticalDirty,
 } from "./engine-persistence.ts";
 import {
   type DispatchParentContext,
@@ -186,6 +187,65 @@ export interface NodeDispatchPort {
 }
 
 /**
+ * The node-liveness surface the engine touches (subtask 2 of the
+ * node-anomaly-detection feature). Structurally satisfied by the platform's
+ * liveness feed — the layer that observes live dispatch sessions (tool calls,
+ * messages, session errors) and reports activity back into the engine.
+ * Declared as a minimal interface so tests can inject a fake and avoid any
+ * real platform/session wiring.
+ *
+ * Direction: `attach` / `detach` are engine→feed — the engine registers a
+ * node's live dispatch session when it is successfully launched and
+ * unregisters it when the node reaches a terminal state, so the feed knows
+ * which sessions to observe. The optional `onHeartbeat` / `onSessionError` /
+ * `onSessionGone` members are feed→engine push hooks the platform may use to
+ * relay session-level observations; the engine's stall monitor (subtask 3)
+ * consumes them through {@link AdvanceEngine.recordLivenessHeartbeat}.
+ *
+ * Every member is `void`-returning — a throwing or absent feed must never
+ * break advancement (the engine calls through optional chaining and contains
+ * nothing here). All members are OPTIONAL-ADDITIVE: an engine without a feed
+ * behaves exactly as before (no liveness recording, no index maintenance).
+ */
+export interface NodeLivenessFeed {
+  /**
+   * Register a node's live dispatch session with the feed. Called by the
+   * engine immediately after a successful launch (`_dispatchNode`), when the
+   * node's `dispatchTaskId` / `dispatchSessionId` are known. The engine ALSO
+   * records the `sessionId → nodeId` mapping in its own reverse index at this
+   * point, so the platform feed can look up the owning node for a session id
+   * (see {@link AdvanceEngine.getNodeIdForSession}).
+   */
+  attach(nodeId: string, sessionId: string): void;
+  /**
+   * Unregister a node's session. Called by the engine when a running node
+   * reaches a terminal state (signal-driven completion / escalation) — the
+   * feed stops observing the session, and the engine drops the node's
+   * `sessionId → nodeId` index entry. A no-op for a node that was never
+   * attached.
+   */
+  detach(nodeId: string): void;
+  /**
+   * Push a session-level activity heartbeat for a node. Optional — a feed
+   * without it simply cannot relay platform activity into the engine; the
+   * engine's own dispatch-time heartbeat and `recordLivenessHeartbeat`
+   * callers remain the alternative observation channels.
+   */
+  onHeartbeat?(nodeId: string, source: NodeLivenessState["heartbeatSource"]): void;
+  /**
+   * Push a session-level error observation for a node. Optional — the stall
+   * monitor (subtask 3) may surface the node's status accordingly.
+   */
+  onSessionError?(nodeId: string, reason: string): void;
+  /**
+   * Push a session-gone observation — the platform can no longer see the
+   * node's session at all. Optional — recovery / the stall monitor (subtask
+   * 3) owns the authoritative timeout handling.
+   */
+  onSessionGone?(nodeId: string): void;
+}
+
+/**
  * The budget-query surface the engine touches. Structurally satisfied by
  * {@link BudgetBridge} (`src/graph/engine/budget-bridge.ts`). Optional —
  * omitted in tests, and Phase 1 never enforces ceilings (see the Phase-7 stub
@@ -311,6 +371,17 @@ export interface AdvanceEngineOptions {
    */
   graphEvents?: GraphEventRecorder;
   /**
+   * Optional node-liveness feed seam (subtask 2 of node-anomaly-detection).
+   * When present, the engine records an initial `dispatch` heartbeat on every
+   * successfully launched node, maintains a `sessionId → nodeId` reverse
+   * index of running nodes, and registers / unregisters each node's session
+   * with the feed (`attach` on launch, `detach` on terminal transition).
+   * Absent → the engine behaves exactly as before: no liveness recording, no
+   * index, no feed calls. A pure role-agnostic DI seam, exactly like
+   * {@link AdvanceEngineOptions.dispatch} / {@link AdvanceEngineOptions.budget}.
+   */
+  livenessFeed?: NodeLivenessFeed;
+  /**
    * Optional graph-terminal notification seam. Invoked exactly once per
    * terminal transition (GRAPH COMPLETE / GRAPH BLOCKED). When absent, the
    * engine behaves identically — this is a pure DI seam like
@@ -381,7 +452,16 @@ export class AdvanceEngine {
   private readonly flushPersistState?: () => void;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
+  private readonly livenessFeed?: NodeLivenessFeed;
   private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  /**
+   * Reverse index of live dispatch sessions: `dispatchSessionId → nodeId`,
+   * maintained for RUNNING nodes only, so the platform liveness feed can look
+   * up the owning node for a session id (subtask 2). Populated on `attach`
+   * (a node's successful launch inside {@link _dispatchNode}), dropped on
+   * `detach` (the node's terminal transition). Empty when no feed is wired.
+   */
+  private readonly _sessionToNodeId = new Map<string, string>();
   private readonly _terminationCtx: TerminationContext = {
     terminalComplete: false,
     terminalBlocked: false,
@@ -409,6 +489,7 @@ export class AdvanceEngine {
     this.flushPersistState = opts.flushPersistState;
     this.onNodeCompletion = opts.onNodeCompletion;
     this.graphEvents = opts.graphEvents;
+    this.livenessFeed = opts.livenessFeed;
     this.onGraphTerminal = opts.onGraphTerminal;
     this.parentContext =
       opts.parentContext ??
@@ -883,6 +964,9 @@ export class AdvanceEngine {
     switch (signalType) {
       case "answer":
         if (node.status === NodeStatus.Running) {
+          // Liveness feed (subtask 2): the node's session is terminal — stop
+          // observing it and drop the reverse-index entry.
+          this._detachLiveness(node);
           markCompleted(this.state, node);
           // Record the node's genuinely produced artifacts/evidence at
           // completion (subtask C-RECORD). Fields stay absent when the node
@@ -897,6 +981,7 @@ export class AdvanceEngine {
         // The reviewing node finished its pass; its own lifecycle completes.
         // Back-edge re-activation of the upstream node is Phase 2.
         if (node.status === NodeStatus.Running) {
+          this._detachLiveness(node);
           markCompleted(this.state, node);
           this._captureNodeResult(node);
           recordNodeArtifactsAndEvidence(this.state, node);
@@ -906,6 +991,7 @@ export class AdvanceEngine {
         break;
       case "escalate":
         if (node.status === NodeStatus.Running) {
+          this._detachLiveness(node);
           markEscalated(this.state, node, this._extractErrorMessage(signalPayload));
           // Subtask 1: notify exactly once — `escalate`.
           this._notifyCompletion(node, "escalate", signalPayload, NodeStatus.Escalate);
@@ -1022,6 +1108,134 @@ export class AdvanceEngine {
     const node = this.state.nodes.get(nodeId);
     if (!node) return;
     this._notifyCompletion(node, signalType, payload, nodeStatus);
+  }
+
+  /**
+   * Record a session-activity heartbeat for a running node (subtask 2 of
+   * node-anomaly-detection). The public liveness intake — called by the
+   * platform liveness feed (session tool-call / message observations) and by
+   * the stall monitor (subtask 3) when it re-classifies activity.
+   *
+   * Guarded: a heartbeat only lands on a node that is BOTH `running` AND
+   * actually dispatched by this engine (`dispatchTaskId` set — matching the
+   * launch that produced the session). Every other case is a strict no-op:
+   * a completed / escalated / blocked / pending node must never be revived
+   * into activity, and a node that was never launched has no live session to
+   * heartbeat. The mutation is non-critical observability churn — it rides
+   * the debounced persistence tier (`markNonCriticalDirty`), never the
+   * synchronous write-through.
+   */
+  recordLivenessHeartbeat(
+    nodeId: string,
+    source: NodeLivenessState["heartbeatSource"],
+  ): void {
+    const node = this.state.nodes.get(nodeId);
+    if (!node) return;
+    if (node.status !== NodeStatus.Running) return;
+    if (!node.dispatchTaskId) return;
+    node.liveness = {
+      ...node.liveness,
+      lastActivityAt: Date.now(),
+      heartbeatSource: source,
+    };
+    markNonCriticalDirty(this.state);
+  }
+
+  /**
+   * Immediate-failure fast path (subtask 4 of node-anomaly-detection). Public
+   * intake for session-level failure observations relayed by the platform
+   * liveness feed — a dispatch session reported `error` (session.error) or
+   * `gone` (session.deleted: the platform can no longer see the session at all).
+   *
+   * Strictly guarded — a no-op unless ALL of:
+   * - the node is RUNNING (a terminal / pending / ready / blocked / cancelled
+   *   node must never be revived or re-advanced);
+   * - the liveness feed is attached: the seam is wired AND the node's dispatch
+   *   session was registered with it at launch (`dispatchSessionId` present —
+   *   the same predicate {@link _detachLiveness} uses to unregister).
+   *
+   * Per-kind semantics:
+   * - `gone` is AUTHORITATIVE — the worker vanished and the platform can no
+   *   longer observe it, so the node fails immediately through the existing
+   *   escalate advance ({@link onNodeSignalEmitted} with source `"dispatch"`),
+   *   reusing the standard escalate propagation + cascade cancel so the
+   *   abnormal node never blocks graph advancement.
+   * - `error` is first re-checked against the dispatch port via
+   *   {@link isDispatchTaskLive}: a task that is STILL LIVE (running / pending /
+   *   awaiting_approval) means the session error was transient — the engine
+   *   records a `session` heartbeat (activity continues) and returns, keeping
+   *   the node running (matching the dispatch layer's guardedMarkError
+   *   semantics). A task that is genuinely NOT live escalates like `gone`.
+   *
+   * Returns the contained advance promise — it resolves when the observation
+   * was processed (or rejected by a guard) and never rejects out of the box:
+   * the escalate advance's critical section contains its own errors (subtask 2),
+   * so a throwing feed relay can never break the engine.
+   */
+  handleFeedSessionEvent(
+    nodeId: string,
+    kind: "error" | "gone",
+    reason?: string,
+  ): Promise<void> {
+    const node = this.state.nodes.get(nodeId);
+    if (!node) return Promise.resolve();
+    if (node.status !== NodeStatus.Running) return Promise.resolve();
+    // The liveness feed must be attached: the seam is wired AND the node's
+    // session was registered with it at launch. A node whose session was never
+    // attached has no observed session to fail fast on.
+    if (!this.livenessFeed || !node.dispatchSessionId) return Promise.resolve();
+
+    // `error` carries the transient-error protection: the session reported an
+    // error, but the dispatch task may still be live (a transient execution
+    // error while the underlying session continues — guardedMarkError parity
+    // with engine-recovery.ts subscribeTaskTermination). Only a task that is
+    // genuinely NOT live escalates.
+    if (kind === "error") {
+      const taskId = node.dispatchTaskId;
+      if (taskId && isDispatchTaskLive(this.dispatchPort, taskId)) {
+        // Still live — record the session activity and keep the node running;
+        // the subscribed onTaskTerminated listener (or recovery) advances it on
+        // a genuine later termination.
+        this.recordLivenessHeartbeat(nodeId, "session");
+        return Promise.resolve();
+      }
+    }
+
+    // `gone` (authoritative) or a genuinely-dead `error` → immediate escalate
+    // through the standard advancement path: running → escalated lifecycle +
+    // completion seam + escalate propagation (retry gate / cascade cancel) +
+    // termination re-check. Source `"dispatch"`: the observation is a
+    // dispatch-layer session event, not a recovery pass.
+    const payload = { error: reason ?? "dispatch session deleted" };
+    return this.onNodeSignalEmitted(node.nodeId, "escalate", payload, "dispatch");
+  }
+
+  /**
+   * Reverse-lookup the node owning a live dispatch session (subtask 2). Backs
+   * the platform liveness feed's `sessionId → nodeId` reverse index: given a
+   * session the platform observes, the feed can find the graph node it
+   * belongs to. Returns `undefined` for an unknown session or a session whose
+   * node has detached (terminal transition). Only meaningful when a
+   * {@link NodeLivenessFeed} is wired — the index is otherwise empty.
+   */
+  getNodeIdForSession(sessionId: string): string | undefined {
+    return this._sessionToNodeId.get(sessionId);
+  }
+
+  /**
+   * Unregister a node's session from the feed + reverse index (subtask 2).
+   * Mirrors {@link NodeLivenessFeed.attach}: called when a running node
+   * reaches a terminal state, so the feed stops observing the session and the
+   * `sessionId → nodeId` index entry is dropped. A no-op when no feed is
+   * wired (the index is empty then) or the node never attached. The feed
+   * call is optional-chained and total — it can never break advancement.
+   */
+  private _detachLiveness(node: NodeRuntimeState): void {
+    if (!this.livenessFeed) return;
+    if (node.dispatchSessionId) {
+      this._sessionToNodeId.delete(node.dispatchSessionId);
+    }
+    this.livenessFeed.detach(node.nodeId);
   }
 
   /**
@@ -1174,6 +1388,26 @@ export class AdvanceEngine {
     node.dispatchTaskId = task.id;
     node.dispatchSessionId = task.sessionId;
     markDirty(state);
+    // Liveness feed (subtask 2): record the initial `dispatch` heartbeat — the
+    // node is provably live the moment its launch succeeded — and register its
+    // session with the platform feed plus the engine's own reverse index
+    // (`sessionId → nodeId`, for the feed's reverse lookup).
+    //
+    // The initial heartbeat is written WITHOUT a separate non-critical dirty
+    // mark: `markDirty` above already flags this critical section, so the
+    // synchronous write-through persists the whole snapshot — including the
+    // `liveness` carrier (serialized at engine-persistence.ts) — in the same
+    // section. Adding `markNonCriticalDirty` here would leave the flag set
+    // after the sync tier owns the write, breaking the M5 contract that a
+    // pure critical mutation leaves `isNonCriticalDirty` untouched (and
+    // triggering a spurious debounced write on the next idle section). Later
+    // heartbeats outside critical sections (`recordLivenessHeartbeat`) DO ride
+    // the debounced tier, as they are genuinely standalone non-critical churn.
+    node.liveness = { lastActivityAt: Date.now(), heartbeatSource: "dispatch" };
+    if (this.livenessFeed) {
+      this.livenessFeed.attach(node.nodeId, task.sessionId);
+      this._sessionToNodeId.set(task.sessionId, node.nodeId);
+    }
     // Phase-3 delivery seam (closes the known integration gap): a real dispatch
     // completion never reached the advance engine — only direct
     // `signalBridge.record` injection did. Register an `onTaskTerminated`

@@ -102,12 +102,16 @@ import {
   type CreateEngineOptions,
   type NodeDispatchPort,
   type NodeCompletionEvent,
+  type NodeStallEvent,
+  type NodeLivenessFeed,
   type GraphTerminalEvent,
   GraphEventRecorder,
   readGraphEventLog,
   createGraphNotifier,
+  createGraphStallNotifier,
   createGraphTerminalNotifier,
   type GraphCompletionHandler,
+  type GraphStallHandler,
   type GraphTerminalHandler,
   graphParentContext,
   type DispatchParentContext,
@@ -223,6 +227,31 @@ export interface GraphToolSetDeps {
    * only — opt-out).
    */
   sweeperIntervalMs?: number;
+  /**
+   * Optional soft-stall warn threshold (ms) for the heartbeat-based liveness
+   * monitor every engine this toolset builds instantiates (subtask 6). A
+   * heartbeat-fed `running` node that goes idle past this threshold is
+   * classified `stalling` and surfaces the engine's `onNodeStall` seam (the
+   * stall notifier) once per stall episode. Absent → the monitor's default
+   * (`min(60_000, nodeStaleTimeoutMs / 2)`).
+   */
+  nodeStallWarnMs?: number;
+  /**
+   * Optional hard-stall grace (ms) past `nodeStallWarnMs` before a stalling
+   * node is marked `timeout` (subtask 6). Absent → the monitor's default
+   * (30_000).
+   */
+  nodeStallGraceMs?: number;
+  /**
+   * Optional node-liveness feed seam (node-anomaly-detection subtask 2).
+   * Threaded into every engine this toolset builds: when present, the engine
+   * records a `dispatch` heartbeat on every launch, registers its sessions
+   * with the feed, and maintains a `sessionId → nodeId` reverse index (see
+   * {@link GraphToolSet.resolveSessionOwner}) so the platform liveness wiring
+   * can heartbeat / fail-fast graph sessions. Absent → engine behavior
+   * unchanged.
+   */
+  livenessFeed?: NodeLivenessFeed;
   /**
    * Optional graph-notify source (subtask 3). When present, every engine this
    * toolset constructs — in `buildEngine` (used by all construction paths) and
@@ -372,6 +401,12 @@ export interface GraphStatusArgs {
    * `NodeRuntimeState.evidence[]` (subtask 1 field). Honest-empty like
    * `include_artifacts`. */
   include_evidence?: boolean;
+  /** Include each node's recorded liveness state from
+   * `NodeRuntimeState.liveness` (subtask 1 field). OPTIONAL-ADDITIVE —
+   * only nodes WITH recorded liveness get the block; absent liveness →
+   * nothing rendered, never fabricated. Running nodes always render their
+   * liveness regardless of this flag. */
+  include_liveness?: boolean;
   /** Include each loop group's ordered round history from
    * `LoopGroupRuntimeState.rounds[]` (subtask 1 field). Absent rounds yield an
    * explicit "no loop rounds recorded" note — never invented rows. */
@@ -640,19 +675,65 @@ export class GraphToolSet {
   }
 
   /**
+   * Resolve the configured graph-notify source into a concrete `onNodeStall`
+   * handler, or `undefined` for the engine's default no-op seam. Same
+   * resolution logic as {@link completionHandler} — config form only
+   * (`GraphNotifyConfig`); a prebuilt `GraphCompletionHandler` fn cannot be
+   * deconstructed, so it yields `undefined` (stall notifications ride the
+   * engine-level `onNodeStall` DI seam, distinct from the prebuilt per-node
+   * completion handler). A fresh notifier = a fresh dedupe epoch per engine
+   * construction. When the resolved emperor session is absent, a degradation
+   * warning naming the graph is logged (plus a durable marker when a stateDir
+   * is configured) instead of silently degrading (F6). Subtask 5.
+   */
+  private stallHandler(
+    graphId: string,
+    invokingSessionId?: string,
+  ): ((event: NodeStallEvent) => void) | undefined {
+    const src = this.deps.graphNotify;
+    if (src === undefined) return undefined;
+    // A prebuilt per-node handler cannot produce a stall handler.
+    if (typeof src === "function") return undefined;
+    const emperorSessionId =
+      typeof src.emperorSessionId === "function"
+        ? src.emperorSessionId(invokingSessionId)
+        : src.emperorSessionId;
+    if (!emperorSessionId) {
+      // F6: no silent no-op — name the graph + seam, and persist a marker when
+      // a stateDir is available so graph_status consumers can observe the drop.
+      log.warn(
+        `graph-tools: graph "${graphId}" stall notification degraded — no emperor session resolved; stall reminder suppressed`,
+      );
+      this.recordNotificationDegraded(graphId, "stall");
+      return undefined;
+    }
+    return createGraphStallNotifier(src.sessionClient, {
+      emperorSessionId,
+      ...(src.agent ? { agent: src.agent } : {}),
+    }) as (event: NodeStallEvent) => void;
+  }
+
+  /**
    * Record a durable `notification_degraded` event when a stateDir is
    * configured (F6, optional-additive — absent stateDir → warning log only).
    * Written by the toolset itself because the notifier is never constructed in
    * this path; the marker lands in the graph's event log (`.rolebox/state/
    * graph-events-{hash}.ndjson`) so a graph_status consumer can surface
-   * "terminal notification degraded".
+   * "terminal notification degraded". Subtask 5 adds the `stall` kind.
    */
   private recordNotificationDegraded(
     graphId: string,
-    kind: "completion" | "terminal",
+    kind: "completion" | "terminal" | "stall",
   ): void {
     if (!this.deps.stateDir) return;
-    new GraphEventRecorder(this.deps.stateDir).notificationDegraded(graphId, kind);
+    // The recorder's `kind` slot is the serialized `status` string
+    // (graph-events.ts writes it verbatim into the record's generic status
+    // field); its type union predates the newer "stall" kind, so the kind is
+    // widened at this boundary — the record shape is identical.
+    new GraphEventRecorder(this.deps.stateDir).notificationDegraded(
+      graphId,
+      kind as "completion" | "terminal",
+    );
   }
 
   /**
@@ -693,6 +774,18 @@ export class GraphToolSet {
       nodeStaleTimeoutMs:
         this.deps.nodeStaleTimeoutMs ?? DEFAULT_NODE_STALE_TIMEOUT_MS,
       sweeperIntervalMs: this.deps.sweeperIntervalMs ?? DEFAULT_SWEEPER_INTERVAL_MS,
+      // Subtask 6: thread the optional liveness-monitor stall thresholds + the
+      // node-liveness feed into every engine the toolset builds (absent → the
+      // engine's defaults / unchanged behavior).
+      ...(this.deps.nodeStallWarnMs !== undefined
+        ? { nodeStallWarnMs: this.deps.nodeStallWarnMs }
+        : {}),
+      ...(this.deps.nodeStallGraceMs !== undefined
+        ? { nodeStallGraceMs: this.deps.nodeStallGraceMs }
+        : {}),
+      ...(this.deps.livenessFeed !== undefined
+        ? { livenessFeed: this.deps.livenessFeed }
+        : {}),
     };
     // Subtask 3: wire the configured graph-notify completion seam (absent →
     // no-op). The emperor session is targeted ONLY for notification; the
@@ -704,6 +797,11 @@ export class GraphToolSet {
     const terminal = this.terminalHandler(graphId, invokingSessionId);
     if (terminal) {
       options.onGraphTerminal = terminal;
+    }
+    // Subtask 5: wire the configured graph-notify stall seam (absent → no-op).
+    const stall = this.stallHandler(graphId, invokingSessionId);
+    if (stall) {
+      options.onNodeStall = stall;
     }
     // Graph monitoring: a durable write-side event log alongside the notifier.
     // Constructed only when a stateDir is configured — absent stateDir → no
@@ -1122,6 +1220,7 @@ export class GraphToolSet {
     // so the emperor-session resolver can target the orchestrator at runtime.
     const completion = this.completionHandler(args.graph_id, sessionId);
     const terminal = this.terminalHandler(args.graph_id, sessionId);
+    const stall = this.stallHandler(args.graph_id, sessionId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
@@ -1137,9 +1236,22 @@ export class GraphToolSet {
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
       ...(completion ? { onNodeCompletion: completion } : {}),
       ...(terminal ? { onGraphTerminal: terminal } : {}),
+      ...(stall ? { onNodeStall: stall } : {}),
       // Graph monitoring: durable write-side event log when a stateDir is set.
       ...(this.deps.stateDir
         ? { graphEvents: new GraphEventRecorder(this.deps.stateDir) }
+        : {}),
+      // Subtask 6: thread the optional liveness-monitor stall thresholds + the
+      // node-liveness feed into the production graph_run runtime (the primary
+      // execution path — absent → the engine's defaults / unchanged behavior).
+      ...(this.deps.nodeStallWarnMs !== undefined
+        ? { nodeStallWarnMs: this.deps.nodeStallWarnMs }
+        : {}),
+      ...(this.deps.nodeStallGraceMs !== undefined
+        ? { nodeStallGraceMs: this.deps.nodeStallGraceMs }
+        : {}),
+      ...(this.deps.livenessFeed !== undefined
+        ? { livenessFeed: this.deps.livenessFeed }
         : {}),
     });
 
@@ -1266,6 +1378,37 @@ export class GraphToolSet {
       }
     }
     return false;
+  }
+
+  // ── Session-level liveness resolution (subtask 6) ──────────────────────────
+
+  /**
+   * Resolve the engine runtime + node owning a live dispatch session (subtask
+   * 6 — the Pi liveness wiring's `sessionId → nodeId` resolution). Iterates
+   * every registry runtime's engine-level reverse index
+   * (`EngineRuntime.getNodeIdForSession` — populated at launch when a liveness
+   * feed is wired onto the engine, dropped on the node's terminal transition).
+   * Returns `undefined` when no registry runtime owns the session (unknown
+   * session, detached terminal node, or an engine built without a liveness
+   * feed) — the wiring then no-ops. Total: a misbehaving runtime is logged and
+   * skipped, never thrown.
+   */
+  resolveSessionOwner(
+    sessionId: string,
+  ): { graphId: string; runtime: EngineRuntime; nodeId: string } | undefined {
+    for (const [graphId, entry] of this.registry) {
+      try {
+        const nodeId = entry.runtime.getNodeIdForSession?.(sessionId);
+        if (nodeId) return { graphId, runtime: entry.runtime, nodeId };
+      } catch (err) {
+        log.warn(
+          `graph-tools: getNodeIdForSession threw for graph "${graphId}" (session "${sessionId}") — skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    return undefined;
   }
 
   // ── graph_status ───────────────────────────────────────────────────────────
@@ -1921,8 +2064,15 @@ export class GraphToolSet {
     lines.push(`Graph "${state.graphId}"  [phase: ${state.phase}]`);
     lines.push("  NODE                  STATUS      AGENT");
     for (const n of limitNodes(nodes, args.limit)) {
+      // Liveness (subtask 7 display): stall marker on the row ONLY for RUNNING
+      // nodes that have a recorded stallStatus. Non-running nodes and nodes
+      // without recorded liveness keep the row byte-identical to legacy output.
+      const stall =
+        n.status === NodeStatus.Running && n.liveness?.stallStatus
+          ? `  [stall: ${n.liveness.stallStatus}]`
+          : "";
       lines.push(
-        `  ${n.nodeId.padEnd(20)} ${n.status.padEnd(11)} ${n.agent}`,
+        `  ${n.nodeId.padEnd(20)} ${n.status.padEnd(11)} ${n.agent}${stall}`,
       );
     }
     if (args.include_budget) {
@@ -2008,6 +2158,23 @@ export class GraphToolSet {
     if (args.include_output && node.result) {
       lines.push("  output:");
       lines.push(this.paginate(GraphToolSet.resultText(node.result), args).replace(/^/gm, "    "));
+    }
+    // Liveness (subtask 7 display): running nodes ALWAYS show their recorded
+    // liveness; non-running nodes only when include_liveness is set. Nodes with
+    // NO recorded liveness get NO block at all (honest-empty — never a
+    // placeholder). Sub-lines are emitted only for fields actually present.
+    if (node.liveness && (node.status === NodeStatus.Running || args.include_liveness)) {
+      lines.push("  liveness:");
+      if (node.liveness.lastActivityAt !== undefined) {
+        lines.push(`    last_activity: ${new Date(node.liveness.lastActivityAt).toISOString()}`);
+        lines.push(`    idle_ms: ${Date.now() - node.liveness.lastActivityAt}`);
+      }
+      if (node.liveness.heartbeatSource) {
+        lines.push(`    heartbeat_source: ${node.liveness.heartbeatSource}`);
+      }
+      if (node.liveness.stallStatus) {
+        lines.push(`    stall_status: ${node.liveness.stallStatus}`);
+      }
     }
     // C-WIRE: append the node-scoped observability sections (checkpoints /
     // artifacts / evidence / signal stream). `include_history` / `round` in a
@@ -2536,6 +2703,26 @@ export class GraphToolSet {
       // field, only when include_output was requested.
       ...(args.include_output && n.result
         ? { output: GraphToolSet.resultText(n.result) }
+        : {}),
+      // Liveness (subtask 7 display): merge snake_case liveness fields when the
+      // node has RECORDED liveness AND (it is running OR include_liveness is
+      // set). Running nodes always surface liveness; non-running nodes only on
+      // request. Nodes without recorded liveness add NO keys (byte-identical
+      // output preserved). Sub-fields are emitted only when actually present.
+      ...(n.liveness && (n.status === NodeStatus.Running || args.include_liveness)
+        ? (() => {
+            const liv = n.liveness!;
+            const liveness: Record<string, unknown> = {};
+            if (liv.lastActivityAt !== undefined) {
+              liveness.last_activity_at = liv.lastActivityAt;
+              liveness.idle_ms = Date.now() - liv.lastActivityAt;
+            }
+            if (liv.heartbeatSource) liveness.heartbeat_source = liv.heartbeatSource;
+            if (liv.stallStatus) liveness.stall_status = liv.stallStatus;
+            if (liv.stallWarnedAt !== undefined) liveness.stall_warned_at = liv.stallWarnedAt;
+            if (liv.stallReason !== undefined) liveness.stall_reason = liv.stallReason;
+            return liveness;
+          })()
         : {}),
     };
   }

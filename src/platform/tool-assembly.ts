@@ -43,6 +43,7 @@ import {
 // seven imperative graph_* tools. Import-only (no protected files touched).
 import { createGraphTools } from "../graph/tools/index.ts";
 import type { GraphNotifySource, GraphToolSet } from "../graph/tools/index.ts";
+import type { NodeLivenessFeed } from "../graph/engine/index.ts";
 
 export interface BuildToolsOptions {
   sessionClient?: ISessionClient;
@@ -87,6 +88,27 @@ export interface BuildToolsOptions {
    * construct their own toolset (legacy behavior).
    */
   graphTools?: GraphToolSet;
+  /**
+   * Optional node-liveness feed seam (node-anomaly-detection subtask 2).
+   * Threaded through `createGraphTools` into the toolset's engines (when the
+   * toolset is constructed inside tool-assembly): the platform liveness wiring
+   * heartbeats / fail-fasts graph sessions through the shared feed. Absent →
+   * engines run without liveness recording (backward compatible).
+   */
+  livenessFeed?: NodeLivenessFeed;
+  /**
+   * Optional soft-stall warn threshold (ms) for the heartbeat-based liveness
+   * monitor (node-anomaly-detection subtask 6). Threaded into every engine
+   * the graph tools construct. Absent → the monitor's default
+   * (`min(60_000, nodeStaleTimeoutMs / 2)`).
+   */
+  nodeStallWarnMs?: number;
+  /**
+   * Optional hard-stall grace (ms) past `nodeStallWarnMs` before a stalling
+   * node is marked `timeout` (subtask 6). Absent → the monitor's default
+   * (30_000).
+   */
+  nodeStallGraceMs?: number;
 }
 
 export function buildCanonicalTools(
@@ -177,6 +199,18 @@ export function buildCanonicalTools(
       // the graph_* tools and the HookDeps graphTools query) when the
       // platform assembly layer provided one.
       toolset: opts.graphTools,
+      // Subtask 6: thread the node-liveness feed + monitor stall thresholds
+      // into the graph tools' engine construction (absent → defaults,
+      // behavior unchanged).
+      ...(opts.livenessFeed !== undefined
+        ? { livenessFeed: opts.livenessFeed }
+        : {}),
+      ...(opts.nodeStallWarnMs !== undefined
+        ? { nodeStallWarnMs: opts.nodeStallWarnMs }
+        : {}),
+      ...(opts.nodeStallGraceMs !== undefined
+        ? { nodeStallGraceMs: opts.nodeStallGraceMs }
+        : {}),
     }));
   }
 

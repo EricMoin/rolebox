@@ -258,6 +258,40 @@ export interface NodeRuntimeState {
    * OPTIONAL-ADDITIVE — absent when the node declared no budget.
    */
   budget?: NodeBudgetSpec;
+  /**
+   * Per-node liveness detection state — heartbeat + stall tracking for the
+   * node-anomaly-detection monitor.
+   *
+   * OPTIONAL-ADDITIVE — absent in persisted files written before this field
+   * existed, and absent for nodes that have not yet recorded a heartbeat;
+   * both cases deserialize cleanly (the field is simply `undefined`).
+   *
+   * Written by the liveness feed (subtask 2) and classified by the stall
+   * monitor (subtask 3); the state carrier itself is defined here (subtask 1).
+   */
+  liveness?: NodeLivenessState;
+}
+
+/**
+ * Per-node liveness tracking state recorded by the liveness feed and
+ * classified by the stall monitor.
+ *
+ * OPTIONAL-ADDITIVE runtime carrier on {@link NodeRuntimeState.liveness} —
+ * every field is JSON-primitive, so the carrier serializes and deserializes
+ * losslessly through `engine-persistence.ts` without a schema bump. Absent
+ * until the first heartbeat is recorded.
+ */
+export interface NodeLivenessState {
+  /** Epoch ms of the most recent observed activity (tool call, message, dispatch event, …). */
+  lastActivityAt?: number;
+  /** Which observation channel produced the most recent heartbeat. */
+  heartbeatSource?: "tool" | "message" | "session" | "dispatch" | "feed";
+  /** Latest stall classification from the monitor. */
+  stallStatus?: "healthy" | "stalling" | "stalled";
+  /** Epoch ms when the stall warning was first issued (stalling → stalled). */
+  stallWarnedAt?: number;
+  /** Human-readable reason for the current stallStatus (monitor diagnosis). */
+  stallReason?: string;
 }
 
 // ── Edge Payload ────────────────────────────────────────────────────────

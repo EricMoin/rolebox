@@ -50,6 +50,15 @@ export const GRAPH_COMPLETE_MARKER = "[GRAPH COMPLETE]";
  * produces two distinct terminal reminders with different markers.
  */
 export const GRAPH_BLOCKED_MARKER = "[GRAPH BLOCKED]";
+/**
+ * Marker for graph-node-stall reminders injected into the emperor session by
+ * the graph stall notifier (`src/graph/engine/graph-notify.ts`). Like every
+ * other parent-targeted reminder, it is part of
+ * {@link DISPATCH_NOTIFICATION_MARKERS} so the re-entering chat.message hook
+ * recognizes it as a non-user turn and does NOT reset the auto-continue
+ * counter.
+ */
+export const GRAPH_STALL_MARKER = "[GRAPH NODE STALLED]";
 
 export const DISPATCH_NOTIFICATION_MARKERS = [
   DISPATCH_COMPLETION_MARKER,
@@ -59,6 +68,7 @@ export const DISPATCH_NOTIFICATION_MARKERS = [
   GRAPH_COMPLETION_MARKER,
   GRAPH_COMPLETE_MARKER,
   GRAPH_BLOCKED_MARKER,
+  GRAPH_STALL_MARKER,
 ] as const;
 
 export function isDispatchNotification(text: string): boolean {

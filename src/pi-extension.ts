@@ -20,11 +20,15 @@ import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.
 import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
 import { createPiHookPipeline } from "./platform/adapters/pi/hook-pipeline.ts";
-import { runPiSystemTransform } from "./platform/adapters/pi/system-transform.ts";
+import {
+  extractPiSessionId,
+  runPiSystemTransform,
+} from "./platform/adapters/pi/system-transform.ts";
 import { wirePiChatActivation } from "./platform/adapters/pi/chat-activation.ts";
 import { wireRoleSwitcher } from "./platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
 import type { ToolInterceptorHooks } from "./platform/adapters/pi/tool-interceptor.ts";
+import type { CanonicalEventType } from "./platform/types.ts";
 import { piCapabilities } from "./platform/capabilities.ts";
 import { createSubLogger, formatError } from "./logger.ts";
 import type {
@@ -72,6 +76,7 @@ import {
   GraphEventRecorder,
   createGraphNotifier,
   createGraphTerminalNotifier,
+  type NodeLivenessFeed,
 } from "./graph/engine/index.ts";
 import {
   createAllLspTools,
@@ -918,6 +923,24 @@ export default async function (pi: any): Promise<void> {
     // pipeline's state + deps right after the pipeline is built (before
     // init() compiles the tools).
     const interceptorHooks: ToolInterceptorHooks = {};
+
+    // Subtask 6 (node-anomaly-detection liveness wiring): the shared
+    // NodeLivenessFeed instance threaded into every graph engine the stack's
+    // toolset builds. Its PRESENCE is what gates each engine's `sessionId →
+    // nodeId` reverse index population at launch + terminal detach
+    // (engine-advance.ts _dispatchNode / _detachLiveness) — the index is the
+    // liveness relay's authoritative owner source (see the relay wiring
+    // below). The instance itself is intentionally inert on Pi (observe-only
+    // logging); the relay reads the engines' index through the toolset.
+    const livenessFeed: NodeLivenessFeed = {
+      attach(nodeId: string, sessionId: string): void {
+        log.debug("liveness: session attached", { nodeId, sessionId });
+      },
+      detach(nodeId: string): void {
+        log.debug("liveness: session detached", { nodeId });
+      },
+    };
+
     const serviceStack = new PiLightweightServiceStack(
       pi,
       resolvedRoles,
@@ -935,6 +958,11 @@ export default async function (pi: any): Promise<void> {
       notifyClient,
       process.cwd(),
       interceptorHooks,
+      // Subtask 6: thread the shared node-liveness feed into the stack's
+      // graph toolset so every engine records dispatch heartbeats, registers
+      // its sessions with the feed, and maintains the sessionId → nodeId
+      // reverse index the liveness relay below resolves through.
+      livenessFeed,
     );
 
     // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────
@@ -1058,6 +1086,99 @@ export default async function (pi: any): Promise<void> {
     wireEvent("message_end");
 
     log.info("Event wiring complete", { events: 9 });
+
+    // ── 6b. Node-liveness relay (node-anomaly-detection subtask 6) ────────
+    //
+    // Subscribe to canonical events carrying session-level activity and relay
+    // them into the graph engine's node-liveness machinery through the public
+    // EngineRuntime surface:
+    //
+    //   part.created / part.updated / message.updated → session heartbeat
+    //     (tool-call + message activity = the owning node is alive);
+    //   session.idle → session heartbeat (a finished turn is still activity);
+    //   session.error → handleFeedSessionEvent(nodeId, "error", reason) — the
+    //     engine re-checks the dispatch task's liveness (transient-error
+    //     protection: a still-live task keeps the node running, heartbeat
+    //     only);
+    //   session.deleted → handleFeedSessionEvent(nodeId, "gone") — the
+    //     session vanished, so the owning node escalates immediately.
+    //
+    // The owning node is resolved through the graph toolset's engine-level
+    // `sessionId → nodeId` reverse index (GraphToolSet.resolveSessionOwner —
+    // populated at launch only when a liveness feed is wired onto the engine).
+    // An unknown / detached session, or no toolset (no dispatch manager),
+    // resolves to nothing and the handler no-ops — the wiring is
+    // OPTIONAL-ADDITIVE and engine behavior is unchanged without a feed.
+    //
+    // Every handler is wrapped in try/catch — a relay failure logs at debug
+    // and never throws to the Pi runtime (mirroring the wireEvent pattern at
+    // the top of this section).
+
+    /** Subscribe one canonical activity type → session heartbeat. */
+    const heartbeatOn = (canonicalType: CanonicalEventType): (() => void) =>
+      eventBridge.onType(canonicalType, (event) => {
+        try {
+          const sessionId = extractPiSessionId(event.properties);
+          if (!sessionId) return;
+          const owner = serviceStack.getGraphToolSet()?.resolveSessionOwner(sessionId);
+          if (!owner) return;
+          owner.runtime.recordLivenessHeartbeat(owner.nodeId, "session");
+        } catch (err) {
+          log.debug(`liveness:${canonicalType} relay error`, {
+            error: formatError(err),
+          });
+        }
+      });
+
+    const livenessUnsubs: Array<() => void> = [
+      heartbeatOn("part.created"),
+      heartbeatOn("part.updated"),
+      heartbeatOn("message.updated"),
+      heartbeatOn("session.idle"),
+      eventBridge.onType("session.error", (event) => {
+        try {
+          const sessionId = extractPiSessionId(event.properties);
+          if (!sessionId) return;
+          const owner = serviceStack.getGraphToolSet()?.resolveSessionOwner(sessionId);
+          if (!owner) return;
+          const reason =
+            (typeof event.properties.error === "string" && event.properties.error) ||
+            (typeof event.properties.message === "string" && event.properties.message) ||
+            undefined;
+          void owner.runtime.handleFeedSessionEvent(owner.nodeId, "error", reason);
+        } catch (err) {
+          log.debug("liveness:session.error relay error", {
+            error: formatError(err),
+          });
+        }
+      }),
+      eventBridge.onType("session.deleted", (event) => {
+        try {
+          const sessionId = extractPiSessionId(event.properties);
+          if (!sessionId) return;
+          const owner = serviceStack.getGraphToolSet()?.resolveSessionOwner(sessionId);
+          if (!owner) return;
+          void owner.runtime.handleFeedSessionEvent(owner.nodeId, "gone");
+        } catch (err) {
+          log.debug("liveness:session.deleted relay error", {
+            error: formatError(err),
+          });
+        }
+      }),
+    ];
+    bridgeUnsubscribers.push(() => {
+      for (const unsub of livenessUnsubs) {
+        try {
+          unsub();
+        } catch {
+          // best effort — never throw during teardown
+        }
+      }
+    });
+
+    log.info("Node-liveness relay wired", {
+      subscriptions: 6, // part.created / part.updated / message.updated / session.idle / session.error / session.deleted
+    });
 
     // ── /stop-loop command ─────────────────────────────────────────────
     //
