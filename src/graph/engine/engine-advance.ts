@@ -1388,10 +1388,11 @@ export class AdvanceEngine {
     node.dispatchTaskId = task.id;
     node.dispatchSessionId = task.sessionId;
     markDirty(state);
-    // Liveness feed (subtask 2): record the initial `dispatch` heartbeat — the
-    // node is provably live the moment its launch succeeded — and register its
-    // session with the platform feed plus the engine's own reverse index
-    // (`sessionId → nodeId`, for the feed's reverse lookup).
+    // Liveness feed (subtask 2): when a feed is wired, record the initial
+    // `dispatch` heartbeat — the node is provably live the moment its launch
+    // succeeded — and register its session with the platform feed plus the
+    // engine's own reverse index (`sessionId → nodeId`, for the feed's
+    // reverse lookup).
     //
     // The initial heartbeat is written WITHOUT a separate non-critical dirty
     // mark: `markDirty` above already flags this critical section, so the
@@ -1403,8 +1404,18 @@ export class AdvanceEngine {
     // triggering a spurious debounced write on the next idle section). Later
     // heartbeats outside critical sections (`recordLivenessHeartbeat`) DO ride
     // the debounced tier, as they are genuinely standalone non-critical churn.
-    node.liveness = { lastActivityAt: Date.now(), heartbeatSource: "dispatch" };
+    //
+    // FEED-GATED (false-positive regression): the launch heartbeat is written
+    // ONLY when a liveness feed is wired. Without a feed there is no observer
+    // that can ever refresh `lastActivityAt` (the relay resolves owners through
+    // the feed-gated `sessionId → nodeId` index), so an unconditional launch
+    // heartbeat would leave `NodeLivenessMonitor.tick` with a frozen timestamp
+    // and hard-stall EVERY node running past the warn+grace deadline as a
+    // false positive. Feed-less engines therefore carry NO `liveness` carrier,
+    // which the monitor's Tier-3 fallback skips entirely — they keep the pure
+    // wall-clock staleness deadline (the documented no-feed contract).
     if (this.livenessFeed) {
+      node.liveness = { lastActivityAt: Date.now(), heartbeatSource: "dispatch" };
       this.livenessFeed.attach(node.nodeId, task.sessionId);
       this._sessionToNodeId.set(task.sessionId, node.nodeId);
     }

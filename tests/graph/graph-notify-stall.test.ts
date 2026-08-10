@@ -308,8 +308,9 @@ describe("createGraphStallNotifier", () => {
 describe("graph-tools stall wiring (subtask 5)", () => {
   it("injects one stall reminder from a livenessMonitor tick when a notifier is wired", async () => {
     const client = new FakeSessionClient();
+    const seam = new FakeDispatchSeam();
     const ts = createGraphToolSet({
-      dispatch: new FakeDispatchSeam(),
+      dispatch: seam,
       graphNotify: {
         sessionClient: client,
         emperorSessionId: EMPEROR_SESSION,
@@ -337,6 +338,11 @@ describe("graph-tools stall wiring (subtask 5)", () => {
     // Node A is running (the fake keeps it alive until completeLatest).
     const node = internals.state.nodes.get("A")!;
     expect(node.status).toBe("running");
+    // The dispatch-liveness channel keeps a quiet-but-alive node healthy, so
+    // the stall ladder only fires for a dead/orphaned dispatch: kill the task
+    // WITHOUT a terminal notification (the abnormal state the ladder exists
+    // for) before ticking.
+    seam.tasks.get("task-1")!.status = "error";
     // Stamp a deterministic heartbeat, then idle it past the default warn
     // threshold (min(60_000, 900_000/2) = 60_000 with the toolset 15-min default).
     node.liveness = { lastActivityAt: 1_000, heartbeatSource: "feed" };
@@ -359,7 +365,8 @@ describe("graph-tools stall wiring (subtask 5)", () => {
 
   it("keeps the default no-op seam (0 reminders) without a graphNotify config", async () => {
     const client = new FakeSessionClient();
-    const ts = createGraphToolSet({ dispatch: new FakeDispatchSeam() });
+    const seam = new FakeDispatchSeam();
+    const ts = createGraphToolSet({ dispatch: seam });
 
     const { graph_id: graphId } = ts.graph_create({ name: "stall-noop" });
     ts.graph_add_node({
@@ -379,6 +386,9 @@ describe("graph-tools stall wiring (subtask 5)", () => {
     // Without config the `onNodeStall` seam stays unset (no notifier).
     expect(internals.onNodeStall).toBeUndefined();
 
+    // Kill the dispatch task without a terminal notification so the stall
+    // ladder (rather than the quiet-but-alive channel) classifies the node.
+    seam.tasks.get("task-1")!.status = "error";
     // The monitor still classifies the node — only the notification is absent.
     const node = internals.state.nodes.get("A")!;
     node.liveness = { lastActivityAt: 1_000, heartbeatSource: "feed" };

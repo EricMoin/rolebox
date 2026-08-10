@@ -3,6 +3,8 @@ import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { Config } from "@opencode-ai/plugin";
 import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-bridge.ts";
+import type { CanonicalEvent } from "../../platform/types.ts";
+import type { GraphToolSet } from "../../graph/tools/index.ts";
 import { graphSessionState } from "../../graph/collaboration-state.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
 import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
@@ -31,6 +33,32 @@ import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../utils/timeout.ts";
 
 const log = createSubLogger("hook-service");
 
+/**
+ * Canonical activity event types that refresh the owning graph node's liveness
+ * heartbeat (the opencode analog of the Pi liveness relay's `heartbeatOn`
+ * subscriptions in pi-extension.ts:1117-1167). Each maps genuine session
+ * activity — tool-call parts, streaming part updates, message updates, a
+ * finished turn — to `recordLivenessHeartbeat(nodeId, "session")` via the
+ * GraphToolSet's `sessionId → nodeId` reverse index.
+ */
+const LIVENESS_ACTIVITY_TYPES: ReadonlySet<string> = new Set([
+  "part.created",
+  "part.updated",
+  "message.updated",
+  "session.idle",
+]);
+
+/**
+ * Minimum interval (ms) between liveness heartbeats for one session. The
+ * opencode `event` hook fires for every SDK event in the runtime (streaming
+ * text deltas can arrive dozens of times per second); the liveness monitor
+ * only needs a heartbeat within its warn window (default 60 s), so relaying
+ * every event would be pure churn. Keyed off the last EMITTED timestamp, the
+ * first event after any silence longer than the interval always emits
+ * immediately — a long-running but active subagent keeps refreshing its node.
+ */
+const LIVENESS_HEARTBEAT_INTERVAL_MS = 1_000;
+
 export class HookService implements PluginService {
   readonly name = "hook-service";
   readonly dependencies = [
@@ -45,6 +73,13 @@ export class HookService implements PluginService {
   private customHookRegistry?: CustomHookRegistry;
   private deps?: HookDeps;
   private handlers?: ReturnType<typeof this.buildHandlers>;
+  /**
+   * Per-session throttle stamps for the liveness relay
+   * (`sessionId → lastHeartbeatEmittedAt`). Bounded — entries older than the
+   * throttle interval are pruned lazily when the map grows, so completed
+   * sessions do not accumulate forever.
+   */
+  private readonly livenessHeartbeatAt = new Map<string, number>();
   /**
    * Stable reference wrapper returned to opencode. On hot-reload, init()
    * replaces the methods in-place so the external reference stays valid.
@@ -151,6 +186,85 @@ export class HookService implements PluginService {
     return this.handlersWrapper as ReturnType<typeof this.buildHandlers>;
   }
 
+  /**
+   * Extract the session id from a canonical event's properties bag, following
+   * the opencode SDK property shapes: direct `sessionID` / `sessionId`, then
+   * the `info` object's `sessionID` / `sessionId` / `id`.
+   */
+  private static extractEventSessionId(
+    props: Record<string, unknown> | undefined,
+  ): string | undefined {
+    if (typeof props?.sessionID === "string") return props.sessionID;
+    if (typeof props?.sessionId === "string") return props.sessionId;
+    const info = props?.info as Record<string, unknown> | undefined;
+    if (typeof info?.sessionID === "string") return info.sessionID;
+    if (typeof info?.sessionId === "string") return info.sessionId;
+    if (typeof info?.id === "string") return info.id;
+    return undefined;
+  }
+
+  /**
+   * Relay genuine session activity into the graph engine's node-liveness
+   * machinery (false-positive regression fix for the opencode platform).
+   *
+   * A graph node dispatches its subagent through the opencode SDK
+   * (`session.create`), and that subagent's events — `part.created` /
+   * `part.updated` / `message.updated` / `session.idle` — arrive here through
+   * the plugin's `event` hook. For each, resolve the owning graph node via
+   * the GraphToolSet's `sessionId → nodeId` reverse index (populated at
+   * launch when a liveness feed is wired onto the engine — see tool-service)
+   * and refresh its heartbeat through the public EngineRuntime surface.
+   *
+   * Without this relay, `lastActivityAt` freezes at the launch-time
+   * `dispatch` heartbeat, so the engine's NodeLivenessMonitor hard-stalls
+   * (escalate/timeout) every node whose subagent works longer than the
+   * warn+grace deadline (~90 s default) — the confirmed false positive this
+   * fixes.
+   *
+   * The relay is throttled per session (1 s) and fully contained: an unknown
+   * session, a detached node, an absent toolset, or a throwing runtime all
+   * no-op / log at debug — the hook pipeline must never break on a relay
+   * defect.
+   */
+  private relayLivenessHeartbeat(canonical: CanonicalEvent): void {
+    if (!LIVENESS_ACTIVITY_TYPES.has(canonical.type)) return;
+    const sessionID = HookService.extractEventSessionId(canonical.properties);
+    if (!sessionID) return;
+    // The deps contract exposes only the in-flight query surface; the real
+    // value is the full GraphToolSet (tool-service threads it). Widen for the
+    // liveness owner resolution — safe: the liveness surface is optional on
+    // the cast, so a stub toolset (no resolveSessionOwner) no-ops.
+    const toolset = this.deps?.graphTools as
+      | (GraphToolSet & { hasInflightGraphsForSession(sessionID: string): boolean })
+      | undefined;
+    if (!toolset?.resolveSessionOwner) return;
+
+    // Per-session throttle (see LIVENESS_HEARTBEAT_INTERVAL_MS). Lazy prune
+    // when the map grows so completed sessions cannot accumulate unboundedly.
+    const now = Date.now();
+    const last = this.livenessHeartbeatAt.get(sessionID) ?? 0;
+    if (now - last < LIVENESS_HEARTBEAT_INTERVAL_MS) return;
+    if (this.livenessHeartbeatAt.size > 512) {
+      for (const [sid, ts] of this.livenessHeartbeatAt) {
+        if (now - ts >= LIVENESS_HEARTBEAT_INTERVAL_MS) {
+          this.livenessHeartbeatAt.delete(sid);
+        }
+      }
+    }
+    this.livenessHeartbeatAt.set(sessionID, now);
+
+    try {
+      const owner = toolset.resolveSessionOwner(sessionID);
+      if (!owner) return; // unknown / detached session — nothing to heartbeat
+      owner.runtime.recordLivenessHeartbeat(owner.nodeId, "session");
+    } catch (err) {
+      log.debug("liveness: relay error", {
+        sessionID,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private buildHandlers(tools: Record<string, any>, bus: EventBus, resolvedRoles: any[]) {
     const deps = this.deps!;
     const handlers = {
@@ -158,11 +272,18 @@ export class HookService implements PluginService {
       event: async (input: { event: unknown }) => {
         const canonical = normalizeOpencodeEvent(input.event);
         await handleEvent(canonical, hookState, deps);
+        // Node-liveness relay (opencode analog of the Pi relay in
+        // pi-extension.ts): genuine subagent session activity refreshes the
+        // owning graph node's heartbeat. Without this, a graph node's
+        // dispatched subagent would freeze at its launch-time `dispatch`
+        // heartbeat and be falsely hard-stalled (escalate/timeout) once it
+        // runs past the liveness deadline — opencode subagent sessions ARE
+        // observable through this event hook (same server runtime), unlike
+        // Pi's separate child processes, so this is the correct intake.
+        this.relayLivenessHeartbeat(canonical);
         // Emit to bus for notification and other subscribers
         const props = canonical.properties;
-        const sessionID = typeof props?.sessionID === "string" ? props.sessionID
-          : typeof props?.sessionId === "string" ? props.sessionId
-          : (props?.info as any)?.sessionID ?? (props?.info as any)?.sessionId ?? (props?.info as any)?.id;
+        const sessionID = HookService.extractEventSessionId(props);
         const agent = typeof props?.agent === "string" ? props.agent : undefined;
         if (sessionID) {
           await bus.emit(`event:${canonical.type}`, { sessionID, agent, properties: props });

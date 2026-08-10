@@ -129,14 +129,19 @@ describe("NodeLivenessFeed — initial dispatch heartbeat", () => {
     expect(node.liveness!.heartbeatSource).toBe("dispatch");
   });
 
-  it("records the dispatch heartbeat even when no feed is wired (liveness is unconditional)", async () => {
+  it("records no liveness carrier when no feed is wired (feed-gated — the Tier-3 wall-clock fallback)", async () => {
+    // False-positive regression: an unconditional launch heartbeat with no
+    // observer that can ever refresh it would leave the liveness monitor a
+    // frozen timestamp and hard-stall every long-running node. Feed-less
+    // engines therefore carry NO liveness carrier — the monitor's Tier-3
+    // fallback skips them entirely (pure wall-clock staleness).
     const { state, engine } = buildEngine(singleNode("A"), { withFeed: false });
 
     await engine.dispatchReady();
 
     const node = state.nodes.get("A")!;
-    expect(node.liveness?.heartbeatSource).toBe("dispatch");
-    expect(typeof node.liveness?.lastActivityAt).toBe("number");
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.liveness).toBeUndefined();
   });
 });
 

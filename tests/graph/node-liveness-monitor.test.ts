@@ -269,6 +269,79 @@ describe("NodeLivenessMonitor — no-feed fallback (d)", () => {
   });
 });
 
+// ── Dispatch-liveness channel (quiet-but-alive) ──────────────────────────────
+
+describe("NodeLivenessMonitor — dispatch-liveness channel (isDispatchAlive)", () => {
+  it("keeps a silent-but-alive node healthy past the deadline and never fires onStall/onTimeout", () => {
+    const stalls: string[] = [];
+    const timeouts: string[] = [];
+    const monitor = defaultMonitor({
+      // The dispatch layer verifiably considers the task in-flight (e.g. the
+      // opencode background task status "running", or the Pi child process
+      // alive between JSON events).
+      isDispatchAlive: () => true,
+      onStall: (id) => stalls.push(id),
+      onTimeout: (id) => timeouts.push(id),
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000, heartbeatSource: "dispatch" },
+    });
+
+    // Zero activity events: each tick past the 30s warn refreshes the
+    // heartbeat via the dispatch channel instead of classifying a stall.
+    monitor.tick(state, 31_000); // idle 30_000 ≥ warn → refreshed
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.liveness!.stallStatus).toBe("healthy");
+    expect(node.liveness!.stallWarnedAt).toBeUndefined();
+    expect(node.liveness!.heartbeatSource).toBe("dispatch");
+
+    const refreshedAt = node.liveness!.lastActivityAt!;
+    monitor.tick(state, refreshedAt + 31_000); // idle 30_000 again → refreshed
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.liveness!.stallStatus).toBe("healthy");
+    expect(stalls).toEqual([]);
+    expect(timeouts).toEqual([]);
+  });
+
+  it("does not consult the probe while heartbeats are fresh (idle < warn) — activity keeps its own source", () => {
+    const probeCalls: string[] = [];
+    const monitor = defaultMonitor({
+      isDispatchAlive: () => {
+        probeCalls.push("probe");
+        return true;
+      },
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000, heartbeatSource: "session" },
+    });
+
+    monitor.tick(state, 20_000); // idle 19s < warn 30s → healthy, no probe
+    expect(node.liveness!.heartbeatSource).toBe("session");
+    expect(probeCalls).toEqual([]);
+  });
+
+  it("stalls normally when the dispatch is NOT verifiably alive — the ladder still fires", () => {
+    const stalls: string[] = [];
+    const timeouts: string[] = [];
+    const monitor = defaultMonitor({
+      isDispatchAlive: () => false, // dispatch died / task orphaned
+      onStall: (id) => stalls.push(id),
+      onTimeout: (id) => timeouts.push(id),
+    });
+    const { state, node } = buildRunning({
+      liveness: { lastActivityAt: 1_000 },
+    });
+
+    monitor.tick(state, 31_000); // idle 30_000 ≥ warn → stalling
+    expect(node.liveness!.stallStatus).toBe("stalling");
+    expect(stalls).toEqual(["A"]);
+    monitor.tick(state, 61_000); // idle 60_000 ≥ warn+grace → hard stall
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.liveness!.stallStatus).toBe("stalled");
+    expect(timeouts).toEqual(["A"]);
+  });
+});
+
 // ── Edge cases ──────────────────────────────────────────────────────────────
 
 describe("NodeLivenessMonitor — edge cases", () => {

@@ -82,6 +82,7 @@ import {
   adoptPriorNodeStates,
   clearStaleCriticalSection,
   hydrateEngineState,
+  isDispatchTaskLive,
   reconcileEngine,
   rebuildFrontier,
   EngineLockSweeper,
@@ -762,6 +763,22 @@ class EngineRuntimeImpl implements EngineRuntime {
           : {}),
         onStall: (nodeId, _reason, info) => this.onNodeStallFired(nodeId, info),
         onTimeout: this.onStaleNodeTimeout.bind(this),
+        // Dispatch-liveness channel (quiet-but-alive): while the dispatch
+        // layer verifiably considers the node's task in-flight — opencode:
+        // background-task status running/pending/awaiting_approval backed by
+        // the SDK session tracking; Pi: task status running backed by the
+        // live child process between JSON events — a silent-but-alive node
+        // (long non-streaming model call, child between events) must not be
+        // classified stalled. The stall ladder then fires only when the
+        // dispatch can no longer verify the task (orphaned / dead-task
+        // nodes). Hung-but-alive nodes (task stuck verifiably live, never
+        // completing) are NOT caught here — the wall-clock `staleWatcher`
+        // backstop (nodeStaleTimeoutMs) times them out instead.
+        isDispatchAlive: (node) =>
+          isDispatchTaskLive(
+            this.dispatchPort as DispatchRecoveryPort,
+            node.dispatchTaskId ?? "",
+          ),
       });
     }
   }

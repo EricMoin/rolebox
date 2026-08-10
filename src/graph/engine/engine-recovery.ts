@@ -1062,6 +1062,38 @@ export interface NodeLivenessMonitorOptions {
    */
   stallGraceMs?: number;
   /**
+   * Optional dispatch-liveness probe (quiet-but-alive channel). When present
+   * and returning `true` for a running heartbeat-fed node, {@link tick}
+   * treats the node as quiet-but-alive rather than stalled: once the node has
+   * been idle past `stallWarnMs` (i.e. it is ABOUT to be classified stalled),
+   * the tick refreshes `lastActivityAt` (heartbeatSource `"dispatch"`) and
+   * skips the stall ladder.
+   *
+   * The probe must answer "is the underlying dispatch/process verifiably
+   * in-flight?" — on opencode, the background task status being
+   * running/pending/awaiting_approval (backed by the SDK session tracking);
+   * on Pi, the task status running (backed by the live child process between
+   * JSON events). A subagent mid-turn with zero streaming events is alive, not
+   * stalled, so it must not be hard-stalled merely for being quiet.
+   *
+   * Consequences (deliberate):
+   * - The warn ladder (`[GRAPH NODE STALLED]`) and the heartbeat hard-stall
+   *   now fire ONLY when the dispatch can no longer verify the task — the
+   *   genuinely abnormal state (orphaned node, dead task that never
+   *   terminal-advanced). Quiet-but-alive nodes no longer warn.
+   * - A genuinely HUNG node whose task stays verifiably live but never
+   *   completes is NOT caught here — it falls to the wall-clock
+   *   {@link NodeStalenessWatcher} backstop (`nodeStaleTimeoutMs`), which is
+   *   wired beside this monitor and times out any running node past its
+   *   staleness deadline regardless of heartbeats. The 15-minute backstop is
+   *   intentionally kept intact so hung-but-alive nodes still eventually
+   *   time out.
+   * - A node whose declared per-node budget (`budget.timeout_ms`) is tighter
+   *   than the warn window is bounded by that cap (the hard-stall branch
+   *   precedes the probe refresh) — the declared deadline is authoritative.
+   */
+  isDispatchAlive?: (node: NodeRuntimeState) => boolean;
+  /**
    * Called once when a running node first enters the soft-stall
    * (`stalling`) classification. The optional third argument carries the
    * {@link StallDetectionInfo} captured at fire time (idle / warn threshold /
@@ -1145,6 +1177,30 @@ export class NodeLivenessMonitor {
       const lastActivityAt = node.liveness?.lastActivityAt;
       if (lastActivityAt === undefined) continue; // no feed — wall-clock fallback (Tier 3)
       const idle = now - lastActivityAt;
+      // Dispatch-liveness channel (quiet-but-alive): the node is ABOUT to be
+      // classified stalled (idle >= warn), but the dispatch layer verifiably
+      // considers its task/process in-flight — a silent-but-alive subagent
+      // (long non-streaming model call, Pi child process between JSON events)
+      // is alive, not stalled. Refresh the heartbeat and skip the ladder; the
+      // probe is only consulted once idle reaches the warn threshold, so
+      // normally-active nodes (relay heartbeats) are untouched and the
+      // heartbeatSource tag stays "session" while activity flows. When the
+      // probe turns false (dispatch died / task orphaned), the node is a
+      // genuine stall candidate and the ladder below fires normally. A node
+      // that stays verifiably alive but never completes is caught by the
+      // wall-clock NodeStalenessWatcher backstop, not here.
+      if (idle >= this.stallWarnMs && this.opts.isDispatchAlive?.(node)) {
+        node.liveness = {
+          ...node.liveness,
+          lastActivityAt: now,
+          heartbeatSource: "dispatch",
+          stallStatus: "healthy",
+          stallWarnedAt: undefined,
+          stallReason: undefined,
+        };
+        markNonCriticalDirty(state);
+        continue;
+      }
       const hardStallAt = Math.min(
         effectiveDeadline,
         this.stallWarnMs + this.stallGraceMs,

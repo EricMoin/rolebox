@@ -558,4 +558,118 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect(idles[0] as unknown as { properties: { sessionID: string } })
       .toMatchObject({ properties: { sessionID: record.id } });
   });
+
+  // ── Liveness activity relay (node-anomaly-detection regression) ──────────
+  //
+  // A graph node's dispatched subagent runs as a SEPARATE `pi --mode json -p`
+  // child process, so the host's `pi.on("tool_call")` / `pi.on("message_*")`
+  // events never fire for its activity. The adapter is the ONLY observer of
+  // the child's activity — it must relay it to the event bridge as canonical
+  // `part.created` / `part.updated` heartbeats or the graph engine's liveness
+  // monitor freezes every long-running node at its dispatch heartbeat and
+  // falsely hard-stalls (escalate/timeout) healthy work.
+
+  describe("child activity relays liveness heartbeats to the event bridge", () => {
+    it("emits part.created/part.updated activity heartbeats carrying the session id — and NO session.idle before turn_end", async () => {
+      // Interval 0 → every activity event relays (deterministic, no throttle).
+      const unthrottled = new PiProcessSessionAdapter(undefined, undefined, {
+        activityHeartbeatIntervalMs: 0,
+      });
+      const record = await createRecord(unthrottled);
+      const emitted: Array<{
+        type: string;
+        rawType: string;
+        properties: Record<string, unknown>;
+      }> = [];
+      (unthrottled as any).setEventBridge({
+        emit: (event: {
+          type: string;
+          rawType: string;
+          properties: Record<string, unknown>;
+        }) => {
+          emitted.push(event);
+          return Promise.resolve();
+        },
+      });
+
+      // A realistic active subagent stream: streaming text deltas + a tool
+      // execution + the finalized message. NO turn_end — the session keeps
+      // working well past the liveness deadline.
+      feedJsonl(unthrottled, record, SUCCESS_STREAM);
+
+      const parts = emitted.filter(
+        (e) => e.type === "part.created" || e.type === "part.updated",
+      );
+      expect(parts.length).toBeGreaterThan(0);
+      for (const p of parts) {
+        expect(p.properties.sessionID).toBe(record.id);
+      }
+      // tool_execution_start maps to part.created (a new tool part appears)…
+      const creates = emitted.filter((e) => e.type === "part.created");
+      expect(
+        creates.some((e) => e.rawType === "pi.tool_execution_start"),
+      ).toBe(true);
+      // …streaming text deltas map to part.updated.
+      const updates = emitted.filter((e) => e.type === "part.updated");
+      expect(updates.some((e) => e.rawType === "pi.message_update")).toBe(true);
+
+      // A heartbeat must never look like a terminal event: no completion
+      // signal while the child is still actively working.
+      expect(emitted.filter((e) => e.type === "session.idle")).toHaveLength(0);
+    });
+
+    it("throttles to at most one heartbeat per second per record", async () => {
+      const record = await createRecord(adapter); // default 1s throttle
+      const emitted: Array<{ type: string }> = [];
+      (adapter as any).setEventBridge({
+        emit: (event: { type: string }) => {
+          emitted.push(event);
+          return Promise.resolve();
+        },
+      });
+
+      // 50 rapid activity events (an order of magnitude above realistic
+      // streaming density) inside the throttle window — only the first
+      // relays; the rest are suppressed.
+      const burst: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 50; i++) {
+        burst.push({
+          type: "message_update",
+          sessionID: SESSION_ID,
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: `d${i}` },
+        });
+      }
+      feedJsonl(adapter, record, jsonl(...burst));
+
+      const parts = emitted.filter(
+        (e) => e.type === "part.created" || e.type === "part.updated",
+      );
+      expect(parts.length).toBeLessThanOrEqual(2);
+    });
+
+    it("does not relay terminal events — turn_end yields exactly one session.idle and no part heartbeats", async () => {
+      // Interval 0: even unthrottled, non-activity types must not relay.
+      const unthrottled = new PiProcessSessionAdapter(undefined, undefined, {
+        activityHeartbeatIntervalMs: 0,
+      });
+      const record = await createRecord(unthrottled);
+      const emitted: Array<{ type: string }> = [];
+      (unthrottled as any).setEventBridge({
+        emit: (event: { type: string }) => {
+          emitted.push(event);
+          return Promise.resolve();
+        },
+      });
+
+      feedJsonl(unthrottled, record, jsonl(TURN_END_EVENT));
+
+      // Completion signal exactly once — and zero activity heartbeats.
+      expect(emitted.filter((e) => e.type === "session.idle")).toHaveLength(1);
+      expect(
+        emitted.filter(
+          (e) => e.type === "part.created" || e.type === "part.updated",
+        ),
+      ).toHaveLength(0);
+    });
+  });
 });

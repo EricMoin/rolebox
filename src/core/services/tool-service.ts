@@ -20,6 +20,7 @@ import {
   type GraphToolSet,
   type GraphNotifySource,
 } from "../../graph/tools/index.ts";
+import type { NodeLivenessFeed } from "../../graph/engine/index.ts";
 
 const log = createSubLogger("tool-service");
 
@@ -90,10 +91,24 @@ export class ToolService implements PluginService {
       sessionClient,
       emperorSessionId: (invokingSessionId) => invokingSessionId,
     };
+    // Node-liveness feed (opencode analog of the Pi `livenessFeed` in
+    // pi-extension.ts). Intentionally inert (observe-only logging is omitted
+    // here): its PRESENCE is what gates each engine's `sessionId → nodeId`
+    // reverse-index population at launch + terminal detach (engine-advance.ts
+    // `_dispatchNode` / `_detachLiveness`) and its launch-time `dispatch`
+    // heartbeat — the index is the liveness relay's authoritative owner
+    // source. The relay itself lives in hook-service's `event` handler (it
+    // resolves owners through GraphToolSet.resolveSessionOwner and calls
+    // `recordLivenessHeartbeat`), mirroring the Pi relay's bridge wiring.
+    const livenessFeed: NodeLivenessFeed = {
+      attach(_nodeId: string, _sessionId: string): void {},
+      detach(_nodeId: string): void {},
+    };
     this.graphToolSet = createGraphToolSet({
       manager: dispatchManager,
       directory: ctx.directory,
       graphNotify,
+      livenessFeed,
     });
 
     // 4. Assemble shared canonical tools + OpenCode-only extras
