@@ -325,6 +325,15 @@ function buildRoleConfig(
     ...(typeof resolved.locked === "boolean"
       ? { locked: resolved.locked }
       : {}),
+    ...(typeof resolved.open === "boolean"
+      ? { open: resolved.open }
+      : {}),
+    ...(Array.isArray(resolved.exports)
+      ? { exports: resolved.exports as string[] }
+      : {}),
+    ...(Array.isArray(resolved.open_roles)
+      ? { open_roles: resolved.open_roles as string[] }
+      : {}),
     ...(typeof resolved.version === "string"
       ? { version: resolved.version }
       : {}),

@@ -130,6 +130,12 @@ export interface RoleConfig {
   auto_activate?: string[];
   /** When true, auto-activated functions cannot be deactivated by transition or user. Prevents accidental deactivation of critical functions. */
   locked?: boolean;
+  /** When true, the role is "open": its subagents can be exposed to consumers via exports. When false/absent, the role is private (only the role id is addressable). */
+  open?: boolean;
+  /** Subagent names/slugs to expose when the role is open. Absent = only the role id is exposed; subagents are NOT exposed. */
+  exports?: string[];
+  /** Open role ids (producers) whose public agents this consumer role may discover and dispatch to. Absent = no cross-role discoverability. */
+  open_roles?: string[];
   /** Semantic version string for the role (e.g., "1.0.0") */
   version?: string;
   /** Notification configuration for session lifecycle events */
