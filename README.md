@@ -61,6 +61,56 @@ rolebox install emperor
 
 ---
 
+## Running as a dsh plugin
+
+rolebox can also run inside [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (`dsh`) — a Cordis-based agent harness. The package ships a Cordis plugin entry (`rolebox/dsh`) that boots the full rolebox runtime on dsh's services: role discovery, tool registration, graph dispatch, and loop mode. The entry is delivered as a **dsh profile bundle** (a `dsh.bundle` declaration in `package.json` plus a `cordis.patch.yml` layer), per the contract in [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md).
+
+### Install into a profile
+
+```bash
+dsh plugin --profile <name> add rolebox
+```
+
+`dsh plugin add` forwards to pnpm inside the profile directory and reconciles the profile's `dsh.profile.bundles` list — rolebox's bundle layer is appended and its plugin row (`id: rolebox`, `name: rolebox/dsh`) is inserted into the composed entry tree on the next boot. The plugin waits for dsh's `tools`, `sessions`, and `subagents` services (its `inject` list), so it activates only after dsh-base's bundle rows mount them — which the default profile template already provides.
+
+### Config
+
+All options are optional; the plugin activates with the dsh-home defaults alone:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `roleboxDir` | `string` | `{dsh home}/rolebox` | Directory containing `role.yaml` files (override the default under `$DSH_HOME`) |
+| `skillsDir` | `string` | `{dsh home}/skills` | Global skills directory |
+| `defaultRole` | `string` | — | Role id (directory name) promoted to primary mode |
+| `enabledNamespaces` | `string[]` | all | Tool allow-list: exact tool names or namespace prefixes (e.g. `hashline`, `graph`); `"*"` or absent registers every tool |
+
+Set them by patching the rolebox row's `config` from your profile's own `cordis.patch.yml` (applied after every bundle layer):
+
+```yaml
+# ~/.dsh/profiles/<name>/cordis.patch.yml
+- id: rolebox
+  config:
+    roleboxDir: /absolute/path/to/roles
+    enabledNamespaces: ["asset", "graph", "hashline", "loop", "memory", "reference", "session", "signal"]
+```
+
+> **Note (verified at boot):** the dsh base profile already registers a global `web_search` / `web_fetch` tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects duplicate global tool names, so if rolebox registers its own `web_search`/`web_fetch`/`web_read` on top, the boot fails with `tool "web_search" is already registered`. Exclude the colliding `web` namespace from rolebox's set in the profile patch (as above) and let dsh's own web tools serve — or register rolebox's tools under another allow-list that avoids the overlap.
+
+### Plain-entry fallback (no bundle)
+
+If you installed rolebox as a plain dependency and want to activate it manually, insert the entry row yourself in the profile's `cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: rolebox
+      name: rolebox/dsh
+      config: {}
+```
+
+`name` is the package subpath export `rolebox/dsh` (→ `dist/dsh-plugin.js`), which default-exports the Cordis object plugin `{ name, inject, Config, apply }`. The package root (`main` → `dist/index.js`) is the opencode plugin and is **not** a Cordis plugin — always reference the `rolebox/dsh` subpath. See [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml) for a fully configured example and [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) §5 for the bundle/patch semantics.
+
+---
+
 ## Why rolebox
 
 - **Persistent memory** — SQLite + FTS5 stores decisions, conventions, and lessons across sessions. Workspace-scoped or role-private. Relevant memories auto-inject at session start via `<available_memory>`.
@@ -244,6 +294,7 @@ Edits to `role_config.yaml` take effect on the next hot-reload cycle or role boo
 | Error Handling | [docs/error-handling.md](docs/error-handling.md) |
 | Limitations | [docs/limitations.md](docs/limitations.md) |
 | Compatibility | [docs/compatibility.md](docs/compatibility.md) |
+| dsh Plugin Contract | [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) |
 
 ---
 
