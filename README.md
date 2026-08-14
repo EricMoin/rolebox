@@ -97,6 +97,14 @@ Set them by patching the rolebox row's `config` from your profile's own `cordis.
     enabledNamespaces: ["asset", "graph", "hashline", "loop", "memory", "reference", "session", "signal"]
 ```
 
+> **Warning — config is replaced, not merged.** An `id`-targeted patch replaces the
+> row's `config` wholesale (dsh's `applyEntryPatches` assigns per-key, no deep
+> merge). The bundle layer ships `webEnabled: true` / `webPort: 8787` for the web
+> role-switch adapter — if your profile patch overrides the rolebox row's `config`
+> for any other option, you must re-declare `webEnabled` / `webPort` in the same
+> patch or the web adapter silently stays off. Only the last `- id: rolebox`
+> patch in the file takes effect for each key.
+
 > **Note (verified at boot):** the dsh base profile already registers a global `web_search` / `web_fetch` tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects duplicate global tool names, so if rolebox registers its own `web_search`/`web_fetch`/`web_read` on top, the boot fails with `tool "web_search" is already registered`. Exclude the colliding `web` namespace from rolebox's set in the profile patch (as above) and let dsh's own web tools serve — or register rolebox's tools under another allow-list that avoids the overlap.
 
 ### Web role-switch adapter
@@ -125,6 +133,11 @@ The `session` key is optional everywhere: an explicit session wins, otherwise th
     # webHost defaults to 127.0.0.1 (loopback); webPort defaults to 8787.
     webPort: 8787
 ```
+
+If your profile patch already overrides the rolebox row's `config` (e.g. to exclude
+the colliding `web` tool namespace, see above), add `webEnabled: true` / `webPort`
+to that **same** patch — the id-targeted override replaces the whole config, so a
+separate patch does not inherit the bundle's web settings.
 
 ### Plain-entry fallback (no bundle)
 

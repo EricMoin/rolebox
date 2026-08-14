@@ -627,10 +627,13 @@ Patch files are YAML arrays of loader patch entries (the `cordis-plugin-include`
   entry-list YAML dialect is `entryListSchema` from
   `cordis-plugin-include/lib/types/index.d.ts:10`.
 - Patch semantics (`applyEntryPatches`, include `index.d.ts:26`): patches apply in
-  order over the entry list; an `id`-targeted patch replaces the row's config;
-  a patch matching nothing warns and is skipped; inserted rows can be targeted by
-  later patches. Live-verified with `applyEntryPatches` directly (config override
-  merged, insert appended, unknown-id warned).
+  order over the entry list; an `id`-targeted patch replaces the row's config
+  **per-key, with no deep merge** — the override object is assigned field-by-field
+  onto the row, so a `config:` override replaces the ENTIRE config object (any
+  bundle-provided keys not re-declared in the override are lost); a patch matching
+  nothing warns and is skipped; inserted rows can be targeted by later patches.
+  Live-verified with `applyEntryPatches` directly (config replaced, insert
+  appended, unknown-id warned).
 - A `name` can be a **bare package name** (`@deepseek-ai/dsh-tools`),
   a scoped sub-path (`@deepseek-ai/dsh-tool-subagent-control/list-agents`), or a
   relative module (`./foo.js`) resolved against `ctx.baseUrl` (the profile

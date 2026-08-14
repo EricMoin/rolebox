@@ -42,3 +42,8 @@
 #   config:
 #     defaultRole: emperor
 #     enabledNamespaces: ["graph", "loop"]
+#
+# NOTE (replace, not merge): an id-targeted override replaces the row's whole
+# `config` object — the bundle ships `webEnabled: true` / `webPort: 8787`, so if
+# you override any option here you must re-declare them in the SAME patch or the
+# web role-switch adapter stays off.
