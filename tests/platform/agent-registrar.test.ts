@@ -233,6 +233,33 @@ describe("DshAgentRegistrar", () => {
     expect(await registrar.list()).toEqual(["a", "b"]);
   });
 
+  it("getRegisteredAgents() returns registered definitions sorted by id", async () => {
+    const b = makeDef({ id: "b", description: "B department" });
+    const a = makeDef({ id: "a", description: "A department" });
+    await registrar.register([b, a]);
+
+    const agents = registrar.getRegisteredAgents();
+    expect(agents.map((def) => def.id)).toEqual(["a", "b"]);
+    // The stored definitions themselves are returned, not re-built copies.
+    expect(agents).toEqual([a, b]);
+
+    // unregister() drops the entry from the accessor.
+    await registrar.unregister(["a"]);
+    expect(registrar.getRegisteredAgents().map((def) => def.id)).toEqual(["b"]);
+  });
+
+  it("getRegisteredAgents() reflects definitions applied via sync()", async () => {
+    const a = makeDef({ id: "a", model: "claude-sonnet" });
+    const b = makeDef({ id: "b" });
+    await registrar.sync([a, b]);
+    expect(registrar.getRegisteredAgents().map((def) => def.id)).toEqual(["a", "b"]);
+
+    // A changed definition replaces the catalog entry.
+    const updatedA = makeDef({ id: "a", model: "gpt-5" });
+    await registrar.sync([updatedA]);
+    expect(registrar.getRegisteredAgents()).toEqual([updatedA]);
+  });
+
   it("start() prepends the system prompt and merges the model into agentOptions", async () => {
     const captured: Array<{
       definition: AgentDefinition;

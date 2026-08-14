@@ -387,6 +387,27 @@ export class DshAgentRegistrar implements IAgentRegistrar {
     return [...this.entries.keys()].sort();
   }
 
+  // ── Additional accessor (not part of IAgentRegistrar) ────────────────────
+
+  /**
+   * Retrieve all currently registered agent definitions from the internal
+   * catalog, sorted by agent id.
+   *
+   * Mirrors `PiAgentRegistrar.getRegisteredAgents()`: an extra accessor (the
+   * `IAgentRegistrar` port only exposes id listing) for consumers that need
+   * the resolved definitions — e.g. a role-switcher reading the current
+   * catalog. The returned objects are the definitions stored at registration
+   * time; registration, sync, and unregister semantics are unaffected.
+   *
+   * @returns An array of all currently registered AgentDefinitions, sorted
+   *          by id.
+   */
+  getRegisteredAgents(): AgentDefinition[] {
+    return [...this.entries.keys()]
+      .sort()
+      .map((id) => this.entries.get(id)!.definition);
+  }
+
   // ── Translation helper (exposed for the spawn layer and tests) ───────────
 
   /**

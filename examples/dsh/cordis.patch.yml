@@ -28,6 +28,13 @@
           - hashline
           - web
           - graph
+        # Web role-switch adapter: a rolebox-served loopback HTTP page for
+        # inspecting/switching the active role (see README "Running as a dsh
+        # plugin" → "Web role-switch adapter"). webHost defaults to 127.0.0.1
+        # (loopback only) — the surface exposes session state, so binding to
+        # all interfaces is a deliberate opt-in. webPort defaults to 8787.
+        webEnabled: true
+        webPort: 8787
       disabled: false
 
 # Option 2 — override just the bundle's default row (same id, no insert):

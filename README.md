@@ -83,6 +83,9 @@ All options are optional; the plugin activates with the dsh-home defaults alone:
 | `skillsDir` | `string` | `{dsh home}/skills` | Global skills directory |
 | `defaultRole` | `string` | — | Role id (directory name) promoted to primary mode |
 | `enabledNamespaces` | `string[]` | all | Tool allow-list: exact tool names or namespace prefixes (e.g. `hashline`, `graph`); `"*"` or absent registers every tool |
+| `webEnabled` | `boolean` | `false` | Start the web role-switch adapter (loopback HTTP surface, see below) |
+| `webHost` | `string` | `127.0.0.1` | Bind host for the web role-switch adapter (loopback only by default) |
+| `webPort` | `number` | `8787` | Bind port for the web role-switch adapter |
 
 Set them by patching the rolebox row's `config` from your profile's own `cordis.patch.yml` (applied after every bundle layer):
 
@@ -95,6 +98,33 @@ Set them by patching the rolebox row's `config` from your profile's own `cordis.
 ```
 
 > **Note (verified at boot):** the dsh base profile already registers a global `web_search` / `web_fetch` tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects duplicate global tool names, so if rolebox registers its own `web_search`/`web_fetch`/`web_read` on top, the boot fails with `tool "web_search" is already registered`. Exclude the colliding `web` namespace from rolebox's set in the profile patch (as above) and let dsh's own web tools serve — or register rolebox's tools under another allow-list that avoids the overlap.
+
+### Web role-switch adapter
+
+dsh has no built-in agent picker on its session surface, so rolebox ships a small self-contained web adapter (built on `node:http` — no framework, no new dependencies) that exposes the per-session active-role state as a browser-accessible page. When `webEnabled: true`, the plugin starts it during `apply()`; a bind failure logs a warning and the plugin keeps running without the web surface.
+
+The page and its JSON API are **served by rolebox itself** — a vanilla-JS page rendered by the plugin, not a modification of `@deepseek-ai/dsh-web-app` (the module does not import any `@deepseek-ai/*` package):
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | GET | Self-contained HTML page (no build step): role-name input with a `<datalist>` of switchable roles, switch button, live status line |
+| `/api/roles` | GET | JSON array of switchable roles (`id` / `name` / `description` / `model` / `mode`, primary roles only) |
+| `/api/roles/active` | GET | `{ session, role }` — the active role id for the session, or `null` for the base agent |
+| `/api/roles/switch` | POST | Body `{ role: string, session?: string }` — switch the session's active role |
+| `/api/roles/active` | DELETE | Clear the active role for the session (back to the base agent) |
+
+The `session` key is optional everywhere: an explicit session wins, otherwise the most recently active session in the store is used. Every non-2xx response is JSON with the stable shape `{ "ok": false, "error": string }` (`400` / `404` / `405` / `413` / `500`).
+
+**Loopback only by default.** The adapter binds to `127.0.0.1` unless `webHost` is changed — it exposes live session state, so binding to all interfaces is a deliberate opt-in. To enable it in your profile patch:
+
+```yaml
+# ~/.dsh/profiles/<name>/cordis.patch.yml
+- id: rolebox
+  config:
+    webEnabled: true
+    # webHost defaults to 127.0.0.1 (loopback); webPort defaults to 8787.
+    webPort: 8787
+```
 
 ### Plain-entry fallback (no bundle)
 

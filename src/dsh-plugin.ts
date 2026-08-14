@@ -61,6 +61,11 @@ import type { DshDefineToolOptions } from "./platform/adapters/dsh/tool-factory.
 import { DshSessionAdapter } from "./platform/adapters/dsh/session.ts";
 import type { DshSessionStoreLike } from "./platform/adapters/dsh/session.ts";
 import { DshHookProvider } from "./platform/adapters/dsh/hook-provider.ts";
+import { DshRoleSwitcher } from "./platform/adapters/dsh/role-switcher.ts";
+import {
+  DshRoleSwitchWebServer,
+  ROLE_SWITCH_DEFAULT_HOST,
+} from "./platform/adapters/dsh/web-role-switch-server.ts";
 import { buildCanonicalTools } from "./platform/tool-assembly.ts";
 import type { PlatformCapabilities } from "./platform/capabilities.ts";
 import { createGraphTools } from "./graph/tools/index.ts";
@@ -87,6 +92,13 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
 // ── Config (StandardSchemaV1, contract §2.4) ───────────────────────────────
 
 /**
+ * Default bind port for the web role-switch server — the Config `webPort`
+ * default (and the fallback for direct `apply()` calls that skip cordis's
+ * `~standard` validation).
+ */
+const WEB_ROLE_SWITCH_DEFAULT_PORT = 8787;
+
+/**
  * Plugin config schema — a zod v4 schema implementing the StandardSchemaV1
  * interface cordis 4.0.1 requires for `Config` (see module docstring).
  *
@@ -98,6 +110,13 @@ export const inject: string[] = ["tools", "sessions", "subagents"];
  *   - `defaultRole`       — role id (directory name) promoted to primary
  *   - `enabledNamespaces` — allow-list of tool names / name-space prefixes;
  *                           `"*"` or absent registers every assembled tool
+ *   - `webEnabled`        — start the web role-switch server (default: false)
+ *   - `webHost`           — bind host for that server (default: "127.0.0.1")
+ *   - `webPort`           — bind port for that server (default: 8787)
+ *
+ * `webEnabled`/`webHost`/`webPort` use `.default(...)` (not `.optional()`):
+ * the module docstring verified that zod's `~standard` validation applies
+ * defaults, so a cordis-validated config always carries the concrete values.
  */
 export const Config = z.object({
   roleboxDir: z
@@ -116,6 +135,18 @@ export const Config = z.object({
     .array(z.string())
     .optional()
     .describe("Tool name / namespace-prefix allow-list; '*' registers all"),
+  webEnabled: z
+    .boolean()
+    .default(false)
+    .describe("Start the web role-switch server (loopback HTTP surface)"),
+  webHost: z
+    .string()
+    .default(ROLE_SWITCH_DEFAULT_HOST)
+    .describe("Bind host for the web role-switch server"),
+  webPort: z
+    .number()
+    .default(WEB_ROLE_SWITCH_DEFAULT_PORT)
+    .describe("Bind port for the web role-switch server"),
 });
 
 /** Inferred config type — the object passed to `apply(ctx, config)`. */
@@ -186,6 +217,12 @@ export interface DshPluginStats {
    * graph-only orchestration).
    */
   loopWired: boolean;
+  /**
+   * Whether the web role-switch server is listening. `true` only when
+   * `webEnabled` was set AND `start()` bound the port; a bind failure logs a
+   * warning and leaves this `false` (the plugin keeps running).
+   */
+  webServerStarted: boolean;
 }
 
 /**
@@ -242,9 +279,11 @@ function isNamespaceEnabled(
 /**
  * Capabilities declared for the dsh platform. Values reflect what the dsh
  * adapters actually support (session fork/create/status via the SessionStore
- * adapter; event streaming via the event bus). Currently advisory —
- * `buildCanonicalTools` documents that capabilities are "not consulted in
- * Phase 1 tool assembly" — but kept honest for future consumers.
+ * adapter; event streaming via the event bus; in-session active-role
+ * switching via the DshRoleSwitcher + web role-switch server). Currently
+ * advisory — `buildCanonicalTools` documents that capabilities are "not
+ * consulted in Phase 1 tool assembly" — but kept honest for future
+ * consumers.
  */
 const dshCapabilities: PlatformCapabilities = {
   platformId: "dsh",
@@ -256,7 +295,7 @@ const dshCapabilities: PlatformCapabilities = {
   hasMultiStepTools: true,
   hasEventStream: true,
   hasSessionStatus: true,
-  hasRoleSwitch: false,
+  hasRoleSwitch: true,
 };
 
 // ── apply ───────────────────────────────────────────────────────────────────
@@ -270,6 +309,10 @@ const dshCapabilities: PlatformCapabilities = {
  *      `ctx.subagents` — discovers roles, resolves them, syncs agents into
  *      the dsh subagent catalog.
  *   3. Apply `defaultRole` project-config promotion when configured.
+ *   3a. Wire the dsh role switcher (per-session active-role state + the
+ *       `session/created` restore listener) and, when `webEnabled`, the web
+ *       role-switch server exposing it. A bind failure logs a warning and
+ *       degrades — the plugin keeps running without the web surface.
  *   4. Compile canonical tools via `DshToolFactory` from
  *      `buildCanonicalTools(...)` (with the dsh session adapter as the
  *      session client) and register them into `ctx.tools`, filtered by
@@ -279,12 +322,16 @@ const dshCapabilities: PlatformCapabilities = {
  *   6. Log discovered/resolved/skipped counts mirroring `src/index.ts`.
  *
  * @param ctx    - The cordis context (structural; the injected dsh services).
- * @param config - Validated plugin config (all options optional).
+ * @param config - Validated plugin config. cordis validates through
+ *                 `Config['~standard']` and passes the defaults-applied
+ *                 output; direct callers may pass a partial object — the
+ *                 `webEnabled`/`webHost`/`webPort` fallbacks below keep that
+ *                 path safe too.
  * @returns A fiber disposer that also carries `stats`.
  */
 export async function apply(
   ctx: DshPluginContext,
-  config: DshPluginConfig = {},
+  config: DshPluginConfig = {} as DshPluginConfig,
 ): Promise<DshPluginDisposer> {
   const log = createSubLogger("dsh-plugin");
 
@@ -310,6 +357,39 @@ export async function apply(
   // 3. Apply the defaultRole promotion when configured.
   if (config.defaultRole) {
     applyProjectConfig(resolvedRoles, { defaultRole: config.defaultRole });
+  }
+
+  // 3a. Wire the dsh role switcher (per-session active-role state + the
+  // `session/created` restore listener) and, when webEnabled, the web
+  // role-switch server that exposes it over loopback HTTP. The switcher is
+  // always constructed — the server only binds a port when enabled. A bind
+  // failure logs a warning and degrades: the plugin keeps running without
+  // the web surface.
+  const roleSwitcher = new DshRoleSwitcher({
+    registrar,
+    store: ctx.sessions,
+    ctx,
+  });
+  const webServer = new DshRoleSwitchWebServer(roleSwitcher, ctx.sessions, {
+    host: config.webHost ?? ROLE_SWITCH_DEFAULT_HOST,
+  });
+  const webEnabled = config.webEnabled ?? false;
+  let webServerStarted = false;
+  if (webEnabled) {
+    try {
+      await webServer.start(config.webPort ?? WEB_ROLE_SWITCH_DEFAULT_PORT);
+      webServerStarted = true;
+      log.info("Web role-switch server started", {
+        host: config.webHost ?? ROLE_SWITCH_DEFAULT_HOST,
+        port: webServer.port,
+      });
+    } catch (err) {
+      log.warn("Web role-switch server failed to start — degrading", {
+        host: config.webHost ?? ROLE_SWITCH_DEFAULT_HOST,
+        port: config.webPort ?? WEB_ROLE_SWITCH_DEFAULT_PORT,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // 4. Compile + register tools (dsh session adapter drives the session tools).
@@ -423,6 +503,16 @@ export async function apply(
 
   // Fiber disposer (cordis convention) + stats for callers/tests.
   const disposer = (() => {
+    // Web role-switch teardown FIRST: close the HTTP server (fire-and-forget
+    // — fiber unload is synchronous in cordis; close() is a no-op when the
+    // server never started) and release the switcher's ctx listeners (its
+    // `session/created` restore subscription) before any other cleanup.
+    webServer.close().catch((err) => {
+      log.debug("web role-switch server close failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    roleSwitcher.dispose();
     hookProvider.dispose();
     // Loop teardown: persist the live loop states, then stop the coordinator
     // (clears its sweeper interval + worker termination listeners).
@@ -465,6 +555,7 @@ export async function apply(
     resolvedRoles,
     dispatchMode: "dsh",
     loopWired: true,
+    webServerStarted,
   };
   return disposer;
 }

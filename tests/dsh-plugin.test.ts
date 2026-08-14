@@ -28,6 +28,7 @@ import type {
   DshPluginContext,
   DshPluginDisposer,
   DshPluginStats,
+  DshPluginConfig,
 } from "../src/dsh-plugin.ts";
 import type { DshDefineToolOptions } from "../src/platform/adapters/dsh/tool-factory.ts";
 import type {
@@ -163,11 +164,25 @@ describe("dsh plugin shape", () => {
 
     const ok = std.validate({ roleboxDir: "/tmp/rb", defaultRole: "admin" });
     expect("value" in ok).toBe(true);
-    const value = ok.value as { roleboxDir?: string; skillsDir?: string };
+    const value = ok.value as {
+      roleboxDir?: string;
+      skillsDir?: string;
+      webEnabled?: boolean;
+      webHost?: string;
+      webPort?: number;
+    };
     expect(value.roleboxDir).toBe("/tmp/rb");
+    // Web role-switch defaults ride the validated output (Config uses
+    // `.default(...)`, so the standard-schema validation applies them).
+    expect(value.webEnabled).toBe(false);
+    expect(value.webHost).toBe("127.0.0.1");
+    expect(value.webPort).toBe(8787);
     // Absent optional keys validate to undefined — no required fields.
     const empty = std.validate({});
     expect("value" in empty).toBe(true);
+    expect((empty.value as { webEnabled?: boolean }).webEnabled).toBe(false);
+    expect((empty.value as { webHost?: string }).webHost).toBe("127.0.0.1");
+    expect((empty.value as { webPort?: number }).webPort).toBe(8787);
 
     const bad = std.validate({ roleboxDir: 42 });
     expect("issues" in bad).toBe(true);
@@ -182,7 +197,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools, providers, listeners } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir });
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const stats: DshPluginStats = disposer.stats;
 
     // Role discovery/resolution against the temp dir.
@@ -220,7 +235,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir });
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     // The intersection tool set spans multiple namespaces.
@@ -238,7 +253,7 @@ describe("dsh plugin apply()", () => {
     const disposer = await apply(ctx, {
       roleboxDir: tmpDir,
       enabledNamespaces: ["hashline", "web"],
-    });
+    } as DshPluginConfig);
     const keys = tools.registeredTools.map((t) => t.name);
 
     expect(keys.length).toBeGreaterThanOrEqual(1);
@@ -255,7 +270,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("beta", SIMPLE_ROLE.replace("Test Role", "Beta"));
     const { ctx } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir, defaultRole: "beta" });
+    const disposer = await apply(ctx, { roleboxDir: tmpDir, defaultRole: "beta" } as DshPluginConfig);
     const roles = disposer.stats.resolvedRoles;
 
     const alpha = roles.find((r) => r.id === "alpha");
@@ -273,7 +288,7 @@ describe("dsh plugin apply()", () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
     const { ctx, tools, listeners } = createFakeCtx();
 
-    const disposer = await apply(ctx, { roleboxDir: tmpDir });
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     expect(tools.registeredTools.length).toBeGreaterThanOrEqual(1);
 
     disposer();
@@ -281,6 +296,16 @@ describe("dsh plugin apply()", () => {
     expect(tools.registeredTools).toHaveLength(0);
     expect(listeners.get("tools/pre-execute") ?? []).toHaveLength(0);
     expect(listeners.get("session/event") ?? []).toHaveLength(0);
+  });
+
+  it("reports webServerStarted: false when the web role-switch server is not enabled", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx } = createFakeCtx();
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    expect(disposer.stats.webServerStarted).toBe(false);
+
+    disposer();
   });
 });
 
