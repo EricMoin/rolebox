@@ -559,6 +559,150 @@ disposer removes it.
 Events: `subagent/provider-added`, `subagent/provider-removed`, `subagent/start`,
 `subagent/end` (`index.d.ts:53-92`).
 
+### 4.4 Web-UI extension: host route + browser slot plugin (verified at `0.1.0-rc.6`)
+
+The role-switch UI ships as two halves: a **host route** on dsh's own web server
+(the `/rolebox` REST API) and a **browser slot plugin** (`dsh.client` bundle that
+mounts the dock into the web app). Both surfaces were verified against the
+`0.1.0-rc.6` artifacts (unpacked tarballs under `/tmp/dsh-inspect/`).
+
+#### 4.4.1 Host webserver: `ctx.webServer.register` WebRoute shape
+
+`dsh-host-webserver/lib/types/index.d.ts:19-28`:
+
+```ts
+export type WebRouteKind = 'exact' | 'prefix';
+export interface WebRoute {
+    kind: WebRouteKind;
+    path: string;                  // absolute pathname, no trailing slash
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+}
+```
+
+`register(route)` returns the disposer that unmounts the route; duplicate
+`(kind, path)` registrations throw (composition-level contract)
+(`dsh-host-webserver/lib/types/index.d.ts:67-72`). rolebox consumes this surface
+structurally (duck typing — never imports `@deepseek-ai/*`,
+`src/platform/adapters/dsh/web-role-switch-route.ts:12-13`) and registers one
+`{ kind: 'prefix', path: '/rolebox', handler }` route
+(`web-role-switch-route.ts:163-169`). The service is optional: `apply()` probes
+`ctx.get("webServer")` and skips route registration when absent (headless
+profiles) (`src/dsh-plugin.ts:280-297, 400-421`).
+
+#### 4.4.2 `dsh.client` roster contract (node half)
+
+`dsh-client-modules` is the node half that collects browser plugins: it scans the
+enabled Loader entries for packages declaring `dsh.client`, resolves each
+`exports["./client"]`, hashes the built bundle into the boot graph, and serves it
+with its source map under `/plugins` (`dsh-client-modules/README.md:5-11`). The
+registry service (`ClientModuleRegistry`, `static inject = ["webServer",
+"loader"]`) recomposes on entry changes and registers the `/plugins` bundle route
+plus an index tap that injects the boot manifest
+(`dsh-client-modules/lib/index.js:115-170`). The per-package parse reads
+`pkg.dsh.client`, accepts only `platform: "web"`, resolves the `./client` export,
+and records `inject` / `immediately`
+(`dsh-client-modules/lib/index.js:250-270`). rolebox's declaration
+(`package.json:70-82`):
+
+```json
+"dsh": {
+  "bundle": { "patch": "./dsh/cordis.patch.yml" },
+  "client": {
+    "platform": "web",
+    "inject": ["@deepseek-ai/dsh-client-runtime",
+               "@deepseek-ai/dsh-client-ui-conversation",
+               "@deepseek-ai/dsh-client-locale"]
+  }
+}
+```
+
+**Resolution precondition (the missing link this integration tripped on).** Before
+parsing `dsh.client`, the registry resolves the package by the loader entry's
+**name** (`fiber.entry.options.name`, `lib/index.js:141/153`) through
+`require.resolve('<name>/package.json')` from the host context
+(`createRequire(ctx.baseUrl)`, `lib/index.js:138-139`); an unresolvable name is
+cached as a permanent "not a client package" verdict (`resolveMeta`,
+`lib/index.js:238-247`) and the entry silently never reaches the boot graph.
+dsh's own roster rows use plain package names (`@deepseek-ai/dsh-client-ui-goal`),
+so `<name>/package.json` resolves naturally. rolebox's cordis plugin lives at the
+scoped sub-path export `./dsh`, making its entry name `rolebox/dsh` — which is
+NOT a resolvable package spec on its own. The packaging must therefore export
+`"./dsh/package.json"` → `"./package.json"` (package.json:38), so
+`require.resolve('rolebox/dsh/package.json')` lands on the root manifest carrying
+the `dsh.client` declaration. And the browser half requires the bundle envelope
+id to EQUAL the boot-graph row id (the entry name): `arrive()` rejects a bundle
+that loads without registering its row id (`lib/client.js:84`). The client
+bundle is therefore wrapped with `id: "rolebox/dsh"` (scripts/build-dsh-web-client.ts)
+to match the row — dsh's own bundles satisfy this trivially because their row
+name IS their package name. Both sides of this contract are pinned by
+`tests/dsh-plugin.test.ts` ("dsh packaging exposes the dsh-client-modules resolution seam").
+
+#### 4.4.3 Slot registry + `ctx.slots.inject` pattern
+
+`dsh-client-ui-slots/lib/types/index.d.ts:468-600` documents the slot registry:
+`SlotCore.register(options, component)` (list/keyed/chain validation,
+load-time throws, unload cascade) and the inject-bearing overload that joins the
+registrant's business face into the component's composed props. The runtime
+`SlotRegistry` service wraps it with cordis lifecycle — disposal through
+`ctx.effect`, store-instance minting, the registrant stamp — and adds the
+declaration-wait API:
+
+```ts
+// dsh-client-runtime/lib/types/client/slots.d.ts:90
+inject(key: keyof SlotMap & string, callback: () => SlotInjectionEffect): () => void;
+```
+
+`inject` installs one effect per declaration lifetime of a slot (runs
+synchronously when the declaration already exists, otherwise inside the declaring
+`register()` call); the controller belongs to the caller's fiber, so plugin
+unload cancels pending waits and removes active contributions
+(`slots.d.ts:82-91`). The canonical registrant posture — the one rolebox's client
+entry mirrors (`src/platform/adapters/dsh/web-ui/client.ts:176-189`) — is
+dsh-client-ui-conversation's TodoDock entry: `ctx.slots.inject(key, () =>
+ctx.slots.register({name, id, order, locale}, Component))`
+(`dsh-client-ui-conversation/lib/client.js:6303-6312`).
+
+#### 4.4.4 Declared seats
+
+The conversation UI declares the input-zone region seats
+(`dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts:190-232`):
+
+```ts
+'conversation.input.dock': {        // :190 — full-width row above the composer
+    kind: 'list'; scope: 'session'; owner: InputZone;
+};
+'conversation.composer.dock': {     // :203 — band under the composer card
+    kind: 'list'; scope: 'session'; owner: InputZone;
+};
+'conversation.input.left' / 'conversation.input.right':  // :216 / :228 — tool row ends
+```
+
+The broader roster also declares `conversation.session.header` /
+`conversation.session.header.actions` / `conversation.session.header.utilities`
+(`slots.d.ts:43-66`). rolebox mounts into `conversation.input.dock`
+(`client.ts:77`); the `scope: 'session'` slot makes the inject factory resolve
+the definite session id (`(sessionId) => ({ sessionId })`, `client.ts:184`).
+
+#### 4.4.5 Client bundle format
+
+Browser bundles are registered through the loader's global:
+
+```js
+// dsh-client-ui-commands/lib/client.js:1-3
+window.__ModuleLoader__.load({
+    id: "@deepseek-ai/dsh-client-ui-commands",
+    factory: (require) => { var module = { exports: {} }; ... return module.exports; },
+});
+```
+
+The factory-form CJS model: executing the bundle only **registers** the factory;
+module body side effects run at materialization (`factory(require)` → exports,
+memoized in `loadCache`) — so require cycles throw and load order needs no
+external sequencing (`dsh-client-modules/README.md:5-11`). rolebox's build
+(`scripts/build-dsh-web-client.ts`) bundles `web-ui/client.ts` with Bun
+(`format: "cjs"`, `react` / `react/jsx-runtime` / `@deepseek-ai/*` external) and
+wraps the output in this exact envelope with `id: "rolebox"`.
+
 ---
 
 ## 5. Profile bundle contract for a NON-workspace package (`@deepseek-ai/dsh` + `dsh-app-boot`)
