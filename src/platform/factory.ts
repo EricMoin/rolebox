@@ -18,7 +18,12 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defaultPlatformPaths, piPlatformPaths, type PlatformPaths } from "./paths.ts";
+import {
+  defaultPlatformPaths,
+  dshPlatformPaths,
+  piPlatformPaths,
+  type PlatformPaths,
+} from "./paths.ts";
 import { bootstrapRoles, type BootstrapRolesResult } from "../resolver/bootstrap.ts";
 import { syncAllAgents } from "../sync/agent-files.ts";
 import type { IAgentRegistrar } from "./ports/agent-registrar.ts";
@@ -49,6 +54,7 @@ export interface ResolveDirectoriesOptions {
    * Platform identifier — selects which PlatformPaths to delegate to.
    * - `"opencode"` (default) → `defaultPlatformPaths()` → `~/.config/opencode`
    * - `"pi"` → `piPlatformPaths()` → `~/.pi/agent`
+   * - `"dsh"` → `dshPlatformPaths()` → `$DSH_HOME` or `~/.dsh`
    */
   platformId?: string;
 }
@@ -76,6 +82,8 @@ function getPlatformPaths(platformId: string): PlatformPaths {
   switch (platformId) {
     case "pi":
       return piPlatformPaths();
+    case "dsh":
+      return dshPlatformPaths();
     default:
       return defaultPlatformPaths();
   }

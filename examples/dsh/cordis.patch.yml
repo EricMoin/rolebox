@@ -1,0 +1,37 @@
+# rolebox as a dsh profile bundle layer — configured example.
+#
+# This file mirrors the shipped bundle layer (dsh/cordis.patch.yml) but with a
+# populated `config` block so you can see every Config option in action.
+# Copy the `insert` list (or the id-targeted override) into your profile's
+# cordis.patch.yml at ~/.dsh/profiles/<name>/cordis.patch.yml — the profile
+# layer is applied AFTER every bundle layer, so the id-targeted form below
+# overrides the bundle's default row.
+#
+# Contract reference: docs/dsh-plugin-contract.md §5.3 (entry shapes) and
+# §5.4 (layer order). Config options are all optional; see README
+# "Running as a dsh plugin" for the table.
+#
+# Option 1 — insert a fully-configured rolebox row (bundle-install equivalent):
+- insert:
+    - id: rolebox
+      name: rolebox/dsh          # subpath export → dist/dsh-plugin.js (cordis plugin)
+      config:
+        # Override the rolebox directory (default: {dsh home}/rolebox).
+        roleboxDir: /absolute/path/to/roles
+        # Override the global skills directory (default: {dsh home}/skills).
+        skillsDir: /absolute/path/to/skills
+        # Promote this role id (directory name) to primary mode.
+        defaultRole: emperor
+        # Tool allow-list: exact tool names or namespace prefixes.
+        # "*" (or an absent/empty option) registers every assembled tool.
+        enabledNamespaces:
+          - hashline
+          - web
+          - graph
+      disabled: false
+
+# Option 2 — override just the bundle's default row (same id, no insert):
+# - id: rolebox
+#   config:
+#     defaultRole: emperor
+#     enabledNamespaces: ["graph", "loop"]

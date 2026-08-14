@@ -1,0 +1,15 @@
+# rolebox as a dsh profile bundle layer (contract: docs/dsh-plugin-contract.md §5.3).
+#
+# `name` points at the package subpath export `./dsh` (dist/dsh-plugin.js),
+# which default-exports the cordis Object plugin `{ name, inject, Config,
+# apply }`. The package root (`main` → dist/index.js) is the opencode plugin
+# and is NOT a cordis plugin, so it must not be referenced here — this row
+# follows the verified "scoped sub-path" name form used by the dsh-base
+# bundle (e.g. `@deepseek-ai/dsh-tool-subagent-control/list-agents`).
+#
+# `config` is intentionally empty: every Config option is optional and the
+# dsh defaults (roleboxDir under $DSH_HOME, all namespaces enabled) apply.
+- insert:
+    - id: rolebox
+      name: rolebox/dsh
+      config: {}

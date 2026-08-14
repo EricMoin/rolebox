@@ -24,10 +24,16 @@
     "./pi": {
       "import": "./dist/pi-extension.js",
       "types": "./dist/pi-extension.d.ts"
-    }
+    },
+    "./dsh": {
+      "import": "./dist/dsh-plugin.js",
+      "types": "./dist/dsh-plugin.d.ts"
+    },
+    "./dsh/cordis.patch.yml": "./dsh/cordis.patch.yml"
   },
   "files": [
     "dist",
+    "dsh",
     "examples",
     "functions",
     "tui"
@@ -55,6 +61,11 @@
   "pi": {
     "extensions": ["./dist/pi-extension.js"]
   },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh/cordis.patch.yml"
+    }
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -73,6 +84,7 @@
     "zod": "^4.1.8"
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
     "@opencode-ai/plugin": "^1.3.0",
     "@opentui/core": ">=0.2.16",
     "@opentui/solid": ">=0.2.16",
@@ -84,6 +96,9 @@
     "@earendil-works/pi-coding-agent": ">=0.70.0"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
     "@opentui/core": {
       "optional": true
     },
@@ -110,6 +125,7 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
     "@opencode-ai/plugin": "^1.3.0",
     "@opentui/core": "0.2.16",
     "@opentui/solid": "0.2.16",

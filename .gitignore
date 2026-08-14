@@ -7,3 +7,6 @@ dist/
 
 # Persisted dispatch task state (auto-generated during tests)
 state/
+
+# Runtime storage state (auto-generated during tests)
+.storages/
