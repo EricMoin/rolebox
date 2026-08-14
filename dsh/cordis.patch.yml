@@ -7,9 +7,17 @@
 # follows the verified "scoped sub-path" name form used by the dsh-base
 # bundle (e.g. `@deepseek-ai/dsh-tool-subagent-control/list-agents`).
 #
-# `config` is intentionally empty: every Config option is optional and the
-# dsh defaults (roleboxDir under $DSH_HOME, all namespaces enabled) apply.
+# `config` enables the web role-switch adapter: webEnabled turns on the
+# loopback-only role-switch web UI at http://127.0.0.1:8787 (webHost and
+# webPort default to 127.0.0.1 / 8787). All other Config options stay at
+# their dsh defaults (roleboxDir under $DSH_HOME, all namespaces enabled).
 - insert:
     - id: rolebox
       name: rolebox/dsh
-      config: {}
+      config:
+        # Web role-switch adapter: a rolebox-served loopback HTTP page for
+        # inspecting/switching the active role (see README "Running as a dsh
+        # plugin" → "Web role-switch adapter"). webHost defaults to 127.0.0.1
+        # (loopback only); webPort defaults to 8787.
+        webEnabled: true
+        webPort: 8787
