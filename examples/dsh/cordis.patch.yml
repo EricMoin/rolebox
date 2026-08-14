@@ -28,15 +28,18 @@
           - hashline
           - web
           - graph
-        # Web role-switch adapter: a rolebox-served loopback HTTP page for
-        # inspecting/switching the active role (see README "Running as a dsh
-        # plugin" → "Web role-switch adapter"). webHost defaults to 127.0.0.1
-        # (loopback only) — the surface exposes session state, so binding to
-        # all interfaces is a deliberate opt-in. webPort defaults to 8787.
-        webEnabled: true
-        webPort: 8787
+        # No web config keys exist: the role-switch UI surfaces as a
+        # dsh.client slot plugin in the web profile, and the `/rolebox` route
+        # is served by dsh's own host webserver — nothing to configure here.
       disabled: false
 
+# NOTE (client scan resolution): the row `name` (`rolebox/dsh`) is the package
+# spec dsh-client-modules resolves via require.resolve('<name>/package.json')
+# when scanning for dsh.client packages. package.json must keep the
+# `"./dsh/package.json"` export (→ ./package.json) or the web client is
+# silently skipped from the boot graph; the client bundle envelope id must
+# equal this name too (scripts/build-dsh-web-client.ts).
+#
 # Option 2 — override just the bundle's default row (same id, no insert):
 # - id: rolebox
 #   config:
@@ -44,6 +47,7 @@
 #     enabledNamespaces: ["graph", "loop"]
 #
 # NOTE (replace, not merge): an id-targeted override replaces the row's whole
-# `config` object — the bundle ships `webEnabled: true` / `webPort: 8787`, so if
-# you override any option here you must re-declare them in the SAME patch or the
-# web role-switch adapter stays off.
+# `config` object. The bundle's row ships no web config — the role-switch UI
+# surfaces as a dsh.client slot plugin in the web profile and the `/rolebox`
+# route is served by dsh's own webserver — so nothing hidden is lost by a
+# config override; just re-declare the options you want to keep.

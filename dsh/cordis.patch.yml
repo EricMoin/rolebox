@@ -7,17 +7,19 @@
 # follows the verified "scoped sub-path" name form used by the dsh-base
 # bundle (e.g. `@deepseek-ai/dsh-tool-subagent-control/list-agents`).
 #
-# `config` enables the web role-switch adapter: webEnabled turns on the
-# loopback-only role-switch web UI at http://127.0.0.1:8787 (webHost and
-# webPort default to 127.0.0.1 / 8787). All other Config options stay at
-# their dsh defaults (roleboxDir under $DSH_HOME, all namespaces enabled).
+# No web config keys are needed (or accepted): the role-switch UI now
+# surfaces as a dsh.client slot plugin in the web profile, and the `/rolebox`
+# route is served by dsh's own host webserver via its optional `webServer`
+# service seam. All other Config options stay at their dsh defaults
+# (roleboxDir under $DSH_HOME, all namespaces enabled).
+#
+# The row `name` (`rolebox/dsh`) doubles as the package spec dsh-client-modules
+# resolves via require.resolve('<name>/package.json') when scanning for
+# dsh.client packages — package.json must keep the `"./dsh/package.json"`
+# export (→ ./package.json) or the web client is silently skipped from the
+# boot graph. The client bundle envelope id must equal this name too (see
+# scripts/build-dsh-web-client.ts).
 - insert:
     - id: rolebox
       name: rolebox/dsh
-      config:
-        # Web role-switch adapter: a rolebox-served loopback HTTP page for
-        # inspecting/switching the active role (see README "Running as a dsh
-        # plugin" → "Web role-switch adapter"). webHost defaults to 127.0.0.1
-        # (loopback only); webPort defaults to 8787.
-        webEnabled: true
-        webPort: 8787
+      config: {}
