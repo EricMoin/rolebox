@@ -9,17 +9,15 @@ export { DshRoleSwitcher } from "./role-switcher.ts";
 export type { DshRoleSwitcherOptions } from "./role-switcher.ts";
 export { ACTIVE_ROLE_EVENT, createActiveRoleRef } from "./role-switcher.ts";
 export type { ActiveRoleRef } from "./role-switcher.ts";
-export { DshRoleSwitchWebServer } from "./web-role-switch-server.ts";
-export type {
-  DshRoleSwitchWebServerOptions,
-  RoleSwitchRoleDto,
-  RoleSwitchErrorBody,
-} from "./web-role-switch-server.ts";
 export {
-  ROLE_SWITCH_DEFAULT_SESSION,
-  ROLE_SWITCH_DEFAULT_HOST,
-  ROLE_SWITCH_DEFAULT_MAX_BODY_BYTES,
-} from "./web-role-switch-server.ts";
+  DshRoleSwitchWebRoute,
+  ROLE_SWITCH_ROUTE_PREFIX,
+} from "./web-role-switch-route.ts";
+export type {
+  DshRoleSwitchRouteOptions,
+  DshWebRouteLike,
+  DshWebServerRouteRegistrar,
+} from "./web-role-switch-route.ts";
 export type {
   DshDispatchAdapterOptions,
   DshSubagentDispatchRuntime,

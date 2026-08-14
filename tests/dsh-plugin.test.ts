@@ -12,6 +12,8 @@
  *     into the fake tools registry, syncs agents into the fake subagents
  *     catalog, and reports the discovered/resolved/skipped counts
  *   - the enabledNamespaces tool filter and the defaultRole promotion
+ *   - the optional host webServer seam: `/rolebox` routes register when
+ *     `ctx.get('webServer')` returns a registrar and are skipped when absent
  *   - the disposer cleans up registrations/listeners
  *   - the plugin source stays free of @opencode-ai / @deepseek-ai imports
  *
@@ -20,7 +22,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { load } from "js-yaml";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { apply, name, inject, Config } from "../src/dsh-plugin.ts";
@@ -36,6 +39,10 @@ import type {
 } from "../src/platform/adapters/dsh/agent-registrar.ts";
 import type { DshSubagentDispatchRuntime } from "../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSessionStoreLike } from "../src/platform/adapters/dsh/session.ts";
+import type {
+  DshWebRouteLike,
+  DshWebServerRouteRegistrar,
+} from "../src/platform/adapters/dsh/web-role-switch-route.ts";
 
 // ── Fake cordis ctx double ─────────────────────────────────────────────────
 
@@ -44,8 +51,15 @@ import type { DshSessionStoreLike } from "../src/platform/adapters/dsh/session.t
  * (`tools`, `sessions`, `subagents`). Tracks tool registrations, subagent
  * provider registrations, and event subscriptions so tests can assert that
  * apply() wired everything.
+ *
+ * The optional-service seam (`ctx.get`) resolves `"webServer"` to the
+ * `webServer` option when supplied (a fake host-webserver registrar) and
+ * `undefined` otherwise — mirroring the dsh host, where the web profile
+ * registers the webserver service and headless profiles do not.
  */
-function createFakeCtx() {
+function createFakeCtx(
+  options: { webServer?: DshWebServerRouteRegistrar | null } = {},
+) {
   const registeredTools: DshDefineToolOptions[] = [];
   const providers = new Map<string, DshSubagentProvider>();
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -96,6 +110,12 @@ function createFakeCtx() {
     tools,
     sessions,
     subagents,
+    get(name: string): unknown {
+      // Optional-service seam: only the host web server is probed by the
+      // plugin; every other name resolves to undefined (absent).
+      if (name === "webServer") return options.webServer ?? undefined;
+      return undefined;
+    },
     on(event: string, listener: (...args: unknown[]) => void) {
       const arr = listeners.get(event) ?? [];
       arr.push(listener);
@@ -167,26 +187,81 @@ describe("dsh plugin shape", () => {
     const value = ok.value as {
       roleboxDir?: string;
       skillsDir?: string;
-      webEnabled?: boolean;
-      webHost?: string;
-      webPort?: number;
+      defaultRole?: string;
     };
     expect(value.roleboxDir).toBe("/tmp/rb");
-    // Web role-switch defaults ride the validated output (Config uses
-    // `.default(...)`, so the standard-schema validation applies them).
-    expect(value.webEnabled).toBe(false);
-    expect(value.webHost).toBe("127.0.0.1");
-    expect(value.webPort).toBe(8787);
     // Absent optional keys validate to undefined — no required fields.
     const empty = std.validate({});
     expect("value" in empty).toBe(true);
-    expect((empty.value as { webEnabled?: boolean }).webEnabled).toBe(false);
-    expect((empty.value as { webHost?: string }).webHost).toBe("127.0.0.1");
-    expect((empty.value as { webPort?: number }).webPort).toBe(8787);
 
     const bad = std.validate({ roleboxDir: 42 });
     expect("issues" in bad).toBe(true);
     expect((bad.issues as unknown[]).length).toBeGreaterThan(0);
+  });
+});
+
+// ── Packaging: the dsh-client-modules resolution seam ──────────────────────
+//
+// dsh-client-modules (node half) discovers dsh.client packages by resolving
+// `require.resolve('<loader entry name>/package.json')` from the host context
+// and parsing the manifest for `dsh.client` + `exports["./client"]`
+// (lib/index.js:138-139, 238-264). rolebox's loader row is named
+// `rolebox/dsh` (the cordis plugin lives at the `./dsh` sub-path export), so
+// the exports map MUST expose `"./dsh/package.json"` or the entry is cached
+// as a permanent negative verdict and the web client never reaches the boot
+// graph. The browser half additionally requires the bundle envelope id to
+// equal the graph row id (lib/client.js:84).
+
+describe("dsh packaging — dsh-client-modules resolution seam", () => {
+  const pkgRoot = resolve(import.meta.dir, "..");
+  const pkg = JSON.parse(
+    readFileSync(resolve(pkgRoot, "package.json"), "utf8"),
+  ) as {
+    dsh?: { client?: { platform?: string; inject?: string[] } };
+    exports?: Record<string, unknown>;
+  };
+
+  it("declares the dsh.client web platform + inject roster", () => {
+    expect(pkg.dsh?.client?.platform).toBe("web");
+    expect(Array.isArray(pkg.dsh?.client?.inject)).toBe(true);
+    expect(pkg.dsh?.client?.inject!.length).toBeGreaterThan(0);
+  });
+
+  it("exposes exports['./client'] pointing at the built bundle", () => {
+    const client = pkg.exports?.["./client"] as
+      | string
+      | { default?: string }
+      | undefined;
+    const rel =
+      typeof client === "string" ? client : client?.default;
+    expect(typeof rel).toBe("string");
+    expect(existsSync(resolve(pkgRoot, rel!))).toBe(true);
+  });
+
+  it("resolves require.resolve('rolebox/dsh/package.json') (the entry-name seam)", () => {
+    // Mirror dsh-client-modules resolvePkgJson in the profile layout: the
+    // host's createRequire is anchored at the profile/config tree, and the
+    // profile installs rolebox as a `link:` dependency (pnpm link: → this
+    // repo). Resolving the bare package spec 'rolebox/dsh/package.json' then
+    // walks node_modules, follows the link, and consults THIS package.json's
+    // exports map — which must expose './dsh/package.json'.
+    const sandbox = mkdtempSync(join(tmpdir(), "rolebox-dsh-seam-"));
+    try {
+      const nm = join(sandbox, "node_modules");
+      mkdirSync(nm, { recursive: true });
+      symlinkSync(pkgRoot, join(nm, "rolebox"), "dir");
+      const req = createRequire(join(sandbox, "host.js"));
+      const resolved = req.resolve("rolebox/dsh/package.json");
+      expect(resolved).toBe(resolve(pkgRoot, "package.json"));
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("builds the client bundle envelope with the graph-row id 'rolebox/dsh'", () => {
+    const bundle = readFileSync(resolve(pkgRoot, "dist/dsh-web-client.js"), "utf8");
+    expect(bundle.startsWith("window.__ModuleLoader__.load({")).toBe(true);
+    expect(bundle).toContain('id: "rolebox/dsh"');
   });
 });
 
@@ -298,12 +373,40 @@ describe("dsh plugin apply()", () => {
     expect(listeners.get("session/event") ?? []).toHaveLength(0);
   });
 
-  it("reports webServerStarted: false when the web role-switch server is not enabled", async () => {
+  it("registers /rolebox routes when ctx.get('webServer') returns a registrar", async () => {
     writeRoleYaml("tester", SIMPLE_ROLE);
-    const { ctx } = createFakeCtx();
+    const registered: DshWebRouteLike[] = [];
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        registered.push(route);
+        return () => {
+          const i = registered.indexOf(route);
+          if (i >= 0) registered.splice(i, 1);
+        };
+      },
+    };
+    const { ctx } = createFakeCtx({ webServer: fakeWebServer });
 
     const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
-    expect(disposer.stats.webServerStarted).toBe(false);
+
+    // The seam registered exactly one prefix route at /rolebox.
+    expect(disposer.stats.webRouteRegistered).toBe(true);
+    expect(registered).toHaveLength(1);
+    expect(registered[0].kind).toBe("prefix");
+    expect(registered[0].path).toBe("/rolebox");
+    expect(typeof registered[0].handler).toBe("function");
+
+    // The fiber disposer unmounts the route.
+    disposer();
+    expect(registered).toHaveLength(0);
+  });
+
+  it("skips route registration when ctx.get('webServer') is absent", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const { ctx } = createFakeCtx(); // no webServer — headless profile
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    expect(disposer.stats.webRouteRegistered).toBe(false);
 
     disposer();
   });
