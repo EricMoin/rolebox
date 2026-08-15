@@ -271,6 +271,14 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
       prompt: [{ type: "text", text: prompt }],
       parent: this.opts.parent,
       signal: controller.signal,
+      // rolebox extension: carry the parent/origin session onto the spawn so
+      // the registered provider (DshAgentRegistrar.buildProvider) can apply
+      // the per-session ACTIVE role at spawn time. On the loop path this is
+      // the origin dsh session id (matches the web dock's key); on the graph
+      // path it is the graph id (the engine's budget scope — see
+      // dispatch-bridge.ts:graphParentContext), so a role activated under a
+      // dsh session id only reaches loop-round spawns today.
+      sessionId: parentSessionId,
     };
     const run = await this.opts.subagents.start(agent, request);
 

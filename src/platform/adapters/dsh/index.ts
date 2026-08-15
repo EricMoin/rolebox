@@ -25,8 +25,10 @@ export type {
 } from "./dispatch.ts";
 export type {
   DshAgentRegistrarOptions,
+  DshActiveRoleLookup,
   DshAgentOptions,
   DshContentBlock,
+  DshSpawnContextProvider,
   DshSpawnDelegate,
   DshSubagentCapabilities,
   DshSubagentProvider,

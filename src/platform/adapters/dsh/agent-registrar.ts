@@ -17,6 +17,31 @@
  *                      the `SubagentStartRequest.toolFilter` vocabulary, §4.3)
  *   - `maxSteps`     → `capabilities.depthLimit` (start-time feature, §4.3)
  *
+ * ── Per-session active-role application ─────────────────────────────────────
+ * When the registrar is constructed with an `activeRole` lookup (the
+ * {@link DshRoleSwitcher}'s shared per-session holder), a provider's
+ * `start()` consults it with the spawn request's `sessionId` (threaded by
+ * {@link DshDispatchAdapter} from the parent/origin session) and, when a
+ * role is active for that session, PREPENDS the active role's systemPrompt
+ * to the spawned prompt and applies its model override — the seam that makes
+ * a web-UI role switch actually reach the spawned agent. No active role (or
+ * no sessionId on the request) falls back to the definition's own behavior;
+ * spawning the active role's own definition skips the redundant prepend.
+ *
+ * ── Spawn-time context injection (the system-transform counterpart) ────────
+ * rolebox's `system-transform` hook (`src/hooks/system-transform.ts`) — which
+ * injects the role's dynamic context blocks (available functions, memory,
+ * graph state) into the agent prompt — remains a no-op at the HOOK level in
+ * {@link DshHookProvider} (hook-provider.ts:15,21-24,178); session-level
+ * injection now flows through {@link DshSystemPromptAdapter} (system-prompt.ts
+ * — `rolebox:role` + `rolebox:context`, per-session via `context.agent.id`).
+ * To keep dsh's context injection flowing into a spawned agent, the registrar
+ * exposes a {@link DshSpawnContextProvider} seam: when an active role exists
+ * for the spawn's session, `start()` prepends the provider's context blocks
+ * AHEAD of the active role's complete materialized prompt, so the spawned
+ * agent's prompt carries BOTH the injected context AND the role prompt.
+ * Absent a provider (or active role) the spawn is unchanged — base behavior.
+ *
  * This module does NOT import from any host SDK package — neither the opencode
  * plugin/SDK nor any dsh package. The dsh surface is consumed structurally
  * (duck typing) against the shapes verified in the contract, which keeps the
@@ -93,6 +118,14 @@ export type DshSubagentStartRequest = {
   maxDepth?: number;
   toolFilter?: DshToolRestriction;
   persona?: unknown;
+  /**
+   * rolebox extension (NOT part of the dsh vocabulary): the session id whose
+   * active role applies to this spawn. Threaded by {@link DshDispatchAdapter}
+   * from the parent/origin session; read by `buildProvider().start()` to
+   * apply the per-session active role (see the module docstring). Absent on
+   * requests dsh itself composes → base-agent behavior.
+   */
+  sessionId?: string;
 };
 
 /**
@@ -137,6 +170,35 @@ export type DshSpawnDelegate = (
   request: DshSubagentStartRequest,
 ) => Promise<DshSubagentRun>;
 
+/**
+ * Structural per-session active-role lookup consumed at spawn time.
+ *
+ * Deliberately a minimal structural subset (only `get`) of the switcher's
+ * {@link ActiveRoleRef} — agent-registrar must NOT import from
+ * role-switcher.ts (the switcher imports the registrar type, so a value-level
+ * cycle would form). Any object with `get(sessionId): string | null`
+ * satisfies it; `DshRoleSwitcher.activeRole` does, and so does a test double.
+ */
+export type DshActiveRoleLookup = {
+  /** Return the active role id for a session, or `null` for the base agent. */
+  get(sessionId: string): string | null;
+};
+
+/**
+ * Spawn-time context provider — the dsh counterpart of the rolebox
+ * `system-transform` hook (a documented no-op on dsh, hook-provider.ts:178).
+ *
+ * Given the spawn request's session id, return the rolebox context blocks
+ * (available functions / memory / references — the "context injection" that
+ * reaches a spawned agent on the non-dsh path) to prepend AHEAD of the
+ * active role's prompt. `undefined` (or an empty array) → no context
+ * injection, and the spawn stays unchanged. Wired by the dsh plugin with a
+ * real implementation; tests inject a fake double.
+ */
+export type DshSpawnContextProvider = (
+  sessionId: string,
+) => DshContentBlock[] | undefined;
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /**
@@ -179,6 +241,29 @@ function prependSystemPrompt(
 ): DshContentBlock[] {
   if (!definition.systemPrompt) return prompt;
   return [{ type: "text", text: definition.systemPrompt }, ...prompt];
+}
+
+/**
+ * Compose the final spawn prompt in the conventional order:
+ *
+ *   [injected context blocks?] → [active-role systemPrompt?] →
+ *   [definition systemPrompt] → [...original request prompt blocks]
+ *
+ * The dsh/rolebox context injection LEADS (mirroring the non-dsh path where
+ * the base/context comes first and the role prompt is layered after — see
+ * the Pi adapter's `before_agent_start`: `current + role.systemPrompt`),
+ * ahead of the active role's complete materialized prompt and the spawned
+ * definition's own prompt. Any absent layer is skipped; the request's own
+ * blocks are always preserved last.
+ */
+function composePrompt(
+  context: DshContentBlock[] | undefined,
+  active: AgentDefinition | undefined,
+  prompt: DshContentBlock[],
+): DshContentBlock[] {
+  let out = active ? prependSystemPrompt(active, prompt) : prompt;
+  if (context && context.length > 0) out = [...context, ...out];
+  return out;
 }
 
 /**
@@ -238,6 +323,24 @@ export interface DshAgentRegistrarOptions {
    * sync, and listing remain fully functional.
    */
   onSpawn?: DshSpawnDelegate;
+  /**
+   * Optional per-session active-role lookup (the {@link DshRoleSwitcher}'s
+   * shared `activeRole` holder). When present, a provider's `start()`
+   * consults it with the request's `sessionId` and prepends the active
+   * role's systemPrompt (applying its model override) — the seam that makes
+   * a web-UI role switch reach the spawned agent. Absent → base behavior.
+   */
+  activeRole?: DshActiveRoleLookup;
+  /**
+   * Optional spawn-time context provider — the dsh counterpart of the
+   * `system-transform` hook (a documented no-op on dsh). When present, a
+   * provider's `start()` consults it with the request's `sessionId` and,
+   * when an active role exists for that session, prepends the returned
+   * rolebox context blocks ahead of the active role's complete materialized
+   * prompt — so dsh's context injection reaches the spawned role. Absent →
+   * no context injection (spawn unchanged).
+   */
+  contextProvider?: DshSpawnContextProvider;
 }
 
 /** Internal bookkeeping per registered agent. */
@@ -263,10 +366,14 @@ export class DshAgentRegistrar implements IAgentRegistrar {
   private readonly entries: Map<string, Entry> = new Map();
   private readonly subagents: DshSubagentRuntime;
   private readonly onSpawn?: DshSpawnDelegate;
+  private readonly activeRole?: DshActiveRoleLookup;
+  private readonly contextProvider?: DshSpawnContextProvider;
 
   constructor(options: DshAgentRegistrarOptions) {
     this.subagents = options.subagents;
     this.onSpawn = options.onSpawn;
+    this.activeRole = options.activeRole;
+    this.contextProvider = options.contextProvider;
   }
 
   // ── IAgentRegistrar implementation ───────────────────────────────────────
@@ -415,8 +522,12 @@ export class DshAgentRegistrar implements IAgentRegistrar {
    *
    * The provider's `start()` prepends the definition's system prompt to the
    * request prompt (§3.4), merges the definition's model into
-   * `agentOptions.model` (§4.2), and delegates to the configured `onSpawn`
-   * hook — or throws `DshSpawnNotWiredError` when no hook is wired.
+   * `agentOptions.model` (§4.2), and — when the request carries a sessionId
+   * and the registrar holds an activeRole lookup — additionally prepends the
+   * ACTIVE role's system prompt and applies its model override (the
+   * per-session role-switch seam; see the module docstring). It then
+   * delegates to the configured `onSpawn` hook — or throws
+   * `DshSpawnNotWiredError` when no hook is wired.
    *
    * @param definition - The rolebox agent definition to translate.
    * @returns A SubagentProvider ready for `ctx.subagents.registerProvider`.
@@ -430,10 +541,23 @@ export class DshAgentRegistrar implements IAgentRegistrar {
       start: async (request: DshSubagentStartRequest): Promise<DshSubagentRun> => {
         const prompt = prependSystemPrompt(definition, request.prompt);
         const agentOptions = mergeAgentOptions(definition, request.agentOptions);
+        // Per-session active-role seam: prepend the active role's prompt and
+        // apply its model override when one is active for the request's
+        // session. `mode` is a catalog-level classification with no
+        // spawn-time dsh mapping (AgentOptions = provider/model/maxTokens),
+        // so it is not applied here.
+        const active = this.resolveActiveOverride(request.sessionId, definition.id);
+        // dsh context injection seam: when the session has an active role,
+        // the rolebox context block (the output the `system-transform` hook
+        // would have produced — a documented no-op on dsh via
+        // hook-provider.ts:178) is prepended AHEAD of the active role's
+        // complete materialized prompt, so the spawned agent's effective
+        // prompt carries BOTH the injected context and the role prompt.
+        const context = this.resolveSpawnContext(request.sessionId);
         const startRequest: DshSubagentStartRequest = {
           ...request,
-          prompt,
-          agentOptions,
+          prompt: composePrompt(context, active, prompt),
+          agentOptions: active ? mergeAgentOptions(active, agentOptions) : agentOptions,
         };
         if (this.onSpawn) {
           return this.onSpawn(definition, startRequest);
@@ -442,4 +566,46 @@ export class DshAgentRegistrar implements IAgentRegistrar {
       },
     };
   };
+
+  /**
+   * Resolve the active-role override for a spawn request, or `undefined`.
+   *
+   * Returns the active role's AgentDefinition when ALL of these hold:
+   *   - the request carries a `sessionId` and the registrar holds an
+   *     `activeRole` lookup
+   *   - that session has an active role id
+   *   - the id resolves to a registered definition OTHER than the spawned
+   *     one (spawning the active role's own definition already carries its
+   *     system prompt — a redundant prepend would duplicate it)
+   *
+   * Otherwise `undefined` → base behavior (definition's own prompt/model).
+   */
+  private resolveActiveOverride(
+    sessionId: string | undefined,
+    spawnedId: string,
+  ): AgentDefinition | undefined {
+    if (!sessionId || !this.activeRole) return undefined;
+    const activeId = this.activeRole.get(sessionId);
+    if (!activeId || activeId === spawnedId) return undefined;
+    return this.entries.get(activeId)?.definition;
+  }
+
+  /**
+   * Resolve the spawn-time context blocks for a request, or `undefined`.
+   *
+   * The context flows ONLY when an active role exists for the session (the
+   * reported bug: after a web-UI role switch, dsh's context injection never
+   * reached the role) — no active role (or no provider wired) leaves the
+   * spawn unchanged. Note this deliberately does NOT skip the active role's
+   * own definition spawn: its context still applies even when the redundant
+   * prompt prepend is skipped by {@link resolveActiveOverride}.
+   */
+  private resolveSpawnContext(
+    sessionId: string | undefined,
+  ): DshContentBlock[] | undefined {
+    if (!sessionId || !this.activeRole) return undefined;
+    const activeId = this.activeRole.get(sessionId);
+    if (!activeId) return undefined;
+    return this.contextProvider?.(sessionId);
+  }
 }
