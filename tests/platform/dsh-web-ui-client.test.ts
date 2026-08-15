@@ -148,7 +148,9 @@ describe("dsh web-UI client plugin entry", () => {
 
   it("declares the same-origin rolebox API contract on the dock module", () => {
     expect(dock.ROLES_ENDPOINT).toBe("/rolebox/roles");
+    expect(dock.ACTIVE_ENDPOINT).toBe("/rolebox/roles/active");
     expect(dock.SWITCH_ENDPOINT).toBe("/rolebox/roles/switch");
+    expect(dock.CLEAR_ENDPOINT).toBe("/rolebox/roles/active");
     expect(dock.ROLE_DATALIST_ID).toBe("rolebox-role-list");
   });
 });
