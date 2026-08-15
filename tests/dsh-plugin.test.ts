@@ -14,6 +14,10 @@
  *   - the enabledNamespaces tool filter and the defaultRole promotion
  *   - the optional host webServer seam: `/rolebox` routes register when
  *     `ctx.get('webServer')` returns a registrar and are skipped when absent
+ *   - the optional systemPrompt seam: the `rolebox:role` section and
+ *     `rolebox:context` context entry register on the service double, and
+ *     the section provider serves the ACTIVE role's prompt after a switch;
+ *     headless profiles (no service) degrade with unchanged stats
  *   - the disposer cleans up registrations/listeners
  *   - the plugin source stays free of @opencode-ai / @deepseek-ai imports
  *
@@ -23,6 +27,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { load } from "js-yaml";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -40,6 +45,11 @@ import type {
 import type { DshSubagentDispatchRuntime } from "../src/platform/adapters/dsh/dispatch.ts";
 import type { DshSessionStoreLike } from "../src/platform/adapters/dsh/session.ts";
 import type {
+  DshSystemPromptContextEntry,
+  DshSystemPromptRegistry,
+  DshSystemPromptSection,
+} from "../src/platform/adapters/dsh/system-prompt.ts";
+import type {
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
 } from "../src/platform/adapters/dsh/web-role-switch-route.ts";
@@ -48,21 +58,52 @@ import type {
 
 /**
  * Minimal fake of the cordis Context + the three injected dsh services
- * (`tools`, `sessions`, `subagents`). Tracks tool registrations, subagent
- * provider registrations, and event subscriptions so tests can assert that
- * apply() wired everything.
+ * (`tools`, `sessions`, `subagents`) and the optional systemPrompt registry.
+ * Tracks tool registrations, subagent provider registrations, event
+ * subscriptions, and system-prompt section/context registrations so tests can
+ * assert that apply() wired everything.
  *
  * The optional-service seam (`ctx.get`) resolves `"webServer"` to the
  * `webServer` option when supplied (a fake host-webserver registrar) and
  * `undefined` otherwise — mirroring the dsh host, where the web profile
- * registers the webserver service and headless profiles do not.
+ * registers the webserver service and headless profiles do not. The
+ * `systemPrompt` option (default `false`) wires the factory's recording
+ * system-prompt registry double onto `ctx.systemPrompt` (and
+ * `ctx.get("systemPrompt")`) — mirroring the full profile, where the
+ * `@deepseek-ai/dsh-system-prompt` service is mounted on the context; the
+ * default leaves it absent so apply() exercises its graceful degrade.
  */
 function createFakeCtx(
-  options: { webServer?: DshWebServerRouteRegistrar | null } = {},
+  options: {
+    webServer?: DshWebServerRouteRegistrar | null;
+    systemPrompt?: boolean;
+  } = {},
 ) {
   const registeredTools: DshDefineToolOptions[] = [];
   const providers = new Map<string, DshSubagentProvider>();
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+  // Recording system-prompt registry double: `section()`/`context()` record
+  // every registration (so tests can inspect the entries and invoke their
+  // `text` providers) and return disposers that record their invocation —
+  // mirroring the real `@deepseek-ai/dsh-system-prompt` service surface.
+  const sections: DshSystemPromptSection[] = [];
+  const contexts: DshSystemPromptContextEntry[] = [];
+  const promptDisposed: Array<{ kind: "section" | "context"; name: string }> = [];
+  const systemPrompt: DshSystemPromptRegistry = {
+    section(entry: DshSystemPromptSection): () => void {
+      sections.push(entry);
+      return () => {
+        promptDisposed.push({ kind: "section", name: entry.name });
+      };
+    },
+    context(entry: DshSystemPromptContextEntry): () => void {
+      contexts.push(entry);
+      return () => {
+        promptDisposed.push({ kind: "context", name: entry.name });
+      };
+    },
+  };
 
   const tools = {
     registeredTools,
@@ -110,10 +151,18 @@ function createFakeCtx(
     tools,
     sessions,
     subagents,
+    // Optional-service seam (full profile): the system-prompt registry is
+    // mounted directly on the context, mirroring the dsh host — and also
+    // resolved by name for the probe's `ctx.get('systemPrompt')` fallback.
+    ...(options.systemPrompt ? { systemPrompt } : {}),
     get(name: string): unknown {
-      // Optional-service seam: only the host web server is probed by the
-      // plugin; every other name resolves to undefined (absent).
+      // Optional-service seam: the host web server and (in full profiles) the
+      // system-prompt registry are probed by the plugin; every other name
+      // resolves to undefined (absent).
       if (name === "webServer") return options.webServer ?? undefined;
+      if (name === "systemPrompt") {
+        return options.systemPrompt ? systemPrompt : undefined;
+      }
       return undefined;
     },
     on(event: string, listener: (...args: unknown[]) => void) {
@@ -133,7 +182,84 @@ function createFakeCtx(
     },
   };
 
-  return { ctx, tools, providers, listeners };
+  return { ctx, tools, providers, listeners, systemPrompt, sections, contexts };
+}
+
+// ── Mock req/res for driving the registered /rolebox route handler ──────────
+//
+// The role switcher created inside apply() is not exposed, so the tests reach
+// its activate() through the /rolebox REST surface (the registered route
+// handler delegates to DshRoleSwitcher.activate). Minimal
+// IncomingMessage/ServerResponse doubles are used — no node:http server is
+// ever created — the same pattern as tests/platform/dsh-role-switch-route.
+
+/** Minimal IncomingMessage double: url/method + data/end/error listeners. */
+class MockReq {
+  url: string;
+  method: string;
+  private listeners = new Map<string, Array<(chunk?: unknown) => void>>();
+
+  constructor(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+  }
+
+  on(event: string, cb: (chunk?: unknown) => void) {
+    const arr = this.listeners.get(event) ?? [];
+    arr.push(cb);
+    this.listeners.set(event, arr);
+    return this;
+  }
+
+  /** Emit a body chunk to registered `data` listeners. */
+  push(chunk: string | Buffer): void {
+    const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    for (const cb of this.listeners.get("data") ?? []) cb(buf);
+  }
+
+  /** Emit `end` to registered listeners. */
+  finish(): void {
+    for (const cb of this.listeners.get("end") ?? []) cb();
+  }
+}
+
+/** Minimal ServerResponse double: records status/headers/body. */
+class MockRes {
+  statusCode = 0;
+  headers: Record<string, string> = {};
+  body = "";
+  headersSent = false;
+
+  writeHead(status: number, headers: Record<string, string>) {
+    this.statusCode = status;
+    this.headers = headers;
+    this.headersSent = true;
+    return this;
+  }
+
+  end(text = "") {
+    this.body = text;
+    return this;
+  }
+}
+
+/** Invoke a route handler with a mock req/res and await completion. */
+async function invoke(
+  handler: DshWebRouteLike["handler"],
+  method: string,
+  path: string,
+  body?: string,
+): Promise<{ status: number; headers: Record<string, string>; text: string }> {
+  const req = new MockReq(method, path);
+  const res = new MockRes();
+  const pending = handler(
+    req as unknown as IncomingMessage,
+    res as unknown as ServerResponse,
+  );
+  if (body !== undefined) req.push(body);
+  req.finish();
+  if (pending) await pending;
+  return { status: res.statusCode, headers: res.headers, text: res.body };
 }
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -409,6 +535,103 @@ describe("dsh plugin apply()", () => {
     expect(disposer.stats.webRouteRegistered).toBe(false);
 
     disposer();
+  });
+
+  it("registers rolebox system-prompt contributions; the section provider serves the active role's prompt", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    // Host web server registrar — captures the registered /rolebox route so
+    // the test can drive the switcher's REST surface (POST /roles/switch).
+    const registeredRoutes: DshWebRouteLike[] = [];
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        registeredRoutes.push(route);
+        return () => {
+          const i = registeredRoutes.indexOf(route);
+          if (i >= 0) registeredRoutes.splice(i, 1);
+        };
+      },
+    };
+
+    const { ctx, sections, contexts } = createFakeCtx({
+      webServer: fakeWebServer,
+      systemPrompt: true,
+    });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const stats = disposer.stats;
+
+    // The prompt double recorded the two contributions at their documented
+    // shape (section `rolebox:role` order 50, context `rolebox:context` order 0).
+    expect(sections).toHaveLength(1);
+    expect(sections[0].name).toBe("rolebox:role");
+    expect(sections[0].order).toBe(50);
+    expect(typeof sections[0].text).toBe("function");
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].name).toBe("rolebox:context");
+    expect(contexts[0].order).toBe(0);
+    expect(typeof contexts[0].text).toBe("function");
+
+    // The prompt seam is additive — roles still resolve and tools still
+    // register alongside the contributions.
+    expect(stats.resolved).toBeGreaterThanOrEqual(1);
+    expect(stats.registeredTools).toBeGreaterThanOrEqual(1);
+
+    // Activate the role via the switcher: the /rolebox switch route delegates
+    // to DshRoleSwitcher.activate(role, session) — the session rides in the
+    // POST body (`{ role, session }`; the `?session=` query is only honored
+    // by the GET/DELETE handlers).
+    const sessionId = "session-1";
+    const route = registeredRoutes[0];
+    expect(route).toBeDefined();
+    const switched = await invoke(
+      route.handler,
+      "POST",
+      "/rolebox/roles/switch",
+      JSON.stringify({ role: "tester", session: sessionId }),
+    );
+    expect(switched.status).toBe(200);
+
+    // The registered section text provider now resolves the ACTIVE role's full
+    // systemPrompt for the session. The adapter's resolution chain
+    // (system-prompt.ts resolveActiveRolePrompt) reads the session id from the
+    // context (sessionID/sessionId spellings) alongside agent.id — the exact
+    // shape pinned by tests/platform/dsh-system-prompt.test.ts.
+    expect(
+      sections[0].text({ agent: { id: sessionId }, sessionID: sessionId }),
+    ).toBe("You are a test role.");
+
+    disposer();
+  });
+
+  it("degrades gracefully without a systemPrompt service — roles/tools still resolve, stats unchanged", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    // Baseline boot WITH the prompt seam present — the stats it reports.
+    const withPrompt = createFakeCtx({ systemPrompt: true });
+    const baselineDisposer = await apply(withPrompt.ctx, {
+      roleboxDir: tmpDir,
+    } as DshPluginConfig);
+
+    // No systemPrompt double (the default fake — headless profile): apply()
+    // must not throw, must still resolve roles + register tools/agents...
+    const { ctx, tools, providers } = createFakeCtx();
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    const stats = disposer.stats;
+
+    expect(stats.discovered).toBeGreaterThanOrEqual(1);
+    expect(stats.resolved).toBeGreaterThanOrEqual(1);
+    expect(stats.skipped).toBe(0);
+    expect(tools.registeredTools.length).toBeGreaterThanOrEqual(1);
+    expect(providers.size).toBeGreaterThanOrEqual(1);
+    expect(stats.webRouteRegistered).toBe(false);
+
+    // ...and the reported stats are identical to the seam-present boot: the
+    // absent service adds no degradation marker and perturbs nothing.
+    expect(stats).toEqual(baselineDisposer.stats);
+
+    disposer();
+    baselineDisposer();
   });
 });
 

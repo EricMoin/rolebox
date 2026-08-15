@@ -19,9 +19,12 @@
  *
  *   1. **Per-session state** — the chosen role id is recorded immediately in
  *      a per-session holder (an exposed {@link ActiveRoleRef}, the
- *      session-aware sibling of Pi's `ActiveAgentRef`). role-scoped spawn
- *      behavior (system prompt / model) is already applied by
- *      `DshAgentRegistrar.buildProvider` at spawn time.
+ *      session-aware sibling of Pi's `ActiveAgentRef`). The holder is the
+ *      single shared source of truth for the switch: `DshAgentRegistrar`
+ *      reads it at spawn time (`buildProvider().start()` consults
+ *      `request.sessionId`) to apply the active role's system prompt and
+ *      model override to spawned agents, and the web role-switch surface
+ *      reads/writes it for the UI.
  *   2. **Persistence** — a log-only session event (`rolebox/active-role`,
  *      data `{ id }`) is appended via `session.append(type, data, opts)`
  *      WITHOUT a `surfaceOp`, per the log-only vocabulary in
@@ -30,11 +33,15 @@
  *      session's event log and restores the last persisted active role
  *      (covers seeds / forks / resume that carry the log forward).
  *
- * Unlike the Pi adapter there is no per-turn system-prompt hook on dsh
- * (`system-transform` is a documented no-op in hook-provider.ts) and no model
- * switch on this seam; the switcher owns the per-session active-role state
- * only, which is exactly what the dsh web role-switch surface reads and
- * writes.
+ * The dsh platform has no per-turn system-prompt hook (`system-transform`
+ * is a documented no-op at the hook level in hook-provider.ts: dsh composes
+ * the model-facing system prompt from its mounted `systemPrompt` service,
+ * §3.1). Session-level injection now flows through {@link DshSystemPromptAdapter}
+ * (system-prompt.ts — the `rolebox:role` section + `rolebox:context` entry,
+ * resolved per-session via `context.agent.id`). Spawn-time application for
+ * subagents lives in {@link DshAgentRegistrar} (shared {@link ActiveRoleRef},
+ * wired in `src/dsh-plugin.ts`): the switcher owns write/restore; the
+ * registrar and the prompt adapter own the read side.
  *
  * The dsh surface is consumed structurally (duck typing). This module does
  * NOT import `@deepseek-ai/*` (or `@opencode-ai/*`).

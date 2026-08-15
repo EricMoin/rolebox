@@ -53,7 +53,10 @@ import type {
   InitializeRuntimeOptions,
 } from "./platform/factory.ts";
 import { DshAgentRegistrar } from "./platform/adapters/dsh/agent-registrar.ts";
-import type { DshSubagentProvider } from "./platform/adapters/dsh/agent-registrar.ts";
+import type {
+  DshSpawnContextProvider,
+  DshSubagentProvider,
+} from "./platform/adapters/dsh/agent-registrar.ts";
 import { DshDispatchAdapter } from "./platform/adapters/dsh/dispatch.ts";
 import type { DshSubagentDispatchRuntime } from "./platform/adapters/dsh/dispatch.ts";
 import { DshToolFactory } from "./platform/adapters/dsh/tool-factory.ts";
@@ -61,7 +64,9 @@ import type { DshDefineToolOptions } from "./platform/adapters/dsh/tool-factory.
 import { DshSessionAdapter } from "./platform/adapters/dsh/session.ts";
 import type { DshSessionStoreLike } from "./platform/adapters/dsh/session.ts";
 import { DshHookProvider } from "./platform/adapters/dsh/hook-provider.ts";
-import { DshRoleSwitcher } from "./platform/adapters/dsh/role-switcher.ts";
+import { DshRoleSwitcher, createActiveRoleRef } from "./platform/adapters/dsh/role-switcher.ts";
+import { DshSystemPromptAdapter } from "./platform/adapters/dsh/system-prompt.ts";
+import type { DshSystemPromptRegistry } from "./platform/adapters/dsh/system-prompt.ts";
 import {
   DshRoleSwitchWebRoute,
   ROLE_SWITCH_ROUTE_PREFIX,
@@ -69,6 +74,7 @@ import {
 import type { DshWebServerRouteRegistrar } from "./platform/adapters/dsh/web-role-switch-route.ts";
 import { buildCanonicalTools } from "./platform/tool-assembly.ts";
 import type { PlatformCapabilities } from "./platform/capabilities.ts";
+import { buildAvailableFunctionsBlock } from "./prompt/builder.ts";
 import { createGraphTools } from "./graph/tools/index.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { LoopStore } from "./loop/loop-store.ts";
@@ -162,6 +168,15 @@ export interface DshPluginContext {
    * {@link DshDispatchAdapter}).
    */
   subagents: DshSubagentDispatchRuntime;
+  /**
+   * The dsh system-prompt registry service (`@deepseek-ai/dsh-system-prompt`,
+   * structural subset — see {@link DshSystemPromptRegistry}). Present only in
+   * full profiles; headless profiles have no model-facing prompt assembly, so
+   * the property is absent and the plugin degrades gracefully (see
+   * {@link probeSystemPrompt}). Never injected via the `inject` roster — an
+   * optional service must not gate plugin activation.
+   */
+  systemPrompt?: unknown;
   /**
    * Resolve a cordis service by name (optional-service seam). The dsh host
    * context resolves any registered service; this plugin probes for
@@ -297,6 +312,61 @@ function probeWebServer(
 }
 
 /**
+ * Structurally probe the cordis ctx for the dsh system-prompt registry
+ * service (`@deepseek-ai/dsh-system-prompt`).
+ *
+ * The service may surface either as a direct `ctx.systemPrompt` property
+ * (the host injects the registry onto the context) or through the
+ * named-service resolver `ctx.get("systemPrompt")` — both are probed,
+ * mirroring {@link probeWebServer}. Full profiles mount the registry (the
+ * `system-prompt` bundle row); headless profiles have no model-facing prompt
+ * assembly, so this probe returns `undefined` and the plugin skips the
+ * rolebox prompt contributions gracefully.
+ *
+ * The property read is deliberately NOT trusted as the whole probe: a
+ * service mounted by a SIBLING plugin fiber (the real profile shape — the
+ * bundle loader mounts every row via `ctx.plugin()`, so the registry lives
+ * in another plugin's fiber) is invisible to the property-resolver walk,
+ * which only climbs ANCESTOR fibers and THROWS on an unknown name. A throw
+ * from `ctx.systemPrompt` therefore falls through to the named-service
+ * resolver, which reads the shared reflect store across fibers. The service
+ * is consumed by duck typing (the structural `section(entry)` /
+ * `context(entry)` surface — see {@link DshSystemPromptRegistry}), so a
+ * missing `get`, a throw on an unknown name, or a non-conforming value all
+ * resolve to "absent" rather than failing the boot. The probe is
+ * deliberately NOT gated on the `inject` roster: an optional service must
+ * not gate plugin activation.
+ */
+function probeSystemPrompt(
+  ctx: DshPluginContext,
+): DshSystemPromptRegistry | undefined {
+  let service: unknown;
+  try {
+    service = ctx.systemPrompt;
+  } catch {
+    // Sibling-fiber service (full profile) — the property read throws;
+    // fall through to the cross-fiber named-service resolver below.
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("systemPrompt");
+    } catch {
+      return undefined;
+    }
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { section?: unknown }).section === "function" &&
+    typeof (service as { context?: unknown }).context === "function"
+  ) {
+    return service as DshSystemPromptRegistry;
+  }
+  return undefined;
+}
+
+/**
  * Capabilities declared for the dsh platform. Values reflect what the dsh
  * adapters actually support (session fork/create/status via the SessionStore
  * adapter; event streaming via the event bus; in-session active-role
@@ -335,6 +405,10 @@ const dshCapabilities: PlatformCapabilities = {
  *       service seam (present only in the web profile). A registration
  *       failure logs a warning and degrades — the plugin keeps running
  *       without the web surface.
+ *   3b. OPTIONALLY register the session-level system-prompt contributions
+ *       (`rolebox:role` section + `rolebox:context` context entry) when the
+ *       `systemPrompt` service is present on the ctx (full profiles only);
+ *       headless profiles warn-degrade and the plugin keeps running.
  *   4. Compile canonical tools via `DshToolFactory` from
  *      `buildCanonicalTools(...)` (with the dsh session adapter as the
  *      session client) and register them into `ctx.tools`, filtered by
@@ -365,7 +439,33 @@ export async function apply(
   });
 
   // 2. Discover + resolve roles; sync agents into ctx.subagents.
-  const registrar = new DshAgentRegistrar({ subagents: ctx.subagents });
+  //
+  // The per-session active-role holder is created FIRST and shared by BOTH
+  // the registrar (which reads it at spawn time to apply the active role's
+  // system prompt / model to spawned agents) and the role switcher (which
+  // writes it on switch/clear and restores it on session/created). Sharing
+  // one instance is what makes a web-UI role switch reach the spawned agent.
+  const activeRole = createActiveRoleRef();
+  // Spawn-time context injection: rolebox's `system-transform` hook (which
+  // injects the role's dynamic context — available functions, memory — into
+  // the agent prompt) has no dsh extension point and is a documented no-op
+  // (hook-provider.ts:178). Its counterpart here materializes the ACTIVE
+  // role's context block at spawn time — the available-functions block first
+  // (mirroring src/hooks/system-transform.ts:77-85) — so a spawned agent's
+  // effective prompt carries the rolebox context alongside the role prompt.
+  const contextProvider: DshSpawnContextProvider = (sessionId) => {
+    const activeId = activeRole.get(sessionId);
+    if (!activeId) return undefined;
+    const functions = roleFunctionsMap.get(activeId);
+    if (!functions || functions.length === 0) return undefined;
+    const block = buildAvailableFunctionsBlock(functions);
+    return block ? [{ type: "text", text: block }] : undefined;
+  };
+  const registrar = new DshAgentRegistrar({
+    subagents: ctx.subagents,
+    activeRole,
+    contextProvider,
+  });
   const runtimeOptions: InitializeRuntimeOptions = {
     directories: dirs,
     roleFunctionsMap,
@@ -391,6 +491,7 @@ export async function apply(
     registrar,
     store: ctx.sessions,
     ctx,
+    activeRole,
   });
 
   // Optional host webServer seam — register the /rolebox routes on dsh's own
@@ -418,6 +519,41 @@ export async function apply(
     log.debug(
       "No host web server service on ctx — skipping /rolebox route registration",
     );
+  }
+
+  // Optional systemPrompt service seam — register the rolebox session-level
+  // system-prompt contributions (`rolebox:role` section + `rolebox:context`
+  // context entry) when the dsh host provides the registry, so the
+  // model-facing prompt carries the ACTIVE role's system prompt and its
+  // available-functions block. The service exists only in full profiles (the
+  // `@deepseek-ai/dsh-system-prompt` bundle); headless profiles have no
+  // model-facing prompt assembly, so the probe returns absent and the plugin
+  // keeps booting without the prompt seam — identical degradation to the
+  // webServer seam above. The adapter's registry disposers are collected
+  // into the fiber disposer below via `promptDisposers`.
+  const promptDisposers: Array<() => void> = [];
+  const systemPromptRegistry = probeSystemPrompt(ctx);
+  if (systemPromptRegistry) {
+    try {
+      const promptAdapter = new DshSystemPromptAdapter({
+        registrar,
+        activeRole,
+        roleFunctionsMap,
+        directory: dirs.roleboxDir,
+      });
+      promptAdapter.register(systemPromptRegistry);
+      promptDisposers.push(() => promptAdapter.dispose());
+      log.info("Rolebox system-prompt contributions registered", {
+        section: "rolebox:role",
+        context: "rolebox:context",
+      });
+    } catch (err) {
+      log.warn("System-prompt registration failed — degrading", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    log.warn("No systemPrompt service on ctx — role prompt injection disabled");
   }
 
   // 4. Compile + register tools (dsh session adapter drives the session tools).
@@ -531,15 +667,26 @@ export async function apply(
 
   // Fiber disposer (cordis convention) + stats for callers/tests.
   const disposer = (() => {
-    // Host route teardown FIRST: unmount the /rolebox routes (fire-and-forget
-    // — the disposers are no-ops when the route was never registered) and
-    // release the switcher's ctx listeners (its `session/created` restore
-    // subscription) before any other cleanup.
+    // Host route + prompt-seam teardown FIRST: unmount the /rolebox routes
+    // (fire-and-forget — the disposers are no-ops when the route was never
+    // registered), release the system-prompt registry contributions (also
+    // no-ops when the seam was never wired), and release the switcher's ctx
+    // listeners (its `session/created` restore subscription) before any
+    // other cleanup.
     for (const dispose of routeDisposers) {
       try {
         dispose();
       } catch (err) {
         log.debug("role-switch route disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    for (const dispose of promptDisposers) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("system-prompt disposer failed", {
           error: err instanceof Error ? err.message : String(err),
         });
       }

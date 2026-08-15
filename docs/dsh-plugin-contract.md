@@ -703,6 +703,50 @@ external sequencing (`dsh-client-modules/README.md:5-11`). rolebox's build
 (`format: "cjs"`, `react` / `react/jsx-runtime` / `@deepseek-ai/*` external) and
 wraps the output in this exact envelope with `id: "rolebox"`.
 
+### 4.5 Session-level system-prompt registration (`rolebox:role` / `rolebox:context`)
+
+The model-facing system prompt is composed EXCLUSIVELY by the mounted
+`systemPrompt` service — the `@deepseek-ai/dsh-system-prompt` registry that
+`ctx.tools` waits for (`static inject: ["systemPrompt"]`, §3.1; mounted in a
+full profile by the `system-prompt` bundle row). rolebox's session-level role
+injection registers two contributions into it via `DshSystemPromptAdapter`
+(`src/platform/adapters/dsh/system-prompt.ts`, wired by
+`src/dsh-plugin.ts:519-542`):
+
+- **Section `rolebox:role` — `order: 50`** — renders the ACTIVE role's full
+  `systemPrompt` for the current session (`resolveActiveRolePrompt`). The
+  provider resolves PER-SESSION through the render context: `context.agent.id`
+  (the model-facing agent) must be present, then the session id (dsh spelling
+  `sessionID`, rolebox spelling `sessionId`, or — on the real harness assembly
+  context `{ agent, scope }`, where the agent is the session — the agent's own
+  `id`), then the shared per-session `ActiveRoleRef` (`activeRole.get(sessionId)`
+  — the same holder the role switcher writes and the registrar reads at spawn),
+  then the registrar's definition lookup. Returns `''` when no role is active;
+  the registry's
+  `renderPrompt` drops empty sections, so the base agent's prompt is
+  unchanged.
+- **Context entry `rolebox:context` — `order: 0`** — renders the active role's
+  available-functions block (`buildAvailableFunctionsBlock`), the
+  session-level analog of the registrar's spawn-time context provider
+  (agent-registrar.ts, §4.3). Also `''` when nothing applies, dropped the
+  same way.
+
+Ordering mirrors the spawn-time `composePrompt` convention (context leads,
+role prompt follows): the context entry (order 0) renders AHEAD of the role
+section (order 50).
+
+**Graceful degradation** — the `systemPrompt` service is OPTIONAL. `apply()`
+probes it structurally (`probeSystemPrompt`, `src/dsh-plugin.ts:331-352` —
+`ctx.systemPrompt` property or `ctx.get("systemPrompt")`, both duck-typed)
+and registers the contributions only when the service is present. Full
+profiles mount it; headless profiles have no model-facing prompt assembly, so
+the probe returns absent, `apply()` logs a warning ("No systemPrompt service
+on ctx — role prompt injection disabled") and keeps booting — the same
+degradation shape as the `webServer` seam (§4.4.1). The service is
+deliberately NOT in the `inject` roster, so it can never gate plugin
+activation. Each `section()` / `context()` call returns a disposer; the
+adapter collects them and releases them on fiber unload (`dispose()`).
+
 ---
 
 ## 5. Profile bundle contract for a NON-workspace package (`@deepseek-ai/dsh` + `dsh-app-boot`)

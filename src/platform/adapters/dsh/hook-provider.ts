@@ -21,7 +21,11 @@
  * - **system-transform**: dsh composes the model-facing system prompt from
  *   the mounted `systemPrompt` service (dsh-tools injects it, §3.1); there is
  *   no per-turn prompt transform hook to attach to. The handler in
- *   `getHandlers()` is a no-op.
+ *   `getHandlers()` stays a no-op. Session-level injection now flows through
+ *   {@link DshSystemPromptAdapter} (`system-prompt.ts` — the `rolebox:role`
+ *   section + `rolebox:context` entry in the dsh `systemPrompt` registry,
+ *   resolved per-session via `context.agent.id`). Spawn-time context still
+ *   reaches subagents via the registrar's {@link DshSpawnContextProvider} seam.
  * - **context**: rolebox's `context` "hook" is a helper bundle
  *   (`src/hooks/context.ts` — `collectAllFunctions`, `appendCorrection`,
  *   `fetchLastAssistantText`) with no dsh event seam; its handler is a no-op.
