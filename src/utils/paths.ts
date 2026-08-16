@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { SKILL_MD } from "../constants.ts";
 import {
   defaultPlatformPaths,
@@ -19,6 +19,18 @@ import {
  */
 export function toPosixPath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+/**
+ * Convert a forward-slash path back to native platform separators.
+ *
+ * Inverse of `toPosixPath`: on POSIX it is a no-op; on Windows it restores
+ * backslash separators. Use it when a posix-normalized path must become a
+ * real platform-native filesystem path again (e.g. before `join`, `dirname`,
+ * or fs operations, which on win32 must agree with join-built paths).
+ */
+export function toNativePath(p: string): string {
+  return p.replace(/\//g, sep);
 }
 
 // ── Internal platform path resolver ──────────────────────────────
