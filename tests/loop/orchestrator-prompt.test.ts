@@ -12,8 +12,15 @@ function readLoopPrompt(): {
   const filePath = join(import.meta.dir, "../../functions/loop.md");
   const content = readFileSync(filePath, "utf-8");
 
+  // Normalize Windows CRLF line endings to LF. git's `core.autocrlf` on
+  // Windows (default true, and this repo has no .gitattributes to override it)
+  // checks out .md files with CRLF, which would otherwise break the literal
+  // `\n---` frontmatter-delimiter match below. Mirrors the CRLF normalization
+  // in src/resolver/frontmatter.ts.
+  const normalizedContent = content.replace(/\r\n/g, "\n");
+
   // Split on first --- delimiter
-  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  const match = normalizedContent.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!match) {
     throw new Error("loop.md does not have valid YAML frontmatter");
   }
