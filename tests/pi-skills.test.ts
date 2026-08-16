@@ -190,7 +190,16 @@ afterAll(() => {
     process.env.ROLEBOX_ENGINE_RECOVERY = originalEngineRecovery;
   }
   process.chdir(originalCwd);
-  rmSync(workspace, { recursive: true, force: true });
+  // Windows-only hardening: rmSync on a freshly-written tree transiently
+  // fails with EBUSY/EPERM (antivirus scan, or the OS still holding a
+  // directory handle on just-closed files). POSIX tolerates this because
+  // open/locked files can still be unlinked there; Windows cannot. The
+  // extension init writes engine state, dispatch/loop stores and the
+  // graph-events log under the workspace, so this cleanup is the hotspot.
+  // `maxRetries` retries the recursive removal with a linear backoff of
+  // `retryDelay` ms per attempt (Node fs.rmSync semantics — ignored unless
+  // `recursive` is true, and a no-op on the success path on all platforms).
+  rmSync(workspace, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 });
 
 // ── Assertions ──────────────────────────────────────────────────────────────
