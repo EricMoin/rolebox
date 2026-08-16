@@ -1,5 +1,6 @@
 import type { DispatchInput, DispatchTask, MaterializedResultRef } from "../types.ts";
 import type { IConcurrencyManager } from "../concurrency/concurrency.ts";
+import type { DispatchManagerConfig } from "../config.ts";
 
 export type { TaskLifecycleDeps } from "./lifecycle-shared.ts";
 import type { TaskLifecycleDeps } from "./lifecycle-shared.ts";
@@ -34,6 +35,11 @@ export interface LifecycleBridge {
   getRequestSessions(rootSession: string): number;
   setConcurrencyManager(manager: IConcurrencyManager): void;
   setDirectory(directory: string): void;
+  /** Replace the role-scoped config maps read by deriveKey/effectiveConfigFor at runtime (hot-reload). */
+  setDispatchConfigs(
+    roleConfigs: ReadonlyMap<string, DispatchManagerConfig>,
+    subagentRoleKey: Map<string, string>,
+  ): void;
 }
 
 /** Thin facade that delegates to focused sub-modules. */
@@ -129,5 +135,13 @@ export class TaskLifecycleManager implements LifecycleBridge {
 
   setDirectory(directory: string): void {
     this.d.directory = directory;
+  }
+
+  setDispatchConfigs(
+    roleConfigs: ReadonlyMap<string, DispatchManagerConfig>,
+    subagentRoleKey: Map<string, string>,
+  ): void {
+    this.d.roleConfigs = roleConfigs;
+    this.d.subagentRoleKey = subagentRoleKey;
   }
 }

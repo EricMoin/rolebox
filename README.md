@@ -61,6 +61,81 @@ rolebox install emperor
 
 ---
 
+## Running as a dsh plugin
+
+rolebox can also run inside [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) (`dsh`) — a Cordis-based agent harness. The package ships a Cordis plugin entry (`rolebox/dsh`) that boots the full rolebox runtime on dsh's services: role discovery, tool registration, graph dispatch, and loop mode. The entry is delivered as a **dsh profile bundle** (a `dsh.bundle` declaration in `package.json` plus a `cordis.patch.yml` layer), per the contract in [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md).
+
+### Install into a profile
+
+```bash
+dsh plugin --profile <name> add rolebox
+```
+
+`dsh plugin add` forwards to pnpm inside the profile directory and reconciles the profile's `dsh.profile.bundles` list — rolebox's bundle layer is appended and its plugin row (`id: rolebox`, `name: rolebox/dsh`) is inserted into the composed entry tree on the next boot. The plugin waits for dsh's `tools`, `sessions`, and `subagents` services (its `inject` list), so it activates only after dsh-base's bundle rows mount them — which the default profile template already provides.
+
+### Config
+
+All options are optional; the plugin activates with the dsh-home defaults alone:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `roleboxDir` | `string` | `{dsh home}/rolebox` | Directory containing `role.yaml` files (override the default under `$DSH_HOME`) |
+| `skillsDir` | `string` | `{dsh home}/skills` | Global skills directory |
+| `defaultRole` | `string` | — | Role id (directory name) promoted to primary mode |
+| `enabledNamespaces` | `string[]` | all | Tool allow-list: exact tool names or namespace prefixes (e.g. `hashline`, `graph`); `"*"` or absent registers every tool |
+
+Set them by patching the rolebox row's `config` from your profile's own `cordis.patch.yml` (applied after every bundle layer):
+
+```yaml
+# ~/.dsh/profiles/<name>/cordis.patch.yml
+- id: rolebox
+  config:
+    roleboxDir: /absolute/path/to/roles
+    enabledNamespaces: ["asset", "graph", "hashline", "loop", "memory", "reference", "session", "signal"]
+```
+
+> **Warning — config is replaced, not merged.** An `id`-targeted patch replaces the
+> row's `config` wholesale (dsh's `applyEntryPatches` assigns per-key, no deep
+> merge). If your profile patch overrides the rolebox row's `config` for any
+> option, the bundle layer's own config keys are lost unless re-declared in the
+> same patch. Only the last `- id: rolebox` patch in the file takes effect for each key.
+
+> **Note (verified at boot):** the dsh base profile already registers a global `web_search` / `web_fetch` tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects duplicate global tool names, so if rolebox registers its own `web_search`/`web_fetch`/`web_read` on top, the boot fails with `tool "web_search" is already registered`. Exclude the colliding `web` namespace from rolebox's set in the profile patch (as above) and let dsh's own web tools serve — or register rolebox's tools under another allow-list that avoids the overlap.
+
+### Role-switch UI in the dsh web app
+
+The `web` profile auto-mounts the role-switch dock — **no extra config needed**. The package ships a `dsh.client` slot plugin (`package.json` `dsh.client`, `platform: "web"`) that the web app's client-module registry picks up automatically and mounts into the `conversation.input.dock` slot (the list/session-scoped row above the composer). The dock is a collapsible role-list panel: a header carrying the current status, one row per role (name plus `description · model · mode` metadata, with a current-role indicator), a **Return to base agent** row that appears only while a role is active, and a **Retry** row after a failed switch or clear. Clicking a row switches to that role; on mount (and on session change) the dock hydrates the session's persisted active role so the highlight survives a reload. All requests go to rolebox's REST surface over same-origin relative paths.
+
+The `/rolebox` host route is **served by dsh's own web server**: during `apply()`, the plugin probes for the optional `webServer` service (`ctx.get("webServer")`) and registers a `prefix` route for `/rolebox` on it. The API under the prefix:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/rolebox/roles` | GET | JSON array of switchable roles (`id` / `name` / `description` / `model` / `mode`, primary roles only) |
+| `/rolebox/roles/active` | GET | `{ session, role }` — the active role id for the session, or `null` for the base agent |
+| `/rolebox/roles/switch` | POST | Body `{ role: string, session?: string }` — switch the session's active role |
+| `/rolebox/roles/active` | DELETE | Clear the active role for the session (back to the base agent) |
+
+The `session` key is optional everywhere: an explicit session wins, otherwise the most recently active session in the store is used. Every non-2xx response is JSON with the stable shape `{ "ok": false, "error": string }` (`400` / `404` / `405` / `413` / `500`).
+
+**Headless profiles simply skip route registration.** The `webServer` service only exists when the web profile is active; without it, the plugin skips the `/rolebox` registration with a debug log and keeps running normally — there is no bind host or port on this plugin, and no web surface to configure.
+
+**What switching a role does.** A switch is per-session and takes effect on the next model turn. The active role's system prompt is injected into the model-facing prompt through dsh's system-prompt registry — rolebox contributes a `rolebox:role` section (the active role's full system prompt) and a `rolebox:context` context entry (its available-functions block), both resolved per session so a web-UI switch reaches the running session. Headless profiles have no prompt registry and degrade with a warning. Spawned subagents inherit the active role too: the dsh agent registrar prepends its system prompt to the spawn request and applies its model override at spawn time. The dock's clear/retry/hydrate behaviors close the loop — **Return to base agent** clears the active role, a failed switch or clear keeps the previous state and offers **Retry**, and a reload hydrates the persisted active role. See [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) §4.4/§4.5 for the web-UI route and system-prompt deep material, and [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml) for a fully configured profile patch.
+
+### Plain-entry fallback (no bundle)
+
+If you installed rolebox as a plain dependency and want to activate it manually, insert the entry row yourself in the profile's `cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: rolebox
+      name: rolebox/dsh
+      config: {}
+```
+
+`name` is the package subpath export `rolebox/dsh` (→ `dist/dsh-plugin.js`), which default-exports the Cordis object plugin `{ name, inject, Config, apply }`. The package root (`main` → `dist/index.js`) is the opencode plugin and is **not** a Cordis plugin — always reference the `rolebox/dsh` subpath. See [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml) for a fully configured example and [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) §5 for the bundle/patch semantics.
+
+---
+
 ## Why rolebox
 
 - **Persistent memory** — SQLite + FTS5 stores decisions, conventions, and lessons across sessions. Workspace-scoped or role-private. Relevant memories auto-inject at session start via `<available_memory>`.
@@ -244,6 +319,7 @@ Edits to `role_config.yaml` take effect on the next hot-reload cycle or role boo
 | Error Handling | [docs/error-handling.md](docs/error-handling.md) |
 | Limitations | [docs/limitations.md](docs/limitations.md) |
 | Compatibility | [docs/compatibility.md](docs/compatibility.md) |
+| dsh Plugin Contract | [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) |
 
 ---
 

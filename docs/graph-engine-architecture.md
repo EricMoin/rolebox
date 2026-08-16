@@ -228,6 +228,50 @@ The persistence model is `EnginePersistence` at `engine-persistence.ts:413-523`
 - Write-through is invoked from the critical section's `finally` via the
   `persistState` seam (`engine-advance.ts:501-504`).
 
+### 2.7 Node timeout / liveness monitoring — tiered detection
+
+A `running` node must never hang the graph silently. The engine detects
+dead/stalled nodes through **four tiers**, in decreasing immediacy, each with a
+documented fallback relationship (node-anomaly-detection feature):
+
+| Tier | Name | Mechanism | Trigger | Result |
+|------|------|-----------|---------|--------|
+| **Tier 1** | Immediate failure (fast path) | `EngineRuntime.handleFeedSessionEvent` (`engine-advance.ts:1144-1211`, relayed from `index.ts:788`) | Platform liveness feed observes `session.deleted` (`gone` — authoritative) or `session.error` whose dispatch task is genuinely NOT live | Running node escalates immediately through the standard escalate advance (completion seam + ledger signal + cascade cancel) — the abnormal node never blocks graph advancement |
+| **Tier 2** | Soft-stall warning | `NodeLivenessMonitor` (`engine-recovery.ts:991-1241`) | Heartbeat-fed running node idle `>= nodeStallWarnMs` (default `min(60s, staleTimeout/2)`) | Classified `stalling`, `stallWarnedAt` stamped, `onNodeStall` seam fires **once per stall episode** (a fresh episode after recovery re-fires) |
+| **Tier 3** | Grace escalation (hard stall) | Same `NodeLivenessMonitor` tick | `stalling` node idle `>= stallWarnMs + stallGraceMs` (default grace 30s), capped by the per-node effective deadline `min(budget.timeout_ms, nodeStaleTimeoutMs)` | Marked `timeout` via the shared `markTimedOut` and funnels through the SAME `onStaleNodeTimeout` downstream as Tier 4 (escalate ledger signal + completion seam) |
+| **Tier 4** | Wall-clock fallback | `NodeStalenessWatcher` (`engine-recovery.ts:893-989`) | A running node **without** a heartbeat feed (`liveness.lastActivityAt` absent) exceeds its staleness deadline from `startedAt` | Marked `timeout` + `onTimeout` → the same downstream as Tier 3 |
+
+**Fallback / coexistence rules:**
+
+- **Tiers 1–3 require a heartbeat feed** (`node.liveness.lastActivityAt`,
+  written by the dispatch-time heartbeat / `recordLivenessHeartbeat` / the
+  platform feed). A node WITHOUT a feed is **skipped by the liveness monitor**
+  entirely and falls to Tier 4's pure wall-clock deadline
+  (`engine-recovery.ts:1146` — "no feed — wall-clock fallback").
+- **Tier 2 and Tier 3 are one ladder**: the monitor walks
+  `healthy → stalling → stalled(timeout)` as idle grows; a fresh heartbeat
+  returns a `stalling` node to `healthy` and re-arms a future episode
+  (recovery-then-re-stall re-warns).
+- **Tiers 3 and 4 share the same downstream handler** (`onStaleNodeTimeout`,
+  `index.ts:721-736`): timeout → `notifyNodeTimeout` completion seam +
+  `escalate` ledger signal, so a timed-out upstream cannot silently stall a
+  fan-in join regardless of which tier fired.
+- **Both monitors are opt-in**, instantiated together beside each other only
+  when `nodeStaleTimeoutMs > 0` (`index.ts:684-701`), manually tickable with an
+  injected clock for deterministic tests, and stopped on `cancel()` /
+  `dispose()`. Without the option, engine behavior is byte-identical to the
+  pre-feature engine (no watcher, no monitor, no liveness recording on load).
+- **Liveness carrier is OPTIONAL-ADDITIVE**: `NodeRuntimeState.liveness`
+  (`types.engine-v2.ts:261-294`) is absent for fresh/old nodes, serializes
+  losslessly through `engine-persistence.ts` without a schema bump, and
+  `graph_status` renders it only for recorded nodes (always for `running`,
+  flag-gated `include_liveness` otherwise) — never fabricated.
+
+The runtime's own monitor internal comments number the monitor-local ladder
+"Tier 1 / Tier 2 / Tier 3" (soft / hard / no-feed) — that numbering is scoped
+to the monitor class; the four-tier table above is the engine-wide detection
+semantics.
+
 ---
 
 ## 3. CONFIRMED-GAPS table

@@ -3,10 +3,22 @@
  *
  * Key format: `${providerID}/${modelID}` (model-based concurrency).
  * Fallback key when model unknown: "default".
+ * Composite key format: `${roleId}${CONCURRENCY_KEY_SEPARATOR}${providerID}/${modelID}` —
+ * per-key limits are resolved from the owning root role's merged dispatch config.
+ * Legacy plain keys (no separator) always use the constructor defaults.
  */
 
 import { debugLog, infoLog } from "../core/debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
+import type { DispatchManagerConfig } from "../config.ts";
+
+/**
+ * Separator between the owning role ID and the model key in composite
+ * concurrency keys. A composite key has the form
+ * `${roleId}${CONCURRENCY_KEY_SEPARATOR}${providerID}/${modelID}`; per-key limits
+ * are resolved from the owning root role's merged dispatch config via roleConfigs.
+ */
+export const CONCURRENCY_KEY_SEPARATOR = "::";
 
 interface Waiter {
   resolve: () => void;
@@ -25,6 +37,8 @@ interface ConcurrencySlot {
   limit: number;
   maxQueueDepth: number;
   reserved: number;
+  /** Delay (ms) the caller should wait before retrying after a QueueFullError. */
+  retryAfterMs: number;
   queue: Waiter[];
   activeByParent: Map<string, number>;
 }
@@ -79,6 +93,8 @@ export interface IConcurrencyManager {
   setSlotReserved(key: string, reserved: number): void;
   getQueueDepth(key: string): number;
   getAllKeys(): string[];
+  /** Replace the role-config lookup map used to resolve per-key limits for composite keys. */
+  setRoleConfigs?(map: ReadonlyMap<string, DispatchManagerConfig>): void;
 }
 
 export class ConcurrencyManager implements IConcurrencyManager {
@@ -87,25 +103,56 @@ export class ConcurrencyManager implements IConcurrencyManager {
   private defaultMaxQueueDepth: number;
   private defaultReserved: number;
   private retryAfterMs: number;
+  private roleConfigs?: ReadonlyMap<string, DispatchManagerConfig>;
   private _sweeperInterval: ReturnType<typeof setInterval> | undefined;
 
-  constructor(defaultLimit: number = 5, defaultMaxQueueDepth: number = 10, defaultReserved: number = 1, retryAfterMs: number = 30_000) {
+  constructor(defaultLimit: number = 5, defaultMaxQueueDepth: number = 10, defaultReserved: number = 1, retryAfterMs: number = 30_000, roleConfigs?: ReadonlyMap<string, DispatchManagerConfig>) {
     this.defaultLimit = defaultLimit;
     this.defaultMaxQueueDepth = defaultMaxQueueDepth;
     this.defaultReserved = defaultReserved;
     this.retryAfterMs = retryAfterMs;
+    this.roleConfigs = roleConfigs;
     this._sweeperInterval = setInterval(() => this._sweepExpiredWaiters(), 60_000);
     if (this._sweeperInterval && typeof this._sweeperInterval === "object" && "unref" in this._sweeperInterval) {
       (this._sweeperInterval as any).unref();
     }
   }
 
+  /**
+   * Replace the role-config lookup map used to resolve per-key limits for
+   * composite keys of the form `${roleId}::${providerID}/${modelID}`.
+   */
+  setRoleConfigs(map: ReadonlyMap<string, DispatchManagerConfig>): void {
+    this.roleConfigs = map;
+  }
+
+  /**
+   * Resolve the owning root role's merged dispatch config for a composite key.
+   * Returns undefined for legacy plain keys (no separator) and for composite
+   * keys whose role prefix has no entry in roleConfigs.
+   */
+  private _resolveRoleConfig(key: string): DispatchManagerConfig | undefined {
+    if (!this.roleConfigs || this.roleConfigs.size === 0) return undefined;
+    const roleId = key.split(CONCURRENCY_KEY_SEPARATOR)[0];
+    if (roleId === key) return undefined; // no separator present
+    return this.roleConfigs.get(roleId);
+  }
+
   private getOrCreateSlot(key: string): ConcurrencySlot {
     let slot = this.slots.get(key);
     if (!slot) {
-      slot = { active: 0, limit: this.defaultLimit, maxQueueDepth: this.defaultMaxQueueDepth, reserved: this.defaultReserved, queue: [], activeByParent: new Map() };
+      const roleCfg = this._resolveRoleConfig(key);
+      slot = {
+        active: 0,
+        limit: roleCfg?.maxConcurrent ?? this.defaultLimit,
+        maxQueueDepth: roleCfg?.maxQueueDepth ?? this.defaultMaxQueueDepth,
+        reserved: roleCfg?.syncReservedSlots ?? this.defaultReserved,
+        retryAfterMs: roleCfg?.retryAfterMs ?? this.retryAfterMs,
+        queue: [],
+        activeByParent: new Map(),
+      };
       this.slots.set(key, slot);
-      metrics.gauge("concurrency_limit", { key }).set(this.defaultLimit);
+      metrics.gauge("concurrency_limit", { key }).set(slot.limit);
     }
     return slot;
   }
@@ -128,7 +175,7 @@ export class ConcurrencyManager implements IConcurrencyManager {
     const liveCount = slot.queue.filter(w => !w.cancelled).length;
     if (liveCount >= slot.maxQueueDepth) {
       return {
-        promise: Promise.reject(new QueueFullError(liveCount, slot.maxQueueDepth, this.retryAfterMs)),
+        promise: Promise.reject(new QueueFullError(liveCount, slot.maxQueueDepth, slot.retryAfterMs)),
         cancel: () => {},
       };
     }
@@ -189,7 +236,7 @@ export class ConcurrencyManager implements IConcurrencyManager {
     if (liveCount >= slot.maxQueueDepth) {
       return {
         outcome: "full",
-        error: new QueueFullError(liveCount, slot.maxQueueDepth, this.retryAfterMs),
+        error: new QueueFullError(liveCount, slot.maxQueueDepth, slot.retryAfterMs),
         cancel: () => {},
       };
     }

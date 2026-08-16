@@ -318,7 +318,7 @@ describe("HotReloadService", () => {
       };
       const mockExtensionService = { getExtensionRegistry: mock(() => ({})) };
       const mockNotificationService = { getNotificationManager: mock(() => ({})) };
-      const mockToolService = { getTools: mock(() => ({})) };
+      const mockToolService = { getTools: mock(() => ({})), getGraphToolSet: mock(() => undefined) };
 
       const core = {
         getService: mock((name: string) => {

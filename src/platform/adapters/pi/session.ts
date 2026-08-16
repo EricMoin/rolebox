@@ -19,8 +19,9 @@
  * @module
  */
 
-import { readdirSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, basename, extname, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import { createSubLogger } from "../../../logger.ts";
@@ -90,8 +91,9 @@ export function hasInFlightToolPart(msg?: Message): boolean {
  * ISessionClient adapter for the Pi platform.
  *
  * Supports read-only session operations via filesystem scanning
- * of Pi's JSONL session directory. All mutation methods
- * (prompt, promptSync, create, abort, fork) remain unsupported
+ * of Pi's JSONL session directory, plus filesystem-backed forking
+ * (copying a session JSONL to a new id). The remaining mutation
+ * methods (prompt, promptSync, create, abort) remain unsupported
  * and return null/false.
  */
 export class PiSessionAdapter implements ISessionClient {
@@ -336,14 +338,62 @@ export class PiSessionAdapter implements ISessionClient {
   }
 
   /**
-   * Pi doesn't allow extensions to fork sessions — return null.
+   * Fork a session by copying its JSONL file to a new session id within
+   * the same workspace directory.
+   *
+   * When `options.messageID` is provided, the fork keeps only the messages
+   * up to and including that message (truncated prefix). When the messageID
+   * is not found in the source session, no truncation is applied and all
+   * messages are copied.
+   *
+   * Returns a fresh SessionInfo derived from the copied file, or null only
+   * when the source session file does not exist.
    */
   async fork(
-    _id: string,
-    _options?: { directory?: string; messageID?: string },
+    id: string,
+    options?: { directory?: string; messageID?: string },
   ): Promise<SessionInfo | null> {
-    this._log.debug("fork() is unsupported on Pi — returning null");
-    return null;
+    this._log.debug("fork() forking session", { id, options });
+
+    const sourcePath = this._findSessionFile(id, options?.directory);
+    if (!sourcePath) {
+      this._log.debug("fork() source session not found", { id });
+      return null;
+    }
+
+    const sourceMessages = this._parseMessages(sourcePath);
+
+    // Truncate at the given messageID — keep messages up to and including it.
+    let forkMessages = sourceMessages;
+    if (options?.messageID) {
+      const idx = sourceMessages.findIndex(
+        (m) => m.info?.id === options.messageID,
+      );
+      if (idx === -1) {
+        this._log.debug("fork() messageID not found — copying full session", {
+          messageID: options.messageID,
+        });
+      } else {
+        forkMessages = sourceMessages.slice(0, idx + 1);
+      }
+    }
+
+    // Write the fork as a new session file next to the source (same workspace dir).
+    const newId = randomUUID();
+    const forkPath = join(dirname(sourcePath), `${newId}.jsonl`);
+    const lines = forkMessages.map((m) => JSON.stringify(m)).join("\n");
+    writeFileSync(forkPath, lines ? lines + "\n" : "", "utf-8");
+
+    const info = this._buildSessionInfo(
+      newId,
+      forkMessages,
+      basename(dirname(forkPath)),
+      options?.directory,
+    );
+    info.parentID = id;
+
+    this._log.debug("fork() created fork", { newId, forkPath });
+    return info;
   }
 
   // ── Filesystem-backed read methods ─────────────────────────────────────

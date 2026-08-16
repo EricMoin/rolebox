@@ -124,6 +124,7 @@ async function initStack(dispatchManager?: DispatchManager): Promise<{
     undefined, // dispatchTools
     undefined, // loopTools
     undefined, // taskTools
+    undefined, // extraTools
     dispatchManager,
   );
 

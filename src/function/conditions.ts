@@ -4,6 +4,7 @@ import type { ArtifactStore } from "./artifact-store.ts";
 import { createSubLogger } from "../logger.ts";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { sessionSignalLedger } from "../signal/session-signal-ledger.ts";
 
 
 const log = createSubLogger("conditions");
@@ -45,6 +46,7 @@ function stateEquals(arg: string, env: CondEnv): boolean {
  * - `evidence_met()` — true when all required evidence is observed
  * - `tool_observed(name)` — true when the named tool has been called
  * - `signal_observed(type)` — true when the `signal` tool was called with the given type
+ *   (checks the FnState ledger, then falls back to the session-level signal ledger)
  * - `turn_count(n)` — true when N or more turns have passed since activation
  * - `plan_incomplete(name)` — true when plan file has unchecked `- [ ]` checkboxes
  */
@@ -54,17 +56,20 @@ const NAMED_CONDITIONS: Record<string, (arg: string, env: CondEnv) => boolean> =
   plan_todos_complete: (_arg, env) => uncheckedTodos(env) === 0,
   evidence_met:        (_arg, env) => env.requiredEvidence.every((t) => env.state.evidenceObserved[t] === true),
   tool_observed:       (arg, env) => env.state.toolsObserved.includes(arg),
-  signal_observed:    (arg, env) => {
+  signal_observed: (arg, env) => {
     const raw = env.state.kv["__signals_observed"];
     // Record format: Record<string, unknown> where key = signal type
     if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
-      return arg in (raw as Record<string, unknown>);
+      if (arg in (raw as Record<string, unknown>)) return true;
     }
     // Legacy string-array format (pre-ledger migration)
     if (Array.isArray(raw)) {
-      return (raw as string[]).includes(arg);
+      if ((raw as string[]).includes(arg)) return true;
     }
-    return false;
+    // Fallback: session-level signal ledger. A signal emitted from a session
+    // with no active functions is recorded only there (see signal-tool.ts),
+    // and must still satisfy `continue_until: signal_observed(...)`.
+    return sessionSignalLedger.hasSignal(env.sessionID, arg);
   },
   turn_count:          (arg, env) => (env.state.currentTurn - env.state.activatedAtTurn) >= Number(arg || "0"),
   state_eq:            stateEquals,

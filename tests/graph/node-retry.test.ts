@@ -208,6 +208,39 @@ describe("resetNodeForRetry (pure state mutation)", () => {
     const { state } = buildAdvance(linearABC());
     expect(() => resetNodeForRetry(state, "NOPE")).toThrow(/Unknown node id/);
   });
+
+  it("drops the graph-level signal ledger entry for the target and every reset downstream node", () => {
+    const { state } = buildAdvance(linearABC());
+    const B = state.nodes.get("B")!;
+    const C = state.nodes.get("C")!;
+
+    // Force a terminal graph: B escalated, C escalated, phase complete.
+    markEscalated(state, B, "boom");
+    markEscalated(state, C, "boom");
+    state.phase = EnginePhase.Complete as EnginePhase;
+
+    // Seed the graph-level ledger with pre-retry signal history / lastSignalAt
+    // for B and C (the dual-write `signal-bridge.ts:record` path a real run uses).
+    const bridge = new SignalBridge();
+    bridge.record(state, "B", "progress", 0.5);
+    bridge.record(state, "B", "answer", { note: "first run" });
+    bridge.record(state, "C", "answer", { note: "first run" });
+    expect(state.signalLedger.get("B")!.history!.length).toBe(2);
+    expect(state.signalLedger.get("B")!.lastSignalAt).toBeGreaterThan(0);
+    expect(state.signalLedger.get("C")!.history!.length).toBe(1);
+    expect(state.signalLedger.get("C")!.lastSignalAt).toBeGreaterThan(0);
+
+    resetNodeForRetry(state, "B", { modifyPrompt: "redo" });
+
+    // The reset nodes no longer carry pre-retry stale history / lastSignalAt in
+    // the graph-level ledger — consistent with their cleared signalsObserved.
+    expect(state.signalLedger.has("B")).toBe(false);
+    expect(state.signalLedger.has("C")).toBe(false);
+    expect(B.signalsObserved).toEqual({});
+    expect(C.signalsObserved).toEqual({});
+    // A (untouched upstream) never emitted — still absent from the ledger.
+    expect(state.signalLedger.has("A")).toBe(false);
+  });
 });
 
 // ── AdvanceEngine.retryNode: behavioral core ───────────────────────────────

@@ -7,7 +7,9 @@ import { join, dirname, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { readTextFile } from "../../utils/fs.ts";
 import { discoverRoles } from "../../loader/role-loader.ts";
-import { resolveAllRoles, type ResolveContext } from "../../resolver/orchestrator.ts";
+import { resolveAllRoles, resolvePublicAgents, type ResolveContext } from "../../resolver/orchestrator.ts";
+import { collectOpenRoles } from "../../resolver/open-roles.ts";
+import { roleOpenRegistry } from "../../resolver/registry.ts";
 import { initModelResolver } from "../../resolver/model-resolver.ts";
 import { resolveSkills } from "../../resolver/skill-resolver.ts";
 import { buildAgentPrompt } from "../../prompt/builder.ts";
@@ -242,10 +244,18 @@ export class HotReloadService implements PluginService {
         name: sa.config.name,
         description: sa.config.description,
       }));
+
+      // Recompute the open-role registry from the currently cached resolved
+      // roles and re-resolve this role's public-agents metadata, so the
+      // <available_public_agents> block survives skill-only reloads.
+      const openRegistry = collectOpenRoles(this.ctx.resolvedRoles);
+      const publicAgents = resolvePublicAgents(existingRole.config, openRegistry);
+
       const newPrompt = buildAgentPrompt(existingRole.config, newSkills, {
         subagents: subagentMetadata,
         references: existingRole.references,
         graph: existingRole.graph,
+        ...(publicAgents.length > 0 ? { publicAgents } : {}),
       });
 
       // 3. Update the role in-place
@@ -327,6 +337,15 @@ export class HotReloadService implements PluginService {
     this.ctx.roleGraphMap.clear();
     for (const [k, v] of localRoleGraphMap) {
       this.ctx.roleGraphMap.set(k, v);
+    }
+
+    // 5.6. Rebuild the open-roles registry from the freshly resolved roles.
+    // role.yaml open/exports/open_roles edits route here via the medium/full
+    // path, so this keeps the shared registry in sync with the resolved set.
+    const newOpenRegistry = collectOpenRoles(newResolvedRoles);
+    roleOpenRegistry.clear();
+    for (const [k, v] of newOpenRegistry) {
+      roleOpenRegistry.set(k, v);
     }
 
     // 6. Clear extension module cache so re-imports get fresh code

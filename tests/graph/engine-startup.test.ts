@@ -4,6 +4,8 @@ import {
   rmSync,
   writeFileSync,
   mkdirSync,
+  existsSync,
+  readFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +18,11 @@ import {
   recoverInterruptedGraphs,
   type RecoveryStartupReport,
 } from "../../src/graph/engine/engine-startup.ts";
+import {
+  GraphEventRecorder,
+  graphEventsPath,
+  type GraphEventRecord,
+} from "../../src/graph/engine/graph-events.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 
@@ -216,7 +223,50 @@ describe("recoverInterruptedGraphs", () => {
     );
   });
 
-  it("a recover() failure in one graph does not abort a healthy sibling", async () => {
+  it("(c2) a parseable-but-field-incomplete v2 file is reported in failed[] and does not abort a valid sibling", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    fake.setTask("task-A", "completed");
+    // Valid sibling first (creates the store dir + a structurally-complete v2
+    // file we can reuse as the corrupt base), then a field-incomplete file.
+    persistState(dir, "g-valid", singleNodeDecl("g-valid"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+    const stateDir = stateDirFor(dir);
+    const validFile = JSON.parse(
+      readFileSync(join(stateDir, "engine-g-valid.json"), "utf-8"),
+    ) as Record<string, unknown>;
+    // Strip a required field (`nodes`): the file is valid JSON, passes the
+    // version gate, but is structurally incomplete — previously this made
+    // deserializeEngineState throw a TypeError and the graph permanently
+    // unrecoverable.
+    const { nodes: _nodes, ...incomplete } = validFile;
+    writeFileSync(
+      join(stateDir, "engine-incomplete.json"),
+      JSON.stringify(incomplete),
+      "utf-8",
+    );
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+    });
+
+    // The incomplete file is captured in failed[] (corrupt-to-null contract),
+    // and the valid sibling still recovers — the sweep never aborts.
+    expect(report.scanned).toBe(2);
+    expect(report.recovered).toBe(1);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0]).toContain("engine-incomplete.json");
+    expect(new EnginePersistence(dir).load("g-valid")!.phase).toBe(
+      EnginePhase.Complete,
+    );
+  });
+
+  it("contains a dispatch failure during recovery without aborting a healthy sibling", async () => {
     const dir = makeTmpDir();
     const fake = new FakeManager();
     // Healthy graph: its task completed during the window → clean resume.
@@ -226,7 +276,11 @@ describe("recoverInterruptedGraphs", () => {
       nodeStatus: NodeStatus.Running,
       taskId: "task-A",
     });
-    // Failing graph: a ready root whose launch throws mid-recovery.
+    // Failing graph: a ready root whose launch throws mid-recovery. The
+    // dispatch failure is CONTAINED inside the advancement critical section
+    // (dispatch-failure containment) — the node is timed out instead of the
+    // throw escaping `recover()`, so the graph still resumes and the healthy
+    // sibling is unaffected.
     persistState(
       dir,
       "g-throw",
@@ -241,10 +295,12 @@ describe("recoverInterruptedGraphs", () => {
     });
 
     expect(report.scanned).toBe(2);
-    expect(report.recovered).toBe(1); // g-ok recovered
-    expect(report.failed).toHaveLength(1);
-    expect(report.failed[0]).toContain("g-throw");
+    expect(report.recovered).toBe(2); // g-throw's failure is contained, not aborted
+    expect(report.failed).toHaveLength(0);
     expect(new EnginePersistence(dir).load("g-ok")!.phase).toBe(
+      EnginePhase.Complete,
+    );
+    expect(new EnginePersistence(dir).load("g-throw")!.phase).toBe(
       EnginePhase.Complete,
     );
   });
@@ -309,5 +365,128 @@ describe("recoverInterruptedGraphs", () => {
       stateDir: dir,
     });
     expect(report).toEqual({ scanned: 0, recovered: 0, failed: [] });
+  });
+});
+
+// ── Observer seams (monitor S10) ─────────────────────────────────────────────
+
+/** Read + parse every NDJSON line from a graph's event log ([] if absent). */
+function readEventLines(dir: string, graphId: string): GraphEventRecord[] {
+  const path = graphEventsPath(dir, graphId);
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf-8")
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .map((l) => JSON.parse(l) as GraphEventRecord);
+}
+
+describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
+  it("a recovered engine wired with graphEvents continues writing node_completed lines", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    // The node's task finished during the restart window → recovery re-emits
+    // its (inferred) `answer` and completes the graph.
+    fake.setTask("task-A", "completed");
+    persistState(dir, "g-exec", singleNodeDecl("g-exec"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+      // Monitor (S10): the same GraphEventRecorder (same stateDir) the live
+      // engine used → the recovered engine CONTINUES the audit log.
+      graphEvents: new GraphEventRecorder(dir),
+    });
+
+    // Report semantics unchanged by the observer wiring.
+    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+
+    // The recovered engine wrote the node's terminal transition into the log.
+    const lines = readEventLines(dir, "g-exec");
+    const completed = lines.find((l) => l.event === "node_completed");
+    expect(completed).toBeDefined();
+    expect(completed!.graphId).toBe("g-exec");
+    expect(completed!.nodeId).toBe("A");
+    expect(completed!.signalType).toBe("answer");
+    expect(completed!.status).toBe(NodeStatus.Completed);
+    // And the lifecycle advanced to terminal — phase_change → complete.
+    expect(
+      lines.some((l) => l.event === "phase_change" && l.status === "complete"),
+    ).toBe(true);
+  });
+
+  it("forwards onNodeCompletion and onGraphTerminal onto the recovered engine", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    fake.setTask("task-A", "completed");
+    persistState(dir, "g-exec", singleNodeDecl("g-exec"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+
+    const completions: Array<{ graphId: string; nodeId: string; signalType: string }> = [];
+    const terminals: Array<{ graphId: string; phase: string; isBlocked: boolean }> = [];
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+      onNodeCompletion: (event) => {
+        completions.push({
+          graphId: event.graphId,
+          nodeId: event.nodeId,
+          signalType: event.signalType,
+        });
+      },
+      onGraphTerminal: (event) => {
+        terminals.push({
+          graphId: event.graphId,
+          phase: event.phase,
+          isBlocked: event.isBlocked,
+        });
+      },
+    });
+
+    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    // The recovered node's completion re-announced through the seam.
+    expect(completions).toContainEqual({
+      graphId: "g-exec",
+      nodeId: "A",
+      signalType: "answer",
+    });
+    // The graph reached COMPLETE and the terminal seam fired once.
+    expect(terminals).toEqual([
+      { graphId: "g-exec", phase: "complete", isBlocked: false },
+    ]);
+  });
+
+  it("without the new observer options the sweep behaves exactly as before", async () => {
+    const dir = makeTmpDir();
+    const fake = new FakeManager();
+    fake.setTask("task-A", "completed");
+    persistState(dir, "g-exec", singleNodeDecl("g-exec"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+      taskId: "task-A",
+    });
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+      // No onNodeCompletion / onGraphTerminal / graphEvents → old behavior.
+    });
+
+    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    // No event log is produced (the recorder is only constructed when wired).
+    expect(existsSync(graphEventsPath(dir, "g-exec"))).toBe(false);
+    // The engine state itself still recovered to terminal.
+    expect(new EnginePersistence(dir).load("g-exec")!.phase).toBe(
+      EnginePhase.Complete,
+    );
   });
 });

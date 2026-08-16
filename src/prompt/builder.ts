@@ -64,6 +64,7 @@ export interface PromptSource {
 
 export interface AgentPromptOptions {
   subagents?: Array<{ id: string; name: string; description: string }>;
+  publicAgents?: Array<{ id: string; name: string; description: string }>;
   references?: ResolvedReference[];
   graph?: ResolvedGraph;
 }
@@ -73,7 +74,7 @@ export function buildAgentPrompt(
   skills: ResolvedSkill[],
   options: AgentPromptOptions = {},
 ): string {
-  const { subagents, references, graph } = options;
+  const { subagents, publicAgents, references, graph } = options;
 
   const parts: string[] = [role.prompt];
 
@@ -88,6 +89,11 @@ export function buildAgentPrompt(
   const subagentBlock = buildSubagentBlock(subagents ?? []);
   if (subagentBlock) {
     parts.push(subagentBlock);
+  }
+
+  const publicAgentsBlock = buildPublicAgentsBlock(publicAgents ?? []);
+  if (publicAgentsBlock) {
+    parts.push(publicAgentsBlock);
   }
 
   if (graph) {
@@ -177,6 +183,33 @@ export function buildSubagentBlock(
     "available_subagents",
     SUBAGENT_INSTRUCTIONS,
     subagents.map((a) => xml("subagent", [
+      xml("id", [a.id]),
+      xml("name", [a.name]),
+      xml("description", [a.description]),
+    ])),
+  );
+}
+
+const PUBLIC_AGENT_INSTRUCTIONS = `You can dispatch tasks to these open roles of other roles via the graph execution engine.
+Model each dispatch as a graph node. Use graph_create to start a graph, then
+graph_add_node(graph_id=..., id=..., agent="<open-role-id>", prompt="...") to register a
+worker node, then graph_run(graph_id=..., node_id=...) to launch it.
+graph_run is non-blocking — it dispatches ready nodes and returns immediately
+(phase + active_nodes + pending_nodes). End your turn after graph_run. The engine emits a
+[GRAPH COMPLETE] system-reminder when all nodes finish (or [GRAPH BLOCKED]
+when a node awaits approval). On the next turn, read results once via
+graph_status(graph_id=..., include_output=true). Poll graph_status only as a
+fallback when no reminder arrives; never poll in a loop.
+For multi-step work that must run together, add edges (graph_add_edge) between nodes and
+run the graph as a whole; graph_cancel(graph_id=..., node_id=...) stops a running node.`;
+
+export function buildPublicAgentsBlock(
+  agents: Array<{ id: string; name: string; description: string }>,
+): string {
+  return renderSection(
+    "available_public_agents",
+    PUBLIC_AGENT_INSTRUCTIONS,
+    agents.map((a) => xml("public_agent", [
       xml("id", [a.id]),
       xml("name", [a.name]),
       xml("description", [a.description]),

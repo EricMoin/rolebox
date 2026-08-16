@@ -231,7 +231,7 @@ describe("synthetic signals — ledger history completeness", () => {
     expect(entry!.lastSignalAt).toBe(entry!.history![0].atMs);
   });
 
-  it("dispatch race-guard records a deferred signal with source 'race_guard'", async () => {
+  it("dispatch race-guard records the racing signal with source 'race_guard'", async () => {
     const state = createEngineState(graph(), "g-1");
     provision(state);
     const fake = new RaceGuardDispatch();

@@ -28,11 +28,22 @@
  * directly). Keeping the mapping here means the two entry points can never
  * drift apart.
  *
- * Finally, this module ships the stale-lock {@link EngineLockSweeper}, matching
+ * Finally, this module ships the stale-lock {@link EngineLockSweeper}, the
+ * stale-node {@link NodeStalenessWatcher} (monitor M3), and the heartbeat-based
+ * {@link NodeLivenessMonitor} (node-anomaly-detection subtask 3), matching
  * `src/loop/coordinator.ts:101-124` (engine-state-machine.md §3.4 / failure
- * resilience.md §5.6). The sweeper is **manually tickable** (`sweep`) and does
- * not start an unbounded `setInterval` on its own — `start()` is opt-in so
- * tests never leak a timer.
+ * resilience.md §5.6). All are **manually tickable** and do not start an
+ * unbounded `setInterval` on their own — `start()` is opt-in so tests never
+ * leak a timer.
+ *
+ * Hydrate/adopt completeness (H3 / L7 / M10): `hydrateEngineState` and
+ * `adoptPriorNodeStates` carry the monitor-relevant graph state across
+ * recovery and rebuilds — the append-only `checkpointHistory` (H3), per-node
+ * `artifacts` / `evidence` and loop-group `convergenceFingerprint` (L7), and
+ * the cross-restart `terminalNotified` dedup flags (M10). `subscribeTaskTermination`
+ * returns its registered callback (M4) so callers can later
+ * `removeTaskTerminatedListener`; `reconcileEngine` surfaces the re-subscribed
+ * `{ taskId, callback }` pairs through an optional out-parameter.
  *
  * Design references:
  * - `.rolebox/design/engine-state-machine.md` §5.1 (recovery entry point),
@@ -54,7 +65,7 @@ import type {
 } from "../../types.engine-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
-import { markNonCriticalDirty } from "./engine-persistence.ts";
+import { cloneCheckpointHistory, markNonCriticalDirty } from "./engine-persistence.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -130,6 +141,23 @@ export interface ReconcileReport {
   deferred: DeferredSignal[];
 }
 
+/**
+ * Re-subscription handles surfaced to callers (monitor M4). Passed as an
+ * optional out-parameter to {@link reconcileEngine}; when supplied, every live
+ * re-subscription made by the pass is recorded here so the caller can later
+ * remove the listener (via `removeTaskTerminatedListener(taskId, callback)`)
+ * once the node is no longer running.
+ */
+export interface ReconcileSubscriptions {
+  /**
+   * Re-subscribed live tasks and the exact callbacks handed to
+   * `port.onTaskTerminated`. The callback is the value returned by
+   * {@link subscribeTaskTermination}, so it is safe to pass back to
+   * `removeTaskTerminatedListener`.
+   */
+  listeners: Array<{ taskId: string; callback: TaskTerminatedCallback }>;
+}
+
 /** The signal-drive callback used to advance the graph on a task termination. */
 export type RecoveryEmitSignal = (
   nodeId: string,
@@ -154,7 +182,15 @@ export type RecoveryEmitSignal = (
  * - `timeout`   → `escalate` (a timed-out worker is an unrecoverable failure).
  * - `cancelled` → `null` — a cancellation is not a terminating signal; the node
  *   is cancelled directly by the caller instead.
- * - any other status → `null` (non-terminal: running / pending / awaiting).
+ * - HITL statuses (`awaiting_approval` — the paused task's status — plus
+ *   `need_approval` / `blocked` / `need_clarification` — the signal types the
+ *   completion evaluator delivers) → the pausing `need_approval` signal. The
+ *   engine advances a declared `needs_approval` node `running → blocked` on it
+ *   (engine-advance.ts `_pauseForApproval`), so `[GRAPH BLOCKED]` fires instead
+ *   of the HITL termination being dropped at `subscribeTaskTermination`'s
+ *   `if (!sig) return;`. A node NOT declared `needs_approval` keeps today's
+ *   semantics (record-only; resumes when a human uses approve/reject).
+ * - any other status → `null` (non-terminal: running / pending).
  */
 export function mapDispatchStatusToSignal(
   status: string,
@@ -211,6 +247,20 @@ export function mapDispatchStatusToSignal(
       return {
         type: "escalate",
         payload: { error: "dispatch task timed out" },
+      };
+    // HITL pause statuses (F1 bridge): when the completion evaluator pauses a
+    // task for a human decision (completion-evaluator.ts:53 transitions it to
+    // `awaiting_approval` and :99 delivers the HITL signal type via
+    // notifyTerminated), map to the engine's pausing `need_approval` signal so
+    // `subscribeTaskTermination`'s `if (!sig) return;` never silently drops a
+    // HITL termination. `cancelled` / `running` / `pending` stay `null`.
+    case "awaiting_approval":
+    case "need_approval":
+    case "blocked":
+    case "need_clarification":
+      return {
+        type: "need_approval",
+        payload: { hitl: status, ...(task ? { taskId: task.id } : {}) },
       };
     default:
       return null; // cancelled + non-terminal statuses
@@ -328,18 +378,24 @@ export function captureNodeUsage(
  * terminal error while the underlying session continues — so the escalate is
  * skipped, the node stays `running`, and the listener is re-subscribed so a
  * genuine later termination still advances it.
+ *
+ * Returns the exact callback handed to `port.onTaskTerminated` (monitor M4), so
+ * a caller that no longer needs the subscription can pass it to
+ * `removeTaskTerminatedListener(taskId, callback)`. Returns `undefined` when
+ * there is nothing to subscribe (no task id, or a port without the listener
+ * surface).
  */
 export function subscribeTaskTermination(
   state: EngineState,
   port: DispatchRecoveryPort,
   node: NodeRuntimeState,
   emitSignal: RecoveryEmitSignal,
-): void {
+): TaskTerminatedCallback | undefined {
   const taskId = node.dispatchTaskId;
-  if (!taskId || !port.onTaskTerminated) return;
+  if (!taskId || !port.onTaskTerminated) return undefined;
   const nodeId = node.nodeId;
 
-  port.onTaskTerminated(taskId, (completedTaskId, status) => {
+  const callback: TaskTerminatedCallback = (completedTaskId, status) => {
     const current = state.nodes.get(nodeId);
     if (!current) return;
     if (current.dispatchTaskId !== completedTaskId) return; // superseded task
@@ -371,7 +427,10 @@ export function subscribeTaskTermination(
     const sig = mapDispatchStatusToSignal(status, task);
     if (!sig) return;
     emitSignal(nodeId, sig.type, sig.payload);
-  });
+  };
+
+  port.onTaskTerminated(taskId, callback);
+  return callback;
 }
 
 // ── Per-node reconciliation ──────────────────────────────────────────────────
@@ -398,6 +457,7 @@ export function reconcileEngine(
   state: EngineState,
   port: DispatchRecoveryPort,
   emitSignal: RecoveryEmitSignal,
+  out?: ReconcileSubscriptions,
 ): ReconcileReport {
   const reSubscribed: string[] = [];
   const timedOut: string[] = [];
@@ -450,8 +510,13 @@ export function reconcileEngine(
     }
 
     // Still live → re-subscribe for future termination.
-    subscribeTaskTermination(state, port, node, emitSignal);
+    const callback = subscribeTaskTermination(state, port, node, emitSignal);
     reSubscribed.push(node.nodeId);
+    // Surface the { taskId, callback } pair so the caller can later
+    // removeTaskTerminatedListener (monitor M4) once the node stops running.
+    if (callback && out) {
+      out.listeners.push({ taskId, callback });
+    }
   }
 
   return { reSubscribed, timedOut, deferred };
@@ -483,6 +548,31 @@ export function rebuildFrontier(state: EngineState): string[] {
 // ── Hydrate (adopt a loaded persisted state in place) ────────────────────────
 
 /**
+ * Clear every node's `loopGroupId` that names a loop group the current graph
+ * declaration does not declare.
+ *
+ * Subtask-5 dangling-loop-group guard. A node whose `loopGroupId` points at a
+ * dropped group would otherwise be routed into {@link executeLoopStep} as a
+ * loop member, where a `revise_needed` is fabricated into a `converged`
+ * outcome — silently swallowed (no re-entry, no escalation, no traversal
+ * accounting; an unbounded loop or a lost revision) — and a convergence-tracker
+ * touch (`recordConvergenceOutput` / `resetConvergenceTracker`) throws on the
+ * missing group. The declaration is the source of truth for membership; a
+ * stale id is cleared so the node degrades to a plain non-loop node.
+ */
+function clearUndeclaredLoopGroupIds(state: EngineState): void {
+  const declared = new Set<string>();
+  for (const group of state.graphDeclaration.loop_groups ?? []) {
+    declared.add(group.id);
+  }
+  for (const node of state.nodes.values()) {
+    if (node.loopGroupId !== undefined && !declared.has(node.loopGroupId)) {
+      node.loopGroupId = undefined;
+    }
+  }
+}
+
+/**
  * Copy a loaded {@link EngineState} (from `engine-persistence.load`) into the
  * live state object the {@link AdvanceEngine} already references. Persistence
  * always saved this very object, so the loaded content is semantically
@@ -499,6 +589,13 @@ export function hydrateEngineState(
   target.nodes = source.nodes;
   target.edges = source.edges;
   target.loopGroups = source.loopGroups;
+  // Subtask-5 dangling-loop-group guard: a persisted state whose declaration
+  // dropped a loop group may still carry member nodes tagged with the stale
+  // loopGroupId (the node map is adopted wholesale). Clear any such tag — a
+  // dangling id would route the node into executeLoopStep, which fabricates
+  // `converged` for a revise_needed (silently swallowing the revision) or
+  // throws on the missing group's convergence tracker.
+  clearUndeclaredLoopGroupIds(target);
   target.frontier = source.frontier;
   target.budget = source.budget;
   // Deep-clone signalLedger (Map) to avoid shared-mutation between source/target.
@@ -523,6 +620,16 @@ export function hydrateEngineState(
     ? Object.fromEntries(
         Object.entries(source.checkpoints).map(([id, r]) => [id, { ...r }])
       )
+    : undefined;
+  // OPTIONAL-ADDITIVE (H3): the append-only per-node checkpoint history is
+  // deep-cloned exactly like `checkpoints` so the source and target never share
+  // record arrays. Absent → undefined (no fabricated value).
+  target.checkpointHistory = cloneCheckpointHistory(source.checkpointHistory);
+  // OPTIONAL-ADDITIVE (monitor M10): cross-restart termination-notification
+  // dedup flags are durable graph state — copied, never aliased. Absent →
+  // undefined.
+  target.terminalNotified = source.terminalNotified
+    ? { ...source.terminalNotified }
     : undefined;
 }
 
@@ -579,6 +686,10 @@ export function adoptPriorNodeStates(
     node.tokensConsumed = { ...prev.tokensConsumed };
     node.startedAt = prev.startedAt;
     node.completedAt = prev.completedAt;
+    // OPTIONAL-ADDITIVE (L7): per-node artifact/evidence references are carried
+    // across rebuilds — defensive copies, never aliased.
+    node.artifacts = prev.artifacts ? [...prev.artifacts] : undefined;
+    node.evidence = prev.evidence ? [...prev.evidence] : undefined;
 
     // Frontier correction: only genuinely-ready nodes stay dispatchable.
     if (node.status === NodeStatus.Ready) {
@@ -587,6 +698,15 @@ export function adoptPriorNodeStates(
       removeFromFrontier(target, nodeId);
     }
   }
+
+  // Subtask-5 dangling-loop-group guard: the current declaration is the source
+  // of truth for membership. A node whose loopGroupId names a group the
+  // declaration no longer declares (dropped between the prior run and this
+  // rebuild) must not keep it — executeLoopStep would otherwise fabricate
+  // `converged` for a revise_needed signal (silently swallowing the revision —
+  // no re-entry, no escalation, no traversal accounting) or throw on the
+  // missing group's convergence tracker.
+  clearUndeclaredLoopGroupIds(target);
 
   // ── Post-adoption in-degree reconciliation ──────────────────────────────
   // H2: adoptPriorNodeStates overwrites provision()'s correct `Pending`
@@ -628,6 +748,20 @@ export function adoptPriorNodeStates(
   if (prior.checkpoints) {
     target.checkpoints = { ...prior.checkpoints, ...(target.checkpoints ?? {}) };
   }
+  // OPTIONAL-ADDITIVE (H3): merge the append-only checkpoint history with the
+  // same prior-first semantics as `checkpoints` — prior records survive a
+  // rebuild, and a target record (recorded after provisioning) wins key
+  // conflicts. Absent on both sides → no fabricated value beyond the merge.
+  target.checkpointHistory = {
+    ...cloneCheckpointHistory(prior.checkpointHistory),
+    ...(target.checkpointHistory ?? {}),
+  };
+  // OPTIONAL-ADDITIVE (monitor M10): carry the prior run's terminal-notification
+  // dedup flags so a rebuilt engine never re-notifies a graph whose terminal
+  // reminder was already delivered. Absent → undefined.
+  target.terminalNotified = prior.terminalNotified
+    ? { ...prior.terminalNotified }
+    : undefined;
 
   // Loop-group traversal counters (caps stay honest across rebuilds).
   for (const [groupId, prevGroup] of prior.loopGroups) {
@@ -635,6 +769,10 @@ export function adoptPriorNodeStates(
     if (!group) continue;
     group.traversalCount = prevGroup.traversalCount;
     group.consecutiveStale = prevGroup.consecutiveStale;
+    // OPTIONAL-ADDITIVE (L7): the stuck-exit convergence fingerprint is graph
+    // progress — carried across rebuilds so the stale-exit heuristic is not
+    // reset by a fresh provision.
+    group.convergenceFingerprint = prevGroup.convergenceFingerprint;
     if (prevGroup.rounds) group.rounds = [...prevGroup.rounds];
   }
 
@@ -744,6 +882,412 @@ export class EngineLockSweeper {
   }
 
   /** Stop the periodic sweep (no-op if never started). */
+  stop(): void {
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
+// ── Stale-node watcher (monitor M3) ─────────────────────────────────────────
+
+/** Options for {@link NodeStalenessWatcher}. */
+export interface NodeStalenessWatcherOptions {
+  /** Tick interval for `start()` (defaults to `SWEEPER_INTERVAL_MS`). */
+  intervalMs?: number;
+  /**
+   * How long a `running` node may stay live before it is marked `timeout`.
+   * A node with a declared per-node budget overrides this with
+   * `node.budget?.timeout_ms` (the declaration is authoritative).
+   */
+  nodeStaleTimeoutMs: number;
+  /**
+   * Called with the node id and error reason whenever a stale running node is
+   * marked `timeout` by {@link tick}.
+   */
+  onTimeout?: (nodeId: string, errorReason: string) => void;
+}
+
+/**
+ * Stale-node watcher (monitor M3) — detects `running` nodes whose worker has
+ * stopped advancing and marks them `timeout` so the graph never hangs on a node
+ * nobody is driving. Same shape as the stale-lock {@link EngineLockSweeper}:
+ * **manually tickable** (`tick` with an injectable clock for deterministic
+ * tests) and never starts a timer on its own — `start()` (the periodic
+ * `setInterval`) is opt-in, so tests never leak an interval.
+ *
+ * Deadline resolution per node:
+ * - a node with a declared per-node budget (`node.budget?.timeout_ms`) uses
+ *   that value as its staleness deadline — the declaration wins;
+ * - every other node uses the watcher-wide `nodeStaleTimeoutMs`;
+ * - a non-positive deadline means the node never goes stale (defensive — a
+ *   `0`/negative per-node override or watcher-wide value disables staleness).
+ *
+ * The engine's behavior is unchanged unless a consumer instantiates the
+ * watcher (default not instantiated) and drives it — `index.ts` (S7) wires
+ * the opt-in interval. Each tick marks stale nodes via
+ * {@link markTimedOut} (a normal `running → timeout` transition, so lifecycle
+ * checkpoints and the critical-dirty flag are recorded by the shared
+ * transition choke point).
+ */
+export class NodeStalenessWatcher {
+  private readonly intervalMs: number;
+  private readonly nodeStaleTimeoutMs: number;
+  private timer?: ReturnType<typeof setInterval>;
+
+  constructor(private readonly opts: NodeStalenessWatcherOptions) {
+    this.intervalMs = opts.intervalMs ?? SWEEPER_INTERVAL_MS;
+    this.nodeStaleTimeoutMs = opts.nodeStaleTimeoutMs;
+  }
+
+  /**
+   * One staleness tick. Marks every `running` node whose elapsed `startedAt`
+   * time meets or exceeds its staleness deadline as `timeout` (via
+   * {@link markTimedOut}), reporting each through the `onTimeout` callback.
+   *
+   * @returns The ids of the nodes that were timed out by this tick.
+   * @param now Optional clock for deterministic tests (defaults to `Date.now`).
+   */
+  tick(state: EngineState, now: number = Date.now()): string[] {
+    const timedOut: string[] = [];
+    for (const node of state.nodes.values()) {
+      if (node.status !== NodeStatus.Running) continue;
+      const deadline = node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs;
+      if (deadline <= 0) continue; // no staleness deadline — never stale
+      if (now - node.startedAt >= deadline) {
+        const reason = `node ran past its staleness timeout (${deadline}ms)`;
+        markTimedOut(state, node, reason);
+        timedOut.push(node.nodeId);
+        this.opts.onTimeout?.(node.nodeId, reason);
+      }
+    }
+    return timedOut;
+  }
+
+  /** Start the periodic tick. Opt-in — never auto-started. */
+  start(state: EngineState): void {
+    this.stop();
+    this.timer = setInterval(() => {
+      try {
+        this.tick(state);
+      } catch {
+        // A tick must never take down the process.
+      }
+    }, this.intervalMs);
+    // Don't keep the process alive just because a tick interval is pending.
+    (this.timer as (typeof this.timer) & { unref?: () => unknown })?.unref?.();
+  }
+
+  /** Stop the periodic tick (no-op if never started). */
+  stop(): void {
+    if (this.timer !== undefined) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
+
+// ── Node liveness monitor (heartbeat-based stall detection) ─────────────────
+
+/**
+ * The immutable detection facts captured at the moment {@link NodeLivenessMonitor}
+ * fires its `onStall` callback. Passed as the optional third argument so a
+ * consumer (e.g. the engine's stall notifier seam) can render an actionable
+ * reminder without re-deriving monitor internals.
+ */
+export interface StallDetectionInfo {
+  /** Idle time (ms) since the node's last heartbeat at detection time. */
+  idleMs: number;
+  /** The soft-stall warn threshold (ms) used for this detection. */
+  stallWarnMs: number;
+  /** Epoch-ms timestamp stamping the start of this stall episode. */
+  stallWarnedAt: number;
+}
+
+/**
+ * A node-stall event emitted via the optional {@link NodeLivenessMonitorOptions
+ * .onStall} callback seam (node-anomaly-detection subtask 5). The engine
+ * packages only the immutable facts captured at detection time; notification /
+ * delivery (a notifier) is the consumer's concern and never lives in the
+ * monitor or the engine.
+ */
+export interface NodeStallEvent {
+  /** Owning graph id. */
+  graphId: string;
+  /** The node that entered the soft-stall (`stalling`) classification. */
+  nodeId: string;
+  /** The node's bound agent id. */
+  agent: string;
+  /** Idle time (ms) since the node's last heartbeat at detection time. */
+  idleMs: number;
+  /** The soft-stall warn threshold (ms) used for this detection. */
+  stallWarnMs: number;
+  /**
+   * Epoch-ms timestamp when this stall episode was first warned. Identifies
+   * the stall episode — a notifier's dedupe key folds it in so a recovery
+   * (fresh heartbeat → `healthy`) followed by a re-stall is a distinct episode
+   * and legally re-notifies, while an idempotent replay of the same episode is
+   * dropped.
+   */
+  stallWarnedAt: number;
+}
+
+/** Options for {@link NodeLivenessMonitor}. */
+export interface NodeLivenessMonitorOptions {
+  /** Tick interval for `start()` (defaults to `SWEEPER_INTERVAL_MS`). */
+  intervalMs?: number;
+  /**
+   * Watcher-wide staleness timeout — the hard cap on how long any `running`
+   * node may stay alive. The per-node effective deadline is
+   * `min(node.budget?.timeout_ms ?? this, this)` — a node's declared budget
+   * can shorten the window but never extend it past this value. A
+   * non-positive effective deadline disables liveness-based staleness for
+   * that node.
+   */
+  nodeStaleTimeoutMs: number;
+  /**
+   * Idle time since the last heartbeat at which a node is first classified
+   * `stalling` and `onStall` fires. Single-fire per stall episode — the
+   * callback does not repeat while the node stays `stalling`, and a fresh
+   * episode (after a heartbeat returns the node to `healthy`) warns again.
+   * Defaults to `min(60_000, nodeStaleTimeoutMs / 2)`.
+   */
+  stallWarnMs?: number;
+  /**
+   * Additional idle time past `stallWarnMs` before a stalling node is
+   * hard-stalled — marked `timeout` via {@link markTimedOut} and reported
+   * through `onTimeout` (the same signature as
+   * {@link NodeStalenessWatcherOptions.onTimeout}). Defaults to 30_000.
+   */
+  stallGraceMs?: number;
+  /**
+   * Optional dispatch-liveness probe (quiet-but-alive channel). When present
+   * and returning `true` for a running heartbeat-fed node, {@link tick}
+   * treats the node as quiet-but-alive rather than stalled: once the node has
+   * been idle past `stallWarnMs` (i.e. it is ABOUT to be classified stalled),
+   * the tick refreshes `lastActivityAt` (heartbeatSource `"dispatch"`) and
+   * skips the stall ladder.
+   *
+   * The probe must answer "is the underlying dispatch/process verifiably
+   * in-flight?" — on opencode, the background task status being
+   * running/pending/awaiting_approval (backed by the SDK session tracking);
+   * on Pi, the task status running (backed by the live child process between
+   * JSON events). A subagent mid-turn with zero streaming events is alive, not
+   * stalled, so it must not be hard-stalled merely for being quiet.
+   *
+   * Consequences (deliberate):
+   * - The warn ladder (`[GRAPH NODE STALLED]`) and the heartbeat hard-stall
+   *   now fire ONLY when the dispatch can no longer verify the task — the
+   *   genuinely abnormal state (orphaned node, dead task that never
+   *   terminal-advanced). Quiet-but-alive nodes no longer warn.
+   * - A genuinely HUNG node whose task stays verifiably live but never
+   *   completes is NOT caught here — it falls to the wall-clock
+   *   {@link NodeStalenessWatcher} backstop (`nodeStaleTimeoutMs`), which is
+   *   wired beside this monitor and times out any running node past its
+   *   staleness deadline regardless of heartbeats. The 15-minute backstop is
+   *   intentionally kept intact so hung-but-alive nodes still eventually
+   *   time out.
+   * - A node whose declared per-node budget (`budget.timeout_ms`) is tighter
+   *   than the warn window is bounded by that cap (the hard-stall branch
+   *   precedes the probe refresh) — the declared deadline is authoritative.
+   */
+  isDispatchAlive?: (node: NodeRuntimeState) => boolean;
+  /**
+   * Called once when a running node first enters the soft-stall
+   * (`stalling`) classification. The optional third argument carries the
+   * {@link StallDetectionInfo} captured at fire time (idle / warn threshold /
+   * episode timestamp) so a consumer can render an actionable notification
+   * without re-deriving monitor internals. The monitor contains the call in
+   * try/catch — a throwing consumer is logged and swallowed so a tick never
+   * breaks.
+   */
+  onStall?: (nodeId: string, reason: string, info?: StallDetectionInfo) => void;
+  /**
+   * Called with the node id and error reason whenever a hard-stalled running
+   * node is marked `timeout` by {@link tick}.
+   */
+  onTimeout?: (nodeId: string, errorReason: string) => void;
+}
+
+/**
+ * Node liveness monitor — heartbeat-based stall detection layered on top of
+ * the wall-clock {@link NodeStalenessWatcher} (node-anomaly-detection subtask
+ * 3). Same shape as the watcher: **manually tickable** (`tick` with an
+ * injectable clock for deterministic tests) and never starts a timer on its
+ * own — `start()` (the periodic `setInterval`) is opt-in, so tests never leak
+ * an interval.
+ *
+ * Unlike the wall-clock watcher (which times a node out purely from
+ * `startedAt`), the monitor classifies a node from its **heartbeat feed**
+ * (`node.liveness.lastActivityAt`, written by subtask 2's
+ * `recordLivenessHeartbeat` / the platform liveness feed):
+ *
+ * - heartbeat fresh (`now - lastActivityAt < stallWarnMs`) → `healthy` — the
+ *   node's `stallStatus` is reset to `healthy`, clearing any soft-stall
+ *   classification;
+ * - soft stall (Tier 1) — idle `>= stallWarnMs` and `< stallWarnMs +
+ *   stallGraceMs` → the node is classified `stalling` with `stallWarnedAt`
+ *   stamped, and `onStall` fires **once** (guarded on the existing
+ *   `stallStatus`, so the warning never repeats within one episode);
+ * - hard stall (Tier 2) — idle `>= min(effectiveDeadline, stallWarnMs +
+ *   stallGraceMs)` → the node is marked `timeout` via the shared
+ *   {@link markTimedOut} (the normal `running → timeout` transition, so
+ *   lifecycle checkpoints and the critical-dirty flag are recorded by the
+ *   transition choke point) and reported through `onTimeout`.
+ *
+ * Fallback (Tier 3): a node WITHOUT a heartbeat feed (`liveness.lastActivityAt`
+ * absent) is skipped entirely — it keeps the pure wall-clock deadline of the
+ * unmodified {@link NodeStalenessWatcher}. Both monitors coexist; the engine's
+ * behavior is unchanged unless a consumer instantiates the monitor (default
+ * not instantiated) and drives it.
+ */
+export class NodeLivenessMonitor {
+  private readonly intervalMs: number;
+  private readonly nodeStaleTimeoutMs: number;
+  private readonly stallWarnMs: number;
+  private readonly stallGraceMs: number;
+  private timer?: ReturnType<typeof setInterval>;
+
+  constructor(private readonly opts: NodeLivenessMonitorOptions) {
+    this.intervalMs = opts.intervalMs ?? SWEEPER_INTERVAL_MS;
+    this.nodeStaleTimeoutMs = opts.nodeStaleTimeoutMs;
+    this.stallWarnMs =
+      opts.stallWarnMs ?? Math.min(60_000, this.nodeStaleTimeoutMs / 2);
+    this.stallGraceMs = opts.stallGraceMs ?? 30_000;
+  }
+
+  /**
+   * One liveness tick. Classifies every `running` node with a heartbeat feed
+   * (see the class docs for the healthy → stalling → stalled ladder) and
+   * hard-stalls nodes past their effective deadline via {@link markTimedOut}.
+   *
+   * @returns The ids of the nodes that were hard-stalled (timed out) by this tick.
+   * @param now Optional clock for deterministic tests (defaults to `Date.now`).
+   */
+  tick(state: EngineState, now: number = Date.now()): string[] {
+    const timedOut: string[] = [];
+    for (const node of state.nodes.values()) {
+      if (node.status !== NodeStatus.Running) continue;
+      const effectiveDeadline = Math.min(
+        node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs,
+        this.nodeStaleTimeoutMs,
+      );
+      if (effectiveDeadline <= 0) continue; // liveness staleness disabled
+      const lastActivityAt = node.liveness?.lastActivityAt;
+      if (lastActivityAt === undefined) continue; // no feed — wall-clock fallback (Tier 3)
+      const idle = now - lastActivityAt;
+      // Dispatch-liveness channel (quiet-but-alive): the node is ABOUT to be
+      // classified stalled (idle >= warn), but the dispatch layer verifiably
+      // considers its task/process in-flight — a silent-but-alive subagent
+      // (long non-streaming model call, Pi child process between JSON events)
+      // is alive, not stalled. Refresh the heartbeat and skip the ladder; the
+      // probe is only consulted once idle reaches the warn threshold, so
+      // normally-active nodes (relay heartbeats) are untouched and the
+      // heartbeatSource tag stays "session" while activity flows. When the
+      // probe turns false (dispatch died / task orphaned), the node is a
+      // genuine stall candidate and the ladder below fires normally. A node
+      // that stays verifiably alive but never completes is caught by the
+      // wall-clock NodeStalenessWatcher backstop, not here.
+      if (idle >= this.stallWarnMs && this.opts.isDispatchAlive?.(node)) {
+        node.liveness = {
+          ...node.liveness,
+          lastActivityAt: now,
+          heartbeatSource: "dispatch",
+          stallStatus: "healthy",
+          stallWarnedAt: undefined,
+          stallReason: undefined,
+        };
+        markNonCriticalDirty(state);
+        continue;
+      }
+      const hardStallAt = Math.min(
+        effectiveDeadline,
+        this.stallWarnMs + this.stallGraceMs,
+      );
+      if (idle >= hardStallAt) {
+        // Tier 2 — hard stall: budget or warn+grace elapsed with no heartbeat.
+        const reason =
+          `node heartbeat stalled past its liveness deadline ` +
+          `(idle ${idle}ms, deadline ${hardStallAt}ms)`;
+        markTimedOut(state, node, reason);
+        node.liveness = {
+          ...node.liveness,
+          stallStatus: "stalled",
+          stallWarnedAt: node.liveness!.stallWarnedAt ?? now,
+          stallReason: reason,
+        };
+        markNonCriticalDirty(state);
+        timedOut.push(node.nodeId);
+        this.opts.onTimeout?.(node.nodeId, reason);
+        continue;
+      }
+      if (idle >= this.stallWarnMs) {
+        // Tier 1 — soft stall: single-fire warning per stall episode.
+        if (node.liveness!.stallStatus !== "stalling") {
+          const reason =
+            `node heartbeat stalled for ${idle}ms ` +
+            `(soft-stall warn threshold ${this.stallWarnMs}ms)`;
+          node.liveness = {
+            ...node.liveness,
+            stallStatus: "stalling",
+            stallWarnedAt: now,
+            stallReason: reason,
+          };
+          markNonCriticalDirty(state);
+          // Subtask 5: pass the detection facts captured at fire time as the
+          // optional third argument. The call is contained — a throwing
+          // consumer (e.g. a misbehaving notifier) is logged and swallowed so
+          // a tick never breaks the monitor loop.
+          try {
+            this.opts.onStall?.(node.nodeId, reason, {
+              idleMs: idle,
+              stallWarnMs: this.stallWarnMs,
+              stallWarnedAt: now,
+            });
+          } catch (err) {
+            logWarn(
+              `engine-recovery: onStall consumer threw for node "${node.nodeId}" — ` +
+                `swallowed so a tick never breaks: ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+        continue;
+      }
+      // Heartbeat fresh — healthy; reset any soft-stall classification.
+      if (
+        node.liveness!.stallStatus !== "healthy" ||
+        node.liveness!.stallWarnedAt !== undefined ||
+        node.liveness!.stallReason !== undefined
+      ) {
+        node.liveness = {
+          ...node.liveness,
+          stallStatus: "healthy",
+          stallWarnedAt: undefined,
+          stallReason: undefined,
+        };
+        markNonCriticalDirty(state);
+      }
+    }
+    return timedOut;
+  }
+
+  /** Start the periodic tick. Opt-in — never auto-started. */
+  start(state: EngineState): void {
+    this.stop();
+    this.timer = setInterval(() => {
+      try {
+        this.tick(state);
+      } catch {
+        // A tick must never take down the process.
+      }
+    }, this.intervalMs);
+    // Don't keep the process alive just because a tick interval is pending.
+    (this.timer as (typeof this.timer) & { unref?: () => unknown })?.unref?.();
+  }
+
+  /** Stop the periodic tick (no-op if never started). */
   stop(): void {
     if (this.timer !== undefined) {
       clearInterval(this.timer);

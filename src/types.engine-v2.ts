@@ -16,7 +16,7 @@
  * Design reference: .rolebox/design/engine-state-machine.md
  */
 
-import type { GraphDeclaration, LoopGroupDecl, TerminationDecl } from "./types.graph-v2.ts";
+import type { GraphDeclaration, LoopGroupDecl, NodeBudgetSpec, TerminationDecl } from "./types.graph-v2.ts";
 import type { EnginePhase, JoinStrategy, NodeStatus } from "./constants.ts";
 import type { MaterializedResultRef } from "./dispatch/types.ts";
 import type { UsageRecord } from "./dispatch/budget/budget-tracker.ts";
@@ -149,6 +149,22 @@ export interface EngineState {
    * {@link phaseEventSink}.
    */
   budgetEventSink?: BudgetEventSink;
+
+  /**
+   * Cross-restart termination-notification dedup flag.
+   *
+   * OPTIONAL-ADDITIVE — absent in persisted files written before this field
+   * existed, and absent for graphs that never reached a terminal phase; both
+   * cases deserialize cleanly (the field is simply `undefined`).
+   *
+   * When present, records whether the engine has already delivered the
+   * `[GRAPH COMPLETE]` (`complete`) and/or `[GRAPH BLOCKED]` (`blocked`)
+   * terminal notification for this graph. A fresh engine instance created
+   * after a restart consults this flag before emitting a terminal reminder so
+   * a graph whose terminal notification was already delivered is not notified
+   * again across engine instances (monitor-audit F15 / M10 exact-once).
+   */
+  terminalNotified?: { complete: boolean; blocked: boolean };
 }
 
 // ── Node Runtime State ──────────────────────────────────────────────────
@@ -232,6 +248,50 @@ export interface NodeRuntimeState {
    * `include_evidence` flag. OPTIONAL-ADDITIVE — absent until recorded.
    */
   evidence?: string[];
+  /**
+   * Runtime carrier for this node's declared budget spec — mirrors
+   * {@link NodeConfig.budget} into runtime state so dispatch-facing code can
+   * read the declared limits without re-parsing the declaration. Notably the
+   * DispatchBridge sources the node's declared `timeout_ms` from here into the
+   * dispatch task input (monitor-audit F7 / M2: the declared timeout was
+   * previously written to the declaration but never consumed).
+   * OPTIONAL-ADDITIVE — absent when the node declared no budget.
+   */
+  budget?: NodeBudgetSpec;
+  /**
+   * Per-node liveness detection state — heartbeat + stall tracking for the
+   * node-anomaly-detection monitor.
+   *
+   * OPTIONAL-ADDITIVE — absent in persisted files written before this field
+   * existed, and absent for nodes that have not yet recorded a heartbeat;
+   * both cases deserialize cleanly (the field is simply `undefined`).
+   *
+   * Written by the liveness feed (subtask 2) and classified by the stall
+   * monitor (subtask 3); the state carrier itself is defined here (subtask 1).
+   */
+  liveness?: NodeLivenessState;
+}
+
+/**
+ * Per-node liveness tracking state recorded by the liveness feed and
+ * classified by the stall monitor.
+ *
+ * OPTIONAL-ADDITIVE runtime carrier on {@link NodeRuntimeState.liveness} —
+ * every field is JSON-primitive, so the carrier serializes and deserializes
+ * losslessly through `engine-persistence.ts` without a schema bump. Absent
+ * until the first heartbeat is recorded.
+ */
+export interface NodeLivenessState {
+  /** Epoch ms of the most recent observed activity (tool call, message, dispatch event, …). */
+  lastActivityAt?: number;
+  /** Which observation channel produced the most recent heartbeat. */
+  heartbeatSource?: "tool" | "message" | "session" | "dispatch" | "feed";
+  /** Latest stall classification from the monitor. */
+  stallStatus?: "healthy" | "stalling" | "stalled";
+  /** Epoch ms when the stall warning was first issued (stalling → stalled). */
+  stallWarnedAt?: number;
+  /** Human-readable reason for the current stallStatus (monitor diagnosis). */
+  stallReason?: string;
 }
 
 // ── Edge Payload ────────────────────────────────────────────────────────
@@ -390,13 +450,12 @@ export interface SignalLedgerEntry {
 /**
  * Discriminator for the origin of a signal recorded in the per-node ledger
  * history. Helps graph_status consumers distinguish live worker signals from
- * recovery-side reconciliation, engine-deferred drain, race-guard paths, and
- * synthetic human-approval signals.
+ * recovery-side reconciliation, race-guard paths, and synthetic
+ * human-approval signals.
  */
 export type SignalLedgerSource =
   | "dispatch"
   | "recovery"
-  | "deferred"
   | "race_guard"
   | "approval";
 
@@ -419,8 +478,8 @@ export interface SignalLedgerEvent {
    *
    * - `dispatch`     — live worker signal (onNodeSignalEmitted / dispatch listener)
    * - `recovery`     — recovery-side re-subscription or reconciliation
-   * - `deferred`     — engine-deferred completion drained after lock release
    * - `race_guard`   — race guard detected an already-terminal dispatch task
+   * - `approval`     — synthetic signal from human approval / rejection of a blocked node
    */
   source: SignalLedgerSource;
 }

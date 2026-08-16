@@ -6,6 +6,7 @@ import { ArtifactStore } from "../src/function/artifact-store.ts";
 import { evaluateCondition, KNOWN_CONDITIONS } from "../src/function/conditions.ts";
 import type { CondEnv } from "../src/function/conditions.ts";
 import type { FnState } from "../src/function/runtime-state.ts";
+import { sessionSignalLedger } from "../src/signal/session-signal-ledger.ts";
 
 function mockEnv(overrides: Partial<CondEnv> = {}): CondEnv {
   const base: CondEnv = {
@@ -300,6 +301,68 @@ describe("evaluateCondition", () => {
       },
     });
     expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
+  });
+});
+
+describe("signal_observed session-ledger fallback (no active functions)", () => {
+  const SID = "ledger-fallback-session";
+
+  it("→ true when the session ledger recorded the signal type", () => {
+    sessionSignalLedger.record(SID, "answer", { data: 42 });
+    try {
+      const env = mockEnv({ sessionID: SID });
+      expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
+    } finally {
+      sessionSignalLedger.clearSession(SID);
+    }
+  });
+
+  it("→ false for a type not recorded in the session ledger", () => {
+    sessionSignalLedger.record(SID, "answer", { data: 42 });
+    try {
+      const env = mockEnv({ sessionID: SID });
+      expect(evaluateCondition("signal_observed(blocked)", env)).toBe(false);
+    } finally {
+      sessionSignalLedger.clearSession(SID);
+    }
+  });
+
+  it("→ false when neither the FnState nor the session ledger recorded the signal", () => {
+    const env = mockEnv({ sessionID: "no-signal-session" });
+    expect(evaluateCondition("signal_observed(answer)", env)).toBe(false);
+  });
+
+  it("→ true via session ledger when the FnState ledger lacks the type", () => {
+    sessionSignalLedger.record(SID, "answer", { data: 42 });
+    try {
+      const env = mockEnv({
+        sessionID: SID,
+        state: {
+          ...mockEnv().state,
+          kv: { __signals_observed: { progress: null } },
+        },
+      });
+      expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
+      expect(evaluateCondition("signal_observed(progress)", env)).toBe(true);
+    } finally {
+      sessionSignalLedger.clearSession(SID);
+    }
+  });
+
+  it("FnState ledger takes precedence when both record the type", () => {
+    sessionSignalLedger.record(SID, "answer", { data: 42 });
+    try {
+      const env = mockEnv({
+        sessionID: SID,
+        state: {
+          ...mockEnv().state,
+          kv: { __signals_observed: { answer: { data: 1 } } },
+        },
+      });
+      expect(evaluateCondition("signal_observed(answer)", env)).toBe(true);
+    } finally {
+      sessionSignalLedger.clearSession(SID);
+    }
   });
 });
 

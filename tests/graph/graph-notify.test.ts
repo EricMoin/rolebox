@@ -13,7 +13,7 @@
  * - the duration field is rendered from startedAt/completedAt.
  */
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
 import { NodeStatus } from "../../src/constants.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
 import type {
@@ -25,6 +25,7 @@ import {
   buildGraphCompletionText,
   buildGraphTerminalText,
   createGraphTerminalNotifier,
+  log as graphNotifyLog,
 } from "../../src/graph/engine/graph-notify.ts";
 import {
   DISPATCH_NOTIFICATION_MARKERS,
@@ -115,6 +116,10 @@ function makeEvent(
 
 beforeEach(() => {
   clearParentQueues();
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -365,6 +370,44 @@ describe("createGraphTerminalNotifier", () => {
 
     expect(await handler(makeTerminalEvent())).toBe(false);
     expect(client.prompts).toHaveLength(0);
+  });
+
+  it("logs a warning (and returns false) when enabled but no emperor session is resolved", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, {});
+    const warnSpy = jest.spyOn(graphNotifyLog, "warn");
+
+    // Blocked terminal event → blocked warning naming the graph.
+    const okBlocked = await handler(
+      makeTerminalEvent({ isBlocked: true, phase: "executing" }),
+    );
+    expect(okBlocked).toBe(false);
+    expect(client.prompts).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const blockedMessage = String(warnSpy.mock.calls[0][0]);
+    expect(blockedMessage).toContain("graph-notify: blocked notification skipped");
+    expect(blockedMessage).toContain("g-42");
+
+    // Complete terminal event → complete warning. Not deduped against the
+    // blocked one (separate terminal types) and the no-session path returns
+    // BEFORE the dedupe epoch, so each suppressed notification warns.
+    const okComplete = await handler(makeTerminalEvent());
+    expect(okComplete).toBe(false);
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(String(warnSpy.mock.calls[1][0])).toContain(
+      "graph-notify: complete notification skipped",
+    );
+    expect(String(warnSpy.mock.calls[1][0])).toContain("g-42");
+  });
+
+  it("stays silent (no warning) when disabled — deliberate opt-out", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, { enabled: false });
+    const warnSpy = jest.spyOn(graphNotifyLog, "warn");
+
+    expect(await handler(makeTerminalEvent())).toBe(false);
+    expect(client.prompts).toHaveLength(0);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it("forwards the agent option and a fresh run starts a clean epoch", async () => {

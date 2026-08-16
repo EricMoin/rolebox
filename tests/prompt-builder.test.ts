@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import type { RoleConfig, ResolvedSkill, ResolvedFunction } from "../src/types";
-import { buildAgentPrompt, buildFunctionBlock, buildSkillBlock, buildSubagentBlock, escapeXml } from "../src/prompt/builder";
+import type { RoleConfig, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph } from "../src/types";
+import { ReferenceScope } from "../src/constants";
+import { buildAgentPrompt, buildFunctionBlock, buildPublicAgentsBlock, buildReferenceBlock, buildSkillBlock, buildSubagentBlock, escapeXml } from "../src/prompt/builder";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -217,6 +218,126 @@ describe("buildAgentPrompt", () => {
     expect(result).toContain("<id>alpha</id>");
     expect(result).toContain("<name>Beta</name>");
   });
+
+  it("appends <available_public_agents> block when publicAgents are present but skills are empty", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], {
+      publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
+    });
+    expect(result).toContain("<available_public_agents>");
+    expect(result).toContain("</available_public_agents>");
+    expect(result).toContain("<public_agent>");
+    expect(result).toContain("<id>other-role--open</id>");
+    expect(result).toContain("<name>Open Role</name>");
+    expect(result).toContain("<description>A public open role</description>");
+    expect(result).not.toContain("<available_skills>");
+  });
+
+  it("omits <available_public_agents> when publicAgents is undefined", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], {});
+    expect(result).not.toContain("<available_public_agents>");
+  });
+
+  it("omits <available_public_agents> when publicAgents is an empty array", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], { publicAgents: [] });
+    expect(result).not.toContain("<available_public_agents>");
+  });
+
+  it("renders subagents block before publicAgents block when both are present", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], {
+      subagents: [{ id: "parent--child", name: "Child", description: "Does work" }],
+      publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
+    });
+    expect(result).toContain("<available_subagents>");
+    expect(result).toContain("<available_public_agents>");
+    const subIdx = result.indexOf("<available_subagents>");
+    const publicIdx = result.indexOf("<available_public_agents>");
+    expect(subIdx).toBeLessThan(publicIdx);
+  });
+
+  it("includes static public-agents instruction text", () => {
+    const role = makeRole();
+    const result = buildAgentPrompt(role, [], {
+      publicAgents: [{ id: "other-role--open", name: "Open Role", description: "A public open role" }],
+    });
+    expect(result).toContain(
+      "You can dispatch tasks to these open roles of other roles via the graph execution engine.",
+    );
+    expect(result).toContain('agent="<open-role-id>"');
+    expect(result).toContain("graph_add_node(");
+  });
+});
+
+describe("Backward compatibility (roles without open-role fields)", () => {
+  it("byte-identical composition with skills + subagents and no <available_public_agents>", () => {
+    // A pre-feature role: no open / exports / open_roles fields, and the
+    // publicAgents option is not supplied — output must be byte-identical
+    // to the pre-feature prompt (raw prompt, then sections, nothing else).
+    const role = makeRole({ prompt: "You are a plain role." });
+    const skills = [makeSkill({ name: "core-skill", description: "Core skill", scope: "rolebox" })];
+    const subagents = [{ id: "plain--worker", name: "Worker", description: "Does work" }];
+
+    const result = buildAgentPrompt(role, skills, { subagents });
+
+    expect(result).toBe(
+      "You are a plain role.\n\n" +
+        buildSkillBlock(skills) +
+        "\n\n" +
+        buildSubagentBlock(subagents),
+    );
+    expect(result).not.toContain("<available_public_agents>");
+  });
+
+  it("byte-identical composition with references + skills + subagents + graph and no <available_public_agents>", () => {
+    const role = makeRole({ prompt: "Raw prompt text." });
+    const skills = [makeSkill({ name: "skill-a", description: "Skill A", scope: "rolebox" })];
+    const subagents = [{ id: "plain--worker", name: "Worker", description: "Does work" }];
+    const references: ResolvedReference[] = [
+      {
+        name: "guide",
+        filePath: "/refs/guide.md",
+        description: "The guide",
+        scope: ReferenceScope.Role,
+        relativePath: "guide.md",
+      },
+    ];
+    // Empty collaboration graph: the graph option is passed but contributes
+    // no section (buildCollaborationBlock returns "" for zero nodes).
+    const graph: ResolvedGraph = {
+      edges: [],
+      nodes: [],
+      maxIterations: 5,
+      exitEdges: [],
+      loopGroups: [],
+    };
+
+    const result = buildAgentPrompt(role, skills, { subagents, references, graph });
+
+    expect(result).toBe(
+      "Raw prompt text.\n\n" +
+        buildReferenceBlock(references) +
+        "\n\n" +
+        buildSkillBlock(skills) +
+        "\n\n" +
+        buildSubagentBlock(subagents),
+    );
+    expect(result).not.toContain("<available_public_agents>");
+  });
+
+  it("does not append anything after the <available_subagents> block when publicAgents is absent", () => {
+    const role = makeRole({ prompt: "You are a plain role." });
+    const result = buildAgentPrompt(role, [], {
+      subagents: [{ id: "plain--worker", name: "Worker", description: "Does work" }],
+    });
+
+    // The public-agents block renders after subagents in buildAgentPrompt, so
+    // the prompt ending at </available_subagents> proves nothing was appended.
+    expect(result.endsWith("</available_subagents>")).toBe(true);
+    expect(result).not.toContain("<available_public_agents>");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -338,6 +459,75 @@ describe("buildSubagentBlock", () => {
   it("escapes special characters in description", () => {
     const result = buildSubagentBlock([
       makeSubagent({ description: "Handles <script> & <style> tags" }),
+    ]);
+    expect(result).toContain("<description>Handles &lt;script&gt; &amp; &lt;style&gt; tags</description>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildPublicAgentsBlock helpers
+// ---------------------------------------------------------------------------
+
+function makePublicAgent(
+  overrides: Partial<{ id: string; name: string; description: string }> = {},
+): { id: string; name: string; description: string } {
+  return {
+    id: "other-role--open",
+    name: "Open Role",
+    description: "A public open role of another role",
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// buildPublicAgentsBlock tests
+// ---------------------------------------------------------------------------
+
+describe("buildPublicAgentsBlock", () => {
+  it("returns empty string for empty array", () => {
+    expect(buildPublicAgentsBlock([])).toBe("");
+  });
+
+  it("generates <available_public_agents> XML with one public agent", () => {
+    const result = buildPublicAgentsBlock([makePublicAgent()]);
+    expect(result).toContain("<available_public_agents>");
+    expect(result).toContain("</available_public_agents>");
+    expect(result).toContain("<public_agent>");
+    expect(result).toContain("</public_agent>");
+    expect(result).toContain("<id>other-role--open</id>");
+    expect(result).toContain("<name>Open Role</name>");
+    expect(result).toContain("<description>A public open role of another role</description>");
+  });
+
+  it("includes all public agents when multiple are provided", () => {
+    const agents = [
+      makePublicAgent({ id: "alpha--open", name: "Alpha", description: "First open role" }),
+      makePublicAgent({ id: "beta--open", name: "Beta", description: "Second open role" }),
+      makePublicAgent({ id: "gamma--open", name: "Gamma", description: "Third open role" }),
+    ];
+    const result = buildPublicAgentsBlock(agents);
+
+    expect(result).toContain("<id>alpha--open</id>");
+    expect(result).toContain("<name>Beta</name>");
+    expect(result).toContain("<description>Third open role</description>");
+  });
+
+  it("contains the static instruction text", () => {
+    const result = buildPublicAgentsBlock([makePublicAgent()]);
+    expect(result).toContain(
+      "You can dispatch tasks to these open roles of other roles via the graph execution engine.",
+    );
+    expect(result).toContain(
+      'agent="<open-role-id>"',
+    );
+    expect(result).toContain(
+      "graph_add_node(",
+    );
+  });
+
+  it("escapes special characters in description", () => {
+    const result = buildPublicAgentsBlock([
+      makePublicAgent({ description: "Handles <script> & <style> tags" }),
     ]);
     expect(result).toContain("<description>Handles &lt;script&gt; &amp; &lt;style&gt; tags</description>");
   });

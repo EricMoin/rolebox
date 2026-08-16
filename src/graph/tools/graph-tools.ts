@@ -102,16 +102,22 @@ import {
   type CreateEngineOptions,
   type NodeDispatchPort,
   type NodeCompletionEvent,
+  type NodeStallEvent,
+  type NodeLivenessFeed,
   type GraphTerminalEvent,
   GraphEventRecorder,
+  readGraphEventLog,
   createGraphNotifier,
+  createGraphStallNotifier,
   createGraphTerminalNotifier,
   type GraphCompletionHandler,
+  type GraphStallHandler,
   type GraphTerminalHandler,
   graphParentContext,
   type DispatchParentContext,
 } from "../engine/index.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
+import { createSubLogger } from "../../logger.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
 import { serializeGraphDeclaration } from "../serialize.ts";
 import {
@@ -122,6 +128,7 @@ import {
   filterNodes,
   groupCompletedNodes,
   limitNodes,
+  toEpochMs,
   type GroupByMode,
   type StatusQuery,
 } from "./status-queries.ts";
@@ -129,6 +136,9 @@ import {
   scanPersistedStates,
   type PersistedStateScan,
 } from "./persisted-state.ts";
+
+// Module logger (exported so tests can spy on the degradation warnings, F6).
+export const log = createSubLogger("graph:tools");
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
@@ -200,6 +210,48 @@ export interface GraphToolSetDeps {
   directory?: string;
   /** Optional engine-state persistence dir (`.rolebox/state/...`). */
   stateDir?: string;
+  /**
+   * Optional per-node staleness deadline (ms) for every engine this toolset
+   * builds (F2). Defaults to {@link DEFAULT_NODE_STALE_TIMEOUT_MS} (15 min) —
+   * a `running` node whose worker stops advancing is marked `timeout` so a
+   * graph never hangs. A node's declared per-node `budget.timeout_ms`
+   * overrides it. Set to a non-positive value to disable the staleness
+   * watcher on these engines (opt-out).
+   */
+  nodeStaleTimeoutMs?: number;
+  /**
+   * Optional stale-lock sweep interval (ms) for every engine this toolset
+   * builds (F2). Defaults to {@link DEFAULT_SWEEPER_INTERVAL_MS} (60 s) — a
+   * stuck `advancingLock` is released periodically. Set to a non-positive
+   * value to disable the periodic sweep on these engines (manual ticking
+   * only — opt-out).
+   */
+  sweeperIntervalMs?: number;
+  /**
+   * Optional soft-stall warn threshold (ms) for the heartbeat-based liveness
+   * monitor every engine this toolset builds instantiates (subtask 6). A
+   * heartbeat-fed `running` node that goes idle past this threshold is
+   * classified `stalling` and surfaces the engine's `onNodeStall` seam (the
+   * stall notifier) once per stall episode. Absent → the monitor's default
+   * (`min(60_000, nodeStaleTimeoutMs / 2)`).
+   */
+  nodeStallWarnMs?: number;
+  /**
+   * Optional hard-stall grace (ms) past `nodeStallWarnMs` before a stalling
+   * node is marked `timeout` (subtask 6). Absent → the monitor's default
+   * (30_000).
+   */
+  nodeStallGraceMs?: number;
+  /**
+   * Optional node-liveness feed seam (node-anomaly-detection subtask 2).
+   * Threaded into every engine this toolset builds: when present, the engine
+   * records a `dispatch` heartbeat on every launch, registers its sessions
+   * with the feed, and maintains a `sessionId → nodeId` reverse index (see
+   * {@link GraphToolSet.resolveSessionOwner}) so the platform liveness wiring
+   * can heartbeat / fail-fast graph sessions. Absent → engine behavior
+   * unchanged.
+   */
+  livenessFeed?: NodeLivenessFeed;
   /**
    * Optional graph-notify source (subtask 3). When present, every engine this
    * toolset constructs — in `buildEngine` (used by all construction paths) and
@@ -349,6 +401,12 @@ export interface GraphStatusArgs {
    * `NodeRuntimeState.evidence[]` (subtask 1 field). Honest-empty like
    * `include_artifacts`. */
   include_evidence?: boolean;
+  /** Include each node's recorded liveness state from
+   * `NodeRuntimeState.liveness` (subtask 1 field). OPTIONAL-ADDITIVE —
+   * only nodes WITH recorded liveness get the block; absent liveness →
+   * nothing rendered, never fabricated. Running nodes always render their
+   * liveness regardless of this flag. */
+  include_liveness?: boolean;
   /** Include each loop group's ordered round history from
    * `LoopGroupRuntimeState.rounds[]` (subtask 1 field). Absent rounds yield an
    * explicit "no loop rounds recorded" note — never invented rows. */
@@ -478,6 +536,22 @@ export interface GraphApproveResult {
 const DEFAULT_MAX_CHARS = 16000;
 
 /**
+ * F2 production defaults applied to every engine this toolset builds (in
+ * `buildEngine` and `graph_run`) unless the caller supplies an override:
+ *
+ * - {@link DEFAULT_NODE_STALE_TIMEOUT_MS} — per-node staleness deadline. A
+ *   `running` node whose worker stops advancing is marked `timeout` so a
+ *   graph never hangs (monitor M3). A node's declared per-node
+ *   `budget.timeout_ms` overrides it (engine-recovery.ts, deadline resolution
+ *   is per-node).
+ * - {@link DEFAULT_SWEEPER_INTERVAL_MS} — periodic stale-lock sweep. A stuck
+ *   `advancingLock` is released so a hung critical section never deadlocks
+ *   the graph (failure-resilience.md §5.6).
+ */
+const DEFAULT_NODE_STALE_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_SWEEPER_INTERVAL_MS = 60_000;
+
+/**
  * `graph_status` flags in `.rolebox/design/tool-merge-map.md` §2.2 that have
  * **no backing data** in the current engine runtime shapes
  * (`src/types.engine-v2.ts` — `EngineState` / `NodeRuntimeState` /
@@ -533,9 +607,13 @@ export class GraphToolSet {
    * resolver is invoked with the invoking session id (`invokingSessionId`) when
    * provided, so the emperor session can be derived from the graph tool's
    * execution context at runtime. Returns `undefined` when no source is
-   * configured or the resolved emperor session is absent (no-op). Subtask 3.
+   * configured or the resolved emperor session is absent — in the latter case a
+   * degradation warning naming the graph is logged (and a durable
+   * `notification_degraded` marker recorded when a stateDir is configured) so
+   * the silent drop is observable (F6). Subtask 3.
    */
   private completionHandler(
+    graphId: string,
     invokingSessionId?: string,
   ): ((event: NodeCompletionEvent) => void) | undefined {
     const src = this.deps.graphNotify;
@@ -545,7 +623,15 @@ export class GraphToolSet {
       typeof src.emperorSessionId === "function"
         ? src.emperorSessionId(invokingSessionId)
         : src.emperorSessionId;
-    if (!emperorSessionId) return undefined;
+    if (!emperorSessionId) {
+      // F6: no silent no-op — name the graph + seam, and persist a marker when
+      // a stateDir is available so graph_status consumers can observe the drop.
+      log.warn(
+        `graph-tools: graph "${graphId}" completion notification degraded — no emperor session resolved; node-completion reminder suppressed`,
+      );
+      this.recordNotificationDegraded(graphId, "completion");
+      return undefined;
+    }
     return createGraphNotifier(src.sessionClient, {
       emperorSessionId,
       ...(src.agent ? { agent: src.agent } : {}),
@@ -559,8 +645,12 @@ export class GraphToolSet {
    * config form (`GraphNotifyConfig`) can produce a terminal handler; a prebuilt
    * `GraphCompletionHandler` fn cannot be deconstructed, so it yields
    * `undefined`. A fresh notifier = a fresh dedupe epoch per engine construction.
+   * When the resolved emperor session is absent, a degradation warning naming
+   * the graph is logged (plus a durable marker when a stateDir is configured)
+   * instead of silently degrading (F6).
    */
   private terminalHandler(
+    graphId: string,
     invokingSessionId?: string,
   ): ((event: GraphTerminalEvent) => void) | undefined {
     const src = this.deps.graphNotify;
@@ -571,11 +661,99 @@ export class GraphToolSet {
       typeof src.emperorSessionId === "function"
         ? src.emperorSessionId(invokingSessionId)
         : src.emperorSessionId;
-    if (!emperorSessionId) return undefined;
+    if (!emperorSessionId) {
+      log.warn(
+        `graph-tools: graph "${graphId}" terminal notification degraded — no emperor session resolved; graph-terminal reminder suppressed`,
+      );
+      this.recordNotificationDegraded(graphId, "terminal");
+      return undefined;
+    }
     return createGraphTerminalNotifier(src.sessionClient, {
       emperorSessionId,
       ...(src.agent ? { agent: src.agent } : {}),
     }) as (event: GraphTerminalEvent) => void;
+  }
+
+  /**
+   * Resolve the configured graph-notify source into a concrete `onNodeStall`
+   * handler, or `undefined` for the engine's default no-op seam. Same
+   * resolution logic as {@link completionHandler} — config form only
+   * (`GraphNotifyConfig`); a prebuilt `GraphCompletionHandler` fn cannot be
+   * deconstructed, so it yields `undefined` (stall notifications ride the
+   * engine-level `onNodeStall` DI seam, distinct from the prebuilt per-node
+   * completion handler). A fresh notifier = a fresh dedupe epoch per engine
+   * construction. When the resolved emperor session is absent, a degradation
+   * warning naming the graph is logged (plus a durable marker when a stateDir
+   * is configured) instead of silently degrading (F6). Subtask 5.
+   */
+  private stallHandler(
+    graphId: string,
+    invokingSessionId?: string,
+  ): ((event: NodeStallEvent) => void) | undefined {
+    const src = this.deps.graphNotify;
+    if (src === undefined) return undefined;
+    // A prebuilt per-node handler cannot produce a stall handler.
+    if (typeof src === "function") return undefined;
+    const emperorSessionId =
+      typeof src.emperorSessionId === "function"
+        ? src.emperorSessionId(invokingSessionId)
+        : src.emperorSessionId;
+    if (!emperorSessionId) {
+      // F6: no silent no-op — name the graph + seam, and persist a marker when
+      // a stateDir is available so graph_status consumers can observe the drop.
+      log.warn(
+        `graph-tools: graph "${graphId}" stall notification degraded — no emperor session resolved; stall reminder suppressed`,
+      );
+      this.recordNotificationDegraded(graphId, "stall");
+      return undefined;
+    }
+    return createGraphStallNotifier(src.sessionClient, {
+      emperorSessionId,
+      ...(src.agent ? { agent: src.agent } : {}),
+    }) as (event: NodeStallEvent) => void;
+  }
+
+  /**
+   * Record a durable `notification_degraded` event when a stateDir is
+   * configured (F6, optional-additive — absent stateDir → warning log only).
+   * Written by the toolset itself because the notifier is never constructed in
+   * this path; the marker lands in the graph's event log (`.rolebox/state/
+   * graph-events-{hash}.ndjson`) so a graph_status consumer can surface
+   * "terminal notification degraded". Subtask 5 adds the `stall` kind.
+   */
+  private recordNotificationDegraded(
+    graphId: string,
+    kind: "completion" | "terminal" | "stall",
+  ): void {
+    if (!this.deps.stateDir) return;
+    // The recorder's `kind` slot is the serialized `status` string
+    // (graph-events.ts writes it verbatim into the record's generic status
+    // field); its type union predates the newer "stall" kind, so the kind is
+    // widened at this boundary — the record shape is identical.
+    new GraphEventRecorder(this.deps.stateDir).notificationDegraded(
+      graphId,
+      kind as "completion" | "terminal",
+    );
+  }
+
+  /**
+   * Read-only helper backing the graph_status degraded hint: read the graph's
+   * durable event log (`.rolebox/state/graph-events-{hash}.ndjson`) and return
+   * the deduped `status` values of any `notification_degraded` events
+   * (`"completion"` / `"terminal"`), in file order. Empty when no stateDir is
+   * configured, no log file exists, or no degraded event was recorded — and
+   * never throws, so a missing / corrupt log can never break a status query
+   * (total, observability-only, mirroring the recorder's own total discipline).
+   */
+  private notificationDegradedStatuses(graphId: string): string[] {
+    if (!this.deps.stateDir) return [];
+    const statuses: string[] = [];
+    for (const record of readGraphEventLog(this.deps.stateDir, graphId)) {
+      if (record.event === "notification_degraded" && record.status) {
+        if (!statuses.includes(record.status)) statuses.push(record.status);
+      }
+    }
+    return statuses;
   }
 
   /** Create a fresh, provisioned engine from a declaration (re-provision). */
@@ -588,17 +766,42 @@ export class GraphToolSet {
       manager: this.deps.manager,
       graphId,
       stateDir: this.deps.stateDir,
+      // F2: enable the stale-node watcher + stale-lock sweeper on every engine
+      // the toolset builds — mid-flight rebuilds (construction tools) keep the
+      // same guard as graph_run. Conservative production defaults unless the
+      // caller supplied an explicit override; per-node budget.timeout_ms beats
+      // the watcher deadline (engine-recovery.ts).
+      nodeStaleTimeoutMs:
+        this.deps.nodeStaleTimeoutMs ?? DEFAULT_NODE_STALE_TIMEOUT_MS,
+      sweeperIntervalMs: this.deps.sweeperIntervalMs ?? DEFAULT_SWEEPER_INTERVAL_MS,
+      // Subtask 6: thread the optional liveness-monitor stall thresholds + the
+      // node-liveness feed into every engine the toolset builds (absent → the
+      // engine's defaults / unchanged behavior).
+      ...(this.deps.nodeStallWarnMs !== undefined
+        ? { nodeStallWarnMs: this.deps.nodeStallWarnMs }
+        : {}),
+      ...(this.deps.nodeStallGraceMs !== undefined
+        ? { nodeStallGraceMs: this.deps.nodeStallGraceMs }
+        : {}),
+      ...(this.deps.livenessFeed !== undefined
+        ? { livenessFeed: this.deps.livenessFeed }
+        : {}),
     };
     // Subtask 3: wire the configured graph-notify completion seam (absent →
     // no-op). The emperor session is targeted ONLY for notification; the
     // graphParentContext budget scope (sessionID: graphId) is left unchanged.
-    const completion = this.completionHandler(invokingSessionId);
+    const completion = this.completionHandler(graphId, invokingSessionId);
     if (completion) {
       options.onNodeCompletion = completion;
     }
-    const terminal = this.terminalHandler(invokingSessionId);
+    const terminal = this.terminalHandler(graphId, invokingSessionId);
     if (terminal) {
       options.onGraphTerminal = terminal;
+    }
+    // Subtask 5: wire the configured graph-notify stall seam (absent → no-op).
+    const stall = this.stallHandler(graphId, invokingSessionId);
+    if (stall) {
+      options.onNodeStall = stall;
     }
     // Graph monitoring: a durable write-side event log alongside the notifier.
     // Constructed only when a stateDir is configured — absent stateDir → no
@@ -677,10 +880,24 @@ export class GraphToolSet {
         // Fire-and-forget is unacceptable here (constructors are sync), but
         // adoption's async half is only the dispatch reconcile — which is
         // safe to run detached: it never re-dispatches, only re-attaches /
-        // re-emits already-finished work.
-        void runtime.adoptPrior(priorState);
+        // re-emits already-finished work. Subtask 2: a throwing adoptPrior
+        // must be contained (logged) — never an unhandled rejection from this
+        // fire-and-forget commit site.
+        void runtime.adoptPrior(priorState).catch((err: unknown) => {
+          log.warn(
+            `graph-tools: adoptPrior failed for graph "${graphId}": ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
       }
     }
+    // Monitor M4: dispose the PRIOR runtime before replacing the registry entry
+    // so its orphaned `onTaskTerminated` dispatch listeners (engine-recovery.ts
+    // subscribeTaskTermination) are unregistered from the dispatch seam — a
+    // mid-flight rebuild must never leave a stale runtime receiving (or
+    // leaking) completion callbacks for tasks the new engine now owns.
+    prior?.runtime.dispose?.();
     this.registry.set(graphId, {
       declaration: candidate,
       runtime,
@@ -1001,59 +1218,107 @@ export class GraphToolSet {
     // runtime graph_run builds (absent → the engine's default no-op seam).
     // `sessionId` (the graph-captured / invoking execution session) is forwarded
     // so the emperor-session resolver can target the orchestrator at runtime.
-    const completion = this.completionHandler(sessionId);
-    const terminal = this.terminalHandler(sessionId);
+    const completion = this.completionHandler(args.graph_id, sessionId);
+    const terminal = this.terminalHandler(args.graph_id, sessionId);
+    const stall = this.stallHandler(args.graph_id, sessionId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
       parentContext: this.parentContext(args.graph_id),
       stateDir: this.deps.stateDir,
+      // F2: enable the stale-node watcher + stale-lock sweeper on the
+      // production graph_run runtime (the primary execution path). The
+      // staleness watcher is the secondary backstop for a hung graph — the
+      // per-node `budget.timeout_ms` (if declared) overrides this deadline.
+      nodeStaleTimeoutMs:
+        this.deps.nodeStaleTimeoutMs ?? DEFAULT_NODE_STALE_TIMEOUT_MS,
+      sweeperIntervalMs: this.deps.sweeperIntervalMs ?? DEFAULT_SWEEPER_INTERVAL_MS,
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
       ...(completion ? { onNodeCompletion: completion } : {}),
       ...(terminal ? { onGraphTerminal: terminal } : {}),
+      ...(stall ? { onNodeStall: stall } : {}),
       // Graph monitoring: durable write-side event log when a stateDir is set.
       ...(this.deps.stateDir
         ? { graphEvents: new GraphEventRecorder(this.deps.stateDir) }
         : {}),
+      // Subtask 6: thread the optional liveness-monitor stall thresholds + the
+      // node-liveness feed into the production graph_run runtime (the primary
+      // execution path — absent → the engine's defaults / unchanged behavior).
+      ...(this.deps.nodeStallWarnMs !== undefined
+        ? { nodeStallWarnMs: this.deps.nodeStallWarnMs }
+        : {}),
+      ...(this.deps.nodeStallGraceMs !== undefined
+        ? { nodeStallGraceMs: this.deps.nodeStallGraceMs }
+        : {}),
+      ...(this.deps.livenessFeed !== undefined
+        ? { livenessFeed: this.deps.livenessFeed }
+        : {}),
     });
 
-    // Idempotent re-run: adopt the prior runtime's per-node progress into the
-    // fresh engine BEFORE dispatching. Without this, a second `graph_run` on
-    // the same graph (a common pattern when a model runs each node with its
-    // own graph_run call) rebuilds every node as `ready`/`pending` and
-    // re-dispatches nodes that already completed or are still running.
-    const priorState = entry.runtime.status();
-    const priorHasProgress = [...priorState.nodes.values()].some(
-      (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
-    );
-    if (priorHasProgress || priorState.phase !== EnginePhase.Idle) {
-      await runtime.adoptPrior(priorState, { replayAnswers: true });
-    }
-
-    // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is supplied
-    // with `retry:true` or `modify_prompt`, re-open and re-dispatch that node on
-    // the just-run runtime instead of reporting it as pending. This backs the
-    // design's `dispatch_retry` replacement (MERGE row 4).
-    //
-    // B1 (ordering bug fix): skip `runtime.run()` on the retry path. After
-    // `adoptPrior` loads previously-terminal nodes, `run()` sees a quiescent
-    // graph, fires a premature COMPLETE notification, then `retryNode` re-opens
-    // the phase to `executing` — the stale notification lands after the retry
-    // is already running. `adoptPrior(replayAnswers)` already dispatches nodes
-    // made ready by answer replay, and `retryNode` handles the retry target's
-    // dispatch + termination check, so nothing is left undispatched by skipping
-    // `run()`.
+    // Subtask 3 (failure atomicity): the adopt/retry/run block is the ONLY place
+    // a fresh engine can fail mid-flight (a throwing dispatch seam, an adoptPrior
+    // rejection, a retryNode failure). A throw here used to skip
+    // `entry.runtime.dispose?.()` + `registry.set(...)` below — leaking the
+    // partially-dispatched NEW engine (its registered `onTaskTerminated` dispatch
+    // listeners and wired completion/terminal notifiers keep firing ghost
+    // [GRAPH NODE COMPLETED] / [GRAPH COMPLETE] reminders for the failed run)
+    // while the registry kept the stale OLD runtime. The catch disposes the new
+    // runtime (its dispatch listeners unregistered via the M4 dispose path), the
+    // prior registry entry is left untouched (a retry re-dispatches from a
+    // consistent state), and the actionable error is rethrown. Invariants: no
+    // node is dispatched twice within a run, and no ghost terminal notification
+    // fires for a failed run.
     let retryReport: Awaited<ReturnType<EngineRuntime["retryNode"]>> | undefined;
-    if (args.node_id && (args.retry || args.modify_prompt)) {
-      retryReport = await runtime.retryNode(args.node_id, {
-        modifyPrompt: args.modify_prompt,
-      });
-    } else {
-      await runtime.run();
+    try {
+      // Idempotent re-run: adopt the prior runtime's per-node progress into the
+      // fresh engine BEFORE dispatching. Without this, a second `graph_run` on
+      // the same graph (a common pattern when a model runs each node with its
+      // own graph_run call) rebuilds every node as `ready`/`pending` and
+      // re-dispatches nodes that already completed or are still running.
+      const priorState = entry.runtime.status();
+      const priorHasProgress = [...priorState.nodes.values()].some(
+        (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
+      );
+      if (priorHasProgress || priorState.phase !== EnginePhase.Idle) {
+        await runtime.adoptPrior(priorState, { replayAnswers: true });
+      }
+
+      // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is
+      // supplied with `retry:true` or `modify_prompt`, re-open and re-dispatch
+      // that node on the just-run runtime instead of reporting it as pending.
+      // This backs the design's `dispatch_retry` replacement (MERGE row 4).
+      //
+      // B1 (ordering bug fix): skip `runtime.run()` on the retry path. After
+      // `adoptPrior` loads previously-terminal nodes, `run()` sees a quiescent
+      // graph, fires a premature COMPLETE notification, then `retryNode`
+      // re-opens the phase to `executing` — the stale notification lands after
+      // the retry is already running. `adoptPrior(replayAnswers)` already
+      // dispatches nodes made ready by answer replay, and `retryNode` handles
+      // the retry target's dispatch + termination check, so nothing is left
+      // undispatched by skipping `run()`.
+      if (args.node_id && (args.retry || args.modify_prompt)) {
+        retryReport = await runtime.retryNode(args.node_id, {
+          modifyPrompt: args.modify_prompt,
+        });
+      } else {
+        await runtime.run();
+      }
+    } catch (err) {
+      // Failure atomicity: the new engine never reaches the registry. Dispose
+      // it now so its registered dispatch listeners are unregistered (no ghost
+      // completion can fire for the failed run); the prior registry entry is
+      // left untouched and remains the consistent runtime for any retry.
+      runtime.dispose();
+      throw err;
     }
 
     // Update the registry runtime so subsequent graph_status reads live state,
     // and persist the sticky session id when graph_run carried a fresh one.
+    // Monitor M4: dispose the PRIOR runtime first so its orphaned
+    // `onTaskTerminated` dispatch listeners are unregistered before the new
+    // engine takes over the registry slot — a disposed runtime never receives
+    // (or leaks) stale dispatch→signal callbacks.
+    entry.runtime.dispose?.();
     this.registry.set(args.graph_id, {
       ...entry,
       runtime,
@@ -1086,6 +1351,64 @@ export class GraphToolSet {
           }
         : {}),
     };
+  }
+
+  // ── Session-level in-flight query ───────────────────────────────────────────
+
+  /**
+   * Whether the given session owns at least one graph whose engine is genuinely
+   * mid-flight: phase `executing` AND at least one node `ready` or `running`.
+   *
+   * `Blocked` nodes are deliberately EXCLUDED (hence the dedicated
+   * {@link GRAPH_INFLIGHT_NODE_STATUSES} predicate rather than reusing
+   * `GRAPH_RUN_ACTIVE_STATUSES`, which includes `Blocked`) — a `needs_approval`
+   * gate is a legitimate pause awaiting the human, so an auto-continue must
+   * freeze through the existing gated (approval) path instead of treating the
+   * graph as inflight work to contend with. A graph whose phase is `idle` (never
+   * run / finished) or whose executing engine has no unsettled node does NOT
+   * count. Absent invoking-session match, or no graphs at all → `false`.
+   */
+  hasInflightGraphsForSession(sessionID: string): boolean {
+    for (const entry of this.registry.values()) {
+      if (entry.invokingSessionId !== sessionID) continue;
+      const liveStatus = entry.runtime.status();
+      if (liveStatus.phase !== EnginePhase.Executing) continue;
+      for (const n of liveStatus.nodes.values()) {
+        if (GRAPH_INFLIGHT_NODE_STATUSES.has(n.status)) return true;
+      }
+    }
+    return false;
+  }
+
+  // ── Session-level liveness resolution (subtask 6) ──────────────────────────
+
+  /**
+   * Resolve the engine runtime + node owning a live dispatch session (subtask
+   * 6 — the Pi liveness wiring's `sessionId → nodeId` resolution). Iterates
+   * every registry runtime's engine-level reverse index
+   * (`EngineRuntime.getNodeIdForSession` — populated at launch when a liveness
+   * feed is wired onto the engine, dropped on the node's terminal transition).
+   * Returns `undefined` when no registry runtime owns the session (unknown
+   * session, detached terminal node, or an engine built without a liveness
+   * feed) — the wiring then no-ops. Total: a misbehaving runtime is logged and
+   * skipped, never thrown.
+   */
+  resolveSessionOwner(
+    sessionId: string,
+  ): { graphId: string; runtime: EngineRuntime; nodeId: string } | undefined {
+    for (const [graphId, entry] of this.registry) {
+      try {
+        const nodeId = entry.runtime.getNodeIdForSession?.(sessionId);
+        if (nodeId) return { graphId, runtime: entry.runtime, nodeId };
+      } catch (err) {
+        log.warn(
+          `graph-tools: getNodeIdForSession threw for graph "${graphId}" (session "${sessionId}") — skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    return undefined;
   }
 
   // ── graph_status ───────────────────────────────────────────────────────────
@@ -1274,30 +1597,33 @@ export class GraphToolSet {
     const capped = args.limit && args.limit > 0 ? rows.slice(0, args.limit) : rows;
 
     if (args.format === "json") {
-      return JSON.stringify(
-        {
-          scope,
-          graphs: states.map((s) => ({
-            graph_id: s.graphId,
-            phase: s.phase,
-            node_count: s.nodes.size,
-          })),
-          nodes: capped.map((r) => ({
-            graph_id: r.graphId,
-            node_id: r.node.nodeId,
-            status: r.node.status,
-            agent: r.node.agent,
-            ...(r.node.dispatchSessionId
-              ? { dispatch_session_id: r.node.dispatchSessionId }
-              : {}),
-            ...(r.node.dispatchTaskId
-              ? { dispatch_task_id: r.node.dispatchTaskId }
-              : {}),
-          })),
-          budget,
-        },
-        null,
-        2,
+      return this.paginate(
+        JSON.stringify(
+          {
+            scope,
+            graphs: states.map((s) => ({
+              graph_id: s.graphId,
+              phase: s.phase,
+              node_count: s.nodes.size,
+            })),
+            nodes: capped.map((r) => ({
+              graph_id: r.graphId,
+              node_id: r.node.nodeId,
+              status: r.node.status,
+              agent: r.node.agent,
+              ...(r.node.dispatchSessionId
+                ? { dispatch_session_id: r.node.dispatchSessionId }
+                : {}),
+              ...(r.node.dispatchTaskId
+                ? { dispatch_task_id: r.node.dispatchTaskId }
+                : {}),
+            })),
+            budget,
+          },
+          null,
+          2,
+        ),
+        args,
       );
     }
 
@@ -1352,10 +1678,9 @@ export class GraphToolSet {
       .map(([key, m]) => ({ key, count: m.count, nodes: m.nodes }));
 
     if (args.format === "json") {
-      return JSON.stringify(
-        { scope: args.scope, group_by: mode, graphs: states.length, buckets },
-        null,
-        2,
+      return this.paginate(
+        JSON.stringify({ scope: args.scope, group_by: mode, graphs: states.length, buckets }, null, 2),
+        args,
       );
     }
     const lines: string[] = [
@@ -1638,6 +1963,10 @@ export class GraphToolSet {
     }
     switch (args.format ?? "summary") {
       case "json": {
+        // F6 observability: when the graph's durable event log carries
+        // `notification_degraded` markers, surface them on the snapshot. The
+        // conditional spread keeps the output byte-identical otherwise.
+        const degradedStatuses = this.notificationDegradedStatuses(state.graphId);
         const snapshot = {
           graph_id: state.graphId,
           phase: state.phase,
@@ -1651,11 +1980,20 @@ export class GraphToolSet {
               )
             : undefined,
           metrics: args.include_metrics ? this.metricsSummary(state) : undefined,
+          ...(degradedStatuses.length > 0
+            ? {
+                notification_degraded: true,
+                notification_degraded_statuses: degradedStatuses,
+              }
+            : {}),
         };
         // C-WIRE: merge structured flag data (round/checkpoint/artifacts/evidence/
         // stream) onto the snapshot. No-op when none are set (byte-identical).
         this.mergeFlagData(snapshot, state, args);
-        return JSON.stringify(snapshot, null, 2);
+        // Monitor M8/M9: every JSON output flows through paginate so
+        // max_chars/offset/tail apply, with an explicit truncation marker when
+        // content is dropped (see {@link paginate}).
+        return this.paginate(JSON.stringify(snapshot, null, 2), args);
       }
       case "tree":
         return this.appendFlagSections(
@@ -1686,14 +2024,17 @@ export class GraphToolSet {
   ): string {
     const buckets = groupCompletedNodes(this.visibleNodeMap(state, nodeFilter), args.group_by!);
     if (args.format === "json") {
-      return JSON.stringify(
-        {
-          group_by: args.group_by,
-          graph_id: state.graphId,
-          buckets: buckets.map((b) => ({ key: b.key, count: b.count, nodes: b.nodes })),
-        },
-        null,
-        2,
+      return this.paginate(
+        JSON.stringify(
+          {
+            group_by: args.group_by,
+            graph_id: state.graphId,
+            buckets: buckets.map((b) => ({ key: b.key, count: b.count, nodes: b.nodes })),
+          },
+          null,
+          2,
+        ),
+        args,
       );
     }
     const lines: string[] = [];
@@ -1723,8 +2064,15 @@ export class GraphToolSet {
     lines.push(`Graph "${state.graphId}"  [phase: ${state.phase}]`);
     lines.push("  NODE                  STATUS      AGENT");
     for (const n of limitNodes(nodes, args.limit)) {
+      // Liveness (subtask 7 display): stall marker on the row ONLY for RUNNING
+      // nodes that have a recorded stallStatus. Non-running nodes and nodes
+      // without recorded liveness keep the row byte-identical to legacy output.
+      const stall =
+        n.status === NodeStatus.Running && n.liveness?.stallStatus
+          ? `  [stall: ${n.liveness.stallStatus}]`
+          : "";
       lines.push(
-        `  ${n.nodeId.padEnd(20)} ${n.status.padEnd(11)} ${n.agent}`,
+        `  ${n.nodeId.padEnd(20)} ${n.status.padEnd(11)} ${n.agent}${stall}`,
       );
     }
     if (args.include_budget) {
@@ -1749,6 +2097,18 @@ export class GraphToolSet {
       lines.push("");
       lines.push(`  Metrics — ${this.metricsSummary(state)}`);
     }
+    // F6 observability: append an explicit hint when the graph's durable event
+    // log records a degraded notification seam (no emperor session resolved).
+    // Absent stateDir / log file / marker → nothing is appended (byte-compat).
+    const degradedStatuses = this.notificationDegradedStatuses(state.graphId);
+    if (degradedStatuses.length > 0) {
+      lines.push("");
+      for (const status of degradedStatuses) {
+        lines.push(
+          `  ⚠ notification degraded: ${status} notification could not reach the orchestrator (no emperor session resolved)`,
+        );
+      }
+    }
     return this.paginate(lines.join("\n"), args);
   }
 
@@ -1756,6 +2116,17 @@ export class GraphToolSet {
     const node = state.nodes.get(nodeId);
     if (!node) {
       throw new Error(`graph_status: unknown node "${nodeId}" in graph "${state.graphId}".`);
+    }
+    if (args.format === "json") {
+      // JSON node view (monitor M8): serialize the shared nodeSummary — which
+      // honors include_output by adding an `output` field with the node's
+      // materialized result text — and merge node-scoped C-WIRE observability
+      // data (checkpoints / artifacts / evidence / signal stream), mirroring the
+      // text render's appendFlagSections scoping. Paginated like every other
+      // JSON output so max_chars/offset/tail apply.
+      const summary = this.nodeSummary(state, node, args);
+      this.mergeFlagData(summary, state, { ...args, node_id: nodeId });
+      return this.paginate(JSON.stringify(summary, null, 2), args);
     }
     const lines: string[] = [];
     lines.push(`Node "${nodeId}"`);
@@ -1788,6 +2159,23 @@ export class GraphToolSet {
       lines.push("  output:");
       lines.push(this.paginate(GraphToolSet.resultText(node.result), args).replace(/^/gm, "    "));
     }
+    // Liveness (subtask 7 display): running nodes ALWAYS show their recorded
+    // liveness; non-running nodes only when include_liveness is set. Nodes with
+    // NO recorded liveness get NO block at all (honest-empty — never a
+    // placeholder). Sub-lines are emitted only for fields actually present.
+    if (node.liveness && (node.status === NodeStatus.Running || args.include_liveness)) {
+      lines.push("  liveness:");
+      if (node.liveness.lastActivityAt !== undefined) {
+        lines.push(`    last_activity: ${new Date(node.liveness.lastActivityAt).toISOString()}`);
+        lines.push(`    idle_ms: ${Date.now() - node.liveness.lastActivityAt}`);
+      }
+      if (node.liveness.heartbeatSource) {
+        lines.push(`    heartbeat_source: ${node.liveness.heartbeatSource}`);
+      }
+      if (node.liveness.stallStatus) {
+        lines.push(`    stall_status: ${node.liveness.stallStatus}`);
+      }
+    }
     // C-WIRE: append the node-scoped observability sections (checkpoints /
     // artifacts / evidence / signal stream). `include_history` / `round` in a
     // node view resolve to the node's own loop group rounds when no explicit
@@ -1811,7 +2199,7 @@ export class GraphToolSet {
       const summary = this.loopSummary(state, loop, this.loopNodeIds(state, loopId));
       // C-WIRE: merge loop-scoped round history into the loop JSON when asked.
       this.mergeFlagData(summary, state, { ...args, loop_id: loopId });
-      return JSON.stringify(summary, null, 2);
+      return this.paginate(JSON.stringify(summary, null, 2), args);
     }
     const lines: string[] = [];
     lines.push(`Loop "${loopId}"`);
@@ -2005,19 +2393,20 @@ export class GraphToolSet {
    * Extract per-node timestamped signal-event histories from
    * `SignalLedgerEntry.history[]`, scoped to a node when `nodeId` is given.
    * When `args.since` is a valid ISO-8601 timestamp, events strictly before it
-   * are filtered out. Sorted ascending by `atMs`. An absent/empty `history`
-   * yields an empty event list — the caller surfaces the honest "no events" note.
+   * are filtered out; an INVALID `since` throws (aligned with the
+   * from_date/to_date filter surface). Sorted ascending by `atMs`. An
+   * absent/empty `history` yields an empty event list — the caller surfaces the
+   * honest "no events" note.
    */
   private signalStreamEntries(
     state: EngineState,
     args: GraphStatusArgs,
     nodeId?: string,
   ): Array<{ node_id: string; events: SignalLedgerEvent[] }> {
-    let sinceMs: number | undefined;
-    if (args.since !== undefined) {
-      const parsed = new Date(args.since).getTime();
-      sinceMs = Number.isNaN(parsed) ? undefined : parsed;
-    }
+    // Monitor L2: an invalid `since` THROWS (via the shared toEpochMs, the same
+    // throw pattern as from_date/to_date) instead of silently ignoring the bound
+    // — a garbage timestamp must never silently broaden a stream.
+    const sinceMs = args.since !== undefined ? toEpochMs(args.since) : undefined;
     const out: Array<{ node_id: string; events: SignalLedgerEvent[] }> = [];
     for (const [id, ledger] of state.signalLedger) {
       if (nodeId !== undefined && id !== nodeId) continue;
@@ -2302,7 +2691,38 @@ export class GraphToolSet {
         : {}),
       error: n.errorReason,
       ...(progress && progress.recorded
-        ? { progress: progress.payload, progress_last_signal_at: progress.lastSignalAt }
+        ? {
+            progress: progress.payload,
+            // Monitor L1: this timestamp is the node's LAST SIGNAL time of ANY
+            // type (`SignalLedgerEntry.lastSignalAt`), not a progress-specific
+            // stamp — named accordingly.
+            last_signal_at: progress.lastSignalAt,
+          }
+        : {}),
+      // Monitor M9: surface the node's materialized result text as an `output`
+      // field, only when include_output was requested.
+      ...(args.include_output && n.result
+        ? { output: GraphToolSet.resultText(n.result) }
+        : {}),
+      // Liveness (subtask 7 display): merge snake_case liveness fields when the
+      // node has RECORDED liveness AND (it is running OR include_liveness is
+      // set). Running nodes always surface liveness; non-running nodes only on
+      // request. Nodes without recorded liveness add NO keys (byte-identical
+      // output preserved). Sub-fields are emitted only when actually present.
+      ...(n.liveness && (n.status === NodeStatus.Running || args.include_liveness)
+        ? (() => {
+            const liv = n.liveness!;
+            const liveness: Record<string, unknown> = {};
+            if (liv.lastActivityAt !== undefined) {
+              liveness.last_activity_at = liv.lastActivityAt;
+              liveness.idle_ms = Date.now() - liv.lastActivityAt;
+            }
+            if (liv.heartbeatSource) liveness.heartbeat_source = liv.heartbeatSource;
+            if (liv.stallStatus) liveness.stall_status = liv.stallStatus;
+            if (liv.stallWarnedAt !== undefined) liveness.stall_warned_at = liv.stallWarnedAt;
+            if (liv.stallReason !== undefined) liveness.stall_reason = liv.stallReason;
+            return liveness;
+          })()
         : {}),
     };
   }
@@ -2322,6 +2742,11 @@ export class GraphToolSet {
   private progressForNode(state: EngineState, node: NodeRuntimeState) {
     const recorded = node.signalsObserved["progress"] !== undefined;
     const payload = recorded ? node.signalsObserved["progress"] : undefined;
+    // Monitor L1: `lastSignalAt` is the node's LAST SIGNAL time of ANY type —
+    // the graph-level `SignalLedgerEntry.lastSignalAt` (updated by
+    // signal-bridge.ts:record on every signal, progress or not), NOT a
+    // progress-specific stamp. It rides along with the progress payload so a
+    // consumer gets a recency anchor, but it is named for what it actually is.
     const lastSignalAt = state.signalLedger.get(node.nodeId)?.lastSignalAt;
     return { recorded, payload, lastSignalAt };
   }
@@ -2366,16 +2791,25 @@ export class GraphToolSet {
     return `phase=${state.phase} ${parts}`;
   }
 
-  /** Apply max_chars / offset / tail pagination to a string output. */
+  /** Apply max_chars / offset / tail pagination to a string output.
+   *
+   * Monitor L3: when truncation actually drops content, a `…[truncated: N more
+   * chars]` marker is APPENDED to the tail of the returned text (N = the number
+   * of chars NOT included in the result), so a consumer can tell the output was
+   * cut and by how much. The marker is emitted for both tail mode (head
+   * dropped) and head mode (tail dropped) — the returned slice is always
+   * `max_chars` chars, the marker rides after it. No truncation → no marker
+   * (byte-identical to legacy output). */
   private paginate(text: string, args: GraphStatusArgs): string {
     const maxChars = args.max_chars ?? DEFAULT_MAX_CHARS;
     if (maxChars <= 0 || text.length <= maxChars) {
       return args.offset ? text.slice(args.offset) : text;
     }
-    if (args.tail) {
-      return text.slice(Math.max(0, text.length - maxChars));
-    }
-    return text.slice(args.offset ?? 0, (args.offset ?? 0) + maxChars);
+    const slice = args.tail
+      ? text.slice(Math.max(0, text.length - maxChars))
+      : text.slice(args.offset ?? 0, (args.offset ?? 0) + maxChars);
+    const dropped = text.length - slice.length;
+    return `${slice}\n…[truncated: ${dropped} more chars]`;
   }
 
   /**
@@ -2448,6 +2882,16 @@ const GRAPH_RUN_ACTIVE_STATUSES: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
   NodeStatus.Ready,
   NodeStatus.Running,
   NodeStatus.Blocked,
+]);
+
+/** Statuses that count as genuinely "in-flight" for the session-level
+ *  {@link GraphToolSet.hasInflightGraphsForSession} query: a node that has been
+ *  dispatched (`running`) or is queued for dispatch (`ready`). Excludes Blocked
+ *  — a `needs_approval` gate waits on the human, so auto-continue must freeze
+ *  through the existing gated path instead of treating the graph as inflight. */
+const GRAPH_INFLIGHT_NODE_STATUSES: ReadonlySet<NodeStatus> = new Set<NodeStatus>([
+  NodeStatus.Ready,
+  NodeStatus.Running,
 ]);
 
 /**

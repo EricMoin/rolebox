@@ -342,6 +342,89 @@ describe("EnginePersistence", () => {
     expect(store.load("graph-1")).toBeNull();
   });
 
+  // ── Total hydration: parseable-but-field-incomplete v2 files ───────────────
+  //
+  // A v2 file that passes the version gate but is missing a required field must
+  // return `null` (never throw). Previously deserializeEngineState threw a
+  // TypeError on Object.entries(file.nodes) / spread of undefined — making the
+  // graph permanently unrecoverable (re-failing every restart). Missing
+  // required fields are treated as CORRUPT, not as a migration point; the
+  // version stays 2.
+
+  /** Serialize a rich state and strip one top-level required field. */
+  function v2FileWithout(field: string): string {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const { [field]: _stripped, ...rest } = dto;
+    return JSON.stringify(rest);
+  }
+
+  it("returns null (not throw) for a v2 file missing `nodes`", () => {
+    const path = engineStatePath(dir, "graph-1");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, v2FileWithout("nodes"));
+    expect(() => store.load("graph-1")).not.toThrow();
+    expect(store.load("graph-1")).toBeNull();
+  });
+
+  it("returns null (not throw) for a v2 file missing `frontier`", () => {
+    const path = engineStatePath(dir, "graph-2");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, v2FileWithout("frontier"));
+    expect(() => store.load("graph-2")).not.toThrow();
+    expect(store.load("graph-2")).toBeNull();
+  });
+
+  it("returns null (not throw) for a v2 file missing `pendingCompletions`", () => {
+    const path = engineStatePath(dir, "graph-3");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, v2FileWithout("pendingCompletions"));
+    expect(() => store.load("graph-3")).not.toThrow();
+    expect(store.load("graph-3")).toBeNull();
+  });
+
+  it("treats non-object/array required fields as corrupt (null), never throws", () => {
+    const path = engineStatePath(dir, "graph-4");
+    mkdirSync(join(path, ".."), { recursive: true });
+    // `budget` is required to be an object; a scalar is structurally invalid.
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    writeFileSync(path, JSON.stringify({ ...dto, budget: "not-an-object" }));
+    expect(() => store.load("graph-4")).not.toThrow();
+    expect(store.load("graph-4")).toBeNull();
+  });
+
+  it("loadEngineStateFromJson is total: a deep structurally-invalid v2 file returns null", () => {
+    // Passes the required-field gate (all top-level fields present) but a
+    // nested edge payload is malformed — `artifacts` is absent, which makes
+    // deserializeEngineState's cloneEdgePayload throw on `[...p.artifacts]`.
+    // The try/catch containment must return null, never throw.
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const edges = dto.edges as Record<string, Record<string, unknown>>;
+    const edge = edges["A->B"];
+    const poisoned = {
+      ...dto,
+      edges: {
+        "A->B": {
+          fromNode: edge.fromNode,
+          fromSignal: edge.fromSignal,
+          result: edge.result,
+          budgetConsumed: edge.budgetConsumed,
+          // `artifacts` deliberately absent → structural invalidity
+        },
+      },
+    };
+    expect(() => loadEngineStateFromJson(JSON.stringify(poisoned))).not.toThrow();
+    expect(loadEngineStateFromJson(JSON.stringify(poisoned))).toBeNull();
+  });
+
   it("scheduleSave writes on flush() (debounced non-critical path)", () => {
     const state = buildRichState();
     store.scheduleSave(state);

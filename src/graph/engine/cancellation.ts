@@ -64,6 +64,17 @@ export interface CancelScopeOptions {
   cascade?: boolean;
 }
 
+/**
+ * Notification hook invoked for every node actually retired by a scoped
+ * cancellation (monitor H4). Receives the node id and the cancellation reason
+ * AFTER the node's lifecycle advanced to `cancelled → done`. The engine
+ * runtime wires it to the advance engine's `notifyNodeTerminal` seam so a
+ * scoped cancellation is observable to the monitor (completion seam + durable
+ * event log) exactly like signal-driven transitions. Optional — direct
+ * consumers that don't need observation omit it.
+ */
+export type CancelNodeNotifier = (nodeId: string, reason: string) => void;
+
 /** Result of {@link cancelNodes}, for diagnostics and tests. */
 export interface CancelScopeReport {
   /**
@@ -179,6 +190,7 @@ function cancelOne(
   reason: string,
   dispatchPort: CancelDispatchPort | undefined,
   cancelCalls: string[],
+  onCancelled?: CancelNodeNotifier,
 ): void {
   // Double guard: transition-table legality + the Cancellable rule.
   if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
@@ -189,6 +201,12 @@ function cancelOne(
     cancelCalls.push(node.dispatchTaskId);
     void dispatchPort.cancelTask(node.dispatchTaskId);
   }
+  // Monitor (H4): a scoped cancellation is a lifecycle transition performed
+  // OUTSIDE the signal-driven advancement — surface the retirement through the
+  // caller-provided hook (the engine runtime routes it to
+  // `advance.notifyNodeTerminal`) so the monitor sees the per-node completion
+  // event + durable event log line, identical to signal-driven transitions.
+  onCancelled?.(node.nodeId, reason);
 }
 
 /**
@@ -218,6 +236,9 @@ function cancelOne(
  *                      transitive downstream dependents when true.
  * @param dispatchPort  Optional cancellation seam; when omitted, only the node
  *                      lifecycle is advanced (no dispatch task teardown).
+ * @param onCancelled   Optional per-node notification hook (monitor H4) invoked
+ *                      with `(nodeId, reason)` for every node actually retired;
+ *                      wired by the engine runtime to `notifyNodeTerminal`.
  * @returns A {@link CancelScopeReport} describing what was retired and skipped.
  */
 export function cancelNodes(
@@ -225,6 +246,7 @@ export function cancelNodes(
   nodeIds: string[],
   options: CancelScopeOptions = {},
   dispatchPort?: CancelDispatchPort,
+  onCancelled?: CancelNodeNotifier,
 ): CancelScopeReport {
   const cascade = options.cascade === true;
 
@@ -248,7 +270,7 @@ export function cancelNodes(
       skipped.push(id);
       continue;
     }
-    cancelOne(state, node, reason, dispatchPort, cancelCalls);
+    cancelOne(state, node, reason, dispatchPort, cancelCalls, onCancelled);
     cancelled.push(id);
   }
 

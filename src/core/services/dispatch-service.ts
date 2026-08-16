@@ -15,6 +15,7 @@ import { z } from "zod";
 import {
   createDispatchManager,
   buildSubagentLineage,
+  buildRoleConfigs,
 } from "../../dispatch/factory.ts";
 
 const log = createSubLogger("dispatch-service");
@@ -126,6 +127,16 @@ export class DispatchService implements PluginService, ToolContributor {
     }
 
     this.dispatchManager = dispatchManager;
+
+    // Refresh per-role dispatch configs on EVERY init (hot-reload included).
+    // The manager may be cached from a previous init (managerMap); rebuilding
+    // role configs from the current resolvedRoles keeps per-role concurrency
+    // limits and role-scoped configs in sync after a reload. subagentRoleKey
+    // comes from the lineage built above (~line 93).
+    dispatchManager.updateDispatchConfigs(
+      buildRoleConfigs(ctx.resolvedRoles),
+      lineage.subagentRoleKey,
+    );
 
     // Fire-and-forget: clean expired state files from disk (7-day default retention)
     cleanExpiredState(stateDirFor(storeDir)).catch(() => {});

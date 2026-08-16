@@ -7,6 +7,7 @@ import { resolveFunctions } from "../function/file-resolver.ts";
 import { buildSubagentRoleBlock, SUBAGENT_RESULT_CONTRACT } from "../graph/prompt-builder.ts";
 import { autoConvertCollaboration, graphDeclarationToResolvedGraph } from "../graph/collaboration-bridge.ts";
 import { buildAgentPrompt } from "../prompt/builder.ts";
+import { collectOpenRoles, type OpenRoleEntry } from "./open-roles.ts";
 import { subagentDir, globalFunctionsPath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { RoleConfig, ResolvedRole, ResolvedSubAgent, ResolvedSkill, ResolvedFunction, ResolvedReference, ResolvedGraph, GraphNodeRole, SubAgentConfig } from "../types.ts";
@@ -199,11 +200,89 @@ async function resolveSubagents(
   return results;
 }
 
+/**
+ * Build a minimal pre-resolution ResolvedRole stub from a raw RoleConfig.
+ *
+ * The open-role pre-pass in resolveAllRoles runs BEFORE subagents are resolved,
+ * so it feeds collectOpenRoles these stubs: export names still resolve to full
+ * `roleId--slug` ids against the raw subagent tree, using the exact slug
+ * computation resolveSubagents applies (orchestrator.ts:118-119). The stub
+ * carries no skills/functions/references — collectOpenRoles only reads the id,
+ * the config (open/name/description/exports) and the subagent id/name tree.
+ */
+function stubResolvedRole(roleId: string, config: RoleConfig): ResolvedRole {
+  const stubSubagent = (sa: SubAgentConfig, parentId: string): ResolvedSubAgent => {
+    const slug = sa.name.toLowerCase().replace(/\s+/g, "-");
+    const id = `${parentId}${SUBAGENT_ID_SEPARATOR}${slug}`;
+    return {
+      id,
+      config: sa,
+      prompt: sa.prompt,
+      skills: [],
+      functions: [],
+      references: [],
+      subagents: (sa.subagents ?? []).map((child) => stubSubagent(child, id)),
+      parentId,
+      inheritedFrom: {},
+    };
+  };
+  return {
+    id: roleId,
+    config,
+    prompt: config.prompt,
+    skills: [],
+    functions: [],
+    references: [],
+    subagents: (config.subagents ?? []).map((sa) => stubSubagent(sa, roleId)),
+  };
+}
+
+/**
+ * Resolve the <available_public_agents> metadata for a consumer role: every
+ * producer id in config.open_roles that exists in the open-role registry
+ * yields {id, name, description}. Unknown producer ids warn and are skipped;
+ * duplicate declarations are collapsed.
+ *
+ * Exported so the hot-reload fast path can rebuild a role's prompt with the
+ * same open-agents metadata after a skill-only reload (see
+ * src/core/services/hot-reload-service.ts performFastReload).
+ */
+export function resolvePublicAgents(
+  config: RoleConfig,
+  openRegistry: Map<string, OpenRoleEntry>,
+): Array<{ id: string; name: string; description: string }> {
+  const agents: Array<{ id: string; name: string; description: string }> = [];
+  const seen = new Set<string>();
+  for (const producerId of config.open_roles ?? []) {
+    if (seen.has(producerId)) continue;
+    seen.add(producerId);
+    const entry = openRegistry.get(producerId);
+    if (entry === undefined) {
+      log.warn(
+        `Role "${config.name}" declares open_roles for "${producerId}", but no open role with that id was found`,
+      );
+      continue;
+    }
+    agents.push({ id: entry.roleId, name: entry.name, description: entry.description });
+  }
+  return agents;
+}
+
 export async function resolveAllRoles(
   roles: Map<string, RoleConfig>,
   ctx: ResolveContext,
 ): Promise<ResolvedRole[]> {
   const resolved: ResolvedRole[] = [];
+
+  // Pre-pass: compute the open-role registry (roles with open: true plus their
+  // resolved export ids) from the raw configs, BEFORE per-role resolution.
+  // Consumer roles declaring open_roles: [producerId] then receive the
+  // producer's metadata in <available_public_agents> inside the loop.
+  const openRegistry = collectOpenRoles(
+    Array.from(roles.entries(), ([roleId, config]) =>
+      stubResolvedRole(roleId, config),
+    ),
+  );
 
   for (const [roleId, config] of roles) {
     try {
@@ -274,7 +353,13 @@ export async function resolveAllRoles(
         name: sa.config.name,
         description: sa.config.description,
       }));
-      const prompt = buildAgentPrompt(config, skills, { subagents: subagentMetadata, references: allReferences, graph });
+      const publicAgents = resolvePublicAgents(config, openRegistry);
+      const prompt = buildAgentPrompt(config, skills, {
+        subagents: subagentMetadata,
+        references: allReferences,
+        graph,
+        ...(publicAgents.length > 0 ? { publicAgents } : {}),
+      });
 
       resolved.push({
         id: roleId,

@@ -140,8 +140,29 @@ export function getLanguageIdFromExtension(filePath: string): string | undefined
 function findCommandOnPath(command: string): string | null {
   const isWin = process.platform === "win32";
 
-  const resolved = Bun.which(command);
-  if (resolved) return resolved;
+  // Dual-runtime guard: Bun.which is Bun-only. Pi loads this module via jiti
+  // in a Node.js process where the Bun global does not exist, so under Node we
+  // fall back to a portable PATH lookup. Matches the isBunRuntime() pattern
+  // in src/memory/db-driver.ts.
+  if (typeof (globalThis as any).Bun !== "undefined") {
+    const resolved = (globalThis as any).Bun?.which?.(command);
+    if (resolved) return resolved;
+  } else {
+    // Node-portable PATH lookup: walk each PATH dir, trying the command name
+    // (plus PATHEXT extensions on Windows, defaulting to exe/cmd/bat/com).
+    const pathDirs = (process.env.PATH ?? "").split(path.delimiter);
+    const extensions = isWin
+      ? (process.env.PATHEXT ?? ".exe;.cmd;.bat;.com").split(";")
+      : [""];
+
+    for (const dir of pathDirs) {
+      if (!dir) continue;
+      for (const ext of extensions) {
+        const candidate = path.join(dir, command + ext);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
 
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const commonPaths = [

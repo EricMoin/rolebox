@@ -10,8 +10,14 @@ import type {
   NodeRuntimeState,
 } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
-import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
+import type {
+  DispatchParentContext,
+  TaskTerminatedCallback,
+} from "../../src/graph/engine/dispatch-bridge.ts";
+import type {
+  NodeDispatchPort,
+  NodeCompletionEvent,
+} from "../../src/graph/engine/engine-advance.ts";
 import {
   createEngineState,
   provision,
@@ -25,9 +31,13 @@ import {
   rebuildFrontier,
   clearStaleCriticalSection,
   captureNodeUsage,
+  adoptPriorNodeStates,
   EngineLockSweeper,
+  NodeStalenessWatcher,
+  hydrateEngineState,
   ORPHAN_REASON,
   type ReconcileReport,
+  type ReconcileSubscriptions,
 } from "../../src/graph/engine/engine-recovery.ts";
 import type { UsageRecord } from "../../src/dispatch/budget/budget-tracker.ts";
 import type { SignalType } from "../../src/graph/engine/signal-bridge.ts";
@@ -217,10 +227,41 @@ describe("mapDispatchStatusToSignal", () => {
     expect(mapDispatchStatusToSignal("cancelled")).toBeNull();
   });
 
-  it("non-terminal statuses → null", () => {
+  it("running / pending → null (non-terminal statuses)", () => {
     expect(mapDispatchStatusToSignal("running")).toBeNull();
     expect(mapDispatchStatusToSignal("pending")).toBeNull();
-    expect(mapDispatchStatusToSignal("awaiting_approval")).toBeNull();
+  });
+
+  it("HITL pause statuses → pausing need_approval signal (F1 bridge)", () => {
+    // The completion evaluator pauses a task for a human decision and delivers
+    // the HITL signal type (awaiting_approval is the task's status; the others
+    // are the session-ledger signal types) to the engine's onTaskTerminated
+    // listener. Each must map to the engine's pausing `need_approval` signal so
+    // subscribeTaskTermination's `if (!sig) return;` never drops it.
+    expect(mapDispatchStatusToSignal("awaiting_approval")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "awaiting_approval" },
+    });
+    expect(mapDispatchStatusToSignal("need_approval")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "need_approval" },
+    });
+    expect(mapDispatchStatusToSignal("blocked")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "blocked" },
+    });
+    expect(mapDispatchStatusToSignal("need_clarification")).toEqual({
+      type: "need_approval",
+      payload: { hitl: "need_clarification" },
+    });
+  });
+
+  it("HITL status → need_approval signal carries the task id when a task is present", () => {
+    const task = makeTask("t-hitl", "awaiting_approval");
+    expect(mapDispatchStatusToSignal("awaiting_approval", task)).toEqual({
+      type: "need_approval",
+      payload: { hitl: "awaiting_approval", taskId: "t-hitl" },
+    });
   });
 });
 
@@ -266,6 +307,18 @@ describe("subscribeTaskTermination", () => {
     const { fire, emitted } = subscribe(NodeStatus.Running);
     fire("completed");
     expect(emitted).toEqual([["A", "answer", { __inferred: true }]]);
+  });
+
+  it("emits a need_approval signal (NOT dropped) when the listener fires a HITL status (F1)", () => {
+    // Before F1, a HITL pause status mapped to null and `if (!sig) return;`
+    // silently dropped it — the node stayed `running` forever and [GRAPH
+    // BLOCKED] never fired. Now the listener must emit the pausing
+    // `need_approval` signal (with the paused task id in the payload).
+    const { fire, emitted } = subscribe(NodeStatus.Running);
+    fire("need_approval");
+    expect(emitted).toEqual([
+      ["A", "need_approval", { hitl: "need_approval", taskId: "task-A" }],
+    ]);
   });
 
   it("does NOT emit for a node that is no longer running", () => {
@@ -815,6 +868,87 @@ describe("engine.recover() integration", () => {
     expect(engine.status().phase).toBe(EnginePhase.Idle);
     expect(fake.calls).toEqual([]);
   });
+
+  it("notifies persisted Timeout nodes one by one on the no-getTask recovery path [M6]", async () => {
+    const dir = makeTmpDir();
+    const graphId = "rec-m6-noget";
+    // Persist a crashed state in which A was ALREADY marked timeout. The
+    // no-getTask path cannot apply timeout semantics (no dispatch read to
+    // reconcile a vanished running task), so it must still surface the
+    // recorded timeout through the completion seam + event log.
+    const crashed = buildState(singleNodeGraph(), graphId);
+    crashed.nodes.get("A")!.status = NodeStatus.Timeout;
+    crashed.nodes.get("A")!.errorReason = ORPHAN_REASON;
+    new EnginePersistence(dir).save(crashed);
+
+    const events: NodeCompletionEvent[] = [];
+    // A dispatch port WITHOUT getTask → recovery takes the no-getTask path.
+    const plainFake: NodeDispatchPort = {
+      executeNode: async () => makeTask("never-dispatched"),
+    };
+    const engine = createEngine(singleNodeGraph(), {
+      stateDir: dir,
+      graphId,
+      dispatch: plainFake,
+      onNodeCompletion: (e) => events.push(e),
+    });
+    await engine.recover();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].nodeId).toBe("A");
+    expect(events[0].signalType).toBe("timeout");
+    expect(events[0].nodeStatus).toBe(NodeStatus.Timeout);
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+  });
+
+  it("notifies Timeout nodes one by one when reconcile throws mid-pass [M6 catch path]", async () => {
+    const dir = makeTmpDir();
+    const graphId = "rec-m6-catch";
+    // Two roots: A's task VANISHED (timed out first in the reconcile pass),
+    // B's task is still live but its re-subscription THROWS — reconcileEngine
+    // aborts mid-pass and the catch path must surface every node it already
+    // timed out (A) without fabricating a timeout for the still-running B.
+    const twoNode: GraphDeclaration = {
+      version: 2,
+      name: "m6-catch",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "pA" },
+        { id: "B", agent: "a2", prompt: "pB" },
+      ],
+      edges: [],
+    };
+    const crashed = buildState(twoNode, graphId);
+    crashed.nodes.get("A")!.status = NodeStatus.Running;
+    crashed.nodes.get("A")!.dispatchTaskId = "task-A";
+    crashed.nodes.get("B")!.status = NodeStatus.Running;
+    crashed.nodes.get("B")!.dispatchTaskId = "task-B";
+    new EnginePersistence(dir).save(crashed);
+
+    const events: NodeCompletionEvent[] = [];
+    const throwingPort = {
+      getTask: (id: string) =>
+        id === "task-B" ? makeTask("task-B", "running") : undefined,
+      onTaskTerminated: () => {
+        throw new Error("port down");
+      },
+    };
+    const engine = createEngine(twoNode, {
+      stateDir: dir,
+      graphId,
+      dispatch: throwingPort as unknown as NodeDispatchPort,
+      onNodeCompletion: (e) => events.push(e),
+    });
+    await engine.recover();
+
+    // Exactly one timeout notification — for A, the node the reconcile pass
+    // timed out before throwing. B (still running) is not fabricated.
+    expect(events).toHaveLength(1);
+    expect(events[0].nodeId).toBe("A");
+    expect(events[0].signalType).toBe("timeout");
+    expect(events[0].nodeStatus).toBe(NodeStatus.Timeout);
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(engine.status().nodes.get("B")!.status).toBe(NodeStatus.Running);
+  });
 });
 
 // ── Integration: engine.cancel() ────────────────────────────────────────────
@@ -866,5 +1000,398 @@ describe("engine.cancel() integration", () => {
     expect(loaded!.phase).toBe(EnginePhase.Complete);
     expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Done);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── H3: checkpointHistory hydration & adoption ───────────────────────────────
+
+describe("H3 — checkpointHistory hydration & adoption", () => {
+  it("hydrateEngineState round-trips checkpointHistory without loss (defensive copies)", () => {
+    const source = buildState(singleNodeGraph(), "hyd-h");
+    source.checkpointHistory = {
+      A: [
+        { nodeId: "A", status: NodeStatus.Ready, at: 1 },
+        { nodeId: "A", status: NodeStatus.Completed, at: 2, note: "done" },
+      ],
+    };
+    const target = createEngineState(singleNodeGraph(), "hyd-h");
+    hydrateEngineState(target, source);
+    expect(target.checkpointHistory).toEqual(source.checkpointHistory);
+    // Defensive copies, not aliases — mutating the target never mutates source.
+    expect(target.checkpointHistory).not.toBe(source.checkpointHistory);
+    expect(target.checkpointHistory!.A).not.toBe(source.checkpointHistory!.A);
+    expect(target.checkpointHistory!.A[0]).not.toBe(source.checkpointHistory!.A[0]);
+  });
+
+  it("hydrateEngineState passes an absent checkpointHistory through as undefined", () => {
+    // Non-provisioned source: no lifecycle transition ever ran, so the
+    // append-only history is genuinely absent (provision() itself records a
+    // ready checkpoint and would fabricate an entry).
+    const source = createEngineState(singleNodeGraph(), "hyd-h-absent");
+    expect(source.checkpointHistory).toBeUndefined();
+    const target = createEngineState(singleNodeGraph(), "hyd-h-absent");
+    hydrateEngineState(target, source);
+    expect(target.checkpointHistory).toBeUndefined();
+  });
+
+  it("adoptPriorNodeStates merges checkpointHistory prior-first (target wins conflicts)", () => {
+    const prior = buildState(singleNodeGraph(), "adopt-h");
+    prior.checkpointHistory = {
+      A: [{ nodeId: "A", status: NodeStatus.Running, at: 10 }],
+      B: [{ nodeId: "B", status: NodeStatus.Ready, at: 11 }],
+    };
+    const target = buildState(singleNodeGraph(), "adopt-h");
+    // A target-side record (recorded after provisioning) survives the merge.
+    target.checkpointHistory = {
+      A: [{ nodeId: "A", status: NodeStatus.Completed, at: 12 }],
+    };
+    adoptPriorNodeStates(target, prior);
+    // Prior-only key B carried; target key A wins the conflict.
+    expect(target.checkpointHistory).toEqual({
+      A: [{ nodeId: "A", status: NodeStatus.Completed, at: 12 }],
+      B: [{ nodeId: "B", status: NodeStatus.Ready, at: 11 }],
+    });
+  });
+});
+
+// ── L7: monitor fields survive adoptPriorNodeStates ─────────────────────────
+
+describe("L7 — artifacts / evidence / convergenceFingerprint adoption", () => {
+  it("carries per-node artifacts and evidence across adoption (defensive copies)", () => {
+    const prior = buildState(singleNodeGraph(), "adopt-l7");
+    const pNode = prior.nodes.get("A")!;
+    pNode.status = NodeStatus.Completed;
+    pNode.artifacts = ["out/a.txt", "out/b.txt"];
+    pNode.evidence = ["ev/cite.md"];
+    const target = buildState(singleNodeGraph(), "adopt-l7");
+    adoptPriorNodeStates(target, prior);
+    const tNode = target.nodes.get("A")!;
+    expect(tNode.artifacts).toEqual(["out/a.txt", "out/b.txt"]);
+    expect(tNode.evidence).toEqual(["ev/cite.md"]);
+    // Defensive copies — mutating the target arrays does not alias the prior.
+    tNode.artifacts!.push("out/c.txt");
+    expect(prior.nodes.get("A")!.artifacts).toEqual(["out/a.txt", "out/b.txt"]);
+  });
+
+  it("carries the loop-group convergenceFingerprint across adoption", () => {
+    const loopDecl: GraphDeclaration = {
+      version: 2,
+      name: "loop-adopt",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "B", to: "A", type: "always" }],
+      loop_groups: [
+        { id: "lg", nodes: ["A", "B"], max_traversals: 3 },
+      ],
+    };
+    const prior = buildState(loopDecl, "adopt-lg");
+    prior.loopGroups.get("lg")!.convergenceFingerprint = "fp-123";
+    const target = buildState(loopDecl, "adopt-lg");
+    // Fresh provision has no fingerprint — adoption must restore it.
+    expect(target.loopGroups.get("lg")!.convergenceFingerprint).toBeUndefined();
+    adoptPriorNodeStates(target, prior);
+    expect(target.loopGroups.get("lg")!.convergenceFingerprint).toBe("fp-123");
+  });
+
+  it("leaves an absent prior convergenceFingerprint as undefined in the target", () => {
+    const loopDecl: GraphDeclaration = {
+      version: 2,
+      name: "loop-adopt-none",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+      loop_groups: [{ id: "lg", nodes: ["A"], max_traversals: 3 }],
+    };
+    const prior = buildState(loopDecl, "adopt-lg-none");
+    const target = buildState(loopDecl, "adopt-lg-none");
+    adoptPriorNodeStates(target, prior);
+    expect(target.loopGroups.get("lg")!.convergenceFingerprint).toBeUndefined();
+  });
+});
+
+// ── M10: terminalNotified hydration & adoption ───────────────────────────────
+
+describe("M10 — terminalNotified hydration & adoption", () => {
+  it("hydrateEngineState copies terminalNotified (cloned; absent → undefined)", () => {
+    const source = buildState(singleNodeGraph(), "hyd-tn");
+    source.terminalNotified = { complete: true, blocked: false };
+    const target = createEngineState(singleNodeGraph(), "hyd-tn");
+    hydrateEngineState(target, source);
+    expect(target.terminalNotified).toEqual({ complete: true, blocked: false });
+    // Cloned, never aliased.
+    expect(target.terminalNotified).not.toBe(source.terminalNotified);
+
+    const bare = buildState(singleNodeGraph(), "hyd-tn-absent");
+    const t2 = createEngineState(singleNodeGraph(), "hyd-tn-absent");
+    hydrateEngineState(t2, bare);
+    expect(t2.terminalNotified).toBeUndefined();
+  });
+
+  it("adoptPriorNodeStates carries terminalNotified so a rebuilt engine does not re-notify", () => {
+    const prior = buildState(singleNodeGraph(), "adopt-tn");
+    prior.terminalNotified = { complete: true, blocked: true };
+    const target = buildState(singleNodeGraph(), "adopt-tn");
+    adoptPriorNodeStates(target, prior);
+    expect(target.terminalNotified).toEqual({ complete: true, blocked: true });
+
+    const barePrior = buildState(singleNodeGraph(), "adopt-tn-absent");
+    const t2 = buildState(singleNodeGraph(), "adopt-tn-absent");
+    adoptPriorNodeStates(t2, barePrior);
+    expect(t2.terminalNotified).toBeUndefined();
+  });
+});
+
+// ── Subtask 5: dangling loop-group adoption/hydration guard ─────────────────
+
+describe("subtask 5 — dangling loopGroupId cleared when the declaration drops the group", () => {
+  function loopDropPair(): { prior: EngineState; target: EngineState } {
+    const withLoop: GraphDeclaration = {
+      version: 2,
+      name: "loop-drop",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "B", to: "A", type: "always" }],
+      loop_groups: [{ id: "lg", nodes: ["A", "B"], max_traversals: 3 }],
+    };
+    const withoutLoop: GraphDeclaration = {
+      version: 2,
+      name: "loop-drop",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "B", to: "A", type: "always" }],
+    };
+    const prior = buildState(withLoop, "adopt-dangle");
+    // The prior run made real progress and carried the loop tag.
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+    const target = buildState(withoutLoop, "adopt-dangle");
+    return { prior, target };
+  }
+
+  it("adoptPriorNodeStates clears the adopted node's loopGroupId when the declaration dropped the group", () => {
+    const { prior, target } = loopDropPair();
+    // Fresh provision from the group-less declaration leaves no tag.
+    expect(prior.nodes.get("A")!.loopGroupId).toBe("lg");
+    expect(target.nodes.get("A")!.loopGroupId).toBeUndefined();
+    // Simulate the stale tag adoptPrior must heal (a prior/persisted copy that
+    // carried the group id over a rebuild whose declaration dropped the group).
+    target.nodes.get("A")!.loopGroupId = "lg";
+
+    adoptPriorNodeStates(target, prior);
+
+    // The dangling tag is cleared; the node degrades to a plain non-loop node.
+    expect(target.nodes.get("A")!.loopGroupId).toBeUndefined();
+    expect(target.nodes.get("B")!.loopGroupId).toBeUndefined();
+    // The runtime map has no group either (fresh provision from the drop).
+    expect(target.loopGroups.has("lg")).toBe(false);
+    // Legitimate prior progress is still adopted.
+    expect(target.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+  });
+
+  it("adoptPriorNodeStates preserves loopGroupId when the declaration still declares the group", () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "loop-keep",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+      loop_groups: [{ id: "lg", nodes: ["A"], max_traversals: 3 }],
+    };
+    const prior = buildState(decl, "adopt-keep");
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+    const target = buildState(decl, "adopt-keep");
+    adoptPriorNodeStates(target, prior);
+    expect(target.nodes.get("A")!.loopGroupId).toBe("lg");
+  });
+
+  it("hydrateEngineState clears a loopGroupId whose group the persisted declaration dropped", () => {
+    const droppedDecl: GraphDeclaration = {
+      version: 2,
+      name: "hyd-dangle",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+    };
+    const source = buildState(droppedDecl, "hyd-dangle");
+    // A persisted node tagged with a group the persisted declaration no longer
+    // declares (e.g. saved before a declaration mutation that dropped the group).
+    source.nodes.get("A")!.loopGroupId = "lg";
+
+    const target = createEngineState(droppedDecl, "hyd-dangle");
+    hydrateEngineState(target, source);
+
+    expect(target.nodes.get("A")!.loopGroupId).toBeUndefined();
+  });
+
+  it("hydrateEngineState preserves loopGroupId when the persisted declaration declares the group", () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "hyd-keep",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+      loop_groups: [{ id: "lg", nodes: ["A"], max_traversals: 3 }],
+    };
+    const source = buildState(decl, "hyd-keep");
+    const target = createEngineState(decl, "hyd-keep");
+    hydrateEngineState(target, source);
+    expect(target.nodes.get("A")!.loopGroupId).toBe("lg");
+  });
+});
+
+// ── M3: NodeStalenessWatcher (manually tickable — no unbounded interval) ────
+
+describe("NodeStalenessWatcher", () => {
+  it("marks a running node whose startedAt exceeds the timeout and reports it", () => {
+    const state = buildState(singleNodeGraph(), "stale-node");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.startedAt = 1_000;
+    const timedOutIds: string[] = [];
+    const reasons: string[] = [];
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 30_000,
+      onTimeout: (id, reason) => {
+        timedOutIds.push(id);
+        reasons.push(reason);
+      },
+    });
+    // Fresh — not stale yet.
+    expect(watcher.tick(state, 1_000 + 29_999)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+    // Past the deadline — marked timeout + reported through the callback.
+    expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(timedOutIds).toEqual(["A"]);
+    expect(reasons[0]).toContain("staleness");
+  });
+
+  it("honors per-node budget.timeout_ms over the watcher-wide timeout", () => {
+    const state = buildState(singleNodeGraph(), "stale-node-budget");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.startedAt = 1_000;
+    node.budget = { timeout_ms: 5_000 };
+    const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 30_000 });
+    // 5s elapsed: stale under the per-node budget, fresh under the watcher-wide one.
+    expect(watcher.tick(state, 1_000 + 5_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+  });
+
+  it("does not touch non-running nodes, even with an ancient startedAt", () => {
+    const state = buildState(singleNodeGraph(), "stale-node-idle");
+    const node = state.nodes.get("A")!;
+    // Ready (provisioned default) with an ancient startedAt — only Running counts.
+    node.startedAt = 1;
+    const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 10 });
+    expect(watcher.tick(state, 100_000)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Ready);
+  });
+
+  it("skips a running node whose per-node budget disables staleness (timeout_ms 0)", () => {
+    const state = buildState(singleNodeGraph(), "stale-node-disabled");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.startedAt = 1;
+    node.budget = { timeout_ms: 0 };
+    const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 10 });
+    expect(watcher.tick(state, 100_000)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+  });
+
+  it("start()/stop() manage the opt-in interval without leaking timers", () => {
+    const state = buildState(singleNodeGraph(), "stale-node-timer");
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 10,
+      intervalMs: 1,
+    });
+    watcher.start(state);
+    watcher.stop();
+    watcher.stop(); // idempotent
+  });
+});
+
+// ── M4: subscribeTaskTermination returns its callback ───────────────────────
+
+describe("subscribeTaskTermination return value (M4)", () => {
+  it("returns the exact callback handed to onTaskTerminated — a valid removal handle", () => {
+    const state = buildState(singleNodeGraph(), "sub-ret");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    let registered: TaskTerminatedCallback | undefined;
+    const port = {
+      getTask: (id: string) => makeTask(id, "running"),
+      onTaskTerminated: (_id: string, cb: TaskTerminatedCallback) => {
+        registered = cb;
+      },
+    };
+    const emitted: Array<[string, SignalType, unknown]> = [];
+    const callback = subscribeTaskTermination(
+      state,
+      port as never,
+      node,
+      (n, t, p) => emitted.push([n, t, p]),
+    );
+    expect(typeof callback).toBe("function");
+    expect(registered).toBe(callback); // the port registered THIS function
+    // Driving the returned callback still advances the node through the seam.
+    callback!("task-A", "completed");
+    expect(emitted).toEqual([["A", "answer", { __inferred: true }]]);
+  });
+
+  it("returns undefined when the node has no dispatch task id", () => {
+    const state = buildState(singleNodeGraph(), "sub-ret-none");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    const port = { onTaskTerminated: () => {} };
+    const callback = subscribeTaskTermination(state, port as never, node, () => {});
+    expect(callback).toBeUndefined();
+  });
+
+  it("returns undefined when the port has no onTaskTerminated surface", () => {
+    const state = buildState(singleNodeGraph(), "sub-ret-noport");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    const callback = subscribeTaskTermination(state, {} as never, node, () => {});
+    expect(callback).toBeUndefined();
+  });
+});
+
+// ── M4: reconcileEngine surfaces re-subscription handles via the out-param ───
+
+describe("reconcileEngine re-subscription out-param (M4)", () => {
+  it("collects { taskId, callback } for live re-subscriptions", () => {
+    const state = buildState(singleNodeGraph(), "rec-sub");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    const registered = new Map<string, TaskTerminatedCallback>();
+    const port = {
+      getTask: () => makeTask("task-A", "running"),
+      onTaskTerminated: (id: string, cb: TaskTerminatedCallback) =>
+        registered.set(id, cb),
+    };
+    const subs: ReconcileSubscriptions = { listeners: [] };
+    const report = reconcileEngine(state, port as never, () => {}, subs);
+    expect(report.reSubscribed).toEqual(["A"]);
+    expect(subs.listeners).toHaveLength(1);
+    expect(subs.listeners[0].taskId).toBe("task-A");
+    // The surfaced callback is the exact function the port registered — a valid
+    // removeTaskTerminatedListener handle.
+    expect(subs.listeners[0].callback).toBe(registered.get("task-A"));
+  });
+
+  it("is a no-op collection for non-live nodes (orphaned / terminal)", () => {
+    const state = buildState(singleNodeGraph(), "rec-sub-none");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = undefined; // orphaned → timed out, never re-subscribed
+    const subs: ReconcileSubscriptions = { listeners: [] };
+    const report = reconcileEngine(state, {} as never, () => {}, subs);
+    expect(report.timedOut).toEqual(["A"]);
+    expect(subs.listeners).toEqual([]);
   });
 });

@@ -30,6 +30,7 @@ import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
+import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -125,12 +126,24 @@ const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType
  *                  execution. Optional for construction/status/cancel/dry-run.
  * @param opts.directory - Working directory for graph node dispatches.
  * @param opts.stateDir - Optional engine-state persistence dir.
+ * @param opts.dispatch - Optional dispatch seam (a {@link NodeDispatchPort}).
+ *        When present it is threaded into the constructed toolset in place of
+ *        the manager-backed bridge — the dsh platform path constructs graph
+ *        tools with {@link DshDispatchAdapter} this way, while the opencode
+ *        path keeps using `manager` unchanged (additive routing by platform).
  * @param opts.graphNotify - Optional graph node-completion + graph-terminal
  *        notifier (subtask 3): a prebuilt `GraphCompletionHandler` or an owner
  *        config carrying the emperor session + session client. Threaded into
  *        every engine the toolset constructs so graph node completions AND
  *        graph-terminal transitions route to graph-notify targeting the emperor
  *        session. More here in src/graph/tools/graph-tools.ts.
+ * @param opts.toolset - Optional prebuilt {@link GraphToolSet} (subtask 2).
+ *        When provided, the tools bind to THIS instance instead of
+ *        constructing a fresh one — letting a platform assembly layer (e.g.
+ *        tool-service / PiLightweightServiceStack) construct the toolset once
+ *        and reuse it for both the `graph_*` tools AND the HookDeps
+ *        `graphTools` query, so the two surfaces always observe the same
+ *        in-memory graph registry.
  * @returns A record of `graph_*` key → {@link CanonicalToolDef}.
  */
 export function createGraphTools(
@@ -139,13 +152,41 @@ export function createGraphTools(
     directory?: string;
     stateDir?: string;
     graphNotify?: GraphNotifySource;
+    toolset?: GraphToolSet;
+    /**
+     * Optional dispatch seam (a {@link NodeDispatchPort}) threaded into the
+     * constructed toolset in place of the manager-backed bridge. This is the
+     * additive dsh platform path: `createGraphTools(undefined, { dispatch })`
+     * builds a toolset whose engines dispatch through the dsh subagent seam
+     * while the opencode path (`manager` only) is byte-identical. When both
+     * are present, `dispatch` wins over the manager bridge (mirrors
+     * `createEngine`'s explicit > manager precedence).
+     */
+    dispatch?: NodeDispatchPort;
+    // Subtask 6 (node-liveness wiring): optional liveness-monitor stall
+    // thresholds + the node-liveness feed, threaded into the toolset's
+    // engines when the toolset is constructed HERE (a prebuilt `toolset`
+    // carries its own deps — this passthrough only applies when absent).
+    nodeStallWarnMs?: number;
+    nodeStallGraceMs?: number;
+    livenessFeed?: NodeLivenessFeed;
   } = {},
 ): Record<string, CanonicalToolDef> {
-  const toolset: GraphToolSet = createGraphToolSet({
+  const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
     manager,
+    dispatch: opts.dispatch,
     directory: opts.directory,
     stateDir: opts.stateDir,
     graphNotify: opts.graphNotify,
+    ...(opts.nodeStallWarnMs !== undefined
+      ? { nodeStallWarnMs: opts.nodeStallWarnMs }
+      : {}),
+    ...(opts.nodeStallGraceMs !== undefined
+      ? { nodeStallGraceMs: opts.nodeStallGraceMs }
+      : {}),
+    ...(opts.livenessFeed !== undefined
+      ? { livenessFeed: opts.livenessFeed }
+      : {}),
   });
 
   return {
@@ -167,6 +208,13 @@ export type {
   GraphNotifySource,
   GraphNotifyConfig,
 } from "./graph-tools.ts";
+
+// Subtask 2: re-export the toolset factory + type so platform assembly layers
+// (tool-service.ts / PiLightweightServiceStack) can construct a single
+// GraphToolSet and thread it into buildCanonicalTools via the `graphTools`
+// option — one instance backing both the graph_* tools and the HookDeps
+// graphTools in-flight query.
+export { createGraphToolSet, type GraphToolSet } from "./graph-tools.ts";
 
 // ── Individual tool factories ───────────────────────────────────────────────
 
@@ -520,6 +568,17 @@ function createGraphStatusTool(
         .describe(
           "Include the node's recorded evidence references from " +
             "NodeRuntimeState.evidence[]. Honest-empty like include_artifacts.",
+        ),
+      include_liveness: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include each node's recorded liveness state from " +
+            "NodeRuntimeState.liveness (lastActivityAt / heartbeatSource / " +
+            "stallStatus / stallWarnedAt / stallReason). OPTIONAL-ADDITIVE — " +
+            "only nodes WITH recorded liveness get the block; absent liveness " +
+            "renders nothing, never fabricated. Running nodes always render " +
+            "liveness regardless of this flag.",
         ),
       include_history: z
         .boolean()

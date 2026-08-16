@@ -34,7 +34,7 @@
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
 import type { GraphBudgetState, EdgePayload, RoundHistoryEntry } from "../../types.engine-v2.ts";
-import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
+import type { EngineState, NodeRuntimeState, NodeLivenessState } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
 import type { BudgetCheckResult, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
@@ -44,6 +44,7 @@ import {
   clearNonCriticalDirty,
   shouldPersistNonCritical,
   markDirty,
+  markNonCriticalDirty,
 } from "./engine-persistence.ts";
 import {
   type DispatchParentContext,
@@ -69,6 +70,7 @@ import {
   markReady,
   markRunning,
   markEscalated,
+  markTimedOut,
   markNodeBlocked,
   canTransitionNode,
 } from "./node-lifecycle.ts";
@@ -160,6 +162,19 @@ export interface NodeDispatchPort {
     callback: TaskTerminatedCallback,
   ): void;
   /**
+   * Remove a previously-registered task-terminated listener. Optional — a port
+   * without it simply cannot clean up its subscriptions (leak-free teardown is
+   * then the caller's concern). Structurally satisfied by {@link DispatchBridge}
+   * (which delegates to `DispatchManager.removeTaskTerminatedListener`).
+   * Consumed by the engine's subscription accessor
+   * ({@link AdvanceEngine.getTerminationSubscriptions}) so a teardown path
+   * (monitor M4 / S7 dispose) can unregister every listener this engine wired.
+   */
+  removeTaskTerminatedListener?(
+    taskId: string,
+    callback: TaskTerminatedCallback,
+  ): void;
+  /**
    * Cumulative token/cost usage for a single dispatched session (keyed by the
    * dispatch session ID). OPTIONAL-ADDITIVE — a port without it simply cannot
    * report per-node usage, so the engine degrades to the pre-Phase-7 behavior
@@ -169,6 +184,65 @@ export interface NodeDispatchPort {
    * task termination.
    */
   getSessionUsage?(sessionId: string): UsageRecord;
+}
+
+/**
+ * The node-liveness surface the engine touches (subtask 2 of the
+ * node-anomaly-detection feature). Structurally satisfied by the platform's
+ * liveness feed — the layer that observes live dispatch sessions (tool calls,
+ * messages, session errors) and reports activity back into the engine.
+ * Declared as a minimal interface so tests can inject a fake and avoid any
+ * real platform/session wiring.
+ *
+ * Direction: `attach` / `detach` are engine→feed — the engine registers a
+ * node's live dispatch session when it is successfully launched and
+ * unregisters it when the node reaches a terminal state, so the feed knows
+ * which sessions to observe. The optional `onHeartbeat` / `onSessionError` /
+ * `onSessionGone` members are feed→engine push hooks the platform may use to
+ * relay session-level observations; the engine's stall monitor (subtask 3)
+ * consumes them through {@link AdvanceEngine.recordLivenessHeartbeat}.
+ *
+ * Every member is `void`-returning — a throwing or absent feed must never
+ * break advancement (the engine calls through optional chaining and contains
+ * nothing here). All members are OPTIONAL-ADDITIVE: an engine without a feed
+ * behaves exactly as before (no liveness recording, no index maintenance).
+ */
+export interface NodeLivenessFeed {
+  /**
+   * Register a node's live dispatch session with the feed. Called by the
+   * engine immediately after a successful launch (`_dispatchNode`), when the
+   * node's `dispatchTaskId` / `dispatchSessionId` are known. The engine ALSO
+   * records the `sessionId → nodeId` mapping in its own reverse index at this
+   * point, so the platform feed can look up the owning node for a session id
+   * (see {@link AdvanceEngine.getNodeIdForSession}).
+   */
+  attach(nodeId: string, sessionId: string): void;
+  /**
+   * Unregister a node's session. Called by the engine when a running node
+   * reaches a terminal state (signal-driven completion / escalation) — the
+   * feed stops observing the session, and the engine drops the node's
+   * `sessionId → nodeId` index entry. A no-op for a node that was never
+   * attached.
+   */
+  detach(nodeId: string): void;
+  /**
+   * Push a session-level activity heartbeat for a node. Optional — a feed
+   * without it simply cannot relay platform activity into the engine; the
+   * engine's own dispatch-time heartbeat and `recordLivenessHeartbeat`
+   * callers remain the alternative observation channels.
+   */
+  onHeartbeat?(nodeId: string, source: NodeLivenessState["heartbeatSource"]): void;
+  /**
+   * Push a session-level error observation for a node. Optional — the stall
+   * monitor (subtask 3) may surface the node's status accordingly.
+   */
+  onSessionError?(nodeId: string, reason: string): void;
+  /**
+   * Push a session-gone observation — the platform can no longer see the
+   * node's session at all. Optional — recovery / the stall monitor (subtask
+   * 3) owns the authoritative timeout handling.
+   */
+  onSessionGone?(nodeId: string): void;
 }
 
 /**
@@ -245,8 +319,14 @@ export interface AdvanceEngineOptions {
    * transitions write through immediately; noisy (non-critical) updates are
    * debounced elsewhere. When absent, the engine runs without persistence
    * (in-memory only), preserving the role-agnostic primitive's constructibility.
+   *
+   * Returns `true` when the state reached durable storage, `false` on a failed
+   * write (never throws) — the engine only clears its dirty flag on success
+   * (monitor M5), so a failed save is retried by the next mutating critical
+   * section instead of silently dropped. A `void` return (or an absent seam)
+   * is treated as success — backward-compatible with no-op test seams.
    */
-  persistState?: (state: EngineState) => void;
+  persistState?: (state: EngineState) => boolean | void;
   /**
    * Optional debounced-persistence seam (Q2 Option A, non-critical tier). When
    * a critical section produced ONLY non-critical mutations (signal-ledger
@@ -254,8 +334,16 @@ export interface AdvanceEngineOptions {
    * write through this debounced seam instead of the synchronous
    * {@link persistState}. Absent → non-critical-only sections skip persistence
    * (the in-memory engine still runs).
+   *
+   * Returns `false` on a definite write failure (the debounced store retains
+   * the pending state and retries it); the engine keeps its non-critical dirty
+   * flag set in that case so a later section re-hands the churn to the seam
+   * (monitor M5, non-critical tier). A `void` return is treated as success —
+   * `EnginePersistence.scheduleSave` is the legacy void-returning seam, whose
+   * failure retry is owned internally by the debounced store's pending
+   * retention.
    */
-  schedulePersistState?: (state: EngineState) => void;
+  schedulePersistState?: (state: EngineState) => boolean | void;
   /**
    * Optional flush seam for the debounced tier. Invoked when the engine reaches
    * a terminal phase (`complete`) so no pending debounced write is lost. Absent
@@ -283,6 +371,17 @@ export interface AdvanceEngineOptions {
    */
   graphEvents?: GraphEventRecorder;
   /**
+   * Optional node-liveness feed seam (subtask 2 of node-anomaly-detection).
+   * When present, the engine records an initial `dispatch` heartbeat on every
+   * successfully launched node, maintains a `sessionId → nodeId` reverse
+   * index of running nodes, and registers / unregisters each node's session
+   * with the feed (`attach` on launch, `detach` on terminal transition).
+   * Absent → the engine behaves exactly as before: no liveness recording, no
+   * index, no feed calls. A pure role-agnostic DI seam, exactly like
+   * {@link AdvanceEngineOptions.dispatch} / {@link AdvanceEngineOptions.budget}.
+   */
+  livenessFeed?: NodeLivenessFeed;
+  /**
    * Optional graph-terminal notification seam. Invoked exactly once per
    * terminal transition (GRAPH COMPLETE / GRAPH BLOCKED). When absent, the
    * engine behaves identically — this is a pure DI seam like
@@ -302,6 +401,22 @@ const TERMINATING_SEVERITY: readonly SignalType[] = [
   "revise_needed",
   "answer",
 ];
+
+/**
+ * Detect the default throw-on-use dispatch stub (`index.ts:throwOnDispatch`).
+ * The stub carries the `isNoDispatchSeamStub` marker so `_dispatchNode` can
+ * rethrow ITS rejection — the "no dispatch seam" misconfiguration must surface
+ * to the caller of `run()` — while containing every genuine dispatch failure.
+ */
+function isNoDispatchSeamStub(port: NodeDispatchPort): boolean {
+  return (port as { isNoDispatchSeamStub?: boolean }).isNoDispatchSeamStub === true;
+}
+
+/** Minimal, dependency-free warning logger (no sub-logger import cycle). */
+function logWarn(message: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(message);
+}
 
 export type { GraphTerminalEvent } from "./engine-termination.ts";
 export type { TerminationContext } from "./engine-termination.ts";
@@ -332,16 +447,36 @@ export class AdvanceEngine {
   private readonly budgetPort?: GraphBudgetPort;
   private readonly parentContext: DispatchParentContext;
   private readonly conditionResolver?: EdgeConditionResolver;
-  private readonly persistState?: (state: EngineState) => void;
-  private readonly schedulePersistState?: (state: EngineState) => void;
+  private readonly persistState?: (state: EngineState) => boolean | void;
+  private readonly schedulePersistState?: (state: EngineState) => boolean | void;
   private readonly flushPersistState?: () => void;
   private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
   private readonly graphEvents?: GraphEventRecorder;
+  private readonly livenessFeed?: NodeLivenessFeed;
   private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  /**
+   * Reverse index of live dispatch sessions: `dispatchSessionId → nodeId`,
+   * maintained for RUNNING nodes only, so the platform liveness feed can look
+   * up the owning node for a session id (subtask 2). Populated on `attach`
+   * (a node's successful launch inside {@link _dispatchNode}), dropped on
+   * `detach` (the node's terminal transition). Empty when no feed is wired.
+   */
+  private readonly _sessionToNodeId = new Map<string, string>();
   private readonly _terminationCtx: TerminationContext = {
     terminalComplete: false,
     terminalBlocked: false,
   };
+  /**
+   * Every `onTaskTerminated` subscription this engine registered via
+   * {@link subscribeTaskTermination} during `_dispatchNode` (monitor M4),
+   * as the exact `{ taskId, callback }` pair handed to the dispatch port.
+   * Consumed by {@link getTerminationSubscriptions} so a teardown path
+   * (S7 dispose) can unregister each listener and never leak one.
+   */
+  private readonly _terminationSubscriptions: Array<{
+    taskId: string;
+    callback: TaskTerminatedCallback;
+  }> = [];
 
   constructor(opts: AdvanceEngineOptions) {
     this.state = opts.state;
@@ -354,6 +489,7 @@ export class AdvanceEngine {
     this.flushPersistState = opts.flushPersistState;
     this.onNodeCompletion = opts.onNodeCompletion;
     this.graphEvents = opts.graphEvents;
+    this.livenessFeed = opts.livenessFeed;
     this.onGraphTerminal = opts.onGraphTerminal;
     this.parentContext =
       opts.parentContext ??
@@ -447,9 +583,31 @@ export class AdvanceEngine {
   register(): () => void {
     const listener: NodeSignalEmittedListener = (nodeId, type, payload) => {
       // Recording already happened upstream (signalBridge.record step 1).
-      void this._advanceSignal(nodeId, type, payload);
+      // Subtask 2: the advance is contained (see _advanceSignal), but this
+      // promise is discarded fire-and-forget — attach a catch so a future
+      // regression can never surface an unhandled rejection from here.
+      void this._advanceSignal(nodeId, type, payload).catch((err) => {
+        logWarn(
+          `engine: signal-driven advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
+      });
     };
     return this.signalBridge.onNodeSignalEmitted(listener);
+  }
+
+  /**
+   * The task-termination subscriptions this engine has registered during
+   * `_dispatchNode` (monitor M4). Returns a defensive copy so a teardown path
+   * (S7 dispose) can iterate it and unregister every listener via
+   * `dispatch.removeTaskTerminatedListener(taskId, callback)` without mutating
+   * the engine's internal ledger. Each `callback` is the exact value that was
+   * handed to `port.onTaskTerminated`.
+   */
+  getTerminationSubscriptions(): Array<{
+    taskId: string;
+    callback: TaskTerminatedCallback;
+  }> {
+    return [...this._terminationSubscriptions];
   }
 
   // ── Re-entrancy guard (coordinator.ts:397-404 + 450-462 pattern) ──────────
@@ -472,8 +630,12 @@ export class AdvanceEngine {
       queuePendingCompletion(this.state, nodeId);
       return;
     }
-    return this._runCriticalSection(() =>
-      this._advance(nodeId, signalType, signalPayload),
+    return this._runCriticalSection(
+      () => this._advance(nodeId, signalType, signalPayload),
+      // Subtask 2: contain a throwing advance — log, escalate the affected
+      // node, and let the section resolve instead of rejecting (fire-and-forget
+      // advancement paths discard the promise with `void`).
+      (err) => this._containAdvanceError(nodeId, err),
     );
   }
 
@@ -485,7 +647,10 @@ export class AdvanceEngine {
    * section produced (e.g. a retry count). Existing `() => Promise<void>`
    * callers are unaffected.
    */
-  private async _runCriticalSection<T>(work: () => Promise<T>): Promise<T> {
+  private async _runCriticalSection<T>(
+    work: () => Promise<T>,
+    onError?: (err: unknown) => void,
+  ): Promise<T> {
     try {
       if (
         this.state.phase === EnginePhase.Idle &&
@@ -494,6 +659,34 @@ export class AdvanceEngine {
         transitionPhase(this.state, EnginePhase.Executing);
       }
       return await work();
+    } catch (err) {
+      // Subtask 2: a throwing critical-section body must never escape as a
+      // rejection — fire-and-forget advancement paths (the signalBridge
+      // listener in register(), the dispatch-termination callback, recovery's
+      // reconcile callbacks) discard the promise with `void`, so an escaped
+      // rejection would surface as an unhandled rejection. Log, hand the
+      // error to the caller's containment hook (escalate the affected node),
+      // and RESOLVE. Callers that must keep propagating — e.g. dispatchReady
+      // from run(), whose "no dispatch seam" rejection is a public contract
+      // (engine-index.test.ts "rejects run() with a clear error") — simply
+      // omit `onError`.
+      logWarn(
+        `engine: advancement critical section threw for graph "${this.state.graphId}": ${this._errorString(err)}`,
+      );
+      if (onError) {
+        try {
+          onError(err);
+        } catch (containErr) {
+          // containment must never rethrow out of the section
+          logWarn(
+            `engine: advancement error containment threw for graph "${this.state.graphId}": ${String(containErr)}`,
+          );
+        }
+        return undefined as T;
+      }
+      // No containment hook — propagate the rejection (e.g. dispatchReady from
+      // run(), whose "no dispatch seam" rejection is a public contract).
+      throw err;
     } finally {
       releaseAdvancingLock(this.state);
       // Two-tier persistence point (Q2 Option A): only persist when the state
@@ -506,12 +699,25 @@ export class AdvanceEngine {
       // no-op. See engine-persistence.ts dirty-flag helpers.
       if (shouldPersist(this.state) || shouldPersistNonCritical(this.state)) {
         if (shouldPersist(this.state)) {
-          this.persistState?.(this.state);
+          // Monitor M5: only clear the dirty flag when the write-through save
+          // actually reached durable storage. A failed save (boolean `false`
+          // from the seam; a void return is treated as success) leaves
+          // `isDirty` set so the NEXT mutating critical section retries the
+          // persist instead of silently dropping the mutation.
+          const ok = this.persistState?.(this.state);
+          if (ok !== false) {
+            clearDirty(this.state);
+          }
         } else {
-          this.schedulePersistState?.(this.state);
+          // Non-critical tier (monitor M5, same policy): the debounced seam
+          // reports a definite failure via `false`; the engine keeps the
+          // non-critical dirty flag set so the churn is re-handed on a later
+          // section (the store also retains its pending state internally).
+          const ok = this.schedulePersistState?.(this.state);
+          if (ok !== false) {
+            clearNonCriticalDirty(this.state);
+          }
         }
-        clearDirty(this.state);
-        clearNonCriticalDirty(this.state);
       }
       // flush-on-terminate: when the engine reaches a terminal phase (complete),
       // drain any pending debounced non-critical write so the on-disk state is
@@ -535,12 +741,76 @@ export class AdvanceEngine {
   private async _drainDeferred(): Promise<void> {
     const drained = drainPendingCompletions(this.state);
     for (const nodeId of drained) {
-      const node = getNode(this.state, nodeId);
+      const node = this.state.nodes.get(nodeId);
+      if (!node) continue; // node vanished — skip (getNode would throw)
       const sig = this._latestTerminating(node);
       if (!sig) continue;
       // Lock is free here — each drained item re-acquires its own section.
-      await this._advanceSignal(nodeId, sig.type, sig.payload);
+      // Subtask 2: a drained advance must never reject the caller's critical
+      // section (a rejection here would override the section's resolution and
+      // surface as an unhandled rejection at the fire-and-forget call sites) —
+      // contain per node.
+      try {
+        await this._advanceSignal(nodeId, sig.type, sig.payload);
+      } catch (err) {
+        logWarn(
+          `engine: deferred-drain advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
+      }
     }
+  }
+
+  /**
+   * Contain a throwing advancement critical section for the affected node
+   * (subtask 2). Invoked via {@link _advanceSignal}'s onError hook so a
+   * `work()` exception — a throwing conditionResolver, a broken propagation
+   * invariant, a throwing recorder — surfaces as a terminal node failure
+   * instead of an unhandled rejection:
+   *
+   * - Escalate the node when its lifecycle permits (`running` / `ready` /
+   *   `pending` / `completed` / `blocked` → `escalate`), carrying the error
+   *   reason, and surface it through the completion seam like a live escalate.
+   * - Fall back to `timeout` when the node is stuck `running` and escalation
+   *   is somehow not legal (defense-in-depth for the "stuck running" case).
+   * - When the node is already terminal, just log — there is no transition
+   *   left to apply.
+   *
+   * Finally re-checks graph termination so the terminal transition (GRAPH
+   * COMPLETE / BLOCKED) is never silently dropped by the containment.
+   */
+  private _containAdvanceError(nodeId: string, err: unknown): void {
+    const node = this.state.nodes.get(nodeId);
+    const reason = `advance critical-section error: ${this._errorString(err)}`;
+    if (!node) {
+      logWarn(
+        `engine: cannot contain advancement error for unknown node "${nodeId}" in graph "${this.state.graphId}": ${reason}`,
+      );
+      return;
+    }
+    if (canTransitionNode(node.status, NodeStatus.Escalate)) {
+      markEscalated(this.state, node, reason);
+      removeFromFrontier(this.state, nodeId);
+      this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
+    } else if (canTransitionNode(node.status, NodeStatus.Timeout)) {
+      markTimedOut(this.state, node, reason);
+      this._notifyCompletion(node, "timeout", reason, NodeStatus.Timeout);
+    } else {
+      logWarn(
+        `engine: node "${nodeId}" in "${node.status}" after section error — cannot escalate (graph "${this.state.graphId}"): ${reason}`,
+      );
+    }
+    try {
+      this._checkTermination();
+    } catch (termErr) {
+      logWarn(
+        `engine: termination re-check after containment threw for graph "${this.state.graphId}": ${this._errorString(termErr)}`,
+      );
+    }
+  }
+
+  /** Best-effort error message from an unknown throw value. */
+  private _errorString(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
   }
 
   // ── Advancement core ──────────────────────────────────────────────────────
@@ -601,12 +871,22 @@ export class AdvanceEngine {
             this.dispatchPort,
           );
         }
+        // Monitor (M1b): escalate propagation escalated downstream convergence
+        // node(s) inside signal-propagation.ts — those markEscalated calls are
+        // lifecycle transitions, not signals, so surface each through the
+        // completion seam / event log exactly once.
+        this._notifyPropagatedEscalations(report, signalPayload);
       }
     } else if (signalType === "revise_needed") {
       if (loopMember) {
         executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
       } else {
-        this._propagateRevise(node, signalPayload);
+        // Monitor (M1b): a plain revise with nowhere to re-enter escalates
+        // (or a stuck / max-traversals-exhausted revision marks the reviewer
+        // done) inside signal-propagation.ts — surface the report's escalated
+        // node(s) through the completion seam exactly once.
+        const report = this._propagateRevise(node, signalPayload);
+        this._notifyPropagatedEscalations(report, signalPayload);
       }
     }
 
@@ -684,6 +964,9 @@ export class AdvanceEngine {
     switch (signalType) {
       case "answer":
         if (node.status === NodeStatus.Running) {
+          // Liveness feed (subtask 2): the node's session is terminal — stop
+          // observing it and drop the reverse-index entry.
+          this._detachLiveness(node);
           markCompleted(this.state, node);
           // Record the node's genuinely produced artifacts/evidence at
           // completion (subtask C-RECORD). Fields stay absent when the node
@@ -698,6 +981,7 @@ export class AdvanceEngine {
         // The reviewing node finished its pass; its own lifecycle completes.
         // Back-edge re-activation of the upstream node is Phase 2.
         if (node.status === NodeStatus.Running) {
+          this._detachLiveness(node);
           markCompleted(this.state, node);
           this._captureNodeResult(node);
           recordNodeArtifactsAndEvidence(this.state, node);
@@ -707,6 +991,7 @@ export class AdvanceEngine {
         break;
       case "escalate":
         if (node.status === NodeStatus.Running) {
+          this._detachLiveness(node);
           markEscalated(this.state, node, this._extractErrorMessage(signalPayload));
           // Subtask 1: notify exactly once — `escalate`.
           this._notifyCompletion(node, "escalate", signalPayload, NodeStatus.Escalate);
@@ -747,9 +1032,28 @@ export class AdvanceEngine {
     const cb = this.onNodeCompletion;
     if (cb) {
       try {
-        cb(event);
-      } catch {
+        const ret = cb(event) as unknown;
+        // Subtask 2: the seam is typed `() => void`, but real notifiers
+        // (graph-notify.ts createGraphNotifier) return a promise — an async
+        // throw / rejection would otherwise surface as an unhandled rejection
+        // at the fire-and-forget advancement paths. Contain sync throws
+        // (catch below) AND async rejections (catch on the thenable).
+        if (
+          ret !== null &&
+          ret !== undefined &&
+          typeof (ret as PromiseLike<unknown>).then === "function"
+        ) {
+          void (ret as PromiseLike<unknown>).then(undefined, (e: unknown) => {
+            logWarn(
+              `engine: node-completion notifier rejected for node "${node.nodeId}" in graph "${this.state.graphId}": ${this._errorString(e)}`,
+            );
+          });
+        }
+      } catch (err) {
         // never let a notifier failure break graph advancement
+        logWarn(
+          `engine: node-completion notifier threw for node "${node.nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
       }
     }
     // Write-side durable log: record the terminal transition alongside the
@@ -763,14 +1067,17 @@ export class AdvanceEngine {
    * (subtask 1). Recovery marks a `running` node `timeout` directly inside
    * `reconcileEngine` (`engine-recovery.ts`) when its dispatch task vanished —
    * that transition happens outside the signal-driven `_applySignalTransition`,
-   * so recovery surfaces it through this public seam exactly once. A no-op when
-   * the node is not `timeout` or no callback is registered. No terminating
-   * signal drives a timeout, so the event uses the synthetic `timeout` marker
-   * with the node's recorded `errorReason` as payload.
+   * so recovery surfaces it through this public seam exactly once. No
+   * terminating signal drives a timeout, so the event uses the synthetic
+   * `timeout` marker with the node's recorded `errorReason` as payload.
+   *
+   * Monitor H2: the durable event log is written UNCONDITIONALLY — even when
+   * no `onNodeCompletion` notifier is registered — mirroring
+   * {@link _notifyCompletion} (the event is built and logged regardless of the
+   * notifier seam). Only the `onNodeCompletion` callback invocation is
+   * conditional. A no-op when the node is not `timeout`.
    */
   notifyNodeTimeout(nodeId: string): void {
-    const cb = this.onNodeCompletion;
-    if (!cb) return;
     const node = getNode(this.state, nodeId);
     if (node.status !== NodeStatus.Timeout) return;
     this._notifyCompletion(
@@ -779,6 +1086,169 @@ export class AdvanceEngine {
       node.errorReason ?? "timed out",
       NodeStatus.Timeout,
     );
+  }
+
+  /**
+   * Public node-terminal notification entry point (monitor H4). Wraps the
+   * private {@link _notifyCompletion} so external control paths that mutate
+   * node lifecycle OUTSIDE the signal-driven advancement (e.g. graph
+   * cancellation, S7) can surface the node's terminal transition through the
+   * same completion seam + durable event log as signal-driven transitions.
+   *
+   * The caller supplies the transition facts (`signalType`, `payload`,
+   * `nodeStatus`) — the engine stays role-agnostic and only packages them.
+   * A no-op for an unknown node id.
+   */
+  notifyNodeTerminal(
+    nodeId: string,
+    signalType: string,
+    payload: unknown,
+    nodeStatus: NodeStatus,
+  ): void {
+    const node = this.state.nodes.get(nodeId);
+    if (!node) return;
+    this._notifyCompletion(node, signalType, payload, nodeStatus);
+  }
+
+  /**
+   * Record a session-activity heartbeat for a running node (subtask 2 of
+   * node-anomaly-detection). The public liveness intake — called by the
+   * platform liveness feed (session tool-call / message observations) and by
+   * the stall monitor (subtask 3) when it re-classifies activity.
+   *
+   * Guarded: a heartbeat only lands on a node that is BOTH `running` AND
+   * actually dispatched by this engine (`dispatchTaskId` set — matching the
+   * launch that produced the session). Every other case is a strict no-op:
+   * a completed / escalated / blocked / pending node must never be revived
+   * into activity, and a node that was never launched has no live session to
+   * heartbeat. The mutation is non-critical observability churn — it rides
+   * the debounced persistence tier (`markNonCriticalDirty`), never the
+   * synchronous write-through.
+   */
+  recordLivenessHeartbeat(
+    nodeId: string,
+    source: NodeLivenessState["heartbeatSource"],
+  ): void {
+    const node = this.state.nodes.get(nodeId);
+    if (!node) return;
+    if (node.status !== NodeStatus.Running) return;
+    if (!node.dispatchTaskId) return;
+    node.liveness = {
+      ...node.liveness,
+      lastActivityAt: Date.now(),
+      heartbeatSource: source,
+    };
+    markNonCriticalDirty(this.state);
+  }
+
+  /**
+   * Immediate-failure fast path (subtask 4 of node-anomaly-detection). Public
+   * intake for session-level failure observations relayed by the platform
+   * liveness feed — a dispatch session reported `error` (session.error) or
+   * `gone` (session.deleted: the platform can no longer see the session at all).
+   *
+   * Strictly guarded — a no-op unless ALL of:
+   * - the node is RUNNING (a terminal / pending / ready / blocked / cancelled
+   *   node must never be revived or re-advanced);
+   * - the liveness feed is attached: the seam is wired AND the node's dispatch
+   *   session was registered with it at launch (`dispatchSessionId` present —
+   *   the same predicate {@link _detachLiveness} uses to unregister).
+   *
+   * Per-kind semantics:
+   * - `gone` is AUTHORITATIVE — the worker vanished and the platform can no
+   *   longer observe it, so the node fails immediately through the existing
+   *   escalate advance ({@link onNodeSignalEmitted} with source `"dispatch"`),
+   *   reusing the standard escalate propagation + cascade cancel so the
+   *   abnormal node never blocks graph advancement.
+   * - `error` is first re-checked against the dispatch port via
+   *   {@link isDispatchTaskLive}: a task that is STILL LIVE (running / pending /
+   *   awaiting_approval) means the session error was transient — the engine
+   *   records a `session` heartbeat (activity continues) and returns, keeping
+   *   the node running (matching the dispatch layer's guardedMarkError
+   *   semantics). A task that is genuinely NOT live escalates like `gone`.
+   *
+   * Returns the contained advance promise — it resolves when the observation
+   * was processed (or rejected by a guard) and never rejects out of the box:
+   * the escalate advance's critical section contains its own errors (subtask 2),
+   * so a throwing feed relay can never break the engine.
+   */
+  handleFeedSessionEvent(
+    nodeId: string,
+    kind: "error" | "gone",
+    reason?: string,
+  ): Promise<void> {
+    const node = this.state.nodes.get(nodeId);
+    if (!node) return Promise.resolve();
+    if (node.status !== NodeStatus.Running) return Promise.resolve();
+    // The liveness feed must be attached: the seam is wired AND the node's
+    // session was registered with it at launch. A node whose session was never
+    // attached has no observed session to fail fast on.
+    if (!this.livenessFeed || !node.dispatchSessionId) return Promise.resolve();
+
+    // `error` carries the transient-error protection: the session reported an
+    // error, but the dispatch task may still be live (a transient execution
+    // error while the underlying session continues — guardedMarkError parity
+    // with engine-recovery.ts subscribeTaskTermination). Only a task that is
+    // genuinely NOT live escalates.
+    if (kind === "error") {
+      const taskId = node.dispatchTaskId;
+      if (taskId && isDispatchTaskLive(this.dispatchPort, taskId)) {
+        // Still live — record the session activity and keep the node running;
+        // the subscribed onTaskTerminated listener (or recovery) advances it on
+        // a genuine later termination.
+        this.recordLivenessHeartbeat(nodeId, "session");
+        return Promise.resolve();
+      }
+    }
+
+    // `gone` (authoritative) or a genuinely-dead `error` → immediate escalate
+    // through the standard advancement path: running → escalated lifecycle +
+    // completion seam + escalate propagation (retry gate / cascade cancel) +
+    // termination re-check. Source `"dispatch"`: the observation is a
+    // dispatch-layer session event, not a recovery pass.
+    const payload = { error: reason ?? "dispatch session deleted" };
+    return this.onNodeSignalEmitted(node.nodeId, "escalate", payload, "dispatch");
+  }
+
+  /**
+   * Reverse-lookup the node owning a live dispatch session (subtask 2). Backs
+   * the platform liveness feed's `sessionId → nodeId` reverse index: given a
+   * session the platform observes, the feed can find the graph node it
+   * belongs to. Returns `undefined` for an unknown session or a session whose
+   * node has detached (terminal transition). Only meaningful when a
+   * {@link NodeLivenessFeed} is wired — the index is otherwise empty.
+   */
+  getNodeIdForSession(sessionId: string): string | undefined {
+    return this._sessionToNodeId.get(sessionId);
+  }
+
+  /**
+   * Unregister a node's session from the feed + reverse index (subtask 2).
+   * Mirrors {@link NodeLivenessFeed.attach}: called when a running node
+   * reaches a terminal state, so the feed stops observing the session and the
+   * `sessionId → nodeId` index entry is dropped. A no-op when no feed is
+   * wired (the index is empty then) or the node never attached. The feed
+   * call is optional-chained and total — it can never break advancement.
+   */
+  private _detachLiveness(node: NodeRuntimeState): void {
+    if (!this.livenessFeed) return;
+    if (node.dispatchSessionId) {
+      this._sessionToNodeId.delete(node.dispatchSessionId);
+    }
+    this.livenessFeed.detach(node.nodeId);
+  }
+
+  /**
+   * Public termination re-check (monitor H4). Wraps the private
+   * {@link _checkTermination} so external control paths (e.g. graph
+   * cancellation, S7) can re-evaluate graph termination after manual state
+   * mutation without entering a full advancement critical section. Fires the
+   * `onGraphTerminal` seam (deduped via the two-layer guards) and surfaces
+   * runtime-deadlock synthetic escalations through the completion seam, exactly
+   * like the signal-driven path.
+   */
+  checkTermination(): void {
+    this._checkTermination();
   }
 
   /**
@@ -864,6 +1334,17 @@ export class AdvanceEngine {
           // The node is escalated, not dispatched — drop it from the frontier so
           // it is not left lingering as a ready entry (see budget pre-check).
           removeFromFrontier(state, node.nodeId);
+          // Monitor (M1a): the budget pre-check escalated a ready node that was
+          // never dispatched — surface it through the completion seam / durable
+          // event log exactly like a live `escalate` signal (markEscalated is a
+          // lifecycle transition, not a signal, so _applySignalTransition never
+          // sees it).
+          this._notifyCompletion(
+            node,
+            "escalate",
+            check.reason ?? "graph budget exhausted",
+            NodeStatus.Escalate,
+          );
         }
         return;
       }
@@ -877,14 +1358,67 @@ export class AdvanceEngine {
     // `startedAt` was set by `markRunning`). Total — never breaks dispatch.
     this.graphEvents?.nodeDispatched(state.graphId, node.nodeId, node.agent, node.startedAt);
 
-    const task = await this.dispatchPort.executeNode(
-      node,
-      this.parentContext,
-      `graph node ${node.nodeId}`,
-    );
+    let task: DispatchTask;
+    try {
+      task = await this.dispatchPort.executeNode(
+        node,
+        this.parentContext,
+        `graph node ${node.nodeId}`,
+      );
+    } catch (err) {
+      // Preserve the "no dispatch seam" misconfiguration rejection: only the
+      // throwOnDispatch fallback stub (index.ts, marker-detected) rethrows so
+      // run() still rejects with /no dispatch seam/. All genuine dispatch
+      // failures are contained below.
+      if (isNoDispatchSeamStub(this.dispatchPort)) throw err;
+      const reason = `node dispatch failed: ${String(err)}`;
+      logWarn(
+        `engine: dispatch failed for node "${node.nodeId}" in graph "${this.state.graphId}": ${reason}`,
+      );
+      // Orphan-path parity (engine-recovery.ts:469-478): mark the node terminal
+      // (timeout) + record an escalate ledger signal so downstream joins fail
+      // fast via the deferred-drain re-advance (race-guard pattern at
+      // engine-advance.ts:1110-1111).
+      markTimedOut(this.state, node, reason);
+      recordSignalToLedger(this.state, node.nodeId, "escalate", { error: reason }, "race_guard");
+      queuePendingCompletion(this.state, node.nodeId);
+      this.notifyNodeTimeout(node.nodeId); // completion seam parity (index.ts:782-784)
+      return; // CONTINUE dispatching the remaining frontier — do not abort the pass
+    }
     node.dispatchTaskId = task.id;
     node.dispatchSessionId = task.sessionId;
     markDirty(state);
+    // Liveness feed (subtask 2): when a feed is wired, record the initial
+    // `dispatch` heartbeat — the node is provably live the moment its launch
+    // succeeded — and register its session with the platform feed plus the
+    // engine's own reverse index (`sessionId → nodeId`, for the feed's
+    // reverse lookup).
+    //
+    // The initial heartbeat is written WITHOUT a separate non-critical dirty
+    // mark: `markDirty` above already flags this critical section, so the
+    // synchronous write-through persists the whole snapshot — including the
+    // `liveness` carrier (serialized at engine-persistence.ts) — in the same
+    // section. Adding `markNonCriticalDirty` here would leave the flag set
+    // after the sync tier owns the write, breaking the M5 contract that a
+    // pure critical mutation leaves `isNonCriticalDirty` untouched (and
+    // triggering a spurious debounced write on the next idle section). Later
+    // heartbeats outside critical sections (`recordLivenessHeartbeat`) DO ride
+    // the debounced tier, as they are genuinely standalone non-critical churn.
+    //
+    // FEED-GATED (false-positive regression): the launch heartbeat is written
+    // ONLY when a liveness feed is wired. Without a feed there is no observer
+    // that can ever refresh `lastActivityAt` (the relay resolves owners through
+    // the feed-gated `sessionId → nodeId` index), so an unconditional launch
+    // heartbeat would leave `NodeLivenessMonitor.tick` with a frozen timestamp
+    // and hard-stall EVERY node running past the warn+grace deadline as a
+    // false positive. Feed-less engines therefore carry NO `liveness` carrier,
+    // which the monitor's Tier-3 fallback skips entirely — they keep the pure
+    // wall-clock staleness deadline (the documented no-feed contract).
+    if (this.livenessFeed) {
+      node.liveness = { lastActivityAt: Date.now(), heartbeatSource: "dispatch" };
+      this.livenessFeed.attach(node.nodeId, task.sessionId);
+      this._sessionToNodeId.set(task.sessionId, node.nodeId);
+    }
     // Phase-3 delivery seam (closes the known integration gap): a real dispatch
     // completion never reached the advance engine — only direct
     // `signalBridge.record` injection did. Register an `onTaskTerminated`
@@ -895,9 +1429,44 @@ export class AdvanceEngine {
     // with the identical semantics. The listener fires asynchronously (the
     // manager's immediate-fire guard uses a microtask), so re-entrancy into the
     // advancing critical section is safe.
-    subscribeTaskTermination(this.state, this.dispatchPort, node, (nid, type, payload) => {
-      this.signalBridge.record(this.state, nid, type, payload, "dispatch");
-    });
+    // Monitor (M4): `subscribeTaskTermination` returns the exact callback it
+    // handed to `port.onTaskTerminated`. Register it into the engine's own
+    // subscription ledger (keyed by the dispatched task id) so a teardown path
+    // can unregister every listener this engine wired — exposed via
+    // {@link getTerminationSubscriptions} (S7 dispose iterates it and calls
+    // `port.removeTaskTerminatedListener(taskId, callback)`).
+    const terminationCb = subscribeTaskTermination(
+      this.state,
+      this.dispatchPort,
+      node,
+      (nid, type, payload) => {
+        // F1 bridge: route dispatch terminations through the public advance
+        // entry instead of the raw signalBridge.record seam. signalBridge.record
+        // only fires listeners for TERMINATING signals, so a HITL pause status
+        // (mapped to the pausing `need_approval` signal in engine-recovery.ts)
+        // was recorded but never advanced the node — it stayed `running`
+        // forever and [GRAPH BLOCKED] never fired. onNodeSignalEmitted keeps
+        // signalBridge.record as the exclusive ledger-write path (step 1) and
+        // additionally routes the pausing `need_approval` through
+        // `_advanceSignal` → the running → blocked transition. Fire-and-forget
+        // (void), matching the record-only callback's semantics today —
+        // Subtask 2: attach a catch so a contained-advance regression can
+        // never surface an unhandled rejection from this fire-and-forget site.
+        void this.onNodeSignalEmitted(nid, type, payload, "dispatch").catch(
+          (err) => {
+            logWarn(
+              `engine: dispatch-termination advance failed for node "${nid}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+            );
+          },
+        );
+      },
+    );
+    if (terminationCb) {
+      this._terminationSubscriptions.push({
+        taskId: task.id,
+        callback: terminationCb,
+      });
+    }
 
     // Post-registration race-condition guard: after the onTaskTerminated listener
     // is attached, re-read the dispatched task's current status. If the task has
@@ -971,9 +1540,108 @@ export class AdvanceEngine {
    * nodes remain but ≥1 blocked node exists. Fires `onGraphTerminal` with
    * `isBlocked=true` WITHOUT a phase transition. Each terminal type (complete /
    * blocked) fires at most once via separate dedupe guards.
+   *
+   * Monitor (M1c): the runtime-deadlock guard's synthetic escalations (pending
+   * nodes escalated with `DEADLOCK_REASON` inside checkGraphTermination) are
+   * surfaced through the completion seam via the `onSyntheticEscalate` hook —
+   * one `_notifyCompletion` per escalated node. Dedup: the deadlock guard only
+   * escalates `pending` nodes and only when no node is already escalated
+   * (`counts.escalate === 0`), so a node escalated by propagation (M1b) or a
+   * live signal is never double-notified; the status guard below is the
+   * defense-in-depth.
    */
   private _checkTermination(): void {
-    checkGraphTermination(this.state, this.onGraphTerminal, this._terminationCtx);
+    checkGraphTermination(
+      this.state,
+      this.onGraphTerminal,
+      this._terminationCtx,
+      (nodeId, reason) => {
+        const node = this.state.nodes.get(nodeId);
+        if (!node) return;
+        // Only a node the guard JUST escalated (`pending → escalate`) is
+        // notified — an already-terminal node cannot be re-escalated, and a
+        // node escalated by a live signal or propagation is not pending.
+        if (node.status !== NodeStatus.Escalate) return;
+        this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
+      },
+      // F3: the runtime-deadlock predicate. A pure state reader built from the
+      // edge topology + conditionResolver — a pending node is dead-ended when
+      // every one of its incoming edges can provably never activate, so the
+      // deadlock guard may fire even when an escalated/timed-out node exists.
+      (nodeId) => this._isPendingDeadEnded(nodeId),
+    );
+  }
+
+  /**
+   * Whether a pending node is dead-ended: every one of its incoming edges is
+   * provably unable to activate, so the node can never become `ready` (F3).
+   *
+   * A pending node is dead-ended iff EVERY incoming edge is:
+   * (i)   an `on_condition` edge with no condition, no injected resolver, or a
+   *       resolver that returns false (the edge can never fire);
+   * (ii)  an `on_signal` edge whose `signal_filter` excludes the source's
+   *       recorded terminating signal while the source is terminal
+   *       (Completed / Done / Escalate / Timeout — the source can never emit
+   *       an in-filter signal again);
+   * (iii) sourced from a Cancelled node (a cancelled source never emits).
+   *
+   * An `always` edge NEVER counts as dead-ended, even from a terminal source:
+   * the graph is then in an error state awaiting orchestrator attention — an
+   * escalated node with a pending downstream via an `always` edge must keep
+   * the engine `executing` (engine-terminal.test.ts "does NOT deadlock-
+   * terminate a graph with an escalated node and a pending downstream").
+   *
+   * Pure state reader — never mutates. Unknown / unverifiable topology
+   * conservatively reports NOT dead-ended so the guard never force-completes
+   * a graph it cannot prove is stuck.
+   */
+  private _isPendingDeadEnded(nodeId: string): boolean {
+    const state = this.state;
+    const node = state.nodes.get(nodeId);
+    if (!node || node.status !== NodeStatus.Pending) return false;
+    const incoming = state.graphDeclaration.edges.filter((e) => e.to === nodeId);
+    if (incoming.length === 0) return false;
+    for (const edge of incoming) {
+      const source = state.nodes.get(edge.from);
+      // (iii) an edge sourced from a cancelled node can never fire.
+      if (source && source.status === NodeStatus.Cancelled) continue;
+      if (edge.type === "always") return false; // always edges never count
+      if (edge.type === "on_condition") {
+        // (i) a never-activatable on_condition edge.
+        if (!edge.condition || !this.conditionResolver) continue;
+        if (!source) return false; // missing source — cannot verify dead-end
+        try {
+          if (!this.conditionResolver(edge.condition, source)) continue;
+        } catch (err) {
+          // Subtask 2: a throwing resolver can never activate its edge — the
+          // pending node IS dead-ended (the edge is provably never-firing).
+          // Without this the F3 guard could not quiesce a graph whose resolver
+          // already aborted advancement, leaving it hung in `executing`.
+          logWarn(
+            `engine: conditionResolver threw for condition "${edge.condition}" (node "${nodeId}", graph "${this.state.graphId}"): ${this._errorString(err)}`,
+          );
+          continue;
+        }
+        return false; // could still activate → not dead-ended
+      }
+      if (edge.type === "on_signal") {
+        // (ii) filter excludes the source's recorded terminating signal while
+        // the source is terminal.
+        if (
+          source &&
+          (source.status === NodeStatus.Completed ||
+            source.status === NodeStatus.Done ||
+            source.status === NodeStatus.Escalate ||
+            source.status === NodeStatus.Timeout)
+        ) {
+          const sig = this._latestTerminating(source);
+          if (!sig || !(edge.signal_filter ?? []).includes(sig.type)) continue;
+        }
+        return false; // source not terminal, or an in-filter signal → not dead-ended
+      }
+      return false; // unknown edge type — conservative
+    }
+    return true;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1021,6 +1689,42 @@ export class AdvanceEngine {
   }
 
   /**
+   * Surface every node a propagation pass escalated (monitor M1b).
+   *
+   * `propagateEscalate` / `propagateRevise` escalate nodes via the lifecycle
+   * `markEscalated` / `markDone` transitions inside signal-propagation.ts —
+   * those are not signals, so `_applySignalTransition` never sees them and the
+   * completion seam would otherwise stay silent. This helper replays the
+   * propagation report's `escalated` list through {@link _notifyCompletion}.
+   *
+   * Dedup: a node is only notified when it actually landed in a terminal
+   * escalated state this pass (`Escalate`, or `Done` for a stuck / exhausted
+   * revise). The escalating SOURCE node was already notified by
+   * `_applySignalTransition`, and an already-terminal node cannot be escalated
+   * again (escalate is terminal), so no node is double-notified here; the
+   * status guard is the defense-in-depth against any future overlap with the
+   * synthetic-escalation path ({@link _checkTermination}).
+   *
+   * The payload is the propagation's machine-readable reason when present
+   * (e.g. `max_traversals exhausted`), falling back to the original signal
+   * payload for a join-failure cascade.
+   */
+  private _notifyPropagatedEscalations(
+    report: SignalPropagationReport,
+    fallbackPayload: unknown,
+  ): void {
+    const payload = report.reason ?? fallbackPayload;
+    for (const id of report.escalated) {
+      const node = this.state.nodes.get(id);
+      if (!node) continue;
+      if (node.status !== NodeStatus.Escalate && node.status !== NodeStatus.Done) {
+        continue;
+      }
+      this._notifyCompletion(node, "escalate", payload, node.status);
+    }
+  }
+
+  /**
    * Back-propagate a `revise_needed` along the loop group's
    * `on_signal(revise_needed)` back-edges so upstream nodes re-enter `ready`,
    * bounded by the loop group's `max_traversals` (escalate when exhausted).
@@ -1034,8 +1738,8 @@ export class AdvanceEngine {
   private _propagateRevise(
     node: NodeRuntimeState,
     signalPayload: unknown,
-  ): void {
-    propagateRevise(this.state, node, signalPayload);
+  ): SignalPropagationReport {
+    return propagateRevise(this.state, node, signalPayload);
   }
 
   // ── Phase 3 approval lifecycle ────────────────────────────────────────────
@@ -1200,6 +1904,14 @@ export class AdvanceEngine {
       //    retried chain quiesces again (stale dedupe guard B2).
       this._terminationCtx.terminalComplete = false;
       this._terminationCtx.terminalBlocked = false;
+      // Monitor (M10): re-opening a terminal graph starts a NEW terminal
+      // epoch — the persisted cross-restart dedup flag must be cleared
+      // alongside the per-instance ctx guards so the retried chain's next
+      // terminal event fires (and the cleared flag is durable via markDirty).
+      if (this.state.terminalNotified) {
+        this.state.terminalNotified = undefined;
+        markDirty(this.state);
+      }
       await this._dispatchReadyNodes();
       this._checkTermination();
       let reDispatched = 0;
@@ -1227,6 +1939,14 @@ export class AdvanceEngine {
   resetTerminalDedupe(): void {
     this._terminationCtx.terminalComplete = false;
     this._terminationCtx.terminalBlocked = false;
+    // Monitor (M10): same epoch reset as `retryNode` — the persisted
+    // cross-restart dedup flag must not suppress the next legitimate terminal
+    // event after a non-retry re-open (e.g. extend after complete). Cleared
+    // durably via markDirty.
+    if (this.state.terminalNotified) {
+      this.state.terminalNotified = undefined;
+      markDirty(this.state);
+    }
   }
 
   /**

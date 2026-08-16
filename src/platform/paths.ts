@@ -62,3 +62,29 @@ export function piPlatformPaths(): PlatformPaths {
     extensionsDir: join(base, "extensions"),
   };
 }
+
+/**
+ * Returns platform paths for the dsh (DeepSeek Harness) platform.
+ *
+ * Per the dsh plugin contract (§5.1), the dsh home directory resolves as
+ * `$DSH_HOME` when set (non-blank), otherwise `~/.dsh`; a blank env value is
+ * treated as unset.
+ *
+ * - `configDir`: dsh home (`$DSH_HOME` or `~/.dsh`)
+ * - `agentsDir`: `{configDir}/skills` (mirrors the pi pattern — dsh has no
+ *   native agents directory, so rolebox agent files live under the home tree)
+ * - `skillsDir`: `{configDir}/skills`
+ * - `sessionsDir`: `{configDir}/sessions` (documented `dshHomePath('sessions')`)
+ */
+export function dshPlatformPaths(): PlatformPaths {
+  const dshHome = process.env.DSH_HOME?.trim()
+    ? process.env.DSH_HOME
+    : join(os.homedir(), ".dsh");
+  return {
+    platformId: "dsh",
+    configDir: dshHome,
+    agentsDir: join(dshHome, "skills"),
+    skillsDir: join(dshHome, "skills"),
+    sessionsDir: join(dshHome, "sessions"),
+  };
+}

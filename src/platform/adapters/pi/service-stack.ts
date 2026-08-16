@@ -22,10 +22,17 @@
 import { defineTool } from "../../ports/tool-factory.ts";
 import type { IHookProvider } from "../../ports/hook-provider.ts";
 import { PiToolFactory } from "./tool-factory.ts";
+import type { ToolInterceptorHooks } from "./tool-interceptor.ts";
 import { PiSessionAdapter } from "./session.ts";
 import { z } from "zod";
+import { registerToolSchema, registerDeprecatedTool } from "../../../hooks/tool-before.ts";
 import type { DispatchManager } from "../../../dispatch/core/manager.ts";
 import type { ISessionClient } from "../../ports/session-client.ts";
+import {
+  createGraphToolSet,
+  type GraphToolSet,
+} from "../../../graph/tools/index.ts";
+import type { NodeLivenessFeed } from "../../../graph/engine/index.ts";
 
 // ── Shared tool assembly ────────────────────────────────────────────────────
 
@@ -114,9 +121,32 @@ export class PiLightweightServiceStack implements IHookProvider {
   private _dispatchTools?: Record<string, CanonicalToolDef>;
   private _loopTools?: Record<string, CanonicalToolDef>;
   private _taskTools?: Record<string, CanonicalToolDef>;
+  private _extraTools?: Record<string, CanonicalToolDef>;
   private _dispatchManager?: DispatchManager;
   private _graphNotifyClient?: ISessionClient;
   private _stateDir: string;
+  /** Hook wiring consumed by the tool-execution interceptor (subtask S9). */
+  private _interceptorHooks: ToolInterceptorHooks | undefined;
+  /**
+   * The single GraphToolSet instance (subtask 2) backing BOTH the `graph_*`
+   * tools (threaded into buildCanonicalTools via the `graphTools` option) and
+   * the HookDeps `graphTools` in-flight query (consumed by the Pi hook
+   * pipeline through {@link getGraphToolSet}). Constructed eagerly with the
+   * SAME deps the graph_* tools receive inside buildCanonicalTools — manager,
+   * directory (process.cwd()), stateDir and graphNotify — so both surfaces
+   * observe the same in-memory graph registry. Absent (undefined) when no
+   * dispatch manager is supplied, mirroring the graph_* gating in
+   * buildCanonicalTools.
+   */
+  private _graphToolSet: GraphToolSet | undefined;
+  /**
+   * Shared node-liveness feed (subtask 6). Threaded into every graph engine
+   * the stack's toolset builds so the engine records dispatch heartbeats,
+   * registers its sessions with the feed, and maintains the `sessionId →
+   * nodeId` reverse index the Pi liveness relay resolves through. Absent →
+   * engines run without liveness recording (backward compatible).
+   */
+  private _livenessFeed?: NodeLivenessFeed;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -127,20 +157,45 @@ export class PiLightweightServiceStack implements IHookProvider {
     dispatchTools?: Record<string, CanonicalToolDef>,
     loopTools?: Record<string, CanonicalToolDef>,
     taskTools?: Record<string, CanonicalToolDef>,
+    extraTools?: Record<string, CanonicalToolDef>,
     dispatchManager?: DispatchManager,
     graphNotifyClient?: ISessionClient,
     stateDir: string = process.cwd(),
+    interceptorHooks?: ToolInterceptorHooks,
+    livenessFeed?: NodeLivenessFeed,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
-    this._toolFactory = new PiToolFactory();
+    this._toolFactory = new PiToolFactory(interceptorHooks);
     this._sessionAdapter = new PiSessionAdapter(sessionDir);
     this._dispatchTools = dispatchTools;
     this._loopTools = loopTools;
     this._taskTools = taskTools;
+    this._extraTools = extraTools;
     this._dispatchManager = dispatchManager;
     this._graphNotifyClient = graphNotifyClient;
     this._stateDir = stateDir;
+    this._interceptorHooks = interceptorHooks;
+    this._livenessFeed = livenessFeed;
+    // Subtask 2: the graph tools only assemble when a dispatch manager is
+    // present (buildCanonicalTools gates the eight graph_* keys on it), so
+    // the shared toolset is constructed under the same gate. The graph-notify
+    // session client resolves exactly as in init() below (external client
+    // wins over the filesystem-backed session adapter).
+    if (dispatchManager) {
+      this._graphToolSet = createGraphToolSet({
+        manager: dispatchManager,
+        directory: process.cwd(),
+        stateDir,
+        graphNotify: {
+          sessionClient: graphNotifyClient ?? this._sessionAdapter,
+          emperorSessionId: (invokingSessionId) => invokingSessionId,
+        },
+        // Subtask 6: thread the shared node-liveness feed into the toolset's
+        // engines (absent → engine behavior unchanged).
+        ...(livenessFeed !== undefined ? { livenessFeed } : {}),
+      });
+    }
   }
 
   /** The PiSessionAdapter instance for external access. */
@@ -151,6 +206,16 @@ export class PiLightweightServiceStack implements IHookProvider {
   /** The PiToolFactory instance for external access. */
   get toolFactory(): PiToolFactory {
     return this._toolFactory;
+  }
+
+  /**
+   * The single GraphToolSet instance (subtask 2) backing the graph_* tools and
+   * the HookDeps `graphTools` in-flight query. `undefined` when no dispatch
+   * manager was supplied (no graph tools are registered either). The Pi hook
+   * pipeline reads this when assembling HookDeps.
+   */
+  getGraphToolSet(): GraphToolSet | undefined {
+    return this._graphToolSet;
   }
 
   /**
@@ -194,6 +259,10 @@ export class PiLightweightServiceStack implements IHookProvider {
         sessionClient: this._graphNotifyClient ?? this._sessionAdapter,
         emperorSessionId: (invokingSessionId) => invokingSessionId,
       },
+      // Subtask 2: bind the graph_* tools to the prebuilt toolset (single
+      // instance — same registry the HookDeps graphTools query reads). Absent
+      // when no dispatch manager was supplied (no graph tools are assembled).
+      graphTools: this._graphToolSet,
       dispatchToolsOverride,
       loopToolsOverride: this._loopTools && Object.keys(this._loopTools).length > 0
         ? this._loopTools
@@ -204,11 +273,36 @@ export class PiLightweightServiceStack implements IHookProvider {
       taskToolsOverride: this._taskTools && Object.keys(this._taskTools).length > 0
         ? this._taskTools
         : undefined,
+      // Platform-extra tools (opencode-only surface adapted for Pi, e.g.
+      // memory_update, function_graph, skill_compose, context_assemble).
+      // Same `.length > 0` degradation guard as the other overrides: an empty
+      // record registers nothing rather than overriding the shared surface.
+      extraTools: this._extraTools && Object.keys(this._extraTools).length > 0
+        ? this._extraTools
+        : undefined,
       // Engine-state persistence dir, threaded through createGraphTools into
       // every engine the graph tools construct (`.rolebox/state`). Defaults to
       // process.cwd() at construction.
       stateDir: this._stateDir,
+      // Subtask 6: thread the shared node-liveness feed into the graph tools'
+      // engine construction (absent → engine behavior unchanged).
+      ...(this._livenessFeed !== undefined
+        ? { livenessFeed: this._livenessFeed }
+        : {}),
     });
+
+    // 2.5 Register tool schemas + deprecation markers into the shared hook
+    // registries (mirrors tool-service.ts:109-112). The S9 interceptor
+    // (inside PiToolFactory.execute) reads these to run strict zod
+    // validation and deprecated-tool warnings on every Pi tool invocation.
+    for (const [name, def] of Object.entries(allTools)) {
+      registerToolSchema(name, (def as { args: z.ZodRawShape }).args);
+      if (def.deprecated) {
+        const message =
+          typeof def.deprecated === "object" ? def.deprecated.message : undefined;
+        registerDeprecatedTool(name, message);
+      }
+    }
 
     // 3. Compile all tools to Pi's native format
     const compiled = this._toolFactory.compileAll(allTools);

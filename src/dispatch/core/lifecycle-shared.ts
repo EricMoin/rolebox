@@ -5,6 +5,8 @@ import { metrics } from "../persistence/metrics.ts";
 import { resultSidecarPath } from "../completion/result-extractor.ts";
 import type { ProgressStore } from "../types.progress.ts";
 import { clearEmittedThresholds } from "../progress/progress-tools.ts";
+import type { DispatchManagerConfig } from "../config.ts";
+import { CONCURRENCY_KEY_SEPARATOR } from "../concurrency/concurrency.ts";
 
 /** Index mapping parentSessionId → set of task IDs for O(1) lookup. */
 export type ParentTasksIndex = Map<string, Set<string>>;
@@ -46,7 +48,7 @@ export interface TaskLifecycleDeps {
   client: import("../../platform/ports/session-client.ts").ISessionClient;
   concurrency: import("../concurrency/concurrency.ts").IConcurrencyManager;
   watchdog: import("./watchdog.ts").TaskWatchdogManager;
-  config: import("../config.ts").DispatchManagerConfig;
+  config: DispatchManagerConfig;
   cancelQueue: Map<string, () => void>;
   syncControllers: Map<string, AbortController>;
   completedSyncSessions: Map<string, string>;
@@ -60,6 +62,10 @@ export interface TaskLifecycleDeps {
   deferredIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
   cleanedUpTasks: Map<string, number>;
   subagentModelKey: Map<string, string>;
+  /** Maps a dispatched agent ID to its owning root role ID — the role prefix of composite concurrency keys. */
+  subagentRoleKey: Map<string, string>;
+  /** Per-role merged dispatch configs keyed by root role ID — resolved by resolveDispatchingRole/effectiveConfigFor. */
+  roleConfigs: ReadonlyMap<string, DispatchManagerConfig>;
   directory: string;
   sessionMonitor: {
     verifyExistence: (client: import("../../platform/ports/session-client.ts").ISessionClient, sessionId: string) => Promise<"exists" | "missing" | "unknown">;
@@ -85,9 +91,37 @@ export interface TaskLifecycleDeps {
 
 const DEFAULT_CONCURRENCY_KEY = "default";
 
+/**
+ * Resolve the owning root role ID for a dispatched agent.
+ *
+ * Priority: the explicit subagent→role map (d.subagentRoleKey), then treating
+ * the agent ID itself as a root role ID when it has a per-role dispatch config
+ * (covers graph dispatch of a root role id). Returns undefined when neither
+ * applies — the legacy plain-model-key path.
+ */
+export function resolveDispatchingRole(d: TaskLifecycleDeps, agentId: string): string | undefined {
+  const roleId = d.subagentRoleKey.get(agentId);
+  if (roleId !== undefined) return roleId;
+  if (d.roleConfigs.has(agentId)) return agentId;
+  return undefined;
+}
+
 /** Derive the concurrency key for a subagent ID. */
 export function deriveKey(d: TaskLifecycleDeps, subagentId: string): string {
+  const roleId = resolveDispatchingRole(d, subagentId);
+  if (roleId !== undefined) {
+    const model = d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
+    return `${roleId}${CONCURRENCY_KEY_SEPARATOR}${model}`;
+  }
   return d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
+}
+
+/**
+ * Resolve the effective dispatch config for a dispatched agent: the owning
+ * role's merged config when a role resolves, otherwise the manager's base config.
+ */
+export function effectiveConfigFor(d: TaskLifecycleDeps, agentId: string): DispatchManagerConfig {
+  return d.roleConfigs.get(resolveDispatchingRole(d, agentId) ?? "") ?? d.config;
 }
 
 /** Compute the nesting depth for a task dispatched from the given parent session. */

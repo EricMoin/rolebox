@@ -809,3 +809,62 @@ describe("engine-advance — single-node always self-loop does not self-re-enter
     expect(state.phase).toBe(EnginePhase.Complete);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Subtask 5 — dangling loop-group guard: a node whose loopGroupId names a
+// group the declaration dropped must NOT be fabricated into `converged`.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("loop-group executor — dangling loopGroupId (subtask 5)", () => {
+  it("a revise_needed on a node with a dangling loopGroupId escalates instead of being swallowed as converged", () => {
+    const { state } = buildEngine(reviewLoopGraph(3));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+    // The group is gone from the runtime map (declaration dropped it) but the
+    // node still carries the stale tag.
+    state.loopGroups.delete("lg");
+    expect(review.loopGroupId).toBe("lg");
+
+    const report = executeLoopStep(state, review, "revise_needed", {
+      findings: ["still needs work"],
+    });
+
+    // NOT silently swallowed as a fabricated converged outcome.
+    expect(report.outcome).not.toBe("converged");
+    // The node escalated — a plain revision with nowhere to re-enter.
+    expect(report.escalated).toContain("review");
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Escalate);
+    // The dangling tag is demoted so later signals take the non-loop path.
+    expect(state.nodes.get("review")!.loopGroupId).toBeUndefined();
+  });
+
+  it("an escalate on a node with a dangling loopGroupId propagates forward (non-loop path)", () => {
+    const { state } = buildEngine(convergeLoopGraph());
+    const a = state.nodes.get("A")!;
+    a.status = NodeStatus.Completed;
+    state.loopGroups.delete("lg");
+
+    const report = executeLoopStep(state, a, "escalate", { reason: "boom" });
+
+    // Not swallowed as converged — worst-signal forward propagation ran.
+    expect(report.outcome).toBe("escalating");
+    expect(report.escalated.length).toBeGreaterThan(0);
+    expect(state.nodes.get("A")!.loopGroupId).toBeUndefined();
+  });
+
+  it("an answer on a node with a dangling loopGroupId converges without touching the missing tracker", () => {
+    const { state } = buildEngine(reviewLoopGraph(3));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+    // review has a revise back-edge — the old code path would call
+    // resetConvergenceTracker("lg") and throw on the missing group.
+    state.loopGroups.delete("lg");
+
+    const report = executeLoopStep(state, review, "answer", { verdict: "ok" });
+
+    // Forward flow only — no throw, no convergence-tracker touch, no traversal.
+    expect(report.outcome).toBe("converged");
+    expect(state.nodes.get("review")!.loopGroupId).toBeUndefined();
+    expect(report.traversals).toBe(0);
+  });
+});

@@ -18,9 +18,16 @@
  * - **Skip** graphs whose phase is already `complete` — a terminal graph has
  *   nothing to resume.
  * - For every remaining graph, build `createEngine(declaration, { manager,
- *   graphId, stateDir })` and `await recover()` **inside a per-graph
+ *   graphId, stateDir, onNodeCompletion, onGraphTerminal, graphEvents })` and
+ *   `await recover()` **inside a per-graph
  *   try/catch**, so one corrupt or failing graph never aborts the sweep.
  *   Failures are captured in `failed[]` and the loop continues to the sibling.
+ *
+ * Observer seams (monitor S10): the optional `onNodeCompletion` /
+ * `onGraphTerminal` / `graphEvents` options are forwarded to every resumed
+ * engine, so a graph that finished while the plugin was down re-announces its
+ * transitions and continues its durable event log instead of being silent.
+ * Absent → resumed engines behave exactly as before.
  *
  * Failure isolation is a hard guarantee: plugin startup must never be blocked
  * by a single bad engine file. This is enforced at three levels:
@@ -51,6 +58,11 @@ import { join } from "node:path";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import { EnginePhase } from "../../constants.ts";
 import { loadEngineStateFromJson } from "./engine-persistence.ts";
+import type {
+  NodeCompletionEvent,
+  GraphTerminalEvent,
+} from "./engine-advance.ts";
+import type { GraphEventRecorder } from "./graph-events.ts";
 // NOTE: imports createEngine from the public barrel (./index.ts) rather than
 // a separate factory file. createEngine is defined in index.ts alongside its
 // private EngineRuntimeImpl class — extracting it to a standalone factory
@@ -104,6 +116,38 @@ export interface RecoverInterruptedGraphsOptions {
    * the re-persist root.
    */
   stateDir?: string;
+
+  /**
+   * Optional node-completion notification seam (graph monitoring) forwarded to
+   * every resumed engine's `onNodeCompletion` hook. Recovery re-emits the
+   * terminating transitions of nodes whose tasks finished during the restart
+   * window — wiring a notifier here lets the orchestrator perceive those
+   * completions instead of the recovered engine being completely silent on
+   * reminders (the pre-fix gap). Defaults to absent → each resumed engine
+   * keeps its default no-op seam, so behavior is identical to older versions.
+   */
+  onNodeCompletion?: (event: NodeCompletionEvent) => void;
+
+  /**
+   * Optional graph-terminal notification seam (graph monitoring) forwarded to
+   * every resumed engine's `onGraphTerminal` hook — re-announces
+   * [GRAPH COMPLETE] / [GRAPH BLOCKED] for graphs that reached a terminal
+   * state while the plugin was down. Defaults to absent → no-op (unchanged
+   * behavior).
+   */
+  onGraphTerminal?: (event: GraphTerminalEvent) => void;
+
+  /**
+   * Optional write-side durable event log (graph monitoring) forwarded to
+   * every resumed engine's `graphEvents` seam. Passing the same
+   * {@link GraphEventRecorder} (built over the same `stateDir`) the running
+   * graph used lets a recovered engine CONTINUE appending
+   * `node_completed` / `phase_change` / … lines to
+   * `graph-events-{hash}.ndjson` instead of leaving the audit log silent
+   * after a restart. Defaults to absent → no event logging (unchanged
+   * behavior).
+   */
+  graphEvents?: GraphEventRecorder;
 }
 
 // ── Startup recovery sweep ──────────────────────────────────────────────────
@@ -182,6 +226,13 @@ export async function recoverInterruptedGraphs(
         manager: opts.manager,
         graphId: loaded.graphId,
         stateDir: opts.stateDir ?? opts.directory,
+        // Monitor (S10): forward the observer seams onto the resumed engine so
+        // a recovered graph re-announces node completions / graph-terminal
+        // transitions and continues its durable event log instead of running
+        // completely silent on reminders and audit lines.
+        onNodeCompletion: opts.onNodeCompletion,
+        onGraphTerminal: opts.onGraphTerminal,
+        graphEvents: opts.graphEvents,
       });
       await engine.recover();
       recovered += 1;

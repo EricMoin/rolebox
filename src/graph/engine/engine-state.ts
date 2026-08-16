@@ -202,6 +202,12 @@ export function registerNode(
     traversalCount: 0,
     startedAt: now,
     retryCount: 0,
+    // Shallow-copy the declared per-node budget into runtime state (monitor
+    // M2). Absent when the node declared no budget — OPTIONAL-ADDITIVE, so
+    // dispatch-facing code reads `node.budget` without re-parsing the
+    // declaration. The clone keeps later config mutation from leaking into
+    // the runtime carrier.
+    ...(config.budget ? { budget: { ...config.budget } } : {}),
   };
   state.nodes.set(config.id, node);
   state.updatedAt = now;

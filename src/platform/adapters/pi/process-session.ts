@@ -87,6 +87,14 @@ interface ProcessRecord {
    * the event stream instead of process exit.
    */
   idleEmitted: boolean;
+  /**
+   * Epoch-ms timestamp of the last liveness activity heartbeat relayed to
+   * the event bridge for this session. 0 until the first activity event.
+   * Used to throttle heartbeats (one per record per
+   * {@link ACTIVITY_HEARTBEAT_INTERVAL_MS}) so a streaming child cannot
+   * flood the bridge with an event per token delta.
+   */
+  lastActivityEmittedAt: number;
   /** Sidecar file path for appending JSON events (null if not available). */
   sidecarPath: string | null;
 }
@@ -192,6 +200,60 @@ const DEFAULT_AGENT_CONFIG: PiProcessAgentConfig = {
 };
 
 /**
+ * Minimum interval (ms) between liveness activity heartbeats relayed to the
+ * event bridge for one session. A streaming `pi --mode json -p` child can
+ * emit dozens of events per second (one text_delta per token); the liveness
+ * monitor only needs a heartbeat within its warn window (default 60 s), so
+ * relaying every event would be pure bridge churn. The throttle guarantees a
+ * fresh heartbeat at most once per interval — and, because it keys off the
+ * last EMITTED timestamp, the first event after any silence longer than the
+ * interval always emits immediately, so a long-running but active child keeps
+ * refreshing its owning graph node's liveness.
+ */
+const ACTIVITY_HEARTBEAT_INTERVAL_MS = 1_000;
+
+/**
+ * Raw `pi --mode json` event types that constitute genuine child-session
+ * activity (a new tool part or message part being produced). Each such event
+ * is relayed to the event bridge as a canonical `part.created` heartbeat so
+ * the graph engine's node-liveness relay can refresh the owning node.
+ *
+ * Terminal / error / canonical event types are deliberately excluded:
+ * - `turn_end` drives completion (`_completeTurn` emits the authoritative
+ *   `session.idle`) — the turn is ending, not progressing;
+ * - `error` / `session.*` / `message.created` / `message.completed` /
+ *   `part.created` / `part.updated` are already canonical or non-activity —
+ *   relaying them would risk feedback loops or duplicate completion signals.
+ */
+const PART_CREATE_ACTIVITY_EVENTS: ReadonlySet<string> = new Set([
+  "tool_execution_start",
+  "tool_call",
+]);
+
+const PART_UPDATE_ACTIVITY_EVENTS: ReadonlySet<string> = new Set([
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_update",
+  "tool_execution_end",
+  "text",
+  "reasoning",
+  "tool_result",
+  "step-finish",
+  "turn_start",
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+]);
+
+/** True when the raw event type represents genuine child-session activity. */
+function isActivityEventType(type: string): boolean {
+  return (
+    PART_CREATE_ACTIVITY_EVENTS.has(type) || PART_UPDATE_ACTIVITY_EVENTS.has(type)
+  );
+}
+
+/**
  * Separator character sequence used to delimit the context-inclusive
  * continuation prompt when reopening a session.
  */
@@ -227,6 +289,9 @@ export class PiProcessSessionAdapter implements ISessionClient {
   /** Optional event bridge for emitting canonical events (e.g., session.idle on process exit). */
   private eventBridge?: IEventBridge;
 
+  /** Liveness activity-heartbeat throttle (ms) for this adapter instance. */
+  private readonly activityHeartbeatIntervalMs: number;
+
   /**
    * @param agentConfigs - Optional pre-configured agent configs keyed by agent name.
    * @param sessionDir   - Optional session directory override (passed to PiSessionAdapter).
@@ -234,9 +299,14 @@ export class PiProcessSessionAdapter implements ISessionClient {
   constructor(
     agentConfigs?: Map<string, PiProcessAgentConfig>,
     sessionDir?: string,
+    options?: { activityHeartbeatIntervalMs?: number },
   ) {
     this.log = createSubLogger("pi-process-session");
     this.piSession = new PiSessionAdapter(sessionDir);
+    // Liveness activity-heartbeat throttle — injectable so tests can force
+    // per-event emission (interval 0) or exercise the default cadence.
+    this.activityHeartbeatIntervalMs =
+      options?.activityHeartbeatIntervalMs ?? ACTIVITY_HEARTBEAT_INTERVAL_MS;
 
     if (agentConfigs) {
       for (const [key, value] of agentConfigs) {
@@ -290,6 +360,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
         resolve: null,
         reject: null,
         idleEmitted: false,
+        lastActivityEmittedAt: 0,
         sidecarPath: join(process.cwd(), ".rolebox", "pi-sessions", `${id}.jsonl`),
       };
 
@@ -352,6 +423,7 @@ export class PiProcessSessionAdapter implements ISessionClient {
       resolve: null,
       reject: null,
       idleEmitted: false,
+      lastActivityEmittedAt: 0,
       sidecarPath: null,
     };
 
@@ -1047,10 +1119,62 @@ export class PiProcessSessionAdapter implements ISessionClient {
   }
 
   /**
+   * Relay one child-session activity heartbeat to the event bridge, throttled
+   * to at most one per {@link ACTIVITY_HEARTBEAT_INTERVAL_MS} per record.
+   *
+   * The canonical event type mirrors the platform's own host-session mapping
+   * (`tool_call` → `part.created`, `tool_result` / streaming updates →
+   * `part.updated` — see `src/platform/adapters/pi/event-bridge.ts`), so the
+   * graph engine's node-liveness relay (pi-extension.ts `heartbeatOn`)
+   * recognizes it without any new vocabulary. Both types are inert to the
+   * hook pipeline's dispatch-completion switch (`event-handler.ts` has no
+   * `part.*` case) and to the notification manager, so relaying them never
+   * mutates dispatch completion semantics — unlike `session.idle` /
+   * `message.updated`, which the completion evaluator consumes.
+   *
+   * Fire-and-forget with a swallowed rejection, mirroring the existing
+   * `session.idle` / `session.error` emission sites — a throwing bridge must
+   * never break child event parsing.
+   */
+  private _emitActivityHeartbeat(record: ProcessRecord, rawType: string): void {
+    const now = Date.now();
+    if (now - record.lastActivityEmittedAt < this.activityHeartbeatIntervalMs) {
+      return; // throttled — a recent heartbeat already covers this activity
+    }
+    record.lastActivityEmittedAt = now;
+    const canonicalType = PART_CREATE_ACTIVITY_EVENTS.has(rawType)
+      ? "part.created"
+      : "part.updated";
+    void this.eventBridge!.emit({
+      type: canonicalType,
+      rawType: `pi.${rawType}`,
+      properties: { sessionID: record.id },
+    }).catch((err: unknown) => {
+      this.log.debug("Failed to emit liveness activity heartbeat", {
+        id: record.id,
+        rawType,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  /**
    * Handle a single parsed JSON event from the Pi CLI's JSON mode stdout.
    * Mutates the ProcessRecord's messages array in place.
    */
   private _handleJsonEvent(event: PiJsonEvent, record: ProcessRecord): void {
+    // Liveness activity relay: genuine child-session activity (message /
+    // tool production) is forwarded to the event bridge as a canonical
+    // `part.created` / `part.updated` heartbeat so the graph engine's
+    // node-liveness relay can refresh the owning node's lastActivityAt.
+    // Without this, a dispatched subagent's activity is invisible to the
+    // parent process (the child runs in its own `pi --mode json -p`
+    // process, so host `pi.on("tool_call")` etc. never fire for it) and
+    // every long-running graph node is falsely judged stalled. Throttled
+    // per record — see ACTIVITY_HEARTBEAT_INTERVAL_MS.
+    if (this.eventBridge && isActivityEventType(event.type)) {
+      this._emitActivityHeartbeat(record, event.type);
+    }
     switch (event.type) {
       case "message_start": {
         // pi 0.81.x payload: { type, message } — create (or adopt) a message
@@ -1618,6 +1742,21 @@ export class PiProcessSessionAdapter implements ISessionClient {
         properties: { sessionID: id },
       }).catch((err: unknown) => {
         this.log.debug("Failed to emit session.idle for turn_end", {
+          id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+      // 3b. Emit session.status idle so the dispatch status pipeline
+      // (pi-extension.ts bridge → dispatchManager.handleSessionStatus)
+      // observes the turn-level idle transition too. Additive — the
+      // canonical session.idle emission above is unchanged.
+      void this.eventBridge.emit({
+        type: "session.status",
+        rawType: "pi.turn_end",
+        properties: { sessionID: id, status: "idle" },
+      }).catch((err: unknown) => {
+        this.log.debug("Failed to emit session.status for turn_end", {
           id,
           error: err instanceof Error ? err.message : String(err),
         });
