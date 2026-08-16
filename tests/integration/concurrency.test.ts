@@ -383,4 +383,124 @@ describe.skipIf(!hasOpencode())("concurrency integration — real ConcurrencyMan
       removeTestDir(testDir);
     }
   }, 30_000);
+
+  /**
+   * (d) Per-role isolation — composite keys carry per-role limits.
+   *
+   * DispatchManager constructed with roleConfigs (per-role merged configs)
+   * and a subagentRoleKey map. Tasks dispatched on "emperor" resolve to the
+   * composite key "role-y::default" with role-y's limit (maxConcurrent 2,
+   * syncReservedSlots 1 → bgLimit 1): launching 2 → 1 running + 1 pending.
+   * A second role ("role-x", maxConcurrent 20) added via
+   * updateDispatchConfigs gets its own independent key/slot.
+   *
+   * Uses a mock client (unique session IDs) since this test validates
+   * per-role key isolation, not server interaction.
+   */
+  it("per-role isolation — composite keys roleId::model carry per-role limits [test d]", async () => {
+    const testDir = makeTestDir();
+    try {
+      const mockClient = createUniqueMockClient();
+      const sessionAdapter = new OpencodeSessionAdapter(mockClient as any);
+
+      // role-y owns the "emperor" subagent: maxConcurrent 2, reserved 1 → bgLimit 1
+      const roleConfigs = new Map<string, Partial<DispatchManagerConfig>>([
+        ["role-y", { maxConcurrent: 2, syncReservedSlots: 1, maxQueueDepth: 10 }],
+      ]) as unknown as ReadonlyMap<string, DispatchManagerConfig>;
+      const subagentRoleKey = new Map([["emperor", "role-y"]]);
+
+      const manager = new DispatchManager(
+        sessionAdapter,
+        concurrencyTestConfig(),
+        undefined,
+        undefined,
+        roleConfigs,
+        subagentRoleKey,
+      );
+      manager.setStoreDirectory(testDir);
+
+      const parentSessionId = await createParentSession(testDir);
+
+      // Launch 2 background tasks on "emperor" (role-y) — 1 acquired, 1 queued
+      const tasks = await Promise.all(
+        Array.from({ length: 2 }, (_, i) =>
+          manager.launch(
+            {
+              subagent: "emperor",
+              prompt: `Task Y-${i}`,
+              run_in_background: true,
+            },
+            {
+              sessionID: parentSessionId,
+              agent: "emperor--jinyiwei",
+              directory: testDir,
+            },
+          ),
+        ),
+      );
+
+      const running = tasks.filter((t) => t.status === "running");
+      const pending = tasks.filter((t) => t.status === "pending");
+      expect(running).toHaveLength(1);
+      expect(pending).toHaveLength(1);
+      for (const t of tasks) {
+        expect(t.concurrencyKey).toBe("role-y::default");
+      }
+
+      // Composite key surfaced in concurrency status with role-y's limit
+      const status = manager.getConcurrencyStatus();
+      const roleY = status.keys.find((k) => k.key === "role-y::default");
+      expect(roleY).toBeDefined();
+      expect(roleY!.limit).toBe(2);
+      expect(roleY!.reserved).toBe(1);
+      expect(roleY!.active).toBe(1);
+      expect(roleY!.queueDepth).toBe(1);
+
+      // Add a second role with its own limit — the key/slot must be independent
+      manager.updateDispatchConfigs(
+        new Map<string, Partial<DispatchManagerConfig>>([
+          ["role-y", { maxConcurrent: 2, syncReservedSlots: 1, maxQueueDepth: 10 }],
+          ["role-x", { maxConcurrent: 20, syncReservedSlots: 1, maxQueueDepth: 10 }],
+        ]) as unknown as ReadonlyMap<string, DispatchManagerConfig>,
+        new Map([
+          ["emperor", "role-y"],
+          ["group-x", "role-x"],
+        ]),
+      );
+
+      // role-x task acquires immediately (own slot, limit 20) while role-y is full
+      const taskX = await manager.launch(
+        {
+          subagent: "group-x",
+          prompt: "Task X",
+          run_in_background: true,
+        },
+        {
+          sessionID: parentSessionId,
+          agent: "emperor--jinyiwei",
+          directory: testDir,
+        },
+      );
+      expect(taskX.status).toBe("running");
+      expect(taskX.concurrencyKey).toBe("role-x::default");
+
+      const status2 = manager.getConcurrencyStatus();
+      const roleX = status2.keys.find((k) => k.key === "role-x::default");
+      expect(roleX).toBeDefined();
+      expect(roleX!.limit).toBe(20);
+      expect(roleX!.active).toBe(1);
+      expect(roleX!.queueDepth).toBe(0);
+
+      // role-y untouched by role-x's launch
+      const roleYAfter = status2.keys.find((k) => k.key === "role-y::default");
+      expect(roleYAfter).toBeDefined();
+      expect(roleYAfter!.active).toBe(1);
+      expect(roleYAfter!.queueDepth).toBe(1);
+
+      // Clean up the queued waiter (clears its TTL timer)
+      await manager.cancelTask(pending[0].id);
+    } finally {
+      removeTestDir(testDir);
+    }
+  }, 30_000);
 });

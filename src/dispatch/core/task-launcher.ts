@@ -12,6 +12,7 @@ import {
   notifyTerminated,
   leaveRunning,
   addToParentIndex,
+  effectiveConfigFor,
 } from "./lifecycle-shared.ts";
 import { infoLog, debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
@@ -35,6 +36,9 @@ export async function launch(
 ): Promise<DispatchTask> {
   const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
   const concurrencyKey = deriveKey(d, input.subagent);
+  // Per-role config drives launch-time concurrency options (role-resolved when
+  // the dispatched agent maps to a role, manager base config otherwise).
+  const cfg = effectiveConfigFor(d, input.subagent);
 
   const budget = d.config.maxTotalSessionsPerRequest;
   const root = parentContext.sessionID;
@@ -92,12 +96,15 @@ export async function launch(
 
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
-    maxActivePerParent: parentContext.maxActivePerParent ?? d.config.maxActivePerParent,
+    // Per-parent cap is context-derived: graph parents carry an explicit
+    // unbounded cap (graphParentContext), real-session parents fall back to
+    // the effective (role-resolved) config default (maxActivePerParent, default 3).
+    maxActivePerParent: parentContext.maxActivePerParent ?? cfg.maxActivePerParent,
   });
 
   switch (acqResult.outcome) {
     case "full": {
-      const maxRetries = d.config.backpressureMaxRetries ?? 0;
+      const maxRetries = cfg.backpressureMaxRetries ?? 0;
       if (maxRetries > 0) {
         task.concurrencyKey = concurrencyKey;
         debugLog("launch", taskId, `QUEUE-FULL — scheduling backpressure retry (0/${maxRetries})`);
@@ -335,8 +342,11 @@ function scheduleBackpressureRetry(
   const task = d.tasks.get(taskId);
   if (!task || task.status !== "pending") return;
 
-  const retryAfterMs = d.config.retryAfterMs;
-  const maxDelayMs = d.config.backpressureMaxDelayMs ?? 60000;
+  // Recompute the effective per-role config so backpressure delay constants
+  // and the per-parent cap stay consistent with the launch-site resolution.
+  const cfg = effectiveConfigFor(d, input.subagent);
+  const retryAfterMs = cfg.retryAfterMs;
+  const maxDelayMs = cfg.backpressureMaxDelayMs ?? 60000;
   const delay = Math.min(retryAfterMs * Math.pow(2, attempt), maxDelayMs);
   metrics.counter("dispatch_backpressure_retry_total", { key: concurrencyKey }).inc();
 
@@ -349,7 +359,9 @@ function scheduleBackpressureRetry(
 
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
-    maxActivePerParent: parentContext.maxActivePerParent ?? d.config.maxActivePerParent,
+    // Context-derived cap, mirroring the launch site: graph parents are
+    // unbounded, real-session parents keep the effective config default.
+    maxActivePerParent: parentContext.maxActivePerParent ?? cfg.maxActivePerParent,
     priority: task.priority,
   });
 
@@ -407,7 +419,9 @@ export async function reopenForContinuation(
   const concurrencyKey = deriveKey(d, input.subagent);
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
-    maxActivePerParent: parentContext.maxActivePerParent ?? d.config.maxActivePerParent,
+    // Context-derived cap, mirroring the launch site: graph parents are
+    // unbounded, real-session parents keep the effective config default.
+    maxActivePerParent: parentContext.maxActivePerParent ?? effectiveConfigFor(d, input.subagent).maxActivePerParent,
     priority: task.priority,
   });
   if (acqResult.outcome === "full" || acqResult.outcome === "queued") {

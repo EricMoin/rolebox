@@ -35,7 +35,9 @@ export interface CreateDispatchManagerOptions {
   resolvedRoles: ResolvedRole[];
   /** Directory used for task state persistence. */
   storeDirectory: string;
-  /** Optional primary role override (if omitted, the factory finds the first primary role). */
+  /** Optional primary role override (if omitted, the factory selects among the
+   *  roles with mode: primary — preferring the first that carries a dispatch
+   *  config block, falling back to the first primary in array order). */
   primaryRole?: ResolvedRole;
   /** Optional config overrides applied with highest precedence. */
   configOverrides?: Partial<DispatchManagerConfig>;
@@ -56,12 +58,18 @@ export interface CreateDispatchManagerResult {
 export interface SubagentLineageResult {
   resolvedSubagents: Map<string, { parentFullId: string }>;
   subagentModelKey: Map<string, string>;
+  /** Maps every resolved subagent (any nesting depth) and every root role id
+   *  to the id of its OWNING root role — the role prefix of composite
+   *  concurrency keys and the key into roleConfigs. */
+  subagentRoleKey: Map<string, string>;
 }
 
 /**
- * Builds resolvedSubagents and subagentModelKey maps from resolved roles.
- * Models cascade down: a child without an explicit model inherits its
- * parent's model.
+ * Builds resolvedSubagents, subagentModelKey, and subagentRoleKey maps from
+ * resolved roles. Models cascade down: a child without an explicit model
+ * inherits its parent's model. subagentRoleKey maps every descendant subagent
+ * (any nesting depth) to the ROOT role id at the top-level call, so role-scoped
+ * configs and concurrency keys resolve uniformly regardless of depth.
  *
  * Exported separately so callers that already have a cached
  * DispatchManager (e.g., DispatchService on hot-reload) can rebuild
@@ -72,28 +80,65 @@ export function buildSubagentLineage(
 ): SubagentLineageResult {
   const resolvedSubagents = new Map<string, { parentFullId: string }>();
   const subagentModelKey = new Map<string, string>();
+  const subagentRoleKey = new Map<string, string>();
 
   function registerSubagentLineage(
     subagents: ResolvedSubAgent[],
     parentFullId: string,
     parentModel: string | undefined,
+    rootRoleId: string,
   ): void {
     for (const sub of subagents) {
       resolvedSubagents.set(sub.id, { parentFullId });
       const model = sub.config.model ?? parentModel;
       const key = model ? model : "default";
       subagentModelKey.set(sub.id, key);
+      subagentRoleKey.set(sub.id, rootRoleId);
       if (sub.subagents.length > 0) {
-        registerSubagentLineage(sub.subagents, sub.id, model);
+        registerSubagentLineage(sub.subagents, sub.id, model, rootRoleId);
       }
     }
   }
 
   for (const role of resolvedRoles) {
-    registerSubagentLineage(role.subagents, role.id, role.config.model);
+    // Root role ids map to themselves — covers graph dispatch of a root role
+    // id and gives role-scoped resolution a uniform entry for every role.
+    subagentRoleKey.set(role.id, role.id);
+    registerSubagentLineage(
+      role.subagents,
+      role.id,
+      role.config.model,
+      role.id,
+    );
   }
 
-  return { resolvedSubagents, subagentModelKey };
+  return { resolvedSubagents, subagentModelKey, subagentRoleKey };
+}
+
+/**
+ * Build per-role merged dispatch configs for EVERY resolved role.
+ *
+ * Each role (primary and subagent modes alike) gets an entry: the merged
+ * result of default → role dispatch config → env overrides, then
+ * configOverrides applied with highest precedence. The manager-wide
+ * finalConfig (governed by the effective primary role) is separate and still
+ * built inside createDispatchManager — this map feeds role-scoped config
+ * resolution (effectiveConfigFor) and per-role concurrency limits.
+ */
+export function buildRoleConfigs(
+  resolvedRoles: ResolvedRole[],
+  configOverrides?: Partial<DispatchManagerConfig>,
+): Map<string, DispatchManagerConfig> {
+  const roleConfigs = new Map<string, DispatchManagerConfig>();
+  const envConfig = resolveEnvConfig();
+  for (const role of resolvedRoles) {
+    const merged = mergeConfig(DEFAULT_CONFIG, role.dispatchConfig, envConfig);
+    roleConfigs.set(
+      role.id,
+      configOverrides ? { ...merged, ...configOverrides } : merged,
+    );
+  }
+  return roleConfigs;
 }
 
 /**
@@ -121,8 +166,13 @@ export async function createDispatchManager(
   } = opts;
 
   // 1. Build subagent lineage maps.
-  const { resolvedSubagents, subagentModelKey } =
+  const { resolvedSubagents, subagentModelKey, subagentRoleKey } =
     buildSubagentLineage(resolvedRoles);
+
+  // 1b. Build per-role merged dispatch configs (every resolved role gets an
+  // entry, not just primaries) — feeds role-scoped config resolution and
+  // per-role concurrency limits downstream.
+  const roleConfigs = buildRoleConfigs(resolvedRoles, configOverrides);
 
   // 2. Determine primary role if not provided.
   const primaries = resolvedRoles.filter(
@@ -174,6 +224,8 @@ export async function createDispatchManager(
     finalConfig,
     subagentModelKey,
     customConcurrency,
+    roleConfigs,
+    subagentRoleKey,
   );
 
   // 6. Set store directory and recover.

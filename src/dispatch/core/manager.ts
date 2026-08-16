@@ -52,6 +52,10 @@ export class DispatchManager {
   /** Timestamps (epoch ms) for completedSyncSessions entries — used for TTL eviction. */
   private completedSyncSessionsSetAt = new Map<string, number>();
   private subagentModelKey: Map<string, string>;
+  /** Role-scoped dispatch configs (subtask 3) — resolved per subagent role in lifecycle. */
+  private roleConfigs: ReadonlyMap<string, DispatchManagerConfig>;
+  /** Subagent → role key map (subtask 3) — role-scoped overrides for model keys. */
+  private subagentRoleKey: Map<string, string>;
   private sessionMonitor: SessionMonitor;
   private metricsPersister: MetricsPersister;
   private budgetTracker: BudgetTracker;
@@ -77,6 +81,8 @@ export class DispatchManager {
     config?: Partial<DispatchManagerConfig>,
     subagentModelKey?: Map<string, string>,
     customConcurrency?: IConcurrencyManager,
+    roleConfigs?: ReadonlyMap<string, DispatchManagerConfig>,
+    subagentRoleKey?: Map<string, string>,
   ) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -95,11 +101,14 @@ export class DispatchManager {
         this.config.maxQueueDepth ?? 100,
         this.config.syncReservedSlots ?? 2,
         this.config.retryAfterMs,
+        roleConfigs,
       );
     }
     this._directory = process.cwd();
     this.store = new TaskStateStore(this._directory);
     this.subagentModelKey = subagentModelKey ?? new Map();
+    this.roleConfigs = roleConfigs ?? new Map();
+    this.subagentRoleKey = subagentRoleKey ?? new Map();
     this.sessionMonitor = new SessionMonitor();
     this.metricsPersister = new MetricsPersister(this._directory);
     this.checkpointStore = new FileSystemCheckpointStore(this._directory);
@@ -182,6 +191,10 @@ export class DispatchManager {
       deferredIdleTimers: this._deferredIdleTimers,
       cleanedUpTasks: this.cleanedUpTasks,
       subagentModelKey: this.subagentModelKey,
+      // Role-scoped maps (subtask 3) — default to empty Maps when not supplied,
+      // keeping resolveDispatchingRole on the legacy plain-model-key path.
+      subagentRoleKey: this.subagentRoleKey,
+      roleConfigs: this.roleConfigs,
       directory: this._directory,
       sessionMonitor: this.sessionMonitor,
       cleanupTask: (taskId: string) => this.orchestrator.cleanupTask(taskId),
@@ -547,6 +560,25 @@ export class DispatchManager {
   setConcurrencyManager(manager: IConcurrencyManager): void {
     this.concurrency = manager;
     this.lifecycle.setConcurrencyManager(manager);
+  }
+
+  /**
+   * Update role-scoped dispatch configs and the subagent→role key map at runtime.
+   * Propagates the configs to the ConcurrencyManager when it supports them
+   * (guarded — custom IConcurrencyManager implementations may not implement
+   * setRoleConfigs).
+   */
+  updateDispatchConfigs(
+    roleConfigs: ReadonlyMap<string, DispatchManagerConfig>,
+    subagentRoleKey: Map<string, string>,
+  ): void {
+    this.roleConfigs = roleConfigs;
+    this.subagentRoleKey = subagentRoleKey;
+    // Propagate the new maps into the lifecycle deps — they were captured by
+    // reference at construction, so rebinding the manager's fields alone would
+    // leave deriveKey/effectiveConfigFor reading stale role mappings.
+    this.lifecycle.setDispatchConfigs(roleConfigs, subagentRoleKey);
+    this.concurrency.setRoleConfigs?.(roleConfigs);
   }
 
   setStoreDirectory(directory: string): void {
