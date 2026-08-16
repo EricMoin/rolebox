@@ -23,6 +23,9 @@ import type { IConcurrencyManager } from "./concurrency/concurrency.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../types.ts";
 import { RoleMode } from "../constants.ts";
+import { createSubLogger } from "../logger.ts";
+
+const log = createSubLogger("dispatch-factory");
 
 /** Options for createDispatchManager. */
 export interface CreateDispatchManagerOptions {
@@ -122,8 +125,27 @@ export async function createDispatchManager(
     buildSubagentLineage(resolvedRoles);
 
   // 2. Determine primary role if not provided.
-  const effectivePrimaryRole =
-    primaryRole ?? resolvedRoles.find((r) => r.config.mode === RoleMode.Primary);
+  const primaries = resolvedRoles.filter(
+    (r) => r.config.mode === RoleMode.Primary,
+  );
+  let effectivePrimaryRole = primaryRole;
+  if (!effectivePrimaryRole) {
+    if (primaries.length > 1) {
+      // Multiple primaries: prefer the first (in resolvedRoles array order)
+      // that carries a dispatch config block (the config-bearing role);
+      // otherwise keep the historical first-primary pick.
+      effectivePrimaryRole =
+        primaries.find((r) => r.dispatchConfig !== undefined) ?? primaries[0];
+    } else {
+      effectivePrimaryRole = primaries[0];
+    }
+  }
+  if (primaries.length > 1) {
+    log.warn(
+      `multiple roles declare mode: primary (${primaries.map((r) => r.id).join(", ")}); ` +
+        `using "${effectivePrimaryRole?.id ?? "none"}" as the dispatch primary`,
+    );
+  }
 
   // 3. Merge config with precedence: default → role dispatch config → env → overrides.
   const mergedConfig = mergeConfig(
