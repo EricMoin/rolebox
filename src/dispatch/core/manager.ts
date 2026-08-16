@@ -206,14 +206,14 @@ export class DispatchManager {
 
   async launch(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string },
+    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
   ): Promise<DispatchTask> {
     return this.lifecycle.launch(input, parentContext);
   }
 
   async executeSync(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string },
+    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
   ): Promise<string> {
     return this.lifecycle.executeSync(input, parentContext);
   }
@@ -221,7 +221,7 @@ export class DispatchManager {
   async reopenForContinuation(
     taskId: string,
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string },
+    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
   ): Promise<DispatchTask> {
     return this.lifecycle.reopenForContinuation(taskId, input, parentContext);
   }

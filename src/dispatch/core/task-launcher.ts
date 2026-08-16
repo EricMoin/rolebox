@@ -31,7 +31,7 @@ import {
 export async function launch(
   d: TaskLifecycleDeps,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
 ): Promise<DispatchTask> {
   const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
   const concurrencyKey = deriveKey(d, input.subagent);
@@ -92,7 +92,7 @@ export async function launch(
 
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
-    maxActivePerParent: d.config.maxActivePerParent,
+    maxActivePerParent: parentContext.maxActivePerParent ?? d.config.maxActivePerParent,
   });
 
   switch (acqResult.outcome) {
@@ -144,7 +144,7 @@ export async function startBackgroundTask(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
 ): Promise<void> {
   const task = d.tasks.get(taskId);
   if (!task) return;
@@ -307,7 +307,7 @@ async function promoteQueued(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
 ): Promise<void> {
   d.cancelQueue.delete(taskId);
 
@@ -328,7 +328,7 @@ function scheduleBackpressureRetry(
   taskId: string,
   concurrencyKey: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
   attempt: number,
   maxRetries: number,
 ): void {
@@ -349,7 +349,7 @@ function scheduleBackpressureRetry(
 
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
-    maxActivePerParent: d.config.maxActivePerParent,
+    maxActivePerParent: parentContext.maxActivePerParent ?? d.config.maxActivePerParent,
     priority: task.priority,
   });
 
@@ -397,7 +397,7 @@ export async function reopenForContinuation(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
 ): Promise<DispatchTask> {
   if (d.cleanedUpTasks.has(taskId)) throw new Error(`Task '${taskId}' was cleaned up`);
   const task = d.tasks.get(taskId);
@@ -407,7 +407,7 @@ export async function reopenForContinuation(
   const concurrencyKey = deriveKey(d, input.subagent);
   const acqResult = d.concurrency.acquireBackground(concurrencyKey, {
     parentId: task.parentSessionId,
-    maxActivePerParent: d.config.maxActivePerParent,
+    maxActivePerParent: parentContext.maxActivePerParent ?? d.config.maxActivePerParent,
     priority: task.priority,
   });
   if (acqResult.outcome === "full" || acqResult.outcome === "queued") {
