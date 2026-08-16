@@ -44,6 +44,13 @@ jobs:
       - name: Build TUI module (bundle + declarations)
         run: bun run build:tui
 
+      - name: Build dsh web client bundle (browser bundle + envelope)
+        # `dist/` is gitignored, so the dsh-client-modules seam tests
+        # (tests/dsh-plugin.test.ts:356-391) fail on a fresh runner unless the
+        # bundle is built here: they assert dist/dsh-web-client.js exists and
+        # that its envelope id is "rolebox/dsh". Run before the test steps.
+        run: bun run build:dsh-web-client
+
       - name: Run tests (isolated core suite)
         # Each test file runs in its own module registry under `--isolate`,
         # which is what makes cross-file mock.module leakage structurally
