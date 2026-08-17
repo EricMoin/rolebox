@@ -1,5 +1,8 @@
 import { defineCommand } from "citty";
+import * as clack from "@clack/prompts";
 import { loadConfig, loadLock, addToLock, findInLock } from "../config.ts";
+import { assertInteractiveContext, pickRegistryAndRole } from "../pick.ts";
+import type { PromptApi } from "../pick.ts";
 import { fetchRegistryManifest, downloadRole, resolveVersion, computeIntegrity } from "../registry-client.ts";
 import { DownloadProgress } from "../download-progress.ts";
 import { getRolePath } from "../paths.ts";
@@ -41,6 +44,39 @@ export function parseRoleSpec(spec: string): { roleId: string; registry?: string
   }
 
   return { roleId: remaining, registry, version };
+}
+
+/**
+ * Interactive flow for `rolebox install` without a role specifier: pick a
+ * registry and role, confirm, then install. Returns true when an install was
+ * performed, false when the user cancelled (or nothing was installed).
+ * `prompts` is injectable for tests; production callers use real clack.
+ */
+export async function installInteractive(prompts: PromptApi = clack): Promise<boolean> {
+  assertInteractiveContext(
+    "install",
+    "Pass a role specifier explicitly, e.g. `rolebox install software-architect`.",
+  );
+
+  prompts.intro("rolebox install");
+  const picked = await pickRegistryAndRole(undefined, prompts);
+  if (!picked) {
+    prompts.cancel("Operation cancelled.");
+    return false;
+  }
+
+  const spec = picked.registry ? `${picked.registry}:${picked.roleId}` : picked.roleId;
+  const confirmed = await prompts.confirm({
+    message: `Install ${picked.roleId}?`,
+  });
+  if (prompts.isCancel(confirmed) || !confirmed) {
+    prompts.cancel("Operation cancelled.");
+    return false;
+  }
+
+  prompts.outro("Installing…");
+  await install(spec);
+  return true;
 }
 
 /**
@@ -189,8 +225,8 @@ export default defineCommand({
   args: {
     role: {
       type: "positional",
-      description: "Role specifier (e.g. software-architect, my-reg:role@2.0.0)",
-      required: true,
+      description: "Role specifier (e.g. software-architect, my-reg:role@2.0.0). Omit for interactive selection",
+      required: false,
     },
     quiet: {
       type: "boolean",
@@ -209,6 +245,10 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    if (!args.role) {
+      await installInteractive();
+      return;
+    }
     await install(args.role, {
       quiet: args.quiet,
       verbose: args.verbose,

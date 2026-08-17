@@ -40,6 +40,7 @@ const REQUIRED_TOOLS = [
   "web_read",
   "web_fetch",
   "signal",
+  "interactive_terminal",
   // Asset tools
   "asset_search",
   "asset_inspect",

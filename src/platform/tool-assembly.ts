@@ -24,6 +24,7 @@ import { createWebSearchTool } from "../web/web-search.ts";
 import { createPageReadTool } from "../web/page-read.ts";
 import { createWebFetchTool } from "../web/web-fetch.ts";
 import { createSignalTool } from "../signal/signal-tool.ts";
+import { createInteractiveTerminalTool } from "../terminal/interactive-terminal-tool.ts";
 import { createAssetSearchTool } from "../asset/asset-search.ts";
 import { createAssetInspectTool } from "../asset/asset-inspect.ts";
 import { createAssetValidateTool } from "../asset/asset-validate.ts";
@@ -130,6 +131,7 @@ export function buildCanonicalTools(
   tools.web_read = createPageReadTool();
   tools.web_fetch = createWebFetchTool();
   tools.signal = createSignalTool();
+  tools.interactive_terminal = createInteractiveTerminalTool();
 
   tools.asset_search = createAssetSearchTool(opts.resolvedRoles);
   tools.asset_inspect = createAssetInspectTool(opts.resolvedRoles);

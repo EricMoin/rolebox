@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0
+
+### Features
+
+- **Interactive role selection for role-targeting commands** — `rolebox install`, `uninstall`, `info`, and `config` now accept an optional role argument: run them without a role (e.g. `rolebox install`) to enter an interactive picker and choose the role from a searchable list instead of remembering the exact role id. `install` lets you pick the registry (when several are configured) and the role from the registry manifest, then asks for confirmation; `uninstall` asks for confirmation before removing; `info --json` requires an explicit role so the JSON output stays machine-readable; non-TTY invocations fail with a friendly hint naming the explicit form. (043314e)
+- **Interactive terminal tool with stable pi session ids** — Adds a single multiplexed `interactive_terminal` tool that drives persistent terminal sessions (REPLs, interactive prompts, and full-screen TUIs when a real PTY is available); sessions stay alive across tool calls via a hybrid backend (node-pty when it can be built, otherwise node:child_process pipes), with a `context.ask()`-gated open plus write/read/resize/close/list actions and documented `\uXXXX` keystroke decoding so control keys can reach TUIs. Also fixes pi session-id resolution in the tool factory: pi's tool-execute context exposes no direct sessionID field, so the per-invocation toolCallId fallback made every call look like a different session and broke owner-scoped state such as interactive terminal sessions; the context's sessionManager now supplies a stable session id. (3690bea)
+- **Screen snapshot reads and TUI-hardened terminal sessions** — Adds a lightweight VT100/xterm screen emulator (`screen-buffer.ts`) so terminal reads can return the current rendered screen (like tmux capture-pane) instead of the raw repaint stream — the right view for full-screen TUIs; the emulator also auto-answers terminal queries (cursor position, device attributes, window size) that TUIs block on, and feeds a paint-op count used to auto-detect TUI sessions (`auto` read mode). Write now accepts named keys (`<enter>`, `<ctrl+c>`, `<alt+x>`, f1–f12) via the `keys` arg or `<...>` tokens in data with PTY-aware Enter (`\r` vs `\n`), and lifecycle handling is hardened: SIGTERM-then-SIGKILL after a grace period on close, per-owner session caps, caller-requested session ids, Ctrl-D emulated as EOF on the pipe backend, fast-fail on immediate spawn errors, and honest until-timeout reporting instead of silent empty reads. (0d94280)
+
+---
+
 ## 1.3.0
 
 ### Features

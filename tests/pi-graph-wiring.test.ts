@@ -76,6 +76,7 @@ const REQUIRED_TOOLS = [
   "web_read",
   "web_fetch",
   "signal",
+  "interactive_terminal",
   "asset_search",
   "asset_inspect",
   "reference_search",
@@ -96,7 +97,7 @@ const DISPATCH_TOOLS_WITHHELD = [
   "dispatch_status",
 ];
 
-const BASE_TOOL_COUNT = REQUIRED_TOOLS.length + OPTIONAL_TOOLS.length; // 19
+const BASE_TOOL_COUNT = REQUIRED_TOOLS.length + OPTIONAL_TOOLS.length; // 20
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

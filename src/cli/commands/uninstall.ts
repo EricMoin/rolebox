@@ -1,9 +1,43 @@
 import { defineCommand } from "citty";
+import * as clack from "@clack/prompts";
 import { findInLock, removeFromLock } from "../config.ts";
 import { getRolePath, getSyncTarget } from "../paths.ts";
 import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { SYNC_TARGET_VALUES } from "../../constants.ts";
+import { assertInteractiveContext, pickInstalledRole } from "../pick.ts";
+import type { PromptApi } from "../pick.ts";
+
+/**
+ * Interactive flow for `rolebox uninstall` without a role: pick an installed
+ * role, confirm, then uninstall. Returns true when an uninstall was performed,
+ * false when the user cancelled. `prompts` is injectable for tests.
+ */
+export async function uninstallInteractive(prompts: PromptApi = clack): Promise<boolean> {
+  assertInteractiveContext(
+    "uninstall",
+    "Pass the role explicitly, e.g. `rolebox uninstall software-architect`.",
+  );
+
+  prompts.intro("rolebox uninstall");
+  const roleId = await pickInstalledRole("Select a role to uninstall:", prompts);
+  if (!roleId) {
+    prompts.cancel("Operation cancelled.");
+    return false;
+  }
+
+  const confirmed = await prompts.confirm({
+    message: `Uninstall "${roleId}"?`,
+  });
+  if (prompts.isCancel(confirmed) || !confirmed) {
+    prompts.cancel("Operation cancelled.");
+    return false;
+  }
+
+  prompts.outro("Uninstalling…");
+  await uninstall(roleId);
+  return true;
+}
 
 export async function uninstall(roleId: string): Promise<void> {
   const entry = findInLock(roleId);
@@ -55,11 +89,15 @@ export default defineCommand({
   args: {
     role: {
       type: "positional",
-      description: "Role ID to uninstall",
-      required: true,
+      description: "Role ID to uninstall. Omit for interactive selection",
+      required: false,
     },
   },
   async run({ args }) {
+    if (!args.role) {
+      await uninstallInteractive();
+      return;
+    }
     await uninstall(args.role);
   },
 });

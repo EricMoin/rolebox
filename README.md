@@ -351,10 +351,11 @@ Run the same task across fresh sessions and iterate automatically — useful for
 | Command | Description |
 |---|---|
 | `rolebox init <name>` | Scaffold a new role directory |
-| `rolebox install <name>` | Install a role from the registry |
+| `rolebox install [name]` | Install a role from the registry (interactive picker when omitted) |
 | `rolebox status` | List all installed roles and their status |
-| `rolebox info <name>` | Detailed role inspection |
+| `rolebox info [name]` | Detailed role inspection (interactive picker when omitted) |
 | `rolebox sync <target>` | Deploy installed roles to a harness (`opencode` / `pi` / `dsh`) |
+| `rolebox config [name]` | Configure models for a role (interactive picker when omitted) |
 | `rolebox monitor` | Live dispatch metrics dashboard (TUI) |
 | `rolebox memory search <query>` | Full-text search across persistent memory |
 | `rolebox --version` | Show version |
