@@ -93,6 +93,30 @@ describe("paths", () => {
     expect(toPosixPath(target)).toEndWith("opencode/rolebox");
   });
 
+  it("getSyncTarget pi returns path ending with agent/rolebox", () => {
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
+    try {
+      const target = getSyncTarget("pi");
+      expect(toPosixPath(target)).toEndWith(".pi/agent/rolebox");
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+    }
+  });
+
+  it("getSyncTarget dsh returns path under DSH_HOME", () => {
+    const prev = process.env.DSH_HOME;
+    process.env.DSH_HOME = join(tmpdir(), "dsh-home");
+    try {
+      const target = getSyncTarget("dsh");
+      expect(target).toBe(join(tmpdir(), "dsh-home", "rolebox"));
+    } finally {
+      if (prev === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = prev;
+    }
+  });
+
   it("getSyncTarget with unknown target throws", () => {
     expect(() => getSyncTarget("vscode")).toThrow("Unknown sync target");
   });

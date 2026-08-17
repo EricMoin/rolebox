@@ -185,7 +185,7 @@ describe("PiNotificationSessionClient", () => {
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       { customType: "rolebox-inject", content: "silent note", display: true, details: { source: "rolebox-dispatch" } },
-      { triggerTurn: false, deliverAs: "nextTurn" },
+      { triggerTurn: false, deliverAs: "followUp" },
     );
     expect(result).toEqual({ id: "external-1" });
   });
@@ -247,7 +247,7 @@ describe("PiNotificationSessionClient", () => {
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       { customType: "rolebox-inject", content: "[loop-progress] round 1/3 completed]", display: true, details: { source: "rolebox-dispatch" } },
-      { triggerTurn: false, deliverAs: "nextTurn" },
+      { triggerTurn: false, deliverAs: "followUp" },
     );
     expect(result).toEqual({ id: "external-1" });
   });
@@ -268,7 +268,7 @@ describe("PiNotificationSessionClient", () => {
     expect(result).toEqual({ id: "external-1" });
   });
 
-  it("non-loop dispatch notification with noReply:true still uses triggerTurn:false (no fromLoop), unchanged", async () => {
+  it("non-loop dispatch notification with noReply:true uses triggerTurn:false with immediate silent delivery (no fromLoop)", async () => {
     const options = {
       parts: [{ type: "text", text: "dispatch completed" }],
       noReply: true,
@@ -279,7 +279,7 @@ describe("PiNotificationSessionClient", () => {
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       { customType: "rolebox-inject", content: "dispatch completed", display: true, details: { source: "rolebox-dispatch" } },
-      { triggerTurn: false, deliverAs: "nextTurn" },
+      { triggerTurn: false, deliverAs: "followUp" },
     );
     expect(result).toEqual({ id: "external-1" });
   });

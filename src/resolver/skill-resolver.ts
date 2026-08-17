@@ -3,7 +3,7 @@ import fg from "fast-glob";
 import type { ResolvedReference, ResolvedSkill, SkillMetadata } from "../types.ts";
 import { SkillScope, ReferenceScope } from "../constants.ts";
 import { resolveAllReferences } from "./reference-resolver.ts";
-import { skillDirPath, skillFilePath, toPosixPath } from "../utils/paths.ts";
+import { skillDirPath, skillFilePath, toPosixPath, toNativePath } from "../utils/paths.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { readTextFile, fileExists } from "../utils/fs.ts";
@@ -81,7 +81,11 @@ export async function resolveSkills(
       // fast-glob's always-forward-slash match set on Windows.
       const pattern = toPosixPath(candidate.pattern);
       if (matchSet.has(pattern)) {
-        winners.push({ name, filePath: pattern, scope: candidate.scope });
+        // Store the real filesystem path (native separators on win32), not
+        // the glob-normalized pattern: consumers use filePath for actual
+        // fs access and path joins (dirname, symlink targets, Pi's
+        // resources_discover), which must agree with join-built paths.
+        winners.push({ name, filePath: toNativePath(pattern), scope: candidate.scope });
         found = true;
         break;
       }

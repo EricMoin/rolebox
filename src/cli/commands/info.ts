@@ -3,9 +3,10 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import { loadLock, findInLock } from "../config.ts";
-import { getSyncTarget, getRolePath } from "../paths.ts";
+import { getSyncTarget, getRolePath, getTargetConfigDir } from "../paths.ts";
 import { computeIntegrity } from "../registry-client.ts";
-import { DEFAULT_FUNCTIONS, RoleMode, SyncTarget, ROLE_YAML } from "../../constants.ts";
+import { DEFAULT_FUNCTIONS, RoleMode, ROLE_YAML } from "../../constants.ts";
+import { PLATFORM_REGISTRY } from "../../platform/registry.ts";
 import {
   bold,
   dim,
@@ -64,6 +65,7 @@ interface InfoJson {
   subagents: Array<{ name: string; description?: string }>;
   collaboration?: { topology?: string; maxIterations?: number };
   sync: { synced: boolean; symlinkValid: boolean };
+  syncTargets: Array<{ target: string; label: string; present: boolean; synced: boolean; symlinkValid: boolean; linkPath: string }>;
   integrityCheck?: { passed: boolean; expected: string; actual: string };
 }
 
@@ -86,11 +88,25 @@ export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: 
     }
   }
 
-  const syncTarget = getSyncTarget(SyncTarget.Opencode);
-  const linkPath = join(syncTarget, entry.role);
-  const sym = checkSymlink(linkPath, entry.role);
-  const synced = sym.exists && sym.isSymlink;
-  const symlinkValid = synced && sym.targetExists;
+  // Compute sync status for EVERY registered platform — registry-driven, so a
+  // new harness is reported here automatically.
+  const syncTargets = PLATFORM_REGISTRY.map((platform) => {
+    const linkPath = join(getSyncTarget(platform.id), entry.role);
+    const sym = checkSymlink(linkPath, entry.role);
+    const tSynced = sym.exists && sym.isSymlink;
+    return {
+      target: platform.id,
+      label: platform.label,
+      present: existsSync(getTargetConfigDir(platform.id)),
+      synced: tSynced,
+      symlinkValid: tSynced && sym.targetExists,
+      linkPath,
+    };
+  });
+  // opencode remains the backward-compatible top-level `sync` field.
+  const opencodeSync = syncTargets.find((t) => t.target === "opencode") ?? syncTargets[0];
+  const synced = opencodeSync?.synced ?? false;
+  const symlinkValid = opencodeSync?.symlinkValid ?? false;
 
   const allSkills = [...(roleConfig.skills || []), ...(roleConfig.opencode_skills || [])];
   const allFunctions = roleConfig.functions || [...DEFAULT_FUNCTIONS];
@@ -132,6 +148,14 @@ export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: 
         },
       } : {}),
       sync: { synced, symlinkValid },
+      syncTargets: syncTargets.map((t) => ({
+        target: t.target,
+        label: t.label,
+        present: t.present,
+        synced: t.synced,
+        symlinkValid: t.symlinkValid,
+        linkPath: t.linkPath,
+      })),
       ...(integrityResult ? { integrityCheck: integrityResult } : {}),
     };
     console.log(JSON.stringify(output, null, 2));
@@ -201,14 +225,18 @@ export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: 
     if (collab.flow) printField("Custom flow", `${collab.flow.length} edges`, 4);
   }
 
-  // Sync status
+  // Sync status — per target (opencode, pi, dsh)
   printHeader("Sync");
-  if (symlinkValid) {
-    console.log(`  ${SYM_OK} Symlinked to ${dim(shortenPath(linkPath))}`);
-  } else if (synced) {
-    console.log(`  ${SYM_WARN} Symlink exists but target is ${red("missing")}`);
-  } else {
-    console.log(`  ${SYM_FAIL} Not synced. Run ${cyan("rolebox sync opencode")}`);
+  for (const t of syncTargets) {
+    const label = t.label.padEnd(9);
+    if (t.symlinkValid) {
+      console.log(`  ${SYM_OK} ${label} Symlinked to ${dim(shortenPath(t.linkPath))}`);
+    } else if (t.synced) {
+      console.log(`  ${SYM_WARN} ${label} symlink exists but target is ${red("missing")}`);
+    } else {
+      const hint = t.present ? cyan(`rolebox sync ${t.target}`) : dim(`${t.label} not detected`);
+      console.log(`  ${SYM_FAIL} ${label} Not synced ${dim("—")} ${hint}`);
+    }
   }
 
   // Integrity check

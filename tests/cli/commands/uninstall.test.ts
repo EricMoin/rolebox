@@ -14,17 +14,30 @@ async function importUninstall() {
 
 let tmpConfigDir: string;
 let tmpDataDir: string;
+let savedPiDir: string | undefined;
+let savedDshHome: string | undefined;
 
 beforeEach(() => {
   tmpConfigDir = mkdtempSync(join(tmpdir(), "rolebox-uninstall-config-"));
   tmpDataDir = mkdtempSync(join(tmpdir(), "rolebox-uninstall-data-"));
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
   process.env.XDG_DATA_HOME = tmpDataDir;
+  // Isolate the pi / dsh sync targets too — uninstall sweeps symlinks across
+  // ALL platform sync targets, and without these overrides it would touch the
+  // real ~/.pi/agent/rolebox and ~/.dsh/rolebox on the developer's machine.
+  savedPiDir = process.env.PI_CODING_AGENT_DIR;
+  savedDshHome = process.env.DSH_HOME;
+  process.env.PI_CODING_AGENT_DIR = join(tmpConfigDir, "pi-agent");
+  process.env.DSH_HOME = join(tmpConfigDir, "dsh-home");
 });
 
 afterEach(() => {
   delete process.env.XDG_CONFIG_HOME;
   delete process.env.XDG_DATA_HOME;
+  if (savedPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = savedPiDir;
+  if (savedDshHome === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = savedDshHome;
   rmSync(tmpConfigDir, { recursive: true, force: true });
   rmSync(tmpDataDir, { recursive: true, force: true });
 });

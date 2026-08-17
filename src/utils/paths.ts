@@ -1,10 +1,10 @@
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { SKILL_MD } from "../constants.ts";
 import {
   defaultPlatformPaths,
   piPlatformPaths,
-  type PlatformPaths,
 } from "../platform/paths.ts";
+import { resolvePlatformPaths } from "../platform/registry.ts";
 
 // ── Path normalization ───────────────────────────────────────────
 
@@ -21,11 +21,16 @@ export function toPosixPath(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-// ── Internal platform path resolver ──────────────────────────────
-
-function resolvePaths(platformId?: string): PlatformPaths {
-  if (platformId === "pi") return piPlatformPaths();
-  return defaultPlatformPaths();
+/**
+ * Convert a forward-slash path back to native platform separators.
+ *
+ * Inverse of `toPosixPath`: on POSIX it is a no-op; on Windows it restores
+ * backslash separators. Use it when a posix-normalized path must become a
+ * real platform-native filesystem path again (e.g. before `join`, `dirname`,
+ * or fs operations, which on win32 must agree with join-built paths).
+ */
+export function toNativePath(p: string): string {
+  return p.replace(/\//g, sep);
 }
 
 // ── Function / Skill / Subagent helpers (pure joins) ─────────────
@@ -79,10 +84,11 @@ export function agentsDir(): string {
 /**
  * Returns the platform-specific agent directory.
  * - `"pi"` → `piPlatformPaths().agentsDir`
+ * - `"dsh"` → `dshPlatformPaths().agentsDir`
  * - default (or `"opencode"`) → `defaultPlatformPaths().agentsDir`
  */
 export function platformAgentsDir(platformId?: string): string {
-  return resolvePaths(platformId).agentsDir;
+  return resolvePlatformPaths(platformId).agentsDir;
 }
 
 /**

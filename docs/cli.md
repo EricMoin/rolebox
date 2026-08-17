@@ -59,13 +59,23 @@ rolebox uninstall software-architect
 
 ### `sync <target>`
 
-Deploy installed roles to a target tool's configuration directory. Currently only supports `opencode`.
+Deploy installed roles to a target tool's configuration directory. Supported targets: `opencode`, `pi`, `dsh`.
 
 ```bash
 rolebox sync opencode
+rolebox sync pi
+rolebox sync dsh
 ```
 
-This creates symlinks: `~/.config/opencode/rolebox/{roleId}` → `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`
+This creates symlinks from the target's rolebox directory to the installed role:
+
+| Target | Rolebox directory |
+| --- | --- |
+| `opencode` | `~/.config/opencode/rolebox/{roleId}` (respects `XDG_CONFIG_HOME`) |
+| `pi` | `~/.pi/agent/rolebox/{roleId}` (respects `PI_CODING_AGENT_DIR`) |
+| `dsh` | `~/.dsh/rolebox/{roleId}` (respects `DSH_HOME`) |
+
+Each symlink points to `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`
 
 If a manual role (regular directory) already exists at the target path, it is preserved with a warning.
 
@@ -112,7 +122,7 @@ rolebox registry remove my-roles         # Remove a registry (not the default)
 
 ### `info <role>`
 
-Show detailed information about an installed role, including model config, skills, functions, subagents, collaboration graph, and sync status.
+Show detailed information about an installed role, including model config, skills, functions, subagents, collaboration graph, and per-target sync status (opencode, pi, dsh).
 
 ```bash
 rolebox info software-architect
@@ -138,13 +148,19 @@ The TUI dashboard shows: active loops, graph workflows, dispatch summary (queue 
 
 ### `status`
 
-Show overall health of the rolebox installation: version, registries, installed roles with sync status, opencode plugin registration, and skill symlink integrity.
+Show overall health of the rolebox installation: version, registries, installed roles, and — for **every** registered platform (opencode, pi, dsh, and any future harness) — its sync target, per-target synced role count, host integration/registration status, and skill symlink integrity.
 
 ```bash
 rolebox status
 rolebox status --check-updates   # Also check for newer versions in registries
 rolebox status --json            # JSON output for scripting
 ```
+
+The set of reported platforms is driven by the platform registry
+(`src/platform/registry.ts`); each harness contributes a descriptor declaring
+its paths and how to detect that rolebox is registered with the host tool. The
+JSON output includes a `targets` array (one entry per platform) alongside the
+legacy `opencode` field retained for backward compatibility.
 
 ## Configuration
 

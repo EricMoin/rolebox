@@ -120,16 +120,15 @@ export class PiNotificationSessionClient implements ISessionClient {
    * For sessions managed by the inner adapter (present in `processes`),
    * delegates to `inner.prompt()`. For external (parent) sessions, sends
    * the message via `pi.sendMessage()` with `triggerTurn` derived from
-   * `options.noReply` and `options.fromLoop`. Falls back to
+   * `options.noReply` (`triggerTurn = !noReply`). Falls back to
    * `pi.sendUserMessage()` on legacy Pi versions where `pi.sendMessage`
    * is unavailable.
    *
-   * When `fromLoop` is true, `triggerTurn` is the logical inverse of
-   * `noReply` — the loop coordinator uses `fromLoop: true, noReply: true`
-   * for silent progress markers and `fromLoop: true, noReply: false` for
-   * terminal turn-triggering completions. When `fromLoop` is false
-   * (default), `triggerTurn` equals `!noReply` for standard dispatch
-   * notifications.
+   * `noReply: true` produces `{ triggerTurn: false, deliverAs: "followUp" }`
+   * — the message is delivered silently and immediately without waking
+   * the session. `noReply: false` produces `{ triggerTurn: true,
+   * deliverAs: "followUp" }` — the message is delivered and the session
+   * wakes to process it.
    *
    * When no messaging API is available or the call throws, a warning is
    * logged and a `session.error` canonical event is emitted (when
@@ -166,7 +165,7 @@ export class PiNotificationSessionClient implements ISessionClient {
     const text = options.parts
       ?.map((p) => p.text)
       .join("\n") ?? "";
-    const triggerTurn = options.fromLoop ? !options.noReply : !options.noReply;
+    const triggerTurn = !options.noReply;
 
     try {
       this._sendMessage(text, triggerTurn);
@@ -255,9 +254,11 @@ export class PiNotificationSessionClient implements ISessionClient {
   /**
    * Send a message to the parent session via Pi's ExtensionAPI.
    *
-   * Uses `pi.sendMessage()` with the given `triggerTurn` flag plus the
-   * matching `deliverAs` ("followUp" when triggering, "nextTurn" when
-   * silent) for fine-grained turn control. Falls back to
+   * Uses `pi.sendMessage()` with `deliverAs: "followUp"` and the given
+   * `triggerTurn` flag. With `triggerTurn: false` the message is appended
+   * to the session state and emitted immediately without triggering a
+   * model turn (silent immediate delivery); with `triggerTurn: true` the
+   * session is woken to process the message. Falls back to
    * `pi.sendUserMessage()` (which always triggers a turn) on legacy Pi
    * versions where `pi.sendMessage` is unavailable.
    *
@@ -275,7 +276,7 @@ export class PiNotificationSessionClient implements ISessionClient {
         },
         {
           triggerTurn,
-          deliverAs: triggerTurn ? "followUp" : "nextTurn",
+          deliverAs: "followUp",
         },
       );
       return;

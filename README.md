@@ -5,7 +5,7 @@
 # rolebox
 
 <p align="center">
-  An <a href="https://github.com/sst/opencode">opencode</a> plugin
+  An agent-harness plugin — for <a href="https://github.com/sst/opencode">opencode</a>, <a href="https://pi.dev">pi</a>, and <a href="https://www.npmjs.com/package/@deepseek-ai/dsh">dsh</a> —
   with persistent memory, multi-agent dispatch, LSP integration, and engineering-team workflows.
 </p>
 
@@ -31,13 +31,31 @@
 
 ---
 
-## Quick Start
+## Supported harnesses
+
+rolebox runs on three agent harnesses. Each resolves its own config tree — roles, skills, and runtime state live under the harness's home directory:
+
+| Harness | Config directory | Roles directory | Global skills | Env override |
+|---|---|---|---|---|
+| [opencode](https://github.com/sst/opencode) | `~/.config/opencode` | `~/.config/opencode/rolebox` | `~/.config/opencode/skills` | `XDG_CONFIG_HOME` |
+| [pi](https://pi.dev) | `~/.pi/agent` | `~/.pi/agent/rolebox` | `~/.pi/agent/skills` | `PI_CODING_AGENT_DIR` |
+| [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) | `~/.dsh` | `~/.dsh/rolebox` | `~/.dsh/skills` | `DSH_HOME` |
+
+On every harness, a `rolebox/` directory in the **current working directory** takes precedence over the global roles directory — handy for project-local role definitions. Registry roles installed with `rolebox install <name>` are deployed to a harness with `rolebox sync <opencode|pi|dsh>`.
+
+Jump to setup: [opencode](#quick-start-opencode) · [pi](#running-as-a-pi-extension) · [dsh](#running-as-a-dsh-plugin)
+
+---
+
+## Quick Start (opencode)
+
+Install the plugin into opencode's config directory:
 
 ```bash
 cd ~/.config/opencode && npm install rolebox
 ```
 
-Add to `opencode.jsonc`:
+Register it in `opencode.jsonc`:
 
 ```jsonc
 {
@@ -48,16 +66,88 @@ Add to `opencode.jsonc`:
 Create your first role:
 
 ```bash
-rolebox init my-agent -y
+mkdir -p ~/.config/opencode/rolebox
+cd ~/.config/opencode/rolebox && rolebox init my-agent -y
 ```
 
 A ready-to-use role directory is created in `~/.config/opencode/rolebox/my-agent/`. Restart opencode and pick the agent from your agent list.
 
-To install the Emperor orchestrator:
+To install a pre-built role from the registry (e.g. the Emperor orchestrator):
 
 ```bash
 rolebox install emperor
+rolebox sync opencode
 ```
+
+`sync` symlinks each installed role into `~/.config/opencode/rolebox/{roleId}`. Verify with `rolebox status`, which also checks that the plugin is registered in `opencode.jsonc` and that skill symlinks are intact.
+
+### Directory layout
+
+| Path | Purpose |
+|---|---|
+| `~/.config/opencode/rolebox/` | Role definitions (`{roleId}/role.yaml`) |
+| `~/.config/opencode/skills/` | Global skills (referenced via `opencode_skills:`) |
+| `~/.config/opencode/role_config.yaml` | [Model alias mappings](#model-alias-configuration) |
+| `~/.config/opencode/opencode.jsonc` | opencode config — plugin registration + provider/model list |
+| `{project}/.rolebox/` | Per-workspace runtime state (memory DB, engine state, event logs) |
+
+`XDG_CONFIG_HOME` relocates the whole `~/.config/opencode` tree.
+
+---
+
+## Running as a Pi extension
+
+rolebox ships a [pi](https://pi.dev) extension (`rolebox/pi` → `dist/pi-extension.js`) that boots the full runtime on pi's ExtensionAPI: role discovery, agent registration, the shared tool surface (memory, hashline, graph engine, LSP, web, session tools), skill resources, and dispatch. The package declares it under the `pi.extensions` key in `package.json`, so pi's package manager picks it up automatically.
+
+### Install
+
+```bash
+pi install npm:rolebox
+```
+
+This writes the package into `~/.pi/agent/settings.json` (`packages` array) and installs it under `~/.pi/agent/npm/`. Use `pi install -l npm:rolebox` for a project-local install (`.pi/settings.json`, shareable with your team). Restart pi — the extension logs discovered roles at startup.
+
+Alternatively, for a from-source checkout, point `settings.json` at the built extension directly:
+
+```json
+{
+  "extensions": ["/path/to/rolebox/dist/pi-extension.js"]
+}
+```
+
+### Add roles
+
+Roles load from `{cwd}/rolebox` when present, otherwise from `~/.pi/agent/rolebox`:
+
+```bash
+mkdir -p ~/.pi/agent/rolebox
+cd ~/.pi/agent/rolebox && rolebox init my-agent -y
+```
+
+Or deploy registry roles:
+
+```bash
+rolebox install emperor
+rolebox sync pi
+```
+
+`sync pi` symlinks each installed role into `~/.pi/agent/rolebox/{roleId}`.
+
+### Directory layout
+
+| Path | Purpose |
+|---|---|
+| `~/.pi/agent/rolebox/` | Role definitions (`{roleId}/role.yaml`) |
+| `~/.pi/agent/skills/` | Global skills (referenced via `opencode_skills:`) |
+| `~/.pi/agent/role_config.yaml` | [Model alias mappings](#model-alias-configuration) |
+| `{project}/.rolebox/` | Per-workspace runtime state (memory DB, engine state, event logs) |
+
+`PI_CODING_AGENT_DIR` relocates the whole `~/.pi/agent` tree (pi's own config-directory override — rolebox follows it).
+
+### Platform notes
+
+- The full shared opencode tool surface is registered on pi (parity is enforced by `tests/pi-parity.test.ts`) — see the matrix in [docs/compatibility.md](docs/compatibility.md).
+- Hot reload (`asset_hot_reload`), the extension loader, the crash-recovery engine, and the TUI are opencode-only — see [docs/limitations.md](docs/limitations.md).
 
 ---
 
@@ -72,6 +162,35 @@ dsh plugin --profile <name> add rolebox
 ```
 
 `dsh plugin add` forwards to pnpm inside the profile directory and reconciles the profile's `dsh.profile.bundles` list — rolebox's bundle layer is appended and its plugin row (`id: rolebox`, `name: rolebox/dsh`) is inserted into the composed entry tree on the next boot. The plugin waits for dsh's `tools`, `sessions`, and `subagents` services (its `inject` list), so it activates only after dsh-base's bundle rows mount them — which the default profile template already provides.
+
+### Add roles
+
+Roles load from `{cwd}/rolebox` when present, otherwise from `{dsh home}/rolebox` (`$DSH_HOME` when set, else `~/.dsh`):
+
+```bash
+mkdir -p ~/.dsh/rolebox
+cd ~/.dsh/rolebox && rolebox init my-agent -y
+```
+
+Or deploy registry roles:
+
+```bash
+rolebox install emperor
+rolebox sync dsh
+```
+
+`sync dsh` symlinks each installed role into `~/.dsh/rolebox/{roleId}`.
+
+### Directory layout
+
+| Path | Purpose |
+|---|---|
+| `~/.dsh/rolebox/` | Role definitions (`{roleId}/role.yaml`) — overridable via the `roleboxDir` config option |
+| `~/.dsh/skills/` | Global skills — overridable via the `skillsDir` config option |
+| `~/.dsh/role_config.yaml` | [Model alias mappings](#model-alias-configuration) |
+| `{project}/.rolebox/` | Per-workspace runtime state (memory DB, engine state, event logs) |
+
+`DSH_HOME` relocates the whole `~/.dsh` tree (blank values are treated as unset).
 
 ### Config
 
@@ -235,7 +354,7 @@ Run the same task across fresh sessions and iterate automatically — useful for
 | `rolebox install <name>` | Install a role from the registry |
 | `rolebox status` | List all installed roles and their status |
 | `rolebox info <name>` | Detailed role inspection |
-| `rolebox sync` | Sync installed roles with registry |
+| `rolebox sync <target>` | Deploy installed roles to a harness (`opencode` / `pi` / `dsh`) |
 | `rolebox monitor` | Live dispatch metrics dashboard (TUI) |
 | `rolebox memory search <query>` | Full-text search across persistent memory |
 | `rolebox --version` | Show version |
@@ -263,7 +382,7 @@ Install any role with `rolebox install <name>` and restart opencode.
 
 Roles published on the [oh-my-role registry](https://github.com/EricMoin/oh-my-role) often use placeholder model names (e.g. `PLACEHOLDER`, `YOUR_MODEL_HERE`) instead of real provider/model identifiers. Rather than editing each role's `role.yaml` manually, you can define local alias mappings once.
 
-Create or edit `~/.config/opencode/role_config.yaml` (same directory as your `opencode.jsonc`):
+Create or edit `role_config.yaml` in your harness's config directory — `~/.config/opencode/role_config.yaml` on opencode (same directory as `opencode.jsonc`), `~/.pi/agent/role_config.yaml` on pi, `~/.dsh/role_config.yaml` on dsh:
 
 ```yaml
 model_aliases:

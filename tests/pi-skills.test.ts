@@ -16,8 +16,8 @@
  * src/pi-extension.ts) against a hermetic fixture:
  *   - `process.chdir()` → a temp workspace containing `rolebox/` with
  *     role.yaml fixtures that reference role-local and global skills;
- *   - `XDG_CONFIG_HOME` → a temp dir so configDir / globalSkillsDir
- *     resolve inside the fixture (never the real ~/.config/opencode);
+ *   - `PI_CODING_AGENT_DIR` → a temp dir so configDir / globalSkillsDir
+ *     resolve inside the fixture (never the real ~/.pi/agent);
  *   - `ROLEBOX_ENGINE_RECOVERY=off` skips the graph-recovery sweep
  *     (orthogonal to skill wiring; documented opt-out).
  *
@@ -43,8 +43,8 @@ import initExtension from "../src/pi-extension.ts";
 //   {workspace}/rolebox/engineer/skills/code-review/SKILL.md   ← role-local skill
 //   {workspace}/rolebox/doctor/role.yaml          opencode_skills: [shared-tools]
 //                                                 subagents: [assistant w/ assistant-kit]
-//   {workspace}/xdg/opencode/skills/shared-tools/SKILL.md      ← global skill
-//   {workspace}/xdg/opencode/skills/assistant-kit/SKILL.md     ← subagent global skill
+//   {workspace}/pi-agent/skills/shared-tools/SKILL.md      ← global skill
+//   {workspace}/pi-agent/skills/assistant-kit/SKILL.md     ← subagent global skill
 
 const ENGINEER_ROLE_YAML = `\
 name: Engineer
@@ -113,7 +113,7 @@ function createMockPi(sessionDir: string): MockPi {
 
 let workspace: string;
 let originalCwd: string;
-let originalXdg: string | undefined;
+let originalPiDir: string | undefined;
 let originalEngineRecovery: string | undefined;
 let mockPi: MockPi;
 
@@ -128,7 +128,7 @@ async function discoverSkillPaths(): Promise<string[]> {
 
 beforeAll(async () => {
   originalCwd = process.cwd();
-  originalXdg = process.env.XDG_CONFIG_HOME;
+  originalPiDir = process.env.PI_CODING_AGENT_DIR;
   originalEngineRecovery = process.env.ROLEBOX_ENGINE_RECOVERY;
 
   // Canonicalize the workspace up front: on macOS, `os.tmpdir()` returns
@@ -138,8 +138,8 @@ beforeAll(async () => {
   // form or the assertions never match.
   workspace = realpathSync(mkdtempSync(join(tmpdir(), "rolebox-pi-skills-")));
   const roleboxDir = join(workspace, "rolebox");
-  const xdgConfigHome = join(workspace, "xdg");
-  const globalSkillsDir = join(xdgConfigHome, "opencode", "skills");
+  const piAgentDir = join(workspace, "pi-agent");
+  const globalSkillsDir = join(piAgentDir, "skills");
 
   // ── rolebox/engineer — role-local skill ──────────────────────────────
   const engineerDir = join(roleboxDir, "engineer");
@@ -165,8 +165,8 @@ beforeAll(async () => {
   }
 
   // Redirect platform paths + working directory into the fixture so the
-  // extension never touches the real ~/.config/opencode or the repo.
-  process.env.XDG_CONFIG_HOME = xdgConfigHome;
+  // extension never touches the real ~/.pi/agent or the repo.
+  process.env.PI_CODING_AGENT_DIR = piAgentDir;
   process.env.ROLEBOX_ENGINE_RECOVERY = "off";
   process.chdir(workspace);
 
@@ -179,10 +179,10 @@ beforeAll(async () => {
 
 afterAll(() => {
   // Restore process state and remove the fixture.
-  if (originalXdg === undefined) {
-    delete process.env.XDG_CONFIG_HOME;
+  if (originalPiDir === undefined) {
+    delete process.env.PI_CODING_AGENT_DIR;
   } else {
-    process.env.XDG_CONFIG_HOME = originalXdg;
+    process.env.PI_CODING_AGENT_DIR = originalPiDir;
   }
   if (originalEngineRecovery === undefined) {
     delete process.env.ROLEBOX_ENGINE_RECOVERY;
@@ -190,7 +190,43 @@ afterAll(() => {
     process.env.ROLEBOX_ENGINE_RECOVERY = originalEngineRecovery;
   }
   process.chdir(originalCwd);
-  rmSync(workspace, { recursive: true, force: true });
+  // Windows-only hardening: rmSync on a freshly-written tree transiently
+  // fails with EBUSY/EPERM (Defender/AV scanning a just-closed file, or the
+  // OS still releasing a directory handle). POSIX tolerates this because
+  // open/locked files can still be unlinked there; Windows cannot. The
+  // extension init writes engine state, dispatch/loop stores and the
+  // graph-events log under the workspace, so this cleanup is the hotspot.
+  //
+  // IMPORTANT: bun's node:fs rmSync does NOT honor `maxRetries`/`retryDelay`
+  // (verified against bun's source — src/runtime/node/node_fs.rs parses the
+  // options into `RmDir` but never consumes them; `rm` calls
+  // `zig_delete_tree` directly, whose only internal retry is an
+  // ENOTEMPTY/EEXIST re-iteration, and empirically bun 1.3.14 fails in
+  // ~0-2ms regardless of the options). The retry therefore must be
+  // hand-rolled and runtime-agnostic.
+  const rmWithRetry = (target: string, attempts = 8, delayMs = 250): void => {
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        rmSync(target, { recursive: true, force: true });
+        return;
+      } catch (err) {
+        lastErr = err;
+        // Synchronous sleep without runtime-specific APIs: Atomics.wait
+        // blocks this thread for delayMs with a timeout — no setTimeout,
+        // no busy-spin, works on bun and node alike.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+      }
+    }
+    if (process.platform === "win32") {
+      // Transient AV/handle locks on an ephemeral CI runner are harmless to
+      // leak; a failed cleanup must not fail the suite on Windows.
+      console.warn(`[pi-skills] cleanup of ${target} deferred (still locked):`, lastErr);
+      return;
+    }
+    throw lastErr;
+  };
+  rmWithRetry(workspace);
 });
 
 // ── Assertions ──────────────────────────────────────────────────────────────
@@ -210,14 +246,14 @@ describe("pi-extension skill path registration", () => {
   it("resources_discover returns global-scope skill directories", async () => {
     const skillPaths = await discoverSkillPaths();
     expect(skillPaths).toContain(
-      join(workspace, "xdg", "opencode", "skills", "shared-tools"),
+      join(workspace, "pi-agent", "skills", "shared-tools"),
     );
   });
 
   it("registers subagent skill paths under the subagent's own agent id", async () => {
     const skillPaths = await discoverSkillPaths();
     expect(skillPaths).toContain(
-      join(workspace, "xdg", "opencode", "skills", "assistant-kit"),
+      join(workspace, "pi-agent", "skills", "assistant-kit"),
     );
   });
 

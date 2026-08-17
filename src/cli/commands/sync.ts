@@ -129,12 +129,12 @@ export async function sync(target: string): Promise<void> {
 export default defineCommand({
   meta: {
     name: "sync",
-    description: "Deploy roles to target tool (e.g. opencode)",
+    description: "Deploy roles to target tool (opencode | pi | dsh)",
   },
   args: {
     target: {
       type: "positional",
-      description: "Sync target (default: opencode)",
+      description: "Sync target: opencode, pi, or dsh (default: opencode)",
       default: SyncTarget.Opencode,
     },
   },

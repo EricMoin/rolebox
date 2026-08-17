@@ -401,7 +401,7 @@ export default async function (pi: any): Promise<void> {
     // ── 1. Resolve directories (delegates to R5's PlatformPaths) ─────────
 
     const dirs = resolveRoleboxDirectories({
-      platformId: "opencode",
+      platformId: "pi",
     });
 
     log.info("Pi extension starting", {

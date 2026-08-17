@@ -13,16 +13,21 @@ process.env.XDG_DATA_HOME = infoDataDir;
 
 import { createPathsMockPayload } from "../../helpers/paths-mock";
 
+// Redirect every sync target under XDG_CONFIG_HOME so tests never touch a
+// developer's real ~/.pi/agent or ~/.dsh directories.
+function infoTargetBase(target: string): string {
+  const xdg = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+  if (target === "opencode") return join(xdg, "opencode");
+  if (target === "pi") return join(xdg, "pi-agent");
+  if (target === "dsh") return join(xdg, "dsh");
+  throw new Error(`Unknown sync target: "${target}". Supported targets: opencode, pi, dsh`);
+}
+
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
-    getSyncTarget: (target: string) => {
-      if (target === "opencode") {
-        const xdg = process.env.XDG_CONFIG_HOME;
-        if (xdg) return join(xdg, "opencode", "rolebox");
-        return join(homedir(), ".config", "opencode", "rolebox");
-      }
-      throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
-    },
+    getSyncTarget: (target: string) => join(infoTargetBase(target), "rolebox"),
+    getTargetConfigDir: (target: string) => infoTargetBase(target),
+    getTargetSkillsDir: (target: string) => join(infoTargetBase(target), "skills"),
   },
 }));
 

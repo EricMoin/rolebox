@@ -1,10 +1,26 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { SyncTarget } from "../constants.ts";
+import type { PlatformPaths } from "../platform/paths.ts";
 import {
   defaultPlatformPaths,
   piPlatformPaths,
 } from "../platform/paths.ts";
+import { PLATFORM_REGISTRY } from "../platform/registry.ts";
+
+/**
+ * Strictly resolve a CLI sync target's platform paths from the registry.
+ * Throws the CLI-flavored "Unknown sync target" error (listing supported ids)
+ * for an unknown target — registry-backed, with no per-platform branches.
+ */
+function resolveSyncTargetPaths(target: string): PlatformPaths {
+  const platform = PLATFORM_REGISTRY.find((p) => p.id === target);
+  if (!platform) {
+    throw new Error(
+      `Unknown sync target: "${target}". Supported targets: ${PLATFORM_REGISTRY.map((p) => p.id).join(", ")}`,
+    );
+  }
+  return platform.paths();
+}
 
 // ── Platform seam ─────────────────────────────────────────────────
 //
@@ -116,15 +132,38 @@ export function getRolesDir(): string {
 
 /**
  * Returns the sync target directory for a given tool.
- * Delegates to the PlatformPaths registry for directory resolution.
- * Currently only supports "opencode": {configDir}/rolebox
- * Extensible for future targets.
+ * Delegates to the PlatformPaths registry for directory resolution:
+ * - `"opencode"` → `{~/.config/opencode}/rolebox`
+ * - `"pi"` → `{$PI_CODING_AGENT_DIR or ~/.pi/agent}/rolebox`
+ * - `"dsh"` → `{$DSH_HOME or ~/.dsh}/rolebox`
+ *
+ * Each path matches where the corresponding runtime entry point resolves
+ * its `roleboxDir` (see `resolveRoleboxDirectories` in platform/factory.ts).
  */
 export function getSyncTarget(target: string): string {
-  if (target === SyncTarget.Opencode) {
-    return join(defaultPlatformPaths().configDir, "rolebox");
-  }
-  throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
+  return join(resolveSyncTargetPaths(target).configDir, "rolebox");
+}
+
+/**
+ * Returns the config (home) directory for a given sync target — the directory
+ * whose presence indicates the tool is installed on this machine.
+ * - `opencode` → `~/.config/opencode`
+ * - `pi` → `$PI_CODING_AGENT_DIR` or `~/.pi/agent`
+ * - `dsh` → `$DSH_HOME` or `~/.dsh`
+ */
+export function getTargetConfigDir(target: string): string {
+  return resolveSyncTargetPaths(target).configDir;
+}
+
+/**
+ * Returns the skills directory for a given sync target — where rolebox skill
+ * symlinks are deployed for that tool's skill discovery.
+ * - `opencode` → `{~/.config/opencode}/skills`
+ * - `pi` → `{~/.pi/agent}/skills`
+ * - `dsh` → `{~/.dsh}/skills`
+ */
+export function getTargetSkillsDir(target: string): string {
+  return resolveSyncTargetPaths(target).skillsDir;
 }
 
 /**

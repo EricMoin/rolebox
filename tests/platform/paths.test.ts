@@ -13,6 +13,7 @@ import { resolveRoleboxDirectories } from "../../src/platform/factory.ts";
 
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_DSH_HOME = process.env.DSH_HOME;
+const ORIGINAL_PI_DIR = process.env.PI_CODING_AGENT_DIR;
 
 let tempDshHome: string;
 
@@ -33,6 +34,11 @@ afterEach(() => {
     delete process.env.DSH_HOME;
   } else {
     process.env.DSH_HOME = ORIGINAL_DSH_HOME;
+  }
+  if (ORIGINAL_PI_DIR === undefined) {
+    delete process.env.PI_CODING_AGENT_DIR;
+  } else {
+    process.env.PI_CODING_AGENT_DIR = ORIGINAL_PI_DIR;
   }
   if (ORIGINAL_HOME === undefined) {
     delete process.env.HOME;
@@ -92,6 +98,47 @@ describe("resolveRoleboxDirectories with platformId 'dsh'", () => {
 
     expect(dirs.configDir).toBe(defaultPlatformPaths().configDir);
     expect(dirs.globalSkillsDir).toBe(defaultPlatformPaths().skillsDir);
+  });
+});
+
+describe("piPlatformPaths", () => {
+  it("resolves every path under PI_CODING_AGENT_DIR when it is set", () => {
+    process.env.PI_CODING_AGENT_DIR = tempDshHome;
+
+    const paths = piPlatformPaths();
+
+    expect(paths.platformId).toBe("pi");
+    expect(paths.configDir).toBe(tempDshHome);
+    expect(paths.agentsDir).toBe(join(tempDshHome, "skills"));
+    expect(paths.skillsDir).toBe(join(tempDshHome, "skills"));
+    expect(paths.sessionsDir).toBe(join(tempDshHome, "sessions"));
+    expect(paths.extensionsDir).toBe(join(tempDshHome, "extensions"));
+  });
+
+  it("falls back to ~/.pi/agent when PI_CODING_AGENT_DIR is unset or blank", () => {
+    const fallback = join(homedir(), ".pi", "agent");
+
+    delete process.env.PI_CODING_AGENT_DIR;
+    expect(piPlatformPaths().configDir).toBe(fallback);
+
+    process.env.PI_CODING_AGENT_DIR = "   ";
+    expect(piPlatformPaths().configDir).toBe(fallback);
+  });
+});
+
+describe("resolveRoleboxDirectories with platformId 'pi'", () => {
+  it("routes to piPlatformPaths so directories resolve under the pi agent dir", () => {
+    process.env.PI_CODING_AGENT_DIR = tempDshHome;
+
+    const dirs = resolveRoleboxDirectories({
+      platformId: "pi",
+      workingDir: tempDshHome,
+    });
+
+    // {workingDir}/rolebox does not exist, so roleboxDir falls back under configDir.
+    expect(dirs.roleboxDir).toBe(join(tempDshHome, "rolebox"));
+    expect(dirs.configDir).toBe(tempDshHome);
+    expect(dirs.globalSkillsDir).toBe(join(tempDshHome, "skills"));
   });
 });
 
