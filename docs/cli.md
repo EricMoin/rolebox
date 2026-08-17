@@ -59,13 +59,23 @@ rolebox uninstall software-architect
 
 ### `sync <target>`
 
-Deploy installed roles to a target tool's configuration directory. Currently only supports `opencode`.
+Deploy installed roles to a target tool's configuration directory. Supported targets: `opencode`, `pi`, `dsh`.
 
 ```bash
 rolebox sync opencode
+rolebox sync pi
+rolebox sync dsh
 ```
 
-This creates symlinks: `~/.config/opencode/rolebox/{roleId}` → `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`
+This creates symlinks from the target's rolebox directory to the installed role:
+
+| Target | Rolebox directory |
+| --- | --- |
+| `opencode` | `~/.config/opencode/rolebox/{roleId}` (respects `XDG_CONFIG_HOME`) |
+| `pi` | `~/.pi/agent/rolebox/{roleId}` (respects `PI_CODING_AGENT_DIR`) |
+| `dsh` | `~/.dsh/rolebox/{roleId}` (respects `DSH_HOME`) |
+
+Each symlink points to `~/.local/share/rolebox/roles/{registry}/{roleId}@{version}/`
 
 If a manual role (regular directory) already exists at the target path, it is preserved with a warning.
 

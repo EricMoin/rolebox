@@ -3,7 +3,7 @@ import { findInLock, removeFromLock } from "../config.ts";
 import { getRolePath, getSyncTarget } from "../paths.ts";
 import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { SyncTarget } from "../../constants.ts";
+import { SYNC_TARGET_VALUES } from "../../constants.ts";
 
 export async function uninstall(roleId: string): Promise<void> {
   const entry = findInLock(roleId);
@@ -19,23 +19,27 @@ export async function uninstall(roleId: string): Promise<void> {
     rmSync(rolePath, { recursive: true, force: true });
   }
 
-  try {
-    const syncTarget = getSyncTarget(SyncTarget.Opencode);
-    if (existsSync(syncTarget)) {
-      const entries = readdirSync(syncTarget);
-      for (const entry of entries) {
-        const fullPath = join(syncTarget, entry);
-        try {
-          if (lstatSync(fullPath).isSymbolicLink()) {
-            unlinkSync(fullPath);
+  // Clean up sync symlinks across every supported target platform
+  // (opencode / pi / dsh) — the role may have been synced to any of them.
+  for (const target of SYNC_TARGET_VALUES) {
+    try {
+      const syncTarget = getSyncTarget(target);
+      if (existsSync(syncTarget)) {
+        const entries = readdirSync(syncTarget);
+        for (const entry of entries) {
+          const fullPath = join(syncTarget, entry);
+          try {
+            if (lstatSync(fullPath).isSymbolicLink()) {
+              unlinkSync(fullPath);
+            }
+          } catch {
+            console.warn("Warning: Failed to clean up symlink:", fullPath);
           }
-        } catch {
-          console.warn("Warning: Failed to clean up symlink:", fullPath);
         }
       }
+    } catch {
+      // Best-effort — symlink cleanup should not crash uninstall
     }
-  } catch {
-    // Best-effort — symlink cleanup should not crash uninstall
   }
 
   removeFromLock(roleId, registry);

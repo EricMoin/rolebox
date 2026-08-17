@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { SyncTarget } from "../constants.ts";
 import {
   defaultPlatformPaths,
+  dshPlatformPaths,
   piPlatformPaths,
 } from "../platform/paths.ts";
 
@@ -116,15 +117,27 @@ export function getRolesDir(): string {
 
 /**
  * Returns the sync target directory for a given tool.
- * Delegates to the PlatformPaths registry for directory resolution.
- * Currently only supports "opencode": {configDir}/rolebox
- * Extensible for future targets.
+ * Delegates to the PlatformPaths registry for directory resolution:
+ * - `"opencode"` → `{~/.config/opencode}/rolebox`
+ * - `"pi"` → `{$PI_CODING_AGENT_DIR or ~/.pi/agent}/rolebox`
+ * - `"dsh"` → `{$DSH_HOME or ~/.dsh}/rolebox`
+ *
+ * Each path matches where the corresponding runtime entry point resolves
+ * its `roleboxDir` (see `resolveRoleboxDirectories` in platform/factory.ts).
  */
 export function getSyncTarget(target: string): string {
   if (target === SyncTarget.Opencode) {
     return join(defaultPlatformPaths().configDir, "rolebox");
   }
-  throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
+  if (target === SyncTarget.Pi) {
+    return join(piPlatformPaths().configDir, "rolebox");
+  }
+  if (target === SyncTarget.Dsh) {
+    return join(dshPlatformPaths().configDir, "rolebox");
+  }
+  throw new Error(
+    `Unknown sync target: "${target}". Supported targets: opencode, pi, dsh`,
+  );
 }
 
 /**

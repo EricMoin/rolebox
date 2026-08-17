@@ -80,7 +80,12 @@ export const DEFAULT_FUNCTIONS: readonly string[] = ["plan", "execute", "loop"];
 /** Supported sync targets for the CLI `sync` command. */
 export const SyncTarget = {
   Opencode: "opencode",
+  Pi: "pi",
+  Dsh: "dsh",
 } as const;
+
+/** All valid SyncTarget values, for runtime validation and cleanup sweeps. */
+export const SYNC_TARGET_VALUES: readonly SyncTarget[] = Object.values(SyncTarget);
 
 export type SyncTarget = (typeof SyncTarget)[keyof typeof SyncTarget];
 
