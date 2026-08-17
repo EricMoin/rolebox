@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.0
+
+### Features
+
+- **All sync targets reported in status and info** — `status` and `info` now iterate the platform registry and report opencode, pi, and dsh as separate sync targets, each with its own sync target dir, synced role count, skill symlink integrity, and (where the host offers a detectable mechanism) integration/registration status; JSON output gains a `targets` array (status) and `syncTargets` array (info) while the legacy top-level `opencode` field is retained for backward compatibility, and hints are registry-driven so only targets actually in use nag. (2310dfd)
+- **Pi and dsh as CLI sync targets** — `rolebox sync` previously rejected any target other than opencode, so roles could not be deployed to the other harnesses; it now resolves through the PlatformPaths registry (pi → `~/.pi/agent`, dsh → `$DSH_HOME` / `~/.dsh`) and `uninstall` sweeps symlinks across every sync target, since a role may have been deployed to any harness. (60dd5d3)
+- **Pi extension routed through the pi home directory** — The pi extension hardcoded `platformId: "opencode"`, so it borrowed opencode's config tree (`~/.config/opencode`) and never scanned the pi home (`~/.pi/agent`); it now routes through `piPlatformPaths` and honors pi's documented `PI_CODING_AGENT_DIR` override (blank treated as unset, like `DSH_HOME`). (43ff888)
+
+### Bug Fixes
+
+- **Silent notifications delivered immediately on Pi** — `noReply: true` mapped to `deliverAs: "nextTurn"`, and pi 0.84.2 buffers "nextTurn" messages into `_pendingNextTurnMessages` (injected only with the next user prompt), so every silent system reminder (graph node completed, stall, loop progress) surfaced only on a following turn; these now map to `deliverAs: "followUp"` with `triggerTurn: false`, which appends silently and immediately when idle. (ea2e8fd)
+- **Native-separator skill filePath on Windows** — `resolveSkills` stored the forward-slash glob pattern as the resolved skill's `filePath`, but consumers use it for real fs access and path joins (dirname, symlink targets, Pi's `resources_discover`) that must agree with join-built native paths on win32; the pattern is now converted back to native separators via a new `toNativePath` helper before being stored. (43149a4)
+- **dsh-web-client bundle built before CI test steps** — `dist/` is gitignored, so the dsh-client-modules seam tests (`tests/dsh-plugin.test.ts`) asserted a missing `dist/dsh-web-client.js` on fresh runners; CI now builds the bundle before running tests. (1e49e23)
+
+### Refactors
+
+- **Platform path resolution centralized** — `src/platform/registry.ts` becomes the single source of truth for host platforms, and factory/utils path resolution routes through `resolvePlatformPaths()`, replacing duplicated switch statements; unknown or omitted platform ids still fall back to opencode. (4048be4)
+
+### Documentation
+
+- **All three harnesses documented** — Adds a harness overview table (opencode / pi / dsh config dirs, role dirs, global skills, env overrides), a full pi extension setup guide, per-harness roles + directory layout sections, and updates the CLI sync reference and model-alias locations. (ff257d7)
+
+### Tests
+
+- **Hand-rolled workspace-cleanup retry in the pi-skills test** — bun's `rmSync` does not honor `maxRetries`/`retryDelay` (the options are parsed but never consumed), so recursive cleanup of the freshly-written test workspace still transiently failed with EBUSY/EPERM on Windows; the retry is now hand-rolled with `Atomics.wait` sync sleeps (runtime-agnostic), warning-and-leaking — not failing the suite — when a Windows AV/handle lock persists. (a990861)
+- **CRLF-tolerant frontmatter parsing in the loop orchestrator test** — `loop.md` frontmatter parsing tolerates a CRLF checkout so the test passes on Windows. (ad892ef)
+- **Windows EBUSY cleanup retry in the pi-skills test** — recursive workspace removal now retries with `maxRetries`/`retryDelay` to tolerate transient Windows EBUSY/EPERM on just-closed files. (767e663)
+
+---
+
 ## 1.2.0
 
 ### Features
