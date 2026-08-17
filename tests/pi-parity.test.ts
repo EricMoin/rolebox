@@ -71,6 +71,7 @@ const OPENCODE_SURFACE: readonly string[] = [
   "web_read",
   "web_fetch",
   "signal",
+  "interactive_terminal",
   "asset_search",
   "asset_inspect",
   "asset_validate",
