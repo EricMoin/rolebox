@@ -72,6 +72,36 @@ function toPiResult(
  * Since Pi's context shape is not imported (optional peer dep), we extract
  * fields by convention and provide sensible fallbacks.
  */
+/**
+ * Resolve a STABLE session id from Pi's tool-execute context.
+ *
+ * Pi's extension context (`createContext()`) exposes no direct
+ * `sessionID`/`sessionId` field — it carries `sessionManager` (a
+ * SessionManager instance whose `sessionId` is stable for the whole
+ * session). Falling back to `toolCallId` is a LAST RESORT because a
+ * fresh toolCallId is minted per invocation, which would make every
+ * call look like a different session (breaking owner-scoped state such
+ * as interactive terminal sessions).
+ */
+function extractPiSessionId(c: Record<string, unknown>, toolCallId: string): string {
+  const direct =
+    (c.sessionID as string | undefined) ??
+    (c.session_id as string | undefined) ??
+    (c.sessionId as string | undefined);
+  if (typeof direct === "string" && direct.length > 0) return direct;
+  const sm = c.sessionManager as
+    | { getSessionId?: () => string; sessionId?: unknown }
+    | undefined;
+  if (sm) {
+    if (typeof sm.getSessionId === "function") {
+      const id = sm.getSessionId();
+      if (typeof id === "string" && id.length > 0) return id;
+    }
+    if (typeof sm.sessionId === "string" && sm.sessionId.length > 0) return sm.sessionId;
+  }
+  return toolCallId;
+}
+
 function toCanonicalContext(
   toolCallId: string,
   signal: AbortSignal,
@@ -81,7 +111,7 @@ function toCanonicalContext(
   const c = ctx as Record<string, unknown>;
 
   return {
-    sessionID: String(c.sessionID ?? c.session_id ?? c.sessionId ?? toolCallId),
+    sessionID: String(extractPiSessionId(c, toolCallId)),
     messageID: String(c.messageID ?? c.message_id ?? c.messageId ?? toolCallId),
     agent: String(c.agent ?? c.agentName ?? c.agent_name ?? ""),
     directory: String(c.directory ?? c.dir ?? c.cwd ?? ""),
