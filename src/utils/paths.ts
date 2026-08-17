@@ -2,6 +2,7 @@ import { join, sep } from "node:path";
 import { SKILL_MD } from "../constants.ts";
 import {
   defaultPlatformPaths,
+  dshPlatformPaths,
   piPlatformPaths,
   type PlatformPaths,
 } from "../platform/paths.ts";
@@ -37,6 +38,7 @@ export function toNativePath(p: string): string {
 
 function resolvePaths(platformId?: string): PlatformPaths {
   if (platformId === "pi") return piPlatformPaths();
+  if (platformId === "dsh") return dshPlatformPaths();
   return defaultPlatformPaths();
 }
 
@@ -91,6 +93,7 @@ export function agentsDir(): string {
 /**
  * Returns the platform-specific agent directory.
  * - `"pi"` → `piPlatformPaths().agentsDir`
+ * - `"dsh"` → `dshPlatformPaths().agentsDir`
  * - default (or `"opencode"`) → `defaultPlatformPaths().agentsDir`
  */
 export function platformAgentsDir(platformId?: string): string {

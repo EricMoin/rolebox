@@ -16,8 +16,8 @@
  * src/pi-extension.ts) against a hermetic fixture:
  *   - `process.chdir()` → a temp workspace containing `rolebox/` with
  *     role.yaml fixtures that reference role-local and global skills;
- *   - `XDG_CONFIG_HOME` → a temp dir so configDir / globalSkillsDir
- *     resolve inside the fixture (never the real ~/.config/opencode);
+ *   - `PI_CODING_AGENT_DIR` → a temp dir so configDir / globalSkillsDir
+ *     resolve inside the fixture (never the real ~/.pi/agent);
  *   - `ROLEBOX_ENGINE_RECOVERY=off` skips the graph-recovery sweep
  *     (orthogonal to skill wiring; documented opt-out).
  *
@@ -43,8 +43,8 @@ import initExtension from "../src/pi-extension.ts";
 //   {workspace}/rolebox/engineer/skills/code-review/SKILL.md   ← role-local skill
 //   {workspace}/rolebox/doctor/role.yaml          opencode_skills: [shared-tools]
 //                                                 subagents: [assistant w/ assistant-kit]
-//   {workspace}/xdg/opencode/skills/shared-tools/SKILL.md      ← global skill
-//   {workspace}/xdg/opencode/skills/assistant-kit/SKILL.md     ← subagent global skill
+//   {workspace}/pi-agent/skills/shared-tools/SKILL.md      ← global skill
+//   {workspace}/pi-agent/skills/assistant-kit/SKILL.md     ← subagent global skill
 
 const ENGINEER_ROLE_YAML = `\
 name: Engineer
@@ -113,7 +113,7 @@ function createMockPi(sessionDir: string): MockPi {
 
 let workspace: string;
 let originalCwd: string;
-let originalXdg: string | undefined;
+let originalPiDir: string | undefined;
 let originalEngineRecovery: string | undefined;
 let mockPi: MockPi;
 
@@ -128,7 +128,7 @@ async function discoverSkillPaths(): Promise<string[]> {
 
 beforeAll(async () => {
   originalCwd = process.cwd();
-  originalXdg = process.env.XDG_CONFIG_HOME;
+  originalPiDir = process.env.PI_CODING_AGENT_DIR;
   originalEngineRecovery = process.env.ROLEBOX_ENGINE_RECOVERY;
 
   // Canonicalize the workspace up front: on macOS, `os.tmpdir()` returns
@@ -138,8 +138,8 @@ beforeAll(async () => {
   // form or the assertions never match.
   workspace = realpathSync(mkdtempSync(join(tmpdir(), "rolebox-pi-skills-")));
   const roleboxDir = join(workspace, "rolebox");
-  const xdgConfigHome = join(workspace, "xdg");
-  const globalSkillsDir = join(xdgConfigHome, "opencode", "skills");
+  const piAgentDir = join(workspace, "pi-agent");
+  const globalSkillsDir = join(piAgentDir, "skills");
 
   // ── rolebox/engineer — role-local skill ──────────────────────────────
   const engineerDir = join(roleboxDir, "engineer");
@@ -165,8 +165,8 @@ beforeAll(async () => {
   }
 
   // Redirect platform paths + working directory into the fixture so the
-  // extension never touches the real ~/.config/opencode or the repo.
-  process.env.XDG_CONFIG_HOME = xdgConfigHome;
+  // extension never touches the real ~/.pi/agent or the repo.
+  process.env.PI_CODING_AGENT_DIR = piAgentDir;
   process.env.ROLEBOX_ENGINE_RECOVERY = "off";
   process.chdir(workspace);
 
@@ -179,10 +179,10 @@ beforeAll(async () => {
 
 afterAll(() => {
   // Restore process state and remove the fixture.
-  if (originalXdg === undefined) {
-    delete process.env.XDG_CONFIG_HOME;
+  if (originalPiDir === undefined) {
+    delete process.env.PI_CODING_AGENT_DIR;
   } else {
-    process.env.XDG_CONFIG_HOME = originalXdg;
+    process.env.PI_CODING_AGENT_DIR = originalPiDir;
   }
   if (originalEngineRecovery === undefined) {
     delete process.env.ROLEBOX_ENGINE_RECOVERY;
@@ -246,14 +246,14 @@ describe("pi-extension skill path registration", () => {
   it("resources_discover returns global-scope skill directories", async () => {
     const skillPaths = await discoverSkillPaths();
     expect(skillPaths).toContain(
-      join(workspace, "xdg", "opencode", "skills", "shared-tools"),
+      join(workspace, "pi-agent", "skills", "shared-tools"),
     );
   });
 
   it("registers subagent skill paths under the subagent's own agent id", async () => {
     const skillPaths = await discoverSkillPaths();
     expect(skillPaths).toContain(
-      join(workspace, "xdg", "opencode", "skills", "assistant-kit"),
+      join(workspace, "pi-agent", "skills", "assistant-kit"),
     );
   });
 

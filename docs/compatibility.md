@@ -8,6 +8,8 @@ Works alongside oh-my-openagent. Rolebox roles appear in the agent list and skil
 
 Rolebox's Pi extension (`src/pi-extension.ts`) registers the full shared opencode tool surface through `PiLightweightServiceStack`; parity is enforced by `tests/pi-parity.test.ts`.
 
+On Pi, rolebox resolves its directories under the pi config directory (`$PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`): roles load from `{cwd}/rolebox` when present, else `~/.pi/agent/rolebox`; global skills resolve from `~/.pi/agent/skills`. Deploy installed roles there with `rolebox sync pi`. The dsh plugin resolves the same layout under `$DSH_HOME` / `~/.dsh` (see [dsh-plugin-contract.md](dsh-plugin-contract.md) §5.1); use `rolebox sync dsh`.
+
 | Tool surface | Opencode | Pi |
 | --- | --- | --- |
 | hashline_read / hashline_edit | ✓ | ✓ |

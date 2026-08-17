@@ -45,14 +45,20 @@ export function defaultPlatformPaths(): PlatformPaths {
 /**
  * Returns platform paths for the Pi platform.
  *
- * - `configDir`: `~/.pi/agent`
- * - `agentsDir`: `~/.pi/agent/skills`
- * - `skillsDir`: `~/.pi/agent/skills`
- * - `sessionsDir`: `~/.pi/agent/sessions`
- * - `extensionsDir`: `~/.pi/agent/extensions`
+ * Per pi's documented environment variables, the config directory resolves
+ * as `$PI_CODING_AGENT_DIR` when set (non-blank), otherwise `~/.pi/agent`;
+ * a blank env value is treated as unset.
+ *
+ * - `configDir`: `$PI_CODING_AGENT_DIR` or `~/.pi/agent`
+ * - `agentsDir`: `{configDir}/skills`
+ * - `skillsDir`: `{configDir}/skills`
+ * - `sessionsDir`: `{configDir}/sessions`
+ * - `extensionsDir`: `{configDir}/extensions`
  */
 export function piPlatformPaths(): PlatformPaths {
-  const base = join(os.homedir(), ".pi", "agent");
+  const base = process.env.PI_CODING_AGENT_DIR?.trim()
+    ? process.env.PI_CODING_AGENT_DIR
+    : join(os.homedir(), ".pi", "agent");
   return {
     platformId: "pi",
     configDir: base,
