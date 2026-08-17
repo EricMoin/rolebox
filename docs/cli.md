@@ -38,7 +38,7 @@ rolebox init my-role -t subagents     # Use a specific template
 | `subagents` | Parent role with child sub-agent scaffolding |
 | `collaboration` | Multi-agent role with collaboration graph topology |
 
-### `install <role>[@version]`
+### `install [role]`
 
 Install a role from a registry. The role specifier can be in several formats:
 
@@ -47,14 +47,21 @@ Install a role from a registry. The role specifier can be in several formats:
 - `rolebox install my-registry:custom-role` — install from named registry
 - `rolebox install my-registry:role@2.0.0` — install specific version from named registry
 
+Omit the role specifier to pick a role interactively:
+
+```bash
+rolebox install        # Select a registry (if multiple) and a role to install
+```
+
 After installing, run `rolebox sync opencode` to deploy the role.
 
-### `uninstall <role>`
+### `uninstall [role]`
 
 Remove an installed role and clean up any symlinks.
 
 ```bash
 rolebox uninstall software-architect
+rolebox uninstall     # Select an installed role to remove (asks for confirmation)
 ```
 
 ### `sync <target>`
@@ -120,14 +127,27 @@ rolebox registry add https://github.com/user/my-roles  # Add a registry
 rolebox registry remove my-roles         # Remove a registry (not the default)
 ```
 
-### `info <role>`
+### `info [role]`
 
 Show detailed information about an installed role, including model config, skills, functions, subagents, collaboration graph, and per-target sync status (opencode, pi, dsh).
 
 ```bash
 rolebox info software-architect
+rolebox info                    # Select an installed role to inspect
 rolebox info software-architect --json    # JSON output
 rolebox info software-architect --check   # Verify integrity hash
+```
+
+Note: `--json` requires an explicit role so the output stays machine-readable.
+
+### `config [role]`
+
+Configure models for a role and its subagents. The role must already be synced (`rolebox sync` first).
+
+```bash
+rolebox config software-architect          # Interactive model wizard
+rolebox config                             # Select a synced role, then configure
+rolebox config software-architect -m gpt-4o # Non-interactive model update
 ```
 
 ### `monitor`

@@ -5,6 +5,8 @@ import { join, relative } from "node:path";
 import { getSyncTarget } from "../paths.ts";
 import { SyncTarget } from "../../constants.ts";
 import { scanAvailableModels, scanRoleModels } from "../model-utils.ts";
+import { assertInteractiveContext, pickSyncedRole } from "../pick.ts";
+import type { PromptApi } from "../pick.ts";
 import type { ModelOption, RoleModelEntry } from "../model-utils.ts";
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -275,9 +277,23 @@ async function runInteractive(roleDir: string): Promise<void> {
   clack.log.step(`Files: ${updated.length}`);
 }
 
+/**
+ * Interactive flow for `rolebox config` without a role: pick a synced role
+ * and return its name, or undefined when the user cancels. `prompts` is
+ * injectable for tests.
+ */
+export async function configInteractive(
+  prompts: PromptApi = clack,
+  hint: string = "Pass the role explicitly, e.g. `rolebox config <role>`.",
+): Promise<string | undefined> {
+  assertInteractiveContext("config", hint);
+  const picked = await pickSyncedRole(SyncTarget.Opencode, "Select a role to configure:", prompts);
+  return picked ?? undefined;
+}
+
 // ── Non-Interactive Flow ──────────────────────────────────────────
 
-async function runNonInteractive(
+export async function runNonInteractive(
   roleDir: string,
   model: string,
   primaryOnly: boolean,
@@ -336,8 +352,8 @@ export default defineCommand({
   args: {
     role: {
       type: "positional",
-      description: "Role name to configure (must be synced)",
-      required: true,
+      description: "Role name to configure (must be synced). Omit for interactive selection",
+      required: false,
     },
     model: {
       type: "string",
@@ -351,12 +367,21 @@ export default defineCommand({
     },
   },
   async run({ args }) {
+    let role: string | undefined = args.role;
+    if (!role) {
+      const hint = args.model
+        ? `Pass the role explicitly, e.g. \`rolebox config <role> --model ${args.model}\`.`
+        : "Pass the role explicitly, e.g. `rolebox config <role>`.";
+      role = await configInteractive(clack, hint);
+      if (!role) return;
+    }
+
     const syncTarget = getSyncTarget(SyncTarget.Opencode);
-    const roleDir = join(syncTarget, args.role);
+    const roleDir = join(syncTarget, role);
 
     if (!existsSync(roleDir)) {
       console.error(
-        `Role "${args.role}" not found at ${syncTarget}. Run \`rolebox sync\` first.`,
+        `Role "${role}" not found at ${syncTarget}. Run \`rolebox sync\` first.`,
       );
       process.exitCode = 1;
       return;

@@ -1,10 +1,13 @@
 import { defineCommand } from "citty";
+import * as clack from "@clack/prompts";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import yaml from "js-yaml";
 import { loadLock, findInLock } from "../config.ts";
 import { getSyncTarget, getRolePath, getTargetConfigDir } from "../paths.ts";
 import { computeIntegrity } from "../registry-client.ts";
+import { assertInteractiveContext, pickInstalledRole } from "../pick.ts";
+import type { PromptApi } from "../pick.ts";
 import { DEFAULT_FUNCTIONS, RoleMode, ROLE_YAML } from "../../constants.ts";
 import { PLATFORM_REGISTRY } from "../../platform/registry.ts";
 import {
@@ -285,6 +288,27 @@ function discoverFileSubagents(rolePath: string): Array<{ name: string; descript
 
 
 
+/**
+ * Interactive flow for `rolebox info` without a role: pick an installed role
+ * and return its roleId, or undefined when the user cancels. `prompts` is
+ * injectable for tests.
+ */
+export async function infoInteractive(prompts: PromptApi = clack): Promise<string | undefined> {
+  assertInteractiveContext(
+    "info",
+    "Pass the role explicitly, e.g. `rolebox info software-architect`.",
+  );
+
+  prompts.intro("rolebox info");
+  const picked = await pickInstalledRole("Select a role to inspect:", prompts);
+  if (!picked) {
+    prompts.cancel("Operation cancelled.");
+    return undefined;
+  }
+  prompts.outro("");
+  return picked;
+}
+
 export default defineCommand({
   meta: {
     name: "info",
@@ -293,8 +317,8 @@ export default defineCommand({
   args: {
     role: {
       type: "positional",
-      description: "Role ID to inspect",
-      required: true,
+      description: "Role ID to inspect. Omit for interactive selection",
+      required: false,
     },
     json: {
       type: "boolean",
@@ -306,6 +330,20 @@ export default defineCommand({
     },
   },
   async run({ args }) {
-    await info(args.role, args.json ?? false, args.check ?? false);
+    // JSON output must stay machine-readable — an interactive picker would
+    // pollute stdout, so require an explicit role in that mode.
+    if (!args.role && args.json) {
+      throw new Error(
+        "`rolebox info --json` requires an explicit role so the JSON output stays machine-readable. Use `rolebox info <role> --json`.",
+      );
+    }
+
+    let roleId: string | undefined = args.role;
+    if (!roleId) {
+      roleId = await infoInteractive();
+      if (!roleId) return;
+    }
+
+    await info(roleId, args.json ?? false, args.check ?? false);
   },
 });

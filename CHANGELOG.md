@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Interactive role selection for role-targeting commands** — `rolebox install`, `uninstall`, `info`, and `config` now accept an optional role argument: run them without a role (e.g. `rolebox install`) to enter an interactive picker and choose the role from a searchable list instead of remembering the exact role id. `install` lets you pick the registry (when several are configured) and the role from the registry manifest, then asks for confirmation; `uninstall` asks for confirmation before removing; `info --json` requires an explicit role so the JSON output stays machine-readable; non-TTY invocations fail with a friendly hint naming the explicit form.
+
+---
+
 ## 1.3.0
 
 ### Features
