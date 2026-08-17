@@ -264,9 +264,9 @@ describe("PI Dispatch — Notification & DispatchAdapter", () => {
     expect(inner.prompt).not.toHaveBeenCalled();
   });
 
-  // ── A.2: Background dispatch intermediate notification (triggerTurn: false) ──
+  // ── A.2: Background dispatch intermediate notification (triggerTurn: false, immediate silent delivery) ──
 
-  it("background dispatch: prompt with noReply:true sends triggerTurn:false (intermediate notification)", async () => {
+  it("background dispatch: prompt with noReply:true sends triggerTurn:false with immediate silent delivery", async () => {
     const inner = createMockInner();
     const pi = createMockPi();
     const log = createMockLogger();
@@ -279,7 +279,7 @@ describe("PI Dispatch — Notification & DispatchAdapter", () => {
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       { customType: "rolebox-inject", content: "background task dispatched", display: true, details: { source: "rolebox-dispatch" } },
-      { triggerTurn: false, deliverAs: "nextTurn" },
+      { triggerTurn: false, deliverAs: "followUp" },
     );
     expect(result).toEqual({ id: "external-1" });
   });
@@ -310,9 +310,9 @@ describe("PI Dispatch — Notification & DispatchAdapter", () => {
     expect(result).toEqual({ id: "external-1" });
   });
 
-  // ── A.4: Loop progress silent (fromLoop:true, noReply:true → triggerTurn:false) ──
+  // ── A.4: Loop progress — immediate silent delivery (fromLoop:true, noReply:true → triggerTurn:false) ──
 
-  it("loop progress: fromLoop:true + noReply:true sends triggerTurn:false (silent)", async () => {
+  it("loop progress: fromLoop:true + noReply:true sends triggerTurn:false with immediate silent delivery", async () => {
     const inner = createMockInner();
     const pi = createMockPi();
     const log = createMockLogger();
@@ -331,7 +331,7 @@ describe("PI Dispatch — Notification & DispatchAdapter", () => {
         display: true,
         details: { source: "rolebox-dispatch" },
       },
-      { triggerTurn: false, deliverAs: "nextTurn" },
+      { triggerTurn: false, deliverAs: "followUp" },
     );
     expect(result).toEqual({ id: "external-1" });
   });
@@ -382,7 +382,7 @@ describe("PI Dispatch — DispatchAdapter", () => {
         display: true,
         details: { source: "rolebox-dispatch" },
       },
-      { triggerTurn: false, deliverAs: "nextTurn" },
+      { triggerTurn: false, deliverAs: "followUp" },
     );
   });
 
