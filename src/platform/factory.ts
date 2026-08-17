@@ -18,12 +18,7 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import {
-  defaultPlatformPaths,
-  dshPlatformPaths,
-  piPlatformPaths,
-  type PlatformPaths,
-} from "./paths.ts";
+import { resolvePlatformPaths } from "./registry.ts";
 import { bootstrapRoles, type BootstrapRolesResult } from "../resolver/bootstrap.ts";
 import { syncAllAgents } from "../sync/agent-files.ts";
 import type { IAgentRegistrar } from "./ports/agent-registrar.ts";
@@ -75,20 +70,6 @@ export interface InitializeRuntimeOptions {
   registrar?: IAgentRegistrar;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Resolve PlatformPaths for the given platform identifier. */
-function getPlatformPaths(platformId: string): PlatformPaths {
-  switch (platformId) {
-    case "pi":
-      return piPlatformPaths();
-    case "dsh":
-      return dshPlatformPaths();
-    default:
-      return defaultPlatformPaths();
-  }
-}
-
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /**
@@ -107,7 +88,7 @@ export function resolveRoleboxDirectories(
 ): RoleboxDirectories {
   const workingDir = opts.workingDir ?? process.cwd();
   const platformId = opts.platformId ?? "opencode";
-  const paths = getPlatformPaths(platformId);
+  const paths = resolvePlatformPaths(platformId);
 
   const cwdRoleboxDir = path.join(workingDir, "rolebox");
   const roleboxDir = existsSync(cwdRoleboxDir)

@@ -2,10 +2,9 @@ import { join, sep } from "node:path";
 import { SKILL_MD } from "../constants.ts";
 import {
   defaultPlatformPaths,
-  dshPlatformPaths,
   piPlatformPaths,
-  type PlatformPaths,
 } from "../platform/paths.ts";
+import { resolvePlatformPaths } from "../platform/registry.ts";
 
 // ── Path normalization ───────────────────────────────────────────
 
@@ -32,14 +31,6 @@ export function toPosixPath(p: string): string {
  */
 export function toNativePath(p: string): string {
   return p.replace(/\//g, sep);
-}
-
-// ── Internal platform path resolver ──────────────────────────────
-
-function resolvePaths(platformId?: string): PlatformPaths {
-  if (platformId === "pi") return piPlatformPaths();
-  if (platformId === "dsh") return dshPlatformPaths();
-  return defaultPlatformPaths();
 }
 
 // ── Function / Skill / Subagent helpers (pure joins) ─────────────
@@ -97,7 +88,7 @@ export function agentsDir(): string {
  * - default (or `"opencode"`) → `defaultPlatformPaths().agentsDir`
  */
 export function platformAgentsDir(platformId?: string): string {
-  return resolvePaths(platformId).agentsDir;
+  return resolvePlatformPaths(platformId).agentsDir;
 }
 
 /**
