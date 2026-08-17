@@ -13,16 +13,21 @@ process.env.XDG_DATA_HOME = statusDataDir;
 
 import { createPathsMockPayload } from "../../helpers/paths-mock";
 
+// Redirect every sync target under XDG_CONFIG_HOME so tests never touch a
+// developer's real ~/.pi/agent or ~/.dsh directories.
+function targetBase(target: string): string {
+  const xdg = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+  if (target === "opencode") return join(xdg, "opencode");
+  if (target === "pi") return join(xdg, "pi-agent");
+  if (target === "dsh") return join(xdg, "dsh");
+  throw new Error(`Unknown sync target: "${target}". Supported targets: opencode, pi, dsh`);
+}
+
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
   extra: {
-    getSyncTarget: (target: string) => {
-      if (target === "opencode") {
-        const xdg = process.env.XDG_CONFIG_HOME;
-        if (xdg) return join(xdg, "opencode", "rolebox");
-        return join(homedir(), ".config", "opencode", "rolebox");
-      }
-      throw new Error(`Unknown sync target: "${target}". Supported targets: opencode`);
-    },
+    getSyncTarget: (target: string) => join(targetBase(target), "rolebox"),
+    getTargetConfigDir: (target: string) => targetBase(target),
+    getTargetSkillsDir: (target: string) => join(targetBase(target), "skills"),
     getOpencodeConfigPath: () => {
       const xdg = process.env.XDG_CONFIG_HOME;
       if (xdg) return join(xdg, "opencode", "opencode.jsonc");
@@ -212,6 +217,61 @@ describe("status", () => {
     expect(parsed.roles[0].version).toBe("2.0.0");
     expect(parsed.opencode).toBeDefined();
     expect(parsed.opencode.pluginRegistered).toBeDefined();
+    // All three sync targets must be reported.
+    expect(parsed.targets).toBeInstanceOf(Array);
+    const targetNames = parsed.targets.map((t: any) => t.target).sort();
+    expect(targetNames).toEqual(["dsh", "opencode", "pi"]);
+    for (const t of parsed.targets) {
+      expect(typeof t.syncTarget).toBe("string");
+      expect(typeof t.present).toBe("boolean");
+      expect(t.roles).toBeInstanceOf(Array);
+    }
+  });
+
+  it("shows pi and dsh integration sections, not just opencode", async () => {
+    const roleDir = createRoleDir("oh-my-role", "multi-role", "1.0.0");
+    createLockFile([{
+      role: "multi-role",
+      registry: "oh-my-role",
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      integrity: "sha256-abc",
+    }]);
+    createSyncSymlink("multi-role", roleDir);
+
+    const { status } = await importStatus();
+    const { logs, run } = captureLogs(() => status(false, false));
+    await run();
+
+    const allOutput = logs.join("\n");
+    expect(allOutput).toContain("OpenCode Integration");
+    expect(allOutput).toContain("pi Integration");
+    expect(allOutput).toContain("dsh Integration");
+  });
+
+  it("reports per-target sync counts in JSON", async () => {
+    const roleDir = createRoleDir("oh-my-role", "count-role", "1.0.0");
+    createLockFile([{
+      role: "count-role",
+      registry: "oh-my-role",
+      version: "1.0.0",
+      installedAt: "2024-01-01T00:00:00Z",
+      integrity: "sha256-abc",
+    }]);
+    // Sync only to opencode; pi/dsh should report 0 synced.
+    createSyncSymlink("count-role", roleDir);
+
+    const { status } = await importStatus();
+    const { logs, run } = captureLogs(() => status(false, true));
+    await run();
+
+    const parsed = JSON.parse(logs[0]);
+    const oc = parsed.targets.find((t: any) => t.target === "opencode");
+    const pi = parsed.targets.find((t: any) => t.target === "pi");
+    expect(oc.syncedCount).toBe(1);
+    expect(oc.totalCount).toBe(1);
+    expect(pi.syncedCount).toBe(0);
+    expect(pi.totalCount).toBe(1);
   });
 
   it("handles missing config dir gracefully", async () => {

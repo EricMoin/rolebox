@@ -2,11 +2,20 @@ import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadLock, loadConfig, getConfigPath, getLockPath } from "../config.ts";
-import { getSyncTarget, getRolePath, getOpencodeConfigPath, getOpencodeSkillsDir } from "../paths.ts";
+import { loadLock, loadConfig, getConfigPath } from "../config.ts";
+import {
+  getSyncTarget,
+  getRolePath,
+  getTargetConfigDir,
+  getTargetSkillsDir,
+} from "../paths.ts";
 import { fetchRegistryManifest } from "../registry-client.ts";
 import { compareVersions } from "./update.ts";
-import { SyncTarget, PLUGIN_ID } from "../../constants.ts";
+import {
+  PLATFORM_REGISTRY,
+  type PlatformDescriptor,
+  type PlatformIntegration,
+} from "../../platform/registry.ts";
 import {
   bold,
   dim,
@@ -25,6 +34,22 @@ import {
   shortenPath,
 } from "../format.ts";
 
+interface TargetStatus {
+  target: string;
+  label: string;
+  present: boolean;
+  syncTarget: string;
+  roles: Array<{ role: string; synced: boolean; symlinkValid: boolean }>;
+  syncedCount: number;
+  totalCount: number;
+  skillSymlinks: Array<{ name: string; valid: boolean }>;
+  /**
+   * Host integration/registration status, as declared by the platform
+   * descriptor. `null` when the platform has no detectable mechanism.
+   */
+  integration: PlatformIntegration | null;
+}
+
 interface StatusJson {
   version: string;
   config: { path: string; exists: boolean };
@@ -38,10 +63,51 @@ interface StatusJson {
     symlinkValid: boolean;
     latestVersion?: string;
   }>;
+  targets: TargetStatus[];
+  /** @deprecated Retained for backward compatibility — use `targets` instead. */
   opencode: {
     syncTarget: string;
     pluginRegistered: boolean;
     skillSymlinks: Array<{ name: string; valid: boolean }>;
+  };
+}
+
+/**
+ * Compute sync status for a single platform across all installed roles.
+ * Purely descriptor-driven — knows nothing platform-specific.
+ */
+function computeTargetStatus(
+  platform: PlatformDescriptor,
+  lock: ReturnType<typeof loadLock>,
+): TargetStatus {
+  const syncTarget = getSyncTarget(platform.id);
+  const present = existsSync(getTargetConfigDir(platform.id));
+
+  const roles = lock.roles.map((entry) => {
+    const linkPath = join(syncTarget, entry.role);
+    const sym = checkSymlink(linkPath, entry.role);
+    return {
+      role: entry.role,
+      synced: sym.exists && sym.isSymlink,
+      symlinkValid: sym.exists && sym.isSymlink && sym.targetExists,
+    };
+  });
+
+  const skillSymlinks = listSymlinks(getTargetSkillsDir(platform.id), "rolebox--").map((s) => ({
+    name: s.name,
+    valid: s.isSymlink && s.targetExists,
+  }));
+
+  return {
+    target: platform.id,
+    label: platform.label,
+    present,
+    syncTarget,
+    roles,
+    syncedCount: roles.filter((r) => r.symlinkValid).length,
+    totalCount: roles.length,
+    skillSymlinks,
+    integration: platform.detectIntegration(),
   };
 }
 
@@ -54,22 +120,27 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
   const config = loadConfig();
   const lock = loadLock();
   const configPath = getConfigPath();
-  const syncTarget = getSyncTarget(SyncTarget.Opencode);
-  const opencodeConfigPath = getOpencodeConfigPath();
 
-  const pluginRegistered = checkPluginRegistered(opencodeConfigPath);
+  // Compute sync status for EVERY registered platform (opencode, pi, dsh, and
+  // any future harness) — the CLI iterates the registry rather than naming
+  // targets. A role is only "deployed" relative to a specific tool, so each
+  // registered platform is reported.
+  const targetStatuses: TargetStatus[] = PLATFORM_REGISTRY.map((p) =>
+    computeTargetStatus(p, lock),
+  );
+  const opencodeStatus =
+    targetStatuses.find((t) => t.target === "opencode") ?? targetStatuses[0];
 
+  // Top-level role identity list (registry/version/installedAt), enriched with
+  // opencode sync flags for backward compatibility.
   const roleStatuses = lock.roles.map((entry) => {
-    const linkPath = join(syncTarget, entry.role);
-    const sym = checkSymlink(linkPath, entry.role);
+    const oc = opencodeStatus?.roles.find((r) => r.role === entry.role);
     return {
       ...entry,
-      synced: sym.exists && sym.isSymlink,
-      symlinkValid: sym.exists && sym.isSymlink && sym.targetExists,
+      synced: oc?.synced ?? false,
+      symlinkValid: oc?.symlinkValid ?? false,
     };
   });
-
-  const skillSymlinks = listSymlinks(getOpencodeSkillsDir(), "rolebox--");
 
   let latestVersions: Record<string, string> = {};
   if (checkUpdates) {
@@ -90,13 +161,11 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
         symlinkValid: r.symlinkValid,
         ...(latestVersions[r.role] ? { latestVersion: latestVersions[r.role] } : {}),
       })),
+      targets: targetStatuses,
       opencode: {
-        syncTarget,
-        pluginRegistered,
-        skillSymlinks: skillSymlinks.map((s) => ({
-          name: s.name,
-          valid: s.isSymlink && s.targetExists,
-        })),
+        syncTarget: opencodeStatus?.syncTarget ?? "",
+        pluginRegistered: opencodeStatus?.integration?.registered ?? false,
+        skillSymlinks: opencodeStatus?.skillSymlinks ?? [],
       },
     };
     console.log(JSON.stringify(output, null, 2));
@@ -143,45 +212,63 @@ export async function status(checkUpdates: boolean, jsonOutput: boolean): Promis
     }
   }
 
-  // OpenCode Integration
-  printHeader("OpenCode Integration");
-  printField("Plugin", pluginRegistered ? `${SYM_OK} registered` : `${SYM_FAIL} ${red("not found in opencode config")}`);
-  printField("Sync target", shortenPath(syncTarget));
+  // Sync Targets — one section per registered platform. Fully registry-driven:
+  // a new harness appears here automatically, with its own integration line.
+  for (const ts of targetStatuses) {
+    printHeader(`${ts.label} Integration${ts.present ? "" : dim(" (not detected)")}`);
 
-  const syncedCount = roleStatuses.filter((r) => r.symlinkValid).length;
-  const totalCount = roleStatuses.length;
-  if (totalCount > 0) {
-    const syncSummary = syncedCount === totalCount
-      ? green(`${syncedCount}/${totalCount} roles`)
-      : yellow(`${syncedCount}/${totalCount} roles`);
-    printField("Synced", syncSummary);
-  }
+    // Integration/registration line — rendered generically from whatever the
+    // platform descriptor reports. Platforms with no detectable mechanism
+    // (integration === null) simply omit this line rather than guessing.
+    if (ts.integration) {
+      printField(
+        ts.integration.mechanism,
+        ts.integration.registered
+          ? `${SYM_OK} ${ts.integration.detail}`
+          : `${SYM_FAIL} ${red(ts.integration.detail)}`,
+      );
+    }
 
-  // Skill Symlinks
-  if (skillSymlinks.length > 0) {
-    console.log("");
-    console.log(`  ${dim("Skill symlinks")} ${dim(`(${skillSymlinks.length}):`)}`)
-    const broken = skillSymlinks.filter((s) => !s.targetExists || !s.isSymlink);
-    const valid = skillSymlinks.filter((s) => s.isSymlink && s.targetExists);
+    printField("Sync target", shortenPath(ts.syncTarget));
 
-    if (broken.length === 0) {
-      console.log(`    ${SYM_OK} ${green("all valid")}`);
-    } else {
-      console.log(`    ${SYM_OK} ${valid.length} valid`);
-      for (const b of broken) {
-        console.log(`    ${SYM_FAIL} ${b.name} ${red("(broken)")}`);
+    if (ts.totalCount > 0) {
+      const syncSummary = ts.syncedCount === ts.totalCount
+        ? green(`${ts.syncedCount}/${ts.totalCount} roles`)
+        : (ts.syncedCount === 0 ? dim(`${ts.syncedCount}/${ts.totalCount} roles`) : yellow(`${ts.syncedCount}/${ts.totalCount} roles`));
+      printField("Synced", syncSummary);
+    }
+
+    // Skill Symlinks for this target
+    if (ts.skillSymlinks.length > 0) {
+      const broken = ts.skillSymlinks.filter((s) => !s.valid);
+      const valid = ts.skillSymlinks.filter((s) => s.valid);
+      console.log(`  ${dim("Skill symlinks")} ${dim(`(${ts.skillSymlinks.length}):`)}`);
+      if (broken.length === 0) {
+        console.log(`    ${SYM_OK} ${green("all valid")}`);
+      } else {
+        console.log(`    ${SYM_OK} ${valid.length} valid`);
+        for (const b of broken) {
+          console.log(`    ${SYM_FAIL} ${b.name} ${red("(broken)")}`);
+        }
       }
     }
   }
 
-  // Hints
+  // Hints — also registry-driven.
   const hints: string[] = [];
-  const unsyncedRoles = roleStatuses.filter((r) => !r.synced);
-  if (unsyncedRoles.length > 0) {
-    hints.push(`Run ${cyan("rolebox sync opencode")} to sync ${unsyncedRoles.length} unsynced role(s).`);
-  }
-  if (!pluginRegistered) {
-    hints.push(`Add ${cyan('"rolebox"')} to the "plugin" array in ${shortenPath(opencodeConfigPath)}.`);
+  for (const ts of targetStatuses) {
+    // Only nag about targets that are actually in use: the tool is detected, or
+    // at least one role is already synced to it.
+    const relevant = ts.present || ts.syncedCount > 0;
+    if (!relevant) continue;
+    const unsyncedCount = ts.roles.filter((r) => !r.synced).length;
+    if (unsyncedCount > 0) {
+      hints.push(`Run ${cyan(`rolebox sync ${ts.target}`)} to sync ${unsyncedCount} unsynced role(s) to ${ts.label}.`);
+    }
+    // Surface the platform's own registration hint when detected but unregistered.
+    if (ts.present && ts.integration && !ts.integration.registered && ts.integration.hint) {
+      hints.push(ts.integration.hint);
+    }
   }
 
   if (hints.length > 0) {
@@ -205,53 +292,6 @@ function findPackageJson(): string {
   }
   throw new Error("Could not find package.json");
 }
-
-function checkPluginRegistered(configPath: string): boolean {
-  if (!existsSync(configPath)) return false;
-  try {
-    const content = readFileSync(configPath, "utf-8");
-    const stripped = stripJsonComments(content);
-    const parsed = JSON.parse(stripped) as { plugin?: string[] };
-    if (!Array.isArray(parsed.plugin)) return false;
-    return parsed.plugin.some((p) => p === PLUGIN_ID || p.startsWith(`${PLUGIN_ID}@`));
-  } catch {
-    // JSON parse failed — return false, no crash
-    return false;
-  }
-}
-
-function stripJsonComments(input: string): string {
-  let result = "";
-  let i = 0;
-  while (i < input.length) {
-    if (input[i] === '"') {
-      result += '"';
-      i++;
-      while (i < input.length && input[i] !== '"') {
-        if (input[i] === '\\') {
-          result += input[i] + (input[i + 1] || "");
-          i += 2;
-        } else {
-          result += input[i];
-          i++;
-        }
-      }
-      if (i < input.length) { result += '"'; i++; }
-    } else if (input[i] === '/' && input[i + 1] === '/') {
-      while (i < input.length && input[i] !== '\n') i++;
-    } else if (input[i] === '/' && input[i + 1] === '*') {
-      i += 2;
-      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) i++;
-      i += 2;
-    } else {
-      result += input[i];
-      i++;
-    }
-  }
-  return result;
-}
-
-
 
 async function fetchLatestVersions(
   config: { registries: Array<{ name: string; url: string }> },
