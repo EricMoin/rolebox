@@ -651,10 +651,19 @@ export default async function (pi: any): Promise<void> {
     process.on("exit", shutdownHandler);
 
     // Construct DispatchManager via shared factory.
+    //
+    // storeDirectory MUST be the workspace (process.cwd()), NOT dirs.configDir
+    // (the pi home, ~/.pi/agent). The shared dispatch pipeline materializes
+    // task results via writeResultSidecar(taskId, fullText, d.directory) and
+    // persists checkpoints/progress under the same directory — pointing it at
+    // the pi home made `.rolebox/state/results|checkpoints|progress` vanish
+    // from the project (only the graph engine's `state/engine-*.json`, which
+    // uses process.cwd(), survived). This matches opencode (ctx.directory) and
+    // dsh (process.cwd()).
     const result = await createDispatchManager({
       sessionClient: notifyClient,
       resolvedRoles,
-      storeDirectory: dirs.configDir,
+      storeDirectory: process.cwd(),
     });
     const dispatchManager = result.manager;
 

@@ -33,6 +33,8 @@ import type {
   Todo,
   SessionStatus,
 } from "../../types.ts";
+import type { Part } from "../../../session/types.ts";
+import { readSession } from "./sidecar-persister.ts";
 
 /**
  * Default directory where Pi stores session JSONL files.
@@ -438,6 +440,8 @@ export class PiSessionAdapter implements ISessionClient {
   /**
    * Get a single session by ID.
    * Searches workspace subdirectories (or a specific directory if provided).
+   * Falls back to the retained rolebox sidecar when no Pi-native session
+   * file exists (sub-agent transcripts spawned via `pi --no-session`).
    */
   async get(
     id: string,
@@ -447,6 +451,16 @@ export class PiSessionAdapter implements ISessionClient {
 
     const filePath = this._findSessionFile(id, directory);
     if (!filePath) {
+      const sidecarMessages = await this._messagesFromSidecar(id);
+      if (sidecarMessages !== null && sidecarMessages.length > 0) {
+        this._log.debug("get() fell back to retained sidecar", { id });
+        return this._buildSessionInfo(
+          id,
+          sidecarMessages,
+          basename(dirname(this._sidecarPath(id))),
+          directory,
+        );
+      }
       this._log.debug("Session not found", { id });
       return null;
     }
@@ -465,6 +479,11 @@ export class PiSessionAdapter implements ISessionClient {
   /**
    * Get messages for a session by parsing its JSONL file.
    * Optionally limits the number of messages returned.
+   *
+   * Falls back to the retained rolebox sidecar
+   * (`.rolebox/pi-sessions/{id}.jsonl`) when the session has no Pi-native
+   * session file — this is how sub-agent transcripts survive after their
+   * `pi --no-session` child exits (see sidecar-persister.ts).
    */
   async messages(
     id: string,
@@ -474,6 +493,13 @@ export class PiSessionAdapter implements ISessionClient {
 
     const filePath = this._findSessionFile(id, options?.directory);
     if (!filePath) {
+      const sidecarMessages = await this._messagesFromSidecar(id);
+      if (sidecarMessages !== null) {
+        if (options?.limit && options.limit > 0) {
+          return sidecarMessages.slice(0, options.limit);
+        }
+        return sidecarMessages;
+      }
       this._log.debug("Session not found for messages", { id });
       return [];
     }
@@ -612,6 +638,8 @@ export class PiSessionAdapter implements ISessionClient {
    * Derives status from the session's message content.
    * Returns "idle" for sessions with complete messages,
    * "busy" if the last message has no completion time.
+   * Falls back to the retained sidecar for sessions without a
+   * Pi-native file (sub-agent transcripts).
    */
   async status(
     id: string,
@@ -620,11 +648,316 @@ export class PiSessionAdapter implements ISessionClient {
     this._log.debug("status() for session", { id });
 
     const filePath = this._findSessionFile(id, directory);
-    if (!filePath) return null;
+    if (!filePath) {
+      const sidecarMessages = await this._messagesFromSidecar(id);
+      if (sidecarMessages === null || sidecarMessages.length === 0) return null;
+      return this._deriveStatus(sidecarMessages);
+    }
 
     const messages = this._parseMessages(filePath);
     if (messages.length === 0) return null;
+    return this._deriveStatus(messages);
+  }
 
+  // ── Sidecar fallback (retained sub-agent transcripts) ────────────────────
+
+  /**
+   * Resolve the rolebox sidecar path for a session id:
+   * `{cwd}/.rolebox/pi-sessions/{id}.jsonl` (the same layout used by
+   * sidecar-persister.ts).
+   */
+  private _sidecarPath(id: string): string {
+    return join(process.cwd(), ".rolebox", "pi-sessions", `${id}.jsonl`);
+  }
+
+  /**
+   * Read messages from the retained rolebox sidecar for a session.
+   * Returns `null` when no sidecar exists (session genuinely unknown),
+   * otherwise replays the raw pi JSON events into Message objects.
+   */
+  private async _messagesFromSidecar(id: string): Promise<Message[] | null> {
+    const sidecarPath = this._sidecarPath(id);
+    if (!existsSync(sidecarPath)) return null;
+
+    this._log.debug("Reading messages from retained sidecar", {
+      id,
+      sidecarPath,
+    });
+    const events = await readSession(id);
+    if (!events || events.length === 0) return [];
+
+    const messages: Message[] = [];
+    for (const rawEvent of events) {
+      const event = rawEvent as Record<string, unknown>;
+      const type = typeof event.type === "string" ? event.type : "";
+      switch (type) {
+        case "message_start": {
+          // pi 0.81.x payload: { type, message } — adopt a message shell.
+          const m = (event.message ?? {}) as { role?: string; timestamp?: number };
+          const role: "user" | "assistant" = m.role === "user" ? "user" : "assistant";
+          const msgInfo = {
+            id: String(event.messageID ?? event.id ?? `msg-${messages.length}-${Date.now()}`),
+            sessionID: String(event.sessionID ?? ""),
+            role,
+            time: { created: (m.timestamp as number) ?? Date.now() },
+          };
+          // Adopt an empty shell instead of stacking a duplicate.
+          const last = messages[messages.length - 1];
+          if (last && last.parts.length === 0 && last.info.role === role) {
+            last.info = msgInfo;
+          } else {
+            messages.push({ info: msgInfo, parts: [] });
+          }
+          break;
+        }
+        case "message_update": {
+          // Streaming text_delta / thinking_delta.
+          const sub = (event.assistantMessageEvent ?? {}) as {
+            type?: string;
+            contentIndex?: number;
+            delta?: string;
+          };
+          const last = messages[messages.length - 1];
+          if (!last || typeof sub.delta !== "string" || !sub.delta) break;
+          const isText = sub.type === "text_delta";
+          if (!isText && sub.type !== "thinking_delta") break;
+          const contentIndex = typeof sub.contentIndex === "number" ? sub.contentIndex : 0;
+          const slotId = `${isText ? "text" : "reasoning"}-slot-${contentIndex}`;
+          let part = last.parts.find((p) => p.id === slotId);
+          if (!part) {
+            part = {
+              id: slotId,
+              sessionID: last.info.sessionID,
+              messageID: last.info.id,
+              type: isText ? "text" : "reasoning",
+              text: "",
+              time: { start: Date.now() },
+            };
+            last.parts.push(part as Part);
+          }
+          (part as { text: string }).text += sub.delta;
+          break;
+        }
+        case "message_end": {
+          // Finalized message replaces parts wholesale.
+          const m = (event.message ?? {}) as {
+            role?: string;
+            content?: string | Array<Record<string, unknown>>;
+            stopReason?: string;
+            errorMessage?: string;
+          };
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          if (m.role === "user" || m.role === "assistant") last.info.role = m.role;
+          last.info.time = { ...last.info.time, completed: Date.now() };
+          const rebuilt: Part[] = [];
+          if (typeof m.content === "string") {
+            rebuilt.push({
+              id: `text-0-${Date.now()}`,
+              sessionID: last.info.sessionID,
+              messageID: last.info.id,
+              type: "text",
+              text: m.content,
+              time: { start: Date.now() },
+            });
+          } else if (Array.isArray(m.content)) {
+            for (const entry of m.content) {
+              const partId = `p-${rebuilt.length}-${Date.now()}`;
+              switch (entry.type) {
+                case "text":
+                  rebuilt.push({
+                    id: partId,
+                    sessionID: last.info.sessionID,
+                    messageID: last.info.id,
+                    type: "text",
+                    text: String(entry.text ?? ""),
+                    time: { start: Date.now() },
+                  });
+                  break;
+                case "thinking":
+                  rebuilt.push({
+                    id: partId,
+                    sessionID: last.info.sessionID,
+                    messageID: last.info.id,
+                    type: "reasoning",
+                    text: String(entry.thinking ?? ""),
+                    time: { start: Date.now() },
+                  });
+                  break;
+                case "toolCall": {
+                  // Reuse the live tool part (built by tool_execution_* events)
+                  // so its completed/error state survives the wholesale
+                  // replacement — mirrors process-session.ts _handleJsonEvent.
+                  const tcId = String(entry.id ?? "");
+                  const live = last.parts.find(
+                    (p) => p.type === "tool" &&
+                      "callID" in p &&
+                      (p as { callID: string }).callID === tcId,
+                  );
+                  rebuilt.push(live ?? {
+                    id: partId,
+                    sessionID: last.info.sessionID,
+                    messageID: last.info.id,
+                    type: "tool",
+                    callID: tcId || `call-${Date.now()}`,
+                    tool: String(entry.name ?? "unknown"),
+                    state: {
+                      status: "running",
+                      input: (entry.arguments as Record<string, unknown>) ?? {},
+                    },
+                  });
+                  break;
+                }
+                default:
+                  break;
+              }
+            }
+          }
+          if (rebuilt.length > 0) last.parts = rebuilt;
+          if (typeof m.stopReason === "string" && m.stopReason) {
+            last.info.finish = m.stopReason;
+          }
+          if (m.stopReason === "error") {
+            last.info.error = typeof m.errorMessage === "string" && m.errorMessage
+              ? m.errorMessage
+              : "error";
+          }
+          break;
+        }
+        case "text": {
+          // Legacy/plain text event — append to the last message.
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          const text = typeof event.text === "string" ? event.text : "";
+          const existing = last.parts.find((p) => p.type === "text");
+          if (existing) {
+            (existing as { text: string }).text += text;
+          } else {
+            last.parts.push({
+              id: String(event.id ?? `text-${Date.now()}`),
+              sessionID: last.info.sessionID,
+              messageID: last.info.id,
+              type: "text",
+              text,
+              time: { start: Date.now() },
+            });
+          }
+          break;
+        }
+        case "reasoning": {
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          last.parts.push({
+            id: String(event.id ?? `reasoning-${Date.now()}`),
+            sessionID: last.info.sessionID,
+            messageID: last.info.id,
+            type: "reasoning",
+            text: typeof event.text === "string" ? event.text : "",
+            time: { start: Date.now() },
+          });
+          break;
+        }
+        case "tool_execution_start": {
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          const callID = String(event.toolCallId ?? event.callID ?? "");
+          if (!callID) break;
+          if (!last.parts.some((p) => p.type === "tool" && "callID" in p && (p as { callID: string }).callID === callID)) {
+            last.parts.push({
+              id: String(event.id ?? `tool-${Date.now()}`),
+              sessionID: last.info.sessionID,
+              messageID: last.info.id,
+              type: "tool",
+              callID,
+              tool: String(event.toolName ?? "unknown"),
+              state: {
+                status: "running",
+                input: (event.args as Record<string, unknown>) ?? {},
+              },
+            });
+          }
+          break;
+        }
+        case "tool_execution_end": {
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          const callID = String(event.toolCallId ?? event.callID ?? "");
+          const match = last.parts.find(
+            (p) => p.type === "tool" && "callID" in p && (p as { callID: string }).callID === callID,
+          ) as (Part & { state?: Record<string, unknown> }) | undefined;
+          if (!match) break;
+          const output = event.result === undefined
+            ? ""
+            : typeof event.result === "string"
+              ? event.result
+              : JSON.stringify(event.result);
+          if (event.isError === true) {
+            match.state = {
+              status: "error",
+              error: output || "Tool execution failed",
+              time: { start: Date.now(), end: Date.now() },
+            };
+          } else {
+            match.state = {
+              ...match.state,
+              status: "completed",
+              output,
+              time: { start: Date.now(), end: Date.now() },
+            };
+          }
+          break;
+        }
+        case "tool_call": {
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          last.parts.push({
+            id: String(event.id ?? `tool-${Date.now()}`),
+            sessionID: last.info.sessionID,
+            messageID: last.info.id,
+            type: "tool",
+            callID: String(event.callID ?? `call-${Date.now()}`),
+            tool: String(event.tool ?? "unknown"),
+            state: {
+              status: "running",
+              input: (event.input as Record<string, unknown>) ?? {},
+            },
+          });
+          break;
+        }
+        case "tool_result": {
+          const last = messages[messages.length - 1];
+          if (!last) break;
+          const callID = String(event.callID ?? "");
+          const match = last.parts.find(
+            (p) => p.type === "tool" && "callID" in p && (p as { callID: string }).callID === callID,
+          ) as (Part & { state?: Record<string, unknown> }) | undefined;
+          if (!match) break;
+          match.state = {
+            ...match.state,
+            status: "completed",
+            output: String(event.output ?? ""),
+            title: String(event.title ?? ""),
+            metadata: (event.metadata as Record<string, unknown>) ?? {},
+            time: {
+              start: Date.now(),
+              end: Date.now(),
+            },
+          };
+          break;
+        }
+        default:
+          // Non-message events (turn_end, agent_*, session.*, step-finish,
+          // tool_execution_update, ...) do not change the transcript.
+          break;
+      }
+    }
+
+    return messages;
+  }
+
+  /** Derive a SessionStatus from parsed messages (shared by status paths). */
+  private _deriveStatus(messages: Message[]): SessionStatus | null {
+    if (messages.length === 0) return null;
     const lastMsg = messages[messages.length - 1];
     const lastInfo = lastMsg?.info;
 

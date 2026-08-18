@@ -30,9 +30,11 @@ import type { IEventBridge } from "../../ports/event-bridge.ts";
 import { PiSessionAdapter, hasInFlightToolPart } from "./session.ts";
 import {
   appendEvent,
-  cleanup as cleanupSidecar,
   scanOrphanedSessions,
   readSession,
+  pruneSidecars,
+  MAX_RETAINED_SIDECARS,
+  writeSystemPrompt,
 } from "./sidecar-persister.ts";
 import type {
   SessionInfo,
@@ -951,6 +953,13 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // If there is no system prompt, an empty file is written.
     await writeFile(sysPromptPath, systemPrompt ?? record.agentConfig.systemPrompt, "utf-8");
 
+    // Persist the effective system prompt NEXT TO the transcript
+    // (`.rolebox/pi-sessions/{id}.systemprompt.txt`) so a completed or
+    // failed child's prompt can be inspected after the temp dir is cleaned
+    // up on exit. Best-effort; pruned in lockstep with the sidecar by
+    // pruneSidecars().
+    void writeSystemPrompt(id, systemPrompt ?? record.agentConfig.systemPrompt);
+
     // Build CLI arguments.
     const args: string[] = [
       "--mode", "json",
@@ -1053,12 +1062,18 @@ export class PiProcessSessionAdapter implements ISessionClient {
       // Clear the timeout.
       clearTimeout(timeoutHandle);
 
-      // Clean up the sidecar file (best-effort).
-      if (record.sidecarPath) {
-        void cleanupSidecar(id);
-      }
+      // Retain the child transcript sidecar for diagnosis/recovery. The
+      // just-finished transcript is NEVER deleted here — `session_read`,
+      // escalate-recovery, and cross-session result retrieval all depend
+      // on it surviving process exit. Growth is bounded by pruning the
+      // OLDEST sidecars beyond the retention cap (by mtime); the file just
+      // written is always the newest, so it always survives the prune.
+      // A failed child (non-zero exit or no valid completion) is thereby
+      // always retained as well — its sidecar is the one just written.
+      void pruneSidecars(MAX_RETAINED_SIDECARS);
 
-      // Clean up the temp directory.
+      // Clean up the ephemeral temp directory (the system prompt was also
+      // persisted next to the transcript — see _spawnProcess).
       this._cleanupTempDir(tmpDir, sysPromptPath);
 
       // If there are pending resolver(s), resolve with the last assistant text.

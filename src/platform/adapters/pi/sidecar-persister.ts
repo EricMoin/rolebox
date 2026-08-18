@@ -25,6 +25,8 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
+  statSync,
+  unlinkSync,
 } from "node:fs";
 import { join, extname, basename } from "node:path";
 
@@ -128,6 +130,11 @@ export async function readSession(
 
 /**
  * Delete the sidecar file for a session. Best-effort — never throws.
+ *
+ * NOTE: The process-session exit path no longer calls this — child
+ * transcripts are retained for diagnosis/recovery and bounded by
+ * {@link pruneSidecars}. This remains exported for explicit teardown
+ * (e.g. tests, session deletion flows).
  */
 export async function cleanup(sessionId: string): Promise<void> {
   try {
@@ -157,6 +164,124 @@ export function scanOrphanedSessions(): string[] {
     sessions.push(basename(entry.name, ".jsonl"));
   }
   return sessions;
+}
+
+// ── Retention ───────────────────────────────────────────────────────────────
+
+/**
+ * Maximum number of child-transcript sidecars (`{sessionId}.jsonl`)
+ * retained in the sidecar directory. Older transcripts beyond this cap
+ * are pruned by mtime. The just-finished transcript is never pruned —
+ * `pruneSidecars()` is only invoked AFTER a child exits, so the most
+ * recent file (by mtime) is always the one just written. This bounds
+ * disk growth while keeping completed/failed children inspectable.
+ */
+export const MAX_RETAINED_SIDECARS = 50;
+
+/**
+ * Prune sidecar transcripts down to the most recent `keep` (by mtime).
+ *
+ * Only `{sessionId}.jsonl` transcripts are counted — `notify-dedup.json`
+ * and `{sessionId}.systemprompt.txt` companions are never eligible.
+ * System-prompt companions are removed in lockstep with their transcript:
+ * when a `.jsonl` is pruned (or is missing entirely, leaving an orphaned
+ * companion), the matching `.systemprompt.txt` is removed too.
+ *
+ * Best-effort — never throws. Returns the number of files removed.
+ */
+export function pruneSidecars(keep: number = MAX_RETAINED_SIDECARS): number {
+  const dir = getSidecarDir();
+  if (!existsSync(dir)) return 0;
+
+  let entries: Array<{ name: string; mtimeMs: number }> = [];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith(".jsonl") && e.name !== NOTIFY_DEDUP_FILE)
+      .map((e) => {
+        let mtimeMs = 0;
+        try {
+          mtimeMs = statSync(join(dir, e.name)).mtimeMs;
+        } catch {
+          // File vanished between readdir and stat — treat as oldest.
+        }
+        return { name: e.name, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  } catch {
+    return 0;
+  }
+
+  // Beyond the retention cap — unlink the transcript and its companion.
+  const removed = entries.slice(keep);
+  let pruned = 0;
+  for (const entry of removed) {
+    const transcriptPath = join(dir, entry.name);
+    const sessionId = entry.name.slice(0, -".jsonl".length);
+    try {
+      unlinkSync(transcriptPath);
+      pruned++;
+    } catch {
+      // Best-effort — file may already be gone.
+    }
+    try {
+      unlinkSync(join(dir, `${sessionId}.systemprompt.txt`));
+      pruned++;
+    } catch {
+      // Companion may not exist.
+    }
+  }
+
+  // Orphaned system-prompt companions (no matching transcript) — clean up.
+  let allFiles: string[] = [];
+  try {
+    allFiles = readdirSync(dir);
+  } catch {
+    return pruned;
+  }
+  const retainedTranscripts = new Set(
+    entries.slice(0, keep).map((e) => e.name.slice(0, -".jsonl".length)),
+  );
+  for (const name of allFiles) {
+    if (!name.endsWith(".systemprompt.txt")) continue;
+    const sessionId = name.slice(0, -".systemprompt.txt".length);
+    if (retainedTranscripts.has(sessionId)) continue;
+    try {
+      unlinkSync(join(dir, name));
+      pruned++;
+    } catch {
+      // Best-effort — file may already be gone.
+    }
+  }
+
+  return pruned;
+}
+
+// ── System prompt persistence ───────────────────────────────────────────────
+
+/**
+ * Resolve the system-prompt companion path for a session.
+ * The effective system prompt (delivered via `--append-system-prompt`)
+ * is persisted next to the child transcript so completed/failed children
+ * can be inspected after the fact.
+ */
+export function getSystemPromptPath(sessionId: string): string {
+  return join(getSidecarDir(), `${sessionId}.systemprompt.txt`);
+}
+
+/**
+ * Persist the effective system prompt next to the session transcript.
+ * Best-effort — never throws.
+ */
+export async function writeSystemPrompt(
+  sessionId: string,
+  text: string,
+): Promise<void> {
+  try {
+    await ensureSidecarDir();
+    await writeFile(getSystemPromptPath(sessionId), text, "utf-8");
+  } catch {
+    // Best-effort persistence — logging is left to the caller.
+  }
 }
 
 // ── Notification dedup persistence ──────────────────────────────────────────
