@@ -19,6 +19,12 @@
  *     PiLightweightServiceStack instead and deliberately omits it
  *     (src/pi-extension.ts:917-918)
  *
+ * Documented Pi-only tool (NOT part of the shared surface):
+ *   - load_role_skill — skill-loading tool registered only on Pi via
+ *     pi-extension.ts extraTools (src/pi-extension.ts:952-953); opencode has
+ *     its own native skill tool and never registers it
+ *     (src/asset/skill-tool.ts:156-159)
+ *
  * The Pi side is wired EXACTLY as src/pi-extension.ts wires it (same
  * factories, same overrides, same dispatchManager gate), so the assertions
  * pin the real platform wiring, not a synthetic setup.
@@ -32,6 +38,7 @@ import { createTaskTools } from "../src/dispatch/query/task-tools.ts";
 import { createMemoryUpdateTool } from "../src/memory/tools.ts";
 import { createFunctionGraphTool } from "../src/function/function-graph.ts";
 import { createSkillComposeTool } from "../src/asset/skill-compose.ts";
+import { createLoadRoleSkillTool } from "../src/asset/skill-tool.ts";
 import { createContextAssembleTool } from "../src/dispatch/query/context-assemble.ts";
 import {
   createAllLspTools,
@@ -130,6 +137,13 @@ const WITHHELD_ON_BOTH: readonly string[] = [
 /** Opencode-only tool — deliberately NOT part of the shared surface. */
 const OPENCODE_ONLY: readonly string[] = ["asset_hot_reload"];
 
+/**
+ * Pi-only tool — registered on Pi but deliberately NOT part of the shared
+ * surface (opencode has its own native skill tool, so the name only exists
+ * on the Pi platform; wired via pi-extension.ts:952-953).
+ */
+const PI_ONLY: readonly string[] = ["load_role_skill"];
+
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 function makeRole(): ResolvedRole {
@@ -205,6 +219,19 @@ function buildExtraTools(): Record<string, CanonicalToolDef> {
 }
 
 /**
+ * The Pi-side extraTools mirror (pi-extension.ts:948-964): the shared extras
+ * plus the Pi-only load_role_skill tool. opencode's tool-service.ts never
+ * registers load_role_skill (it has a native skill tool), so this builder is
+ * used ONLY for the Pi stack — never for the shared-surface self-check.
+ */
+function buildPiExtraTools(): Record<string, CanonicalToolDef> {
+  return {
+    ...buildExtraTools(),
+    load_role_skill: createLoadRoleSkillTool([makeRole()]),
+  };
+}
+
+/**
  * The full shared surface the parity contract pins: the explicit opencode
  * surface plus the live lsp_* names (both platforms consume the identical
  * createAllLspTools factory, so lsp parity is structural).
@@ -233,7 +260,7 @@ async function initPiStack(): Promise<{ registeredNames: string[]; count: number
     undefined, // dispatchTools (disabled — graph-only orchestration)
     undefined, // loopTools (disabled — graph_add_loop replaces loop_*)
     buildTaskTools(), // taskTools (task_retry withheld)
-    buildExtraTools(), // extraTools (memory_update/function_graph/skill_compose/context_assemble/lsp_*)
+    buildPiExtraTools(), // extraTools (shared extras + Pi-only load_role_skill + lsp_*)
     makeDispatchManager(), // dispatchManager — gates the eight graph_* tools
     undefined, // graphNotifyClient (defaults to the Pi session adapter)
     process.cwd(), // stateDir (engine-state persistence)
@@ -289,29 +316,30 @@ describe("Pi ↔ opencode tool-surface parity (S11)", () => {
     expect(surface).toEqual(assembledKeys);
   });
 
-  it("registers the full shared opencode tool surface on Pi (surface ⊆ Pi)", async () => {
+  it("registers the full shared opencode tool surface on Pi (surface ∪ PI_ONLY ⊆ Pi)", async () => {
     const { registeredNames, count } = await initPiStack();
-    const surface = sharedSurface();
+    const expected = [...sharedSurface(), ...PI_ONLY];
 
-    // The documented surface has no duplicate names (so the exact-count
-    // assertion below cannot pass vacuously).
-    expect(new Set(surface).size).toBe(surface.length);
+    // The documented surface ∪ PI_ONLY has no duplicate names (so the
+    // exact-count assertion below cannot pass vacuously).
+    expect(new Set(expected).size).toBe(expected.length);
 
-    for (const name of surface) {
+    for (const name of expected) {
       expect(registeredNames).toContain(name);
     }
 
-    expect(count).toBe(surface.length);
+    expect(count).toBe(expected.length);
   });
 
-  it("registers nothing outside the shared surface (exact parity, no undocumented extras)", async () => {
+  it("registers nothing outside surface ∪ PI_ONLY (exact parity, no undocumented extras)", async () => {
     const { registeredNames } = await initPiStack();
     const surfaceSet = new Set(sharedSurface());
+    const piOnlySet = new Set(PI_ONLY);
 
     for (const name of registeredNames) {
-      expect(surfaceSet.has(name)).toBe(true);
+      expect(surfaceSet.has(name) || piOnlySet.has(name)).toBe(true);
     }
-    expect(registeredNames.length).toBe(surfaceSet.size);
+    expect(registeredNames.length).toBe(surfaceSet.size + piOnlySet.size);
   });
 
   it("withholds the documented exceptions on Pi (dispatch_*, loop_*, task_retry, asset_hot_reload)", async () => {
@@ -322,10 +350,10 @@ describe("Pi ↔ opencode tool-surface parity (S11)", () => {
     }
   });
 
-  it("the documented surface itself excludes the withheld names (contract self-check)", () => {
+  it("the documented surface itself excludes the withheld names and the opencode-only/Pi-only tools (contract self-check)", () => {
     const surface = new Set(sharedSurface());
 
-    for (const name of [...WITHHELD_ON_BOTH, ...OPENCODE_ONLY]) {
+    for (const name of [...WITHHELD_ON_BOTH, ...OPENCODE_ONLY, ...PI_ONLY]) {
       expect(surface.has(name)).toBe(false);
     }
   });

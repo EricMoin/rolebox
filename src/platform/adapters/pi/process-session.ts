@@ -262,6 +262,55 @@ function isActivityEventType(type: string): boolean {
 const CONTINUATION_SEPARATOR =
   "\n\n— Previous messages reproduced above for context —\n\n";
 
+// ── Spawn argument builder ─────────────────────────────────────────────────
+
+/**
+ * Build the CLI argument array for a spawned Pi child process.
+ *
+ * Ordering contract (locked by tests/pi-process-session-json.test.ts):
+ *   --mode json -p --no-session --model <model>
+ *   --tools <comma-joined>          — only when tools.length > 0
+ *   --append-system-prompt <path>   — only when the file exists
+ *   [extra args]                    — only when provided
+ *   Task: <promptText>              — final positional
+ *
+ * Pure with respect to the caller: no side effects, no `this`. The
+ * sysPromptPath existence check mirrors the former inline builder so
+ * callers that always write the file first keep identical behavior, and
+ * non-agent configs (empty tools) spawn exactly as before.
+ */
+export function buildSpawnArgs(
+  model: string,
+  tools: string[],
+  sysPromptPath: string,
+  promptText: string,
+  extra?: string[],
+): string[] {
+  const args: string[] = [
+    "--mode", "json",
+    "-p",
+    "--no-session",
+    "--model", model,
+  ];
+
+  // Only agents with a configured toolset get --tools.
+  if (tools.length > 0) {
+    args.push("--tools", tools.join(","));
+  }
+
+  if (existsSync(sysPromptPath)) {
+    args.push("--append-system-prompt", sysPromptPath);
+  }
+
+  if (extra && extra.length > 0) {
+    args.push(...extra);
+  }
+
+  // The prompt text is the final positional argument.
+  args.push(`Task: ${promptText}`);
+  return args;
+}
+
 // ── Adapter ────────────────────────────────────────────────────────────────
 
 /**
@@ -960,26 +1009,8 @@ export class PiProcessSessionAdapter implements ISessionClient {
     // pruneSidecars().
     void writeSystemPrompt(id, systemPrompt ?? record.agentConfig.systemPrompt);
 
-    // Build CLI arguments.
-    const args: string[] = [
-      "--mode", "json",
-      "-p",
-      "--no-session",
-      "--model", model,
-    ];
-
-    // Add tools if any are configured.
-    if (tools.length > 0) {
-      args.push("--tools", tools.join(","));
-    }
-
-    // Add system prompt file reference.
-    if (existsSync(sysPromptPath)) {
-      args.push("--append-system-prompt", sysPromptPath);
-    }
-
-    // Add the prompt text as the final positional argument.
-    args.push(`Task: ${promptText}`);
+    // Build CLI arguments (ordering locked by buildSpawnArgs + unit tests).
+    const args = buildSpawnArgs(model, tools, sysPromptPath, promptText);
 
     this.log.debug("Spawning Pi process", { id, model, toolCount: tools.length, agent: agentId });
 
@@ -1377,7 +1408,26 @@ export class PiProcessSessionAdapter implements ISessionClient {
         // must be driven by this event, not by waiting for process exit
         // (which previously only resolved via the 600s SIGTERM timeout,
         // leaving sync dispatches hanging and async completions starved).
-        this._completeTurn(record);
+        //
+        // pi emits turn_end after EVERY turn, not just the final one. A
+        // turn that ended with tool calls is followed by a new turn_start
+        // (the model continues), so completing here would SIGTERM the
+        // child before it writes its final answer — the cause of
+        // engine-dispatched subagents "echoing" their SKILL.md (the last
+        // tool result was the largest text the result extractor saw).
+        // Complete only when the just-completed turn is the model's
+        // tool-free final answer; otherwise let the agentic loop proceed
+        // (agent_end/agent_settled below is the safety net for agents
+        // that settle without a tool-free turn, and the per-process
+        // timeout remains the ultimate backstop).
+        if (this._isFinalTurn(record)) {
+          this._completeTurn(record);
+        } else {
+          this.log.debug(
+            "turn_end after tool use — not completing; awaiting next turn",
+            { id: record.id, turnIndex: event.turnIndex },
+          );
+        }
         break;
       }
 
@@ -1627,13 +1677,27 @@ export class PiProcessSessionAdapter implements ISessionClient {
       case "agent_start":
       case "turn_start":
       case "turn_end":
-      case "agent_end":
-      case "agent_settled":
         // pi 0.81.x agent lifecycle events — no parser state to update.
+        // (`turn_end` here is unreachable: the dedicated case above
+        // matches first and owns completion.)
         this.log.debug("Pi agent lifecycle event", {
           type: event.type,
           turnIndex: event.turnIndex,
         });
+        break;
+
+      case "agent_end":
+      case "agent_settled":
+        // Safety net: the agent has genuinely settled — pi will not start
+        // another turn. Complete even when the last turn still carried tool
+        // parts (e.g. a tool-only loop pi itself terminated), so the
+        // dispatch is not left hanging until the process timeout. Idempotent
+        // via record.idleEmitted if the final turn_end already completed.
+        this.log.debug("Pi agent lifecycle event", {
+          type: event.type,
+          turnIndex: event.turnIndex,
+        });
+        this._completeTurn(record);
         break;
 
       case "session.idle":
@@ -1691,6 +1755,40 @@ export class PiProcessSessionAdapter implements ISessionClient {
       typeof value === "object" &&
       value !== null &&
       !Array.isArray(value)
+    );
+  }
+
+  /**
+   * True when the just-completed turn is the model's FINAL answer: the
+   * last assistant message carries no tool parts (in-flight or settled)
+   * and no tool-related stop reason. pi emits turn_end after EVERY turn,
+   * so a turn_end whose last message still references tool calls is NOT
+   * terminal — the agentic loop continues in a new turn, and completing
+   * early would kill the child before it writes its answer (the "skill
+   * echo" root cause). agent_end/agent_settled and the per-process
+   * timeout remain the backstops for agents that never produce a
+   * tool-free turn.
+   */
+  private _isFinalTurn(record: ProcessRecord): boolean {
+    const last = record.messages[record.messages.length - 1];
+    if (!last) return false;
+    if (last.info?.role !== "assistant") return false;
+    // In-flight tool/shell work — results have not landed yet.
+    if (hasInFlightToolPart(last)) return false;
+    // Any tool part (completed/errored included) means this turn issued
+    // tool calls; pi starts a new turn for the model's follow-up.
+    if (last.parts.some((p) => p.type === "tool")) return false;
+    // Tool-related stop reason (e.g. "toolUse" / "tool_use") — same signal.
+    const finish = last.info?.finish;
+    if (typeof finish === "string" && /tool/i.test(finish)) return false;
+    // A final answer carries a non-empty text part. A tool-free turn
+    // without text is not an answer — completing with an empty extraction
+    // would fall back to tool-result text (the echo) downstream.
+    return last.parts.some(
+      (p) =>
+        p.type === "text" &&
+        "text" in p &&
+        (p as { text: string }).text.trim().length > 0,
     );
   }
 

@@ -272,6 +272,15 @@ export interface WirePiChatActivationOptions {
   deps: HookDeps;
   /** Pi active-agent ref (role switcher) used as the agent fallback. */
   activeAgent?: { get(): string | null } | undefined;
+  /**
+   * Opt-out switch (child-process mode, subtask S2). When `false` the
+   * wiring is skipped entirely — no `message_start` subscription is
+   * created and `handleChatMessage` is never invoked, so a spawned Pi
+   * subagent does not re-run the parent-side chat-activation machinery on
+   * top of the `--append-system-prompt` it already received. Defaults to
+   * `true`.
+   */
+  enabled?: boolean;
 }
 
 export interface PiChatActivationWireResult {
@@ -291,7 +300,12 @@ export interface PiChatActivationWireResult {
 export function wirePiChatActivation(
   options: WirePiChatActivationOptions,
 ): PiChatActivationWireResult {
-  const { pi, state, deps, activeAgent } = options;
+  const { pi, state, deps, activeAgent, enabled = true } = options;
+
+  if (!enabled) {
+    log.debug("Pi chat activation disabled (child-process mode) — not wired");
+    return { unsubscribe: () => {} };
+  }
 
   if (typeof pi?.on !== "function") {
     log.debug("Pi API lacks .on() — chat activation not wired");

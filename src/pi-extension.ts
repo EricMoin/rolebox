@@ -25,6 +25,10 @@ import {
   runPiSystemTransform,
 } from "./platform/adapters/pi/system-transform.ts";
 import { wirePiChatActivation } from "./platform/adapters/pi/chat-activation.ts";
+import {
+  isPiChildProcess,
+  resolveChildDispatchStoreDir,
+} from "./platform/adapters/pi/child-mode.ts";
 import { wireRoleSwitcher } from "./platform/adapters/pi/role-switcher.ts";
 import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
 import type { ToolInterceptorHooks } from "./platform/adapters/pi/tool-interceptor.ts";
@@ -57,6 +61,7 @@ import { createTaskTools } from "./dispatch/query/task-tools.ts";
 import { createMemoryUpdateTool } from "./memory/tools.ts";
 import { createFunctionGraphTool } from "./function/function-graph.ts";
 import { createSkillComposeTool } from "./asset/skill-compose.ts";
+import { createLoadRoleSkillTool } from "./asset/skill-tool.ts";
 import { createContextAssembleTool } from "./dispatch/query/context-assemble.ts";
 import {
   createDispatchManager,
@@ -88,6 +93,34 @@ import {
 
 const roleFunctionsMap: Map<string, ResolvedFunction[]> = new Map();
 const roleGraphMap: Map<string, ResolvedGraph> = new Map();
+
+// ── Pi subagent tool allowlist ────────────────────────────────────────────
+//
+// Deterministic toolset for spawned subagent children. Pi built-ins first,
+// then the rolebox gate tools a subagent needs for role/skill resolution,
+// memory, LSP, sessions, graph orchestration, and dispatch queries. Spawned
+// children get EXACTLY this list — never the full host toolset — so child
+// behavior is deterministic regardless of which role/agent spawned it.
+// The skill-loading tool is `load_role_skill` (Pi-only; opencode has its own
+// native skill tool), NOT `skill`.
+
+export const PI_SUBAGENT_TOOLS: string[] = [
+  // pi built-ins
+  "read", "bash", "write", "edit", "grep", "find", "ls",
+  // rolebox gate tools
+  "load_role_skill", "skill_compose", "reference_search",
+  "asset_search", "asset_inspect", "asset_validate",
+  "hashline_read", "hashline_edit",
+  "memory_recall", "memory_list", "memory_write",
+  "lsp_diagnostics", "lsp_hover", "lsp_find_references",
+  "lsp_goto_definition", "lsp_servers",
+  "session_read", "session_list", "session_info",
+  "context_assemble",
+  "signal",
+  "graph_create", "graph_add_node", "graph_add_edge", "graph_add_loop",
+  "graph_run", "graph_status", "graph_cancel", "graph_approve",
+  "task_search", "task_budget", "task_graph",
+];
 
 // ── Module-level logger ───────────────────────────────────────────────────
 //
@@ -561,7 +594,7 @@ export default async function (pi: any): Promise<void> {
         const key = model ? resolveChildModel(model) : resolveChildModel("default");
         sessionAdapter.registerAgentConfig(sub.id, {
           model: key,
-          tools: [],
+          tools: PI_SUBAGENT_TOOLS,
           systemPrompt: sub.prompt,
         });
         if (sub.subagents.length > 0) {
@@ -660,10 +693,15 @@ export default async function (pi: any): Promise<void> {
     // from the project (only the graph engine's `state/engine-*.json`, which
     // uses process.cwd(), survived). This matches opencode (ctx.directory) and
     // dsh (process.cwd()).
+    //
+    // Child-process mode (subtask S5): a spawned Pi subagent boots the same
+    // entry point and must NOT share the host's `.rolebox/state` — its store
+    // is isolated per-pid under `<tmpdir>/rolebox-dispatch/<pid>` via
+    // resolveChildDispatchStoreDir, preventing host/child state collision.
     const result = await createDispatchManager({
       sessionClient: notifyClient,
       resolvedRoles,
-      storeDirectory: process.cwd(),
+      storeDirectory: resolveChildDispatchStoreDir(process.pid, isPiChildProcess()),
     });
     const dispatchManager = result.manager;
 
@@ -911,6 +949,8 @@ export default async function (pi: any): Promise<void> {
       memory_update: createMemoryUpdateTool(),
       function_graph: createFunctionGraphTool(resolvedRoles),
       skill_compose: createSkillComposeTool(resolvedRoles),
+      // load_role_skill is Pi-only (opencode has its own native skill tool).
+      load_role_skill: createLoadRoleSkillTool(resolvedRoles),
       context_assemble: createContextAssembleTool({
         dispatchManager,
         sessionClient: notifyClient,
@@ -1039,6 +1079,25 @@ export default async function (pi: any): Promise<void> {
       log.info("Seeded active agent from environment", { agent: seededAgent });
     }
 
+    // ── Child-process mode guard (subtask S2) ─────────────────────────────
+    //
+    // A spawned Pi subagent (process-session.ts) is seeded with
+    // ROLEBOX_ACTIVE_AGENT and receives its dispatch prompt via
+    // --append-system-prompt. In that process the parent-side prompt /
+    // function machinery must NOT re-run on top of the appended prompt, so
+    // the chat activation wiring, the loop lifecycle event handlers, and
+    // the before_agent_start system-prompt injection are all skipped below
+    // (guarded by `isChildProcess`). Everything a nested dispatch needs is
+    // kept: tool registration via serviceStack.init(), the dispatchManager,
+    // the hook pipeline, event wiring, resources_discover, LSP managers,
+    // and the activeAgent seeding above.
+    const isChildProcess = isPiChildProcess();
+    if (isChildProcess) {
+      log.info("Pi extension in child-process mode — parent-side wiring skipped", {
+        agent: seededAgent,
+      });
+    }
+
     // ── 4b. Pi chat-message activation wiring (subtask S8) ───────────────
     //
     // Detect user messages on Pi — pi.on("message_start") events whose
@@ -1050,15 +1109,22 @@ export default async function (pi: any): Promise<void> {
     // like the opencode chat.message hook. Synthetic injections are skipped
     // exactly as chat-message.ts:26-29 (the shared pipeline applies the
     // predicate on live events; the JSONL replay path applies it here).
-    const chatActivation = wirePiChatActivation({
-      pi,
-      state: hookPipeline.state,
-      deps: hookPipeline.deps,
-      activeAgent,
-    });
-    bridgeUnsubscribers.push(chatActivation.unsubscribe);
+    //
+    // Skipped entirely in child-process mode (subtask S2): a spawned Pi
+    // subagent must not re-run handleChatMessage on top of the
+    // --append-system-prompt it already received — its parent already ran
+    // the pipeline against the originating user message.
+    if (!isChildProcess) {
+      const chatActivation = wirePiChatActivation({
+        pi,
+        state: hookPipeline.state,
+        deps: hookPipeline.deps,
+        activeAgent,
+      });
+      bridgeUnsubscribers.push(chatActivation.unsubscribe);
 
-    log.info("Pi chat activation wired — message_start → handleChatMessage");
+      log.info("Pi chat activation wired — message_start → handleChatMessage");
+    }
 
     await serviceStack.init();
 
@@ -1217,8 +1283,12 @@ export default async function (pi: any): Promise<void> {
     // agent_settled → re-subscribe listeners for completed workers,
     // session_shutdown → cancel active loops and dispose coordinator,
     // before_agent_start → scan for [rolebox:stop-loop] marker.
-
-    if (typeof pi.on === "function") {
+    //
+    // Skipped entirely in child-process mode (subtask S2): a spawned Pi
+    // subagent owns a fresh LoopCoordinator with no parent loops to manage —
+    // wiring these handlers would re-run parent-side loop lifecycle
+    // machinery on top of the --append-system-prompt it already received.
+    if (!isChildProcess && typeof pi.on === "function") {
       // agent_settled: fires after agent finishes and no retry/compaction
       // is pending. Use this to recover loops whose workers completed
       // while the agent was busy streaming or processing.
@@ -1276,8 +1346,13 @@ export default async function (pi: any): Promise<void> {
     // Before Pi starts an agent, inject a section listing all registered
     // rolebox roles as available agents. This makes the role hierarchy
     // visible to the active agent's system prompt.
-
-    if (typeof pi.on === "function") {
+    //
+    // Skipped entirely in child-process mode (subtask S2): the spawned
+    // subagent already received its dispatch prompt via
+    // --append-system-prompt — re-injecting available_roles / loop_tool /
+    // available_functions on top of it would duplicate the parent-side
+    // prompt machinery.
+    if (!isChildProcess && typeof pi.on === "function") {
       pi.on("before_agent_start", async (event: any, ctx: unknown) => {
         try {
           const agents = registrar.getRegisteredAgents();
@@ -1359,9 +1434,9 @@ export default async function (pi: any): Promise<void> {
           return undefined;
         }
       });
-    }
 
-    log.info("Agent prompt injection wired");
+      log.info("Agent prompt injection wired");
+    }
 
     // ── 8. Skill path contribution ──────────────────────────────────────
     //

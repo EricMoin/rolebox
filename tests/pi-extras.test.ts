@@ -4,16 +4,18 @@
  * Verifies the optional `extraTools?: Record<string, CanonicalToolDef>`
  * constructor param (7th positional arg, after taskTools):
  *   1. init() merges the extra tools into the assembled surface via
- *      buildCanonicalTools({ extraTools }) — all four register through
+ *      buildCanonicalTools({ extraTools }) — all five register through
  *      pi.registerTool with their canonical names (memory_update,
- *      function_graph, skill_compose, context_assemble).
+ *      function_graph, skill_compose, load_role_skill, context_assemble).
  *   2. Each extra tool executes with a mock CanonicalToolContext.
  *   3. dispatch_* and loop_* stay disabled (bare-dispatch prevention holds
  *      when extraTools is present).
  *
  * Mirrors the opencode-side wiring at src/core/services/tool-service.ts:91-106,
- * restricted to the four Pi-eligible tools (LSP + asset_hot_reload are
- * opencode-only and intentionally not forwarded).
+ * restricted to the five Pi-eligible tools (LSP + asset_hot_reload are
+ * opencode-only and intentionally not forwarded). load_role_skill is the
+ * Pi-only skill loader (src/pi-extension.ts:952-953; opencode has its own
+ * native skill tool).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -27,6 +29,7 @@ import {
 } from "../src/memory/tools.ts";
 import { createFunctionGraphTool } from "../src/function/function-graph.ts";
 import { createSkillComposeTool } from "../src/asset/skill-compose.ts";
+import { createLoadRoleSkillTool } from "../src/asset/skill-tool.ts";
 import { createContextAssembleTool } from "../src/dispatch/query/context-assemble.ts";
 import { SkillScope, FunctionSource } from "../src/constants.ts";
 import type {
@@ -41,11 +44,12 @@ import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 
 // ── Expected tool surface ───────────────────────────────────────────────────
 
-/** The four extra tools this channel forwards (mirrors tool-service.ts:91-106). */
+/** The five extra tools this channel forwards (mirrors tool-service.ts:91-106 + load_role_skill). */
 const EXTRA_TOOL_NAMES = [
   "memory_update",
   "function_graph",
   "skill_compose",
+  "load_role_skill",
   "context_assemble",
 ];
 
@@ -175,6 +179,7 @@ function buildExtraTools() {
     memory_update: createMemoryUpdateTool(),
     function_graph: createFunctionGraphTool([role]),
     skill_compose: createSkillComposeTool([role]),
+    load_role_skill: createLoadRoleSkillTool([role]),
     context_assemble: createContextAssembleTool({
       dispatchManager: makeDispatchManager(),
       sessionClient: makeSessionClient(),
@@ -201,7 +206,7 @@ describe("PiLightweightServiceStack extraTools channel", () => {
     }
   });
 
-  it("registers the 4 extra tools via pi.registerTool and keeps dispatch_*/loop_* disabled", async () => {
+  it("registers the 5 extra tools via pi.registerTool and keeps dispatch_*/loop_* disabled", async () => {
     const registeredNames: string[] = [];
     const mockPi = {
       registerTool: (toolDef: any) => {
@@ -222,7 +227,7 @@ describe("PiLightweightServiceStack extraTools channel", () => {
 
     const count = await stack.init();
 
-    // Additive merge: legacy 19-tool surface + the 4 extra tools = 23.
+    // Additive merge: legacy 20-tool surface + the 5 extra tools = 25.
     expect(count).toBe(BASE_TOOL_COUNT + EXTRA_TOOL_NAMES.length);
 
     for (const name of EXTRA_TOOL_NAMES) {

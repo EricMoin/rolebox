@@ -123,6 +123,7 @@ describe("buildAgentPrompt", () => {
     <name>alpha</name>
     <description>Alpha description</description>
     <scope>rolebox</scope>
+    <location>/fake/path/SKILL.md</location>
   </skill>`;
     expect(result).toContain(block);
   });
@@ -155,6 +156,31 @@ describe("buildAgentPrompt", () => {
     expect(result).toContain(
       "Skills provide specialized instructions. Use the skill tool to load when task matches.",
     );
+  });
+
+  it("includes <location> with the file path for a skill that has one", () => {
+    const role = makeRole();
+    const skills = [makeSkill({ name: "located-skill", filePath: "/skills/located/SKILL.md" })];
+    const result = buildAgentPrompt(role, skills);
+
+    expect(result).toContain("<location>/skills/located/SKILL.md</location>");
+  });
+
+  it("escapes special characters in <location> file path", () => {
+    const role = makeRole();
+    const skills = [makeSkill({ filePath: "/skills/a&b/SKILL.md" })];
+    const result = buildAgentPrompt(role, skills);
+
+    expect(result).toContain("<location>/skills/a&amp;b/SKILL.md</location>");
+  });
+
+  it("omits <location> for a skill without a filePath", () => {
+    const role = makeRole();
+    const skills = [makeSkill({ filePath: undefined })];
+    const result = buildAgentPrompt(role, skills);
+
+    expect(result).toContain("<name>test-skill</name>");
+    expect(result).not.toContain("<location>");
   });
 
   it("returns raw prompt when neither skills nor subagents are provided", () => {
