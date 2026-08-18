@@ -51,6 +51,15 @@ export interface DispatchParentContext {
    * dispatch_* tools) omit this field and keep per-parent fairness.
    */
   maxActivePerParent?: number;
+  /**
+   * Graph-scope marker. Set by {@link graphParentContext}; carried onto the
+   * dispatched {@link DispatchTask} by task-launcher. While set, the dispatch
+   * layer suppresses its parent notifications — graph-node completion is
+   * reported EXCLUSIVELY by the graph notifier
+   * (`src/graph/engine/graph-notify.ts`). Real-session parents omit this field
+   * and keep dispatch-layer notifications exactly as before.
+   */
+  graphScoped?: boolean;
 }
 
 /**
@@ -100,6 +109,12 @@ export function graphParentContext(opts: GraphParentOptions): DispatchParentCont
     sessionID: opts.graphId,
     agent: opts.agent || DEFAULT_GRAPH_AGENT,
     directory: opts.directory,
+    // Graph-scope marker: dispatch-layer parent notifications are suppressed
+    // for graph-scoped tasks — node completion is reported exclusively by the
+    // graph notifier (graph-notify.ts), avoiding duplicate [BACKGROUND TASK
+    // COMPLETED]/[ALL BACKGROUND TASKS COMPLETE] reminders under the internal
+    // bg_* task id namespace.
+    graphScoped: true,
     // graphId is a request/budget scope, not a real parent session — the
     // engine's frontier, loop max_traversals, and per-node budgets are the
     // governing bounds (emperor role.yaml design comment: "concurrency is
@@ -224,6 +239,10 @@ export class DispatchBridge {
       run_in_background: true,
       description: description ?? `graph node ${node.nodeId}`,
       noParentInherit: true,
+      // Graph-scope marker (see DispatchInput.graphScoped): suppresses the
+      // dispatch layer's parent notifications for this task — node completion
+      // is reported exclusively by the graph notifier (graph-notify.ts).
+      graphScoped: true,
       // Monitor M2: propagate the node's declared per-node budget timeout into
       // the dispatch task input. `task-launcher.ts:444-445` consumes
       // `input.timeout_ms` → `task.timeoutMs` (the background-task hard

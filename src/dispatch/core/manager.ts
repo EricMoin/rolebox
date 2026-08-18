@@ -219,14 +219,14 @@ export class DispatchManager {
 
   async launch(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
   ): Promise<DispatchTask> {
     return this.lifecycle.launch(input, parentContext);
   }
 
   async executeSync(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
   ): Promise<string> {
     return this.lifecycle.executeSync(input, parentContext);
   }
@@ -234,7 +234,7 @@ export class DispatchManager {
   async reopenForContinuation(
     taskId: string,
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
   ): Promise<DispatchTask> {
     return this.lifecycle.reopenForContinuation(taskId, input, parentContext);
   }
@@ -348,7 +348,20 @@ export class DispatchManager {
 
   // ── Notification ──────────────────────────────────────────────
 
+  /**
+   * Notify the parent session about a task's completion.
+   *
+   * Graph-scope suppression: graph-scoped tasks (dispatched by the graph
+   * engine via `executeNode`/`graphParentContext`) return immediately without
+   * sending — graph-node completion is reported EXCLUSIVELY by the graph
+   * notifier (`createGraphNotifier`/`createGraphTerminalNotifier` in
+   * `src/graph/engine/graph-notify.ts`). This guards the direct callers
+   * (approveTask/rejectTask) and the `sendNotification` callback path used by
+   * recovery-orchestrator and the completion-orchestrator outbox sweeper.
+   * Real-session tasks notify exactly as before.
+   */
   async notifyCompletion(task: DispatchTask, remainingTasks: number, resultText?: string): Promise<boolean> {
+    if (task.graphScoped) return true;
     return notifyParent(this.client, task, remainingTasks, undefined, resultText);
   }
 

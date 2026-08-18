@@ -32,13 +32,18 @@ import {
 export async function launch(
   d: TaskLifecycleDeps,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
 ): Promise<DispatchTask> {
   const taskId = `bg_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
   const concurrencyKey = deriveKey(d, input.subagent);
   // Per-role config drives launch-time concurrency options (role-resolved when
   // the dispatched agent maps to a role, manager base config otherwise).
   const cfg = effectiveConfigFor(d, input.subagent);
+  // Graph-scope marker: set by the graph engine via graphParentContext and/or
+  // DispatchInput.graphScoped (executeNode sets both). Carried onto the task so
+  // the notification choke points can suppress parent reminders for
+  // graph-scoped tasks (graph-notify.ts reports node completion instead).
+  const graphScoped = parentContext.graphScoped ?? input.graphScoped;
 
   const budget = d.config.maxTotalSessionsPerRequest;
   const root = parentContext.sessionID;
@@ -59,6 +64,7 @@ export async function launch(
       progress: { lastUpdate: new Date(), toolCalls: 0 },
       timeoutMs: input.timeout_ms,
       priority: input.priority ?? 0,
+      graphScoped,
       error: JSON.stringify({
         error: "Session budget exhausted",
         limit: budget,
@@ -86,6 +92,7 @@ export async function launch(
     progress: { lastUpdate: new Date(), toolCalls: 0 },
     timeoutMs: input.timeout_ms,
     priority: input.priority ?? 0,
+    graphScoped,
   };
 
   d.tasks.set(taskId, task);
@@ -151,7 +158,7 @@ export async function startBackgroundTask(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
 ): Promise<void> {
   const task = d.tasks.get(taskId);
   if (!task) return;
@@ -268,7 +275,12 @@ export async function startBackgroundTask(
         leaveRunning(d, taskId);
         notifyTerminated(d, taskId, "error");
         try { await d.client.abort(task.sessionId); } catch { /* session may already be gone */ }
-        void notifyParent(d.client, task, 0, { maxRetries: 0 });
+        // Graph-scope suppression: node completion is reported exclusively by
+        // the graph notifier — never emit a dispatch-layer parent reminder for
+        // a graph-scoped task, even on spawn failure.
+        if (!task.graphScoped) {
+          void notifyParent(d.client, task, 0, { maxRetries: 0 });
+        }
         return;
       }
 
@@ -298,7 +310,12 @@ export async function startBackgroundTask(
       leaveRunning(d, taskId);
       notifyTerminated(d, taskId, "error");
       try { await d.client.abort(task.sessionId); } catch { /* session may already be gone */ }
-      void notifyParent(d.client, task, 0, { maxRetries: 0 });
+      // Graph-scope suppression: node completion is reported exclusively by
+      // the graph notifier — never emit a dispatch-layer parent reminder for
+      // a graph-scoped task, even on session-create failure.
+      if (!task.graphScoped) {
+        void notifyParent(d.client, task, 0, { maxRetries: 0 });
+      }
     } else {
       d.concurrency.release(task.concurrencyKey!, task.parentSessionId);
       scheduleCleanup(d, taskId);
@@ -314,7 +331,7 @@ async function promoteQueued(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
 ): Promise<void> {
   d.cancelQueue.delete(taskId);
 
@@ -335,7 +352,7 @@ function scheduleBackpressureRetry(
   taskId: string,
   concurrencyKey: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
   attempt: number,
   maxRetries: number,
 ): void {
@@ -409,7 +426,7 @@ export async function reopenForContinuation(
   d: TaskLifecycleDeps,
   taskId: string,
   input: DispatchInput,
-  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number },
+  parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
 ): Promise<DispatchTask> {
   if (d.cleanedUpTasks.has(taskId)) throw new Error(`Task '${taskId}' was cleaned up`);
   const task = d.tasks.get(taskId);
