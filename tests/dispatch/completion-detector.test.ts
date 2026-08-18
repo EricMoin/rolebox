@@ -256,13 +256,87 @@ describe("detectCompletion", () => {
     expect(result).toEqual({ type: "completed" });
   });
 
-  it("allows completed tools (state complete) through with skipStabilityGating", () => {
+  it("returns not_ready for a settled tool part (state complete) — the agentic loop must continue (supersedes old completed-tool behavior)", () => {
     const result = detectCompletion(
       [
         msg({ finish: "end_turn" }, [
           { type: "tool", state: "complete" },
         ]),
       ],
+      idle(),
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  // ── Settled-tool completion gap (Bug 1 part c) ─────────────────────
+  //
+  // Pi adapter: message_end carries stopReason "tool_use" and the tool part
+  // arrives settled — previously this slipped through all gates and was
+  // wrongly declared complete. Any tool part OR tool-related finish → not_ready.
+
+  it("returns not_ready for a settled tool part with finish tool_use (Pi adapter bug case)", () => {
+    const result = detectCompletion(
+      [
+        msg({ finish: "tool_use" }, [
+          { type: "tool", state: "complete" },
+        ]),
+      ],
+      idle(),
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready for a settled tool part with no state field (Pi shape)", () => {
+    const result = detectCompletion(
+      [
+        msg({ finish: "tool_use" }, [
+          { type: "tool" },
+        ]),
+      ],
+      idle(),
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready when finish is tool_use even with a text-only last message", () => {
+    const result = detectCompletion(
+      [msg({ finish: "tool_use" }, [{ type: "text", text: "calling a tool" }])],
+      idle(),
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready when finish is toolUse (camelCase variant)", () => {
+    const result = detectCompletion(
+      [msg({ finish: "toolUse" })],
+      idle(),
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("returns not_ready when finish is tool-calls on a text-only message (unchanged)", () => {
+    const result = detectCompletion(
+      [msg({ finish: "tool-calls" }, [{ type: "text", text: "calling" }])],
+      idle(),
+      eventState(),
+      true,
+    );
+    expect(result).toEqual({ type: "not_ready" });
+  });
+
+  it("still completes a text-only message with finish end_turn (no tool parts, no tool finish)", () => {
+    const result = detectCompletion(
+      [msg({ finish: "end_turn" }, [{ type: "text", text: "final answer" }])],
       idle(),
       eventState(),
       true,
