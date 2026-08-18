@@ -1226,9 +1226,27 @@ export class PiProcessSessionAdapter implements ISessionClient {
         // pi 0.81.x payload: { type, message } — create (or adopt) a message
         // shell. The role comes from event.message.role, NOT event.role
         // (types.d.ts MessageStartEvent — the event itself has no role field).
+        //
+        // Classify as assistant ONLY when the role is exactly "assistant".
+        // pi 0.81.x emits tool results as SEPARATE messages with role
+        // "toolResult" (verified: pi-ai 0.81.1 types.d.ts
+        // ToolResultMessage.role === "toolResult", and real `--mode json`
+        // sidecar streams carry message.role "toolResult" on the
+        // post-tool-execution message_start). The old catch-all — any
+        // non-"user" role → "assistant" — turned tool-result content into
+        // "assistant text", which then satisfied _isFinalTurn and was
+        // extracted as the session's "final answer" (the tool-echo bug).
+        // Ambiguous/absent roles stay non-assistant too.
         const m = event.message;
-        const role: "user" | "assistant" =
-          m?.role === "user" ? "user" : "assistant";
+        const rawRole = m?.role;
+        const role: MessageInfo["role"] =
+          rawRole === "user"
+            ? "user"
+            : rawRole === "assistant"
+              ? "assistant"
+              : typeof rawRole === "string" && rawRole.length > 0
+                ? rawRole
+                : "unknown";
         const msgInfo: MessageInfo = {
           id: event.messageID ?? event.id ??
             `msg-${record.messages.length}-${Date.now()}`,
@@ -1687,18 +1705,37 @@ export class PiProcessSessionAdapter implements ISessionClient {
         break;
 
       case "agent_end":
-      case "agent_settled":
-        // Safety net: the agent has genuinely settled — pi will not start
-        // another turn. Complete even when the last turn still carried tool
-        // parts (e.g. a tool-only loop pi itself terminated), so the
-        // dispatch is not left hanging until the process timeout. Idempotent
-        // via record.idleEmitted if the final turn_end already completed.
+      case "agent_settled": {
+        // Safety net — but ONLY for a genuinely final, tool-free answer.
+        //
+        // pi emits agent_end/agent_settled after the run settles, and
+        // agent-session.js emits agent_settled from _runAgentPrompt's
+        // finally AFTER the whole agent run — including every tool
+        // round-trip — so a settled signal with a tool-carrying last
+        // message means the tool round-trip's follow-up answer has NOT
+        // been written yet (or the run ended mid-round-trip). Completing
+        // here unconditionally fired session.idle and SIGTERM'd the child
+        // while it was still mid-tool-round-trip — the completion that
+        // must NOT happen. Apply the SAME _isFinalTurn guard as turn_end:
+        // complete only when the last message is an assistant text-bearing,
+        // tool-free message; otherwise let the agentic loop continue (the
+        // per-process timeout remains the ultimate backstop for runs that
+        // settle without a tool-free turn). Idempotent via record.idleEmitted
+        // if the final turn_end already completed.
         this.log.debug("Pi agent lifecycle event", {
           type: event.type,
           turnIndex: event.turnIndex,
         });
-        this._completeTurn(record);
+        if (this._isFinalTurn(record)) {
+          this._completeTurn(record);
+        } else {
+          this.log.debug(
+            "agent_end/agent_settled after tool use — not completing; awaiting next turn",
+            { id: record.id, type: event.type },
+          );
+        }
         break;
+      }
 
       case "session.idle":
       case "session.updated":
@@ -1765,8 +1802,9 @@ export class PiProcessSessionAdapter implements ISessionClient {
    * so a turn_end whose last message still references tool calls is NOT
    * terminal — the agentic loop continues in a new turn, and completing
    * early would kill the child before it writes its answer (the "skill
-   * echo" root cause). agent_end/agent_settled and the per-process
-   * timeout remain the backstops for agents that never produce a
+   * echo" root cause). agent_end/agent_settled apply the SAME guard (they
+   * must not complete a mid-tool-round-trip run); the per-process
+   * timeout remains the backstop for agents that never produce a
    * tool-free turn.
    */
   private _isFinalTurn(record: ProcessRecord): boolean {

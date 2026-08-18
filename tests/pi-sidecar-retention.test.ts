@@ -292,6 +292,47 @@ describe("PiSessionAdapter sidecar fallback", () => {
     expect(toolPart!.state?.output).toBe("hi");
   });
 
+  it("does not classify a sidecar tool-result message (role 'toolResult') as assistant", async () => {
+    // Mirror of the process-session.ts role fix: pi 0.81.x writes tool
+    // results as separate messages with message.role "toolResult". The
+    // sidecar replay must preserve that role — never surface the tool's
+    // output as assistant text.
+    const id = "sidecar-toolresult-1";
+    const events = [
+      { type: "message_start", messageID: "m1", sessionID: id, message: { role: "assistant", timestamp: 1000 } },
+      { type: "message_end", messageID: "m1", sessionID: id, message: { role: "assistant", content: "Hi back" } },
+      { type: "message_start", messageID: "m2", sessionID: id, message: { role: "toolResult", toolCallId: "call-1", toolName: "bash", timestamp: 2000 } },
+      { type: "message_end", messageID: "m2", sessionID: id, message: { role: "toolResult", content: [{ type: "text", text: "ls output" }], timestamp: 2001 } },
+    ];
+    writeSidecar(id, Date.now(), events);
+
+    const adapter = new PiSessionAdapter(join(workspace, "no-pi-sessions"));
+    const messages = await adapter.messages(id);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0].info.role).toBe("assistant");
+    expect(messages[1].info.role).not.toBe("assistant");
+    expect(messages[1].info.role).toBe("toolResult");
+  });
+
+  it("does not classify a sidecar message with an undefined or foreign role as assistant", async () => {
+    const id = "sidecar-unknown-role-1";
+    const events = [
+      { type: "message_start", messageID: "m1", sessionID: id, message: { role: "tool", timestamp: 1000 } },
+      { type: "message_end", messageID: "m1", sessionID: id, message: { role: "tool", content: "foreign" } },
+      { type: "message_start", messageID: "m2", sessionID: id, message: { timestamp: 2000 } },
+    ];
+    writeSidecar(id, Date.now(), events);
+
+    const adapter = new PiSessionAdapter(join(workspace, "no-pi-sessions"));
+    const messages = await adapter.messages(id);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0].info.role).not.toBe("assistant");
+    expect(messages[0].info.role).toBe("tool");
+    expect(messages[1].info.role).not.toBe("assistant");
+  });
+
   it("get() returns SessionInfo from a retained sidecar", async () => {
     const id = "sidecar-get-1";
     const events = [

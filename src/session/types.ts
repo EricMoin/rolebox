@@ -29,7 +29,12 @@ export type SessionInfo = {
 export type MessageInfo = {
   id: string;
   sessionID: string;
-  role: "user" | "assistant";
+  /**
+   * Speaker role. "user" | "assistant" are the canonical harness roles;
+   * adapter-specific roles (e.g. pi's "toolResult") are preserved as-is
+   * so tool-result content is never misclassified as assistant text.
+   */
+  role: "user" | "assistant" | (string & {});
   time: {
     created: number;
     completed?: number;

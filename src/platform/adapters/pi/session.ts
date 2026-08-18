@@ -33,7 +33,7 @@ import type {
   Todo,
   SessionStatus,
 } from "../../types.ts";
-import type { Part } from "../../../session/types.ts";
+import type { Part, MessageInfo } from "../../../session/types.ts";
 import { readSession } from "./sidecar-persister.ts";
 
 /**
@@ -693,8 +693,21 @@ export class PiSessionAdapter implements ISessionClient {
       switch (type) {
         case "message_start": {
           // pi 0.81.x payload: { type, message } — adopt a message shell.
+          // Classify as assistant ONLY when the role is exactly "assistant"
+          // (mirror of process-session.ts): pi emits tool results as
+          // separate messages with role "toolResult", and those must never
+          // surface as assistant text. Ambiguous/absent roles stay
+          // non-assistant.
           const m = (event.message ?? {}) as { role?: string; timestamp?: number };
-          const role: "user" | "assistant" = m.role === "user" ? "user" : "assistant";
+          const rawRole = m.role;
+          const role: MessageInfo["role"] =
+            rawRole === "user"
+              ? "user"
+              : rawRole === "assistant"
+                ? "assistant"
+                : typeof rawRole === "string" && rawRole.length > 0
+                  ? rawRole
+                  : "unknown";
           const msgInfo = {
             id: String(event.messageID ?? event.id ?? `msg-${messages.length}-${Date.now()}`),
             sessionID: String(event.sessionID ?? ""),

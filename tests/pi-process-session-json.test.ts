@@ -429,7 +429,13 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect((signal as { message: string }).message).toBe("Pi worker crashed");
   });
 
-  it("detectCompletion reports completed with idle status after a successful stream", async () => {
+  it("detectCompletion reports not_ready for a stream ending in a tool-use turn — the agentic loop must continue", async () => {
+    // The detector (completion-detector.ts) treats ANY tool part on the
+    // last assistant message — settled included — as "the agent issued
+    // tool calls; the loop must continue" (Bug 1 part c). SUCCESS_STREAM
+    // ends with agent_end after a tool-use turn, so it is NOT a complete
+    // run under the hardened semantics: the model's follow-up answer has
+    // not been written yet.
     const record = await createRecord(adapter);
 
     feedJsonl(adapter, record, SUCCESS_STREAM);
@@ -439,6 +445,30 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect(textParts(last)).toHaveLength(1);
     expect(toolParts(record).every((p) => p.state.status === "completed"))
       .toBe(true);
+
+    const snapshots = record.messages as unknown as SessionMessageSnapshot[];
+    const signal = detectCompletion(
+      snapshots,
+      { type: "idle" },
+      defaultEventState(),
+      true,
+    );
+    expect(signal).toEqual({ type: "not_ready" });
+  });
+
+  it("detectCompletion reports completed for a tool-free final-answer stream", async () => {
+    // A genuinely complete run ends with the model's tool-free final
+    // answer — that is the shape detectCompletion must accept.
+    const record = await createRecord(adapter);
+
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        FINAL_MESSAGE_START_EVENT,
+        FINAL_MESSAGE_END_EVENT,
+      ),
+    );
 
     const snapshots = record.messages as unknown as SessionMessageSnapshot[];
     const signal = detectCompletion(
@@ -463,6 +493,63 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       true,
     );
     expect(signal).toEqual({ type: "not_ready" });
+  });
+
+  // ── message_start role classification (Bug 1 part b) ────────────────────
+  //
+  // pi 0.81.x emits tool results as SEPARATE messages whose message.role is
+  // "toolResult" (verified: pi-ai 0.81.1 types.d.ts ToolResultMessage, and
+  // real `--mode json` sidecar streams). The old mapping — any non-"user"
+  // role → "assistant" — turned tool-result content into "assistant text",
+  // which then satisfied _isFinalTurn and surfaced as the session's "final
+  // answer" (the tool-echo). Assistant must be assigned ONLY for the exact
+  // "assistant" role.
+
+  it("message_start with role 'toolResult' is not classified assistant (tool-result content is not assistant text)", async () => {
+    const record = await createRecord(adapter);
+
+    // Mirror the real sidecar shape: message_start carries message.role
+    // "toolResult" with toolCallId/toolName/content (pi 0.81.x).
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        { type: "message_start", messageID: "msg-tool-1", sessionID: SESSION_ID, message: { role: "toolResult", toolCallId: TOOL_CALL_ID, toolName: "bash", timestamp: 1700000004000 } },
+        { type: "message_end", messageID: "msg-tool-1", sessionID: SESSION_ID, message: { role: "toolResult", content: [{ type: "text", text: TOOL_OUTPUT }], timestamp: 1700000005000 } },
+      ),
+    );
+
+    expect(record.messages).toHaveLength(1);
+    expect(record.messages[0].info.role).not.toBe("assistant");
+    expect(record.messages[0].info.role).toBe("toolResult");
+    // The tool result must never be extracted as the assistant's text.
+    expect((adapter as any)._extractLastAssistantText(record.messages)).toBe("");
+  });
+
+  it("message_start with an undefined or unknown role is not classified assistant", async () => {
+    const record = await createRecord(adapter);
+
+    // No role field at all (malformed/foreign stream) and a foreign role.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        { type: "message_start", messageID: "msg-u-1", sessionID: SESSION_ID, message: { timestamp: 1700000006000 } },
+        { type: "message_end", messageID: "msg-u-1", sessionID: SESSION_ID, message: { role: "tool", content: "foreign", timestamp: 1700000006500 } },
+        { type: "message_start", messageID: "msg-u-2", sessionID: SESSION_ID, message: { role: "tool", timestamp: 1700000007000 } },
+      ),
+    );
+
+    expect(record.messages).toHaveLength(2);
+    expect(record.messages[0].info.role).not.toBe("assistant");
+    expect(record.messages[1].info.role).not.toBe("assistant");
+    expect(record.messages[1].info.role).toBe("tool");
+  });
+
+  it("message_start with role 'assistant' is still classified assistant (exact match only)", async () => {
+    const record = await createRecord(adapter);
+    feedJsonl(adapter, record, jsonl(MESSAGE_START_EVENT));
+    expect(record.messages[0].info.role).toBe("assistant");
   });
 
   // ── status() in-flight-tool guard (bug #2: no false idle while a node
@@ -622,10 +709,59 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect(kills).toEqual(["SIGTERM"]);
   });
 
-  it("agent_settled completes a record whose last turn still carried tool parts (safety net)", async () => {
-    // Some agents settle without a tool-free final turn (e.g. a tool-only
-    // loop pi itself terminates). agent_settled must complete so the
-    // dispatch is not left hanging until the process timeout.
+  it("agent_end/agent_settled after a tool-call turn does NOT complete the session and does NOT emit session.idle", async () => {
+    // Regression for the premature-completion bug: agent_end/agent_settled
+    // used to call _completeTurn unconditionally, firing session.idle and
+    // SIGTERM'ing the child while it was still mid-tool-round-trip (the
+    // model's follow-up answer had not been written yet — the "tool echo"
+    // root cause). They must now apply the SAME _isFinalTurn guard as
+    // turn_end: a last assistant message carrying tool parts is NOT the
+    // final answer.
+    const record = await createRecord(adapter);
+
+    const resolved: unknown[] = [];
+    const kills: unknown[] = [];
+    const emitted: Array<{ type: string; rawType: unknown }> = [];
+    record.resolve = (value: unknown) => {
+      resolved.push(value);
+    };
+    record.proc = { killed: false, kill: (sig: unknown) => kills.push(sig) };
+    record.exitCode = null;
+    (adapter as any).setEventBridge({
+      emit: (event: { type: string; rawType: unknown }) => {
+        emitted.push(event);
+        return Promise.resolve();
+      },
+    });
+
+    // Tool turn only — the assistant's message carries a toolCall, the tool
+    // executes, then the run settles. NO tool-free final answer follows.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        MESSAGE_START_EVENT,
+        ...MESSAGE_UPDATE_EVENTS,
+        MESSAGE_END_EVENT,
+        TOOL_EXECUTION_START_EVENT,
+        TOOL_EXECUTION_END_EVENT,
+        TURN_END_EVENT, // tool turn — not terminal, no completion
+        AGENT_SETTLED_EVENT, // settles mid-tool-round-trip — must not complete
+        AGENT_END_EVENT, // same guard on agent_end
+      ),
+    );
+
+    // No completion: no resolved prompt, no SIGTERM, no idle emission.
+    expect(resolved).toHaveLength(0);
+    expect(kills).toEqual([]);
+    expect(record.idleEmitted).toBe(false);
+    expect(emitted.filter((e) => e.type === "session.idle")).toHaveLength(0);
+  });
+
+  it("agent_settled after a tool-free final answer still completes (guard passes — real final answers are not broken)", async () => {
+    // The guard must not break genuine final-answer completion: when the
+    // last message IS the tool-free final answer, agent_settled completes
+    // exactly as before (idempotent with turn_end via record.idleEmitted).
     const record = await createRecord(adapter);
 
     const resolved: unknown[] = [];
@@ -642,11 +778,8 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       jsonl(
         MESSAGE_START_EVENT,
         ...MESSAGE_UPDATE_EVENTS,
-        MESSAGE_END_EVENT,
-        TOOL_EXECUTION_START_EVENT,
-        TOOL_EXECUTION_END_EVENT,
-        TURN_END_EVENT, // tool turn — not terminal, no completion
-        AGENT_SETTLED_EVENT, // agent settles without a tool-free turn
+        FINAL_MESSAGE_END_EVENT, // tool-free final answer
+        AGENT_SETTLED_EVENT, // settles after the real final turn
       ),
     );
 
@@ -654,6 +787,7 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     const result = resolved[0] as { parts: Array<{ type: string; text?: string }> };
     expect(result.parts[0].text).toBe(FINAL_ASSISTANT_TEXT);
     expect(kills).toEqual(["SIGTERM"]);
+    expect(record.idleEmitted).toBe(true);
   });
 
   it("turn_end emits exactly one session.idle — duplicates and later exits do not re-emit", async () => {
