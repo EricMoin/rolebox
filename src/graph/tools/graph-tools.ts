@@ -1279,8 +1279,18 @@ export class GraphToolSet {
       const priorHasProgress = [...priorState.nodes.values()].some(
         (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
       );
+      // BUG 3b (retry completion race): on the retry path, adopt prior state
+      // WITHOUT replaying answers. adoptPrior's answer replay re-emits an
+      // adopted Completed node's `answer` through the full advancement critical
+      // section, which runs `_checkTermination()` while the retry target is
+      // still `Completed` (resetNodeForRetry has not run yet) — firing a
+      // premature `[GRAPH COMPLETE]` before `retryNode` re-opens the node. The
+      // subsequent `retryNode` call is the sole dispatch + termination authority
+      // on the retry path, so answer replay is both unnecessary and harmful
+      // here. The non-retry path keeps `replayAnswers: true` unchanged.
+      const isRetry = Boolean(args.node_id && (args.retry || args.modify_prompt));
       if (priorHasProgress || priorState.phase !== EnginePhase.Idle) {
-        await runtime.adoptPrior(priorState, { replayAnswers: true });
+        await runtime.adoptPrior(priorState, { replayAnswers: !isRetry });
       }
 
       // Node retry (tool-merge-map.md §2.2 `graph_run`): when `node_id` is
