@@ -604,6 +604,15 @@ function snapshotEngineState(state: EngineState): EngineState {
     isDirty: state.isDirty,
     isNonCriticalDirty: state.isNonCriticalDirty,
     pendingCompletions: [...state.pendingCompletions],
+    // Monitor (M10 / bug 3 part a): the persisted-layer terminal-notification
+    // dedupe flags are cross-restart graph progress — carry them into the
+    // snapshot (shallow copy, mirroring engine-persistence.ts:334 and
+    // engine-recovery.ts:762-764) so the adopt/rebuild path (graph-tools.ts
+    // status() → adoptPrior) never discards the claim and defeats the two-layer
+    // exact-once terminal guard. Absent → undefined (no fabricated claim).
+    terminalNotified: state.terminalNotified
+      ? { ...state.terminalNotified }
+      : undefined,
   };
 }
 

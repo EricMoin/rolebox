@@ -18,6 +18,11 @@ import {
   shouldPersist,
 } from "../../src/graph/engine/engine-persistence.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
+import {
+  checkGraphTermination,
+  type GraphTerminalEvent,
+  type TerminationContext,
+} from "../../src/graph/engine/engine-termination.ts";
 import { AdvanceEngine, type NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import { SignalBridge, type SignalType } from "../../src/graph/engine/signal-bridge.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
@@ -900,5 +905,62 @@ describe("two-tier persistence (Q2 Option A)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Bug 3 part a: snapshotEngineState must preserve terminalNotified ─────────
+//
+// snapshotEngineState (src/graph/engine/index.ts) did NOT serialize
+// state.terminalNotified. The graph-tools rebuild path reads the prior run via
+// status() (a snapshot — graph-tools.ts:875) and hands it to
+// adoptPriorNodeStates (engine-recovery.ts:762-764), which copied `undefined` —
+// discarding the persisted-layer terminal claim and defeating the two-layer
+// exact-once terminal guard (engine-termination.ts) on the adopt/rebuild path.
+// The snapshot must now carry the flags object (shallow copy), both when absent
+// (undefined, never fabricated) and when claimed ({ complete: true }).
+
+describe("snapshotEngineState preserves terminalNotified (bug 3 part a)", () => {
+  /** Fresh per-instance dedupe context (mirrors engine-termination-s4.test.ts). */
+  function freshCtx(): TerminationContext {
+    return { terminalComplete: false, terminalBlocked: false };
+  }
+
+  /** Quiesce a single-node graph so checkGraphTermination sees a terminal state. */
+  function quiesce(state: EngineState, nodeId = "A"): void {
+    const node = state.nodes.get(nodeId);
+    if (!node) throw new Error(`node ${nodeId} not found`);
+    node.status = NodeStatus.Completed;
+    state.frontier = [];
+  }
+
+  it("keeps terminalNotified undefined when it was never claimed (never fabricated)", () => {
+    const engine = createEngine(singleNodeDeclaration(), { graphId: "g-snap-m10-fresh" });
+    expect(engine.status().terminalNotified).toBeUndefined();
+  });
+
+  it("carries a claimed { complete: true } flags object through status() → adoptPrior → status()", async () => {
+    // Stage 1: a prior run reaches terminal completion — the two-layer guard
+    // claims the persisted flag on the live state (fireGraphTerminal).
+    const state = createEngineState(singleNodeDeclaration(), "g-snap-m10-prior");
+    provision(state);
+    state.phase = EnginePhase.Executing;
+    quiesce(state);
+    const events: GraphTerminalEvent[] = [];
+    checkGraphTermination(state, (e) => events.push(e), freshCtx());
+    expect(events).toHaveLength(1);
+    expect(state.terminalNotified).toEqual({ complete: true, blocked: false });
+
+    // Stage 2: the running engine serves a snapshot (graph-tools.ts:875) —
+    // pre-fix this snapshot dropped the claim (snapshotEngineState omission).
+    const prior = createEngine(singleNodeDeclaration(), { graphId: "g-snap-m10-served" });
+    await prior.adoptPrior(state);
+    const priorSnapshot = prior.status();
+    expect(priorSnapshot.terminalNotified).toEqual({ complete: true, blocked: false });
+
+    // Stage 3: a fresh rebuild adopts the SNAPSHOT (graph-tools.ts:886/1283) —
+    // its own snapshot must still carry the claim.
+    const rebuilt = createEngine(singleNodeDeclaration(), { graphId: "g-snap-m10-rebuilt" });
+    await rebuilt.adoptPrior(priorSnapshot);
+    expect(rebuilt.status().terminalNotified).toEqual({ complete: true, blocked: false });
   });
 });
