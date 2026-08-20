@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
@@ -675,7 +676,7 @@ describe("dirty-flag durability", () => {
     }
   });
 
-  it("a mutating section persists exactly once, then idle sections produce zero extra writes", async () => {
+  it("a dispatch section persists the running snapshot and the launch snapshot, then idle sections produce zero extra writes", async () => {
     const dir = mkdtempSync(join(tmpdir(), "engine-dirt-once-"));
     try {
       let persistCount = 0;
@@ -693,9 +694,12 @@ describe("dirty-flag durability", () => {
         },
       });
 
-      // Dispatch the root → exactly 1 persist.
+      // Dispatch the root → exactly 2 persists: the dispatch-start
+      // write-through (status=running hits disk before the dispatch task
+      // resolves — closes the false-completed window) and the section-end
+      // write (dispatchTaskId/dispatchSessionId + budget, the launch snapshot).
       await engine.dispatchReady();
-      expect(persistCount).toBe(1);
+      expect(persistCount).toBe(2);
 
       // Verify the persisted file on disk is complete.
       const loaded1 = new EnginePersistence(dir).load("g-dirt-once-1");
@@ -708,7 +712,7 @@ describe("dirty-flag durability", () => {
       for (let i = 0; i < 5; i++) {
         await engine.dispatchReady();
       }
-      expect(persistCount).toBe(1);
+      expect(persistCount).toBe(2);
 
       // The on-disk state remains unchanged (no further writes).
       const loaded2 = new EnginePersistence(dir).load("g-dirt-once-1");
@@ -744,10 +748,11 @@ describe("dirty-flag batching: optimization fires on idle sections", () => {
       },
     });
 
-    // First dispatch: dispatches the ready root → 1 persist (isDirty from
-    // provisioning + phase transition + markRunning + removeFromFrontier).
+    // First dispatch: dispatches the ready root → 2 persists (dispatch-start
+    // write-through of the `running` transition + the section-end launch
+    // snapshot — see the running-window fix in _dispatchNode).
     await engine.dispatchReady();
-    expect(persistCount).toBe(1);
+    expect(persistCount).toBe(2);
 
     // Five idle dispatches: nothing ready, frontier empty, lock acquire is
     // non-dirtying, drainPendingCompletions is empty → zero extra persists.
@@ -755,7 +760,7 @@ describe("dirty-flag batching: optimization fires on idle sections", () => {
     for (let i = 0; i < N; i++) {
       await engine.dispatchReady();
     }
-    expect(persistCount).toBe(1);
+    expect(persistCount).toBe(2);
   });
 });
 
@@ -781,8 +786,10 @@ describe("two-tier persistence: signal-only mutations are non-critical (debounce
     });
 
     // Dispatch the root first so the node is running and frontier is empty.
+    // The dispatch section invokes the critical seam twice (dispatch-start
+    // running write-through + section-end launch snapshot).
     await engine.dispatchReady();
-    expect(criticalPersistCount).toBe(1);
+    expect(criticalPersistCount).toBe(2);
 
     // Record a non-terminating signal — writes signalLedger history +
     // node.signalsObserved. Under Q2 Option A this is NON-critical churn:
@@ -794,7 +801,7 @@ describe("two-tier persistence: signal-only mutations are non-critical (debounce
     // An idle section sees ONLY non-critical churn → schedules a debounced
     // write instead of a synchronous one. The critical seam is NOT invoked.
     await engine.dispatchReady();
-    expect(criticalPersistCount).toBe(1);
+    expect(criticalPersistCount).toBe(2);
     expect(debouncedScheduleCount).toBe(1);
     // The non-critical flag is cleared after being handed to the debounce.
     expect(state.isNonCriticalDirty).toBe(false);
@@ -861,9 +868,11 @@ describe("two-tier persistence (Q2 Option A)", () => {
     });
 
     // dispatchReady runs a critical section with critical mutations (idle →
-    // executing, root ready → running) — these write through synchronously.
+    // executing, root ready → running). The critical seam fires twice per
+    // dispatch section: the dispatch-start write-through (running transition)
+    // plus the section-end finally — never the debounced tier.
     await engine.dispatchReady();
-    expect(criticalCount).toBe(1);
+    expect(criticalCount).toBe(2);
     expect(scheduleCount).toBe(0);
     // The state itself reflects the critical transition.
     expect(state.phase).toBe(EnginePhase.Executing);
@@ -962,5 +971,79 @@ describe("snapshotEngineState preserves terminalNotified (bug 3 part a)", () => 
     const rebuilt = createEngine(singleNodeDeclaration(), { graphId: "g-snap-m10-rebuilt" });
     await rebuilt.adoptPrior(priorSnapshot);
     expect(rebuilt.status().terminalNotified).toEqual({ complete: true, blocked: false });
+  });
+});
+
+// ── Atomic write: no ENOENT read window (rename-over) ────────────────────────
+//
+// `_write` replaces the destination with a single atomic `renameSync(tmp,
+// filePath)`. The pre-fix sequence unlink-then-rename left the path ABSENT
+// between the two syscalls — a concurrent reader (the TUI polling
+// engine-*.json) could observe ENOENT and drop the graph for a tick. This test
+// hammers writes from the main thread while a worker thread loops reads, and
+// asserts the reader never observes the path missing. With rename-over the
+// invariant holds deterministically (the destination always holds either the
+// previous or the new snapshot); the unlink window made it fail repeatedly.
+
+describe("atomic write: no ENOENT read window (rename-over)", () => {
+  it("a concurrent reader never observes the state file missing while writes are in flight", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-persist-atomic-"));
+    try {
+      const store = new EnginePersistence(dir);
+      const state = buildRichState();
+      const path = engineStatePath(dir, "graph-1");
+
+      // First write creates the destination; every subsequent write must
+      // replace it atomically (rename-over), never unlink-then-rename.
+      store.save(state);
+
+      // Reader worker: tight open/close loop until the main thread clears the
+      // stop flag; tallies every ENOENT observation. `openSync` is a leaner
+      // syscall than `readFileSync` (no read/parse), so the reader samples the
+      // destination path fast enough to hit the unlink→rename gap the pre-fix
+      // write left between two syscalls.
+      const code = `
+        const { parentPort, workerData } = require("node:worker_threads");
+        const fs = require("node:fs");
+        let enoent = 0;
+        let reads = 0;
+        while (Atomics.load(workerData.ctrl, 0) === 0) {
+          let fd;
+          try {
+            fd = fs.openSync(workerData.path, "r");
+          } catch (e) {
+            if (e.code === "ENOENT") enoent++;
+          } finally {
+            if (fd !== undefined) {
+              fs.closeSync(fd);
+              reads++;
+            }
+          }
+        }
+        parentPort.postMessage({ enoent, reads });
+      `;
+      const saba = new SharedArrayBuffer(4);
+      const ctrl = new Int32Array(saba);
+      const worker = new Worker(code, {
+        eval: true,
+        workerData: { path, ctrl },
+      });
+
+      // Hammer writes while the reader races them. Rename-over never removes
+      // the path, so the reader must observe zero ENOENT.
+      for (let i = 0; i < 2000; i++) {
+        store.save(state);
+      }
+      Atomics.store(ctrl, 0, 1); // stop the reader
+      const { enoent, reads } = await new Promise<{ enoent: number; reads: number }>(
+        (resolve) => worker.once("message", resolve),
+      );
+      await worker.terminate();
+
+      expect(reads).toBeGreaterThan(0); // the reader genuinely raced the writes
+      expect(enoent).toBe(0);           // rename-over never exposes ENOENT
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

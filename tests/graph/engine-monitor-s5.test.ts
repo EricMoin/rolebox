@@ -378,15 +378,19 @@ describe("M5 — failed persist retains the dirty flag", () => {
       },
     });
 
-    // First mutating section: save fails → the dirty flag must survive.
+    // First mutating section: save fails → the dirty flag must survive. The
+    // section invokes the seam twice — the dispatch-start write-through
+    // (running transition, running-window fix in _dispatchNode) and the
+    // section-end finally — so a failed save is retried within the same
+    // section; both attempts fail, and the dirty flag survives.
     await engine.dispatchReady();
-    expect(persistCount).toBe(1);
+    expect(persistCount).toBe(2);
     expect(state.isDirty).toBe(true);
 
     // Next mutating section: save succeeds → dirty cleared, retry happened.
     fail = false;
     await engine.onNodeSignalEmitted("A", "answer", "ok");
-    expect(persistCount).toBe(2);
+    expect(persistCount).toBe(3);
     expect(state.isDirty).toBe(false);
   });
 

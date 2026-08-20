@@ -1,4 +1,7 @@
 import { describe, it, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import { ADVANCING_LOCK_TIMEOUT_MS } from "../../src/loop/constants.ts";
 import type { EngineLockSweeper } from "../../src/graph/engine/engine-recovery.ts";
@@ -9,6 +12,7 @@ import type {
 } from "../../src/types.engine-v2.ts";
 import type { DispatchTask, DispatchTaskStatus } from "../../src/dispatch/types.ts";
 import type { TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
+import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
 import {
   createEngine,
   type EngineRuntime,
@@ -126,6 +130,39 @@ class DisposableDispatch implements NodeDispatchPort {
 
 /** Let chained setTimeout-driven task completions drain. */
 const settle = () => new Promise((r) => setTimeout(r, 50));
+
+/**
+ * Dispatch seam that blocks every dispatch on an explicit `release()` — lets
+ * the test observe the on-disk engine state while a node is `running` but its
+ * dispatch task has NOT resolved yet (the false-completed window). The
+ * `called` promise resolves from inside `executeNode`, which the engine
+ * invokes AFTER its dispatch-start persistence seam — so once `called`
+ * resolves, the running transition is already durably on disk.
+ */
+class GatedDispatch implements NodeDispatchPort {
+  calls: string[] = [];
+  private releaseTask!: (task: DispatchTask) => void;
+  private markCalled!: () => void;
+  readonly task = new Promise<DispatchTask>((r) => {
+    this.releaseTask = r;
+  });
+  readonly called = new Promise<void>((r) => {
+    this.markCalled = r;
+  });
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    this.calls.push(node.nodeId);
+    this.markCalled();
+    return this.task;
+  }
+
+  release(task: DispatchTask): void {
+    this.releaseTask(task);
+  }
+}
 
 function makeTask(nodeId: string): DispatchTask {
   return {
@@ -329,6 +366,45 @@ describe("engine.run()", () => {
     await engine.run(); // no prior provision() call
     expect(fake.calls.map((c) => c.nodeId)).toEqual(["A"]);
     expect(engine.status().phase).toBe(EnginePhase.Executing);
+  });
+});
+
+// ── Dispatch-start write-through: disk never lags a node's running status ────
+
+describe("engine.run() — dispatch-start write-through persistence (running window)", () => {
+  it("persists status=running to engine-*.json before the dispatch task resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-runwin-"));
+    try {
+      const gate = new GatedDispatch();
+      const engine = createEngine(singleNodeGraph(), {
+        graphId: "g-runwin-1",
+        dispatch: gate,
+        stateDir: dir,
+      });
+
+      // Do NOT await run(): the dispatch blocks on the gate. `called` fires
+      // from inside executeNode, which the engine invokes AFTER the
+      // dispatch-start persistence seam — so once it resolves, disk already
+      // holds the `running` transition while the task is still unresolved.
+      const runPromise = engine.run();
+      await gate.called;
+      expect(gate.calls).toEqual(["A"]);
+
+      const loaded = new EnginePersistence(dir).load("g-runwin-1");
+      expect(loaded).not.toBeNull();
+      // The running transition hit durable storage before task resolution —
+      // the false-completed window (disk at `completed` during the dispatch
+      // await) is closed.
+      expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Running);
+      expect(loaded!.phase).toBe(EnginePhase.Executing);
+
+      // Release the gate so the dispatch pass (and the engine) finish cleanly.
+      gate.release(makeTask("A"));
+      await runPromise;
+      expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

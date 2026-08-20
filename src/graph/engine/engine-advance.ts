@@ -1365,6 +1365,23 @@ export class AdvanceEngine {
     // left in a dispatching-ready state while the critical section awaits.
     markRunning(this.state, node);
     removeFromFrontier(state, node.nodeId);
+    // Write-through persistence seam (running-window fix): persist the
+    // `running` transition synchronously BEFORE the async dispatch awaits, so
+    // the on-disk engine-*.json never lags a node's running status. Loop
+    // re-entry during the dispatch await previously left disk at `completed`
+    // (false-completed on Pi/dsh) because the section's only persist ran in
+    // the `finally` AFTER the await resolved. Mirrors the M5 contract
+    // (lines 701-731): clear the dirty flags only when the save actually
+    // reached durable storage — a failed save (`false` from the seam) keeps
+    // them set so the section's `finally` retries instead of silently
+    // dropping the mutation.
+    if (shouldPersist(this.state)) {
+      const ok = this.persistState?.(this.state);
+      if (ok !== false) {
+        clearDirty(this.state);
+        clearNonCriticalDirty(this.state);
+      }
+    }
     // Write-side durable log: record that this node was dispatched (its
     // `startedAt` was set by `markRunning`). Total — never breaks dispatch.
     this.graphEvents?.nodeDispatched(state.graphId, node.nodeId, node.agent, node.startedAt);

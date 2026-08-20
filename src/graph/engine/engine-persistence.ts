@@ -41,7 +41,7 @@
  *   modified).
  */
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { EnginePhase } from "../../constants.ts";
@@ -570,7 +570,14 @@ export class EnginePersistence {
   }
 
   /**
-   * Serialize → mkdir → write `.tmp` → unlink existing → rename.
+   * Serialize → mkdir → write `.tmp` → atomic rename-over the destination.
+   *
+   * The destination is replaced by a single `renameSync(tmp, filePath)` —
+   * POSIX rename-over is atomic, so a concurrent reader (e.g. the TUI polling
+   * engine-*.json) can never observe the path missing mid-write: the
+   * destination always holds either the previous snapshot or the new one.
+   * The former unlink-then-rename sequence opened an ENOENT read window
+   * between the two syscalls that made the TUI drop the graph for a tick.
    *
    * Returns `true` on success, `false` on failure. Never throws — write-through
    * must not break the advancement critical section, so a failed write degrades
@@ -585,11 +592,9 @@ export class EnginePersistence {
       mkdirSync(stateDir, { recursive: true });
       const tmp = `${filePath}.tmp`;
       writeFileSync(tmp, json, "utf-8");
-      try {
-        unlinkSync(filePath);
-      } catch {
-        // No existing file — fine.
-      }
+      // Atomic replace in one step: rename-over the destination, no separate
+      // unlink. A reader with no open descriptor always sees either the
+      // previous snapshot or the new one — never ENOENT.
       renameSync(tmp, filePath);
       return true;
     } catch (err) {
