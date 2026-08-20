@@ -97,7 +97,7 @@ export async function launch(
 
   d.tasks.set(taskId, task);
   addToParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
-  incRequestSessions(d, root);
+  incRequestSessions(d, root, taskId);
 
   debugLog("launch", taskId, `agent=${input.subagent} key=${concurrencyKey} bg=${input.run_in_background} desc="${input.description ?? ""}"`);
 

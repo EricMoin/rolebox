@@ -393,3 +393,192 @@ describe("NodeLivenessMonitor — edge cases", () => {
     monitor.stop(); // idempotent
   });
 });
+
+// ── Enriched staleness timeout reasons (S1 — reason string only) ─────────────
+
+describe("NodeStalenessWatcher — enriched timeout reasons (S1)", () => {
+  it("appends liveness-carrier facts to the timeout reason when present", () => {
+    const reasons: string[] = [];
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 30_000,
+      onTimeout: (_id, reason) => reasons.push(reason),
+    });
+    const { state, node } = buildRunning({
+      startedAt: 1_000,
+      liveness: {
+        lastActivityAt: 11_000, // idle at tick = 20_000 → "20s"
+        heartbeatSource: "session",
+        stallStatus: "stalling",
+      },
+    });
+
+    expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.errorReason).toBe(
+      "node ran past its staleness timeout (30000ms); " +
+        "last heartbeat 20s ago, heartbeat source=session, stall status=stalling",
+    );
+    // The same enriched reason is reported through the onTimeout callback.
+    expect(reasons).toEqual([node.errorReason]);
+  });
+
+  it("folds the probe result into the timeout reason when it reports the task dead", () => {
+    // (S2 note: a probe returning TRUE now gates the timeout away — see the
+    // dispatch-liveness gate describe below — so a reason string can only
+    // ever carry `dispatch task live=false`.)
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 900_000,
+      isDispatchAlive: () => false,
+    });
+    const { state, node } = buildRunning({
+      startedAt: 1_000,
+      liveness: { lastActivityAt: 1_000 + 180_000 }, // idle at tick = 720_000 → "12m"
+    });
+
+    watcher.tick(state, 1_000 + 900_000);
+    expect(node.errorReason).toBe(
+      "node ran past its staleness timeout (900000ms); " +
+        "dispatch task live=false, last heartbeat 12m ago",
+    );
+  });
+
+  it("renders dispatch task live=false when the probe reports the task dead", () => {
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 30_000,
+      isDispatchAlive: () => false,
+    });
+    const { state, node } = buildRunning({ startedAt: 1_000 });
+
+    watcher.tick(state, 1_000 + 30_000);
+    expect(node.errorReason).toContain("dispatch task live=false");
+  });
+
+  it("keeps the legacy reason byte-identical when no liveness facts or probe exist", () => {
+    const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 30_000 });
+    const { state, node } = buildRunning({ startedAt: 1_000 }); // no liveness
+
+    watcher.tick(state, 1_000 + 30_000);
+    expect(node.errorReason).toBe("node ran past its staleness timeout (30000ms)");
+  });
+
+  it("S2 guardrail — probe absent or false keeps the wall-clock kill identical; only probe=true skips it", () => {
+    const run = (isDispatchAlive?: (node: NodeRuntimeState) => boolean) => {
+      const watcher = new NodeStalenessWatcher({
+        nodeStaleTimeoutMs: 30_000,
+        ...(isDispatchAlive ? { isDispatchAlive } : {}),
+      });
+      const { state, node } = buildRunning({
+        startedAt: 1_000,
+        liveness: { lastActivityAt: 500 },
+      });
+      return { timedOut: watcher.tick(state, 1_000 + 30_000), status: node.status };
+    };
+    const withoutProbe = run();
+    const withFalseProbe = run(() => false);
+    const withTrueProbe = run(() => true);
+    // No-feed fallback contract: absent and false probes kill identically —
+    // the wall-clock decision is byte-identical.
+    expect(withFalseProbe.timedOut).toEqual(withoutProbe.timedOut);
+    expect(withFalseProbe.timedOut).toEqual(["A"]);
+    expect(withFalseProbe.status).toBe(withoutProbe.status);
+    // Only a verifiably-live dispatch suspends the wall-clock kill (S2).
+    expect(withTrueProbe.timedOut).toEqual([]);
+    expect(withTrueProbe.status).toBe(NodeStatus.Running);
+  });
+
+  it("never lets a throwing probe break a tick or alter the reason base", () => {
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 30_000,
+      isDispatchAlive: () => {
+        throw new Error("probe exploded");
+      },
+    });
+    const { state, node } = buildRunning({ startedAt: 1_000 });
+
+    expect(() => watcher.tick(state, 1_000 + 30_000)).not.toThrow();
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.errorReason).toBe("node ran past its staleness timeout (30000ms)");
+  });
+});
+
+// ── Dispatch-liveness gate on the wall-clock watcher (S2) ────────────────────
+
+describe("NodeStalenessWatcher — dispatch-liveness gate (S2)", () => {
+  it("probe=true keeps a node alive past the 15-min deadline — liveness refreshed via the dispatch channel", () => {
+    const timeouts: string[] = [];
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 900_000, // the 15-minute wall-clock deadline
+      isDispatchAlive: () => true, // dispatch verifiably in-flight
+      onTimeout: (id) => timeouts.push(id),
+    });
+    const { state, node } = buildRunning({
+      startedAt: 1_000,
+      liveness: { lastActivityAt: 1_000, heartbeatSource: "session" },
+    });
+
+    // Past the deadline — the probe gates the kill: the node stays running
+    // and the heartbeat is refreshed through the dispatch channel (mirroring
+    // the NodeLivenessMonitor quiet-but-alive refresh).
+    const t1 = 1_000 + 900_000;
+    expect(watcher.tick(state, t1)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(timeouts).toEqual([]);
+    expect(node.liveness!.lastActivityAt).toBe(t1);
+    expect(node.liveness!.heartbeatSource).toBe("dispatch");
+    expect(node.liveness!.stallStatus).toBe("healthy");
+
+    // A second tick far beyond the deadline: still alive while the probe
+    // keeps verifying the task in-flight.
+    const t2 = t1 + 900_000;
+    expect(watcher.tick(state, t2)).toEqual([]);
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(timeouts).toEqual([]);
+    expect(node.liveness!.lastActivityAt).toBe(t2);
+    expect(node.liveness!.heartbeatSource).toBe("dispatch");
+  });
+
+  it("probe=false still times the node out at the wall-clock deadline", () => {
+    const timeouts: string[] = [];
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 30_000,
+      isDispatchAlive: () => false, // dispatch died / task orphaned
+      onTimeout: (id) => timeouts.push(id),
+    });
+    const { state, node } = buildRunning({ startedAt: 1_000 });
+
+    expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(timeouts).toEqual(["A"]);
+    expect(node.errorReason).toContain("dispatch task live=false");
+  });
+
+  it("no-probe path is unchanged — the pure wall-clock kill still fires", () => {
+    const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 30_000 });
+    const { state, node } = buildRunning({ startedAt: 1_000 });
+
+    expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.errorReason).toBe("node ran past its staleness timeout (30000ms)");
+  });
+
+  it("the probe-gated skip ends the moment the probe turns false — the node then times out", () => {
+    let live = true;
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 30_000,
+      isDispatchAlive: () => live,
+    });
+    const { state, node } = buildRunning({
+      startedAt: 1_000,
+      liveness: { lastActivityAt: 1_000, heartbeatSource: "dispatch" },
+    });
+
+    watcher.tick(state, 1_000 + 30_000); // probe=true → skip
+    expect(node.status).toBe(NodeStatus.Running);
+    expect(node.liveness!.heartbeatSource).toBe("dispatch");
+
+    live = false; // dispatch died / task orphaned mid-flight
+    expect(watcher.tick(state, 1_000 + 60_000)).toEqual(["A"]);
+    expect(node.status).toBe(NodeStatus.Timeout);
+    expect(node.errorReason).toContain("dispatch task live=false");
+  });
+});

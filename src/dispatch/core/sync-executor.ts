@@ -156,7 +156,7 @@ export async function executeSync(
       d.sessionToTask.set(session.id, taskId);
       d.completedSyncSessions.set(taskId, session.id);
       d.completedSyncSessionsSetAt.set(taskId, Date.now());
-      if (isNewSession) incRequestSessions(d, root);
+      if (isNewSession) incRequestSessions(d, root, taskId);
     }
 
     const controller = new AbortController();
@@ -206,6 +206,10 @@ export async function executeSync(
     d.sessionToTask.delete(task.sessionId);
     removeFromParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
     d.tasks.delete(taskId);
+    // Sync tasks never reach scheduleCleanup — prune the counting marker here.
+    // A cancelled sync task already had its marker consumed by the refund;
+    // a completed sync task keeps its slot counted but must not leak the marker.
+    d.budgetCountedTasks.delete(taskId);
     if (didAcquire) {
       d.concurrency.release(concurrencyKey, parentContext.sessionID);
     }

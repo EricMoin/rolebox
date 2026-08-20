@@ -7,6 +7,7 @@ import {
   leaveRunning,
   notifyTerminated,
   resetRequestSessions,
+  decRequestSessions,
 } from "../core/lifecycle-shared.ts";
 import { detectCompletion, hasInflightToolPart } from "./completion-detector.ts";
 import { extractSessionErrorMessage } from "../core/error-utils.ts";
@@ -172,6 +173,8 @@ function timeoutAndRelease(d: TaskLifecycleDeps, taskId: string, reason: string)
   d.watchdog.cancelDebounce(taskId);
   notifyTerminated(d, taskId, "timeout");
   const t = d.tasks.get(taskId)!;
+  // Refund the per-request session slot — a timed-out task produced no result.
+  decRequestSessions(d, taskId);
   // Abort the worker session to prevent leaks (mirrors task-cancellation.ts:83-84)
   if (t.sessionId) {
     d.client.abort(t.sessionId).catch(() => {});
@@ -755,6 +758,8 @@ export function handleTaskTimeout(d: TaskLifecycleDeps, taskId: string, reason: 
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
   notifyTerminated(d, taskId, "timeout");
+  // Refund the per-request session slot — a timed-out task produced no result.
+  decRequestSessions(d, taskId);
   cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);

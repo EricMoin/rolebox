@@ -45,6 +45,8 @@ export class DispatchManager {
   private checkpointStore: FileSystemCheckpointStore;
 
   private sessionsByRequest = new Map<string, number>();
+  /** Task ids holding a per-request session slot in this process (refund bookkeeping). */
+  private budgetCountedTasks = new Set<string>();
   private _cancelQueue: Map<string, () => void> = new Map();
   private _syncControllers: Map<string, AbortController> = new Map();
   /** Maps completed sync task IDs to their opencode session IDs for continuation support. */
@@ -187,6 +189,7 @@ export class DispatchManager {
       pendingNotifications: this.pendingNotifications,
       sessionToTask: this.sessionToTask,
       sessionsByRequest: this.sessionsByRequest,
+      budgetCountedTasks: this.budgetCountedTasks,
       notifyOutbox: this.notifyOutbox,
       deferredIdleTimers: this._deferredIdleTimers,
       cleanedUpTasks: this.cleanedUpTasks,

@@ -9,7 +9,7 @@
  *
  * The bridge surfaces two checks:
  *
- * - **Graph-level** — `checkGraphBudget(graphId)` delegates to
+ * - **Graph-level** — `checkGraphBudget(graphId, state)` first delegates to
  *   `BudgetTracker.isRequestBudgetExceeded(parentSessionId)`, passing the
  *   graph ID as the request scope. Because `dispatch-bridge.graphParentContext`
  *   seeds request usage keyed off the graph ID, this yields a per-graph budget
@@ -17,6 +17,14 @@
  *
  *   `isRequestBudgetExceeded` already covers both the request and session
  *   tiers from one `DispatchManagerConfig` (`src/dispatch/budget/budget-tracker.ts:148-176`).
+ *
+ *   On top of the tracker check, the bridge enforces the graph-declared
+ *   `budget.max_total_sessions` cap (`src/types.graph-v2.ts:236-238`) against
+ *   `EngineState.budget.sessionsSpawned` — a NET-LIVE counter: incremented per
+ *   successful dispatch (`engine-advance.ts`), decremented when a dispatch task
+ *   terminates cancelled/timeout (`engine-recovery.ts`, the graph-level mirror
+ *   of S4's `decRequestSessions` refunds). When the declaration carries no
+ *   `max_total_sessions`, this second check is a no-op.
  *
  * - **Per-node** — `checkNodeBudget(node)` is a stub in this phase. Enforcement
  *   of cumulative per-node consumption against per-graph `max_total_*` limits
@@ -31,7 +39,8 @@
  */
 
 import type { BudgetTracker, BudgetCheckResult, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
-import type { NodeRuntimeState } from "../../types.engine-v2.ts";
+import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
+import type { GraphDeclaration } from "../../types.graph-v2.ts";
 
 // ── BudgetBridge ────────────────────────────────────────────────────────────
 
@@ -43,18 +52,38 @@ import type { NodeRuntimeState } from "../../types.engine-v2.ts";
  * engine never mutates budget state through this bridge.
  */
 export class BudgetBridge {
-  constructor(private readonly tracker: BudgetTracker) {}
+  constructor(
+    private readonly tracker: BudgetTracker,
+    private readonly graphDeclaration: GraphDeclaration,
+  ) {}
 
   /**
    * Graph-level budget check.
    *
-   * Delegates to `BudgetTracker.isRequestBudgetExceeded(graphId)`. Because the
-   * graph ID is the request scope (see `dispatch-bridge.graphParentContext`),
-   * this returns `{ exceeded: true, reason }` when the graph instance has
-   * breached any configured request-level ceiling.
+   * Delegates to `BudgetTracker.isRequestBudgetExceeded(graphId)` — the graph
+   * ID is the request scope (see `dispatch-bridge.graphParentContext`), so the
+   * tracker check returns `{ exceeded: true, reason }` when the graph instance
+   * has breached any configured request-level ceiling.
+   *
+   * Additionally enforces the graph-declared `budget.max_total_sessions` cap
+   * against `state.budget.sessionsSpawned` (only when the declaration sets it).
+   * `sessionsSpawned` counts NET-LIVE sessions — incremented per successful
+   * dispatch, decremented when a dispatch task terminates cancelled/timeout —
+   * so the cap blocks further dispatches only while the graph genuinely holds
+   * that many live sessions (S4-refund-consistent).
    */
-  checkGraphBudget(graphId: string): BudgetCheckResult {
-    return this.tracker.isRequestBudgetExceeded(graphId);
+  checkGraphBudget(graphId: string, state: EngineState): BudgetCheckResult {
+    const trackerCheck = this.tracker.isRequestBudgetExceeded(graphId);
+    if (trackerCheck.exceeded) return trackerCheck;
+
+    const max = this.graphDeclaration.budget?.max_total_sessions;
+    if (max !== undefined && state.budget.sessionsSpawned >= max) {
+      return {
+        exceeded: true,
+        reason: `graph session budget exhausted: ${state.budget.sessionsSpawned} >= ${max}`,
+      };
+    }
+    return trackerCheck;
   }
 
   /**

@@ -583,10 +583,14 @@ describe("liveness wiring — session activity past the stall deadline (false-po
 
   // ── (h3) Dead / hung dispatch backstop: a node whose dispatch DIES with no
   // completion IS caught by the heartbeat stall ladder; a node whose dispatch
-  // HANGS (stays verifiably alive but never completes) is caught by the
-  // wall-clock NodeStalenessWatcher backstop.
+  // HANGS (stays verifiably alive but never completes) is left running by
+  // BOTH monitors (S2 — the wall-clock watcher applies the same dispatch
+  // probe gate as the heartbeat monitor), with the authoritative hung-kill
+  // living in the dispatch watchdog. The wall-clock kill is preserved for
+  // the no-feed fallback: once the dispatch task dies (probe → false), the
+  // watcher times the node out.
 
-  it("a node whose dispatch dies with no completion IS still caught; a hung-but-alive dispatch is caught by the wall-clock backstop", async () => {
+  it("a node whose dispatch dies with no completion IS still caught; a hung-but-alive dispatch stays running past the deadline and is wall-clock timed out once its task dies", async () => {
     // Part 1 — dispatch dies silently (no terminal notification): the probe
     // turns false, so idle accrues → warn then hard-stall.
     const stalls: NodeStallEvent[] = [];
@@ -614,8 +618,13 @@ describe("liveness wiring — session activity past the stall deadline (false-po
 
     // Part 2 — hung-but-alive: the dispatch task stays verifiably "running"
     // forever (never completes). The heartbeat monitor must NOT stall it
-    // (quiet-but-alive); the wall-clock staleWatcher backstop MUST time it
-    // out at its staleness deadline.
+    // (quiet-but-alive), and — since S2 wires the SAME dispatch-liveness
+    // probe into the wall-clock watcher — the watcher must NOT time it out
+    // either while the probe verifies the task in-flight: the authoritative
+    // hung-kill for a verifiably-live-but-stuck task lives in the dispatch
+    // watchdog (`completion-evaluator.ts` not_ready branch), not the engine's
+    // watchers. The wall-clock kill is preserved for the no-feed fallback
+    // (probe absent / false).
     const rig2 = buildRig({
       stall: { stale: 60_000, warn: 30_000, grace: 20_000 },
     });
@@ -641,13 +650,24 @@ describe("liveness wiring — session activity past the stall deadline (false-po
     expect(node2.status).toBe(NodeStatus.Running);
     expect(node2.liveness!.stallStatus).not.toBe("stalled");
 
-    // The wall-clock backstop fires at the staleness deadline (60s from
-    // startedAt) — the hung-but-alive node is still eventually caught.
+    // S2: the wall-clock watcher consults the SAME dispatch probe — at its
+    // staleness deadline (60s from startedAt) the task is still verifiably
+    // in-flight, so the watcher SKIPS the kill (quiet-but-alive) and the
+    // node stays running past its deadline instead of being timed out.
+    staleWatcher!.tick(liveState2, node2.startedAt + 60_000);
+    await settle();
+    expect(node2.status).toBe(NodeStatus.Running);
+    expect(node2.liveness!.heartbeatSource).toBe("dispatch");
+
+    // No-feed fallback: the moment the dispatch task dies (probe → false),
+    // the wall-clock watcher times the node out at its staleness deadline.
+    rig2.dispatch.markTaskNonLive(node2.dispatchTaskId ?? "task-A-1");
     staleWatcher!.tick(liveState2, node2.startedAt + 60_000);
     await settle();
     expect(node2.status).toBe(NodeStatus.Timeout);
     // The wall-clock path surfaces the reason through the node's errorReason
-    // (markTimedOut) — the liveness carrier is untouched by this monitor.
+    // (markTimedOut) — with the dead-probe fact folded in for diagnosis.
     expect(node2.errorReason).toContain("staleness timeout");
+    expect(node2.errorReason).toContain("dispatch task live=false");
   });
 });
