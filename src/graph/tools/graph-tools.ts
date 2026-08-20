@@ -1421,6 +1421,29 @@ export class GraphToolSet {
     return undefined;
   }
 
+  // ── Live registry snapshot (monitor S10) ───────────────────────────────────
+
+  /**
+   * Snapshot every live runtime in this toolset's in-memory graph registry as
+   * an {@link EngineState}, in registry order (graph_create order).
+   *
+   * This is the monitor's live-state surface: on platforms where engine state
+   * is never persisted to disk (opencode — see the platform contract in
+   * `src/core/services/tool-service.ts`), `readLiveEngineGraphs`
+   * (`src/cli/commands/monitor/monitor-reader-engine.ts`) projects these
+   * runtimes instead of scanning `engine-*.json`. Statuses come from
+   * {@link EngineRuntime.status()}, so each returned state is a deep-enough
+   * clone — mutating it cannot corrupt the live engine. Returns an empty array
+   * when the registry holds no graphs.
+   */
+  liveEngineStates(): EngineState[] {
+    const states: EngineState[] = [];
+    for (const [, entry] of this.registry) {
+      states.push(entry.runtime.status());
+    }
+    return states;
+  }
+
   // ── graph_status ───────────────────────────────────────────────────────────
 
   graph_status(args: GraphStatusArgs): string {

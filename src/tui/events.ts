@@ -90,6 +90,8 @@ export interface GraphNodeStartEvent {
   graphId: string;
   nodeId: string;
   agent: string;
+  /** Node lifecycle status — `node_dispatched` lines always carry `running`. */
+  status: string;
   ts: string;
 }
 
@@ -259,7 +261,7 @@ function parseGraphEventLine(line: string): RawGraphEventLine | null {
 /**
  * Map a parsed graph-event line onto the TUI {@link RoleboxEvent} vocabulary.
  *
- * - `node_dispatched` → `graph_node_start`
+ * - `node_dispatched` → `graph_node_start` (carrying `status: "running"`)
  * - `node_completed`  → `graph_node_end` (carrying `status` / `signalType`)
  * - `phase_change`    → `graph_signal`
  *
@@ -276,6 +278,9 @@ function toGraphEvent(record: RawGraphEventLine): RoleboxEvent | null {
         graphId: record.graphId,
         nodeId: record.nodeId,
         agent: record.agent ?? "",
+        // `node_dispatched` lines always carry status "running" (see
+        // src/graph/engine/graph-events.ts GraphEventRecorder.nodeDispatched).
+        status: record.status ?? "running",
         ts,
       };
     case "node_completed":
@@ -300,6 +305,49 @@ function toGraphEvent(record: RawGraphEventLine): RoleboxEvent | null {
       // budget_update and unknown event kinds — no TUI surface.
       return null;
   }
+}
+
+/**
+ * Fold drained graph events into the live-signal maps the engine-graph
+ * display reads between disk snapshots (the 1s snapshot lags the 250ms poll).
+ *
+ * Two maps are maintained, one per event scope, so unrelated vocabularies
+ * never share a slot:
+ *
+ * - **graph-level** `graphId → status`: fed ONLY by `graph_signal` events,
+ *   whose `status` is the engine phase (`idle` / `executing` / `complete`).
+ *   Node events are deliberately excluded so `signalType` (`answer` /
+ *   `revise_needed`) can never be conflated with engine phase.
+ * - **node-scoped** `` `${graphId}::${nodeId}` → status ``: fed by
+ *   `graph_node_start` (status `running`) and `graph_node_end` (its terminal
+ *   `status` field).
+ *
+ * Pure and total — never throws, never mutates the input maps; callers hold
+ * the returned copies as the new live state.
+ */
+export function foldGraphSignals(
+  events: readonly RoleboxEvent[],
+  graphSignals: ReadonlyMap<string, string>,
+  nodeSignals: ReadonlyMap<string, string>,
+): { graphSignals: Map<string, string>; nodeSignals: Map<string, string> } {
+  const nextGraph = new Map(graphSignals);
+  const nextNodes = new Map(nodeSignals);
+  for (const e of events) {
+    switch (e.type) {
+      case "graph_signal":
+        if (e.status) nextGraph.set(e.graphId, e.status);
+        break;
+      case "graph_node_start":
+        nextNodes.set(`${e.graphId}::${e.nodeId}`, e.status);
+        break;
+      case "graph_node_end":
+        nextNodes.set(`${e.graphId}::${e.nodeId}`, e.status);
+        break;
+      default:
+        break;
+    }
+  }
+  return { graphSignals: nextGraph, nodeSignals: nextNodes };
 }
 
 /**
