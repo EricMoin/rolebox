@@ -363,11 +363,18 @@ export class HotReloadService implements PluginService {
     // 8. Refresh role hash cache for incremental diff on next change
     await this.refreshRoleHashCache(newRoles);
 
-    // Invalidate asset search cache before restarting services
+    // Invalidate the asset-search module-level index. reference_search needs
+    // no equivalent invalidation: it keeps NO module-level cache — its index
+    // is a per-tool-instance closure snapshot rebuilt when the tool is
+    // re-created below (dispatch-service restart cascades to tool-service,
+    // which re-runs buildCanonicalTools with the refreshed resolvedRoles).
     invalidateAssetIndex();
 
     // 9. Restart dispatch-service (cascades to tool-service and hook-service,
-    //    refreshing the frozen subagent maps and tool registrations)
+    //    refreshing the frozen subagent maps and tool registrations).
+    //    Awaited: the reload tool only reports completion after this resolves,
+    //    so newly-discovered role agents are resolvable to graph_run/dispatch
+    //    synchronously after the reload returns (no "Agent not found" race).
     await this.ctx.core.restartService("dispatch-service");
 
     log.info("Hot reload complete", {

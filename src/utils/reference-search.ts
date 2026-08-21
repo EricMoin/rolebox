@@ -111,6 +111,19 @@ async function searchInFile(
   return matches;
 }
 
+/**
+ * Create the reference_search tool.
+ *
+ * Index design: the reference index (`allRefs`) is captured ONCE at tool
+ * creation time from the live roles array. There is deliberately NO
+ * module-level cache (unlike asset-search.ts's `_cachedAssets`), so hot-reload
+ * needs no `invalidateReferenceIndex()` hook: the full-reload path rebuilds
+ * this tool instance via the dispatch-service restart cascade (tool-service
+ * re-init re-assembles buildCanonicalTools with the in-place-mutated
+ * resolvedRoles). Reference file CONTENTS are read fresh from disk on every
+ * execute() — only the metadata snapshot (which references exist) lives in the
+ * closure, and that is refreshed whenever the tool is re-created.
+ */
 export function createReferenceSearchTool(roles: ResolvedRole[]) {
   const allRefs = collectReferences(roles);
 
