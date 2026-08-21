@@ -158,6 +158,7 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
         .describe("Search query — keywords matched against asset name and description. Multiple words use AND logic (all must match)."),
       type: z
         .enum(["skill", "function", "reference", "all"])
+        .catch("all") // Normalize invalid values (e.g. literal string "undefined") to "all"
         .optional()
         .default("all")
         .describe("Filter by asset type"),
@@ -187,10 +188,17 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
       // Parse query into keywords (AND logic)
       const keywords = input.query.toLowerCase().split(/\s+/).filter((k) => k.length > 0);
 
-      // Filter by type
+      // Filter by type. Normalize missing/invalid values — some models emit the
+      // literal string "undefined" for an omitted arg — to "all" so the filter
+      // never silently matches zero assets against a bogus type.
+      const type =
+        input.type === "skill" || input.type === "function" ||
+        input.type === "reference" || input.type === "all"
+          ? input.type
+          : "all";
       let candidates = allAssets;
-      if (input.type !== "all") {
-        candidates = candidates.filter((a) => a.type === input.type);
+      if (type !== "all") {
+        candidates = candidates.filter((a) => a.type === type);
       }
 
       // Filter by role_id
@@ -233,7 +241,7 @@ export function createAssetSearchTool(roles: ResolvedRole[]) {
       const limited = scored.slice(0, input.limit ?? 20);
 
       if (limited.length === 0) {
-        return `No assets matching "${input.query}"${input.type !== "all" ? ` of type "${input.type}"` : ""}.`;
+        return `No assets matching "${input.query}"${type !== "all" ? ` of type "${type}"` : ""}.`;
       }
 
       if (input.format === "json") {
