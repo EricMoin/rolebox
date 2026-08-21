@@ -26,6 +26,19 @@
  *     `.row` (client.js:6316): the bounded (max-height 180px) scroll list
  *     and the 36px rows with the `row + row` inset divider, hover
  *     background and focus-visible outline.
+ *   - `.rolebox-dock-name` / `.rolebox-dock-meta` — DEVIATION from the
+ *     shipped row split (deliberate): the name seat is protected
+ *     (`flex: none`, capped at the row width) so a role's identity is
+ *     never sacrificed to its description/model/mode meta; the meta seat
+ *     absorbs whatever space is left (`flex: 1 1 auto`, ellipsis) and
+ *     truncates first.
+ *   - `.rolebox-dock-filter` / `.rolebox-dock-filter-lead` /
+ *     `.rolebox-dock-filter-input` / `.rolebox-dock-filter-clear` /
+ *     `.rolebox-dock-empty` — NEW (no shipped counterpart): the
+ *     expanded-state search chrome (a 36px row in the header/row rhythm,
+ *     lead glyph seat, `:focus-within` ring in the same focus language as
+ *     the rows) and the explicit no-match row. Tokens stay inside the
+ *     `--dsw-*` alias set.
  *
  * Injection: the module injects the CSS into the document on load using the
  * exact pattern the dsh client packages ship (e.g.
@@ -169,12 +182,12 @@ export const dockCss = `
 }
 
 .rolebox-dock-name {
-  min-width: 0;
-  color: var(--dsw-alias-label-primary);
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  overflow: hidden;
-  flex: auto;
+  color: var(--dsw-alias-label-primary);
   font-size: 13px;
   font-weight: 500;
   line-height: 24px;
@@ -182,12 +195,91 @@ export const dockCss = `
 
 .rolebox-dock-meta {
   min-width: 0;
-  color: var(--dsw-alias-label-tertiary);
-  font: var(--dsw-font-xs-13);
+  flex: 1 1 auto;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  overflow: hidden;
-  flex: 0 1 auto;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xs-13);
+}
+
+.rolebox-dock-filter {
+  box-sizing: border-box;
+  height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 12px;
+  display: flex;
+  box-shadow: inset 0 -1px 0 var(--dsw-alias-border-l1);
+}
+
+.rolebox-dock-filter:focus-within {
+  outline: 2px solid var(--dsw-alias-label-tertiary);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.rolebox-dock-filter-lead {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  place-items: center;
+  display: grid;
+}
+
+.rolebox-dock-filter-input {
+  min-width: 0;
+  flex: auto;
+  padding: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.rolebox-dock-filter-input::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.rolebox-dock-filter-clear {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  place-items: center;
+  display: grid;
+}
+
+.rolebox-dock-filter-clear:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rolebox-dock-filter-clear:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-tertiary);
+  outline-offset: -2px;
+}
+
+.rolebox-dock-empty {
+  box-sizing: border-box;
+  height: 36px;
+  align-items: center;
+  padding: 4px 5px 4px 12px;
+  display: flex;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+}
+
+.rolebox-dock-empty + .rolebox-dock-row {
+  box-shadow: inset 0 1px 0 var(--dsw-alias-border-l1);
 }
 
 .rolebox-dock-current {
@@ -212,6 +304,11 @@ export const dockClass = {
   row: "rolebox-dock-row",
   name: "rolebox-dock-name",
   meta: "rolebox-dock-meta",
+  filter: "rolebox-dock-filter",
+  filterLead: "rolebox-dock-filter-lead",
+  filterInput: "rolebox-dock-filter-input",
+  filterClear: "rolebox-dock-filter-clear",
+  empty: "rolebox-dock-empty",
   current: "rolebox-dock-current",
 } as const;
 

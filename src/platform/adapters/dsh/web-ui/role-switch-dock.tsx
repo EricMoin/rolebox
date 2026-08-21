@@ -8,20 +8,32 @@
  * registered into that slot by the client plugin entry (`client.ts`) and
  * renders a dsh-styled one-tap role picker:
  *
- *   - a 36px toggle header (lead glyph + "Role" title + status seat) that
- *     collapses/expands the role list, styled from the sibling
- *     `role-switch-dock.css.ts` module (itself a faithful replica of the
- *     shipped QueueDock/TodoPanel rules — see that module's docstring for
- *     the citation map);
+ *   - a 36px toggle header (lead glyph + "Role" title + status seat, plus a
+ *     current-role dot) that collapses/expands the role list — the dock
+ *     starts COLLAPSED on mount and on every session change so it never
+ *     blocks the composer, and the status seat still reports the hydrated
+ *     active role while collapsed (the dot gives the same state at a
+ *     glance). The styles come from the sibling `role-switch-dock.css.ts`
+ *     module (itself a faithful replica of the shipped QueueDock/TodoPanel
+ *     rules — see that module's docstring for the citation map);
  *   - a collapsible role list (`GET /rolebox/roles`, same-origin relative
  *     path — the dsh web server serves the rolebox API under `/rolebox/*`),
  *     one 36px row per role; a row click posts
  *     `POST /rolebox/roles/switch` with `{ role, session: sessionId }` (the
  *     session id arrives through the entry's inject factory, `client.ts`);
+ *   - a filter row between the header and the list (shown while expanded
+ *     and while roles exist) that narrows the list client-side by name and
+ *     description as the user types, with a clear affordance and an
+ *     explicit no-match row. The query survives collapse/expand (it stays
+ *     visible in the field — no hidden state) and resets on session change;
  *   - on mount (and on every `sessionId` change) the session's persisted
  *     active role is hydrated from `GET /rolebox/roles/active?session=…`,
  *     so the `aria-current` highlight and the status seat reflect the role
  *     that survived a reload / session switch;
+ *   - a successful switch or clear collapses the dock again — the
+ *     always-visible status seat carries the confirmation and the dock
+ *     returns to its 36px posture; a FAILED mutation keeps the list open
+ *     so the Retry row stays reachable;
  *   - a clear-to-base row (visible only while a role is active) issues
  *     `DELETE /rolebox/roles/active?session=…`, returning the session to
  *     the base agent; on success the `aria-current` highlight and the
@@ -227,36 +239,105 @@ function RoleGlyph() {
 }
 
 /**
+ * Filter lead glyph — a 14×14 magnifier marking the search field, following
+ * the same stroke convention as {@link RoleGlyph} (inline local SVG,
+ * `fill: none`, `aria-hidden`).
+ */
+function SearchGlyph() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx="6" cy="6" r="3.4" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M8.7 8.7 12 12"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Filter clear glyph — a 12×12 cross centered in the 24×24 clear-button hit
+ * area (see `.rolebox-dock-filter-clear`), same stroke convention.
+ */
+function ClearGlyph() {
+  return (
+    <svg
+      width={12}
+      height={12}
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m2.5 2.5 7 7M9.5 2.5l-7 7"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
  * The dock component: a dsh-styled picker (toggle header + role list).
  *
  * Behavior:
+ *   - starts collapsed (and re-collapses on every `sessionId` change, and
+ *     after a successful switch/clear): the header's status seat plus the
+ *     current-role dot report the active role while the list is hidden, and
+ *     one header click expands it;
  *   - on mount (and on every `sessionId` change), fetches the switchable
  *     roles from `GET /rolebox/roles` and the session's persisted active
  *     role from `GET /rolebox/roles/active?session=…` — both best-effort:
  *     a failed roles fetch leaves an empty list and the status seat reports
  *     the error; a failed active probe just leaves the seat unhighlighted
  *     (see {@link RoleSwitchActiveBody});
+ *   - the expanded list is preceded by a filter row: a keystroke filter
+ *     narrows the rows by name and description (case-insensitive
+ *     substring), the clear button (visible only while a query is typed)
+ *     restores the full list, and an explicit no-match row reports an
+ *     empty result set;
  *   - the header toggles the list; a row click posts
  *     `{ role, session: sessionId }` to `POST /rolebox/roles/switch` (the
  *     framework-resolved session id from the inject face), then reflects
  *     the outcome on the status seat — on success the seat names the role
- *     as active for the current session, on failure the previous active
- *     role is preserved, the server error is shown, and a Retry row
- *     re-runs the failed switch;
+ *     as active for the current session and the dock collapses, on failure
+ *     the previous active role is preserved, the list stays open, the
+ *     server error is shown, and a Retry row re-runs the failed switch;
  *   - the clear-to-base row (visible only while a role is active) issues
  *     `DELETE /rolebox/roles/active?session=…`, resetting the
  *     `aria-current` highlight and the status seat to the base agent on
- *     success; a failed clear keeps the previous active role and shows
- *     the server error with a Retry row;
+ *     success (and collapsing the dock); a failed clear keeps the previous
+ *     active role and shows the server error with a Retry row;
  *   - rows and the clear/retry controls are disabled while a mutation is
- *     in flight.
+ *     in flight (the filter stays usable — filtering is not a mutation).
  *
  * @param props - composed slot props (see {@link RoleSwitchDockProps}).
  */
 export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
   const [roles, setRoles] = useState<RoleSwitchRoleDto[]>([]);
   const [busy, setBusy] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  /**
+   * Collapsed by default: the dock is a quiet 36px tool strip above the
+   * composer, not a view. Every session change re-collapses it (see the
+   * load effect) and a successful switch/clear collapses it again.
+   */
+  const [collapsed, setCollapsed] = useState(true);
+  /**
+   * The keystroke filter over the role list (name + description,
+   * case-insensitive). Transient chrome state: it survives collapse/expand
+   * (the field stays visible and self-explanatory — no hidden state) but is
+   * reset by a session change.
+   */
+  const [query, setQuery] = useState("");
   const [activeRole, setActiveRole] = useState<string | null>(null);
   /**
    * The last failed mutation (switch/clear), retained so the Retry row can
@@ -279,10 +360,14 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
     let cancelled = false;
 
     // Drop the previous session's rows/seat before re-fetching: a session
-    // switch must never render stale state.
+    // switch must never render stale state. The dock also returns to its
+    // collapsed posture and drops the transient filter — a fresh session
+    // starts from the full list, not a stale narrowed one.
     setRoles([]);
     setActiveRole(null);
     setFailedAction(null);
+    setCollapsed(true);
+    setQuery("");
     setStatus({ text: "Loading roles…", error: false });
 
     async function loadDockState(): Promise<void> {
@@ -365,6 +450,10 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
         text: "Role " + result.role + " is active for this session",
         error: false,
       });
+      // The picker closes on success: the always-visible status seat (and
+      // the header's current-role dot) carries the confirmation, and the
+      // dock returns to its 36px posture instead of blocking the composer.
+      setCollapsed(true);
     } catch (err) {
       setFailedAction({ kind: "switch", role });
       setStatus({
@@ -404,6 +493,7 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       setFailedAction(null);
       setActiveRole(null);
       setStatus({ text: "Base agent active for this session", error: false });
+      setCollapsed(true);
     } catch (err) {
       setFailedAction({ kind: "clear" });
       setStatus({
@@ -422,6 +512,23 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
     else void switchRole(failedAction.role);
   }
 
+  /**
+   * Client-side filter: case-insensitive substring over name + description
+   * (the model/mode overrides stay out of the match surface — they are
+   * display meta, not identity). The trimmed needle is also what the
+   * no-match row echoes back, so a whitespace-only query reads as "no
+   * filter".
+   */
+  const needle = query.trim().toLowerCase();
+  const visibleRoles =
+    needle === ""
+      ? roles
+      : roles.filter(
+          (role) =>
+            role.name.toLowerCase().includes(needle) ||
+            role.description.toLowerCase().includes(needle),
+        );
+
   return (
     <div className="rolebox-dock" data-rolebox-dock>
       <div className={dockClass.panel}>
@@ -437,6 +544,7 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
           <span className={dockClass.title}>Role</span>
           <span
             role="status"
+            title={status.text}
             className={
               status.error
                 ? dockClass.status + " " + dockClass.statusError
@@ -445,63 +553,111 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
           >
             {status.text}
           </span>
+          {activeRole !== null && (
+            <span className={dockClass.current} aria-hidden="true" />
+          )}
         </button>
         {!collapsed && (
-          <div className={dockClass.list}>
-            {roles.map((role) => {
-              const meta = [role.description, role.model, role.mode]
-                .filter((part): part is string => Boolean(part))
-                .join(" · ");
-              return (
+          <>
+            {roles.length > 0 && (
+              <div className={dockClass.filter}>
+                <span className={dockClass.filterLead} aria-hidden="true">
+                  <SearchGlyph />
+                </span>
+                <input
+                  type="text"
+                  className={dockClass.filterInput}
+                  value={query}
+                  placeholder="Filter roles"
+                  aria-label="Filter roles"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event: { target: { value: string } }) =>
+                    setQuery(event.target.value)
+                  }
+                  onKeyDown={(event: { key: string }) => {
+                    if (event.key === "Escape" && query !== "") setQuery("");
+                  }}
+                />
+                {query !== "" && (
+                  <button
+                    type="button"
+                    className={dockClass.filterClear}
+                    aria-label="Clear filter"
+                    onClick={() => setQuery("")}
+                  >
+                    <ClearGlyph />
+                  </button>
+                )}
+              </div>
+            )}
+            <div className={dockClass.list}>
+              {visibleRoles.map((role) => {
+                const meta = [role.description, role.model, role.mode]
+                  .filter((part): part is string => Boolean(part))
+                  .join(" · ");
+                return (
+                  <button
+                    key={role.id}
+                    type="button"
+                    className={dockClass.row}
+                    disabled={busy}
+                    aria-current={role.id === activeRole ? "true" : undefined}
+                    onClick={() => {
+                      void switchRole(role.id);
+                    }}
+                  >
+                    <span className={dockClass.name} title={role.name}>
+                      {role.name}
+                    </span>
+                    {meta !== "" && (
+                      <span className={dockClass.meta} title={meta}>
+                        {meta}
+                      </span>
+                    )}
+                    {role.id === activeRole && (
+                      <span className={dockClass.current} aria-hidden="true" />
+                    )}
+                  </button>
+                );
+              })}
+              {needle !== "" && visibleRoles.length === 0 && (
+                <div className={dockClass.empty} role="status">
+                  No roles match “{query.trim()}”
+                </div>
+              )}
+              {failedAction !== null && (
                 <button
-                  key={role.id}
                   type="button"
                   className={dockClass.row}
                   disabled={busy}
-                  aria-current={role.id === activeRole ? "true" : undefined}
+                  onClick={retryLastAction}
+                >
+                  <span className={dockClass.name}>Retry</span>
+                  <span className={dockClass.meta}>
+                    {failedAction.kind === "clear"
+                      ? "Return to base agent"
+                      : "Switch to " + failedAction.role}
+                  </span>
+                </button>
+              )}
+              {activeRole !== null && (
+                <button
+                  type="button"
+                  className={dockClass.row}
+                  disabled={busy}
                   onClick={() => {
-                    void switchRole(role.id);
+                    void clearRole();
                   }}
                 >
-                  <span className={dockClass.name}>{role.name}</span>
-                  {meta !== "" && <span className={dockClass.meta}>{meta}</span>}
-                  {role.id === activeRole && (
-                    <span className={dockClass.current} aria-hidden="true" />
-                  )}
+                  <span className={dockClass.name}>Return to base agent</span>
+                  <span className={dockClass.meta} aria-hidden="true">
+                    clear active role
+                  </span>
                 </button>
-              );
-            })}
-            {failedAction !== null && (
-              <button
-                type="button"
-                className={dockClass.row}
-                disabled={busy}
-                onClick={retryLastAction}
-              >
-                <span className={dockClass.name}>Retry</span>
-                <span className={dockClass.meta}>
-                  {failedAction.kind === "clear"
-                    ? "Return to base agent"
-                    : "Switch to " + failedAction.role}
-                </span>
-              </button>
-            )}
-            {activeRole !== null && (
-              <button
-                type="button"
-                className={dockClass.row}
-                disabled={busy}
-                onClick={() => {
-                  void clearRole();
-                }}
-              >
-                <span className={dockClass.name}>Return to base agent</span>
-                <span className={dockClass.meta} aria-hidden="true">
-                  clear active role
-                </span>
-              </button>
-            )}
-          </div>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>
