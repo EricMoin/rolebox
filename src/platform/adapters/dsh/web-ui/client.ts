@@ -2,9 +2,16 @@
  * dsh web-UI slot plugin — browser half (`src/platform/adapters/dsh/web-ui/client.ts`)
  *
  * This module is the client entry of the rolebox web-UI slot integration: a
- * dsh client plugin that contributes the {@link RoleSwitchDock} component to
- * the `'conversation.input.dock'` slot of the dsh web app (the
- * list/session-scoped full-width row above the composer card).
+ * dsh client plugin that contributes two components to the dsh web app:
+ *
+ *   - {@link RoleSwitchDock} → the `'conversation.input.dock'` slot (the
+ *     list/session-scoped full-width row above the composer card);
+ *   - {@link RoleboxMonitorPanel} → the `'settings.section'` slot (the
+ *     list/root-scoped settings page showing the live rolebox engine state).
+ *
+ * Each contribution follows the same posture (see below); the sections that
+ * follow document the two slot contracts and the graceful-degradation rule
+ * that keeps the plugin healthy when a declaration is absent.
  *
  * ── Plugin shape ──────────────────────────────────────────────────────────
  * The export mirrors the canonical registrant-plugin posture of
@@ -30,9 +37,36 @@
  * lib/types/index.d.ts:367) — delivering the framework-resolved session id
  * to the component for the switch request.
  *
+ * ── The `settings.section` contribution ────────────────────────────────────
+ * The monitor panel is contributed to the `'settings.section'` slot — one
+ * settings page per list entry — declared by
+ * `@deepseek-ai/dsh-client-ui-settings` as
+ * `{ kind: 'list', scope: 'root', owner: SettingsSectionOwnerProps }`
+ * (lib/types/client/contract/slots.d.ts:67-71). The owner share is
+ * `{ close: () => void }` (SettingsSectionOwnerProps, slots.d.ts:148-151) —
+ * the shell hands the section a `close` handle (closes the settings panel)
+ * and renders the contribution inside the panel content column. Registrant
+ * options carry the nav identity: `id` (section key, drives `only`
+ * filtering), `order` (nav position), `label` (registrant-localized display
+ * text). Because the slot is `scope: 'root'` (not `'session'`), the entry
+ * needs no inject factory — the register options carry no `inject` face and
+ * the component receives the owner share directly.
+ *
+ * ── Graceful degradation ───────────────────────────────────────────────────
+ * `ctx.slots.inject` installs an effect per declaration lifetime: the
+ * callback runs synchronously when the declaration already exists, or inside
+ * the declaring `register()` call otherwise (dsh-client-runtime
+ * lib/client.js:55, slots.d.ts:46-91). If a slot is never declared — e.g.
+ * the settings shell (`sidebar.settings` owner in ui-settings-general) does
+ * not activate — the corresponding injection callback simply never runs:
+ * the contribution does not mount, `apply` still returns a disposer, and
+ * the plugin remains healthy. The two contributions are independent: the
+ * dock still mounts even when the settings surface is absent, and vice
+ * versa.
+ *
  * ── Structural typing (duck types) ────────────────────────────────────────
  * `@deepseek-ai/dsh-client-runtime` / `@deepseek-ai/dsh-client-ui-slots` are
- * NOT installed yet (subtask 3 adds the devDeps). Following the repo's dsh
+ * installed as devDeps for type/tests, but following the repo's dsh
  * convention ("The dsh surface is consumed structurally — this module does
  * NOT import `@deepseek-ai/*`", cf. web-role-switch-route.ts:13), the
  * slots service surface and the client context are duck-typed against the
@@ -48,9 +82,9 @@
  *                     store / registrant.
  *   - component     — `SlotComponent<P> = (props: P) => ReactNode`
  *                     (dsh-client-ui-slots lib/types/index.d.ts:310); the
- *                     return type is structurally `unknown` here (react is
- *                     also not installed — the temporary `react.stub.d.ts`
- *                     covers its type surface).
+ *                     return type is structurally `unknown` here (the
+ *                     temporary `react.stub.d.ts` covers react's type
+ *                     surface for the bundler, which keeps `react` external).
  *
  * Browser constraint: this module runs in the dsh web app — no node builtins.
  *
@@ -59,6 +93,7 @@
 
 import { RoleSwitchDock } from "./role-switch-dock.tsx";
 import type { RoleSwitchDockProps } from "./role-switch-dock.tsx";
+import { RoleboxMonitorPanel } from "./rolebox-monitor-panel.tsx";
 
 // ── Plugin metadata ────────────────────────────────────────────────────────
 
@@ -88,6 +123,18 @@ export const DOCK_SLOT_ORDER = 40;
 
 /** Locale namespace declared by the entry (dsh-client-ui-conversation). */
 export const DOCK_LOCALE = "conversation";
+
+/** The settings page slot this plugin contributes into (one page per feature). */
+export const MONITOR_SLOT_NAME = "settings.section";
+
+/** Section key within settings.section (drives the `only` filtering). */
+export const MONITOR_SLOT_ID = "rolebox-monitor";
+
+/** Nav position — after the feature pages (late order keeps it near the end). */
+export const MONITOR_SLOT_ORDER = 90;
+
+/** Nav display text (registrant-localized label rendered by the shell). */
+export const MONITOR_SLOT_LABEL = "Monitoring";
 
 // ── Structural slot contract (duck of @deepseek-ai/dsh-client-ui-slots) ────
 
@@ -162,34 +209,59 @@ export interface DshClientContext {
 // ── apply ──────────────────────────────────────────────────────────────────
 
 /**
- * Client plugin `apply(ctx)` — registers the {@link RoleSwitchDock} into the
- * `'conversation.input.dock'` slot following the TodoDock posture: wait on
- * the slot declaration via `ctx.slots.inject`, then register inside the
- * injected callback so the contribution tracks the declaration across
- * independent activation and reload.
+ * Client plugin `apply(ctx)` — registers both contributions into their slots
+ * following the TodoDock posture: wait on each slot declaration via
+ * `ctx.slots.inject`, then register inside the injected callback so the
+ * contribution tracks the declaration across independent activation and
+ * reload.
  *
- * The inject factory resolves the session-scoped session id (the framework
- * calls it with the definite session id per `InjectParams<'session'>`) and
- * returns the business face `{ sessionId }` the dock consumes for the
- * `POST /rolebox/roles/switch` body.
+ *   - the {@link RoleSwitchDock} into `'conversation.input.dock'`. The inject
+ *     factory resolves the session-scoped session id (the framework calls it
+ *     with the definite session id per `InjectParams<'session'>`) and
+ *     returns the business face `{ sessionId }` the dock consumes for the
+ *     `POST /rolebox/roles/switch` body.
+ *   - the {@link RoleboxMonitorPanel} into `'settings.section'`. The slot is
+ *     `scope: 'root'`, so the register options carry no inject face — the
+ *     component receives the owner share (`{ close }`) directly from the
+ *     shell.
+ *
+ * The returned disposer tears down BOTH injection effects (each contribution
+ * is independently removable, so an absent declaration degrades gracefully —
+ * see the module docstring).
  *
  * @param ctx - the client cordis context (structural; the injected slots service).
- * @returns the fiber disposer removing the injection effect (and, through
- *          the registered callback's disposer, the slot contribution).
+ * @returns the fiber disposer removing both injection effects (and, through
+ *          the registered callbacks' disposers, both slot contributions).
  */
 export function apply(ctx: DshClientContext): (() => void) | void {
-  return ctx.slots.inject(DOCK_SLOT_NAME, () =>
-    ctx.slots.register(
-      {
-        name: DOCK_SLOT_NAME,
-        id: DOCK_SLOT_ID,
-        order: DOCK_SLOT_ORDER,
-        locale: DOCK_LOCALE,
-        inject: (sessionId: string) => ({ sessionId }),
-      },
-      RoleSwitchDock,
+  const disposers = [
+    ctx.slots.inject(DOCK_SLOT_NAME, () =>
+      ctx.slots.register(
+        {
+          name: DOCK_SLOT_NAME,
+          id: DOCK_SLOT_ID,
+          order: DOCK_SLOT_ORDER,
+          locale: DOCK_LOCALE,
+          inject: (sessionId: string) => ({ sessionId }),
+        },
+        RoleSwitchDock,
+      ),
     ),
-  );
+    ctx.slots.inject(MONITOR_SLOT_NAME, () =>
+      ctx.slots.register(
+        {
+          name: MONITOR_SLOT_NAME,
+          id: MONITOR_SLOT_ID,
+          order: MONITOR_SLOT_ORDER,
+          label: MONITOR_SLOT_LABEL,
+        },
+        RoleboxMonitorPanel,
+      ),
+    ),
+  ];
+  return () => {
+    for (const dispose of disposers) dispose();
+  };
 }
 
 // ── Default export (object plugin shape) ───────────────────────────────────

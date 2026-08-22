@@ -17,6 +17,12 @@
  *     factory resolving the session-scoped session id into `{ sessionId }`
  *   - the registered component is the `RoleSwitchDock` component and the
  *     disposer returned by `apply` is a function (fiber cleanup)
+ *   - `apply` ALSO wires the settings-page contribution: `ctx.slots.inject`
+ *     is called with `'settings.section'`, and its injected callback
+ *     registers the `RoleboxMonitorPanel` with `name: 'settings.section'`,
+ *     `id: 'rolebox-monitor'`, `order: 90`, `label: 'Monitoring'` — and,
+ *     because the slot is `scope: 'root'`, carries no inject face (unlike
+ *     the session-scoped dock)
  *   - the dock module's same-origin API contract (`GET /rolebox/roles`,
  *     `POST /rolebox/roles/switch`)
  *
@@ -67,6 +73,7 @@ mock.module("react/jsx-dev-runtime", jsxRuntimeDouble);
 
 const client = await import("../../src/platform/adapters/dsh/web-ui/client.ts");
 const dock = await import("../../src/platform/adapters/dsh/web-ui/role-switch-dock.tsx");
+const monitor = await import("../../src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx");
 
 // ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -120,12 +127,12 @@ describe("dsh web-UI client plugin entry", () => {
     const { slots, injected, registered } = createFakeSlots();
     const disposer = client.apply({ slots });
 
-    // apply waits on the input-dock declaration (TodoDock posture).
-    expect(injected).toHaveLength(1);
-    expect(injected[0]!.key).toBe("conversation.input.dock");
+    // apply waits on BOTH slot declarations; pick the dock one by key.
+    const dockInject = injected.find((i) => i.key === "conversation.input.dock");
+    expect(dockInject).toBeDefined();
 
     // the injected callback performs the registration.
-    injected[0]!.callback();
+    dockInject!.callback();
     expect(registered).toHaveLength(1);
 
     const call = registered[0]!;
@@ -143,6 +150,34 @@ describe("dsh web-UI client plugin entry", () => {
     expect(face("sess-1")).toEqual({ sessionId: "sess-1" });
 
     // apply returns the fiber disposer (a function) for cleanup.
+    expect(typeof disposer).toBe("function");
+  });
+
+  it("wires the settings.section registration through ctx.slots", () => {
+    const { slots, injected, registered } = createFakeSlots();
+    const disposer = client.apply({ slots });
+
+    // the second contribution waits on the settings-page slot declaration.
+    const monitorInject = injected.find((i) => i.key === "settings.section");
+    expect(monitorInject).toBeDefined();
+
+    // the injected callback performs the registration.
+    monitorInject!.callback();
+    expect(registered).toHaveLength(1);
+
+    const call = registered[0]!;
+    expect(call.options.name).toBe("settings.section");
+    expect(call.options.id).toBe("rolebox-monitor");
+    expect(call.options.order).toBe(90);
+    expect(call.options.label).toBe("Monitoring");
+
+    // the registered component is the RoleboxMonitorPanel component.
+    expect(call.component).toBe(monitor.RoleboxMonitorPanel);
+
+    // scope 'root' slot: no inject face (unlike the session-scoped dock).
+    expect(call.options.inject).toBeUndefined();
+
+    // the disposer tears down both contributions and is idempotent-safe.
     expect(typeof disposer).toBe("function");
   });
 

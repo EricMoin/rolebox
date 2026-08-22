@@ -564,7 +564,10 @@ Events: `subagent/provider-added`, `subagent/provider-removed`, `subagent/start`
 The role-switch UI ships as two halves: a **host route** on dsh's own web server
 (the `/rolebox` REST API) and a **browser slot plugin** (`dsh.client` bundle that
 mounts the dock into the web app). Both surfaces were verified against the
-`0.1.0-rc.6` artifacts (unpacked tarballs under `/tmp/dsh-inspect/`).
+`0.1.0-rc.6` artifacts (unpacked tarballs under `/tmp/dsh-inspect/`). The
+sidebar monitoring surface ships through the same two halves: two read-only
+endpoints added to the `/rolebox` host API (§4.4.6) and a `settings.section`
+monitoring page contributed by the same client bundle (§4.4.7).
 
 #### 4.4.1 Host webserver: `ctx.webServer.register` WebRoute shape
 
@@ -702,6 +705,140 @@ external sequencing (`dsh-client-modules/README.md:5-11`). rolebox's build
 (`scripts/build-dsh-web-client.ts`) bundles `web-ui/client.ts` with Bun
 (`format: "cjs"`, `react` / `react/jsx-runtime` / `@deepseek-ai/*` external) and
 wraps the output in this exact envelope with `id: "rolebox"`.
+
+#### 4.4.6 Monitoring endpoints: `GET /rolebox/status` / `GET /rolebox/metrics`
+
+The monitoring surface adds two **read-only** endpoints under the existing
+`/rolebox` prefix route (§4.4.1) — no existing endpoint is touched. They are
+dispatched by the same structural host-route module pattern:
+`DshRoleboxMonitorWebRoute` (`src/platform/adapters/dsh/web-rolebox-monitor-route.ts`)
+provides the handler and is composed with the role-switch surface into a single
+`{ kind: 'prefix', path: '/rolebox', handler }` registration in `apply()` (after
+the loop-coordinator block, whose live-loop census the monitor needs — see the
+`Registration constraint` below) through the same `webServer` probe seam — so
+headless profiles (no `webServer` service) skip registration exactly as the
+role-switch route does (§4.4.1). The response composition below is the pinned
+contract; every data source is rolebox's own in-process service:
+
+**Registration constraint (real host).** The host webserver rejects a
+duplicate `(kind, path)` registration — live-verified against the installed
+`0.1.0-rc.6` artifact: a second `prefix /rolebox` `register()` throws
+`webserver: duplicate prefix route "/rolebox"` (`dsh-host-webserver/lib/index.js:53-56`,
+contract §4.4.1). `apply()` therefore composes the role-switch surface and the
+monitor surface into a SINGLE `{ kind: 'prefix', path: '/rolebox' }`
+registration (after the loop-coordinator block): the monitor route owns
+`/status` + `/metrics` and delegates every other sub-path (`/roles*`) to the
+role-switch handler via its optional `delegate` option
+(`web-rolebox-monitor-route.ts`). Both `webRouteRegistered` and
+`monitorRouteRegistered` are set from this one registration outcome, so the
+monitor endpoints are reachable on a real host. The route tests cover the
+composed handler serving both surfaces, and `tests/dsh-plugin.test.ts` includes
+a duplicate-rejecting registrar double (mirroring the real host) proving exactly
+one `/rolebox` registration happens.
+
+- **`GET /rolebox/status`** — composite runtime snapshot:
+  - **loop summary** — `LoopCoordinator.getAllLoopStates()` (`src/loop/coordinator.ts:568`,
+    `Map<string, LoopState>`: per-loop round state, status, termination);
+  - **engine graph snapshot** — `readLiveEngineGraphs(stateDir)` (`src/cli/commands/monitor/monitor-reader-engine.ts:201`,
+    `EngineGraphSnapshot[]`: live in-memory graph registry rows — the same feed
+    the monitor TUI reads);
+  - **sessions** — count + most recent ids from `DshSessionStoreLike.list()`;
+  - **per-session active role** — `DshRoleSwitcher.getActive(sessionId)` (`src/platform/adapters/dsh/role-switcher.ts:174`,
+    the session's active role id or `null` for the base agent).
+- **`GET /rolebox/metrics`** — the in-process dispatch metrics snapshot
+  `metrics.snapshot()` (`src/dispatch/persistence/metrics.ts:209-238`):
+  `{ counters, gauges, histograms }` keyed by metric name; each
+  counter/gauge entry is `{ value }` and each histogram entry is
+  `{ buckets, sum, count }` (the optional `labels` field is declared on the
+  snapshot types but never populated by `snapshot()` — labels fold into the
+  entry key via `makeKey`, `metrics.ts:257-260`).
+
+**`ROLEBOX_METRICS` gating.** The module-level `metrics` registry reads the env
+var at construction (`metrics.ts:156` — `!!process.env.ROLEBOX_METRICS`). When
+the var is **unset**, the registry still tracks only the core-named metrics —
+counters `dispatch_rejected_total`, `dispatch_backpressure_retry_total`; gauges
+`inflight_tasks`, `concurrency_queued` (`CORE_METRIC_NAMES`, `metrics.ts:16-19`)
+— and `snapshot()` returns `{ counters, gauges, histograms: {} }` containing
+exactly those core metrics **that have been touched** (`metrics.ts:210-220`) —
+a process that has not dispatched yet returns
+`{ counters: {}, gauges: {}, histograms: {} }` (the metrics-persister test
+pins this: `tests/dispatch/metrics-persister.test.ts:224`). With
+`ROLEBOX_METRICS` set it carries the full counter/gauge/histogram snapshot.
+The endpoint itself is not gated by the env var — only the payload richness
+varies; whether the route is reachable at all on a real host is governed by
+the registration constraint below.
+
+**Error contract** — the same stable JSON error shape as the role-switch route
+(§4.4.1, `web-role-switch-route.ts:39-45`): every non-2xx response is JSON
+with `{ "ok": false, "error": string }`. The monitor handler itself emits
+`404` (unknown route under `/rolebox`), `405` (known path, wrong method), and
+`500` (unexpected failure — the handler never rejects; every branch is guarded
+so a failing handler yields stable JSON instead of a bare socket teardown).
+`400` and `413` are NOT part of the monitor surface: both endpoints are pure
+`GET` reads that never buffer a request body (unlike `POST /rolebox/roles/switch`,
+which owns the 64 KiB body cap), so those two role-switch codes cannot fire
+here. Both endpoints have no mutation surface.
+
+#### 4.4.7 `settings.section` monitoring page entry
+
+The monitoring panel is the client bundle's **second** slot contribution — the
+existing `conversation.input.dock` dock registration (§4.4.4) is untouched.
+`src/platform/adapters/dsh/web-ui/client.ts` adds, alongside the dock, the
+canonical TodoDock registrant posture (§4.4.3) targeting the settings page
+seat:
+
+```ts
+ctx.slots.inject("settings.section", () =>
+  ctx.slots.register(
+    { name: "settings.section", id: "rolebox-monitor", order: 90, label: "Monitoring" },
+    RoleboxMonitorPanel,
+  ),
+);
+```
+
+The `settings.section` seat is declared by `@deepseek-ai/dsh-client-ui-settings`
+(`dsh-client-ui-settings/lib/types/client/contract/slots.d.ts:67-72`):
+
+```ts
+'settings.section': {
+    kind: 'list';
+    scope: 'root';
+    owner: SettingsSectionOwnerProps;   // { close: () => void } — slots.d.ts:148-151
+};
+```
+
+The declaration's contract comment (`slots.d.ts:58-66`): "One settings page per
+list entry. Registrant options carry the nav identity: `id` (section key,
+drives `only` filtering), `order` (nav position), `label` (registrant-localized
+display text …). Sections render inside the panel content column." The
+`SettingsSectionOwnerProps` owner share (`slots.d.ts:148-151`) hands the
+registrant `close: () => void` — the panel may close the settings shell; the
+shell owns the open state.
+
+- **Entry metadata** — slot key `settings.section`; list-kind entry `id`
+  `rolebox-monitor`; `order` `90` (after the stock sections); `label`
+  `Monitoring`. The `scope: 'root'` slot means the inject factory receives **no
+  definite session id** — unlike the session-scoped `conversation.input.dock`
+  (§4.4.4, whose inject factory resolves `(sessionId) => ({ sessionId })`) —
+  so the panel hydrates the session dimension itself from `GET /rolebox/status`.
+- **Posture** — mirrors the TodoDock entry exactly (§4.4.3): `ctx.slots.inject`
+  waits on the declaration; `register` runs inside the injection callback, so
+  the contribution tracks the declaration across independent activation and
+  reload.
+- **Graceful degradation** — if the `settings.section` declaration is absent
+  (a profile without the settings feature), the inject effect never fires, the
+  contribution does not mount, and the plugin stays healthy — the same
+  declaration-wait semantics as §4.4.3; the dock contribution is unaffected.
+- **Why `settings.section` and not the sidebar list** — the dsh sidebar column
+  (session list + foot) exposes no third-party list slot; `settings.trigger`
+  (the sidebar-foot trigger) is single-kind and occupied by the settings
+  feature itself. The sidebar gear → settings panel → `settings.section` page
+  is the only additive sidebar-reachable seat, so the monitoring page lives
+  there. The panel (`src/platform/adapters/dsh/web-ui/rolebox-monitor-panel.tsx`
+  + `rolebox-monitor-panel.css.ts`) fetches `GET /rolebox/status` and
+  `GET /rolebox/metrics` same-origin (relative paths on the dsh web server)
+  and renders the engine-graph / loop / metrics readings with
+  loading/error/empty states.
 
 ### 4.5 Session-level system-prompt registration (`rolebox:role` / `rolebox:context`)
 

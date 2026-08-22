@@ -72,6 +72,7 @@ import {
   ROLE_SWITCH_ROUTE_PREFIX,
 } from "./platform/adapters/dsh/web-role-switch-route.ts";
 import type { DshWebServerRouteRegistrar } from "./platform/adapters/dsh/web-role-switch-route.ts";
+import { DshRoleboxMonitorWebRoute } from "./platform/adapters/dsh/web-rolebox-monitor-route.ts";
 import { buildCanonicalTools } from "./platform/tool-assembly.ts";
 import type { PlatformCapabilities } from "./platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "./prompt/builder.ts";
@@ -224,9 +225,21 @@ export interface DshPluginStats {
    * web server. `true` only when the optional `webServer` service was present
    * on the ctx (the web profile) AND registration succeeded; headless
    * profiles have no web server, so this stays `false` and the plugin keeps
-   * running.
+   * running. The role-switch surface shares ONE `/rolebox` prefix
+   * registration with the monitor surface (see `monitorRouteRegistered`) —
+   * the real host webserver rejects duplicate prefix routes.
    */
   webRouteRegistered: boolean;
+  /**
+   * Whether the `/rolebox` monitor routes (`/status`, `/metrics`) were
+   * registered on dsh's host web server. Mirrors `webRouteRegistered` — the
+   * role-switch and monitor surfaces are composed into a single `/rolebox`
+   * prefix registration, so both flags are set from the same registration
+   * outcome. `true` only when the optional `webServer` service was present
+   * AND registration succeeded; headless profiles stay `false` and the
+   * plugin keeps running.
+   */
+  monitorRouteRegistered: boolean;
 }
 
 /**
@@ -401,10 +414,13 @@ const dshCapabilities: PlatformCapabilities = {
  *   3. Apply `defaultRole` project-config promotion when configured.
  *   3a. Wire the dsh role switcher (per-session active-role state + the
  *       `session/created` restore listener) and — OPTIONALLY — register the
- *       `/rolebox` routes on dsh's host web server via the `webServer`
- *       service seam (present only in the web profile). A registration
- *       failure logs a warning and degrades — the plugin keeps running
- *       without the web surface.
+ *       composed `/rolebox` prefix route (role-switch surface + monitor
+ *       `/status`, `/metrics` surfaces) on dsh's host web server via the
+ *       `webServer` service seam (present only in the web profile). The two
+ *       surfaces share ONE prefix registration — the real host webserver
+ *       rejects duplicate `(kind, path)` pairs. A registration failure logs
+ *       a warning and degrades — the plugin keeps running without the web
+ *       surface.
  *   3b. OPTIONALLY register the session-level system-prompt contributions
  *       (`rolebox:role` section + `rolebox:context` context entry) when the
  *       `systemPrompt` service is present on the ctx (full profiles only);
@@ -494,32 +510,18 @@ export async function apply(
     activeRole,
   });
 
-  // Optional host webServer seam — register the /rolebox routes on dsh's own
-  // web server via the subtask-1 route adapter. A registration failure logs a
-  // warning and degrades; the route disposer (when registered) is collected
-  // into the fiber disposer below.
+  // Optional host webServer seam — probe ONCE here. The composed `/rolebox`
+  // prefix route (role-switch surface + monitor surface) is registered below,
+  // after the loop wiring that the monitor surface depends on (its live-loop
+  // census). The real dsh host webserver rejects a duplicate `(kind, path)`
+  // registration (`webserver: duplicate prefix route "/rolebox"` — see
+  // `@deepseek-ai/dsh-host-webserver` lib/index.js:54-55), so both surfaces
+  // MUST share a single prefix registration; a failure logs a warning and
+  // degrades — the plugin keeps running without the web surface.
   const routeDisposers: Array<() => void> = [];
   const webServer = probeWebServer(ctx);
   let webRouteRegistered = false;
-  if (webServer) {
-    try {
-      const route = new DshRoleSwitchWebRoute(roleSwitcher, ctx.sessions);
-      const dispose = route.register(webServer);
-      routeDisposers.push(dispose);
-      webRouteRegistered = true;
-      log.info("Role-switch routes registered on host web server", {
-        prefix: ROLE_SWITCH_ROUTE_PREFIX,
-      });
-    } catch (err) {
-      log.warn("Role-switch route registration failed — degrading", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  } else {
-    log.debug(
-      "No host web server service on ctx — skipping /rolebox route registration",
-    );
-  }
+  let monitorRouteRegistered = false;
 
   // Optional systemPrompt service seam — register the rolebox session-level
   // system-prompt contributions (`rolebox:role` section + `rolebox:context`
@@ -601,6 +603,51 @@ export async function apply(
     },
   });
   const loopTools = createLoopTools(loopCoordinator, sessionAdapter);
+
+  // Optional host webServer seam — register the composed `/rolebox` prefix
+  // route on dsh's own web server. The role-switch surface (`/roles*`) and
+  // the monitor surface (`/status`, `/metrics`) are composed into a SINGLE
+  // registration — the real host webserver rejects a second `prefix /rolebox`
+  // `register()` (`webserver: duplicate prefix route "/rolebox"`,
+  // `@deepseek-ai/dsh-host-webserver` lib/index.js:54-55) — with the monitor
+  // route owning `/status` + `/metrics` and delegating the `/roles*`
+  // sub-paths to the role-switch handler via its `delegate` option. A
+  // registration failure logs a warning and degrades (the plugin keeps
+  // running without the web surface); the route disposer is collected into
+  // the fiber disposer below.
+  if (webServer) {
+    try {
+      const roleSwitchRoute = new DshRoleSwitchWebRoute(
+        roleSwitcher,
+        ctx.sessions,
+      );
+      const monitorRoute = new DshRoleboxMonitorWebRoute(
+        roleSwitcher,
+        ctx.sessions,
+        loopCoordinator,
+        process.cwd(),
+        {
+          delegate: (req, res) => roleSwitchRoute.handle(req, res),
+        },
+      );
+      const dispose = monitorRoute.register(webServer);
+      routeDisposers.push(dispose);
+      webRouteRegistered = true;
+      monitorRouteRegistered = true;
+      log.info("Rolebox routes registered on host web server", {
+        prefix: ROLE_SWITCH_ROUTE_PREFIX,
+        surfaces: "role-switch + monitor",
+      });
+    } catch (err) {
+      log.warn("Rolebox route registration failed — degrading", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    log.debug(
+      "No host web server service on ctx — skipping /rolebox route registration",
+    );
+  }
 
   const tools = {
     ...buildCanonicalTools({
@@ -735,6 +782,7 @@ export async function apply(
     dispatchMode: "dsh",
     loopWired: true,
     webRouteRegistered,
+    monitorRouteRegistered,
   };
   return disposer;
 }

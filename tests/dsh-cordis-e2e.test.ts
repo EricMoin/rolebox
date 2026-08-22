@@ -588,11 +588,15 @@ describe("real @deepseek-ai/dsh-system-prompt registry on the cordis boot", () =
     });
 
     // The real registry is mounted and the plugin registered into it: the
-    // systemPrompt service resolved on the ctx, and the /rolebox route was
-    // registered on the fake host web server (webRouteRegistered proves the
-    // probe found the service).
+    // systemPrompt service resolved on the ctx, and the /rolebox routes were
+    // registered on the fake host web server (webRouteRegistered /
+    // monitorRouteRegistered prove the probe found the service). The
+    // role-switch surface and the monitor surface (/status, /metrics) are
+    // composed into ONE prefix route — the real host webserver rejects
+    // duplicate (kind, path) registrations.
     expect(systemPrompt).toBeDefined();
     expect(disposer!.stats.webRouteRegistered).toBe(true);
+    expect(disposer!.stats.monitorRouteRegistered).toBe(true);
     expect(webServer.routes).toHaveLength(1);
     const route = webServer.routes[0];
     expect(route.kind).toBe("prefix");

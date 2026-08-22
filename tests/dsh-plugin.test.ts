@@ -12,8 +12,11 @@
  *     into the fake tools registry, syncs agents into the fake subagents
  *     catalog, and reports the discovered/resolved/skipped counts
  *   - the enabledNamespaces tool filter and the defaultRole promotion
- *   - the optional host webServer seam: `/rolebox` routes register when
- *     `ctx.get('webServer')` returns a registrar and are skipped when absent
+ *   - the optional host webServer seam: the `/rolebox` role-switch AND
+ *     monitor (`/status`, `/metrics`) surfaces register — composed into ONE
+ *     `/rolebox` prefix route (the real host webserver rejects duplicate
+ *     prefix registrations) — when `ctx.get('webServer')` returns a
+ *     registrar, and are skipped when absent
  *   - the optional systemPrompt seam: the `rolebox:role` section and
  *     `rolebox:context` context entry register on the service double, and
  *     the section provider serves the ACTIVE role's prompt after a switch;
@@ -515,14 +518,106 @@ describe("dsh plugin apply()", () => {
 
     const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
 
-    // The seam registered exactly one prefix route at /rolebox.
+    // The seam registered the COMPOSED /rolebox prefix route exactly once:
+    // the real host webserver rejects duplicate (kind, path) registrations
+    // (`webserver: duplicate prefix route "/rolebox"`, lib/index.js:54-55),
+    // so the role-switch surface and the monitor surface share one handler.
     expect(disposer.stats.webRouteRegistered).toBe(true);
+    expect(disposer.stats.monitorRouteRegistered).toBe(true);
+    expect(registered).toHaveLength(1);
+    const route = registered[0];
+    expect(route.kind).toBe("prefix");
+    expect(route.path).toBe("/rolebox");
+    expect(typeof route.handler).toBe("function");
+
+    // The single composed handler serves BOTH surfaces: the role-switch
+    // surface (/roles — a bare JSON array) and the monitor surface
+    // (/status — the composed runtime snapshot, /metrics — the dispatch
+    // metrics snapshot).
+    const roles = await invoke(route.handler, "GET", "/rolebox/roles");
+    expect(roles.status).toBe(200);
+    expect(Array.isArray(JSON.parse(roles.text))).toBe(true);
+
+    const metrics = await invoke(route.handler, "GET", "/rolebox/metrics");
+    expect(metrics.status).toBe(200);
+    const metricsBody = JSON.parse(metrics.text) as {
+      counters: Record<string, unknown>;
+      gauges: Record<string, unknown>;
+      histograms: Record<string, unknown>;
+    };
+    expect(typeof metricsBody.counters).toBe("object");
+    expect(typeof metricsBody.gauges).toBe("object");
+    expect(typeof metricsBody.histograms).toBe("object");
+
+    const status = await invoke(route.handler, "GET", "/rolebox/status");
+    expect(status.status).toBe(200);
+    const statusBody = JSON.parse(status.text) as {
+      ok: boolean;
+      loops: { count: number; states: unknown[] };
+      engineGraphs: unknown[];
+      sessions: {
+        count: number;
+        mostRecentId: string | null;
+        activeRoles: Record<string, string | null>;
+      };
+    };
+    expect(statusBody.ok).toBe(true);
+    expect(typeof statusBody.loops.count).toBe("number");
+    expect(Array.isArray(statusBody.loops.states)).toBe(true);
+    expect(Array.isArray(statusBody.engineGraphs)).toBe(true);
+    expect(typeof statusBody.sessions.count).toBe("number");
+    expect(statusBody.sessions.mostRecentId).toBeNull();
+    expect(statusBody.sessions.activeRoles).toEqual({});
+
+    // The fiber disposer unmounts the route.
+    disposer();
+    expect(registered).toHaveLength(0);
+  });
+
+  it("registers the /rolebox prefix exactly once when the host rejects duplicate prefixes", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    // Mirror the real @deepseek-ai/dsh-host-webserver register(): duplicate
+    // (kind, path) pairs THROW (`webserver: duplicate prefix route
+    // "/rolebox"`, lib/index.js:54-55) — a tolerant array double would never
+    // surface the collision this test guards against.
+    const registered: DshWebRouteLike[] = [];
+    const seenPaths = new Set<string>();
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        if (seenPaths.has(route.path)) {
+          throw new Error(
+            `webserver: duplicate ${route.kind} route "${route.path}"`,
+          );
+        }
+        seenPaths.add(route.path);
+        registered.push(route);
+        return () => {
+          const i = registered.indexOf(route);
+          if (i >= 0) registered.splice(i, 1);
+        };
+      },
+    };
+    const { ctx } = createFakeCtx({ webServer: fakeWebServer });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+
+    // Exactly ONE registration under /rolebox — no duplicate was attempted
+    // and nothing was swallowed: BOTH route surfaces report registered, and
+    // the single composed handler serves the role-switch AND monitor faces.
     expect(registered).toHaveLength(1);
     expect(registered[0].kind).toBe("prefix");
     expect(registered[0].path).toBe("/rolebox");
-    expect(typeof registered[0].handler).toBe("function");
+    expect(disposer.stats.webRouteRegistered).toBe(true);
+    expect(disposer.stats.monitorRouteRegistered).toBe(true);
 
-    // The fiber disposer unmounts the route.
+    const roles = await invoke(registered[0].handler, "GET", "/rolebox/roles");
+    expect(roles.status).toBe(200);
+    expect(Array.isArray(JSON.parse(roles.text))).toBe(true);
+    const status = await invoke(registered[0].handler, "GET", "/rolebox/status");
+    expect(status.status).toBe(200);
+    const metrics = await invoke(registered[0].handler, "GET", "/rolebox/metrics");
+    expect(metrics.status).toBe(200);
+
     disposer();
     expect(registered).toHaveLength(0);
   });
@@ -533,6 +628,7 @@ describe("dsh plugin apply()", () => {
 
     const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
     expect(disposer.stats.webRouteRegistered).toBe(false);
+    expect(disposer.stats.monitorRouteRegistered).toBe(false);
 
     disposer();
   });
