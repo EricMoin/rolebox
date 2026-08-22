@@ -1,20 +1,22 @@
 /**
- * S5 — graph-declared session budget enforcement (`budget.max_total_sessions`).
+ * Graph-declared session budget: cap REMOVED, display counter retained.
  *
- * `BudgetBridge.checkGraphBudget` (src/graph/engine/budget-bridge.ts) enforces
- * the declaration's `max_total_sessions` cap against `EngineState.budget
- * .sessionsSpawned` — a NET-LIVE counter:
+ * The graph-declared `budget.max_total_sessions` cap was removed upstream.
+ * `BudgetBridge.checkGraphBudget` (src/graph/engine/budget-bridge.ts) now
+ * delegates SOLELY to the request-level tracker — the graph declaration's
+ * session ceiling no longer gates dispatch.
+ *
+ * `EngineState.budget.sessionsSpawned` remains a NET-LIVE DISPLAY COUNTER:
  *
  *   - incremented per SUCCESSFUL dispatch (`engine-advance.ts::_dispatchNode`,
  *     `applyBudgetDelta(state, { sessions: 1 })` — failed launches never count),
  *   - decremented when a dispatch task terminates `cancelled` / `timeout`
- *     (`engine-recovery.ts::subscribeTaskTermination`, `sessions: -1` — the
- *     graph-level mirror of S4's `decRequestSessions` refunds; completed /
+ *     (`engine-recovery.ts::subscribeTaskTermination`, `sessions: -1`; completed /
  *     error / blocked tasks keep counting).
  *
- * The engine's pre-dispatch check (engine-advance.ts, `_dispatchNode`) escalates
- * a ready node with the bridge's reason, so a graph whose live-session counter
- * reached the cap never spawns another dispatch.
+ * The counter is observable (monitor / status / persistence) but no longer
+ * gates dispatch — a graph whose live-session counter is high still spawns
+ * every ready node.
  *
  * Run: bun test tests/graph/graph-session-budget.test.ts
  */
@@ -23,7 +25,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { NodeStatus } from "../../src/constants.ts";
-import type { GraphDeclaration, GraphBudgetSpec } from "../../src/types.graph-v2.ts";
+import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState } from "../../src/types.engine-v2.ts";
 import type { DispatchManagerConfig } from "../../src/dispatch/config.ts";
 import { BudgetTracker } from "../../src/dispatch/budget/budget-tracker.ts";
@@ -45,13 +47,12 @@ import { ScriptedDispatch } from "./helpers/scripted-dispatch.ts";
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 /** N root nodes (no edges) with an optional graph-level budget spec. */
-function decl(nodeIds: string[], budget?: GraphBudgetSpec): GraphDeclaration {
+function decl(nodeIds: string[]): GraphDeclaration {
   return {
     version: 2,
     name: "session-budget",
     nodes: nodeIds.map((id) => ({ id, agent: "a", prompt: `p-${id}` })),
     edges: [],
-    ...(budget ? { budget } : {}),
   };
 }
 
@@ -61,7 +62,7 @@ function makeTracker(): BudgetTracker {
   const dir = mkdtempSync(join(tmpdir(), "graph-session-budget-"));
   dirs.push(dir);
   // No limits anywhere → `isRequestBudgetExceeded` always returns
-  // `{ exceeded: false }`; only the graph-declared session cap can reject.
+  // `{ exceeded: false }`.
   return new BudgetTracker({} as DispatchManagerConfig, dir);
 }
 
@@ -94,30 +95,20 @@ function buildEngine(
   return { state, engine };
 }
 
-// ── Unit: bridge enforces the declaration's session cap ────────────────────
+// ── Unit: bridge delegates to the tracker; sessionsSpawned never gates ──────
 
-describe("BudgetBridge.checkGraphBudget — graph-declared session cap", () => {
-  it("rejects when sessionsSpawned reaches max_total_sessions (exact reason)", () => {
-    const g = decl(["A"], { max_total_sessions: 2 });
+describe("BudgetBridge.checkGraphBudget — tracker-only (cap removed)", () => {
+  it("never rejects on sessionsSpawned alone, no matter how high", () => {
+    const g = decl(["A"]);
     const state = createEngineState(g, "g-x");
-    state.budget.sessionsSpawned = 2;
+    state.budget.sessionsSpawned = 999;
     const bridge = new BudgetBridge(makeTracker(), g);
 
     const check = bridge.checkGraphBudget(state.graphId, state);
-    expect(check.exceeded).toBe(true);
-    expect(check.reason).toBe("graph session budget exhausted: 2 >= 2");
+    expect(check).toEqual({ exceeded: false });
   });
 
-  it("passes while sessionsSpawned is below the cap", () => {
-    const g = decl(["A"], { max_total_sessions: 2 });
-    const state = createEngineState(g, "g-x");
-    state.budget.sessionsSpawned = 1;
-    const bridge = new BudgetBridge(makeTracker(), g);
-
-    expect(bridge.checkGraphBudget(state.graphId, state).exceeded).toBe(false);
-  });
-
-  it("adds no rejection when max_total_sessions is undefined (tracker-only result)", () => {
+  it("passes when the declaration carries no budget at all (tracker-only result)", () => {
     const g = decl(["A"]); // no budget field at all
     const state = createEngineState(g, "g-x");
     state.budget.sessionsSpawned = 99;
@@ -128,59 +119,76 @@ describe("BudgetBridge.checkGraphBudget — graph-declared session cap", () => {
   });
 });
 
-// ── Engine-level: pre-check escalates the ready node past the cap ──────────
+// ── Engine-level: every ready node dispatches regardless of the counter ─────
 
-describe("engine pre-check — per-graph session cap escalation", () => {
-  it("dispatches 2 of 3 roots and escalates the 3rd with the session-cap reason", async () => {
-    const g = decl(["A", "B", "C"], { max_total_sessions: 2 });
+describe("engine pre-check — sessionsSpawned does not gate dispatch", () => {
+  it("dispatches ALL ready roots even when sessionsSpawned is high", async () => {
+    const g = decl(["A", "B", "C"]);
+    const fake = new ScriptedDispatch();
+    const { state, engine } = buildEngine(g, fake, new BudgetBridge(makeTracker(), g));
+
+    // Simulate a high pre-existing live-session count — the display counter
+    // must NOT stop the engine from dispatching every ready node.
+    state.budget.sessionsSpawned = 50;
+
+    await engine.dispatchReady();
+    await new Promise((r) => setTimeout(r, 25)); // let auto-completions drain
+
+    // All three roots dispatched despite the elevated counter.
+    expect(fake.dispatches("A")).toBe(1);
+    expect(fake.dispatches("B")).toBe(1);
+    expect(fake.dispatches("C")).toBe(1);
+
+    // Counter reflects the three successful dispatches on top of the seed.
+    expect(state.budget.sessionsSpawned).toBe(53);
+  });
+});
+
+// ── Display counter: successful dispatch increments; cancel/timeout refunds ─
+
+describe("sessionsSpawned display counter — increment / refund semantics", () => {
+  it("increments per successful dispatch and counts completed tasks", async () => {
+    const g = decl(["A", "B"]);
     const fake = new ScriptedDispatch();
     const { state, engine } = buildEngine(g, fake, new BudgetBridge(makeTracker(), g));
 
     await engine.dispatchReady();
-    await new Promise((r) => setTimeout(r, 25)); // let A/B auto-completions drain
-
-    // A and B launched (one net-live session each); C was never dispatched.
+    expect(state.budget.sessionsSpawned).toBe(2);
     expect(fake.dispatches("A")).toBe(1);
     expect(fake.dispatches("B")).toBe(1);
-    expect(fake.dispatches("C")).toBe(0);
 
-    // C escalated in place with the bridge's exact reason — the engine's
-    // pre-check escalation path (markEscalated + removeFromFrontier + notify).
-    const c = state.nodes.get("C")!;
-    expect(c.status).toBe(NodeStatus.Escalate);
-    expect(c.errorReason).toBe("graph session budget exhausted: 2 >= 2");
-
-    // Completed tasks keep counting (S4 semantics) — the counter stays at 2.
+    // Auto-completions land as `completed` — completed tasks keep counting.
+    await new Promise((r) => setTimeout(r, 25));
     expect(state.budget.sessionsSpawned).toBe(2);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
   });
-});
 
-// ── Refund: cancelled dispatch frees the slot (S4 consistency) ─────────────
-
-describe("S4-consistency — cancelled dispatch refunds its net-live slot", () => {
-  it("a cancelled held dispatch frees the slot so a later dispatch is permitted", async () => {
-    const g = decl(["A", "B"], { max_total_sessions: 1 });
-    const fake = new ScriptedDispatch(["A"]); // A stays running; B escalates at the cap
+  it("a cancelled held dispatch decrements the net-live display counter", async () => {
+    const g = decl(["A", "B"]);
+    const fake = new ScriptedDispatch(["A"]); // A stays running; B auto-completes
     const { state, engine } = buildEngine(g, fake, new BudgetBridge(makeTracker(), g));
 
     await engine.dispatchReady();
-    expect(state.budget.sessionsSpawned).toBe(1);
-    expect(fake.dispatches("A")).toBe(1);
-    expect(fake.dispatches("B")).toBe(0);
-    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.budget.sessionsSpawned).toBe(2);
 
     // Cancel A's live dispatch task through the registered onTaskTerminated
-    // listener — the graph-level mirror of S4's decRequestSessions refund.
+    // listener — the -1 refund keeps the display counter accurate.
     fake.fireTermination(fake.taskIds[0], "cancelled");
-    expect(state.budget.sessionsSpawned).toBe(0);
+    expect(state.budget.sessionsSpawned).toBe(1);
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Cancelled);
 
-    // The freed slot permits a subsequent dispatch: re-open B and run again.
+    // B completed in the meantime — its slot keeps counting, so the counter
+    // rests at exactly 1 (A refunded, B still counted).
+    await new Promise((r) => setTimeout(r, 25));
+    expect(state.budget.sessionsSpawned).toBe(1);
+
+    // A later dispatch is permitted unconditionally (no cap): re-open B and
+    // run again — the counter climbs, nothing blocks it.
     const bNode = state.nodes.get("B")!;
     markReady(state, bNode);
     addToFrontier(state, "B");
     await engine.dispatchReady();
-    expect(fake.dispatches("B")).toBe(1);
-    expect(state.budget.sessionsSpawned).toBe(1);
+    expect(fake.dispatches("B")).toBe(2);
+    expect(state.budget.sessionsSpawned).toBe(2);
   });
 });

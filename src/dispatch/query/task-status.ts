@@ -147,9 +147,6 @@ function getDetailedStatus(manager: DispatchManager, taskId: string): string {
   lines.push(`- **Depth**: ${task.depth ?? 0}`);
   lines.push(`- **Session ID**: \`${task.sessionId}\``);
   lines.push(`- **Parent Session ID**: \`${task.parentSessionId}\``);
-  if (task.concurrencyKey) {
-    lines.push(`- **Concurrency Key**: ${task.concurrencyKey}`);
-  }
   lines.push("");
 
   // Status

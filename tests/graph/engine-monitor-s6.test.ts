@@ -45,7 +45,7 @@ const fastConfig = {
 };
 
 /** Minimal single-node declaration, optionally carrying a per-node budget. */
-function singleNode(budget?: { timeout_ms?: number; max_sessions?: number }): GraphDeclaration {
+function singleNode(budget?: { timeout_ms?: number }): GraphDeclaration {
   return {
     version: 2,
     name: "m6",
@@ -65,11 +65,11 @@ function singleNode(budget?: { timeout_ms?: number; max_sessions?: number }): Gr
 
 describe("M2 — per-node budget carrier (registerNode) and timeout flow (executeNode)", () => {
   it("registerNode shallow-clones the declared budget into node.budget", () => {
-    const decl = singleNode({ timeout_ms: 42_000, max_sessions: 2 });
+    const decl = singleNode({ timeout_ms: 42_000 });
     const state = createEngineState(decl, "g-m2-clone");
     const node = registerNode(state, decl.nodes[0]);
 
-    expect(node.budget).toEqual({ timeout_ms: 42_000, max_sessions: 2 });
+    expect(node.budget).toEqual({ timeout_ms: 42_000 });
     // Clone, not aliasing: mutating the declaration must not leak into the
     // runtime carrier.
     expect(node.budget).not.toBe(decl.nodes[0].budget);

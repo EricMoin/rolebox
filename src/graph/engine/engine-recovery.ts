@@ -404,12 +404,12 @@ export function subscribeTaskTermination(
     // the node advances. Idempotent replace — safe across the live-seam /
     // race-guard double-observation of the same termination.
     captureNodeUsage(state, current, port);
-    // Graph session budget (S5): a cancelled / timed-out dispatch task refunds
-    // its net-live session slot — the graph-level mirror of S4's
-    // `decRequestSessions` (the dispatch layer refunds cancelled/timeout tasks
-    // only; completed / error / blocked keep counting). Without this refund a
-    // cancelled sibling would hold its slot forever and permanently starve
-    // later dispatches under `budget.max_total_sessions`.
+    // Session-slot refund (the graph-level mirror of S4's `decRequestSessions`):
+    // a cancelled / timed-out dispatch task refunds its net-live session slot
+    // (the dispatch layer refunds cancelled/timeout tasks only; completed /
+    // error / blocked keep counting). The graph-declared session cap was
+    // removed, so this refund no longer gates dispatch — `sessionsSpawned`
+    // remains a NET-LIVE display counter, and the -1 refund keeps it accurate.
     if (status === "cancelled" || status === "timeout") {
       applyBudgetDelta(state, { sessions: -1 });
     }

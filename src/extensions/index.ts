@@ -14,7 +14,6 @@ export type {
   NotificationChannelModule,
   ObserveHandlerModule,
   ObserveCapabilityModule,
-  ConcurrencyPolicyModule,
   ExtensionModule,
 } from "./types.ts";
 

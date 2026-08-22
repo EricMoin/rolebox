@@ -229,10 +229,6 @@ export function createTaskBudgetTool(dispatchManager: DispatchManager) {
       const requestUsage = budgetTracker.getRequestUsage(sessionID);
       budgetTracker.isRequestBudgetExceeded(sessionID);
 
-      // Sessions used under this parent = child tasks dispatched from it.
-      const childTasks = dispatchManager.getTasksByParent(sessionID);
-      const sessionsUsed = childTasks.length;
-
       const lines: string[] = [];
       lines.push(`## Task Budget: \`${sessionID}\``);
       lines.push("");
@@ -241,11 +237,6 @@ export function createTaskBudgetTool(dispatchManager: DispatchManager) {
       lines.push("");
       lines.push("| Metric | Current | Limit | % Used | Remaining |");
       lines.push("|--------|---------|-------|--------|-----------|");
-      lines.push(
-        `| Sessions | ${sessionsUsed} | ${fmtLimit(config.maxTotalSessionsPerRequest)} | ` +
-          `${pct(sessionsUsed, config.maxTotalSessionsPerRequest)} | ` +
-          `${fmtRemaining(sessionsUsed, config.maxTotalSessionsPerRequest)} |`,
-      );
       lines.push(
         `| Input Tokens | ${requestUsage.inputTokens} | ${fmtLimit(config.maxInputTokensPerRequest)} | ` +
           `${pct(requestUsage.inputTokens, config.maxInputTokensPerRequest)} | ` +
@@ -511,66 +502,6 @@ export function createTaskRetryTool(dispatchManager: DispatchManager) {
         log.warn(`task_retry failed for id=${task_id}: ${message}`, { tag: "task-retry", taskId: task_id });
         return `Retry failed for task \`${task_id}\`: ${message}`;
       }
-    },
-  });
-}
-
-// ── task_concurrency ───────────────────────────────────────────────────────
-
-export function createTaskConcurrencyTool(manager: DispatchManager) {
-  return defineTool({
-    description:
-      "Retrieve real-time concurrency slot status per concurrency key. Shows active slots, limits, available capacity, reserved slots, and queue depth. Returns a human-readable summary or JSON. Optionally exports the status JSON to a file. Rolebox-specific: the opencode platform has no native concurrency slot monitoring.",
-    args: {
-      format: z
-        .enum(["summary", "json"])
-        .optional()
-        .default("summary")
-        .describe("Output format: 'summary' for human-readable, 'json' for machine parsing"),
-      export_path: z
-        .string()
-        .optional()
-        .describe("Optional file path to write the status JSON atomically"),
-    },
-    async execute(input, context: CanonicalToolContext) {
-      const status = manager.getConcurrencyStatus();
-      const jsonStr = JSON.stringify(status, null, 2);
-
-      if (input.export_path) {
-        const resolved = resolveWithinWorkspace(context, input.export_path);
-        if ("error" in resolved) {
-          return `Error: ${resolved.error}`;
-        }
-        writeFileAtomic(resolved.fullPath, jsonStr);
-      }
-
-      if (input.format === "json") {
-        return jsonStr;
-      }
-
-      if (status.keys.length === 0) {
-        return "No concurrency keys registered. No tasks have been dispatched yet.";
-      }
-
-      const lines: string[] = ["## Task Concurrency Status", ""];
-      lines.push("### Per-Key Breakdown");
-      lines.push("");
-      lines.push("| Key | Active | Limit | Available | Reserved | Queue Depth |");
-      lines.push("|-----|--------|-------|-----------|----------|-------------|");
-      for (const key of status.keys) {
-        lines.push(
-          `| ${key.key} | ${key.active} | ${key.limit} | ${key.available} | ${key.reserved} | ${key.queueDepth} |`,
-        );
-      }
-      lines.push("");
-      lines.push("### Global Summary");
-      lines.push("");
-      lines.push(`- Total active: ${status.total.active}`);
-      lines.push(`- Total limit: ${status.total.limit}`);
-      lines.push(`- Total queue depth: ${status.total.queueDepth}`);
-      lines.push(`- Concurrency keys: ${status.total.keys}`);
-
-      return lines.join("\n");
     },
   });
 }
@@ -845,7 +776,6 @@ export function createTaskTools(
     task_budget: createTaskBudgetTool(manager),
     task_graph: createTaskGraphTool(manager),
     task_retry: createTaskRetryTool(manager),
-    task_concurrency: createTaskConcurrencyTool(manager),
     task_chronology: createTaskChronologyTool(manager),
     task_export: createTaskExportTool(manager, directory),
   };

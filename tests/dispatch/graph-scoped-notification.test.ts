@@ -43,7 +43,6 @@ import { metrics } from "../../src/dispatch/persistence/metrics";
 
 const fastConfig = {
   staleTimeoutMs: 500,
-  maxConcurrent: 5,
   taskTtlMs: 100,
 };
 
@@ -158,23 +157,6 @@ describe("graph-scoped notification suppression", () => {
     expect(client.prompt).not.toHaveBeenCalled();
   });
 
-  it("suppresses the budget-exhausted launch notification for a graph-scoped task (lifecycle notifyCompletion path)", async () => {
-    const client = createMockClient();
-    // maxTotalSessionsPerRequest: 0 forces the launcher's budget-exhausted
-    // path, which calls lifecycle-shared notifyCompletion with the error task.
-    const manager = new DispatchManager(client, { maxTotalSessionsPerRequest: 0, ...fastConfig });
-
-    const task = await manager.launch(
-      graphInput(),
-      graphParentContext({ graphId: "graph-abc", directory: "/tmp/test" }),
-    );
-
-    expect(task.status).toBe("error");
-    expect(task.graphScoped).toBe(true);
-    await new Promise((r) => setTimeout(r, 10));
-    expect(client.prompt).not.toHaveBeenCalled();
-  });
-
   it("still emits [BACKGROUND TASK COMPLETED] for a real-session task (intermediate)", async () => {
     const client = createMockClient();
     const manager = new DispatchManager(client, fastConfig);
@@ -215,29 +197,6 @@ describe("graph-scoped notification suppression", () => {
     expect(calls[0][1].parts[0].text).toContain(DISPATCH_ALL_COMPLETE_MARKER);
     expect(calls[0][1].parts[0].text).not.toContain(DISPATCH_COMPLETION_MARKER);
     expect(calls[0][1].noReply).toBe(false);
-  });
-
-  it("real-session budget-exhausted launch still notifies the parent", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, { maxTotalSessionsPerRequest: 0, ...fastConfig });
-
-    const task = await manager.launch(
-      {
-        subagent: "helper",
-        prompt: "real work",
-        run_in_background: true,
-      },
-      parentContext(),
-    );
-
-    expect(task.status).toBe("error");
-    expect(task.graphScoped).toBeUndefined();
-    await new Promise((r) => setTimeout(r, 10));
-
-    const calls = (client.prompt as ReturnType<typeof mock>).mock.calls;
-    expect(calls).toHaveLength(1);
-    expect(calls[0][0]).toBe("parent-session-1");
-    expect(calls[0][1].parts[0].text).toContain(DISPATCH_ALL_COMPLETE_MARKER);
   });
 });
 

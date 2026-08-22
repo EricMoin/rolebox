@@ -76,8 +76,6 @@ export interface DispatchTask {
   error?: string;
   /** Runtime progress metrics */
   progress: TaskProgress;
-  /** Optional concurrency key, set during launch for recovered tasks */
-  concurrencyKey?: string;
   /** Task ID this continues from (set on re-prompt continuation) */
   continuationOf?: string;
   /** Message count at continuation time — used as lower bound for output detection */

@@ -6,7 +6,6 @@ import {
   notifyCompletion,
   leaveRunning,
   notifyTerminated,
-  decRequestSessions,
 } from "./lifecycle-shared.ts";
 import { infoLog, debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
@@ -51,8 +50,6 @@ export async function cancelTask(
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
     d.clearEmittedThresholds(taskId);
     notifyTerminated(d, taskId, "cancelled");
-    // Refund the per-request session slot — cancelled tasks produced no result.
-    decRequestSessions(d, taskId);
     void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
     scheduleCleanup(d, taskId);
     return true;
@@ -77,10 +74,6 @@ export async function cancelTask(
     metrics.counter("dispatch_cancelled_total", { agent: t.agent }).inc();
     d.clearEmittedThresholds(taskId);
     notifyTerminated(d, taskId, "cancelled");
-    // Refund the slot ONLY when this sync task actually counted one (a new
-    // session was created); a pending sync task cancelled before session
-    // creation or a continuation never incremented — decRequestSessions no-ops.
-    decRequestSessions(d, taskId);
     return true;
   }
 
@@ -99,8 +92,6 @@ export async function cancelTask(
   d.watchdog.cancelDebounce(taskId);
   d.clearEmittedThresholds(taskId);
   notifyTerminated(d, taskId, "cancelled");
-  // Refund the per-request session slot — cancelled tasks produced no result.
-  decRequestSessions(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);
   return true;

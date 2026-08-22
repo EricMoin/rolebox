@@ -710,7 +710,6 @@ export default async function (pi: any): Promise<void> {
     }
 
     log.info("Dispatch manager initialized", {
-      maxConcurrent: dispatchManager.getConfig().maxConcurrent,
       subagentKeys: subagentModelKey.size,
     });
 

@@ -1,10 +1,7 @@
 import type { DispatchInput } from "../types.ts";
 import type { TaskLifecycleDeps } from "./lifecycle-shared.ts";
 import {
-  deriveKey,
   computeDepth,
-  getRequestSessions,
-  incRequestSessions,
   addToParentIndex,
   removeFromParentIndex,
 } from "./lifecycle-shared.ts";
@@ -13,26 +10,23 @@ import { metrics } from "../persistence/metrics.ts";
 import { withTimeout, TimeoutError } from "./with-timeout.ts";
 import {
   SYNC_TIMEOUT_MS,
-  DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS,
   MATERIALIZE_TIMEOUT_MS,
 } from "../config.ts";
 
 /**
  * Execute a dispatch synchronously (blocking the caller).
  * Only allowed at depth===0 (direct dispatch from the caller session).
- * Handles session creation/continuation, concurrency acquisition, prompt timeout.
+ * Handles session creation/continuation and prompt timeout.
  */
 export async function executeSync(
   d: TaskLifecycleDeps,
   input: DispatchInput,
   parentContext: { sessionID: string; agent: string; directory: string },
 ): Promise<string> {
-  const acquireTimeoutMs = d.config.syncAcquireTimeoutMs ?? DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS;
   const promptTimeoutMs = input.sync_timeout_ms
     ?? d.config.syncPromptTimeoutMs
     ?? d.config.syncTimeoutMs
     ?? SYNC_TIMEOUT_MS;
-  const concurrencyKey = deriveKey(d, input.subagent);
 
   const callerDepth = computeDepth(d, parentContext.sessionID);
   if (callerDepth > 0) {
@@ -41,10 +35,6 @@ export async function executeSync(
       depth: callerDepth,
     }));
   }
-
-  const budget = d.config.maxTotalSessionsPerRequest;
-  const root = parentContext.sessionID;
-  const isNewSession = !input.session_id;
 
   let existingSessionId: string | undefined;
   if (input.session_id) {
@@ -59,15 +49,6 @@ export async function executeSync(
         phase: "continuation",
       }));
     }
-  }
-
-  if (isNewSession && budget !== undefined && getRequestSessions(d, root) >= budget) {
-    metrics.counter("dispatch_rejected_total", { reason: "budget-exhausted" }).inc();
-    throw new Error(JSON.stringify({
-      error: "Session budget exhausted",
-      limit: budget,
-      spawned: getRequestSessions(d, root),
-    }));
   }
 
   const taskId = `sync_${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
@@ -90,28 +71,9 @@ export async function executeSync(
   d.tasks.set(taskId, task);
   addToParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
 
-  let didAcquire = false;
   const startTime = Date.now();
 
   try {
-    const { promise: acq, cancel: cancelAcq } = d.concurrency.acquireSync(concurrencyKey);
-    let acqTimer: ReturnType<typeof setTimeout> | undefined;
-    const acqTimeout = new Promise<"timeout">((r) => {
-      acqTimer = setTimeout(() => r("timeout"), acquireTimeoutMs);
-    });
-    const acqResult = await Promise.race([acq.then(() => "acquired" as const), acqTimeout]);
-    clearTimeout(acqTimer);
-
-    if (acqResult === "timeout") {
-      cancelAcq();
-      const err = JSON.stringify({
-        error: `Timed out waiting for a concurrency slot after ${acquireTimeoutMs}ms`,
-        phase: "acquire",
-        timeout_ms: acquireTimeoutMs,
-      });
-      throw new Error(err);
-    }
-    didAcquire = true;
     metrics.counter("dispatch_total", { agent: input.subagent, mode: "sync" }).inc();
     metrics.gauge("inflight_tasks").inc();
 
@@ -156,7 +118,6 @@ export async function executeSync(
       d.sessionToTask.set(session.id, taskId);
       d.completedSyncSessions.set(taskId, session.id);
       d.completedSyncSessionsSetAt.set(taskId, Date.now());
-      if (isNewSession) incRequestSessions(d, root, taskId);
     }
 
     const controller = new AbortController();
@@ -206,12 +167,5 @@ export async function executeSync(
     d.sessionToTask.delete(task.sessionId);
     removeFromParentIndex(d.parentTasksIndex, task.parentSessionId, taskId);
     d.tasks.delete(taskId);
-    // Sync tasks never reach scheduleCleanup — prune the counting marker here.
-    // A cancelled sync task already had its marker consumed by the refund;
-    // a completed sync task keeps its slot counted but must not leak the marker.
-    d.budgetCountedTasks.delete(taskId);
-    if (didAcquire) {
-      d.concurrency.release(concurrencyKey, parentContext.sessionID);
-    }
   }
 }

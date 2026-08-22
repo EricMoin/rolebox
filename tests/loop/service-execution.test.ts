@@ -153,8 +153,7 @@ function createStatefulDispatchMocks(): StatefulDispatchMocks {
     // Used during service init (ExtensionService bridges recovery snapshots /
     // concurrency policies into the manager) — no-ops for the mock.
     setRecoverySnapshotProvider: mock(() => {}),
-    setConcurrencyManager: mock(() => {}),
-    getConfig: mock(() => ({ maxConcurrent: 4 })),
+    getConfig: mock(() => ({})),
     dispose: mock(async () => {}),
     flushPersistSync: mock(() => {}),
   };

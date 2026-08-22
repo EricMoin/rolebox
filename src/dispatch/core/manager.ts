@@ -10,7 +10,6 @@ import {
   GLOBAL_SWEEP_INTERVAL_MS,
   IDLE_DEBOUNCE_MS,
 } from "../config.ts";
-import { ConcurrencyManager, type IConcurrencyManager } from "../concurrency/concurrency.ts";
 import { TaskWatchdogManager } from "./watchdog.ts";
 import { notifyParent } from "../notification.ts";
 import { SessionMonitor } from "../completion/session-monitor.ts";
@@ -35,7 +34,6 @@ export class DispatchManager {
   private sidecarGCTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingNotifications: Set<string> = new Set();
   private cleanedUpTasks = new Map<string, number>();
-  private concurrency: IConcurrencyManager;
   private config: DispatchManagerConfig;
   private client: ISessionClient;
   private watchdog: TaskWatchdogManager;
@@ -44,9 +42,6 @@ export class DispatchManager {
   private store: TaskStateStore;
   private checkpointStore: FileSystemCheckpointStore;
 
-  private sessionsByRequest = new Map<string, number>();
-  /** Task ids holding a per-request session slot in this process (refund bookkeeping). */
-  private budgetCountedTasks = new Set<string>();
   private _cancelQueue: Map<string, () => void> = new Map();
   private _syncControllers: Map<string, AbortController> = new Map();
   /** Maps completed sync task IDs to their opencode session IDs for continuation support. */
@@ -82,30 +77,11 @@ export class DispatchManager {
     client: ISessionClient,
     config?: Partial<DispatchManagerConfig>,
     subagentModelKey?: Map<string, string>,
-    customConcurrency?: IConcurrencyManager,
     roleConfigs?: ReadonlyMap<string, DispatchManagerConfig>,
     subagentRoleKey?: Map<string, string>,
   ) {
     this.client = client;
     this.config = { ...DEFAULT_CONFIG, ...config };
-    if (customConcurrency) {
-      this.concurrency = customConcurrency;
-    } else if (this.config.concurrency_policy) {
-      this.concurrency = this.config.concurrency_policy(
-        this.config.maxConcurrent,
-        this.config.maxQueueDepth ?? DEFAULT_CONFIG.maxQueueDepth ?? 100,
-        this.config.syncReservedSlots ?? 2,
-        this.config.retryAfterMs,
-      );
-    } else {
-      this.concurrency = new ConcurrencyManager(
-        this.config.maxConcurrent,
-        this.config.maxQueueDepth ?? 100,
-        this.config.syncReservedSlots ?? 2,
-        this.config.retryAfterMs,
-        roleConfigs,
-      );
-    }
     this._directory = process.cwd();
     this.store = new TaskStateStore(this._directory);
     this.subagentModelKey = subagentModelKey ?? new Map();
@@ -144,7 +120,6 @@ export class DispatchManager {
       tasks: this.tasks,
       eventState: this.eventState,
       client: this.client,
-      concurrency: this.concurrency,
       watchdog: this.watchdog,
       config: this.config,
       sessionToTask: this.sessionToTask,
@@ -177,7 +152,6 @@ export class DispatchManager {
       tasks: this.tasks,
       eventState: this.eventState,
       client: this.client,
-      concurrency: this.concurrency,
       watchdog: this.watchdog,
       config: this.config,
       cancelQueue: this._cancelQueue,
@@ -188,8 +162,6 @@ export class DispatchManager {
       sidecarGCTimers: this.sidecarGCTimers,
       pendingNotifications: this.pendingNotifications,
       sessionToTask: this.sessionToTask,
-      sessionsByRequest: this.sessionsByRequest,
-      budgetCountedTasks: this.budgetCountedTasks,
       notifyOutbox: this.notifyOutbox,
       deferredIdleTimers: this._deferredIdleTimers,
       cleanedUpTasks: this.cleanedUpTasks,
@@ -222,14 +194,14 @@ export class DispatchManager {
 
   async launch(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
+    parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
   ): Promise<DispatchTask> {
     return this.lifecycle.launch(input, parentContext);
   }
 
   async executeSync(
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
+    parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
   ): Promise<string> {
     return this.lifecycle.executeSync(input, parentContext);
   }
@@ -237,7 +209,7 @@ export class DispatchManager {
   async reopenForContinuation(
     taskId: string,
     input: DispatchInput,
-    parentContext: { sessionID: string; agent: string; directory: string; maxActivePerParent?: number; graphScoped?: boolean },
+    parentContext: { sessionID: string; agent: string; directory: string; graphScoped?: boolean },
   ): Promise<DispatchTask> {
     return this.lifecycle.reopenForContinuation(taskId, input, parentContext);
   }
@@ -432,42 +404,6 @@ export class DispatchManager {
     return [...this.tasks.values()];
   }
 
-  getConcurrencyStatus(): {
-    keys: Array<{
-      key: string;
-      active: number;
-      limit: number;
-      available: number;
-      reserved: number;
-      queueDepth: number;
-    }>;
-    total: {
-      active: number;
-      limit: number;
-      queueDepth: number;
-      keys: number;
-    };
-  } {
-    const allKeys = this.concurrency.getAllKeys();
-    const keys = allKeys.map(key => {
-      const active = this.concurrency.getActiveCount(key);
-      const limit = this.concurrency.getLimit(key);
-      const reserved = this.concurrency.getReserved(key);
-      const queueDepth = this.concurrency.getQueueDepth(key);
-      const available = Math.max(0, limit - active);
-      return { key, active, limit, available, reserved, queueDepth };
-    });
-
-    const total = {
-      active: keys.reduce((s, k) => s + k.active, 0),
-      limit: keys.reduce((s, k) => s + k.limit, 0),
-      queueDepth: keys.reduce((s, k) => s + k.queueDepth, 0),
-      keys: keys.length,
-    };
-
-    return { keys, total };
-  }
-
   getMetricsSnapshot(): import("../persistence/metrics.ts").MetricsSnapshot {
     return metrics.snapshot();
   }
@@ -567,22 +503,13 @@ export class DispatchManager {
   materializeResult(taskId: string): Promise<import("../types.ts").MaterializedResultRef> { return this.lifecycle.materializeResult(taskId); }
   materializeAndNotify(taskId: string): Promise<void> { return this.lifecycle.materializeAndNotify(taskId); }
   computeDepth(parentSessionId: string): number { return this.lifecycle.computeDepth(parentSessionId); }
-  getRequestSessions(rootSession: string): number { return this.lifecycle.getRequestSessions(rootSession); }
   leaveRunning(taskId: string): void { this.lifecycle.leaveRunning(taskId); }
   persistState(): void { this.orchestrator.persistState(); }
   scheduleCleanup(taskId: string): void { this.orchestrator.scheduleCleanup(taskId); }
   transition(taskId: string, from: import("../types.ts").DispatchTaskStatus[], to: import("../types.ts").DispatchTaskStatus, fields?: Partial<Pick<DispatchTask, "error" | "completedAt">>): boolean { return this.orchestrator.transition(taskId, from, to, fields); }
 
-  setConcurrencyManager(manager: IConcurrencyManager): void {
-    this.concurrency = manager;
-    this.lifecycle.setConcurrencyManager(manager);
-  }
-
   /**
    * Update role-scoped dispatch configs and the subagent→role key map at runtime.
-   * Propagates the configs to the ConcurrencyManager when it supports them
-   * (guarded — custom IConcurrencyManager implementations may not implement
-   * setRoleConfigs).
    */
   updateDispatchConfigs(
     roleConfigs: ReadonlyMap<string, DispatchManagerConfig>,
@@ -592,9 +519,8 @@ export class DispatchManager {
     this.subagentRoleKey = subagentRoleKey;
     // Propagate the new maps into the lifecycle deps — they were captured by
     // reference at construction, so rebinding the manager's fields alone would
-    // leave deriveKey/effectiveConfigFor reading stale role mappings.
+    // leave effectiveConfigFor reading stale role mappings.
     this.lifecycle.setDispatchConfigs(roleConfigs, subagentRoleKey);
-    this.concurrency.setRoleConfigs?.(roleConfigs);
   }
 
   setStoreDirectory(directory: string): void {

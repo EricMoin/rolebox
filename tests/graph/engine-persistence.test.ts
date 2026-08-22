@@ -65,7 +65,7 @@ function richDeclaration(): GraphDeclaration {
     loop_groups: [
       { id: "lg1", nodes: ["A", "B"], max_traversals: 3, termination: { any_of: [{ converged: "done" }] } },
     ],
-    budget: { max_total_sessions: 10 },
+    budget: { max_total_cost_usd: 0.1 },
   };
 }
 

@@ -49,7 +49,6 @@ import {
 /** Graph-level budget spec (tool-merge-map.md §2.2 `GraphBudget`). */
 const graphBudgetSchema = z
   .object({
-    max_total_sessions: z.number().optional(),
     max_total_input_tokens: z.number().optional(),
     max_total_output_tokens: z.number().optional(),
     max_total_cost_usd: z.number().optional(),
@@ -59,7 +58,6 @@ const graphBudgetSchema = z
 /** Per-node budget spec (tool-merge-map.md §2.2 `NodeBudget` + timeout/retry). */
 const nodeBudgetSchema = z
   .object({
-    max_sessions: z.number().optional(),
     max_input_tokens: z.number().optional(),
     max_output_tokens: z.number().optional(),
     max_cost_usd: z.number().optional(),
@@ -536,15 +534,6 @@ function createGraphStatusTool(
         .boolean()
         .optional()
         .describe("Include all loop groups for this graph."),
-      include_concurrency: z
-        .boolean()
-        .optional()
-        .describe(
-          "When set, render live dispatch-manager concurrency slot status (the " +
-            "dispatch_concurrency merge) from manager.getConcurrencyStatus() — " +
-            "per-key breakdown + global summary. When no dispatch manager is bound, " +
-            "returns an explicit documented-unavailable note — never fabricated slot data.",
-        ),
       include_checkpoint: z
         .boolean()
         .optional()

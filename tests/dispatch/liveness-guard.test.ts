@@ -19,7 +19,6 @@ import { createMockClient, parentContext } from "./helpers";
 describe("completion-evaluator liveness guard", () => {
   const fastConfig = {
     staleTimeoutMs: 500,
-    maxConcurrent: 5,
     taskTtlMs: 100,
   };
 
@@ -78,7 +77,6 @@ describe("completion-evaluator liveness guard", () => {
 
     // Cleanup
     mgr.watchdog.unregisterTask(task.id);
-    mgr.concurrency.release("default");
   });
 
   it("genuine session.error while session verifies 'missing' still errors the task (genuine-failure path preserved)", async () => {
@@ -99,7 +97,6 @@ describe("completion-evaluator liveness guard", () => {
 
     // Cleanup
     mgr.watchdog.unregisterTask(task.id);
-    mgr.concurrency.release("default");
   });
 
   it("transient session.deleted while session verifies 'exists' keeps the task running + watchdog registered", async () => {
@@ -125,6 +122,5 @@ describe("completion-evaluator liveness guard", () => {
 
     // Cleanup
     mgr.watchdog.unregisterTask(task.id);
-    mgr.concurrency.release("default");
   });
 });

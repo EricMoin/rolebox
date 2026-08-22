@@ -6,8 +6,6 @@ import {
   notifyCompletion,
   leaveRunning,
   notifyTerminated,
-  resetRequestSessions,
-  decRequestSessions,
 } from "../core/lifecycle-shared.ts";
 import { detectCompletion, hasInflightToolPart } from "./completion-detector.ts";
 import { extractSessionErrorMessage } from "../core/error-utils.ts";
@@ -61,10 +59,6 @@ async function checkHitlSignals(d: TaskLifecycleDeps, taskId: string): Promise<b
 
   metrics.counter("dispatch_hitl_paused_total", { type: hitlType }).inc();
 
-  // Release concurrency slot
-  if (t.concurrencyKey) {
-    d.concurrency.release(t.concurrencyKey, t.parentSessionId);
-  }
   metrics.gauge("inflight_tasks").dec();
   d.persistState();
 
@@ -173,8 +167,6 @@ function timeoutAndRelease(d: TaskLifecycleDeps, taskId: string, reason: string)
   d.watchdog.cancelDebounce(taskId);
   notifyTerminated(d, taskId, "timeout");
   const t = d.tasks.get(taskId)!;
-  // Refund the per-request session slot — a timed-out task produced no result.
-  decRequestSessions(d, taskId);
   // Abort the worker session to prevent leaks (mirrors task-cancellation.ts:83-84)
   if (t.sessionId) {
     d.client.abort(t.sessionId).catch(() => {});
@@ -707,7 +699,6 @@ export async function handleSessionError(d: TaskLifecycleDeps, sessionId: string
 
 /** Handle session.deleted event — route to evaluateAndComplete with deleted-event trigger. */
 export async function handleSessionDeleted(d: TaskLifecycleDeps, sessionId: string): Promise<void> {
-  resetRequestSessions(d, sessionId);
   const taskId = d.sessionToTask.get(sessionId);
   if (!taskId) return;
   debugLog("event", taskId, `session.deleted — routing to evaluateAndComplete`);
@@ -758,8 +749,6 @@ export function handleTaskTimeout(d: TaskLifecycleDeps, taskId: string, reason: 
   infoLog("lifecycle", taskId, `⏱ timeout agent=${t.agent}: ${reason}`);
   metrics.counter("dispatch_timeout_total", { agent: t.agent }).inc();
   notifyTerminated(d, taskId, "timeout");
-  // Refund the per-request session slot — a timed-out task produced no result.
-  decRequestSessions(d, taskId);
   cleanupTerminalError(d, taskId);
   void notifyCompletion(d, t, getInflightCount(d, t.parentSessionId));
   leaveRunning(d, taskId);

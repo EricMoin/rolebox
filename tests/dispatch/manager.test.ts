@@ -14,7 +14,6 @@ import { TimeoutError } from "../../src/dispatch/core/with-timeout";
 
 const fastConfig = {
   staleTimeoutMs: 500,
-  maxConcurrent: 5,
   taskTtlMs: 100,
 };
 
@@ -125,37 +124,12 @@ describe("DispatchManager", () => {
 
   // ── 2b. executeSync() hardened ───────────────────────────────
 
-  it("T7: executeSync acquires slot from shared concurrency pool", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 5000 });
-    const mgr = manager as any;
-
-    // Fill all slots with non-releasing acquires
-    Array.from({ length: 5 }, () => mgr.concurrency.acquireCancelable("default"));
-    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
-
-    // executeSync will block since pool is full
-    const syncPromise = manager.executeSync(
-      { subagent: "sync-test", prompt: "hello", run_in_background: false },
-      parentContext(),
-    );
-
-    // Release one slot — sync should acquire it
-    mgr.concurrency.release("default");
-
-    const result = await syncPromise;
-    expect(result).toBe("Hello from subagent");
-    // After completion, sync released its slot: 4 bg + 0 sync = 4
-    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
-  });
-
-  it("T8: executeSync prompt timeout releases slot and aborts session", async () => {
+  it("T8: executeSync prompt timeout aborts session", async () => {
     const client = createMockClient({
       sessionPrompt: () => new Promise<never>(() => {}), // never resolves
       sessionAbort: () => Promise.resolve(true),
     });
-    const manager = new DispatchManager(client, { ...fastConfig, syncPromptTimeoutMs: 20, syncAcquireTimeoutMs: 5000 });
-    const mgr = manager as any;
+    const manager = new DispatchManager(client, { ...fastConfig, syncPromptTimeoutMs: 20 });
 
     await expect(
       manager.executeSync(
@@ -164,52 +138,7 @@ describe("DispatchManager", () => {
       ),
     ).rejects.toThrow(/timed out/);
 
-    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
     expect(client.abort).toHaveBeenCalled();
-  });
-
-  it("T9: executeSync acquire timeout cancels orphaned waiter", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, { ...fastConfig, syncAcquireTimeoutMs: 20 });
-    const mgr = manager as any;
-
-    // Fill pool to limit
-    Array.from({ length: 5 }, () => mgr.concurrency.acquireCancelable("default"));
-    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
-
-    // executeSync will time out waiting for a slot
-    await expect(
-      manager.executeSync(
-        { subagent: "sync-test", prompt: "hello", run_in_background: false },
-        parentContext(),
-      ),
-    ).rejects.toThrow(/concurrency slot/);
-
-    // Pool should still have 5 active (no slot leaked)
-    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
-
-    // Release one — should not hand it to the cancelled sync waiter
-    mgr.concurrency.release("default");
-    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
-  });
-
-  it("T10: executeSync shares concurrency pool with background tasks", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, { ...fastConfig, syncTimeoutMs: 50 });
-    const mgr = manager as any;
-
-    // Fill 4 background + 1 sync = 5 total (at limit)
-    Array.from({ length: 4 }, () => mgr.concurrency.acquireCancelable("default"));
-
-    // sync acquires 5th slot
-    const syncPromise = manager.executeSync(
-      { subagent: "sync-test", prompt: "hello", run_in_background: false },
-      parentContext(),
-    );
-    const result = await syncPromise;
-    expect(result).toBe("Hello from subagent");
-    // Sync released its slot
-    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
   });
 
   it("executeSync session create hang does not block forever", async () => {
@@ -219,10 +148,8 @@ describe("DispatchManager", () => {
     const manager = new DispatchManager(client, {
       ...fastConfig,
       materializeTimeoutMs: 20,
-      syncAcquireTimeoutMs: 5000,
       syncPromptTimeoutMs: 5000,
     });
-    const mgr = manager as any;
 
     await expect(
       manager.executeSync(
@@ -230,9 +157,6 @@ describe("DispatchManager", () => {
         parentContext(),
       ),
     ).rejects.toThrow(/timed out/);
-
-    // Slot must be released after timeout
-    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
   });
 
   // ── 2c. executeSync metrics ──────────────────────────────────
@@ -368,7 +292,6 @@ describe("DispatchManager", () => {
       const manager = new DispatchManager(client, {
         ...fastConfig,
         syncPromptTimeoutMs: 200,
-        syncAcquireTimeoutMs: 5000,
       });
       const mgr = manager as any;
 
@@ -413,31 +336,6 @@ describe("DispatchManager", () => {
       expect(mgr._syncControllers.has(syncTaskId!)).toBe(false);
     });
 
-    it("split timeouts: acquire uses syncAcquireTimeoutMs, prompt uses syncPromptTimeoutMs", async () => {
-      // Fill all slots so acquire times out quickly
-      const client = createMockClient();
-      const manager = new DispatchManager(client, {
-        ...fastConfig,
-        syncAcquireTimeoutMs: 20,
-        syncPromptTimeoutMs: 600_000,
-      });
-      const mgr = manager as any;
-
-      Array.from({ length: 5 }, () => mgr.concurrency.acquireCancelable("default"));
-
-      const err = await manager.executeSync(
-        { subagent: "sync-test", prompt: "hello", run_in_background: false },
-        parentContext(),
-      ).catch((e: Error) => e);
-
-      const parsed = JSON.parse(err.message);
-      expect(parsed.phase).toBe("acquire");
-      expect(parsed.error).toContain("concurrency slot");
-
-      // Release all slots
-      for (let i = 0; i < 5; i++) mgr.concurrency.release("default");
-    });
-
     it("sync_timeout_ms in input overrides prompt-phase timeout", async () => {
       const client = createMockClient({
         sessionPrompt: () => new Promise<never>(() => {}),
@@ -446,7 +344,6 @@ describe("DispatchManager", () => {
       const manager = new DispatchManager(client, {
         ...fastConfig,
         syncPromptTimeoutMs: 600_000,
-        syncAcquireTimeoutMs: 5000,
       });
 
       const err = await manager.executeSync(
@@ -466,7 +363,6 @@ describe("DispatchManager", () => {
     });
 
     it("sync throw produces JSON-structured error with phase field", async () => {
-      // Prompt timeout case
       const client = createMockClient({
         sessionPrompt: () => new Promise<never>(() => {}),
         sessionAbort: () => Promise.resolve(true),
@@ -474,7 +370,6 @@ describe("DispatchManager", () => {
       const manager = new DispatchManager(client, {
         ...fastConfig,
         syncPromptTimeoutMs: 20,
-        syncAcquireTimeoutMs: 5000,
       });
 
       const err = await manager.executeSync(
@@ -487,30 +382,6 @@ describe("DispatchManager", () => {
       expect(parsed.error).toBeDefined();
       expect(parsed.phase).toBe("prompt");
       expect(parsed.timeout_ms).toBe(20);
-
-      // Acquire timeout case
-      const client2 = createMockClient();
-      const manager2 = new DispatchManager(client2, {
-        ...fastConfig,
-        syncAcquireTimeoutMs: 20,
-        syncPromptTimeoutMs: 600_000,
-      });
-      const mgr2 = manager2 as any;
-
-      Array.from({ length: 5 }, () => mgr2.concurrency.acquireCancelable("default"));
-
-      const err2 = await manager2.executeSync(
-        { subagent: "sync-test", prompt: "hello", run_in_background: false },
-        parentContext(),
-      ).catch((e: Error) => e);
-
-      let parsed2: any;
-      expect(() => { parsed2 = JSON.parse(err2.message); }).not.toThrow();
-      expect(parsed2.error).toBeDefined();
-      expect(parsed2.phase).toBe("acquire");
-      expect(parsed2.timeout_ms).toBe(20);
-
-      for (let i = 0; i < 5; i++) mgr2.concurrency.release("default");
     });
 
     it("recover with persisted mode:sync running task marks error, no notify", async () => {
@@ -1616,7 +1487,7 @@ describe("DispatchManager", () => {
   // ── 10. double-completion guard ──────────────────────────────
 
   describe("double-completion guard", () => {
-    it("handleTaskCompleted twice does not double-release concurrency", async () => {
+    it("handleTaskCompleted twice keeps task completed and is idempotent", async () => {
       const client = createMockClient();
       const manager = new DispatchManager(client, fastConfig);
       const task = await manager.launch(
@@ -1625,17 +1496,12 @@ describe("DispatchManager", () => {
       );
 
       const mgr = manager as any;
-      const concurrencyKey = "default";
-
-      expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(1);
 
       mgr.handleTaskCompleted(task.id);
       expect(task.status).toBe("completed");
-      expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(0);
 
       mgr.handleTaskCompleted(task.id);
       expect(task.status).toBe("completed");
-      expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(0);
     });
 
     it("handleTaskCompleted on error-status task is no-op", async () => {
@@ -1699,7 +1565,7 @@ describe("DispatchManager", () => {
   // ── 11. handleSessionIdle race-guard ──────────────────────────
 
   describe("handleSessionIdle race-guard", () => {
-    it("direct completion wins during idle debounce — idle debounce no-ops, single release", async () => {
+    it("direct completion wins during idle debounce — idle debounce no-ops", async () => {
       const client = createMockClient();
       let resolveMessages!: (v: any) => void;
       const deferred = new Promise<any>((r) => { resolveMessages = r; });
@@ -1725,7 +1591,6 @@ describe("DispatchManager", () => {
       // While suspended, direct complete via handleTaskCompleted
       mgr.handleTaskCompleted(task.id);
       expect(t.status).toBe("completed");
-      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
 
       // Now resolve the deferred — idle resumes, starts debounce
       resolveMessages([
@@ -1733,9 +1598,8 @@ describe("DispatchManager", () => {
       ]);
       await idlePromise;
 
-      // After idle resumes: status still completed, concurrency still 0 (no double-release)
+      // After idle resumes: status still completed
       expect(t.status).toBe("completed");
-      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
     });
 
     it("second handleSessionIdle for same task is a no-op while already debouncing", async () => {
@@ -1774,188 +1638,6 @@ describe("DispatchManager", () => {
       // Second debounce → stable, completes
       await watchdog.triggerDebounce(task.id);
       expect(t.status).toBe("completed");
-      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-    });
-  });
-
-  // ── 12. queue-full rejection ──────────────────────────────────
-
-  describe("queue-full rejection", () => {
-    it("rejected task is scheduled for cleanup and notified with structured error", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, backpressureMaxRetries: 0 });
-      const mgr = manager as any;
-
-      // Fill the single slot
-      mgr.concurrency.acquireCancelable("default");
-
-      const task = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-
-      expect(task.status).toBe("error");
-      const parsed = JSON.parse(task.error!);
-      expect(parsed.error).toBe("Queue is full");
-      expect(parsed.queue_depth).toBe(0);
-      expect(parsed.limit).toBe(0);
-      expect(parsed.retry_after).toBeGreaterThan(0);
-      expect(task.completedAt).toBeInstanceOf(Date);
-
-      // Verify cleanup was scheduled
-      expect(mgr.cleanupTimers.has(task.id)).toBe(true);
-
-      const timer = mgr.cleanupTimers.get(task.id);
-      expect(timer).toBeDefined();
-
-      // Clean up
-      mgr.concurrency.release("default");
-      clearTimeout(timer);
-    });
-
-    it("queue-full does not consume a concurrency slot", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, backpressureMaxRetries: 0 });
-      const mgr = manager as any;
-
-      // Fill the single slot
-      mgr.concurrency.acquireCancelable("default");
-      expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-
-      const task = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-
-      expect(task.status).toBe("error");
-      // Still exactly 1 — rejected task never acquired
-      expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-
-      mgr.concurrency.release("default");
-    });
-  });
-
-  // ── 12b. non-blocking background dispatch (T4) ────────────────
-
-  describe("non-blocking background dispatch", () => {
-    it("T4-1: queued background dispatch returns immediately as pending", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
-      const mgr = manager as any;
-
-      const fill = mgr.concurrency.acquireBackground("default");
-      expect(fill.outcome).toBe("acquired");
-
-      const start = Date.now();
-      const task = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-      const elapsed = Date.now() - start;
-
-      expect(elapsed).toBeLessThan(50);
-      expect(task.status).toBe("pending");
-      expect(task.id).toMatch(/^bg_/);
-      expect(task.sessionId).toBe("");
-      expect(client.create).not.toHaveBeenCalled();
-
-      mgr.concurrency.release("default");
-      await new Promise(r => setTimeout(r, 10));
-    });
-
-    it("T4-2: queued task promotes to running when slot frees", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
-      const mgr = manager as any;
-
-      const fill = mgr.concurrency.acquireBackground("default");
-      expect(fill.outcome).toBe("acquired");
-
-      const task = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-      expect(task.status).toBe("pending");
-
-      mgr.concurrency.release("default");
-      await new Promise(r => setTimeout(r, 10));
-
-      const updated = mgr.tasks.get(task.id);
-      expect(updated.status).toBe("running");
-      expect(updated.sessionId).not.toBe("");
-      expect(client.create).toHaveBeenCalled();
-    });
-
-    it("T4-3: cancel queued task cleans up without session abort or slot leak", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
-      const mgr = manager as any;
-
-      const fill = mgr.concurrency.acquireBackground("default");
-      expect(fill.outcome).toBe("acquired");
-
-      const task = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-      expect(task.status).toBe("pending");
-
-      const cancelled = await manager.cancelTask(task.id);
-      expect(cancelled).toBe(true);
-      const updated = mgr.tasks.get(task.id);
-      expect(updated.status).toBe("cancelled");
-      expect(client.abort).not.toHaveBeenCalled();
-
-      mgr.concurrency.release("default");
-      expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-    });
-
-    it("T4-4: queue-full rejects immediately with structured error", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0, backpressureMaxRetries: 0 });
-      const mgr = manager as any;
-
-      const fill = mgr.concurrency.acquireBackground("default");
-      expect(fill.outcome).toBe("acquired");
-
-      const task = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-
-      expect(task.status).toBe("error");
-      const parsed = JSON.parse(task.error!);
-      expect(parsed.error).toBe("Queue is full");
-      expect(task.completedAt).toBeInstanceOf(Date);
-
-      mgr.concurrency.release("default");
-    });
-
-    it("T4-5: reopenForContinuation rejects immediately when no slot (no queue path)", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 10, syncReservedSlots: 0 });
-      const mgr = manager as any;
-
-      const t1 = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-      expect(t1.status).toBe("running");
-      mgr.handleTaskCompleted(t1.id);
-
-      const fill = mgr.concurrency.acquireBackground("default");
-      expect(fill.outcome).toBe("acquired");
-
-      const t2 = await manager.reopenForContinuation(
-        t1.id,
-        { subagent: "h", prompt: "retry", run_in_background: true },
-        parentContext(),
-      );
-
-      expect(t2.status).toBe("error");
-      expect(mgr.tasks.get(t1.id).completedAt).toBeDefined();
-
-      mgr.concurrency.release("default");
     });
   });
 
@@ -2049,34 +1731,6 @@ describe("DispatchManager", () => {
       );
 
       expect(task.status).toBe("error");
-      expect(g.peek()).toBe(baseline);
-    });
-
-    it("queue-full does not affect inflight gauge", async () => {
-      if (!process.env.ROLEBOX_METRICS) return;
-      const client = createMockClient();
-      const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0, backpressureMaxRetries: 0 });
-      const mgr = manager as any;
-      const g = metrics.gauge("inflight_tasks");
-      const baseline = g.peek();
-
-      const t1 = await manager.launch(
-        { subagent: "h", prompt: "p", run_in_background: true },
-        parentContext(),
-      );
-
-      expect(g.peek()).toBe(baseline + 1);
-
-      const t2 = await manager.launch(
-        { subagent: "h", prompt: "p2", run_in_background: true },
-        parentContext(),
-      );
-
-      expect(t2.status).toBe("error");
-      expect(t2.error).toContain("Queue is full");
-      expect(g.peek()).toBe(baseline + 1);
-
-      mgr.handleTaskCompleted(t1.id);
       expect(g.peek()).toBe(baseline);
     });
   });
@@ -2261,38 +1915,6 @@ describe("reopenForContinuation", () => {
 
     expect(t2.status).toBe("running");
     expect(t2.error).toBeUndefined();
-  });
-
-  it("continuation handles queue-full rejection gracefully", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 1,
-      maxQueueDepth: 0,
-      syncReservedSlots: 0,
-    });
-    const mgr = manager as any;
-
-    const t1 = await manager.launch(
-      { subagent: "helper", prompt: "do it", run_in_background: true },
-      parentContext(),
-    );
-    mgr.handleTaskCompleted(t1.id);
-
-    // Fill the slot
-    mgr.concurrency.acquireCancelable("default");
-
-    const t2 = await manager.reopenForContinuation(
-      t1.id,
-      { subagent: "helper", prompt: "retry", run_in_background: true },
-      parentContext(),
-    );
-
-    expect(t2.status).toBe("error");
-    const parsed = JSON.parse(t2.error!);
-    expect(parsed.error).toBe("Queue is full");
-
-    mgr.concurrency.release("default");
   });
 });
 
@@ -2542,7 +2164,7 @@ describe("recover()", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("recover with running tasks within limit registers all with poller", async () => {
+  it("recover registers all running tasks with poller", async () => {
     const tempDir = createTempDir();
     const client = createMockClient();
     const store = new TaskStateStore(tempDir);
@@ -2562,56 +2184,15 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
     const mgr = manager as any;
-    expect(mgr.concurrency.getActiveCount("default")).toBe(3);
     expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(3);
     for (let i = 0; i < 3; i++) {
       expect(manager.getTask(`bg_rec_${i}`)?.status).toBe("running");
     }
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it("recover with more running tasks than limit errors excess tasks", async () => {
-    const tempDir = createTempDir();
-    const client = createMockClient();
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-    for (let i = 0; i < 6; i++) {
-      const t: DispatchTask = {
-        id: `bg_over_${i}`,
-        sessionId: `ses_${i}`,
-        parentSessionId: "ses_parent",
-        status: "running",
-        agent: "helper",
-        prompt: "work",
-        startedAt: new Date(),
-        progress: { lastUpdate: new Date(), toolCalls: 0 },
-      };
-      tasks.set(t.id, t);
-    }
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 0 });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    const mgr = manager as any;
-    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(5);
-    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
-
-    let errorCount = 0;
-    for (let i = 0; i < 6; i++) {
-      const t = manager.getTask(`bg_over_${i}`);
-      if (t?.status === "error" && t.error?.includes("Exceeded concurrency limit")) {
-        errorCount++;
-      }
-    }
-    expect(errorCount).toBe(1);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -2636,145 +2217,12 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
     const mgr = manager as any;
     expect(mgr.getInflightCount("ses_parent")).toBe(3);
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it("recover uses each task's persisted concurrencyKey for forceOccupy", async () => {
-    const tempDir = createTempDir();
-    const client = createMockClient();
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-
-    // Two tasks with different concurrency keys
-    const openaiTask: DispatchTask = {
-      id: "bg_openai",
-      sessionId: "ses_openai",
-      parentSessionId: "ses_parent",
-      status: "running",
-      agent: "agent-openai",
-      prompt: "work",
-      concurrencyKey: "openai/gpt-4",
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-    };
-    const claudeTask: DispatchTask = {
-      id: "bg_claude",
-      sessionId: "ses_claude",
-      parentSessionId: "ses_parent",
-      status: "running",
-      agent: "agent-claude",
-      prompt: "work",
-      concurrencyKey: "anthropic/claude-3",
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-    };
-    tasks.set(openaiTask.id, openaiTask);
-    tasks.set(claudeTask.id, claudeTask);
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 2, syncReservedSlots: 0 });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    const mgr = manager as any;
-    // Each task occupies its own key's pool, not the default pool
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(1);
-    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-
-    // Both tasks are running
-    expect(manager.getTask("bg_openai")?.status).toBe("running");
-    expect(manager.getTask("bg_claude")?.status).toBe("running");
-    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(2);
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it("recover uses default key when persisted concurrencyKey is missing", async () => {
-    const tempDir = createTempDir();
-    const client = createMockClient();
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-
-    const legacyTask: DispatchTask = {
-      id: "bg_legacy",
-      sessionId: "ses_legacy",
-      parentSessionId: "ses_parent",
-      status: "running",
-      agent: "helper",
-      prompt: "work",
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-    };
-    tasks.set(legacyTask.id, legacyTask);
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 2, syncReservedSlots: 0 });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    const mgr = manager as any;
-    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-    expect(manager.getTask("bg_legacy")?.concurrencyKey).toBe("default");
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it("recover with per-key tasks respects limits independently", async () => {
-    const tempDir = createTempDir();
-    const client = createMockClient();
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-
-    // 2 openai tasks but limit=1 per key
-    const openai1: DispatchTask = {
-      id: "bg_openai_1",
-      sessionId: "ses_o1",
-      parentSessionId: "ses_parent",
-      status: "running",
-      agent: "agent-openai",
-      prompt: "work",
-      concurrencyKey: "openai/gpt-4",
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-    };
-    const openai2: DispatchTask = {
-      id: "bg_openai_2",
-      sessionId: "ses_o2",
-      parentSessionId: "ses_parent",
-      status: "running",
-      agent: "agent-openai",
-      prompt: "work",
-      concurrencyKey: "openai/gpt-4",
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-    };
-    tasks.set(openai1.id, openai1);
-    tasks.set(openai2.id, openai2);
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 1, syncReservedSlots: 0 });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    const mgr = manager as any;
-    // Only 1 task occupies the openai pool (limit=1, reserved=0)
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-
-    // One should be running, the other errored
-    const t1 = manager.getTask("bg_openai_1");
-    const t2 = manager.getTask("bg_openai_2");
-    const running = [t1, t2].filter(t => t?.status === "running").length;
-    const errored = [t1, t2].filter(t => t?.status === "error" && t?.error?.includes("Exceeded concurrency limit")).length;
-    expect(running).toBe(1);
-    expect(errored).toBe(1);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -2810,7 +2258,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2847,7 +2295,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2915,7 +2363,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2960,7 +2408,7 @@ describe("recover()", () => {
     tasks.set(task.id, task);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -3008,7 +2456,7 @@ describe("recover()", () => {
     tasks.set(task.id, task);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5 });
+    const manager = new DispatchManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -3028,68 +2476,6 @@ describe("recover()", () => {
     expect(completionCall).toBeDefined();
     const notifyText: string = completionCall[1].parts[0].text;
     expect(notifyText).toContain("verify-failed notify test");
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it("Task-11: concurrency-exceeded on recover → parent notified via notifyCompletion", async () => {
-    const tempDir = createTempDir();
-    const client = createMockClient({
-      sessionGet: () =>
-        Promise.resolve({ id: "ses_alive" }),
-    });
-
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-    // 6 running tasks, but maxConcurrent is 5 → 1 should exceed
-    for (let i = 0; i < 6; i++) {
-      const t: DispatchTask = {
-        id: `bg_over_${i}`,
-        sessionId: `ses_over_${i}`,
-        parentSessionId: "ses_parent",
-        status: "running",
-        agent: "helper",
-        prompt: "work",
-        description: `overload task ${i}`,
-        startedAt: new Date(),
-        progress: { lastUpdate: new Date(), toolCalls: 0 },
-      };
-      tasks.set(t.id, t);
-    }
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 0 });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    // Wait for async notification
-    await new Promise((r) => setTimeout(r, 50));
-
-    const mgr = manager as any;
-    // 5 tasks re-attached, 1 errored
-    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(5);
-
-    let errorCount = 0;
-    let lastErrorId: string | undefined;
-    for (let i = 0; i < 6; i++) {
-      const t = manager.getTask(`bg_over_${i}`);
-      if (t?.status === "error" && t.error?.includes("Exceeded concurrency limit")) {
-        errorCount++;
-        lastErrorId = `bg_over_${i}`;
-      }
-    }
-    expect(errorCount).toBe(1);
-
-    // Parent was notified about the errored task
-    const notifyCalls = (client.prompt as any).mock.calls;
-    const completionCall = notifyCalls.find(
-      (c: any) =>
-        c[0] === "ses_parent" &&
-        c[1]?.noReply === false &&
-        c[1]?.parts?.[0]?.text?.includes("Exceeded concurrency limit") === false,
-    );
-    // At minimum, the errored task's description should appear in some notify call
-    expect(completionCall).toBeDefined();
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -3179,441 +2565,6 @@ describe("recover()", () => {
     expect(mgr.notifyOutbox.has("bg_outbox")).toBe(true);
 
     expect(mgr.sweeperTimer).toBeDefined();
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-});
-
-// ── 14. Per-model concurrency key isolation ───────────────────
-
-describe("per-model concurrency key", () => {
-  afterEach(() => {
-    mock.restore();
-  });
-
-  it("two different model subagents each occupy independent slots", async () => {
-    const modelKeys = new Map([
-      ["agent-openai", "openai/gpt-4"],
-      ["agent-anthropic", "anthropic/claude-3"],
-    ]);
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 1, syncReservedSlots: 0 },
-      modelKeys,
-    );
-    const t1 = await manager.launch(
-      { subagent: "agent-openai", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-    expect(t1.concurrencyKey).toBe("openai/gpt-4");
-
-    const mgr = manager as any;
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(0);
-
-    // Second subagent with anthropic key — different pool, should succeed
-    const t2 = await manager.launch(
-      { subagent: "agent-anthropic", prompt: "p2", run_in_background: true },
-      parentContext(),
-    );
-    expect(t2.status).toBe("running");
-    expect(t2.concurrencyKey).toBe("anthropic/claude-3");
-
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(1);
-  });
-
-  it("same model key subagents share slots and get rejected at queue limit", async () => {
-    const modelKeys = new Map([
-      ["agent-a", "openai/gpt-4"],
-      ["agent-b", "openai/gpt-4"],
-    ]);
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 0, syncReservedSlots: 0, backpressureMaxRetries: 0 },
-      modelKeys,
-    );
-
-    // First subagent acquires the single slot
-    const t1 = await manager.launch(
-      { subagent: "agent-a", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-    expect(t1.concurrencyKey).toBe("openai/gpt-4");
-
-    const mgr = manager as any;
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-
-    // Second subagent with same key — queue full, rejected
-    const t2 = await manager.launch(
-      { subagent: "agent-b", prompt: "p2", run_in_background: true },
-      parentContext(),
-    );
-    expect(t2.status).toBe("error");
-    const parsed = JSON.parse(t2.error!);
-    expect(parsed.error).toBe("Queue is full");
-    expect(t2.concurrencyKey).toBeUndefined();
-
-    // Slot count unchanged — rejected task never acquired
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-  });
-
-  it("unknown subagent falls back to default key", async () => {
-    const modelKeys = new Map([
-      ["known-agent", "openai/gpt-4"],
-    ]);
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 1, syncReservedSlots: 0 },
-      modelKeys,
-    );
-    const t1 = await manager.launch(
-      { subagent: "unknown-agent", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-    expect(t1.concurrencyKey).toBe("default");
-
-    const mgr = manager as any;
-    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(0);
-  });
-
-  it("release after completion uses correct per-model key", async () => {
-    const modelKeys = new Map([
-      ["helper", "openai/gpt-4"],
-    ]);
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 2 },
-      modelKeys,
-    );
-
-    const task = await manager.launch(
-      { subagent: "helper", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(task.concurrencyKey).toBe("openai/gpt-4");
-
-    const mgr = manager as any;
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(1);
-    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-
-    // Complete the task via handler — leaveRunning releases on correct key
-    mgr.handleTaskCompleted(task.id);
-    expect(mgr.concurrency.getActiveCount("openai/gpt-4")).toBe(0);
-    // "default" pool should be unaffected
-    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-  });
-
-  it("executeSync uses correct per-model key", async () => {
-    const modelKeys = new Map([
-      ["reviewer", "anthropic/claude-3"],
-    ]);
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, syncTimeoutMs: 5000 },
-      modelKeys,
-    );
-    const mgr = manager as any;
-
-    // Fill the specific key's pool
-    mgr.concurrency.acquireCancelable("anthropic/claude-3");
-    mgr.concurrency.acquireCancelable("anthropic/claude-3");
-    mgr.concurrency.acquireCancelable("anthropic/claude-3");
-    mgr.concurrency.acquireCancelable("anthropic/claude-3");
-    mgr.concurrency.acquireCancelable("anthropic/claude-3");
-    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(5);
-
-    // executeSync for reviewer — uses same key, will block (pool full)
-    const syncPromise = manager.executeSync(
-      { subagent: "reviewer", prompt: "hello", run_in_background: false },
-      parentContext(),
-    );
-
-    // Release one slot— the sync should acquire it
-    mgr.concurrency.release("anthropic/claude-3");
-
-    const result = await syncPromise;
-    expect(result).toBe("Hello from subagent");
-    // After sync completes and releases: 5 bg - 1 released + 1 sync - 1 sync release = 4
-    expect(mgr.concurrency.getActiveCount("anthropic/claude-3")).toBe(4);
-    // "default" pool is untouched
-    expect(mgr.concurrency.getActiveCount("default")).toBe(0);
-  });
-});
-
-// ── 15. bounded background queue ──────────────────────────────
-
-describe("bounded background queue", () => {
-  afterEach(() => {
-    mock.restore();
-  });
-
-  it("queue not full → task queues then acquires when slot freed", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 2, syncReservedSlots: 0 },
-    );
-    const mgr = manager as any;
-
-    // First task acquires the only slot
-    const t1 = await manager.launch(
-      { subagent: "h", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-    expect(t1.concurrencyKey).toBe("default");
-
-    // Second task — queue is not full (depth 0 < limit 2), should enqueue
-    const launch2Promise = manager.launch(
-      { subagent: "h", prompt: "p2", run_in_background: true },
-      parentContext(),
-    );
-
-    // Give a tick for the waiter to enqueue
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Task 2 should be pending (enqueued, not yet running)
-    const tasksForParent = manager.getTasksByParent("parent-session-1");
-    const pendingTasks = tasksForParent.filter(t => t.status === "pending");
-    expect(pendingTasks.length).toBeGreaterThanOrEqual(1);
-
-    // The active count should still be 1
-    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-
-    // Complete task 1 → task 2 acquires the freed slot
-    mgr.handleTaskCompleted(t1.id);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    const t2 = await launch2Promise;
-    expect(t2.status).toBe("running");
-    expect(t2.concurrencyKey).toBe("default");
-
-    // Clean up t2
-    mgr.handleTaskCompleted(t2.id);
-  });
-
-    it("queue full → structured error with retry_after, depth, limit", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(
-        client,
-        { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 1, syncReservedSlots: 0, backpressureMaxRetries: 0 },
-      );
-    const mgr = manager as any;
-
-    // Task 1 acquires the only slot
-    const t1 = await manager.launch(
-      { subagent: "h", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-
-    // Task 2 enqueues (queue depth 1 = limit 1)
-    const launch2Promise = manager.launch(
-      { subagent: "h", prompt: "p2", run_in_background: true },
-      parentContext(),
-    );
-
-    // Give a tick for waiter to enqueue
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Task 3 — queue is now full, should reject
-    const t3 = await manager.launch(
-      { subagent: "h", prompt: "p3", run_in_background: true },
-      parentContext(),
-    );
-
-    expect(t3.status).toBe("error");
-    const parsed = JSON.parse(t3.error!);
-    expect(parsed.error).toBe("Queue is full");
-    expect(parsed.queue_depth).toBe(1);
-    expect(parsed.limit).toBe(1);
-    expect(parsed.retry_after).toBeGreaterThan(0);
-    expect(t3.completedAt).toBeInstanceOf(Date);
-
-    // Task 3 should NOT consume a concurrency slot
-    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-
-    // Clean up t1 and t2
-    mgr.handleTaskCompleted(t1.id);
-    await Promise.resolve();
-    await Promise.resolve();
-    const t2 = await launch2Promise;
-    expect(t2.status).toBe("running");
-    mgr.handleTaskCompleted(t2.id);
-  });
-
-  it("queue depth recovers after cancelled waiter frees a queue slot", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 1, maxQueueDepth: 1, syncReservedSlots: 0 },
-    );
-    const mgr = manager as any;
-
-    // Task 1 acquires the only slot
-    const t1 = await manager.launch(
-      { subagent: "h", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-
-    // Enqueue a waiter manually, then cancel it
-    const { cancel } = mgr.concurrency.acquireCancelable("default");
-    cancel();
-
-    // Queue should now be effectively empty (cancelled waiter was removed)
-    // Next launch should enqueue, not reject
-    const launch2Promise = manager.launch(
-      { subagent: "h", prompt: "p2", run_in_background: true },
-      parentContext(),
-    );
-
-    // Give a tick for waiter to enqueue
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Task 2 should be pending (enqueued)
-    expect(mgr.concurrency.getActiveCount("default")).toBe(1);
-
-    // Complete task 1 → task 2 acquires
-    mgr.handleTaskCompleted(t1.id);
-    await Promise.resolve();
-    await Promise.resolve();
-    const t2 = await launch2Promise;
-    expect(t2.status).toBe("running");
-    mgr.handleTaskCompleted(t2.id);
-  });
-});
-
-// ── 16. reserved sync lane integration ─────────────────────────
-
-describe("reserved sync lane", () => {
-  afterEach(() => {
-    mock.restore();
-  });
-
-  it("sync acquires immediately via reserved lane when background is full", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(
-      client,
-      { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 1, syncTimeoutMs: 5000 },
-    );
-    const mgr = manager as any;
-
-    // Fill all 4 background slots via acquireBackground
-    for (let i = 0; i < 4; i++) {
-      const r = mgr.concurrency.acquireBackground("default");
-      expect(r.outcome).toBe("acquired");
-    }
-    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
-
-    // Background launch should block (bg slots full)
-    const launchPromise = manager.launch(
-      { subagent: "bg-blocked", prompt: "p", run_in_background: true },
-      parentContext(),
-    );
-
-    // Give a tick for bg waiter to enqueue
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Background task should be pending (enqueued)
-    const pending = manager.getTasksByParent("parent-session-1")
-      .filter(t => t.status === "pending");
-    expect(pending.length).toBeGreaterThanOrEqual(1);
-
-    // Sync execute should acquire immediately via reserved 5th slot
-    const syncResult = await manager.executeSync(
-      { subagent: "sync-test", prompt: "hello", run_in_background: false },
-      parentContext(),
-    );
-    expect(syncResult).toBe("Hello from subagent");
-
-    // After sync releases: bg waiter gets promoted, active stays at 5 (4 original bg + 1 promoted)
-    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
-  });
-
-    it("background launch rejects when bg slots full and queue at capacity", async () => {
-      const client = createMockClient();
-      const manager = new DispatchManager(
-        client,
-        { ...fastConfig, maxConcurrent: 3, maxQueueDepth: 0, syncReservedSlots: 1, backpressureMaxRetries: 0 },
-      );
-    const mgr = manager as any;
-
-    // Fill all 2 background slots
-    for (let i = 0; i < 2; i++) {
-      const r = mgr.concurrency.acquireBackground("default");
-      expect(r.outcome).toBe("acquired");
-    }
-    expect(mgr.concurrency.getActiveCount("default")).toBe(2);
-
-    // Background launch should reject (bg limit=2, queue depth=0)
-    const task = await manager.launch(
-      { subagent: "h", prompt: "p", run_in_background: true },
-      parentContext(),
-    );
-    expect(task.status).toBe("error");
-    const parsed = JSON.parse(task.error!);
-    expect(parsed.error).toBe("Queue is full");
-    // reserved sync slot should still be available
-    expect(mgr.concurrency.getActiveCount("default")).toBe(2);
-  });
-
-  it("recover uses forceOccupyBackground — clamps to limit-reserved", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "manager-t8-recover-"));
-    const client = createMockClient();
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-
-    // Create 5 running tasks — limit=5, reserved=1 → bgLimit=4
-    for (let i = 0; i < 5; i++) {
-      const t: DispatchTask = {
-        id: `bg_t8_${i}`,
-        sessionId: `ses_${i}`,
-        parentSessionId: "ses_parent",
-        status: "running",
-        agent: "helper",
-        prompt: "work",
-        startedAt: new Date(),
-        progress: { lastUpdate: new Date(), toolCalls: 0 },
-      };
-      tasks.set(t.id, t);
-    }
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, { ...fastConfig, maxConcurrent: 5, syncReservedSlots: 1 });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    const mgr = manager as any;
-    // forceOccupyBackground clamps to 4 (limit - reserved)
-    expect(mgr.watchdog.getRegisteredTaskIds().length).toBe(4);
-    expect(mgr.concurrency.getActiveCount("default")).toBe(4);
-
-    // 1 task should be errored (exceeded concurrency limit on recovery)
-    let errorCount = 0;
-    for (let i = 0; i < 5; i++) {
-      const t = manager.getTask(`bg_t8_${i}`);
-      if (t?.status === "error" && t.error?.includes("Exceeded concurrency limit")) {
-        errorCount++;
-      }
-    }
-    expect(errorCount).toBe(1);
-
-    // The reserved sync slot should still be available
-    const { promise: syncP } = mgr.concurrency.acquireSync("default");
-    await syncP;
-    expect(mgr.concurrency.getActiveCount("default")).toBe(5);
 
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -3736,9 +2687,6 @@ describe("flushPersistSync", () => {
 
     expect(mgr._dirty).toBe(false);
     expect(mgr._persistTimer).toBeUndefined();
-
-    // Cleanup
-    mgr.concurrency.release("default");
   });
 
   it("T5-2: terminal state IS NOT immediately durable (no sync flush in leaveRunning)", async () => {
@@ -3849,9 +2797,6 @@ describe("Task 17: leaveRunning debounced persist", () => {
 
     // saveSync must NOT have been called (no sync flush in leaveRunning)
     expect(saveSyncSpy).not.toHaveBeenCalled();
-
-    // Cleanup
-    mgr.concurrency.release("default");
   });
 });
 
@@ -4111,321 +3056,6 @@ describe("T8: Notification outbox", () => {
   });
 });
 
-// ── Task 12: config injection + per-parent fairness + backpressure ──
-
-describe("Task 12: per-parent fairness", () => {
-  afterEach(() => {
-    mock.restore();
-  });
-
-  it("T12-1: single parent past maxActivePerParent queues while other parent launches immediately", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 5,
-      maxActivePerParent: 1,
-      syncReservedSlots: 0,
-    });
-    const mgr = manager as any;
-
-    const ctxA = { sessionID: "parent-A", agent: "a", directory: "/tmp" };
-    const ctxB = { sessionID: "parent-B", agent: "b", directory: "/tmp" };
-
-    // Parent A: first task acquires
-    const tA1 = await manager.launch(
-      { subagent: "h", prompt: "p", run_in_background: true },
-      ctxA,
-    );
-    expect(tA1.status).toBe("running");
-
-    // Parent A: second task — would exceed maxActivePerParent, should queue
-    const tA2promise = manager.launch(
-      { subagent: "h", prompt: "p2", run_in_background: true },
-      ctxA,
-    );
-
-    // Give a tick for the waiter to enqueue
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Parent B: task should acquire immediately (different parent)
-    const tB1 = await manager.launch(
-      { subagent: "h", prompt: "p", run_in_background: true },
-      ctxB,
-    );
-    expect(tB1.status).toBe("running");
-
-    const tA2 = await tA2promise;
-    // Task A2 should be pending (queued, waiting for A1 to release)
-    // or it might have already been promoted if timing worked out
-    expect(["pending", "running"]).toContain(tA2.status);
-
-    // Complete A1 → A2 gets promoted
-    if (tA2.status === "pending") {
-      mgr.handleTaskCompleted(tA1.id);
-      await new Promise((r) => setTimeout(r, 10));
-      const updatedA2 = mgr.tasks.get(tA2.id);
-      expect(updatedA2.status).toBe("running");
-      mgr.handleTaskCompleted(updatedA2.id);
-    }
-
-    // Cleanup B1
-    mgr.handleTaskCompleted(tB1.id);
-  });
-
-  it("T12-1b: recover rebuilds per-parent active counts from forceOccupyBackground", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "manager-t12-recover-"));
-    const client = createMockClient();
-
-    const store = new TaskStateStore(tempDir);
-    const tasks = new Map<string, DispatchTask>();
-
-    // 2 tasks from parent-A, 1 from parent-B — all alive
-    const taskDefs = [
-      { id: "bg_pa1", sid: "ses_pa1", parent: "parent-A" },
-      { id: "bg_pa2", sid: "ses_pa2", parent: "parent-A" },
-      { id: "bg_pb1", sid: "ses_pb1", parent: "parent-B" },
-    ];
-    for (const td of taskDefs) {
-      const t: DispatchTask = {
-        id: td.id,
-        sessionId: td.sid,
-        parentSessionId: td.parent,
-        status: "running",
-        agent: "helper",
-        prompt: "work",
-        startedAt: new Date(),
-        progress: { lastUpdate: new Date(), toolCalls: 0 },
-      };
-      tasks.set(t.id, t);
-    }
-    await store.save(tasks);
-
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 5,
-      syncReservedSlots: 0,
-    });
-    manager.setStoreDirectory(tempDir);
-    await manager.recover();
-
-    const mgr = manager as any;
-    // getInflightCount should reflect recovered active counts
-    expect(mgr.getInflightCount("parent-A")).toBe(2);
-    expect(mgr.getInflightCount("parent-B")).toBe(1);
-
-    // Concurrency activeByParent should be populated
-    const slot = mgr.concurrency.slots.get("default") as any;
-    expect(slot.activeByParent.get("parent-A")).toBe(2);
-    expect(slot.activeByParent.get("parent-B")).toBe(1);
-
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-});
-
-describe("Task 12: backpressure retry", () => {
-  afterEach(() => {
-    mock.restore();
-  });
-
-  it("T12-2: queue-full with backpressureMaxRetries>0 retries then succeeds when slot frees", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 1,
-      maxQueueDepth: 1,
-      syncReservedSlots: 0,
-      backpressureMaxRetries: 3,
-      retryAfterMs: 10,
-    });
-    const mgr = manager as any;
-
-    // Fill the single slot
-    const t1 = await manager.launch(
-      { subagent: "h", prompt: "p1", run_in_background: true },
-      parentContext(),
-    );
-    expect(t1.status).toBe("running");
-
-    // Enqueue a waiter to fill the queue
-    const t2promise = manager.launch(
-      { subagent: "h", prompt: "p2", run_in_background: true },
-      parentContext(),
-    );
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Queue is full: slot occupied + 1 queued → third task triggers backpressure
-    const t3 = await manager.launch(
-      { subagent: "h", prompt: "p3", run_in_background: true },
-      parentContext(),
-    );
-    expect(t3.status).toBe("pending");
-    expect(mgr._cancelQueue.has(t3.id)).toBe(true);
-
-    // Free up everything: complete t1 → t2 promotes; complete t2 → slot free
-    mgr.handleTaskCompleted(t1.id);
-    await new Promise((r) => setTimeout(r, 10));
-    const t2 = await t2promise;
-    expect(t2.status).toBe("running");
-    mgr.handleTaskCompleted(t2.id);
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Wait for backpressure retry to fire
-    await new Promise((r) => setTimeout(r, 50));
-
-    const updatedT3 = mgr.tasks.get(t3.id);
-    expect(updatedT3.status).toBe("running");
-    expect(updatedT3.sessionId).not.toBe("");
-
-    mgr.handleTaskCompleted(updatedT3.id);
-  });
-
-  it("T12-3: queue-full with retries exhausted → structured JSON error + notify", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 1,
-      maxQueueDepth: 0,
-      syncReservedSlots: 0,
-      backpressureMaxRetries: 1,
-      retryAfterMs: 5,
-    });
-    const mgr = manager as any;
-
-    // Fill the single slot — no queue, so any new launch triggers backpressure
-    mgr.concurrency.acquireBackground("default");
-
-    const task = await manager.launch(
-      { subagent: "h", prompt: "p", run_in_background: true, description: "backpressure-test" },
-      parentContext(),
-    );
-    expect(task.status).toBe("pending");
-
-    // Wait for the retry to fire (attempt 1) and get exhausted
-    await new Promise((r) => setTimeout(r, 50));
-
-    const updated = mgr.tasks.get(task.id);
-    expect(updated.status).toBe("error");
-    const parsed = JSON.parse(updated.error!);
-    expect(parsed.error).toContain("backpressure retries exhausted");
-    expect(parsed.attempts).toBe(1);
-    expect(parsed.retry_after).toBeGreaterThan(0);
-    expect(updated.completedAt).toBeInstanceOf(Date);
-
-    // Inflight count derived from tasks with running status
-    expect(mgr.getInflightCount("parent-session-1")).toBe(0);
-
-    // Notification was sent
-    const notifyCalls = (client.prompt as any).mock.calls;
-    const lastCall = notifyCalls[notifyCalls.length - 1];
-    expect(lastCall).toBeDefined();
-
-    mgr.concurrency.release("default");
-  });
-
-  it("T12-3b: backpressure emits retry metric on each attempt", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 1,
-      maxQueueDepth: 0,
-      syncReservedSlots: 0,
-      backpressureMaxRetries: 2,
-      retryAfterMs: 5,
-    });
-    const mgr = manager as any;
-
-    mgr.concurrency.acquireBackground("default");
-
-    const task = await manager.launch(
-      { subagent: "h", prompt: "p", run_in_background: true },
-      parentContext(),
-    );
-    expect(task.status).toBe("pending");
-
-    // Wait for both retries to exhaust
-    await new Promise((r) => setTimeout(r, 50));
-
-    const updated = mgr.tasks.get(task.id);
-    expect(updated.status).toBe("error");
-
-    // dispatch_backpressure_retry_total counter was incremented
-    const counter = metrics.counter("dispatch_backpressure_retry_total", { key: "default" });
-    expect(counter.peek()).toBeGreaterThanOrEqual(1);
-
-    mgr.concurrency.release("default");
-  });
-});
-
-describe("Task 12: config injection", () => {
-  afterEach(() => {
-    mock.restore();
-  });
-
-  it("T12-4: maxConcurrent and maxActivePerParent from constructor honored", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      maxConcurrent: 2,
-      maxActivePerParent: 1,
-      syncReservedSlots: 0,
-    });
-    const mgr = manager as any;
-
-    const ctx = parentContext();
-
-    // First task acquires normally
-    const t1 = await manager.launch(
-      { subagent: "h", prompt: "p1", run_in_background: true },
-      ctx,
-    );
-    expect(t1.status).toBe("running");
-
-    // Second task from same parent → exceeds maxActivePerParent, queues
-    const t2promise = manager.launch(
-      { subagent: "h", prompt: "p2", run_in_background: true },
-      ctx,
-    );
-    await new Promise((r) => setTimeout(r, 10));
-    const t2 = await t2promise;
-    // It may still be pending (queued) or already promoted
-    expect(["pending", "running"]).toContain(t2.status);
-
-    // Third task from same parent → should also queue (not reject)
-    const t3promise = manager.launch(
-      { subagent: "h", prompt: "p3", run_in_background: true },
-      ctx,
-    );
-    await new Promise((r) => setTimeout(r, 10));
-    const t3 = await t3promise;
-    expect(["pending", "running"]).toContain(t3.status);
-
-    // Complete all and clean up
-    mgr.handleTaskCompleted(t1.id);
-    await new Promise((r) => setTimeout(r, 10));
-    const updatedT2 = mgr.tasks.get(t2.id);
-    if (updatedT2.status !== "completed" && updatedT2.status !== "error") {
-      mgr.handleTaskCompleted(t2.id);
-    }
-    await new Promise((r) => setTimeout(r, 10));
-    const updatedT3 = mgr.tasks.get(t3.id);
-    if (updatedT3.status !== "completed" && updatedT3.status !== "error") {
-      mgr.handleTaskCompleted(t3.id);
-    }
-  });
-
-  it("T12-4b: retryAfterMs passed to ConcurrencyManager constructor", async () => {
-    const client = createMockClient();
-    const manager = new DispatchManager(client, {
-      ...fastConfig,
-      retryAfterMs: 15000,
-    });
-    const mgr = manager as any;
-
-    // ConcurrencyManager was constructed with custom retryAfterMs
-    expect(mgr.concurrency.retryAfterMs).toBe(15000);
-  });
-});
-
 // ── Task 13: completion stability + SessionMonitor ───────────────
 
 describe("Task 13: completion stability re-confirmation", () => {
@@ -4576,7 +3206,6 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     // Cleanup
     mgr.watchdog.unregisterTask(task.id);
-    mgr.concurrency.release("default");
   });
 
   it("T13-4: session uncertain — verifyExistence returns exists, task stays running", async () => {
@@ -4789,7 +3418,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   // ── materializeAndNotify() ordering ─────────────────────────
 
-  it("materializeAndNotify releases slot before materializing", async () => {
+  it("materializeAndNotify materializes asynchronously after completion", async () => {
     let resolveMessages!: (v: any) => void;
     const deferred = new Promise<any>((r) => { resolveMessages = r; });
 
@@ -4804,15 +3433,11 @@ describe("Task 13: completion stability re-confirmation", () => {
     );
 
     const mgr = manager as any;
-    const concurrencyKey = "default";
-    expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(1);
 
     // Fire completion — this calls leaveRunning synchronously, then
     // fires materializeAndNotify which awaits the deferred messages call.
     mgr.handleTaskCompleted(task.id);
 
-    // Slot must be released immediately
-    expect(mgr.concurrency.getActiveCount(concurrencyKey)).toBe(0);
     expect(task.status).toBe("completed");
 
     // At this point, materializeResult is awaiting the deferred messages

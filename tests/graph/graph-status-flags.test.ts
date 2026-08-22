@@ -48,7 +48,6 @@ function buildChain(ts: GraphToolSet, graphId: string): void {
     id: "planner",
     agent: "emperor--chancellor",
     prompt: "Plan.",
-    budget: { max_sessions: 2 },
   });
   ts.graph_add_node({
     graph_id: graphId,
@@ -92,9 +91,12 @@ function liveState(ts: GraphToolSet, graphId: string): EngineState {
 describe("§2.2 unbacked flag registry", () => {
   it("is now empty — every original §2.2 flag is backed", () => {
     // After C-WIRE backed the final seven flags, the registry must be empty.
-    // `group_by` / `limit` / `depth` were backed in subtask 3; `include_concurrency`
-    // in subtask 4; `round` / `include_checkpoint` / `include_history` /
-    // `include_artifacts` / `include_evidence` / `stream` / `since` in C-WIRE.
+    // `group_by` / `limit` / `depth` were backed in subtask 3; the remaining
+    // §2.2 flags (`round` / `include_checkpoint` / `include_history` /
+    // `include_artifacts` / `include_evidence` / `stream` / `since`) in C-WIRE.
+    // `include_concurrency` was REMOVED upstream (the dispatch concurrency
+    // layer it surfaced no longer exists), so it is not part of the registry
+    // or the backed set.
     expect(UNSUPPORTED_GRAPH_STATUS_FLAGS).toEqual([]);
   });
 
@@ -124,8 +126,8 @@ describe("§2.2 unbacked flag registry", () => {
       "include_budget",
       "include_metrics",
       "include_loops",
-      "include_concurrency",
-      // The seven C-WIRE-backed flags.
+      // The seven C-WIRE-backed flags. (`include_concurrency` was removed
+      // upstream along with the dispatch concurrency layer it surfaced.)
       "include_checkpoint",
       "include_artifacts",
       "include_evidence",

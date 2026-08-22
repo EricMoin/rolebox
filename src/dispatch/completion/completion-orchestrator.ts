@@ -6,7 +6,6 @@ import type {
   TaskEventState,
 } from "../types.ts";
 import { OUTBOX_SWEEP_INTERVAL_MS } from "../config.ts";
-import type { IConcurrencyManager } from "../concurrency/concurrency.ts";
 import { TaskWatchdogManager } from "../core/watchdog.ts";
 import { SessionMonitor } from "./session-monitor.ts";
 import { MetricsPersister } from "../persistence/metrics-persister.ts";
@@ -34,7 +33,6 @@ export interface CompletionOrchestratorDeps {
   tasks: Map<string, DispatchTask>;
   eventState: Map<string, TaskEventState>;
   client: ISessionClient;
-  concurrency: IConcurrencyManager;
   watchdog: TaskWatchdogManager;
   config: DispatchManagerConfig;
   sessionToTask: Map<string, string>;

@@ -1,12 +1,10 @@
 import { unlinkSync } from "node:fs";
 import type { DispatchTask, DispatchTaskStatus } from "../types.ts";
-import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { resultSidecarPath } from "../completion/result-extractor.ts";
 import type { ProgressStore } from "../types.progress.ts";
 import { clearEmittedThresholds } from "../progress/progress-tools.ts";
 import type { DispatchManagerConfig } from "../config.ts";
-import { CONCURRENCY_KEY_SEPARATOR } from "../concurrency/concurrency.ts";
 
 /** Index mapping parentSessionId → set of task IDs for O(1) lookup. */
 export type ParentTasksIndex = Map<string, Set<string>>;
@@ -46,7 +44,6 @@ export interface TaskLifecycleDeps {
   tasks: Map<string, DispatchTask>;
   eventState: Map<string, import("../types.ts").TaskEventState>;
   client: import("../../platform/ports/session-client.ts").ISessionClient;
-  concurrency: import("../concurrency/concurrency.ts").IConcurrencyManager;
   watchdog: import("./watchdog.ts").TaskWatchdogManager;
   config: DispatchManagerConfig;
   cancelQueue: Map<string, () => void>;
@@ -57,11 +54,6 @@ export interface TaskLifecycleDeps {
   sidecarGCTimers: Map<string, ReturnType<typeof setTimeout>>;
   pendingNotifications: Set<string>;
   sessionToTask: Map<string, string>;
-  sessionsByRequest: Map<string, number>;
-  /** Task ids whose per-request session slot was counted by incRequestSessions in THIS process.
-   *  Removed by decRequestSessions on refund, or pruned at cleanup. Restored-after-restart tasks
-   *  are never re-marked, so a refund can never touch a slot counted by a previous process. */
-  budgetCountedTasks: Set<string>;
   notifyOutbox: Set<string>;
   deferredIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
   cleanedUpTasks: Map<string, number>;
@@ -93,8 +85,6 @@ export interface TaskLifecycleDeps {
   oldestStartedAtByParent: Map<string, number>;
 }
 
-const DEFAULT_CONCURRENCY_KEY = "default";
-
 /**
  * Resolve the owning root role ID for a dispatched agent.
  *
@@ -108,16 +98,6 @@ export function resolveDispatchingRole(d: TaskLifecycleDeps, agentId: string): s
   if (roleId !== undefined) return roleId;
   if (d.roleConfigs.has(agentId)) return agentId;
   return undefined;
-}
-
-/** Derive the concurrency key for a subagent ID. */
-export function deriveKey(d: TaskLifecycleDeps, subagentId: string): string {
-  const roleId = resolveDispatchingRole(d, subagentId);
-  if (roleId !== undefined) {
-    const model = d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
-    return `${roleId}${CONCURRENCY_KEY_SEPARATOR}${model}`;
-  }
-  return d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
 }
 
 /**
@@ -135,52 +115,6 @@ export function computeDepth(d: TaskLifecycleDeps, parentSessionId: string): num
   const parentTask = d.tasks.get(parentTaskId);
   if (!parentTask) return 0;
   return (parentTask.depth ?? 0) + 1;
-}
-
-/** Get the number of sessions spawned so far for the given root session. */
-export function getRequestSessions(d: TaskLifecycleDeps, rootSession: string): number {
-  return d.sessionsByRequest.get(rootSession) ?? 0;
-}
-
-/** Increment the request session counter for a root session and record the task that holds the slot. */
-export function incRequestSessions(d: TaskLifecycleDeps, rootSession: string, taskId: string): void {
-  d.sessionsByRequest.set(rootSession, (d.sessionsByRequest.get(rootSession) ?? 0) + 1);
-  d.budgetCountedTasks.add(taskId);
-}
-
-/**
- * Refund the per-request session slot held by a task that terminated WITHOUT
- * a produced result.
- *
- * Only tasks that terminated in `cancelled` or `timeout` status refund —
- * `completed`, `error` (covers the `escalate` signal path) and
- * `awaiting_approval` (`blocked`) tasks KEEP counting toward
- * `maxTotalSessionsPerRequest`. The refund is IDEMPOTENT per task id (one
- * refund max — the counting marker is consumed on the first refund) and
- * clamped so the counter never goes negative.
- *
- * Must be called AFTER the task has transitioned to its terminal status
- * (`cancelled` / `timeout`); the status check below is a defensive guard.
- */
-export function decRequestSessions(d: TaskLifecycleDeps, taskId: string): void {
-  // Never counted in this process (budget-rejected launch, sync task cancelled
-  // before session creation, restored-after-restart task) or already refunded
-  // → no-op. This is the idempotency guard: one refund per task id max.
-  if (!d.budgetCountedTasks.has(taskId)) return;
-  const task = d.tasks.get(taskId);
-  if (!task) return;
-  // Guardrail: only cancelled/timeout refund. completed, error (escalate), and
-  // awaiting_approval (blocked) tasks keep counting.
-  if (task.status !== "cancelled" && task.status !== "timeout") return;
-  d.budgetCountedTasks.delete(taskId);
-  const root = task.parentSessionId;
-  const curr = d.sessionsByRequest.get(root) ?? 0;
-  if (curr > 0) d.sessionsByRequest.set(root, curr - 1);
-}
-
-/** Reset the request session counter for a root session. */
-export function resetRequestSessions(d: TaskLifecycleDeps, rootSession: string): void {
-  d.sessionsByRequest.delete(rootSession);
 }
 
 /**
@@ -241,14 +175,7 @@ export function scheduleCleanup(d: TaskLifecycleDeps, taskId: string): void {
       scheduleCleanup(d, taskId);
       return;
     }
-    // Cleanup safety net: refund the per-request session slot for a task that
-    // terminated cancelled/timeout but whose termination path did not already
-    // refund (idempotent per task id; no-op when never counted).
-    decRequestSessions(d, taskId);
     d.cleanupTask(taskId);
-    // Prune the counting marker — the task is gone; a completed/error task
-    // that never refunded must not hold its marker past cleanup.
-    d.budgetCountedTasks.delete(taskId);
   }, d.config.taskTtlMs);
 
   d.cleanupTimers.set(taskId, timer);
@@ -294,15 +221,10 @@ export async function notifyCompletion(
   }
 }
 
-/** Release concurrency slot and schedule cleanup for a task that has finished running. */
+/** Schedule cleanup for a task that has finished running. */
 export function leaveRunning(d: TaskLifecycleDeps, taskId: string): void {
   const t = d.tasks.get(taskId);
   if (!t) return;
-  if (t.concurrencyKey) {
-    d.concurrency.release(t.concurrencyKey, t.parentSessionId);
-  } else {
-    debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
-  }
   const timer = d.deferredIdleTimers.get(taskId);
   if (timer) {
     clearTimeout(timer);

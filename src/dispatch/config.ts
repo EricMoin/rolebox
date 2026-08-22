@@ -1,5 +1,3 @@
-import type { IConcurrencyManager } from "./concurrency/concurrency.ts";
-
 /**
  * Centralized configuration constants for the dispatch subsystem.
  * This is the single source of truth — all other files import from here.
@@ -14,18 +12,6 @@ export const TASK_TTL_MS = 1_800_000;
 /** Minimum runtime (5 s): a task must exist at least this long before it can be reaped.
  *  LIVE — read by manager.ts:898 */
 export const MIN_RUNTIME_MS = 5_000;
-
-/** Default max concurrent background tasks.
- *  LIVE — read by manager.ts constructor (maxConcurrent) */
-export const DEFAULT_MAX_CONCURRENT = 5;
-
-/** Default max queued tasks per concurrency slot (2× maxConcurrent).
- *  LIVE — imported by manager.ts:10 */
-export const DEFAULT_MAX_QUEUE_DEPTH = 10;
-
-/** Default number of reserved slots for synchronous dispatch per concurrency key.
- *  LIVE — imported by manager.ts:10 */
-export const DEFAULT_SYNC_RESERVED_SLOTS = 1;
 
 /** Sync timeout (10 min): max wall-clock time for synchronous executeSync prompts.
  *  LIVE — imported by manager.ts:10 */
@@ -53,30 +39,10 @@ export const GLOBAL_SWEEP_INTERVAL_MS = 30_000;
  *  LIVE — imported by manager.ts:10, watchdog.test.ts:6 */
 export const IDLE_DEBOUNCE_MS = 1_500;
 
-/** Default max active background tasks per parent session.
- *  LIVE — consumed by manager.ts (Task 12) */
-export const DEFAULT_MAX_ACTIVE_PER_PARENT = 3;
-
-/** Delay (ms) after a task dispatch failure before the caller may retry.
- *  LIVE — consumed by manager.ts (Task 12) */
-export const DEFAULT_RETRY_AFTER_MS = 30_000;
-
-/** Default max backpressure retry attempts before giving up.
- *  LIVE — consumed by manager.ts (Task 12) */
-export const DEFAULT_BACKPRESSURE_MAX_RETRIES = 5;
-
 /** Max consecutive SDK fetch failures before escalating a running task to error.
  *  Prevents silent death: if evaluateAndComplete cannot fetch session state,
  *  the task transitions to error instead of cycling through the watchdog forever. */
 export const MAX_CONSECUTIVE_FETCH_FAILURES = 3;
-
-/** Default max backpressure delay (ms) before giving up.
- *  LIVE — consumed by manager.ts (Task 12) */
-export const DEFAULT_BACKPRESSURE_MAX_DELAY_MS = 60_000;
-
-/** Default acquire timeout (ms) for synchronous dispatch.
- *  LIVE — consumed by manager.ts (Task 12) */
-export const DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS = 120_000;
 
 /** Default total session.create attempts (1 initial + N-1 retries) for transient
  *  transport failures. Only THROWN errors are retried; a null return (server
@@ -141,14 +107,6 @@ export const DEFAULT_CHECKPOINT_TTL_MS = 86_400_000;
  * with existing call sites that construct partial configs.
  */
 export interface DispatchManagerConfig {
-  /** Maximum number of concurrent background tasks — default: 5 */
-  maxConcurrent: number;
-  /** Maximum queued tasks waiting per concurrency slot — default: 10 */
-  maxQueueDepth?: number;
-  /** Maximum active background tasks per parent session — default: 3 */
-  maxActivePerParent?: number;
-  /** Cumulative session budget per request — undefined means unlimited (opt-in) */
-  maxTotalSessionsPerRequest?: number;
   /** Maximum cumulative input tokens across all dispatched sessions in a request (undefined = unlimited). */
   maxInputTokensPerRequest?: number;
   /** Maximum cumulative output tokens across all dispatched sessions in a request (undefined = unlimited). */
@@ -165,8 +123,6 @@ export interface DispatchManagerConfig {
   taskTtlMs: number;
   /** Minimum wall-clock time (ms) before a task can be reaped — default: 5000 */
   minRuntimeMs: number;
-  /** Number of concurrency slots reserved for synchronous dispatch per key — default: 1 */
-  syncReservedSlots?: number;
   /** Per-task default stale timeout (ms) for background tasks — default: 900000 (15 min) */
   backgroundStaleTimeoutMs?: number;
   /** Watchdog reconcile interval (ms) — default: 15000 (15 s) */
@@ -176,20 +132,11 @@ export interface DispatchManagerConfig {
   /** Idle debounce delay (ms) — default: 1500 (1.5 s) */
   idleDebounceMs?: number;
 
-  /** @deprecated Use syncAcquireTimeoutMs and syncPromptTimeoutMs instead.
+  /** @deprecated Use syncPromptTimeoutMs instead.
    *  Timeout (ms) for synchronous executeSync prompts — default: 600000 (10 min). */
   syncTimeoutMs?: number;
-  /** Timeout (ms) to acquire a slot for synchronous dispatch — default: 120000 (2 min) */
-  syncAcquireTimeoutMs?: number;
   /** Timeout (ms) for the sub-agent prompt to complete in sync mode — default: 600000 (10 min) */
   syncPromptTimeoutMs?: number;
-
-  /** Delay (ms) after a dispatch failure before the caller may retry — default: 30000 */
-  retryAfterMs: number;
-  /** Max retry attempts under backpressure before giving up — default: 5 */
-  backpressureMaxRetries?: number;
-  /** Max cumulative delay (ms) under backpressure before giving up — default: 60000 */
-  backpressureMaxDelayMs?: number;
 
   /** Total session.create attempts for transient (thrown) failures — default: 3.
    *  A null return (server rejection) is never retried. Set to 1 to disable retries. */
@@ -207,34 +154,19 @@ export interface DispatchManagerConfig {
   outboxMaxRetryMs?: number;
   /** Outbox sweeper polling interval (ms) — default: 5000 */
   outboxSweepIntervalMs?: number;
-
-  /**
-   * Optional factory for creating a custom IConcurrencyManager.
-   * When undefined, the default ConcurrencyManager is used.
-   * Set this to use a custom concurrency policy (e.g., priority-based, fairness-based).
-   */
-  concurrency_policy?: (defaultLimit: number, maxQueueDepth: number, reserved: number, retryAfterMs: number) => IConcurrencyManager;
 }
 
 // ── Default configuration ───────────────────────────────────────────
 
 export const DEFAULT_CONFIG: DispatchManagerConfig = {
-  maxConcurrent: DEFAULT_MAX_CONCURRENT,
-  maxQueueDepth: DEFAULT_MAX_QUEUE_DEPTH,
-  maxActivePerParent: DEFAULT_MAX_ACTIVE_PER_PARENT,
   taskTtlMs: TASK_TTL_MS,
   minRuntimeMs: MIN_RUNTIME_MS,
-  syncReservedSlots: DEFAULT_SYNC_RESERVED_SLOTS,
   backgroundStaleTimeoutMs: BACKGROUND_STALE_TIMEOUT_MS,
   watchdogIntervalMs: WATCHDOG_INTERVAL_MS,
   globalSweepIntervalMs: GLOBAL_SWEEP_INTERVAL_MS,
   idleDebounceMs: IDLE_DEBOUNCE_MS,
   syncTimeoutMs: SYNC_TIMEOUT_MS,
-  syncAcquireTimeoutMs: DEFAULT_SYNC_ACQUIRE_TIMEOUT_MS,
   syncPromptTimeoutMs: DEFAULT_SYNC_PROMPT_TIMEOUT_MS,
-  retryAfterMs: DEFAULT_RETRY_AFTER_MS,
-  backpressureMaxRetries: DEFAULT_BACKPRESSURE_MAX_RETRIES,
-  backpressureMaxDelayMs: DEFAULT_BACKPRESSURE_MAX_DELAY_MS,
 
   createRetryAttempts: DEFAULT_CREATE_RETRY_ATTEMPTS,
   createRetryBackoffMs: DEFAULT_CREATE_RETRY_BACKOFF_MS,
@@ -264,24 +196,6 @@ export function resolveEnvConfig(): Partial<DispatchManagerConfig> {
     if (Number.isNaN(n) || n <= 0) return undefined;
     return n;
   };
-
-  const mc = intEnv("ROLEBOX_DISPATCH_MAX_CONCURRENT");
-  if (mc !== undefined) result.maxConcurrent = mc;
-
-  const mqd = intEnv("ROLEBOX_DISPATCH_MAX_QUEUE_DEPTH");
-  if (mqd !== undefined) result.maxQueueDepth = mqd;
-
-  const sr = intEnv("ROLEBOX_DISPATCH_SYNC_RESERVED");
-  if (sr !== undefined) result.syncReservedSlots = sr;
-
-  const map = intEnv("ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT");
-  if (map !== undefined) result.maxActivePerParent = map;
-
-  const mts = intEnv("ROLEBOX_DISPATCH_MAX_TOTAL_SESSIONS_PER_REQUEST");
-  if (mts !== undefined) result.maxTotalSessionsPerRequest = mts;
-
-  const ra = intEnv("ROLEBOX_DISPATCH_RETRY_AFTER_MS");
-  if (ra !== undefined) result.retryAfterMs = ra;
 
   const bs = intEnv("ROLEBOX_DISPATCH_BG_STALE_MS");
   if (bs !== undefined) result.backgroundStaleTimeoutMs = bs;

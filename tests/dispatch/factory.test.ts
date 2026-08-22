@@ -13,11 +13,6 @@ const savedEnv: Record<string, string | undefined> = {};
 
 function resetEnvVars() {
   for (const key of [
-    "ROLEBOX_DISPATCH_MAX_CONCURRENT",
-    "ROLEBOX_DISPATCH_MAX_QUEUE_DEPTH",
-    "ROLEBOX_DISPATCH_SYNC_RESERVED",
-    "ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT",
-    "ROLEBOX_DISPATCH_RETRY_AFTER_MS",
     "ROLEBOX_DISPATCH_BG_STALE_MS",
     "ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS",
     "ROLEBOX_DISPATCH_RESULT_RETENTION_MS",
@@ -61,25 +56,6 @@ function makeResolvedRole(overrides: {
   };
 }
 
-/** Build a minimal ResolvedSubAgent fixture carrying an explicit model override. */
-function makeChildSubagent(
-  parentId: string,
-  id: string,
-  model: string,
-): ResolvedSubAgent {
-  return {
-    id,
-    config: { name: id, description: "d", prompt: "p", model },
-    prompt: "p",
-    skills: [],
-    functions: [],
-    references: [],
-    subagents: [],
-    parentId,
-    inheritedFrom: {},
-  };
-}
-
 /** Role WITHOUT a dispatch: block — alphabetically first in the user's setup. */
 function makeNoConfigPrimary(id: string): ResolvedRole {
   return makeResolvedRole({ id, mode: RoleMode.Primary });
@@ -91,9 +67,8 @@ function makeConfigBearingPrimary(id: string): ResolvedRole {
     id,
     mode: RoleMode.Primary,
     dispatchConfig: {
-      maxConcurrent: 2147483647,
-      maxQueueDepth: 2147483647,
-      maxActivePerParent: 2147483647,
+      materializeTimeoutMs: 2147483647,
+      backgroundStaleTimeoutMs: 2147483647,
     },
   });
 }
@@ -132,9 +107,8 @@ describe("createDispatchManager primary-role selection", () => {
     ]);
 
     const cfg = manager.getConfig();
-    expect(cfg.maxConcurrent).toBe(2147483647);
-    expect(cfg.maxQueueDepth).toBe(2147483647);
-    expect(cfg.maxActivePerParent).toBe(2147483647);
+    expect(cfg.materializeTimeoutMs).toBe(2147483647);
+    expect(cfg.backgroundStaleTimeoutMs).toBe(2147483647);
   });
 
   it("prefers the FIRST config-bearing primary in resolvedRoles array order", async () => {
@@ -143,61 +117,16 @@ describe("createDispatchManager primary-role selection", () => {
       makeResolvedRole({
         id: "alpha",
         mode: RoleMode.Primary,
-        dispatchConfig: { maxConcurrent: 7 },
+        dispatchConfig: { materializeTimeoutMs: 7 },
       }),
       makeResolvedRole({
         id: "beta",
         mode: RoleMode.Primary,
-        dispatchConfig: { maxConcurrent: 9 },
+        dispatchConfig: { materializeTimeoutMs: 9 },
       }),
     ]);
 
-    expect(manager.getConfig().maxConcurrent).toBe(7);
-  });
-
-  it("two config-bearing primaries with same-model subagents get independent per-role composite keys", async () => {
-    // Both primaries own a subagent using the SAME model id. The composite
-    // concurrency keys must NOT collapse onto a single winner: each role's
-    // key resolves its own limit from its own merged per-role config.
-    const manager = await createManager([
-      makeResolvedRole({
-        id: "alpha",
-        mode: RoleMode.Primary,
-        dispatchConfig: { maxConcurrent: 7 },
-        subagents: [makeChildSubagent("alpha", "alpha--child", "gpt-4")],
-      }),
-      makeResolvedRole({
-        id: "beta",
-        mode: RoleMode.Primary,
-        dispatchConfig: { maxConcurrent: 9 },
-        subagents: [makeChildSubagent("beta", "beta--child", "gpt-4")],
-      }),
-    ]);
-
-    // Existing behavior unchanged: the manager-level config still comes from
-    // the FIRST config-bearing primary (array order).
-    expect(manager.getConfig().maxConcurrent).toBe(7);
-
-    // Slots are lazily created — touch both composite keys with a
-    // zero-occupancy probe so their per-role limits materialize.
-    const cm = (manager as any).concurrency;
-    cm.forceOccupyBackground("alpha::gpt-4", 0);
-    cm.forceOccupyBackground("beta::gpt-4", 0);
-
-    // Both composite keys exist with their OWN limits — no single-winner collapse.
-    const status = manager.getConcurrencyStatus();
-    const alphaKey = status.keys.find((k) => k.key === "alpha::gpt-4");
-    const betaKey = status.keys.find((k) => k.key === "beta::gpt-4");
-    expect(alphaKey).toBeDefined();
-    expect(alphaKey!.limit).toBe(7);
-    expect(betaKey).toBeDefined();
-    expect(betaKey!.limit).toBe(9);
-    expect(status.total.keys).toBe(2);
-
-    // Per-key getLimit confirms the limits are role-scoped, not the manager-wide
-    // default (which would resolve to 7 for BOTH keys if role configs were lost).
-    expect(cm.getLimit("alpha::gpt-4")).toBe(7);
-    expect(cm.getLimit("beta::gpt-4")).toBe(9);
+    expect(manager.getConfig().materializeTimeoutMs).toBe(7);
   });
 
   it("falls back to the first primary when no primary carries a dispatch block", async () => {
@@ -207,8 +136,8 @@ describe("createDispatchManager primary-role selection", () => {
       makeNoConfigPrimary("emperor"),
     ]);
 
-    expect(manager.getConfig().maxConcurrent).toBe(
-      DEFAULT_CONFIG.maxConcurrent,
+    expect(manager.getConfig().materializeTimeoutMs).toBe(
+      DEFAULT_CONFIG.materializeTimeoutMs,
     );
   });
 
@@ -218,10 +147,11 @@ describe("createDispatchManager primary-role selection", () => {
     ]);
 
     const cfg = manager.getConfig();
-    expect(cfg.maxConcurrent).toBe(DEFAULT_CONFIG.maxConcurrent);
-    expect(cfg.maxQueueDepth).toBe(DEFAULT_CONFIG.maxQueueDepth);
-    expect(cfg.maxActivePerParent).toBe(DEFAULT_CONFIG.maxActivePerParent);
-    expect(cfg.maxConcurrent).toBe(5);
+    expect(cfg.taskTtlMs).toBe(DEFAULT_CONFIG.taskTtlMs);
+    expect(cfg.minRuntimeMs).toBe(DEFAULT_CONFIG.minRuntimeMs);
+    expect(cfg.backgroundStaleTimeoutMs).toBe(DEFAULT_CONFIG.backgroundStaleTimeoutMs);
+    // Removed concurrency fields must not surface on the effective config
+    expect((cfg as any).maxConcurrent).toBeUndefined();
   });
 
   it("explicit primaryRole override still wins over deterministic selection", async () => {
@@ -236,8 +166,8 @@ describe("createDispatchManager primary-role selection", () => {
     managed.push(result.manager);
 
     // The explicit primary (ai-designer) has no dispatch block → defaults apply.
-    expect(result.manager.getConfig().maxConcurrent).toBe(
-      DEFAULT_CONFIG.maxConcurrent,
+    expect(result.manager.getConfig().backgroundStaleTimeoutMs).toBe(
+      DEFAULT_CONFIG.backgroundStaleTimeoutMs,
     );
   });
 
@@ -246,8 +176,8 @@ describe("createDispatchManager primary-role selection", () => {
       makeResolvedRole({ id: "helper", mode: RoleMode.Subagent }),
     ]);
 
-    expect(manager.getConfig().maxConcurrent).toBe(
-      DEFAULT_CONFIG.maxConcurrent,
+    expect(manager.getConfig().backgroundStaleTimeoutMs).toBe(
+      DEFAULT_CONFIG.backgroundStaleTimeoutMs,
     );
   });
 });

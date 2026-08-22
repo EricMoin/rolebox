@@ -13,7 +13,6 @@ const TASK_KEYS = [
   "task_budget",
   "task_graph",
   "task_retry",
-  "task_concurrency",
   "task_chronology",
   "task_export",
 ];

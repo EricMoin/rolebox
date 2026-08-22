@@ -105,7 +105,6 @@ const OPENCODE_SURFACE: readonly string[] = [
   "task_search",
   "task_budget",
   "task_graph",
-  "task_concurrency",
   "task_chronology",
   "task_export",
   // 5. Opencode-side extras forwarded to Pi (pi-extension.ts:928-942 mirrors

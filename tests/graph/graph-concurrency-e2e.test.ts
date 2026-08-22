@@ -1,28 +1,24 @@
 /**
- * End-to-end concurrency proof — a graph with 6 independent ready nodes runs
- * with a PEAK of ≥5 concurrently-running sessions (>3) under the emperor role's
- * dispatch block.
+ * End-to-end dispatch proof — a graph with 6 independent ready nodes launches
+ * every one of them concurrently through the emperor role's dispatch block.
  *
- * This test is the acceptance proof for two coordinated fixes:
+ * The dispatch-layer concurrency mechanism (maxConcurrent / maxQueueDepth /
+ * maxActivePerParent / syncReservedSlots and `manager.getConcurrencyStatus()`)
+ * was removed upstream. What REMAINS and is proven here:
  *
- * 1. **Factory primary selection (subtask 2)** — `createDispatchManager`
+ * 1. **Factory primary selection (retained)** — `createDispatchManager`
  *    (`src/dispatch/factory.ts`) selects the dispatch config-bearing primary
  *    role. On the user's machine every role declares `mode: primary`, so the
  *    OLD alphabetical-first pick ("ai-designer", which carries no `dispatch:`
  *    block) silently discarded the emperor's limits. The fixture below
  *    replicates that machine: multiple primaries in alphabetical order, with
- *    "ai-designer" first (no dispatch block) and "emperor" declaring
- *    `maxConcurrent/maxQueueDepth/maxActivePerParent = 2147483647`.
+ *    "ai-designer" first (no dispatch block) and "emperor" declaring a
+ *    distinctive retained config field.
  *
- * 2. **Graph-bridge per-parent cap opt-out (subtask 1)** —
- *    `graphParentContext` (`src/graph/engine/dispatch-bridge.ts`) now carries
- *    `maxActivePerParent: Number.POSITIVE_INFINITY`, and task-launcher
- *    (`src/dispatch/core/task-launcher.ts`) derives the per-parent cap from the
- *    context (`parentContext.maxActivePerParent ?? config.maxActivePerParent`).
- *    Without it, the dispatch config default `maxActivePerParent = 3` would
- *    throttle a graph's nodes merely for sharing the same `graphId` parent
- *    (graphId is a request/budget scope, not a real session needing per-parent
- *    protection).
+ * 2. **Graph-node dispatch concurrency** — the graph engine dispatches every
+ *    ready root through the real DispatchManager → task-launcher path; with no
+ *    dispatch-layer throttling left, all 6 nodes reach `running` immediately
+ *    and the peak live-session count equals the number of launched nodes.
  *
  * The peak is measured with HELD-OPEN fake sessions: the stub ISessionClient
  * never reports completion (empty messages / null status), so every dispatched
@@ -58,8 +54,8 @@ const WORKDIR = "/work/dir-for-graph-concurrency-e2e";
 const GRAPH_NAME = "concurrency-proof";
 const GRAPH_ID = "g-concurrency-proof";
 
-/** The emperor's dispatch block — effectively unbounded concurrency. */
-const UNLIMITED = 2147483647;
+/** A distinctive retained config field marking the emperor's dispatch block. */
+const EMPEROR_TASK_TTL_MS = 9_999_999;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -97,9 +93,7 @@ function userMachineRoles(): ResolvedRole[] {
   return [
     makePrimaryRole("ai-designer"),
     makePrimaryRole("emperor", {
-      maxConcurrent: UNLIMITED,
-      maxQueueDepth: UNLIMITED,
-      maxActivePerParent: UNLIMITED,
+      taskTtlMs: EMPEROR_TASK_TTL_MS,
     }),
   ];
 }
@@ -123,7 +117,8 @@ function sixIndependentNodes(): GraphDeclaration {
  * A held-open stub ISessionClient. Sessions are created immediately but never
  * complete (`messages` → [], `status` → null ⇒ detectCompletion → not_ready),
  * so dispatched tasks stay `running` and their sessions stay open. Tracks the
- * PEAK number of simultaneously-open sessions so the >3 proof is observable.
+ * PEAK number of simultaneously-open sessions so the full-launch proof is
+ * observable.
  */
 function heldOpenSessionClient(): {
   client: ISessionClient;
@@ -197,11 +192,6 @@ const savedEnv: Record<string, string | undefined> = {};
 
 function resetEnvVars() {
   for (const key of [
-    "ROLEBOX_DISPATCH_MAX_CONCURRENT",
-    "ROLEBOX_DISPATCH_MAX_QUEUE_DEPTH",
-    "ROLEBOX_DISPATCH_SYNC_RESERVED",
-    "ROLEBOX_DISPATCH_MAX_ACTIVE_PER_PARENT",
-    "ROLEBOX_DISPATCH_RETRY_AFTER_MS",
     "ROLEBOX_DISPATCH_BG_STALE_MS",
     "ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS",
     "ROLEBOX_DISPATCH_RESULT_RETENTION_MS",
@@ -221,7 +211,7 @@ function restoreEnvVars() {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-describe("graph concurrency e2e — emperor dispatch block → >3 concurrent nodes", () => {
+describe("graph dispatch concurrency — emperor dispatch block → all nodes launch", () => {
   it("createDispatchManager honors the emperor dispatch block when a config-less primary sorts first", async () => {
     resetEnvVars();
     const tmpDir = mkdtempSync(
@@ -236,11 +226,9 @@ describe("graph concurrency e2e — emperor dispatch block → >3 concurrent nod
       });
       try {
         // Pre-fix the factory picked "ai-designer" (first primary, no dispatch
-        // block) → defaults (maxConcurrent 5). Post-fix it must pick the
-        // config-bearing "emperor".
-        expect(manager.getConfig().maxConcurrent).toBe(UNLIMITED);
-        expect(manager.getConfig().maxQueueDepth).toBe(UNLIMITED);
-        expect(manager.getConfig().maxActivePerParent).toBe(UNLIMITED);
+        // block) → defaults. Post-fix it must pick the config-bearing
+        // "emperor" — proven via the distinctive retained config field.
+        expect(manager.getConfig().taskTtlMs).toBe(EMPEROR_TASK_TTL_MS);
       } finally {
         await manager.dispose();
       }
@@ -251,7 +239,7 @@ describe("graph concurrency e2e — emperor dispatch block → >3 concurrent nod
   });
 
   it(
-    "runs 6 independent graph nodes with a PEAK of >= 5 concurrently-running sessions (>3)",
+    "runs 6 independent graph nodes — every one launches and stays live",
     async () => {
       resetEnvVars();
       const tmpDir = mkdtempSync(
@@ -266,14 +254,12 @@ describe("graph concurrency e2e — emperor dispatch block → >3 concurrent nod
         });
         try {
           // Sanity: the emperor dispatch block actually reached the manager.
-          expect(manager.getConfig().maxConcurrent).toBe(UNLIMITED);
-          expect(manager.getConfig().maxActivePerParent).toBe(UNLIMITED);
+          expect(manager.getConfig().taskTtlMs).toBe(EMPEROR_TASK_TTL_MS);
 
           // Drive the FULL graph path: toolset → engine → DispatchBridge →
-          // manager → task-launcher → ConcurrencyManager. The toolset's
-          // parentContext(graphId) is graphParentContext({graphId, directory})
-          // (dispatch-bridge.ts), so graph-bridge per-parent handling is
-          // exercised end to end.
+          // manager → task-launcher. The toolset's parentContext(graphId) is
+          // graphParentContext({graphId, directory}) (dispatch-bridge.ts), so
+          // graph-scoped dispatch handling is exercised end to end.
           const ts = createGraphToolSet({ manager, directory: WORKDIR });
           const created = ts.graph_create({ name: GRAPH_NAME });
           const graphId = created.graph_id;
@@ -294,13 +280,12 @@ describe("graph concurrency e2e — emperor dispatch block → >3 concurrent nod
           // The engine reports all 6 nodes as genuinely active.
           expect(runResult.active_nodes.length).toBeGreaterThanOrEqual(5);
 
-          // Peak concurrently-open sessions must exceed the OLD per-parent
-          // default of 3 — this is the >3 acceptance proof.
+          // With no dispatch-layer throttling, all 6 sessions open and stay
+          // live — the peak equals the launched count.
           expect(createdCount()).toBe(6);
           expect(peakLive()).toBeGreaterThanOrEqual(5);
-          // Cross-check via the manager's own live counters.
+          // Cross-check via the manager's own live counter.
           expect(manager.getInflightCount(graphId)).toBeGreaterThanOrEqual(5);
-          expect(manager.getConcurrencyStatus().total.active).toBeGreaterThanOrEqual(5);
         } finally {
           await manager.dispose();
         }
@@ -312,51 +297,9 @@ describe("graph concurrency e2e — emperor dispatch block → >3 concurrent nod
     { timeout: 30_000 },
   );
 
-  it(
-    "PRE-FIX mechanism: without the bridge opt-out, the config per-parent cap (3) binds and the peak stays < 5",
-    async () => {
-      resetEnvVars();
-      const { client, peakLive } = heldOpenSessionClient();
-      // Pre-fix manager shape: DEFAULT per-parent cap (3) with enough global
-      // headroom that the ONLY binder is the per-parent cap.
-      const manager = new DispatchManager(client, {
-        maxConcurrent: 6,
-        syncReservedSlots: 0,
-        taskTtlMs: 60_000,
-      });
-      const bridge = new DispatchBridge(manager);
-      try {
-        // Pre-fix graphParentContext carried NO maxActivePerParent field —
-        // task-launcher then fell back to config.maxActivePerParent (3).
-        const preFixContext = {
-          sessionID: GRAPH_ID,
-          agent: "emperor--jinyiwei",
-          directory: WORKDIR,
-        };
-        const state = createEngineState(sixIndependentNodes(), GRAPH_ID);
-
-        const tasks: Awaited<ReturnType<DispatchBridge["executeNode"]>>[] = [];
-        for (const nodeDecl of state.graphDeclaration.nodes) {
-          const node = registerNode(state, nodeDecl);
-          tasks.push(await bridge.executeNode(node, preFixContext));
-        }
-
-        // Only 3 of 6 acquire; the other 3 queue behind the per-parent cap.
-        expect(tasks.filter((t) => t.status === "running").length).toBe(3);
-        expect(tasks.filter((t) => t.status === "pending").length).toBe(3);
-        expect(peakLive()).toBeLessThan(5);
-        expect(manager.getInflightCount(GRAPH_ID)).toBe(3);
-      } finally {
-        await manager.dispose();
-        restoreEnvVars();
-      }
-    },
-    { timeout: 30_000 },
-  );
-
-  it("graphParentContext carries an unbounded per-parent cap (mechanism assertion)", () => {
+  it("graphParentContext carries the graph-scope marker (mechanism assertion)", () => {
     const ctx = graphParentContext({ graphId: GRAPH_ID, directory: WORKDIR });
     expect(ctx.sessionID).toBe(GRAPH_ID);
-    expect(ctx.maxActivePerParent).toBe(Number.POSITIVE_INFINITY);
+    expect(ctx.graphScoped).toBe(true);
   });
 });

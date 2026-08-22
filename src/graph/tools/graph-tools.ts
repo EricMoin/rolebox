@@ -380,13 +380,6 @@ export interface GraphStatusArgs {
   include_budget?: boolean;
   include_metrics?: boolean;
   include_loops?: boolean;
-  /** Manager-scoped view (dispatch_concurrency merge, §3 row 14). When set,
-   * render LIVE dispatch-manager concurrency slot status from the real
-   * `manager.getConcurrencyStatus()` API — per-key breakdown + global summary,
-   * mirroring the legacy `dispatch_concurrency` tool's column names / format.
-   * When no dispatch manager is bound to the toolset, returns an explicit
-   * documented-unavailable note — NEVER fabricated slot data. */
-  include_concurrency?: boolean;
   /** Include the node's recorded lifecycle checkpoint snapshot(s) from
    * `EngineState.checkpoints[nodeId]` (subtask 1 field). OPTIONAL-ADDITIVE —
    * absent until a checkpoint is recorded; when none exist, an explicit
@@ -567,8 +560,6 @@ const DEFAULT_SWEEPER_INTERVAL_MS = 60_000;
  *
  * - Subtask 3 backed `group_by` (completed-node bucketing), `limit` (row cap for
  *   summary/json), and `depth` (tree cutoff) — see `status-queries.ts`.
- * - Subtask 4 backed `include_concurrency` — answered from the real
- *   `DispatchManager.getConcurrencyStatus()` API (`renderConcurrency`).
  * - Subtask 3 (C-WIRE) backed the final seven: `round` + `include_history`
  *   (`LoopGroupRuntimeState.rounds[]`), `include_checkpoint`
  *   (`EngineState.checkpoints`), `include_artifacts` / `include_evidence`
@@ -1447,13 +1438,6 @@ export class GraphToolSet {
   // ── graph_status ───────────────────────────────────────────────────────────
 
   graph_status(args: GraphStatusArgs): string {
-    // include_concurrency: a manager-scoped view (not graph-scoped). Render live
-    // dispatch-manager concurrency slot status from the real API, or an explicit
-    // documented-unavailable note when no manager is bound — never fabricated.
-    if (args.include_concurrency) {
-      return this.renderConcurrency();
-    }
-
     const scope: GraphStatusScope = args.scope ?? "session";
     const noTarget = !args.graph_id && !args.node_id && !args.loop_id;
 
@@ -1932,47 +1916,6 @@ export class GraphToolSet {
   }
 
   // ── Status renderers ───────────────────────────────────────────────────────
-
-  /**
-   * Render live dispatch-manager concurrency slot status from the real
-   * `manager.getConcurrencyStatus()` API (the `dispatch_concurrency` merge, §3
-   * row 14). The output mirrors the legacy `dispatch_concurrency` tool's
-   * per-key breakdown table + global summary — same column names, same format —
-   * but sourced here from GENUINE manager data.
-   *
-   * When no dispatch manager is bound to the toolset, returns an explicit
-   * documented-unavailable note. It NEVER fabricates slot data.
-   */
-  private renderConcurrency(): string {
-    if (!this.deps.manager) {
-      return (
-        "no dispatch manager available — concurrency slot status unavailable"
-      );
-    }
-    const status = this.deps.manager.getConcurrencyStatus();
-    // Empty state — no keys registered (same message as the legacy tool).
-    if (status.keys.length === 0) {
-      return "No concurrency keys registered. No tasks have been dispatched yet.";
-    }
-    const lines: string[] = ["## Task Concurrency Status", ""];
-    lines.push("### Per-Key Breakdown");
-    lines.push("");
-    lines.push("| Key | Active | Limit | Available | Reserved | Queue Depth |");
-    lines.push("|-----|--------|-------|-----------|----------|-------------|");
-    for (const key of status.keys) {
-      lines.push(
-        `| ${key.key} | ${key.active} | ${key.limit} | ${key.available} | ${key.reserved} | ${key.queueDepth} |`,
-      );
-    }
-    lines.push("");
-    lines.push("### Global Summary");
-    lines.push("");
-    lines.push(`- Total active: ${status.total.active}`);
-    lines.push(`- Total limit: ${status.total.limit}`);
-    lines.push(`- Total queue depth: ${status.total.queueDepth}`);
-    lines.push(`- Concurrency keys: ${status.total.keys}`);
-    return lines.join("\n");
-  }
 
   private renderGraph(
     state: EngineState,

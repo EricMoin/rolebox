@@ -168,16 +168,7 @@ function parseDispatchConfig(
 
   const validFields: Record<string, number> = {};
   const knownKeys = [
-    "maxConcurrent",
-    "maxQueueDepth",
-    "syncReservedSlots",
-    "maxActivePerParent",
-    "maxTotalSessionsPerRequest",
-    "retryAfterMs",
-    "backpressureMaxRetries",
-    "backpressureMaxDelayMs",
     "backgroundStaleTimeoutMs",
-    "syncAcquireTimeoutMs",
     "syncPromptTimeoutMs",
   ];
 

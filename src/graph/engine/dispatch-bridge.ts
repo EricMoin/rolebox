@@ -41,17 +41,6 @@ export interface DispatchParentContext {
   /** Working directory of the parent. */
   directory: string;
   /**
-   * Optional per-parent concurrency cap for background dispatches.
-   * When omitted, task-launcher falls back to the dispatch config's
-   * `maxActivePerParent` (default 3). {@link graphParentContext} sets this to
-   * `Number.POSITIVE_INFINITY`: graphId is a request/budget scope, not a real
-   * session needing per-parent protection, so graph-node concurrency is
-   * engine-managed (frontier, loop max_traversals, per-node budgets) rather
-   * than capped by the per-parent default. Real-session parents (legacy
-   * dispatch_* tools) omit this field and keep per-parent fairness.
-   */
-  maxActivePerParent?: number;
-  /**
    * Graph-scope marker. Set by {@link graphParentContext}; carried onto the
    * dispatched {@link DispatchTask} by task-launcher. While set, the dispatch
    * layer suppresses its parent notifications — graph-node completion is
@@ -115,14 +104,6 @@ export function graphParentContext(opts: GraphParentOptions): DispatchParentCont
     // COMPLETED]/[ALL BACKGROUND TASKS COMPLETE] reminders under the internal
     // bg_* task id namespace.
     graphScoped: true,
-    // graphId is a request/budget scope, not a real parent session — the
-    // engine's frontier, loop max_traversals, and per-node budgets are the
-    // governing bounds (emperor role.yaml design comment: "concurrency is
-    // engine-managed"). Lifting the per-parent cap (config default: 3) here
-    // means a graph's nodes are never throttled merely for sharing the same
-    // graphId parent. Real-session parents omit this field and retain the
-    // config default via task-launcher's `?? d.config.maxActivePerParent`.
-    maxActivePerParent: Number.POSITIVE_INFINITY,
   };
 }
 

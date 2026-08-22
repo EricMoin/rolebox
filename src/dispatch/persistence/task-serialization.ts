@@ -40,7 +40,6 @@ export interface SerializedDispatchTask {
   completedAt?: string;
   error?: string;
   progress: SerializedTaskProgress;
-  concurrencyKey?: string;
   continuationOf?: string;
   messageCountAtStart?: number;
   timeoutMs?: number;

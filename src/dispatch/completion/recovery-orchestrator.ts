@@ -5,8 +5,6 @@ import { debugLog } from "../core/debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { buildReminder } from "../../prompt/reminder.ts";
 
-const DEFAULT_CONCURRENCY_KEY = "default";
-
 export async function recoverOrchestrator(
   deps: CompletionOrchestratorDeps,
   isRecovered: () => boolean,
@@ -75,28 +73,16 @@ export async function recoverOrchestrator(
     try {
       const result = await deps.client.get(task.sessionId);
       if (result) {
-        const key = task.concurrencyKey ?? DEFAULT_CONCURRENCY_KEY;
-        const occupied = deps.concurrency.forceOccupyBackground(key, 1, task.parentSessionId);
-        if (occupied === 1) {
-          task.concurrencyKey = key;
-          deps.watchdog.registerTask(task.id);
-          deps.sessionToTask.set(task.sessionId, task.id);
-          deps.eventState.set(task.id, {
-            lastMessageCount: 0,
-            lastProgressUpdate: Date.now(),
-            hasProducedOutput: false,
-            lastEventAt: Date.now(),
-            messageCountAtStart: task.messageCountAtStart ?? 0,
-            consecutiveFetchFailures: 0,
-          });
-        } else {
-          deps._transition!(task.id, ["running"], "error", {
-            error: "Exceeded concurrency limit on recovery",
-          });
-          void deps.sendNotification(task, deps.getInflightCount(task.parentSessionId));
-          scheduleCleanupCb(task.id);
-          debugLog("recover", task.id, "dropped — concurrency limit exceeded on recovery");
-        }
+        deps.watchdog.registerTask(task.id);
+        deps.sessionToTask.set(task.sessionId, task.id);
+        deps.eventState.set(task.id, {
+          lastMessageCount: 0,
+          lastProgressUpdate: Date.now(),
+          hasProducedOutput: false,
+          lastEventAt: Date.now(),
+          messageCountAtStart: task.messageCountAtStart ?? 0,
+          consecutiveFetchFailures: 0,
+        });
       } else {
         task.status = "error";
         task.error = "Session lost after process restart — You can re-dispatch with dispatch(...)";

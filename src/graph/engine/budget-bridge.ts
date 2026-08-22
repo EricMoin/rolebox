@@ -18,13 +18,11 @@
  *   `isRequestBudgetExceeded` already covers both the request and session
  *   tiers from one `DispatchManagerConfig` (`src/dispatch/budget/budget-tracker.ts:148-176`).
  *
- *   On top of the tracker check, the bridge enforces the graph-declared
- *   `budget.max_total_sessions` cap (`src/types.graph-v2.ts:236-238`) against
- *   `EngineState.budget.sessionsSpawned` — a NET-LIVE counter: incremented per
- *   successful dispatch (`engine-advance.ts`), decremented when a dispatch task
- *   terminates cancelled/timeout (`engine-recovery.ts`, the graph-level mirror
- *   of S4's `decRequestSessions` refunds). When the declaration carries no
- *   `max_total_sessions`, this second check is a no-op.
+ *   The graph-declared session cap was removed — the bridge now delegates
+ *   solely to the tracker. `EngineState.budget.sessionsSpawned` remains a
+ *   NET-LIVE display counter (incremented per successful dispatch in
+ *   `engine-advance.ts`, decremented on cancelled/timeout termination in
+ *   `engine-recovery.ts`), but no longer gates dispatch.
  *
  * - **Per-node** — `checkNodeBudget(node)` is a stub in this phase. Enforcement
  *   of cumulative per-node consumption against per-graph `max_total_*` limits
@@ -65,25 +63,13 @@ export class BudgetBridge {
    * tracker check returns `{ exceeded: true, reason }` when the graph instance
    * has breached any configured request-level ceiling.
    *
-   * Additionally enforces the graph-declared `budget.max_total_sessions` cap
-   * against `state.budget.sessionsSpawned` (only when the declaration sets it).
-   * `sessionsSpawned` counts NET-LIVE sessions — incremented per successful
-   * dispatch, decremented when a dispatch task terminates cancelled/timeout —
-   * so the cap blocks further dispatches only while the graph genuinely holds
-   * that many live sessions (S4-refund-consistent).
+   * The graph-declared session cap was removed, so this is the only check —
+   * `state.budget.sessionsSpawned` (a NET-LIVE display counter, incremented
+   * per successful dispatch and decremented on cancelled/timeout termination)
+   * no longer gates dispatch.
    */
   checkGraphBudget(graphId: string, state: EngineState): BudgetCheckResult {
-    const trackerCheck = this.tracker.isRequestBudgetExceeded(graphId);
-    if (trackerCheck.exceeded) return trackerCheck;
-
-    const max = this.graphDeclaration.budget?.max_total_sessions;
-    if (max !== undefined && state.budget.sessionsSpawned >= max) {
-      return {
-        exceeded: true,
-        reason: `graph session budget exhausted: ${state.budget.sessionsSpawned} >= ${max}`,
-      };
-    }
-    return trackerCheck;
+    return this.tracker.isRequestBudgetExceeded(graphId);
   }
 
   /**
