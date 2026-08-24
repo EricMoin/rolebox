@@ -70,11 +70,6 @@ collaboration:
 
 # Dispatch configuration (override defaults for subagent dispatch)
 dispatch:
-  maxConcurrent: number             # Max concurrent background tasks (default: 5)
-  maxQueueDepth: number             # Max queued tasks (default: 10)
-  syncReservedSlots: number         # Slots reserved for sync dispatch (default: 1)
-  maxActivePerParent: number        # Max active tasks per parent session (default: 3)
-  maxTotalSessionsPerRequest: number # Max cumulative sessions per user request (default: unlimited / opt-in)
   maxInputTokensPerRequest: number  # Max cumulative input tokens per request (default: unlimited / opt-in)
   maxOutputTokensPerRequest: number # Max cumulative output tokens per request (default: unlimited / opt-in)
   maxCostPerRequest: number         # Max cumulative cost (USD) per request (default: unlimited / opt-in)
@@ -82,11 +77,7 @@ dispatch:
   maxCostPerSession: number         # Max cost (USD) per dispatched session (default: unlimited / opt-in)
   budgetSampleIntervalMs: number    # Budget sampling interval in ms (default: 30000)
   backgroundStaleTimeoutMs: number  # Stale timeout for background tasks (default: 900000)
-  syncAcquireTimeoutMs: number      # Timeout to acquire sync slot (default: 120000)
   syncPromptTimeoutMs: number       # Timeout for sync prompt (default: 600000)
-  retryAfterMs: number              # Delay before retry after failure (default: 30000)
-  backpressureMaxRetries: number    # Max backpressure retries (default: 5)
-  backpressureMaxDelayMs: number    # Max backpressure delay (default: 60000)
 
 # Custom Hooks (see [Custom Hooks](hooks.md))
 hooks:

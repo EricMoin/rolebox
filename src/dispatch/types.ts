@@ -76,8 +76,6 @@ export interface DispatchTask {
   error?: string;
   /** Runtime progress metrics */
   progress: TaskProgress;
-  /** Optional concurrency key, set during launch for recovered tasks */
-  concurrencyKey?: string;
   /** Task ID this continues from (set on re-prompt continuation) */
   continuationOf?: string;
   /** Message count at continuation time — used as lower bound for output detection */
@@ -110,6 +108,19 @@ export interface DispatchTask {
    * correctly.
    */
   terminatingSignal?: { type: string; payload: unknown };
+  /**
+   * Graph-scope marker: set when this task was dispatched by the graph engine
+   * (via `executeNode`/`graphParentContext` in `src/graph/engine/dispatch-bridge.ts`).
+   *
+   * While set, the dispatch layer suppresses its parent notifications
+   * (`[BACKGROUND TASK COMPLETED]` / `[ALL BACKGROUND TASKS COMPLETE]`):
+   * graph-node completion is reported EXCLUSIVELY by the graph notifier
+   * (`createGraphNotifier`/`createGraphTerminalNotifier` in
+   * `src/graph/engine/graph-notify.ts`), which references the node id rather
+   * than the internal `bg_*` dispatch task id. Absent/undefined for every
+   * real-session dispatch, whose notifications behave exactly as before.
+   */
+  graphScoped?: boolean;
 }
 /**
  * Input parameters for the dispatch tool (task() call).
@@ -132,6 +143,14 @@ export interface DispatchInput {
   sync_timeout_ms?: number;
   /** When true, the dispatched session is created without parentID — it does NOT inherit the parent session's conversation history. Used by the loop system to ensure each round starts fresh. */
   noParentInherit?: boolean;
+  /**
+   * Graph-scope marker: set by the graph engine's `executeNode`
+   * (`src/graph/engine/dispatch-bridge.ts`) for every node dispatch. Carried
+   * onto the resulting {@link DispatchTask} so the notification choke points
+   * can suppress parent reminders for graph-scoped tasks (the graph notifier
+   * reports node completion instead). Absent for real-session dispatches.
+   */
+  graphScoped?: boolean;
   /** Priority: lower number = higher priority. Default 0 (normal).
    *  Higher-priority tasks (lower value) acquire concurrency slots first.
    *  Within the same priority level, tasks are dequeued in FIFO order. */

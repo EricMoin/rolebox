@@ -128,11 +128,17 @@ export function buildSkillBlock(skills: ResolvedSkill[]): string {
   return renderSection(
     "available_skills",
     "Skills provide specialized instructions. Use the skill tool to load when task matches.",
-    skills.map((s) => xml("skill", [
-      xml("name", [s.name]),
-      xml("description", [s.description]),
-      xml("scope", [s.scope]),
-    ])),
+    skills.map((s) => {
+      const children: XmlChild[] = [
+        xml("name", [s.name]),
+        xml("description", [s.description]),
+        xml("scope", [s.scope]),
+      ];
+      if (s.filePath) {
+        children.push(xml("location", [s.filePath]));
+      }
+      return xml("skill", children);
+    }),
   );
 }
 

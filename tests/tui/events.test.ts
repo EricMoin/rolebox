@@ -5,7 +5,7 @@ import { mkdirSync, appendFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { GraphEventPoll } from "../../src/tui/events";
+import { GraphEventPoll, foldGraphSignals } from "../../src/tui/events";
 import type { RoleboxEvent } from "../../src/tui/events";
 
 // ── Test helpers ─────────────────────────────────────────────────────
@@ -88,6 +88,8 @@ describe("GraphEventPoll (TUI graph-events bridge)", () => {
       graphId: "g1",
       nodeId: "n1",
       agent: "agent-x",
+      // node_dispatched lines carry status "running" — surfaced as the event status.
+      status: "running",
     });
     expect(typeof events[0].ts).toBe("string");
   });
@@ -216,5 +218,80 @@ describe("GraphEventPoll (TUI graph-events bridge)", () => {
       "n5",
     ]);
     expect(poll.poll()).toHaveLength(0);
+  });
+});
+
+// ── foldGraphSignals (live-signal fold) ────────────────────────────────
+
+describe("foldGraphSignals (live-signal fold)", () => {
+  const ts = "2026-08-20T00:00:00.000Z";
+
+  it("folds a running node entry into the node-scoped map", () => {
+    const { graphSignals, nodeSignals } = foldGraphSignals(
+      [
+        {
+          type: "graph_node_start",
+          graphId: "g1",
+          nodeId: "n1",
+          agent: "agent-x",
+          status: "running",
+          ts,
+        },
+      ],
+      new Map(),
+      new Map(),
+    );
+
+    // node_dispatched → graph_node_start carries status "running".
+    expect(nodeSignals.get("g1::n1")).toBe("running");
+    // Node events never write the graph-level (engine-phase) map.
+    expect(graphSignals.size).toBe(0);
+  });
+
+  it("keeps the graph-level map engine-phase-only and folds node statuses", () => {
+    const events: RoleboxEvent[] = [
+      { type: "graph_signal", graphId: "g1", status: "executing", ts },
+      { type: "graph_node_start", graphId: "g1", nodeId: "n1", agent: "agent-x", status: "running", ts },
+      {
+        type: "graph_node_end",
+        graphId: "g1",
+        nodeId: "n1",
+        agent: "agent-x",
+        status: "completed",
+        signalType: "answer",
+        ts,
+      },
+    ];
+
+    const { graphSignals, nodeSignals } = foldGraphSignals(events, new Map(), new Map());
+
+    // graph-level slot carries the engine phase (graph_signal only)…
+    expect(graphSignals.get("g1")).toBe("executing");
+    // …while the node-scoped slot carries the node status, never the
+    // terminating signalType (answer/revise_needed).
+    expect(nodeSignals.get("g1::n1")).toBe("completed");
+    expect(nodeSignals.get("g1::n1")).not.toBe("answer");
+  });
+
+  it("preserves prior entries and lets later events win", () => {
+    const { graphSignals, nodeSignals } = foldGraphSignals(
+      [
+        {
+          type: "graph_node_end",
+          graphId: "g1",
+          nodeId: "n1",
+          agent: "agent-x",
+          status: "completed",
+          signalType: "answer",
+          ts,
+        },
+      ],
+      new Map([["g1", "executing"]]),
+      new Map([["g1::n1", "running"]]),
+    );
+
+    // running → completed in place; the graph-level phase survives untouched.
+    expect(nodeSignals.get("g1::n1")).toBe("completed");
+    expect(graphSignals.get("g1")).toBe("executing");
   });
 });

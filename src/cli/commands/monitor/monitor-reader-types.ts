@@ -226,6 +226,9 @@ export interface EngineGraphSnapshot {
   startedAt: string;
   /** ISO timestamp of the last state update */
   updatedAt: string;
+  /** Raw epoch-ms timestamp of the last state update (source of truth for
+   *  staleness gating; `0` when the persisted file lacked the field). */
+  updatedAtMs: number;
   /** Whether any per-node checkpoints have been recorded */
   hasCheckpoints: boolean;
 }

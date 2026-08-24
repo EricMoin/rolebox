@@ -20,5 +20,9 @@ export {
   loadNotifyDedup,
   persistNotifyDedup,
   persistNotifyDedupSync,
+  pruneSidecars,
+  MAX_RETAINED_SIDECARS,
+  writeSystemPrompt,
+  getSystemPromptPath,
 } from "./sidecar-persister.ts";
 export { PiToolFactory } from "./tool-factory.ts";

@@ -186,13 +186,62 @@ export async function materializeResult(
 }
 
 /**
- * Build the full assistant output text from session messages,
+ * Extract the final assistant answer from session messages,
  * starting from the given boundary index.
+ *
+ * Walks messages from `boundary` forward and returns the text of the LAST
+ * assistant message that carries a non-empty text part. Messages whose parts
+ * are only tool/reasoning content (no text) are ignored, so tool-result echo
+ * that some adapters (e.g. Pi) misclassify as assistant text does not pollute
+ * the answer.
+ *
+ * The returned text is the raw message text — any ```result fence inside it
+ * is preserved verbatim, so the caller's existing `extractResultBlock` pass
+ * still extracts the fence from the final answer.
+ *
+ * Returns `null` when no assistant message carries text; the caller falls
+ * back to the legacy full-concatenation behavior in that case.
+ */
+export function extractFinalAssistantText(
+  messages: readonly SessionMessageSnapshot[],
+  boundary: number,
+): string | null {
+  let finalText: string | null = null;
+  for (let i = boundary; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.info.role !== "assistant") continue;
+    const textParts: string[] = [];
+    for (const part of msg.parts) {
+      if (part.type === "text" && part.text && part.text.length > 0) {
+        textParts.push(part.text);
+      }
+    }
+    if (textParts.length > 0) {
+      finalText = textParts.join("");
+    }
+  }
+  return finalText;
+}
+
+/**
+ * Build the assistant output text from session messages,
+ * starting from the given boundary index.
+ *
+ * Uses the LAST assistant message that carries a non-empty text part, so
+ * intermediate tool-result echo (misclassified as assistant text by some
+ * adapters) never pollutes the result. Falls back to concatenating all
+ * assistant text parts only when no assistant text exists at all.
  */
 export function buildAssistantText(
   messages: readonly SessionMessageSnapshot[],
   boundary: number,
 ): string {
+  const finalText = extractFinalAssistantText(messages, boundary);
+  if (finalText !== null) {
+    return finalText;
+  }
+  // Fallback: no assistant text found — preserve the legacy
+  // full-concatenation behavior.
   const textParts: string[] = [];
   for (let i = boundary; i < messages.length; i++) {
     const msg = messages[i];

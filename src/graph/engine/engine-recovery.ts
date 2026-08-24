@@ -63,7 +63,7 @@ import type {
   EngineState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
-import { computeInDegrees, releaseAdvancingLock, removeFromFrontier } from "./engine-state.ts";
+import { computeInDegrees, releaseAdvancingLock, removeFromFrontier, applyBudgetDelta } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
 import { cloneCheckpointHistory, markNonCriticalDirty } from "./engine-persistence.ts";
 import type { SignalType } from "./signal-bridge.ts";
@@ -404,6 +404,15 @@ export function subscribeTaskTermination(
     // the node advances. Idempotent replace — safe across the live-seam /
     // race-guard double-observation of the same termination.
     captureNodeUsage(state, current, port);
+    // Session-slot refund (the graph-level mirror of S4's `decRequestSessions`):
+    // a cancelled / timed-out dispatch task refunds its net-live session slot
+    // (the dispatch layer refunds cancelled/timeout tasks only; completed /
+    // error / blocked keep counting). The graph-declared session cap was
+    // removed, so this refund no longer gates dispatch — `sessionsSpawned`
+    // remains a NET-LIVE display counter, and the -1 refund keeps it accurate.
+    if (status === "cancelled" || status === "timeout") {
+      applyBudgetDelta(state, { sessions: -1 });
+    }
     if (status === "cancelled") {
       markCancelled(state, current, "dispatch task cancelled");
       return;
@@ -907,6 +916,27 @@ export interface NodeStalenessWatcherOptions {
    * marked `timeout` by {@link tick}.
    */
   onTimeout?: (nodeId: string, errorReason: string) => void;
+  /**
+   * Optional dispatch-liveness probe (the same quiet-but-alive channel the
+   * {@link NodeLivenessMonitor} consults). When present and returning `true`
+   * for a running node that is past its staleness deadline, {@link tick}
+   * treats the node as quiet-but-alive rather than hung: it refreshes
+   * `lastActivityAt` (heartbeatSource `"dispatch"`) and SKIPS the wall-clock
+   * timeout for that tick. The node stays running while the dispatch layer
+   * verifiably considers its task in-flight; the authoritative hung-kill for
+   * a task that stays verifiably live but never completes lives in the
+   * dispatch watchdog (`completion-evaluator.ts` not_ready branch), not here.
+   *
+   * When the probe is absent, returns `false` (task dead / orphaned), or
+   * throws (unverifiable), the wall-clock deadline remains authoritative —
+   * the node is marked `timeout` exactly as before (the "no-feed fallback"
+   * contract). A throwing probe is swallowed and treated as not-alive, so a
+   * tick never breaks and a broken probe can never resurrect a hung node.
+   * When the probe is present and its node IS timed out, its result is
+   * folded into the timeout REASON string for diagnostics (e.g.
+   * `dispatch task live=false`).
+   */
+  isDispatchAlive?: (node: NodeRuntimeState) => boolean;
 }
 
 /**
@@ -923,6 +953,16 @@ export interface NodeStalenessWatcherOptions {
  * - every other node uses the watcher-wide `nodeStaleTimeoutMs`;
  * - a non-positive deadline means the node never goes stale (defensive — a
  *   `0`/negative per-node override or watcher-wide value disables staleness).
+ *
+ * Dispatch-liveness gate (S2): when the optional {@link NodeStalenessWatcherOptions
+ * .isDispatchAlive} probe is present and verifiably reports the node's task
+ * in-flight, a running node past its deadline is quiet-but-alive — the tick
+ * refreshes its heartbeat (heartbeatSource `"dispatch"`) and skips the
+ * timeout. The wall-clock kill remains the no-feed fallback: probe absent,
+ * `false`, or throwing → the node is timed out byte-identically to the
+ * legacy behavior, and the authoritative hung-kill for a verifiably-live
+ * but never-completing task lives in the dispatch watchdog
+ * (`completion-evaluator.ts` not_ready branch).
  *
  * The engine's behavior is unchanged unless a consumer instantiates the
  * watcher (default not instantiated) and drives it — `index.ts` (S7) wires
@@ -944,7 +984,11 @@ export class NodeStalenessWatcher {
   /**
    * One staleness tick. Marks every `running` node whose elapsed `startedAt`
    * time meets or exceeds its staleness deadline as `timeout` (via
-   * {@link markTimedOut}), reporting each through the `onTimeout` callback.
+   * {@link markTimedOut}), reporting each through the `onTimeout` callback —
+   * unless the optional dispatch-liveness probe verifiably reports the node's
+   * task in-flight, in which case the node is quiet-but-alive: its heartbeat
+   * is refreshed (heartbeatSource `"dispatch"`) and the timeout is skipped
+   * for this tick.
    *
    * @returns The ids of the nodes that were timed out by this tick.
    * @param now Optional clock for deterministic tests (defaults to `Date.now`).
@@ -956,13 +1000,87 @@ export class NodeStalenessWatcher {
       const deadline = node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs;
       if (deadline <= 0) continue; // no staleness deadline — never stale
       if (now - node.startedAt >= deadline) {
-        const reason = `node ran past its staleness timeout (${deadline}ms)`;
+        // Dispatch-liveness gate (quiet-but-alive): when the optional probe
+        // verifiably reports the node's task in-flight, the wall-clock
+        // deadline is suspended — refresh the heartbeat (heartbeatSource
+        // "dispatch", mirroring the NodeLivenessMonitor channel) and skip the
+        // timeout. Hung-but-alive nodes (task stuck verifiably live, never
+        // completing) fall to the dispatch watchdog's not_ready hung-kill,
+        // not this watcher. Probe absent / false / throwing → the wall-clock
+        // kill below is byte-identical to the legacy no-feed fallback.
+        const dispatchAlive = this.evalDispatchAlive(node);
+        if (dispatchAlive === true) {
+          node.liveness = {
+            ...node.liveness,
+            lastActivityAt: now,
+            heartbeatSource: "dispatch",
+            stallStatus: "healthy",
+            stallWarnedAt: undefined,
+            stallReason: undefined,
+          };
+          markNonCriticalDirty(state);
+          continue;
+        }
+        const reason = this.buildTimeoutReason(node, deadline, now, dispatchAlive);
         markTimedOut(state, node, reason);
         timedOut.push(node.nodeId);
         this.opts.onTimeout?.(node.nodeId, reason);
       }
     }
     return timedOut;
+  }
+
+  /**
+   * Evaluate the optional dispatch-liveness probe for a node — exactly once
+   * per tick. Returns `undefined` when the probe is absent or throws; both
+   * resolve to the conservative not-verifiable default, so a broken probe can
+   * never resurrect a hung node and a tick never breaks.
+   */
+  private evalDispatchAlive(node: NodeRuntimeState): boolean | undefined {
+    if (!this.opts.isDispatchAlive) return undefined;
+    try {
+      return this.opts.isDispatchAlive(node);
+    } catch {
+      return undefined; // probe threw — not verifiably alive → wall-clock kill
+    }
+  }
+
+  /**
+   * Compose the timeout reason for a stale running node. The base message is
+   * unchanged; the node's liveness-carrier facts (idle time since the last
+   * heartbeat, heartbeat source, stall classification) and — when the
+   * optional dispatch-liveness probe is present — its result are appended for
+   * diagnosis (S1 enrichment). The probe result is passed in precomputed by
+   * {@link tick} (evaluated exactly once per node per tick — the same value
+   * that gated the timeout skip), so the reason is always consistent with the
+   * decision. Reason string only: this NEVER influences which nodes time out
+   * (the {@link tick} gate plus the wall-clock deadline decide); a throwing
+   * probe resolves to `undefined` (segment omitted) so a tick never breaks;
+   * the legacy reason is byte-identical when no liveness facts or probe
+   * exist.
+   */
+  private buildTimeoutReason(
+    node: NodeRuntimeState,
+    deadline: number,
+    now: number,
+    dispatchAlive?: boolean,
+  ): string {
+    const facts: string[] = [];
+    if (dispatchAlive !== undefined) {
+      facts.push(`dispatch task live=${dispatchAlive}`);
+    }
+    const liv = node.liveness;
+    if (liv?.lastActivityAt !== undefined) {
+      facts.push(`last heartbeat ${formatIdle(now - liv.lastActivityAt)} ago`);
+    }
+    if (liv?.heartbeatSource) {
+      facts.push(`heartbeat source=${liv.heartbeatSource}`);
+    }
+    if (liv?.stallStatus) {
+      facts.push(`stall status=${liv.stallStatus}`);
+    }
+    const base = `node ran past its staleness timeout (${deadline}ms)`;
+    return facts.length > 0 ? `${base}; ${facts.join(", ")}` : base;
   }
 
   /** Start the periodic tick. Opt-in — never auto-started. */
@@ -1082,12 +1200,13 @@ export interface NodeLivenessMonitorOptions {
    *   genuinely abnormal state (orphaned node, dead task that never
    *   terminal-advanced). Quiet-but-alive nodes no longer warn.
    * - A genuinely HUNG node whose task stays verifiably live but never
-   *   completes is NOT caught here — it falls to the wall-clock
-   *   {@link NodeStalenessWatcher} backstop (`nodeStaleTimeoutMs`), which is
-   *   wired beside this monitor and times out any running node past its
-   *   staleness deadline regardless of heartbeats. The 15-minute backstop is
-   *   intentionally kept intact so hung-but-alive nodes still eventually
-   *   time out.
+   *   completes is NOT caught here — it falls to the dispatch watchdog's
+   *   not_ready hung-kill (`completion-evaluator.ts`), and the wall-clock
+   *   {@link NodeStalenessWatcher} wired beside this monitor applies the SAME
+   *   probe gate (S2): while the probe verifies the task in-flight, the
+   *   watcher skips its timeout too. Only a watcher WITHOUT the probe
+   *   (feed-less engines / test fakes) keeps the pure wall-clock deadline as
+   *   the hung-but-alive backstop.
    * - A node whose declared per-node budget (`budget.timeout_ms`) is tighter
    *   than the warn window is bounded by that cap (the hard-stall branch
    *   precedes the probe refresh) — the declared deadline is authoritative.
@@ -1297,6 +1416,17 @@ export class NodeLivenessMonitor {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Compact idle-time rendering for timeout reasons ("42s" for sub-minute,
+ * "12m" for minutes). Negative skew (clock moved backwards) clamps to zero.
+ */
+function formatIdle(ms: number): string {
+  const clamped = Math.max(0, ms);
+  return clamped < 60_000
+    ? `${Math.round(clamped / 1_000)}s`
+    : `${Math.round(clamped / 60_000)}m`;
+}
 
 /** Minimal, dependency-free warning logger (no createSubLogger import cycle). */
 function logWarn(message: string): void {

@@ -604,6 +604,15 @@ function snapshotEngineState(state: EngineState): EngineState {
     isDirty: state.isDirty,
     isNonCriticalDirty: state.isNonCriticalDirty,
     pendingCompletions: [...state.pendingCompletions],
+    // Monitor (M10 / bug 3 part a): the persisted-layer terminal-notification
+    // dedupe flags are cross-restart graph progress — carry them into the
+    // snapshot (shallow copy, mirroring engine-persistence.ts:334 and
+    // engine-recovery.ts:762-764) so the adopt/rebuild path (graph-tools.ts
+    // status() → adoptPrior) never discards the claim and defeats the two-layer
+    // exact-once terminal guard. Absent → undefined (no fabricated claim).
+    terminalNotified: state.terminalNotified
+      ? { ...state.terminalNotified }
+      : undefined,
   };
 }
 
@@ -684,7 +693,7 @@ class EngineRuntimeImpl implements EngineRuntime {
     //    never enforces ceilings — the advance engine treats `undefined` as a
     //    no-op port).
     const budget: GraphBudgetPort | undefined =
-      opts.budget ?? (opts.manager ? new BudgetBridge(opts.manager.getBudgetTracker()) : undefined);
+      opts.budget ?? (opts.manager ? new BudgetBridge(opts.manager.getBudgetTracker(), graphDeclaration) : undefined);
 
     // 4. Signal bridge — routes terminating signals into the advance engine.
     this.signalBridge = new SignalBridge();
@@ -740,10 +749,27 @@ class EngineRuntimeImpl implements EngineRuntime {
     //    manually tickable and never auto-starts a timer — `start()` is
     //    opt-in so tests never leak an interval.
     if (opts.nodeStaleTimeoutMs !== undefined && opts.nodeStaleTimeoutMs > 0) {
+      // Shared dispatch-liveness probe (quiet-but-alive channel): the liveness
+      // monitor consults it for stall classification; the wall-clock watcher
+      // consults it to GATE its timeout (S2) — a running node whose dispatch
+      // task is verifiably in-flight is quiet-but-alive, so the watcher skips
+      // the wall-clock kill, and the authoritative hung-kill for a task that
+      // stays verifiably live but never completes lives in the dispatch
+      // watchdog (completion-evaluator.ts not_ready branch). When the probe
+      // reports not-live (or the engine has no dispatch port / probe —
+      // feed-less engines), the wall-clock deadline still times the node out
+      // unchanged. When a probe-gated node IS timed out (probe false), its
+      // result is folded into the timeout reason for diagnostics (S1).
+      const dispatchAliveProbe = (node: NodeRuntimeState): boolean =>
+        isDispatchTaskLive(
+          this.dispatchPort as DispatchRecoveryPort,
+          node.dispatchTaskId ?? "",
+        );
       this.staleWatcher = new NodeStalenessWatcher({
         nodeStaleTimeoutMs: opts.nodeStaleTimeoutMs,
         intervalMs: opts.sweeperIntervalMs,
         onTimeout: this.onStaleNodeTimeout.bind(this),
+        isDispatchAlive: dispatchAliveProbe,
       });
       // Subtask 5: heartbeat-based liveness monitor beside the wall-clock
       // watcher (same opt-in window, same tick cadence). Soft stalls fire the
@@ -772,13 +798,12 @@ class EngineRuntimeImpl implements EngineRuntime {
         // classified stalled. The stall ladder then fires only when the
         // dispatch can no longer verify the task (orphaned / dead-task
         // nodes). Hung-but-alive nodes (task stuck verifiably live, never
-        // completing) are NOT caught here — the wall-clock `staleWatcher`
-        // backstop (nodeStaleTimeoutMs) times them out instead.
-        isDispatchAlive: (node) =>
-          isDispatchTaskLive(
-            this.dispatchPort as DispatchRecoveryPort,
-            node.dispatchTaskId ?? "",
-          ),
+        // completing) are NOT caught here either — the wall-clock
+        // `staleWatcher` applies the SAME probe gate (S2), so the
+        // authoritative hung-kill for them lives in the dispatch watchdog
+        // (completion-evaluator.ts not_ready branch); only feed-less engines
+        // without a dispatch port keep the pure wall-clock kill.
+        isDispatchAlive: dispatchAliveProbe,
       });
     }
   }

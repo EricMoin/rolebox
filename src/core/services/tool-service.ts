@@ -20,6 +20,7 @@ import {
   type GraphToolSet,
   type GraphNotifySource,
 } from "../../graph/tools/index.ts";
+import { registerLiveGraphToolSet } from "../../graph/tools/live-state.ts";
 import type { NodeLivenessFeed } from "../../graph/engine/index.ts";
 
 const log = createSubLogger("tool-service");
@@ -110,6 +111,12 @@ export class ToolService implements PluginService {
       graphNotify,
       livenessFeed,
     });
+    // Monitor S10 (live-state): register the toolset as the process's live
+    // graph-registry source so the TUI monitor's readLiveEngineGraphs can
+    // project running graphs from memory — on this platform engine state is
+    // never persisted to disk (see the contract note above), so a disk scan
+    // alone would show an empty engine list while graphs are executing.
+    registerLiveGraphToolSet(this.graphToolSet);
 
     // 4. Assemble shared canonical tools + OpenCode-only extras
     this.tools = buildCanonicalTools({

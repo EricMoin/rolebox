@@ -296,3 +296,139 @@ describe("readEngineGraphs", () => {
     }
   });
 });
+
+// ── Staleness gate (Subtask 2: gate stale persisted engine graphs) ─────────
+
+describe("readEngineGraphs staleness gate", () => {
+  /** Timestamp comfortably older than the 60s terminal-graph staleness window. */
+  const STALE = () => Date.now() - 61_000;
+  /** Timestamp comfortably inside the staleness window. */
+  const FRESH = () => Date.now() - 5_000;
+
+  function allCompleted(): Record<string, Record<string, unknown>> {
+    return { n1: { status: "completed" }, n2: { status: "completed" } };
+  }
+
+  it("excludes a stale terminal (complete) graph with no running/blocked node", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    writeEngineFile(
+      "engine-stale-complete.json",
+      JSON.stringify(
+        buildEngineFile(
+          { phase: "complete", updatedAt: STALE() },
+          allCompleted(),
+        ),
+      ),
+    );
+
+    expect(readEngineGraphs(stateDir())).toEqual([]);
+  });
+
+  it("includes a fresh executing graph even when recently idle-updated", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    // Default fixture: phase executing, n1 running — updated within the window.
+    writeEngineFile(
+      "engine-fresh-executing.json",
+      JSON.stringify(buildEngineFile({ updatedAt: FRESH() })),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g).toBeDefined();
+    expect(g.phase).toBe("executing");
+  });
+
+  it("includes a stale terminal graph while any node is running", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    // Persisted phase complete + stale updatedAt, but n1 is still running —
+    // the projected phase derives to executing, so the graph stays live.
+    writeEngineFile(
+      "engine-stale-running.json",
+      JSON.stringify(
+        buildEngineFile(
+          { phase: "complete", updatedAt: STALE() },
+          { n1: { status: "running" } },
+        ),
+      ),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g).toBeDefined();
+    expect(g.nodeStatusCounts.running).toBe(1);
+    expect(g.phase).toBe("executing");
+  });
+
+  it("includes a stale terminal graph while any node is blocked", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    // A blocked (needs_approval) node does not flip the projected phase, so
+    // the explicit blocked exemption is what keeps this graph visible.
+    writeEngineFile(
+      "engine-stale-blocked.json",
+      JSON.stringify(
+        buildEngineFile(
+          { phase: "complete", updatedAt: STALE() },
+          { n1: { status: "blocked" }, n2: { status: "completed" } },
+        ),
+      ),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g).toBeDefined();
+    expect(g.nodeStatusCounts.blocked).toBe(1);
+  });
+
+  it("includes a terminal graph updated within the staleness window", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    writeEngineFile(
+      "engine-fresh-complete.json",
+      JSON.stringify(
+        buildEngineFile(
+          { phase: "complete", updatedAt: FRESH() },
+          allCompleted(),
+        ),
+      ),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g).toBeDefined();
+    expect(g.phase).toBe("complete");
+  });
+
+  it("projects the raw updatedAtMs alongside the ISO timestamp", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    const updatedAt = FRESH();
+    writeEngineFile("engine-updatedatms.json", JSON.stringify(buildEngineFile({ updatedAt })));
+
+    const [g] = readEngineGraphs(stateDir());
+    expect(g.updatedAtMs).toBe(updatedAt);
+    expect(g.updatedAt).toBe(new Date(updatedAt).toISOString());
+  });
+
+  it("excludes stale terminal graphs while keeping fresh and live siblings", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    writeEngineFile(
+      "engine-stale-complete-a.json",
+      JSON.stringify(
+        buildEngineFile(
+          { graphId: "graph-stale", phase: "complete", updatedAt: STALE() },
+          allCompleted(),
+        ),
+      ),
+    );
+    writeEngineFile(
+      "engine-fresh-executing-b.json",
+      JSON.stringify(buildEngineFile({ graphId: "graph-fresh", updatedAt: FRESH() })),
+    );
+    writeEngineFile(
+      "engine-stale-running-c.json",
+      JSON.stringify(
+        buildEngineFile(
+          { graphId: "graph-running", phase: "complete", updatedAt: STALE() },
+          { n1: { status: "running" } },
+        ),
+      ),
+    );
+
+    const graphs = readEngineGraphs(stateDir());
+    expect(graphs.map((g) => g.graphId).sort()).toEqual(["graph-fresh", "graph-running"]);
+  });
+});

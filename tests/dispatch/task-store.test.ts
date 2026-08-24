@@ -234,8 +234,7 @@ describe("TaskStateStore", () => {
       expect(t.id).toBe("bg_v1task");
       expect(t.status).toBe("running");
       expect(t.progress.toolCalls).toBe(3);
-      // v1→v2 defaults
-      expect(t.concurrencyKey).toBe("default");
+      // v1→v2 defaults (concurrencyKey was removed from the schema)
       expect(t.continuationOf).toBeUndefined();
       expect(t.messageCountAtStart).toBe(0);
 
@@ -246,7 +245,7 @@ describe("TaskStateStore", () => {
       const raw = readFileSync(path, "utf-8");
       const parsed = JSON.parse(raw);
       expect(parsed.version).toBe(5);
-      expect(parsed.tasks[0].concurrencyKey).toBe("default");
+      expect(parsed.tasks[0].concurrencyKey).toBeUndefined();
       expect(parsed.tasks[0].messageCountAtStart).toBe(0);
     });
 
@@ -289,7 +288,6 @@ describe("TaskStateStore", () => {
       expect(loaded!.tasks.size).toBe(2);
 
       for (const t of loaded!.tasks.values()) {
-        expect(t.concurrencyKey).toBe("default");
         expect(t.continuationOf).toBeUndefined();
         expect(t.messageCountAtStart).toBe(0);
       }

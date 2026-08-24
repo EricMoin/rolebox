@@ -15,11 +15,8 @@ import {
   mergeConfig,
   resolveEnvConfig,
   DEFAULT_CONFIG,
-  DEFAULT_MAX_QUEUE_DEPTH,
-  DEFAULT_SYNC_RESERVED_SLOTS,
 } from "./config.ts";
 import type { DispatchManagerConfig } from "./config.ts";
-import type { IConcurrencyManager } from "./concurrency/concurrency.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../types.ts";
 import { RoleMode } from "../constants.ts";
@@ -145,9 +142,8 @@ export function buildRoleConfigs(
  * Create a fully initialized DispatchManager.
  *
  * Handles subagent lineage registration, config merge (default → primary
- * role dispatch config → env overrides → configOverrides), custom
- * concurrency policy resolution, manager construction, setStoreDirectory,
- * and recover().
+ * role dispatch config → env overrides → configOverrides), manager
+ * construction, setStoreDirectory, and recover().
  *
  * If recover() fails, the error is returned as `recoverError` in the
  * result rather than thrown. The manager is still usable with empty state.
@@ -207,23 +203,11 @@ export async function createDispatchManager(
     ? { ...mergedConfig, ...configOverrides }
     : mergedConfig;
 
-  // 4. Resolve custom concurrency policy from primary role config.
-  let customConcurrency: IConcurrencyManager | undefined;
-  if (effectivePrimaryRole?.dispatchConfig?.concurrency_policy) {
-    customConcurrency = effectivePrimaryRole.dispatchConfig.concurrency_policy(
-      finalConfig.maxConcurrent,
-      finalConfig.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH,
-      finalConfig.syncReservedSlots ?? DEFAULT_SYNC_RESERVED_SLOTS,
-      finalConfig.retryAfterMs,
-    );
-  }
-
-  // 5. Construct DispatchManager.
+  // 4. Construct DispatchManager.
   const manager = new DispatchManager(
     sessionClient,
     finalConfig,
     subagentModelKey,
-    customConcurrency,
     roleConfigs,
     subagentRoleKey,
   );

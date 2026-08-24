@@ -7,8 +7,9 @@ export type LoopMode = "inherit" | "fresh";
 /**
  * Result of registering a loop with the LoopService.
  * `ok: true` means registration succeeded and the loop was dispatched.
- * `ok: false; reason` describes why registration was rejected (e.g. stall
- * guard, concurrency cap, existing loop for same objective).
+ * `ok: false; reason` describes why registration was rejected (e.g. loop
+ * already active for the session, identical task in an ancestor chain, tree
+ * worker budget exhausted).
  */
 export type RegisterResult = { ok: true } | { ok: false; reason: string };
 

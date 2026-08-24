@@ -1,12 +1,10 @@
 import { unlinkSync } from "node:fs";
 import type { DispatchTask, DispatchTaskStatus } from "../types.ts";
-import { debugLog } from "./debug-log.ts";
 import { metrics } from "../persistence/metrics.ts";
 import { resultSidecarPath } from "../completion/result-extractor.ts";
 import type { ProgressStore } from "../types.progress.ts";
 import { clearEmittedThresholds } from "../progress/progress-tools.ts";
 import type { DispatchManagerConfig } from "../config.ts";
-import { CONCURRENCY_KEY_SEPARATOR } from "../concurrency/concurrency.ts";
 
 /** Index mapping parentSessionId → set of task IDs for O(1) lookup. */
 export type ParentTasksIndex = Map<string, Set<string>>;
@@ -46,7 +44,6 @@ export interface TaskLifecycleDeps {
   tasks: Map<string, DispatchTask>;
   eventState: Map<string, import("../types.ts").TaskEventState>;
   client: import("../../platform/ports/session-client.ts").ISessionClient;
-  concurrency: import("../concurrency/concurrency.ts").IConcurrencyManager;
   watchdog: import("./watchdog.ts").TaskWatchdogManager;
   config: DispatchManagerConfig;
   cancelQueue: Map<string, () => void>;
@@ -57,7 +54,6 @@ export interface TaskLifecycleDeps {
   sidecarGCTimers: Map<string, ReturnType<typeof setTimeout>>;
   pendingNotifications: Set<string>;
   sessionToTask: Map<string, string>;
-  sessionsByRequest: Map<string, number>;
   notifyOutbox: Set<string>;
   deferredIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
   cleanedUpTasks: Map<string, number>;
@@ -89,8 +85,6 @@ export interface TaskLifecycleDeps {
   oldestStartedAtByParent: Map<string, number>;
 }
 
-const DEFAULT_CONCURRENCY_KEY = "default";
-
 /**
  * Resolve the owning root role ID for a dispatched agent.
  *
@@ -104,16 +98,6 @@ export function resolveDispatchingRole(d: TaskLifecycleDeps, agentId: string): s
   if (roleId !== undefined) return roleId;
   if (d.roleConfigs.has(agentId)) return agentId;
   return undefined;
-}
-
-/** Derive the concurrency key for a subagent ID. */
-export function deriveKey(d: TaskLifecycleDeps, subagentId: string): string {
-  const roleId = resolveDispatchingRole(d, subagentId);
-  if (roleId !== undefined) {
-    const model = d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
-    return `${roleId}${CONCURRENCY_KEY_SEPARATOR}${model}`;
-  }
-  return d.subagentModelKey.get(subagentId) ?? DEFAULT_CONCURRENCY_KEY;
 }
 
 /**
@@ -131,21 +115,6 @@ export function computeDepth(d: TaskLifecycleDeps, parentSessionId: string): num
   const parentTask = d.tasks.get(parentTaskId);
   if (!parentTask) return 0;
   return (parentTask.depth ?? 0) + 1;
-}
-
-/** Get the number of sessions spawned so far for the given root session. */
-export function getRequestSessions(d: TaskLifecycleDeps, rootSession: string): number {
-  return d.sessionsByRequest.get(rootSession) ?? 0;
-}
-
-/** Increment the request session counter for a root session. */
-export function incRequestSessions(d: TaskLifecycleDeps, rootSession: string): void {
-  d.sessionsByRequest.set(rootSession, (d.sessionsByRequest.get(rootSession) ?? 0) + 1);
-}
-
-/** Reset the request session counter for a root session. */
-export function resetRequestSessions(d: TaskLifecycleDeps, rootSession: string): void {
-  d.sessionsByRequest.delete(rootSession);
 }
 
 /**
@@ -226,13 +195,24 @@ export function scheduleSidecarGC(d: TaskLifecycleDeps, taskId: string): void {
   d.sidecarGCTimers.set(taskId, timer);
 }
 
-/** Notify parent about task completion. */
+/**
+ * Notify parent about task completion.
+ *
+ * Graph-scope suppression: tasks dispatched by the graph engine (marker
+ * `task.graphScoped`) are skipped entirely — graph-node completion is reported
+ * EXCLUSIVELY by the graph notifier (`createGraphNotifier` /
+ * `createGraphTerminalNotifier` in `src/graph/engine/graph-notify.ts`), which
+ * references the node id rather than the internal `bg_*` dispatch task id.
+ * Emitting both would give the emperor two reminders with two id namespaces.
+ * Real-session tasks notify exactly as before.
+ */
 export async function notifyCompletion(
   d: TaskLifecycleDeps,
   task: DispatchTask,
   remainingTasks: number,
   resultText?: string,
 ): Promise<boolean> {
+  if (task.graphScoped) return true;
   d.pendingNotifications.add(task.id);
   try {
     return await d.sendNotification(task, remainingTasks, resultText);
@@ -241,15 +221,10 @@ export async function notifyCompletion(
   }
 }
 
-/** Release concurrency slot and schedule cleanup for a task that has finished running. */
+/** Schedule cleanup for a task that has finished running. */
 export function leaveRunning(d: TaskLifecycleDeps, taskId: string): void {
   const t = d.tasks.get(taskId);
   if (!t) return;
-  if (t.concurrencyKey) {
-    d.concurrency.release(t.concurrencyKey, t.parentSessionId);
-  } else {
-    debugLog("leaveRunning", taskId, "concurrencyKey is empty — skipping release to prevent ghost slot injection");
-  }
   const timer = d.deferredIdleTimers.get(taskId);
   if (timer) {
     clearTimeout(timer);

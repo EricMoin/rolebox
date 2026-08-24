@@ -7,15 +7,18 @@
  * ID (`recovery-${sessionID}.json`).
  *
  * Writes use the same atomic-file pattern as {@link LoopStore} (via
- * `atomicWrite` / `atomicWriteSync`) so readers never observe partially
- * written state.
+ * `atomicWriteSync` / the unique-temp-file pattern in `fs-util.ts`) so readers
+ * never observe partially written state. Async writes are generation-guarded:
+ * a superseded in-flight write aborts before its rename, so the on-disk state
+ * always reflects the highest-generation write.
  *
  * @module recovery/state
  */
 
-import { readFileSync, existsSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
-import { atomicWrite, atomicWriteSync } from "../function/fs-util.ts";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { atomicWriteSync, uniqueTmpPath } from "../function/fs-util.ts";
 import { stateDirFor } from "../utils/state-paths.ts";
 import { createSubLogger } from "../logger.ts";
 import type { RecoveryState, RecoveryAttempt } from "./types.ts";
@@ -33,9 +36,23 @@ const log = createSubLogger("recovery:state");
 export class RecoveryStateStore {
   private workspaceDir: string;
   private dirty: Map<string, RecoveryState> = new Map();
+  /**
+   * Monotonic write generation per session. Every write intent (save,
+   * saveSync, flushSync via saveSync, delete) bumps it; an in-flight async
+   * write whose captured generation is stale aborts before its rename, so a
+   * superseded write can never clobber newer on-disk state.
+   */
+  private writeGen: Map<string, number> = new Map();
 
   constructor(workspaceDir: string) {
     this.workspaceDir = workspaceDir;
+  }
+
+  /** Bump and return the next write generation for `sessionID`. */
+  private nextWriteGen(sessionID: string): number {
+    const next = (this.writeGen.get(sessionID) ?? 0) + 1;
+    this.writeGen.set(sessionID, next);
+    return next;
   }
 
   /** Resolve the on-disk path for a given session's recovery state file. */
@@ -70,15 +87,35 @@ export class RecoveryStateStore {
    */
   save(sessionID: string, state: RecoveryState): void {
     this.dirty.set(sessionID, state);
-    void this.writeAsync(sessionID, state);
+    const gen = this.nextWriteGen(sessionID);
+    void this.writeAsync(sessionID, state, gen);
   }
 
-  /** Internal async writer — swallows errors and logs them. */
-  private async writeAsync(sessionID: string, state: RecoveryState): Promise<void> {
+  /**
+   * Internal async writer — swallows errors and logs them. Stages the content
+   * into a per-write unique temp file, then — before committing the rename —
+   * aborts (discarding the temp file and leaving the dirty map untouched) if a
+   * newer write for the same session has superseded this one.
+   */
+  private async writeAsync(sessionID: string, state: RecoveryState, gen: number): Promise<void> {
+    const fp = this.filePath(sessionID);
+    const tmp = uniqueTmpPath(fp);
     try {
-      await atomicWrite(this.filePath(sessionID), JSON.stringify(state, null, 2));
+      mkdirSync(dirname(fp), { recursive: true });
+      await writeFile(tmp, JSON.stringify(state, null, 2), "utf-8");
+      // Superseded: a newer write bumped the generation while the temp file
+      // was being staged. Discard it — the stale content must never land on
+      // disk, and the dirty map still holds the newer pending state.
+      if (gen < (this.writeGen.get(sessionID) ?? 0)) {
+        try { unlinkSync(tmp); } catch {}
+        return;
+      }
+      // target may not exist (first write or previous crash left no file) — ENOENT is expected and safe to ignore
+      try { unlinkSync(fp); } catch {}
+      renameSync(tmp, fp);
       this.dirty.delete(sessionID);
     } catch (err) {
+      try { unlinkSync(tmp); } catch {}
       log.debug("Failed to save recovery state", { sessionID, err });
     }
   }
@@ -91,6 +128,9 @@ export class RecoveryStateStore {
    * write would corrupt recovery continuity.
    */
   saveSync(sessionID: string, state: RecoveryState): void {
+    // Bump the generation first so any in-flight async write for this session
+    // sees itself superseded and aborts before its rename.
+    this.nextWriteGen(sessionID);
     try {
       atomicWriteSync(this.filePath(sessionID), JSON.stringify(state, null, 2));
     } catch (err) {
@@ -177,6 +217,9 @@ export class RecoveryStateStore {
    * to prevent stale async writes from recreating the file.
    */
   delete(sessionID: string): void {
+    // Bump the generation so any in-flight async write aborts instead of
+    // recreating the file we are about to remove.
+    this.nextWriteGen(sessionID);
     this.dirty.delete(sessionID);
     try {
       const fp = this.filePath(sessionID);
@@ -190,7 +233,10 @@ export class RecoveryStateStore {
    * Drain all pending async writes synchronously.
    *
    * Call before shutdown, process-exit, or any point where in-flight async
-   * writes must not be lost. After this call the dirty map is empty.
+   * writes must not be lost. Each session's generation is bumped (via
+   * {@link saveSync}) so the still-running async writes for those sessions
+   * abort as superseded instead of overwriting the flushed state. After this
+   * call the dirty map is empty.
    */
   flushSync(): void {
     for (const [sessionID, state] of this.dirty) {

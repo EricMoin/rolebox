@@ -10,6 +10,7 @@ import { roleFunctionsMap } from "../src/index";
 import type { ResolvedRole, ResolvedSubAgent, ResolvedGraph } from "../src/types";
 import { RoleMode } from "../src/constants";
 import type { DispatchManagerConfig } from "../src/dispatch/config.ts";
+import { DEFAULT_CONFIG } from "../src/dispatch/config.ts";
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -196,9 +197,9 @@ describe("Plugin Hooks - Config Injection", () => {
     try {
       const client = createMockClient();
       const dispatchConfig: Partial<DispatchManagerConfig> = {
-        maxConcurrent: 2,
-        maxActivePerParent: 1,
-        retryAfterMs: 10_000,
+        backgroundStaleTimeoutMs: 60_000,
+        materializeTimeoutMs: 2_000,
+        watchdogIntervalMs: 3_000,
       };
 
       const primary = makeRoleWithSubagents({
@@ -213,9 +214,9 @@ describe("Plugin Hooks - Config Injection", () => {
 
       // Manager has config exposed for testing
       const config = manager.getConfig();
-      expect(config.maxConcurrent).toBe(2);
-      expect(config.maxActivePerParent).toBe(1);
-      expect(config.retryAfterMs).toBe(10_000);
+      expect(config.backgroundStaleTimeoutMs).toBe(60_000);
+      expect(config.materializeTimeoutMs).toBe(2_000);
+      expect(config.watchdogIntervalMs).toBe(3_000);
 
       // Defaults from DEFAULT_CONFIG should still be present for unset fields
       expect(config.taskTtlMs).toBeGreaterThan(0);
@@ -236,7 +237,12 @@ describe("Plugin Hooks - Config Injection", () => {
 
       const manager = managerMap.get(tmpDir)!;
       const config = manager.getConfig();
-      expect(config.maxConcurrent).toBe(5); // DEFAULT_CONFIG default
+      // Surviving DEFAULT_CONFIG fields apply
+      expect(config.taskTtlMs).toBe(DEFAULT_CONFIG.taskTtlMs);
+      expect(config.minRuntimeMs).toBe(DEFAULT_CONFIG.minRuntimeMs);
+      expect(config.backgroundStaleTimeoutMs).toBe(DEFAULT_CONFIG.backgroundStaleTimeoutMs);
+      // Removed concurrency fields are absent from the default shape
+      expect((config as any).maxConcurrent).toBeUndefined();
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

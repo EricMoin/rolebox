@@ -20,7 +20,7 @@ On Pi, rolebox resolves its directories under the pi config directory (`$PI_CODI
 | reference_search | ✓ | ✓ |
 | session_list / session_read / session_search / session_info / session_diff / session_fork | ✓ | ✓ |
 | graph_create / graph_add_node / graph_add_edge / graph_add_loop / graph_run / graph_status / graph_cancel / graph_approve | ✓ | ✓ |
-| task_search / task_budget / task_graph / task_concurrency / task_chronology / task_export (task_retry withheld) | ✓ | ✓ |
+| task_search / task_budget / task_graph / task_chronology / task_export (task_retry withheld) | ✓ | ✓ |
 | lsp_* (32 tools) | ✓ | ✓ |
 | function_graph / skill_compose / context_assemble | ✓ | ✓ |
 | asset_hot_reload | ✓ | — (opencode-only) |

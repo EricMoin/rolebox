@@ -212,8 +212,6 @@ export interface LoopGroupDecl {
 
 /** Per-node resource budget (maps to DispatchManager per-session limits). */
 export interface NodeBudgetSpec {
-  /** Max dispatch sessions this node may spawn */
-  max_sessions?: number;
   /** Max input tokens for this node */
   max_input_tokens?: number;
   /** Max output tokens for this node */
@@ -234,8 +232,6 @@ export interface NodeBudgetSpec {
  * but actual consumption is bounded by the graph budget.
  */
 export interface GraphBudgetSpec {
-  /** Max total sessions across all nodes in the graph */
-  max_total_sessions?: number;
   /** Max total input tokens across all nodes */
   max_total_input_tokens?: number;
   /** Max total output tokens across all nodes */

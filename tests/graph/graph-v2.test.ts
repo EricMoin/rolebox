@@ -40,7 +40,6 @@ const CANONICAL_EXAMPLE = `graph:
   name: review-team-plus
 
   budget:
-    max_total_sessions: 20
     max_total_cost_usd: 0.50
 
   nodes:
@@ -49,21 +48,21 @@ const CANONICAL_EXAMPLE = `graph:
       prompt: |
         Design the implementation plan for the feature.
         Available agents: {{agents}}. Budget: {{budget}}.
-      budget: { max_sessions: 1, max_cost_usd: 0.03 }
+      budget: { max_cost_usd: 0.03 }
 
     - id: implementer
       agent: "emperor--jinyiwei--backend"
       prompt: |
         Implement the feature per the design.
         Design: {{upstream_results}}
-      budget: { max_sessions: 3, max_cost_usd: 0.10 }
+      budget: { max_cost_usd: 0.10 }
 
     - id: tester
       agent: "emperor--jinyiwei--test"
       prompt: |
         Write and run tests for the implementation.
         Implementation: {{upstream_results}}
-      budget: { max_sessions: 2, max_cost_usd: 0.05 }
+      budget: { max_cost_usd: 0.05 }
 
     - id: reviewer
       agent: "emperor--validator"
@@ -71,7 +70,7 @@ const CANONICAL_EXAMPLE = `graph:
         Review the implementation and test results.
         If issues found, emit revise_needed with findings.
       join: { strategy: all }
-      budget: { max_sessions: 1, max_cost_usd: 0.02 }
+      budget: { max_cost_usd: 0.02 }
 
     - id: final-gate
       agent: "emperor--jinyiwei"
@@ -123,8 +122,8 @@ describe("parseGraph — canonical Appendix B round-trip", () => {
     expect(graph.loop_groups).toHaveLength(1);
     expect(graph.loop_groups![0].id).toBe("review-cycle");
 
-    // Graph-level budget mapped
-    expect(graph.budget?.max_total_sessions).toBe(20);
+    // Graph-level budget mapped (session cap removed; cost cap retained)
+    expect(graph.budget?.max_total_cost_usd).toBe(0.5);
 
     // needs_approval flag preserved
     const gate = graph.nodes.find((n) => n.id === "final-gate");

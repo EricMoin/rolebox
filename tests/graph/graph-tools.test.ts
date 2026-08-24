@@ -53,7 +53,7 @@ function buildReviewTeamPlus(ts: GraphToolSet, graphId: string): void {
     id: "implementer",
     agent: "emperor--jinyiwei--backend",
     prompt: "Implement the feature.",
-    budget: { max_sessions: 3 },
+    budget: { max_cost_usd: 3 },
     timeout_ms: 300000,
     max_retries: 2,
   });
@@ -141,7 +141,7 @@ describe("imperative construction round-trip", () => {
     const ts = createGraphToolSet();
     const created = ts.graph_create({
       name: "review-team-plus",
-      budget: { max_total_sessions: 20 },
+      budget: { max_total_cost_usd: 20 },
     });
     const graphId = created.graph_id;
 
@@ -175,7 +175,7 @@ describe("imperative construction round-trip", () => {
       agent: "agent-a",
       prompt: "p",
       join: { strategy: "quorum", quorum: 2 },
-      budget: { max_sessions: 4, max_input_tokens: 1000 },
+      budget: { max_input_tokens: 1000 },
       timeout_ms: 60000,
       max_retries: 3,
     });
@@ -183,7 +183,6 @@ describe("imperative construction round-trip", () => {
     const cfg = state.graphDeclaration.nodes[0];
     expect(cfg.join).toEqual({ strategy: "quorum", quorum: 2 });
     expect(cfg.budget).toMatchObject({
-      max_sessions: 4,
       max_input_tokens: 1000,
       timeout_ms: 60000,
       max_retries: 3,

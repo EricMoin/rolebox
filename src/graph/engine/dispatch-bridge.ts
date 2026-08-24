@@ -41,16 +41,14 @@ export interface DispatchParentContext {
   /** Working directory of the parent. */
   directory: string;
   /**
-   * Optional per-parent concurrency cap for background dispatches.
-   * When omitted, task-launcher falls back to the dispatch config's
-   * `maxActivePerParent` (default 3). {@link graphParentContext} sets this to
-   * `Number.POSITIVE_INFINITY`: graphId is a request/budget scope, not a real
-   * session needing per-parent protection, so graph-node concurrency is
-   * engine-managed (frontier, loop max_traversals, per-node budgets) rather
-   * than capped by the per-parent default. Real-session parents (legacy
-   * dispatch_* tools) omit this field and keep per-parent fairness.
+   * Graph-scope marker. Set by {@link graphParentContext}; carried onto the
+   * dispatched {@link DispatchTask} by task-launcher. While set, the dispatch
+   * layer suppresses its parent notifications — graph-node completion is
+   * reported EXCLUSIVELY by the graph notifier
+   * (`src/graph/engine/graph-notify.ts`). Real-session parents omit this field
+   * and keep dispatch-layer notifications exactly as before.
    */
-  maxActivePerParent?: number;
+  graphScoped?: boolean;
 }
 
 /**
@@ -100,14 +98,12 @@ export function graphParentContext(opts: GraphParentOptions): DispatchParentCont
     sessionID: opts.graphId,
     agent: opts.agent || DEFAULT_GRAPH_AGENT,
     directory: opts.directory,
-    // graphId is a request/budget scope, not a real parent session — the
-    // engine's frontier, loop max_traversals, and per-node budgets are the
-    // governing bounds (emperor role.yaml design comment: "concurrency is
-    // engine-managed"). Lifting the per-parent cap (config default: 3) here
-    // means a graph's nodes are never throttled merely for sharing the same
-    // graphId parent. Real-session parents omit this field and retain the
-    // config default via task-launcher's `?? d.config.maxActivePerParent`.
-    maxActivePerParent: Number.POSITIVE_INFINITY,
+    // Graph-scope marker: dispatch-layer parent notifications are suppressed
+    // for graph-scoped tasks — node completion is reported exclusively by the
+    // graph notifier (graph-notify.ts), avoiding duplicate [BACKGROUND TASK
+    // COMPLETED]/[ALL BACKGROUND TASKS COMPLETE] reminders under the internal
+    // bg_* task id namespace.
+    graphScoped: true,
   };
 }
 
@@ -224,6 +220,10 @@ export class DispatchBridge {
       run_in_background: true,
       description: description ?? `graph node ${node.nodeId}`,
       noParentInherit: true,
+      // Graph-scope marker (see DispatchInput.graphScoped): suppresses the
+      // dispatch layer's parent notifications for this task — node completion
+      // is reported exclusively by the graph notifier (graph-notify.ts).
+      graphScoped: true,
       // Monitor M2: propagate the node's declared per-node budget timeout into
       // the dispatch task input. `task-launcher.ts:444-445` consumes
       // `input.timeout_ms` → `task.timeoutMs` (the background-task hard

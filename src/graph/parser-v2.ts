@@ -348,7 +348,6 @@ function mapRetry(raw: unknown): RetryConfig | undefined {
 }
 
 const NODE_BUDGET_FIELDS = [
-  "max_sessions",
   "max_input_tokens",
   "max_output_tokens",
   "max_cost_usd",
@@ -369,7 +368,6 @@ function mapNodeBudget(raw: unknown): NodeBudgetSpec | undefined {
 }
 
 const GRAPH_BUDGET_FIELDS = [
-  "max_total_sessions",
   "max_total_input_tokens",
   "max_total_output_tokens",
   "max_total_cost_usd",

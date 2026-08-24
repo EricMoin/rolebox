@@ -804,15 +804,7 @@ describe("discoverRoles", () => {
           "description: Has dispatch config",
           "prompt: I dispatch tasks.",
           "dispatch:",
-          "  maxConcurrent: 3",
-          "  maxQueueDepth: 20",
-          "  syncReservedSlots: 2",
-          "  maxActivePerParent: 5",
-          "  retryAfterMs: 15000",
-          "  backpressureMaxRetries: 10",
-          "  backpressureMaxDelayMs: 120000",
           "  backgroundStaleTimeoutMs: 600000",
-          "  syncAcquireTimeoutMs: 180000",
           "  syncPromptTimeoutMs: 300000",
         ].join("\n"),
       );
@@ -822,15 +814,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("dispatcher")!;
       expect(config.dispatch).toBeDefined();
-      expect(config.dispatch!.maxConcurrent).toBe(3);
-      expect(config.dispatch!.maxQueueDepth).toBe(20);
-      expect(config.dispatch!.syncReservedSlots).toBe(2);
-      expect(config.dispatch!.maxActivePerParent).toBe(5);
-      expect(config.dispatch!.retryAfterMs).toBe(15000);
-      expect(config.dispatch!.backpressureMaxRetries).toBe(10);
-      expect(config.dispatch!.backpressureMaxDelayMs).toBe(120000);
       expect(config.dispatch!.backgroundStaleTimeoutMs).toBe(600000);
-      expect(config.dispatch!.syncAcquireTimeoutMs).toBe(180000);
       expect(config.dispatch!.syncPromptTimeoutMs).toBe(300000);
       expect(capturedLogs.length).toBe(0);
     });
@@ -843,8 +827,7 @@ describe("discoverRoles", () => {
           "description: Some dispatch fields",
           "prompt: I dispatch.",
           "dispatch:",
-          "  maxConcurrent: 7",
-          "  retryAfterMs: 60000",
+          "  syncPromptTimeoutMs: 300000",
         ].join("\n"),
       );
 
@@ -853,9 +836,7 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("partial-dispatch")!;
       expect(config.dispatch).toBeDefined();
-      expect(config.dispatch!.maxConcurrent).toBe(7);
-      expect(config.dispatch!.retryAfterMs).toBe(60000);
-      expect(config.dispatch!.maxQueueDepth).toBeUndefined();
+      expect(config.dispatch!.syncPromptTimeoutMs).toBe(300000);
       expect(config.dispatch!.backgroundStaleTimeoutMs).toBeUndefined();
       expect(capturedLogs.length).toBe(0);
     });
@@ -868,10 +849,8 @@ describe("discoverRoles", () => {
           "description: Has bad dispatch values",
           "prompt: I dispatch badly.",
           "dispatch:",
-          '  maxConcurrent: "not-a-number"',
-          "  maxQueueDepth: -5",
-          "  retryAfterMs: 30000",
-          "  backgroundStaleTimeoutMs: 0",
+          '  backgroundStaleTimeoutMs: "not-a-number"',
+          "  syncPromptTimeoutMs: 300000",
         ].join("\n"),
       );
 
@@ -880,19 +859,17 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("bad-dispatch")!;
       expect(config.dispatch).toBeDefined();
-      // Invalid values should be dropped
-      expect(config.dispatch!.maxConcurrent).toBeUndefined();
-      expect(config.dispatch!.maxQueueDepth).toBeUndefined();
+      // Invalid value should be dropped
       expect(config.dispatch!.backgroundStaleTimeoutMs).toBeUndefined();
       // Valid value should survive
-      expect(config.dispatch!.retryAfterMs).toBe(30000);
+      expect(config.dispatch!.syncPromptTimeoutMs).toBe(300000);
 
-      // Should have warnings about invalid entries
+      // Should have a warning about the invalid entry
       const warnings = capturedLogs as string[][];
       const warningCount = warnings.filter((c) =>
         c[0].includes("bad-dispatch") && c[0].includes("dispatch"),
       ).length;
-      expect(warningCount).toBeGreaterThanOrEqual(3);
+      expect(warningCount).toBeGreaterThanOrEqual(1);
     });
 
     it("role without dispatch: block loads normally with dispatch undefined", async () => {
@@ -929,7 +906,7 @@ describe("discoverRoles", () => {
     });
 
     it("resolves env vars in dispatch values", async () => {
-      process.env.ROLEBOX_TEST_DISPATCH_CONC = "12";
+      process.env.ROLEBOX_TEST_DISPATCH_STALE = "600000";
       await writeRoleYaml(
         "env-dispatch",
         [
@@ -937,8 +914,8 @@ describe("discoverRoles", () => {
           "description: Dispatch with env vars",
           "prompt: I dispatch with env.",
           "dispatch:",
-          "  maxConcurrent: \"{env:ROLEBOX_TEST_DISPATCH_CONC}\"",
-          "  retryAfterMs: 45000",
+          "  backgroundStaleTimeoutMs: \"{env:ROLEBOX_TEST_DISPATCH_STALE}\"",
+          "  syncPromptTimeoutMs: 300000",
         ].join("\n"),
       );
 
@@ -947,10 +924,10 @@ describe("discoverRoles", () => {
       expect(roles.size).toBe(1);
       const config = roles.get("env-dispatch")!;
       expect(config.dispatch).toBeDefined();
-      expect(config.dispatch!.maxConcurrent).toBe(12);
-      expect(config.dispatch!.retryAfterMs).toBe(45000);
+      expect(config.dispatch!.backgroundStaleTimeoutMs).toBe(600000);
+      expect(config.dispatch!.syncPromptTimeoutMs).toBe(300000);
 
-      delete process.env.ROLEBOX_TEST_DISPATCH_CONC;
+      delete process.env.ROLEBOX_TEST_DISPATCH_STALE;
     });
   });
 });

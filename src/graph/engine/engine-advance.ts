@@ -54,6 +54,7 @@ import {
 import {
   getNode,
   acquireAdvancingLock,
+  applyBudgetDelta,
   releaseAdvancingLock,
   queuePendingCompletion,
   drainPendingCompletions,
@@ -252,7 +253,7 @@ export interface NodeLivenessFeed {
  * note in `budget-bridge.ts`).
  */
 export interface GraphBudgetPort {
-  checkGraphBudget(graphId: string): BudgetCheckResult;
+  checkGraphBudget(graphId: string, state: EngineState): BudgetCheckResult;
 }
 
 /** Evaluates a named `on_condition` edge condition. Phase 2 vocabulary. */
@@ -707,6 +708,16 @@ export class AdvanceEngine {
           const ok = this.persistState?.(this.state);
           if (ok !== false) {
             clearDirty(this.state);
+            // The write-through snapshot serializes the WHOLE state — including
+            // non-critical churn (budget counters / sessionsSpawned, per-node
+            // tokensConsumed, signal-ledger history; see engine-persistence.ts
+            // `cloneEngineStateDto`). So a section that carried telemetry on
+            // top of its critical mutations must ALSO clear the non-critical
+            // flag here: leaving it set would trigger a spurious debounced
+            // write on the next idle section — the exact M5-contract violation
+            // the launch-heartbeat comment below documents (a pure critical
+            // mutation leaves `isNonCriticalDirty` untouched).
+            clearNonCriticalDirty(this.state);
           }
         } else {
           // Non-critical tier (monitor M5, same policy): the debounced seam
@@ -1327,7 +1338,7 @@ export class AdvanceEngine {
   ): Promise<void> {
     // Budget pre-check (Phase 1: stub port; Phase 7 enforces ceilings).
     if (this.budgetPort) {
-      const check = this.budgetPort.checkGraphBudget(state.graphId);
+      const check = this.budgetPort.checkGraphBudget(state.graphId, state);
       if (check.exceeded) {
         if (node.status === NodeStatus.Ready) {
           markEscalated(this.state, node, check.reason ?? "graph budget exhausted");
@@ -1354,6 +1365,23 @@ export class AdvanceEngine {
     // left in a dispatching-ready state while the critical section awaits.
     markRunning(this.state, node);
     removeFromFrontier(state, node.nodeId);
+    // Write-through persistence seam (running-window fix): persist the
+    // `running` transition synchronously BEFORE the async dispatch awaits, so
+    // the on-disk engine-*.json never lags a node's running status. Loop
+    // re-entry during the dispatch await previously left disk at `completed`
+    // (false-completed on Pi/dsh) because the section's only persist ran in
+    // the `finally` AFTER the await resolved. Mirrors the M5 contract
+    // (lines 701-731): clear the dirty flags only when the save actually
+    // reached durable storage — a failed save (`false` from the seam) keeps
+    // them set so the section's `finally` retries instead of silently
+    // dropping the mutation.
+    if (shouldPersist(this.state)) {
+      const ok = this.persistState?.(this.state);
+      if (ok !== false) {
+        clearDirty(this.state);
+        clearNonCriticalDirty(this.state);
+      }
+    }
     // Write-side durable log: record that this node was dispatched (its
     // `startedAt` was set by `markRunning`). Total — never breaks dispatch.
     this.graphEvents?.nodeDispatched(state.graphId, node.nodeId, node.agent, node.startedAt);
@@ -1388,6 +1416,20 @@ export class AdvanceEngine {
     node.dispatchTaskId = task.id;
     node.dispatchSessionId = task.sessionId;
     markDirty(state);
+    // Graph session budget (S5): count the launch — one net-live session per
+    // successful dispatch. Only the success path reaches this line (a failed
+    // launch returned inside the catch above), so a dispatch that never spawned
+    // a session never consumes a slot. Mirrors S4's `incRequestSessions`; the
+    // refund side lives in engine-recovery.ts (cancelled/timeout termination).
+    applyBudgetDelta(state, { sessions: 1 });
+    // `applyBudgetDelta` marks non-critical dirty (engine-state.ts:92), but
+    // this runs INSIDE the critical section where `markDirty` above already
+    // owns the synchronous write-through — the whole snapshot, budget counter
+    // included, persists in this section. Clear the flag so a pure critical
+    // mutation leaves `isNonCriticalDirty` untouched (M5 contract — same
+    // precedent as the liveness heartbeat below: a spurious debounced write
+    // would otherwise fire on the next idle section).
+    clearNonCriticalDirty(state);
     // Liveness feed (subtask 2): when a feed is wired, record the initial
     // `dispatch` heartbeat — the node is provably live the moment its launch
     // succeeded — and register its session with the platform feed plus the

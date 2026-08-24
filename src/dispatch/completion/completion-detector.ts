@@ -9,9 +9,13 @@
  *
  * Detection strategy (aligned with oh-my-openagent):
  *   - Primary signal: session status (idle = potentially done, busy/retry = working)
- *   - Secondary signal: has assistant output + no pending tools
- *   - Does NOT rely on specific `finish` field values since different models
- *     use different finish reasons ("end_turn" for Claude, "stop" for OpenAI, etc.)
+ *   - Secondary signal: has assistant output + no tool parts on the last message
+ *     (any tool part — settled or in-flight — means the model issued tool calls
+ *     and the agentic loop must continue)
+ *   - Non-terminal finish detection: ANY finish reason matching /tool/i
+ *     ("tool_use" from Pi, "toolUse", "tool-calls", etc.) means the model
+ *     expects tool execution → not ready. Other finish values ("end_turn" for
+ *     Claude, "stop" for OpenAI, etc.) are NOT relied upon for terminality.
  */
 
 import type { CompletionSignal, SessionMessageSnapshot, TaskEventState } from "../types.ts";
@@ -21,8 +25,13 @@ import type { CompletionSignal, SessionMessageSnapshot, TaskEventState } from ".
 /**
  * Finish reasons that definitively indicate the model is still working
  * and will produce more output (tool execution pending).
+ *
+ * Verified vocabulary across adapters: "tool-calls" (opencode-style),
+ * "tool_use" (Pi adapter — `stopReason` copied verbatim to `info.finish`),
+ * and "toolUse" (alternate Pi casing). The detector matches these via
+ * /tool/i to stay robust to further variants.
  */
-export type NonTerminalFinishReason = "tool-calls";
+export type NonTerminalFinishReason = "tool-calls" | "tool_use" | "toolUse";
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -69,21 +78,40 @@ export function hasInflightToolPart(
   return false;
 }
 
+/**
+ * True if any tool part is present on the message — settled OR in-flight.
+ *
+ * Mirrors the Pi adapter's `_isFinalTurn` rule: any tool part means this turn
+ * issued tool calls, and the agentic loop is expected to continue with a new
+ * turn for the model's follow-up. Declaring the task complete while a tool
+ * result still sits on the last assistant message can latch a truncated
+ * (tool-echo) result as final — the "settled-tool completion" bug.
+ */
+export function hasToolPart(
+  parts: Array<{ type: string; state?: string | { status?: string } }>,
+): boolean {
+  for (const part of parts) {
+    if (part.type === "tool") return true;
+  }
+  return false;
+}
+
 // ── Core Detection ────────────────────────────────────────────────────
 
 /**
  * Evaluate whether a background task session has reached completion.
  *
  * The decision follows a fixed priority order:
- *   1. Tool-execution-in-progress guard — pending/running tool on the last
- *      assistant message → not ready. Evaluated first so a transient error or
- *      a stale idle/terminal status never latches a terminal result while the
- *      model's tool is still running.
+ *   1. Tool-execution-in-progress guard — any tool part (settled or in-flight)
+ *      on the last assistant message → not ready. Evaluated first so a
+ *      transient error or a stale idle/terminal status never latches a terminal
+ *      result while the model's tool call is still unresolved (a settled tool
+ *      part likewise means the agentic loop must continue with a new turn).
  *   2. Session actively processing → not ready
  *   3. Session in terminal status (interrupted) → completed
  *   4. No assistant output → not ready
  *   5. Error detection on last assistant message
- *   6. finish "tool-calls" → not ready
+ *   6. finish matching /tool/i ("tool-calls" / "tool_use" / "toolUse") → not ready
  *   7. Stability gating (MIN_STABILITY_POLLS consecutive idle polls)
  *
  * @param messages  Chronological message snapshots from the sub-agent session
@@ -110,7 +138,10 @@ export function detectCompletion(
   // Tool-execution-in-progress guard — evaluated BEFORE the idle/error/
   // completed decisions so a transient error or a stale idle/terminal status
   // never latches a terminal result while the model's tool is still running.
-  if (lastAssistant && hasInflightToolPart(lastAssistant.parts)) {
+  // Any tool part counts: an in-flight part means the tool is executing, and
+  // a settled part means the model issued tool calls whose follow-up turn has
+  // not been produced yet. Both are not_ready (Pi adapter `_isFinalTurn` rule).
+  if (lastAssistant && hasToolPart(lastAssistant.parts)) {
     return { type: "not_ready" };
   }
 
@@ -138,8 +169,12 @@ export function detectCompletion(
     return { type: "error", message: extractAssistantError(lastAssistant.info.error) };
   }
 
-  // If finish is explicitly "tool-calls", model expects tool execution → not ready
-  if (lastAssistant.info.finish === "tool-calls") {
+  // If finish is a tool-related reason, the model expects tool execution →
+  // not ready. Match /tool/i to cover every adapter's vocabulary
+  // ("tool-calls", Pi's "tool_use", camelCase "toolUse", etc.) instead of
+  // hard-coding one spelling.
+  const finish = lastAssistant.info.finish;
+  if (typeof finish === "string" && /tool/i.test(finish)) {
     return { type: "not_ready" };
   }
 

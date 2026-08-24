@@ -17,6 +17,10 @@ import type { TuiSlotContext } from "@opencode-ai/plugin/tui";
 import { existsSync } from "node:fs";
 import { stateDirFor } from "../utils/state-paths";
 import { readMonitorSnapshot, readTaskDetail } from "../cli/commands/monitor/monitor-reader";
+import {
+  readLiveEngineGraphs,
+  mergeLiveEngineGraphs,
+} from "../cli/commands/monitor/monitor-reader-engine";
 import type {
   MonitorSnapshot,
   TaskSnapshot,
@@ -35,6 +39,7 @@ import {
   renderFilterBar, countTotalItems, collectSessionIds,
 } from "./components/index";
 
+import { foldGraphSignals } from "./events";
 import type { EventBridge } from "./events";
 const PACKAGE_VERSION = readPackageVersion();
 
@@ -135,9 +140,12 @@ export function createSidebarRenderer(workspaceDir: string) {
       const currentSessionId = props?.session_id ?? "";
       const [sessionScope, setSessionScope] = createSignal<Set<string>>(new Set([currentSessionId]));
 
-      // Live graph signals (graphId → most recent signal status), fed from
-      // drained graph events for sub-250ms engine-graph signal display.
+      // Live graph signals, fed from drained graph events for sub-250ms
+      // engine-graph signal display:
+      //   graphSignals — graphId → most recent ENGINE PHASE (graph_signal only)
+      //   nodeSignals  — `${graphId}::${nodeId}` → most recent node status
       const [graphSignals, setGraphSignals] = createSignal<ReadonlyMap<string, string>>(new Map());
+      const [nodeSignals, setNodeSignals] = createSignal<ReadonlyMap<string, string>>(new Map());
       let lastGood: MonitorSnapshot | null = null;
       let canceled = false;
 
@@ -200,18 +208,32 @@ export function createSidebarRenderer(workspaceDir: string) {
             (e) => e.type === "dispatch_error"
           );
 
-          // Fold graph events into the live-signal map for engine-graph display.
-          if (liveEvents.some((e) => e.type === "graph_signal" || e.type === "graph_node_end")) {
-            const next = new Map(graphSignals());
-            for (const e of liveEvents) {
-              if (e.type === "graph_signal" && e.status) next.set(e.graphId, e.status);
-              else if (e.type === "graph_node_end" && e.signalType) next.set(e.graphId, e.signalType);
-            }
-            setGraphSignals(next);
+          // Fold graph events into the live-signal maps for engine-graph
+          // display: graphSignals carries engine phase only (graph_signal),
+          // nodeSignals carries per-node status (`${graphId}::${nodeId}`) from
+          // graph_node_start (running) / graph_node_end (terminal status).
+          if (liveEvents.some((e) =>
+            e.type === "graph_signal" || e.type === "graph_node_start" || e.type === "graph_node_end"
+          )) {
+            const folded = foldGraphSignals(liveEvents, graphSignals(), nodeSignals());
+            setGraphSignals(folded.graphSignals);
+            setNodeSignals(folded.nodeSignals);
           }
 
           const snap = readMonitorSnapshot(workspaceDir);
           if (canceled) return;
+
+          // Live-source merge (monitor S10): overlay the in-memory graph
+          // registry over the disk snapshot — live wins by graphId, and the
+          // disk-only remainder keeps the stale-terminal gate (so a dead
+          // persisted complete graph is never resurrected). On platforms
+          // where the engine never persists (opencode), this is what surfaces
+          // a running graph at all; on disk platforms it merges the same
+          // scan idempotently (live == disk, empty remainder).
+          snap.engineGraphs = mergeLiveEngineGraphs(
+            snap.engineGraphs,
+            readLiveEngineGraphs(stateDirFor(workspaceDir)),
+          );
         if (present) {
           lastGood = snap;
           const scope = buildSessionScope(stateDirFor(workspaceDir), currentSessionId);
@@ -565,6 +587,7 @@ export function createSidebarRenderer(workspaceDir: string) {
                       sessionScope: sessionScope(),
                       currentSessionId,
                       graphSignals: graphSignals(),
+                      nodeSignals: nodeSignals(),
                       selectedIndex: selectedTaskIndex(),
                       onSelectTask: (index) => setSelectedTaskIndex(index),
                       onOpenDetail: (index) => {

@@ -324,3 +324,101 @@ describe("M10 terminalNotified two-layer dedupe", () => {
     expect(ctx.terminalComplete).toBe(true);
   });
 });
+
+// ── S3: enriched deadlock reason (upstream causal chain) ─────────────────────
+//
+// Subtask S3: the runtime-deadlock guard's synthetic escalation reason is
+// enriched with the upstream causes — for every terminal source (Escalate /
+// Timeout / Done / Cancelled) feeding a pending node, the reason carries the
+// source nodeId and its errorReason (or recorded terminating state). The
+// guard's FIRING conditions are untouched; only the reason text grows, and the
+// base "graph deadlock: ..." prefix is preserved for backward compat.
+
+describe("S3 enriched deadlock reason (upstream causal chain)", () => {
+  it("appends the escalated upstream's nodeId and errorReason to the reason (F3 path)", () => {
+    // A escalates; B is fed ONLY by never-firing on_condition edges from A and
+    // root → B is dead-ended. The F3 predicate (every pending node dead-ended)
+    // lets the guard fire even with an escalated node present; the enriched
+    // reason must surface the causal chain: terminal upstream A + "boom".
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "deadlock-reason-enriched",
+      nodes: [
+        { id: "root", agent: "r", prompt: "pr" },
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2", join: { strategy: "any" } },
+      ],
+      edges: [
+        { from: "root", to: "A", type: "always" },
+        { from: "A", to: "B", type: "on_condition", condition: "cond" },
+        { from: "root", to: "B", type: "on_condition", condition: "cond" },
+      ],
+    };
+    const state = createEngineState(decl, "g-20");
+    provision(state);
+    state.phase = EnginePhase.Executing;
+    state.nodes.get("root")!.status = NodeStatus.Completed;
+    state.nodes.get("A")!.status = NodeStatus.Escalate;
+    state.nodes.get("A")!.errorReason = "boom";
+    state.nodes.get("B")!.status = NodeStatus.Pending;
+    state.frontier = [];
+
+    const escalated: { nodeId: string; reason: string }[] = [];
+    checkGraphTermination(
+      state,
+      undefined,
+      freshCtx(),
+      (nodeId, reason) => escalated.push({ nodeId, reason }),
+      () => true, // F3: B is provably dead-ended
+    );
+
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.phase).toBe(EnginePhase.Complete);
+    const reason = state.nodes.get("B")!.errorReason!;
+    // Base text preserved — existing consumers keep matching.
+    expect(reason).toContain("graph deadlock");
+    // Enriched with the upstream causal chain: nodeId + canonical status +
+    // errorReason.
+    expect(reason).toContain("A escalate: boom");
+    // The seam delivers the same enriched reason, once per escalated node.
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0].reason).toBe(reason);
+  });
+
+  it("groups cancelled upstream sources without a reason (strict path, no escalate/timeout)", () => {
+    // a is pending; its only feeds are b and c, both cancelled (cancelled
+    // sources never emit — F3 predicate case iii). No escalated/timed-out node
+    // → the strict guard fires; the enriched reason groups the causeless
+    // terminal sources by status ("b/c cancelled", matching "t5/t6 cancelled").
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "deadlock-reason-cancelled",
+      nodes: [
+        { id: "a", agent: "a1", prompt: "p1" },
+        { id: "b", agent: "a2", prompt: "p2" },
+        { id: "c", agent: "a3", prompt: "p3" },
+      ],
+      edges: [
+        { from: "b", to: "a", type: "always" },
+        { from: "c", to: "a", type: "always" },
+        // Close the cycle so no node is a provision root (all start pending).
+        { from: "a", to: "b", type: "always" },
+      ],
+    };
+    const state = createEngineState(decl, "g-21");
+    provision(state);
+    state.phase = EnginePhase.Executing;
+    state.nodes.get("a")!.status = NodeStatus.Pending;
+    state.nodes.get("b")!.status = NodeStatus.Cancelled;
+    state.nodes.get("c")!.status = NodeStatus.Cancelled;
+    state.frontier = [];
+
+    checkGraphTermination(state, undefined, freshCtx());
+
+    expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
+    expect(state.phase).toBe(EnginePhase.Complete);
+    const reason = state.nodes.get("a")!.errorReason!;
+    expect(reason).toContain("graph deadlock");
+    expect(reason).toContain("b/c cancelled");
+  });
+});

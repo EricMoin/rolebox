@@ -6,4 +6,3 @@ export { RecoveryPatternExtensionPoint } from "./recovery-patterns.ts";
 export { NotificationChannelExtensionPoint } from "./notification-channels.ts";
 export { NotificationEventExtensionPoint } from "./notification-events.ts";
 export { ObserveEventExtensionPoint } from "./observe-events.ts";
-export { ConcurrencyPolicyExtensionPoint } from "./concurrency-policies.ts";

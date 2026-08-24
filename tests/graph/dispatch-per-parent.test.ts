@@ -1,23 +1,24 @@
 /**
- * Graph Execution Engine — graph-node dispatch is NOT per-parent capped on graphId.
+ * Graph Execution Engine — graph-node dispatch concurrency (post-removal).
  *
- * Regression for Approach C. `graphParentContext` sets
- * `maxActivePerParent: Number.POSITIVE_INFINITY`, so a graph's nodes — all of
- * which share `parentSessionId = graphId` (the dispatch subsystem's per-parent
- * fairness key) — are never throttled by the dispatch config's per-parent
- * default (`maxActivePerParent = 3`). graphId is a request/budget scope, not a
- * real session needing per-parent protection; concurrency is engine-managed
- * (frontier, loop max_traversals, per-node budgets).
+ * The dispatch-layer per-parent concurrency mechanism was removed upstream:
+ * `maxActivePerParent` / `maxConcurrent` / `maxQueueDepth` / `syncReservedSlots`
+ * are gone from `DispatchManagerConfig`, `getConcurrencyStatus()` is gone from
+ * `DispatchManager`, and `graphParentContext` no longer carries a per-parent
+ * cap. There is no dispatch-layer throttling of any parent — graph or
+ * real-session — so every launched node reaches `running` immediately.
  *
- * Real-session parents (legacy dispatch_* tools) build contexts WITHOUT
- * `maxActivePerParent`, so task-launcher falls back to the config default and
- * per-parent fairness is unchanged — verified by the negative control below
- * and the existing dispatch suite (concurrency/manager/integration).
+ * What is RETAINED and pinned here:
  *
- * These tests drive the REAL DispatchManager → task-launcher path over the
- * stub ISessionClient from tests/dispatch/helpers.ts (same rig as
- * engine-monitor-s6.test.ts) — a fake NodeDispatchPort would silently pass
- * regardless of the concurrency wiring.
+ *   - `graphParentContext` builds a graph-scoped parent context
+ *     (`sessionID = graphId`, `graphScoped: true`) so graph-node completion is
+ *     reported exclusively by the graph notifier, never the dispatch layer.
+ *   - Graph nodes launch concurrently through the real DispatchManager →
+ *     task-launcher path over the stub ISessionClient (same rig as
+ *     engine-monitor-s6.test.ts) — a fake NodeDispatchPort would silently pass
+ *     regardless of the dispatch wiring.
+ *   - Real-session parents (legacy dispatch_* tools) launch without any
+ *     per-parent throttling too — the per-parent cap no longer exists.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -36,17 +37,6 @@ import { createMockClient, parentContext } from "../dispatch/helpers";
 const WORKDIR = "/work/dir-for-dispatch-per-parent";
 const GRAPH_ID = "g-per-parent";
 
-/**
- * Config with headroom for 4+ concurrent sessions (maxConcurrent 6, no sync
- * reservation) while leaving `maxActivePerParent` at its DEFAULT of 3 — so the
- * only binder at 4 launches is the per-parent cap.
- */
-const config = {
-  maxConcurrent: 6,
-  syncReservedSlots: 0,
-  taskTtlMs: 60_000,
-};
-
 /** Minimal N-node declaration. All nodes share the same graphId parent. */
 function multiNodeDecl(count: number): GraphDeclaration {
   return {
@@ -62,24 +52,21 @@ function multiNodeDecl(count: number): GraphDeclaration {
 }
 
 describe("graphParentContext", () => {
-  it("returns a context whose per-parent concurrency cap is unbounded", () => {
+  it("returns a graph-scoped parent context (sessionID = graphId, graphScoped)", () => {
     const ctx = graphParentContext({ graphId: GRAPH_ID, directory: WORKDIR });
 
     expect(ctx.sessionID).toBe(GRAPH_ID);
-    expect(ctx.maxActivePerParent).toBe(Number.POSITIVE_INFINITY);
+    expect(ctx.directory).toBe(WORKDIR);
+    expect(ctx.graphScoped).toBe(true);
   });
 });
 
-describe("Approach C — graph nodes are not per-parent capped on graphId", () => {
-  it("launches 4+ independent background nodes concurrently under DEFAULT maxActivePerParent=3", async () => {
+describe("graph-node dispatch launches concurrently (no per-parent cap)", () => {
+  it("launches 4+ independent background nodes concurrently through the real manager", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, config);
+    const manager = new DispatchManager(client, { taskTtlMs: 60_000 });
     const bridge = new DispatchBridge(manager);
     try {
-      // Sanity: the per-parent default (3) is genuinely in effect — the
-      // unbounded cap must come from the graph parent context, not config.
-      expect(manager.getConfig().maxActivePerParent).toBe(3);
-
       const state = createEngineState(multiNodeDecl(4), GRAPH_ID);
       const ctx = graphParentContext({ graphId: GRAPH_ID, directory: WORKDIR });
 
@@ -89,24 +76,22 @@ describe("Approach C — graph nodes are not per-parent capped on graphId", () =
         tasks.push(await bridge.executeNode(node, ctx));
       }
 
-      // All four nodes reach "running" concurrently — >3 sessions from one
-      // parent (graphId) despite the per-parent config default of 3.
+      // All four nodes reach "running" concurrently — no dispatch-layer
+      // throttling remains to bind them.
       expect(tasks.length).toBe(4);
       expect(tasks.every((t) => t.status === "running")).toBe(true);
-      expect(tasks.filter((t) => t.status === "running").length).toBeGreaterThan(3);
+      expect(tasks.filter((t) => t.status === "running").length).toBe(4);
       expect(manager.getInflightCount(GRAPH_ID)).toBe(4);
     } finally {
       await manager.dispose();
     }
   });
 
-  it("real session parents keep the config per-parent cap (3 running, 1 queued) — negative control", async () => {
+  it("real session parents also launch every task (per-parent cap removed)", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, config);
+    const manager = new DispatchManager(client, { taskTtlMs: 60_000 });
     const bridge = new DispatchBridge(manager);
     try {
-      // Real-session shape: NO maxActivePerParent field → task-launcher falls
-      // back to the config default (3), preserving per-parent fairness.
       const ctx = parentContext();
       const input = { subagent: "helper", prompt: "work", run_in_background: true };
 
@@ -115,9 +100,11 @@ describe("Approach C — graph nodes are not per-parent capped on graphId", () =
         tasks.push(await bridge.launch(input, ctx));
       }
 
-      expect(tasks.filter((t) => t.status === "running").length).toBe(3);
-      expect(tasks.filter((t) => t.status === "pending").length).toBe(1);
-      expect(manager.getInflightCount(ctx.sessionID)).toBe(3);
+      // The per-parent cap (previously 3 running / 1 queued) is removed —
+      // every launched task runs immediately.
+      expect(tasks.filter((t) => t.status === "running").length).toBe(4);
+      expect(tasks.filter((t) => t.status === "pending").length).toBe(0);
+      expect(manager.getInflightCount(ctx.sessionID)).toBe(4);
     } finally {
       await manager.dispose();
     }

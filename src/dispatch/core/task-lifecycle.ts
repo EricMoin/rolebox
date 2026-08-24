@@ -1,11 +1,10 @@
 import type { DispatchInput, DispatchTask, MaterializedResultRef } from "../types.ts";
-import type { IConcurrencyManager } from "../concurrency/concurrency.ts";
 import type { DispatchManagerConfig } from "../config.ts";
 
 export type { TaskLifecycleDeps } from "./lifecycle-shared.ts";
 import type { TaskLifecycleDeps } from "./lifecycle-shared.ts";
 
-import { getInflightCount, computeDepth, getRequestSessions, leaveRunning } from "./lifecycle-shared.ts";
+import { getInflightCount, computeDepth, leaveRunning } from "./lifecycle-shared.ts";
 import { launch as launcherLaunch, reopenForContinuation as launcherReopen } from "./task-launcher.ts";
 import { executeSync as syncExecute } from "./sync-executor.ts";
 import { cancelTask as cancellationCancel } from "./task-cancellation.ts";
@@ -32,10 +31,8 @@ export interface LifecycleBridge {
   materializeResult(taskId: string): Promise<MaterializedResultRef>;
   materializeAndNotify(taskId: string): Promise<void>;
   computeDepth(parentSessionId: string): number;
-  getRequestSessions(rootSession: string): number;
-  setConcurrencyManager(manager: IConcurrencyManager): void;
   setDirectory(directory: string): void;
-  /** Replace the role-scoped config maps read by deriveKey/effectiveConfigFor at runtime (hot-reload). */
+  /** Replace the role-scoped config maps read by effectiveConfigFor at runtime (hot-reload). */
   setDispatchConfigs(
     roleConfigs: ReadonlyMap<string, DispatchManagerConfig>,
     subagentRoleKey: Map<string, string>,
@@ -76,10 +73,6 @@ export class TaskLifecycleManager implements LifecycleBridge {
 
   computeDepth(parentSessionId: string): number {
     return computeDepth(this.d, parentSessionId);
-  }
-
-  getRequestSessions(rootSession: string): number {
-    return getRequestSessions(this.d, rootSession);
   }
 
   async evaluateAndComplete(taskId: string, trigger: "idle-debounce" | "watchdog-reconcile" | "global-sweep" | "error-event" | "deleted-event", errorDetail?: string): Promise<void> {
@@ -127,10 +120,6 @@ export class TaskLifecycleManager implements LifecycleBridge {
 
   leaveRunning(taskId: string): void {
     return leaveRunning(this.d, taskId);
-  }
-
-  setConcurrencyManager(manager: IConcurrencyManager): void {
-    this.d.concurrency = manager;
   }
 
   setDirectory(directory: string): void {

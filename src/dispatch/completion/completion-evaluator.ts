@@ -6,7 +6,6 @@ import {
   notifyCompletion,
   leaveRunning,
   notifyTerminated,
-  resetRequestSessions,
 } from "../core/lifecycle-shared.ts";
 import { detectCompletion, hasInflightToolPart } from "./completion-detector.ts";
 import { extractSessionErrorMessage } from "../core/error-utils.ts";
@@ -60,10 +59,6 @@ async function checkHitlSignals(d: TaskLifecycleDeps, taskId: string): Promise<b
 
   metrics.counter("dispatch_hitl_paused_total", { type: hitlType }).inc();
 
-  // Release concurrency slot
-  if (t.concurrencyKey) {
-    d.concurrency.release(t.concurrencyKey, t.parentSessionId);
-  }
   metrics.gauge("inflight_tasks").dec();
   d.persistState();
 
@@ -704,7 +699,6 @@ export async function handleSessionError(d: TaskLifecycleDeps, sessionId: string
 
 /** Handle session.deleted event — route to evaluateAndComplete with deleted-event trigger. */
 export async function handleSessionDeleted(d: TaskLifecycleDeps, sessionId: string): Promise<void> {
-  resetRequestSessions(d, sessionId);
   const taskId = d.sessionToTask.get(sessionId);
   if (!taskId) return;
   debugLog("event", taskId, `session.deleted — routing to evaluateAndComplete`);

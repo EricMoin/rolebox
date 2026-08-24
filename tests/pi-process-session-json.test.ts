@@ -28,8 +28,9 @@
  */
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { PiProcessSessionAdapter } from "../src/platform/adapters/pi/process-session.ts";
+import { PiProcessSessionAdapter, buildSpawnArgs } from "../src/platform/adapters/pi/process-session.ts";
 import { detectCompletion } from "../src/dispatch/completion/completion-detector.ts";
+import { PI_SUBAGENT_TOOLS } from "../src/pi-extension.ts";
 import type {
   SessionMessageSnapshot,
   TaskEventState,
@@ -208,6 +209,41 @@ const TOOL_EXECUTION_END_EVENT = {
 
 /** agent_end — lifecycle no-op marking the run as settled. */
 const AGENT_END_EVENT = { type: "agent_end", sessionID: SESSION_ID };
+
+/** agent_settled — the adapter's safety-net completion signal. */
+const AGENT_SETTLED_EVENT = { type: "agent_settled", sessionID: SESSION_ID };
+
+// ── Fixtures — the model's tool-free FINAL answer turn ──────────────────────
+//
+// A tool-free message_end mirrors the terminal turn of a real multi-turn
+// agent run: pi emits turn_end after it, and the turn IS the final answer
+// (no tool parts, non-tool stopReason). This is the turn whose turn_end
+// must complete — in contrast to a tool-use turn's turn_end, which must not.
+
+const FINAL_MESSAGE_ID = "msg_assistant_final_0001";
+
+/** message_start for the final answer turn. */
+const FINAL_MESSAGE_START_EVENT = {
+  type: "message_start",
+  id: "evt_msg_start_final_0001",
+  messageID: FINAL_MESSAGE_ID,
+  sessionID: SESSION_ID,
+  message: { role: "assistant", timestamp: 1700000003100 },
+};
+
+/** message_end — pure text content, stopReason not tool-related. */
+const FINAL_MESSAGE_END_EVENT = {
+  type: "message_end",
+  id: "evt_msg_end_final_0001",
+  messageID: FINAL_MESSAGE_ID,
+  sessionID: SESSION_ID,
+  message: {
+    role: "assistant",
+    content: [{ type: "text", text: FINAL_ASSISTANT_TEXT }],
+    stopReason: "end_turn",
+    timestamp: 1700000003200,
+  },
+};
 
 /** The full successful 0.81.1 stream, as one line per event. */
 const SUCCESS_STREAM = jsonl(
@@ -393,7 +429,13 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect((signal as { message: string }).message).toBe("Pi worker crashed");
   });
 
-  it("detectCompletion reports completed with idle status after a successful stream", async () => {
+  it("detectCompletion reports not_ready for a stream ending in a tool-use turn — the agentic loop must continue", async () => {
+    // The detector (completion-detector.ts) treats ANY tool part on the
+    // last assistant message — settled included — as "the agent issued
+    // tool calls; the loop must continue" (Bug 1 part c). SUCCESS_STREAM
+    // ends with agent_end after a tool-use turn, so it is NOT a complete
+    // run under the hardened semantics: the model's follow-up answer has
+    // not been written yet.
     const record = await createRecord(adapter);
 
     feedJsonl(adapter, record, SUCCESS_STREAM);
@@ -403,6 +445,30 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     expect(textParts(last)).toHaveLength(1);
     expect(toolParts(record).every((p) => p.state.status === "completed"))
       .toBe(true);
+
+    const snapshots = record.messages as unknown as SessionMessageSnapshot[];
+    const signal = detectCompletion(
+      snapshots,
+      { type: "idle" },
+      defaultEventState(),
+      true,
+    );
+    expect(signal).toEqual({ type: "not_ready" });
+  });
+
+  it("detectCompletion reports completed for a tool-free final-answer stream", async () => {
+    // A genuinely complete run ends with the model's tool-free final
+    // answer — that is the shape detectCompletion must accept.
+    const record = await createRecord(adapter);
+
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        FINAL_MESSAGE_START_EVENT,
+        FINAL_MESSAGE_END_EVENT,
+      ),
+    );
 
     const snapshots = record.messages as unknown as SessionMessageSnapshot[];
     const signal = detectCompletion(
@@ -427,6 +493,63 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       true,
     );
     expect(signal).toEqual({ type: "not_ready" });
+  });
+
+  // ── message_start role classification (Bug 1 part b) ────────────────────
+  //
+  // pi 0.81.x emits tool results as SEPARATE messages whose message.role is
+  // "toolResult" (verified: pi-ai 0.81.1 types.d.ts ToolResultMessage, and
+  // real `--mode json` sidecar streams). The old mapping — any non-"user"
+  // role → "assistant" — turned tool-result content into "assistant text",
+  // which then satisfied _isFinalTurn and surfaced as the session's "final
+  // answer" (the tool-echo). Assistant must be assigned ONLY for the exact
+  // "assistant" role.
+
+  it("message_start with role 'toolResult' is not classified assistant (tool-result content is not assistant text)", async () => {
+    const record = await createRecord(adapter);
+
+    // Mirror the real sidecar shape: message_start carries message.role
+    // "toolResult" with toolCallId/toolName/content (pi 0.81.x).
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        { type: "message_start", messageID: "msg-tool-1", sessionID: SESSION_ID, message: { role: "toolResult", toolCallId: TOOL_CALL_ID, toolName: "bash", timestamp: 1700000004000 } },
+        { type: "message_end", messageID: "msg-tool-1", sessionID: SESSION_ID, message: { role: "toolResult", content: [{ type: "text", text: TOOL_OUTPUT }], timestamp: 1700000005000 } },
+      ),
+    );
+
+    expect(record.messages).toHaveLength(1);
+    expect(record.messages[0].info.role).not.toBe("assistant");
+    expect(record.messages[0].info.role).toBe("toolResult");
+    // The tool result must never be extracted as the assistant's text.
+    expect((adapter as any)._extractLastAssistantText(record.messages)).toBe("");
+  });
+
+  it("message_start with an undefined or unknown role is not classified assistant", async () => {
+    const record = await createRecord(adapter);
+
+    // No role field at all (malformed/foreign stream) and a foreign role.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        { type: "message_start", messageID: "msg-u-1", sessionID: SESSION_ID, message: { timestamp: 1700000006000 } },
+        { type: "message_end", messageID: "msg-u-1", sessionID: SESSION_ID, message: { role: "tool", content: "foreign", timestamp: 1700000006500 } },
+        { type: "message_start", messageID: "msg-u-2", sessionID: SESSION_ID, message: { role: "tool", timestamp: 1700000007000 } },
+      ),
+    );
+
+    expect(record.messages).toHaveLength(2);
+    expect(record.messages[0].info.role).not.toBe("assistant");
+    expect(record.messages[1].info.role).not.toBe("assistant");
+    expect(record.messages[1].info.role).toBe("tool");
+  });
+
+  it("message_start with role 'assistant' is still classified assistant (exact match only)", async () => {
+    const record = await createRecord(adapter);
+    feedJsonl(adapter, record, jsonl(MESSAGE_START_EVENT));
+    expect(record.messages[0].info.role).toBe("assistant");
   });
 
   // ── status() in-flight-tool guard (bug #2: no false idle while a node
@@ -495,7 +618,150 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
     willRetry: false,
   };
 
-  it("turn_end resolves the pending promptSync wait with the accumulated assistant text", async () => {
+  it("turn_end after a tool-free final message resolves the pending promptSync wait with the accumulated assistant text", async () => {
+    const record = await createRecord(adapter);
+
+    const resolved: unknown[] = [];
+    const kills: unknown[] = [];
+    record.resolve = (value: unknown) => {
+      resolved.push(value);
+    };
+    record.proc = { killed: false, kill: (sig: unknown) => kills.push(sig) };
+    record.exitCode = null;
+
+    // The turn's last message is the model's tool-free final answer, so
+    // its turn_end IS terminal and completes exactly as before.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        MESSAGE_START_EVENT,
+        ...MESSAGE_UPDATE_EVENTS,
+        FINAL_MESSAGE_END_EVENT,
+        TURN_END_EVENT,
+      ),
+    );
+
+    expect(resolved).toHaveLength(1);
+    const result = resolved[0] as { parts: Array<{ type: string; text?: string }> };
+    expect(result.parts[0].type).toBe("text");
+    expect(result.parts[0].text).toBe(FINAL_ASSISTANT_TEXT);
+    expect(record.resolve).toBeNull();
+
+    // The still-running child is terminated instead of idling until the
+    // 600s timeout (pi 0.81.1 json -p never exits on its own).
+    expect(kills).toEqual(["SIGTERM"]);
+  });
+
+  it("turn_end after tool calls does NOT complete; the following tool-free turn_end completes with the final answer", async () => {
+    // Regression for the "skill echo": pi emits turn_end after EVERY turn.
+    // A turn that ended with tool calls must NOT complete/kill the child —
+    // the model continues in a new turn and writes its answer there.
+    const record = await createRecord(adapter);
+
+    const resolved: unknown[] = [];
+    const kills: unknown[] = [];
+    record.resolve = (value: unknown) => {
+      resolved.push(value);
+    };
+    record.proc = { killed: false, kill: (sig: unknown) => kills.push(sig) };
+    record.exitCode = null;
+
+    // ── Turn 1: assistant issues a tool call; the result streams back; pi
+    //    then emits turn_end (stopReason "tool_use", toolCall in content).
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        MESSAGE_START_EVENT,
+        ...MESSAGE_UPDATE_EVENTS,
+        MESSAGE_END_EVENT,
+        TOOL_EXECUTION_START_EVENT,
+        TOOL_EXECUTION_UPDATE_EVENT,
+        TOOL_EXECUTION_END_EVENT,
+        TURN_END_EVENT,
+      ),
+    );
+
+    // The child must survive this turn_end: no resolve, no SIGTERM, no idle.
+    expect(resolved).toHaveLength(0);
+    expect(kills).toEqual([]);
+    expect(record.idleEmitted).toBe(false);
+
+    // ── Turn 2: the model's tool-free final answer; this turn_end IS
+    //    terminal — the completed result must be the answer text, not the
+    //    earlier tool result.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        FINAL_MESSAGE_START_EVENT,
+        FINAL_MESSAGE_END_EVENT,
+        TURN_END_EVENT,
+      ),
+    );
+
+    expect(resolved).toHaveLength(1);
+    const result = resolved[0] as { parts: Array<{ type: string; text?: string }> };
+    expect(result.parts[0].type).toBe("text");
+    expect(result.parts[0].text).toBe(FINAL_ASSISTANT_TEXT);
+    expect(record.resolve).toBeNull();
+    expect(kills).toEqual(["SIGTERM"]);
+  });
+
+  it("agent_end/agent_settled after a tool-call turn does NOT complete the session and does NOT emit session.idle", async () => {
+    // Regression for the premature-completion bug: agent_end/agent_settled
+    // used to call _completeTurn unconditionally, firing session.idle and
+    // SIGTERM'ing the child while it was still mid-tool-round-trip (the
+    // model's follow-up answer had not been written yet — the "tool echo"
+    // root cause). They must now apply the SAME _isFinalTurn guard as
+    // turn_end: a last assistant message carrying tool parts is NOT the
+    // final answer.
+    const record = await createRecord(adapter);
+
+    const resolved: unknown[] = [];
+    const kills: unknown[] = [];
+    const emitted: Array<{ type: string; rawType: unknown }> = [];
+    record.resolve = (value: unknown) => {
+      resolved.push(value);
+    };
+    record.proc = { killed: false, kill: (sig: unknown) => kills.push(sig) };
+    record.exitCode = null;
+    (adapter as any).setEventBridge({
+      emit: (event: { type: string; rawType: unknown }) => {
+        emitted.push(event);
+        return Promise.resolve();
+      },
+    });
+
+    // Tool turn only — the assistant's message carries a toolCall, the tool
+    // executes, then the run settles. NO tool-free final answer follows.
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        MESSAGE_START_EVENT,
+        ...MESSAGE_UPDATE_EVENTS,
+        MESSAGE_END_EVENT,
+        TOOL_EXECUTION_START_EVENT,
+        TOOL_EXECUTION_END_EVENT,
+        TURN_END_EVENT, // tool turn — not terminal, no completion
+        AGENT_SETTLED_EVENT, // settles mid-tool-round-trip — must not complete
+        AGENT_END_EVENT, // same guard on agent_end
+      ),
+    );
+
+    // No completion: no resolved prompt, no SIGTERM, no idle emission.
+    expect(resolved).toHaveLength(0);
+    expect(kills).toEqual([]);
+    expect(record.idleEmitted).toBe(false);
+    expect(emitted.filter((e) => e.type === "session.idle")).toHaveLength(0);
+  });
+
+  it("agent_settled after a tool-free final answer still completes (guard passes — real final answers are not broken)", async () => {
+    // The guard must not break genuine final-answer completion: when the
+    // last message IS the tool-free final answer, agent_settled completes
+    // exactly as before (idempotent with turn_end via record.idleEmitted).
     const record = await createRecord(adapter);
 
     const resolved: unknown[] = [];
@@ -512,20 +778,16 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       jsonl(
         MESSAGE_START_EVENT,
         ...MESSAGE_UPDATE_EVENTS,
-        MESSAGE_END_EVENT,
-        TURN_END_EVENT,
+        FINAL_MESSAGE_END_EVENT, // tool-free final answer
+        AGENT_SETTLED_EVENT, // settles after the real final turn
       ),
     );
 
     expect(resolved).toHaveLength(1);
     const result = resolved[0] as { parts: Array<{ type: string; text?: string }> };
-    expect(result.parts[0].type).toBe("text");
     expect(result.parts[0].text).toBe(FINAL_ASSISTANT_TEXT);
-    expect(record.resolve).toBeNull();
-
-    // The still-running child is terminated instead of idling until the
-    // 600s timeout (pi 0.81.1 json -p never exits on its own).
     expect(kills).toEqual(["SIGTERM"]);
+    expect(record.idleEmitted).toBe(true);
   });
 
   it("turn_end emits exactly one session.idle — duplicates and later exits do not re-emit", async () => {
@@ -544,7 +806,7 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       jsonl(
         MESSAGE_START_EVENT,
         ...MESSAGE_UPDATE_EVENTS,
-        MESSAGE_END_EVENT,
+        FINAL_MESSAGE_END_EVENT,
         TURN_END_EVENT,
         // duplicated turn_end (defensive: agent-core re-emits messages)
         TURN_END_EVENT,
@@ -593,9 +855,24 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       });
 
       // A realistic active subagent stream: streaming text deltas + a tool
-      // execution + the finalized message. NO turn_end — the session keeps
-      // working well past the liveness deadline.
-      feedJsonl(unthrottled, record, SUCCESS_STREAM);
+      // execution + the finalized message. NO turn_end and NO agent_end —
+      // the session keeps working well past the liveness deadline. (agent_end
+      // is deliberately excluded: it is now a completion signal — the
+      // agent_settled/agent_end safety net — so a stream that carries it is
+      // no longer "actively working".)
+      feedJsonl(
+        unthrottled,
+        record,
+        jsonl(
+          AGENT_START_EVENT,
+          MESSAGE_START_EVENT,
+          ...MESSAGE_UPDATE_EVENTS,
+          MESSAGE_END_EVENT,
+          TOOL_EXECUTION_START_EVENT,
+          TOOL_EXECUTION_UPDATE_EVENT,
+          TOOL_EXECUTION_END_EVENT,
+        ),
+      );
 
       const parts = emitted.filter(
         (e) => e.type === "part.created" || e.type === "part.updated",
@@ -647,7 +924,7 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
       expect(parts.length).toBeLessThanOrEqual(2);
     });
 
-    it("does not relay terminal events — turn_end yields exactly one session.idle and no part heartbeats", async () => {
+    it("does not relay terminal events — bare turn_end (no finalized message) yields no completion signal and no heartbeats", async () => {
       // Interval 0: even unthrottled, non-activity types must not relay.
       const unthrottled = new PiProcessSessionAdapter(undefined, undefined, {
         activityHeartbeatIntervalMs: 0,
@@ -663,13 +940,89 @@ describe("PiProcessSessionAdapter — pi 0.81.x JSON event stream", () => {
 
       feedJsonl(unthrottled, record, jsonl(TURN_END_EVENT));
 
-      // Completion signal exactly once — and zero activity heartbeats.
-      expect(emitted.filter((e) => e.type === "session.idle")).toHaveLength(1);
+      // A turn_end with no finalized assistant message is NOT a terminal
+      // turn (there is no answer to extract) — no completion signal, and
+      // turn_end itself relays no activity heartbeat.
+      expect(emitted.filter((e) => e.type === "session.idle")).toHaveLength(0);
+      expect(record.idleEmitted).toBe(false);
       expect(
         emitted.filter(
           (e) => e.type === "part.created" || e.type === "part.updated",
         ),
       ).toHaveLength(0);
     });
+  });
+});
+
+// ── Spawn argument builder (deterministic child toolset, subtask S3) ───────
+
+describe("buildSpawnArgs — deterministic spawn arguments", () => {
+  // The test file itself is guaranteed to exist, so the
+  // --append-system-prompt ordering branch is exercised hermetically.
+  const sysPromptPath = import.meta.path;
+
+  it("--tools carries the full PI_SUBAGENT_TOOLS allowlist, comma-joined", () => {
+    const args = buildSpawnArgs(
+      "claude-sonnet-4",
+      PI_SUBAGENT_TOOLS,
+      sysPromptPath,
+      "Do the thing",
+    );
+    const toolsIdx = args.indexOf("--tools");
+    expect(toolsIdx).toBeGreaterThan(-1);
+    expect(args[toolsIdx + 1]).toBe(PI_SUBAGENT_TOOLS.join(","));
+  });
+
+  it("keeps the --model / --append-system-prompt / Task: ordering with the allowlist", () => {
+    const args = buildSpawnArgs(
+      "claude-sonnet-4",
+      PI_SUBAGENT_TOOLS,
+      sysPromptPath,
+      "Do the thing",
+    );
+    expect(args).toEqual([
+      "--mode", "json",
+      "-p",
+      "--no-session",
+      "--model", "claude-sonnet-4",
+      "--tools", PI_SUBAGENT_TOOLS.join(","),
+      "--append-system-prompt", sysPromptPath,
+      "Task: Do the thing",
+    ]);
+  });
+
+  it("omits --tools for empty tool lists — non-agent configs spawn unchanged", () => {
+    const args = buildSpawnArgs(
+      "claude-sonnet-4",
+      [],
+      sysPromptPath,
+      "Hi",
+    );
+    expect(args).not.toContain("--tools");
+    expect(args).toEqual([
+      "--mode", "json",
+      "-p",
+      "--no-session",
+      "--model", "claude-sonnet-4",
+      "--append-system-prompt", sysPromptPath,
+      "Task: Hi",
+    ]);
+  });
+
+  it("omits --append-system-prompt when the prompt file does not exist", () => {
+    const args = buildSpawnArgs(
+      "claude-sonnet-4",
+      [],
+      "/nonexistent/rolebox/system-prompt.txt",
+      "Hi",
+    );
+    expect(args).not.toContain("--append-system-prompt");
+    expect(args).toEqual([
+      "--mode", "json",
+      "-p",
+      "--no-session",
+      "--model", "claude-sonnet-4",
+      "Task: Hi",
+    ]);
   });
 });

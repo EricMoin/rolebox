@@ -266,6 +266,9 @@ function checkRoleTransitions(
   for (const fn of functions) {
     if (!fn.transitions || fn.transitions.length === 0) continue;
     for (const t of fn.transitions) {
+      // "gate" is a sentinel handled by phase-machine.ts (t.when === "gate"
+      // resolves to the function's own gateSatisfied), not a named condition.
+      if (t.when === "gate") continue;
       const condNames = extractConditionNames(t.when);
       for (const name of condNames) {
         if (!knownConditions.has(name)) {

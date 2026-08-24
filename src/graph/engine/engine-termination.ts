@@ -29,19 +29,87 @@
  */
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
-import type { EngineState } from "../../types.engine-v2.ts";
+import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import { canTransitionPhase, transitionPhase } from "./engine-state.ts";
 import { markEscalated } from "./node-lifecycle.ts";
 import { markDirty } from "./engine-persistence.ts";
 
 /**
- * Reason applied to every pending node when a runtime graph deadlock is
+ * Base reason applied to every pending node when a runtime graph deadlock is
  * detected. A deadlocked graph has pending node(s) with no running/ready
  * upstream to ever satisfy them, no blocked gate to resolve them, no terminal
  * error to surface, and no deferred completion still to drain.
+ *
+ * Subtask S3 enrichment: when the guard fires, {@link buildDeadlockReason}
+ * appends the upstream causal chain — every terminal source (Escalate /
+ * Timeout / Done / Cancelled) feeding a pending node, with the source's
+ * errorReason or recorded terminating state — so the synthetic escalation
+ * explains WHY the pending node(s) can never be satisfied. The guard's firing
+ * conditions are untouched; only the reason text grows. Graphs that deadlock
+ * without any terminal upstream keep this exact base text.
  */
 const DEADLOCK_REASON =
   "graph deadlock: no active upstream can satisfy pending node(s)";
+
+/**
+ * Build the enriched deadlock reason (Subtask S3): the base
+ * {@link DEADLOCK_REASON} plus the upstream causal chain, aggregated across
+ * every pending node. For each terminal source feeding a pending node —
+ * Escalate / Timeout / Done / Cancelled, i.e. sources that can never activate
+ * their outbound edges again — include the source nodeId and its errorReason,
+ * or the recorded terminating state (the status doubles as the terminating
+ * signal type for escalate / timeout). Sources without a recorded reason are
+ * grouped by status (`t5/t6 cancelled`), matching the documented format.
+ *
+ * Pure state reader — never mutates. Returns the base reason unchanged when no
+ * pending node has a terminal source, so the legacy exact text is preserved
+ * for deadlocks without an upstream cause.
+ */
+function buildDeadlockReason(
+  state: EngineState,
+  pendingNodeIds: readonly string[],
+): string {
+  const pending = new Set(pendingNodeIds);
+  // Terminal sources feeding any pending node, deduped by nodeId (a source may
+  // feed several pending nodes via multiple edges — include it once).
+  const sources = new Map<string, NodeRuntimeState>();
+  for (const edge of state.graphDeclaration.edges) {
+    if (!pending.has(edge.to)) continue;
+    const source = state.nodes.get(edge.from);
+    if (!source) continue;
+    if (
+      source.status === NodeStatus.Escalate ||
+      source.status === NodeStatus.Timeout ||
+      source.status === NodeStatus.Done ||
+      source.status === NodeStatus.Cancelled
+    ) {
+      sources.set(source.nodeId, source);
+    }
+  }
+  if (sources.size === 0) return DEADLOCK_REASON;
+
+  // Deterministic order — nodeId ascending — so every escalated pending node
+  // in the same quiescence carries the IDENTICAL enriched reason string.
+  const ordered = [...sources.values()].sort((a, b) =>
+    a.nodeId.localeCompare(b.nodeId),
+  );
+  const withReason: string[] = [];
+  const noReasonByStatus = new Map<NodeStatus, string[]>();
+  for (const source of ordered) {
+    if (source.errorReason) {
+      withReason.push(`${source.nodeId} ${source.status}: ${source.errorReason}`);
+    } else {
+      const ids = noReasonByStatus.get(source.status) ?? [];
+      ids.push(source.nodeId);
+      noReasonByStatus.set(source.status, ids);
+    }
+  }
+  const segments = [...withReason];
+  for (const [status, ids] of noReasonByStatus) {
+    segments.push(`${ids.join("/")} ${status}`);
+  }
+  return `${DEADLOCK_REASON} (${segments.join("; ")})`;
+}
 
 /**
  * A graph-terminal event emitted via the optional onGraphTerminal callback
@@ -237,13 +305,19 @@ export function checkGraphTermination(
     // forever and [GRAPH COMPLETE] would never fire. Each synthetic escalation
     // is surfaced through `onSyntheticEscalate` (monitor-audit M1) so the
     // caller can observe it; a no-op when not supplied.
+    // Subtask S3: enrich the deadlock reason with the upstream causal chain —
+    // every terminal source feeding a pending node, with its errorReason or
+    // recorded terminating state. Computed ONCE for the whole deadlock so every
+    // escalated pending node carries the identical reason string. The guard's
+    // firing conditions above are untouched; only the reason text grows.
+    const deadlockReason = buildDeadlockReason(state, pendingNodeIds);
     for (const node of state.nodes.values()) {
       if (node.status === NodeStatus.Pending) {
-        markEscalated(state, node, DEADLOCK_REASON);
+        markEscalated(state, node, deadlockReason);
         counts.escalate += 1;
         if (onSyntheticEscalate) {
           try {
-            onSyntheticEscalate(node.nodeId, DEADLOCK_REASON);
+            onSyntheticEscalate(node.nodeId, deadlockReason);
           } catch {
             // A throwing observer must not break the deadlock quiescence
             // (mirrors the onGraphTerminal notifier convention).

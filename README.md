@@ -223,7 +223,7 @@ Set them by patching the rolebox row's `config` from your profile's own `cordis.
 
 ### Role-switch UI in the dsh web app
 
-The `web` profile auto-mounts the role-switch dock — **no extra config needed**. The package ships a `dsh.client` slot plugin (`package.json` `dsh.client`, `platform: "web"`) that the web app's client-module registry picks up automatically and mounts into the `conversation.input.dock` slot (the list/session-scoped row above the composer). The dock is a collapsible role-list panel: a header carrying the current status, one row per role (name plus `description · model · mode` metadata, with a current-role indicator), a **Return to base agent** row that appears only while a role is active, and a **Retry** row after a failed switch or clear. Clicking a row switches to that role; on mount (and on session change) the dock hydrates the session's persisted active role so the highlight survives a reload. All requests go to rolebox's REST surface over same-origin relative paths.
+The `web` profile auto-mounts the role-switch dock — **no extra config needed**. The package ships a `dsh.client` slot plugin (`package.json` `dsh.client`, `platform: "web"`) that the web app's client-module registry picks up automatically and mounts into the `conversation.input.dock` slot (the list/session-scoped row above the composer). The dock is a collapsible role-list panel: a header carrying the current status, one row per role (name plus `description · model · mode` metadata, with a current-role indicator), a **Return to base agent** row that appears only while a role is active, and a **Retry** row after a failed switch or clear. A keystroke filter row filters roles by name + description (case-insensitive) with a clear button and an explicit no-match row — the query survives collapse/expand and resets on session change. The dock starts collapsed (a 36px posture above the composer) and re-collapses on session change and after a successful switch or clear; failed mutations keep the list open with the **Retry** row, and the name seat is `flex:none` so a role's identity never truncates. Clicking a row switches to that role; on mount (and on session change) the dock hydrates the session's persisted active role so the highlight survives a reload. All requests go to rolebox's REST surface over same-origin relative paths.
 
 The `/rolebox` host route is **served by dsh's own web server**: during `apply()`, the plugin probes for the optional `webServer` service (`ctx.get("webServer")`) and registers a `prefix` route for `/rolebox` on it. The API under the prefix:
 
@@ -233,12 +233,16 @@ The `/rolebox` host route is **served by dsh's own web server**: during `apply()
 | `/rolebox/roles/active` | GET | `{ session, role }` — the active role id for the session, or `null` for the base agent |
 | `/rolebox/roles/switch` | POST | Body `{ role: string, session?: string }` — switch the session's active role |
 | `/rolebox/roles/active` | DELETE | Clear the active role for the session (back to the base agent) |
+| `/rolebox/status` | GET | Composite runtime snapshot: live loop census, in-memory engine-graph feed (the same one the monitor TUI reads), session count + most-recent ids, per-session active role |
+| `/rolebox/metrics` | GET | In-process dispatch metrics snapshot (`{ counters, gauges, histograms }`); `ROLEBOX_METRICS` gates payload richness |
 
 The `session` key is optional everywhere: an explicit session wins, otherwise the most recently active session in the store is used. Every non-2xx response is JSON with the stable shape `{ "ok": false, "error": string }` (`400` / `404` / `405` / `413` / `500`).
 
 **Headless profiles simply skip route registration.** The `webServer` service only exists when the web profile is active; without it, the plugin skips the `/rolebox` registration with a debug log and keeps running normally — there is no bind host or port on this plugin, and no web surface to configure.
 
-**What switching a role does.** A switch is per-session and takes effect on the next model turn. The active role's system prompt is injected into the model-facing prompt through dsh's system-prompt registry — rolebox contributes a `rolebox:role` section (the active role's full system prompt) and a `rolebox:context` context entry (its available-functions block), both resolved per session so a web-UI switch reaches the running session. Headless profiles have no prompt registry and degrade with a warning. Spawned subagents inherit the active role too: the dsh agent registrar prepends its system prompt to the spawn request and applies its model override at spawn time. The dock's clear/retry/hydrate behaviors close the loop — **Return to base agent** clears the active role, a failed switch or clear keeps the previous state and offers **Retry**, and a reload hydrates the persisted active role. See [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) §4.4/§4.5 for the web-UI route and system-prompt deep material, and [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml) for a fully configured profile patch.
+**The rolebox monitor panel.** The same `dsh.client` bundle contributes a second slot entry — `settings.section`, `id: "rolebox-monitor"`, `order: 90`, `label: "Monitoring"` — a settings-page panel that fetches `GET /rolebox/status` and `GET /rolebox/metrics` same-origin and renders the loop / engine-graph / metrics readings with loading, error, and empty states. Both endpoints are read-only and share the **single** `/rolebox` prefix registration with the role-switch surface: the real host webserver rejects a duplicate `(kind, path)` registration, so the monitor route owns `/status` + `/metrics` and delegates every other sub-path (`/roles*`) to the role-switch handler; headless profiles skip registration exactly like the role-switch route. The error contract is the same stable JSON `{ "ok": false, "error": string }` shape, but only `404` / `405` / `500` can fire — both endpoints are pure `GET` reads that never buffer a request body, so the switch surface's `400` / `413` codes do not apply. `/rolebox/metrics` honors the `ROLEBOX_METRICS` env var: unset, the snapshot carries only the core metrics (`dispatch_rejected_total`, `dispatch_backpressure_retry_total` counters; `inflight_tasks`, `concurrency_queued` gauges); set, it returns the full `{ counters, gauges, histograms }` snapshot.
+
+**What switching a role does.** A switch is per-session and takes effect on the next model turn. The active role's system prompt is injected into the model-facing prompt through dsh's system-prompt registry — rolebox contributes a `rolebox:role` section (the active role's full system prompt) and a `rolebox:context` context entry (its available-functions block), both resolved per session so a web-UI switch reaches the running session. Headless profiles have no prompt registry and degrade with a warning. Spawned subagents inherit the active role too: the dsh agent registrar prepends its system prompt to the spawn request and applies its model override at spawn time. The dock's clear/retry/hydrate behaviors close the loop — **Return to base agent** clears the active role, a failed switch or clear keeps the previous state and offers **Retry**, and a reload hydrates the persisted active role. See [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md) §4.4/§4.5 for the web-UI route and system-prompt deep material — §4.4.6/§4.4.7 cover the monitoring surface — and [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml) for a fully configured profile patch.
 
 ### Plain-entry fallback (no bundle)
 
@@ -258,7 +262,7 @@ If you installed rolebox as a plain dependency and want to activate it manually,
 ## Why rolebox
 
 - **Persistent memory** — SQLite + FTS5 stores decisions, conventions, and lessons across sessions. Workspace-scoped or role-private. Relevant memories auto-inject at session start via `<available_memory>`.
-- **Multi-agent dispatch** — define specialist roles in YAML and dispatch them in parallel with concurrency control and budget tracking. The Emperor orchestrator handles planning, delegation, validation, and revision across a team of sub-agents — without writing code.
+- **Multi-agent dispatch** — define specialist roles in YAML and dispatch them in parallel with engine-managed concurrency and budget tracking. The Emperor orchestrator handles planning, delegation, validation, and revision across a team of sub-agents — without writing code.
 - **LSP integration and hashline editing** — 30+ language server tools (go-to-definition, diagnostics, references, rename, completions) available inside your assistant. Content-hash-anchored editing replaces fragile line numbers so edits survive concurrent file changes.
 
 ---
@@ -313,7 +317,7 @@ See [docs/graph-engine-architecture.md](docs/graph-engine-architecture.md) for t
 
 ## Loop mode
 
-Run the same task across fresh sessions and iterate automatically — useful for refinement passes, batch fixes, and self-correcting workflows.
+Run the same task across fresh sessions and iterate automatically — useful for refinement passes, batch fixes, and self-correcting workflows. `|loop:N|` rounds execute **real multi-round iterations**: each round dispatches the task to a fresh worker session and reports its own outcome, with listener registration, session freshness, and cap precedence enforced at the round boundaries.
 
 <p align="center">
   <img alt="rolebox loop mode running the same task across fresh sessions" src="https://raw.githubusercontent.com/EricMoin/rolebox/HEAD/assets/gifs/loop-mode.gif" width="720">
@@ -323,13 +327,13 @@ Run the same task across fresh sessions and iterate automatically — useful for
 
 ## Features at a glance
 
-- **Dispatch system** — parallel background execution with concurrency control, budget tracking, task retry, and dependency graphs. See [docs/dispatch-config.md](docs/dispatch-config.md).
+- **Dispatch system** — parallel background execution with engine-managed concurrency (frontier, loop caps, per-node budgets), budget tracking, task retry, and dependency graphs. See [docs/dispatch-config.md](docs/dispatch-config.md).
 - **Graph execution engine** — explicit node/edge workflows with non-blocking `graph_run`, signal- and condition-based edges, bounded loop groups, and approval gates. See [docs/graph-engine-architecture.md](docs/graph-engine-architecture.md).
 - **Desktop notifications** — native OS notifications with idle detection, quiet hours, event filtering, and smart throttling. See [docs/hooks.md](docs/hooks.md).
 - **Session management** — 10 tools for searching, exporting, forking, diffing, and inspecting session history. See [docs/session-tools-strategy.md](docs/session-tools-strategy.md).
 - **Function state machine** — functions have active, gated, and dormant phases with evidence observation and artifact tracking. See [docs/functions.md](docs/functions.md).
 - **Context assembly** — cross-domain search across memory, assets, tasks, and sessions with token-bounded result blocks.
-- **Asset management** — hot-reload roles, skills, and references at runtime; asset search, inspection, validation, and composition analysis.
+- **Asset management** — hot-reload roles, skills, and references at runtime; asset search, inspection, validation, and composition analysis. `reference_search` keeps no module-level index — its per-tool-instance closure snapshot is rebuilt by the awaited hot-reload restart cascade, so no cache-invalidation hook is needed (and there is no "Agent not found" race after reload).
 
 ---
 
@@ -356,7 +360,7 @@ Run the same task across fresh sessions and iterate automatically — useful for
 | `rolebox info [name]` | Detailed role inspection (interactive picker when omitted) |
 | `rolebox sync <target>` | Deploy installed roles to a harness (`opencode` / `pi` / `dsh`) |
 | `rolebox config [name]` | Configure models for a role (interactive picker when omitted) |
-| `rolebox monitor` | Live dispatch metrics dashboard (TUI) |
+| `rolebox monitor` | Runtime dashboard (TUI): loops, graph workflows, dispatch summary — reads `.rolebox/state/` |
 | `rolebox memory search <query>` | Full-text search across persistent memory |
 | `rolebox --version` | Show version |
 

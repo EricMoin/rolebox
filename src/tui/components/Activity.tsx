@@ -271,8 +271,10 @@ const MAX_ENGINE_NODES = 6;
 export function renderEngineGraphActivity(props: {
   c: ThemeColors;
   graph: EngineGraphSnapshot;
-  /** graphId → most recent signal status, fed from live graph events. */
+  /** graphId → most recent engine phase, fed from live graph events. */
   graphSignals?: ReadonlyMap<string, string>;
+  /** `` `${graphId}::${nodeId}` `` → most recent node status, fed from live graph events. */
+  nodeSignals?: ReadonlyMap<string, string>;
 }) {
   const { c, graph } = props;
   // A graph with any running node is never shown idle (a node may be executing
@@ -309,12 +311,16 @@ export function renderEngineGraphActivity(props: {
       {shown.length > 0 && (
         <>
           <For each={shown}>{(node) => {
-            const glyph = engineNodeGlyph(node.status);
-            const color = engineNodeColor(node.status, c);
-            const done = node.status === "completed" || node.status === "done";
+            // Live node status (folded from graph events, sub-250ms) beats the
+            // snapshot status, which lags up to the 1s disk poll.
+            const liveStatus = props.nodeSignals?.get(`${graph.graphId}::${node.nodeId}`);
+            const status = liveStatus ?? node.status;
+            const glyph = engineNodeGlyph(status);
+            const color = engineNodeColor(status, c);
+            const done = status === "completed" || status === "done";
             // Running nodes surface real runtime status (liveness since start)
             // rather than reading as a stale idle/placeholder.
-            const liveness = node.status === "running" && node.startedAt
+            const liveness = status === "running" && node.startedAt
               ? " \u00b7 " + formatTimeAgo(Math.max(0, Date.now() - new Date(node.startedAt).getTime()))
               : "";
             return (
@@ -396,8 +402,10 @@ export function renderActivity(props: {
   snap: MonitorSnapshot | null;
   sessionScope: Set<string>;
   currentSessionId: string;
-  /** graphId → most recent signal status, from live graph events. */
+  /** graphId → most recent engine phase, from live graph events. */
   graphSignals?: ReadonlyMap<string, string>;
+  /** `` `${graphId}::${nodeId}` `` → most recent node status, from live graph events. */
+  nodeSignals?: ReadonlyMap<string, string>;
   selectedIndex?: number;
   /** Called when a task row is clicked — passes the row index. */
   onSelectTask?: (index: number) => void;
@@ -471,7 +479,11 @@ export function renderActivity(props: {
       {engineGraphs.length > 0 && (
         <>
           <For each={engineGraphs.slice(0, MAX_ENGINE_GRAPH_ROWS)}>{(graph) =>
-            renderEngineGraphActivity({ c, graph, graphSignals: props.graphSignals })
+            renderEngineGraphActivity({
+              c, graph,
+              graphSignals: props.graphSignals,
+              nodeSignals: props.nodeSignals,
+            })
           }</For>
           {engineGraphs.length > MAX_ENGINE_GRAPH_ROWS && (
             <text fg={rgbaToCSS(c.textMuted)} attributes={DIM}>{"  +" + (engineGraphs.length - MAX_ENGINE_GRAPH_ROWS) + " more engine graphs"}</text>
