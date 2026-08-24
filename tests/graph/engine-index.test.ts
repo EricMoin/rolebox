@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
@@ -12,7 +12,11 @@ import type {
 } from "../../src/types.engine-v2.ts";
 import type { DispatchTask, DispatchTaskStatus } from "../../src/dispatch/types.ts";
 import type { TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import {
+  EnginePersistence,
+  NON_CRITICAL_DEBOUNCE_MS,
+  engineStatePath,
+} from "../../src/graph/engine/engine-persistence.ts";
 import {
   createEngine,
   type EngineRuntime,
@@ -130,6 +134,55 @@ class DisposableDispatch implements NodeDispatchPort {
 
 /** Let chained setTimeout-driven task completions drain. */
 const settle = () => new Promise((r) => setTimeout(r, 50));
+
+/**
+ * Dispatch seam for the M9 listener-ledger test: records every
+ * `onTaskTerminated` subscription + removal (like {@link DisposableDispatch})
+ * but ALSO answers `getTask` with a verifiably-live task — so a listener fired
+ * with a transient `error` re-subscribes instead of escalating, exercising the
+ * engine-advance `reSubLedger` wiring end-to-end.
+ */
+class LiveErrorDispatch implements NodeDispatchPort {
+  subs = new Map<string, TaskTerminatedCallback>();
+  removals: string[] = [];
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    return Promise.resolve(makeTask(node.nodeId));
+  }
+
+  getTask(taskId: string): DispatchTask {
+    return {
+      id: taskId,
+      sessionId: `sess-${taskId}`,
+      parentSessionId: "g-1",
+      depth: 1,
+      status: "running", // authoritative read: the task is still live
+      agent: "a",
+      prompt: "p",
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+  }
+
+  onTaskTerminated(taskId: string, cb: TaskTerminatedCallback): TaskTerminatedCallback {
+    this.subs.set(taskId, cb);
+    return cb;
+  }
+
+  removeTaskTerminatedListener(taskId: string, _cb: TaskTerminatedCallback): void {
+    this.removals.push(taskId);
+    this.subs.delete(taskId);
+  }
+
+  /** Fire a dispatch termination at the currently-registered listener. */
+  fire(taskId: string, status: string): void {
+    this.subs.get(taskId)?.(taskId, status);
+  }
+}
 
 /**
  * Dispatch seam that blocks every dispatch on an explicit `release()` — lets
@@ -253,6 +306,8 @@ describe("createEngine()", () => {
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Ready); // root
     expect(state.frontier).toEqual(["A"]);
     expect(state.graphDeclaration).toEqual(singleNodeGraph());
+    // D3: the dead `edges` map was removed — snapshots carry no such member.
+    expect("edges" in state).toBe(false);
   });
 
   it("is idempotent: provisioning twice does not re-register nodes", () => {
@@ -268,6 +323,8 @@ describe("createEngine()", () => {
     const state = engine.provision();
     expect(state.nodes.size).toBe(3);
     expect(engine.status().phase).toBe(EnginePhase.Idle); // status() usable pre-run
+    // D3: the `status()` snapshot (snapshotEngineState) carries no dead `edges`.
+    expect("edges" in engine.status()).toBe(false);
   });
 
   it("rejects run() with a clear error when no dispatch seam is injected", async () => {
@@ -645,6 +702,134 @@ describe("engine.dispose()", () => {
     const engine = createEngine(singleNodeGraph(), { dispatch: fake });
     await engine.run();
     expect(() => engine.dispose()).not.toThrow();
+  });
+
+  it("dispose unregisters a transient-error re-subscription — no zombie callback [M9]", async () => {
+    const fake = new LiveErrorDispatch();
+    const completions: NodeCompletionEvent[] = [];
+    const engine = createEngine(singleNodeGraph(), {
+      dispatch: fake,
+      onNodeCompletion: (e) => completions.push(e),
+    });
+    await engine.run(); // A dispatched → one onTaskTerminated subscription
+    expect(fake.subs.size).toBe(1);
+
+    // The listener fires a transient `error`; the authoritative getTask read
+    // shows the task still live → the listener re-subscribes instead of
+    // escalating. The new callback must be registered in the engine's
+    // subscription ledger (engine-advance `_dispatchNode` reSubLedger wiring) —
+    // NOT escape it (review 04-F5).
+    fake.fire("task-A", "error");
+    expect(fake.subs.size).toBe(1); // replaced by the re-subscription
+    expect(fake.removals).toEqual([]); // nothing removed yet
+    expect(completions).toHaveLength(0); // no escalate surfaced
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // dispose unregisters BOTH the original and the re-subscribed listener.
+    engine.dispose();
+    expect(fake.subs.size).toBe(0);
+    expect(fake.removals.length).toBe(2); // original + re-subscription
+    expect(fake.removals.every((id) => id === "task-A")).toBe(true);
+
+    // A rogue dispatch termination after dispose is never delivered — no
+    // zombie callback carries a disposed engine's closures.
+    fake.fire("task-A", "completed");
+    await settle();
+    expect(completions).toHaveLength(0);
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
+  });
+});
+
+// ── engine.dispose() + persistence: stale-write cancellation (review 05-F1/M14) ──
+
+describe("engine.dispose() cancels the pending debounced persistence write (M14)", () => {
+  /**
+   * Drive an engine into "pending debounced write armed" state: dispatch the
+   * root, record a non-critical liveness heartbeat, then run an idle section
+   * that routes the churn into the debounced write tier.
+   */
+  async function armPendingWrite(
+    dir: string,
+    graphId: string,
+  ): Promise<EngineRuntime> {
+    const engine = createEngine(singleNodeGraph(), {
+      graphId,
+      dispatch: new FakeDispatch(),
+      stateDir: dir,
+    });
+    await engine.run(); // dispatch A → critical write-through lands
+    engine.recordLivenessHeartbeat("A", "tool"); // isNonCriticalDirty
+    await engine.run(); // idle section → schedulePersistState → debounce armed
+    return engine;
+  }
+
+  it("control: WITHOUT dispose the debounced heartbeat write lands on disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-dispose-persist-ctl-"));
+    try {
+      const engine = await armPendingWrite(dir, "g-m14-ctl");
+      // Wait past the debounce window — the pending write fires on its own.
+      await new Promise((r) => setTimeout(r, NON_CRITICAL_DEBOUNCE_MS + 50));
+      const loaded = new EnginePersistence(dir).load("g-m14-ctl");
+      expect(loaded).not.toBeNull();
+      // The heartbeat liveness record landed — proving the arming path works.
+      expect(loaded!.nodes.get("A")!.liveness?.heartbeatSource).toBe("tool");
+      engine.dispose();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a disposed runtime's scheduled non-critical write never lands on disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-dispose-persist-"));
+    try {
+      const engine = await armPendingWrite(dir, "g-m14-dispose");
+      const path = engineStatePath(dir, "g-m14-dispose");
+      expect(existsSync(path)).toBe(true); // critical write is on disk
+
+      // Dispose the runtime — the pending debounced write must be cancelled
+      // and DROPPED (never flushed over the state file).
+      engine.dispose();
+
+      // Wait past the debounce window: the heartbeat state must never land.
+      await new Promise((r) => setTimeout(r, NON_CRITICAL_DEBOUNCE_MS + 50));
+      const loaded = new EnginePersistence(dir).load("g-m14-dispose");
+      expect(loaded).not.toBeNull();
+      // The critical write is intact (node running)…
+      expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Running);
+      // …but the heartbeat liveness record is NOT present — the stale
+      // debounced write was cancelled by dispose (contrast with the control
+      // test above, where it landed).
+      expect(loaded!.nodes.get("A")!.liveness).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── recover(): non-ENOENT load failures surface explicitly (review 05-F6/L22) ──
+
+describe("engine.recover() contains non-ENOENT load failures", () => {
+  it("does not throw and does not treat an unreadable state file as a clean start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-recover-eisdir-"));
+    try {
+      // A DIRECTORY at the state-file path → readFileSync fails with EISDIR
+      // (the file "exists" but is unreadable). recover() must NOT silently
+      // clean-start (re-provisioning completed nodes); it surfaces the failure
+      // through its own catch and returns.
+      const path = engineStatePath(dir, "g-eisdir");
+      mkdirSync(path, { recursive: true });
+
+      const engine = createEngine(singleNodeGraph(), {
+        graphId: "g-eisdir",
+        dispatch: new FakeDispatch(),
+        stateDir: dir,
+      });
+      await expect(engine.recover()).resolves.toBeUndefined();
+      // No state was adopted — the engine stays fresh.
+      expect(engine.status().phase).toBe(EnginePhase.Idle);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

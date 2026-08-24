@@ -188,6 +188,41 @@ describe("graph_run idempotent re-run (adoptPrior)", () => {
     expect(dispatches(fake, "A")).toBe(2);
     expect(fake.calls.at(-1)!.prompt.startsWith("REVISION")).toBe(true);
   });
+
+  it("repeated retries with the same modify_prompt do not stack the injected block (M11 replace-dedup)", async () => {
+    const { ts, fake } = makeToolset();
+    const g = ts.graph_create({ name: "retry-dedup" });
+    ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id: g.graph_id });
+    await settle();
+    expect(dispatches(fake, "A")).toBe(1);
+
+    const r1 = await ts.graph_run({
+      graph_id: g.graph_id,
+      node_id: "A",
+      retry: true,
+      modify_prompt: "REVISION",
+    });
+    await settle();
+    expect(r1.retry?.node_id).toBe("A");
+    expect(dispatches(fake, "A")).toBe(2);
+    const afterFirst = fake.calls.at(-1)!.prompt;
+    expect(afterFirst).toBe("REVISION\n\npA");
+
+    // Second retry with the SAME block: the prompt is identical — the block is
+    // not prepended again (a pre-fix engine grew it to "REVISION\n\nREVISION\n\npA").
+    const r2 = await ts.graph_run({
+      graph_id: g.graph_id,
+      node_id: "A",
+      retry: true,
+      modify_prompt: "REVISION",
+    });
+    await settle();
+    expect(r2.retry?.node_id).toBe("A");
+    expect(dispatches(fake, "A")).toBe(3);
+    expect(fake.calls.at(-1)!.prompt).toBe(afterFirst);
+  });
 });
 
 // ── Controllable dispatch (holds nodes running until released) ──────────────

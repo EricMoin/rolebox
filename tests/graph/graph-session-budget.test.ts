@@ -24,7 +24,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { NodeStatus } from "../../src/constants.ts";
+import { NodeStatus, EnginePhase } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState } from "../../src/types.engine-v2.ts";
 import type { DispatchManagerConfig } from "../../src/dispatch/config.ts";
@@ -190,5 +190,90 @@ describe("sessionsSpawned display counter — increment / refund semantics", () 
     await engine.dispatchReady();
     expect(fake.dispatches("B")).toBe(2);
     expect(state.budget.sessionsSpawned).toBe(2);
+  });
+});
+
+// ── Contract: checkNodeBudget — Phase-7 always-accept stub ──────────────────
+
+describe("BudgetBridge.checkNodeBudget — Phase-7 stub contract (always accept)", () => {
+  it("never rejects, regardless of how much the node has consumed", () => {
+    const g = decl(["A"]);
+    const bridge = new BudgetBridge(makeTracker(), g);
+    const state = createEngineState(g, "g-x");
+    provision(state);
+    const node = state.nodes.get("A")!;
+    // Even a node with a huge cumulative consumption is never rejected — the
+    // stub pins the always-accept semantics until Phase-7 ceiling logic lands
+    // (compare checkGraphBudget, which delegates to the real tracker).
+    node.tokensConsumed = { inputTokens: 999_999, outputTokens: 999_999, cost: 999.99 };
+
+    expect(bridge.checkNodeBudget(node)).toEqual({ exceeded: false });
+  });
+});
+
+// ── Contract: engine invokes checkNodeBudget through the port pre-dispatch ──
+
+describe("engine pre-check — checkNodeBudget is a live typed port call", () => {
+  it("invokes checkNodeBudget for every dispatched node and never gates (stub)", async () => {
+    const g = decl(["A", "B"]);
+    const fake = new ScriptedDispatch();
+    const checked: string[] = [];
+    const budget: GraphBudgetPort = {
+      checkGraphBudget: () => ({ exceeded: false }),
+      checkNodeBudget: (node) => {
+        checked.push(node.nodeId);
+        return { exceeded: false };
+      },
+    };
+    const { state, engine } = buildEngine(g, fake, budget);
+
+    await engine.dispatchReady();
+    await new Promise((r) => setTimeout(r, 25)); // let auto-completions drain
+
+    // The per-node check is a real, typed call through the port — once per
+    // dispatched node — and its always-accept result never blocks dispatch.
+    expect(checked.sort()).toEqual(["A", "B"]);
+    expect(fake.dispatches("A")).toBe(1);
+    expect(fake.dispatches("B")).toBe(1);
+  });
+
+  it("a rejecting per-node check escalates the ready node without dispatching it", async () => {
+    const g = decl(["A"]);
+    const fake = new ScriptedDispatch();
+    const budget: GraphBudgetPort = {
+      checkGraphBudget: () => ({ exceeded: false }),
+      checkNodeBudget: () => ({ exceeded: true, reason: "node budget exhausted" }),
+    };
+    const { state, engine } = buildEngine(g, fake, budget);
+
+    await engine.dispatchReady();
+
+    const node = state.nodes.get("A")!;
+    expect(node.status).toBe(NodeStatus.Escalate);
+    expect(node.errorReason).toBe("node budget exhausted");
+    // Dropped from the frontier — no lingering ready entry.
+    expect(state.frontier.includes("A")).toBe(false);
+    // No dispatch was attempted for the escalated node.
+    expect(fake.dispatches("A")).toBe(0);
+    // Single-node graph with its only node escalated → terminal complete phase.
+    expect(state.phase).toBe(EnginePhase.Complete);
+  });
+});
+
+// ── Contract: getGraphUsage stays a consumer-facing query, not a port member ─
+
+describe("BudgetBridge.getGraphUsage — read-only consumer query (not on the port)", () => {
+  it("delegates to the tracker's request usage and returns a zeroed record when absent", () => {
+    const g = decl(["A"]);
+    const bridge = new BudgetBridge(makeTracker(), g);
+
+    // No usage recorded under this graph id → the tracker returns a zeroed
+    // record. The method is deliberately NOT part of GraphBudgetPort — the
+    // engine never reads it; it exists for status / monitor consumers.
+    expect(bridge.getGraphUsage("g-x")).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cost: 0,
+    });
   });
 });

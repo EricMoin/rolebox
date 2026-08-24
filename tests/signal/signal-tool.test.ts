@@ -12,6 +12,7 @@ import {
   hasSignal,
   getSignalPayload,
 } from "../../src/signal/signal-ledger.ts";
+import { SIGNAL_TYPES } from "../../src/signal/signal-constants.ts";
 
 // Minimal tool context for isolated tool tests
 const makeContext = (sessionID = "test-session"): CanonicalToolContext => ({
@@ -25,17 +26,9 @@ const makeContext = (sessionID = "test-session"): CanonicalToolContext => ({
   ask: async () => {},
 });
 
-// The 8 signal type enum values
-const SIGNAL_TYPES = [
-  "answer",
-  "need_approval",
-  "blocked",
-  "need_clarification",
-  "handoff",
-  "progress",
-  "revise_needed",
-  "escalate",
-] as const;
+// The 8 signal type enum values come from the single source of truth
+// (src/signal/signal-constants.ts) — no local copy, so the vocabulary
+// cannot drift between the tool, the constants, and the tests.
 
 // ── Standalone tool tests (no FSM dependency) ────────────────────────
 
@@ -108,9 +101,19 @@ describe("signal tool", () => {
     }
   });
 
-  it("zod schema rejects invalid signal types", () => {
-    const result = tool.args.type.safeParse("invalid_signal");
-    expect(result.success).toBe(false);
+  it("zod schema rejects unknown signal types", () => {
+    const unknowns = [
+      "invalid_signal",
+      "ANSWER", // case-sensitive: uppercase is not a valid type
+      "unknown",
+      "",
+      "answer ", // trailing whitespace is not trimmed
+      "need_approval ",
+    ];
+    for (const unknown of unknowns) {
+      const result = tool.args.type.safeParse(unknown);
+      expect(result.success).toBe(false);
+    }
   });
 
   it("zod schema accepts all valid signal types", () => {

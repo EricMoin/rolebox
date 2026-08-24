@@ -1,13 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import { JoinStrategy } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
-import type { EdgePayload, FanInContext, NodeRuntimeState } from "../../src/types.engine-v2.ts";
+import type { EdgePayload, NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
   joinSatisfied,
   evaluateJoin,
   collectUpstreamResults,
-  mergeFanInContext,
   getUpstreamNodeIds,
   getJoinStrategy,
 } from "../../src/graph/engine/join-evaluator.ts";
@@ -373,10 +372,10 @@ describe("collectUpstreamResults", () => {
   });
 });
 
-// ── mergeFanInContext ───────────────────────────────────────────────────────
+// ── upstreamResults accumulation shape ──────────────────────────────────────
 
-describe("mergeFanInContext", () => {
-  function merged(): FanInContext {
+describe("upstreamResults accumulation", () => {
+  function collected(): NodeRuntimeState {
     const state = createEngineState(diamondGraph(), "g-1");
     provision(state);
     const sink = state.nodes.get("sink")!;
@@ -398,35 +397,36 @@ describe("mergeFanInContext", () => {
         budgetConsumed: { tokens: 3000, cost: 0.005, sessions: 1 },
       }),
     );
-    return mergeFanInContext(sink.upstreamResults);
+    return sink;
   }
 
-  it("produces the correct sources array with per-node provenance", () => {
-    const ctx = merged();
-    expect(ctx.sources).toEqual([
-      { node: "b", signal: "answer", result: "b-output" },
-      { node: "c", signal: "answer", result: "c-output" },
-    ]);
-  });
-
-  it("deduplicates merged_artifacts while preserving first-appearance order", () => {
-    const ctx = merged();
-    expect(ctx.merged_artifacts).toEqual(["f1.ts", "shared.ts", "f2.ts"]);
-  });
-
-  it("sums budget_consumed_total across sources", () => {
-    const ctx = merged();
-    expect(ctx.budget_consumed_total.tokens).toBe(7000);
-    expect(ctx.budget_consumed_total.sessions).toBe(2);
-    expect(ctx.budget_consumed_total.cost).toBeCloseTo(0.013, 10);
-  });
-
-  it("returns empty aggregates for an empty result map", () => {
-    const ctx = mergeFanInContext(new Map());
-    expect(ctx).toEqual({
-      sources: [],
-      merged_artifacts: [],
-      budget_consumed_total: { tokens: 0, cost: 0, sessions: 0 },
+  it("exposes per-source provenance on node.upstreamResults", () => {
+    const sink = collected();
+    expect([...sink.upstreamResults.keys()]).toEqual(["b", "c"]);
+    expect(sink.upstreamResults.get("b")).toMatchObject({
+      fromNode: "b",
+      fromSignal: "answer",
+      result: "b-output",
     });
+    expect(sink.upstreamResults.get("c")).toMatchObject({
+      fromNode: "c",
+      fromSignal: "answer",
+      result: "c-output",
+    });
+  });
+
+  it("preserves per-source artifacts and budget on the recorded payloads", () => {
+    const sink = collected();
+    expect(sink.upstreamResults.get("b")!.artifacts).toEqual(["f1.ts", "shared.ts"]);
+    expect(sink.upstreamResults.get("c")!.artifacts).toEqual(["f2.ts", "shared.ts"]);
+    expect(sink.upstreamResults.get("b")!.budgetConsumed.tokens).toBe(4000);
+    expect(sink.upstreamResults.get("c")!.budgetConsumed.tokens).toBe(3000);
+    expect(sink.upstreamResults.get("c")!.budgetConsumed.cost).toBeCloseTo(0.005, 10);
+  });
+
+  it("records nothing for a node with no upstream payloads", () => {
+    const state = createEngineState(diamondGraph(), "g-1");
+    provision(state);
+    expect(state.nodes.get("sink")!.upstreamResults.size).toBe(0);
   });
 });

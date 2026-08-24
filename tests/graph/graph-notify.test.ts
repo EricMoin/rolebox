@@ -233,6 +233,8 @@ function makeTerminalEvent(
     phase: overrides.isBlocked ? "executing" : "complete",
     nodeStatusSummaries: {
       completed: 3,
+      done: 0,
+      cancelled: 0,
       escalate: 0,
       timeout: 0,
       blocked: overrides.isBlocked ? 1 : 0,
@@ -278,7 +280,7 @@ describe("buildGraphTerminalText", () => {
     const text = buildGraphTerminalText(makeTerminalEvent({
       phase: "executing",
       isBlocked: true,
-      nodeStatusSummaries: { completed: 2, escalate: 0, timeout: 0, blocked: 1, running: 0 },
+      nodeStatusSummaries: { completed: 2, done: 0, cancelled: 0, escalate: 0, timeout: 0, blocked: 1, running: 0 },
     }));
     expect(text).toContain(GRAPH_BLOCKED_MARKER);
     expect(text).toContain("phase: executing");
@@ -293,6 +295,28 @@ describe("buildGraphTerminalText", () => {
     expect(text).toContain(GRAPH_COMPLETE_MARKER);
     expect(text).not.toContain(GRAPH_BLOCKED_MARKER);
     expect(text).not.toContain("quiescent-blocked");
+  });
+
+  it("renders done and cancelled buckets when non-zero (M4/L17 visibility)", () => {
+    const text = buildGraphTerminalText(makeTerminalEvent({
+      nodeStatusSummaries: {
+        completed: 1,
+        done: 1,
+        cancelled: 2,
+        escalate: 0,
+        timeout: 0,
+        blocked: 0,
+        running: 0,
+      },
+    }));
+    expect(text).toContain("nodes: completed=1 done=1 cancelled=2");
+  });
+
+  it("omits zero done/cancelled counts from the summary", () => {
+    const text = buildGraphTerminalText(makeTerminalEvent());
+    expect(text).toContain("nodes: completed=3");
+    expect(text).not.toContain("done=");
+    expect(text).not.toContain("cancelled=");
   });
 });
 

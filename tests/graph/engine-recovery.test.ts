@@ -460,6 +460,52 @@ describe("subscribeTaskTermination", () => {
     fire("error");
     expect(emitted).toEqual([["A", "escalate", { error: "boom" }]]);
   });
+
+  it("re-subscription-ledger: registers the transient-error re-subscription into the optional out-param (M9)", () => {
+    // The listener reports a transient error; the authoritative getTask read
+    // shows the task still live → the listener re-subscribes. The NEW callback
+    // must land in the optional ledger so the engine's dispose() can unregister
+    // it — no zombie callback escapes the M4 subscription ledger (04-F5).
+    const state = buildState(singleNodeGraph(), "sub-ledger");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    let registered: TaskTerminatedCallback | undefined;
+    const port = {
+      getTask: () => makeTask("task-A", "running"), // authoritative: still live
+      onTaskTerminated: (_id: string, cb: TaskTerminatedCallback) => {
+        registered = cb;
+      },
+    };
+    const ledger: Array<{ taskId: string; callback: TaskTerminatedCallback }> =
+      [];
+    const emitted: Array<[string, SignalType, unknown]> = [];
+    subscribeTaskTermination(
+      state,
+      port as never,
+      node,
+      (n, t, p) => emitted.push([n, t, p]),
+      ledger,
+    );
+    expect(ledger).toEqual([]); // nothing yet — no transient error fired
+
+    // Fire the transient-error path: no escalate, node stays running.
+    registered!("task-A", "error");
+    expect(emitted).toEqual([]);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // The re-subscribed callback is captured in the ledger — the exact handle
+    // the caller (engine-advance `_dispatchNode`) registers into
+    // `_terminationSubscriptions` for dispose.
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].taskId).toBe("task-A");
+    expect(ledger[0].callback).toBe(registered!); // the new listener on the port
+
+    // The re-subscribed listener still advances the node on a genuine
+    // termination (the ledger handle is a live, working callback).
+    registered!("task-A", "completed");
+    expect(emitted).toEqual([["A", "answer", { __inferred: true }]]);
+  });
 });
 
 // ── captureNodeUsage (Phase-7 per-node consumption) ─────────────────────────
@@ -615,6 +661,61 @@ describe("reconcileEngine", () => {
     expect(subTasks).toEqual(["task-A"]);
     expect(report.deferred).toEqual([]);
   });
+
+  it("reconcile-live-error: an error-reported-but-live task keeps the node running and re-subscribes (M8)", () => {
+    // The classification read reports `error`, but the authoritative liveness
+    // re-check read shows the task recovered to a LIVE status — a transient
+    // execution error whose session is still continuing (review 04-F4). The
+    // restart window must not latch the node as a terminal escalate: reconcile
+    // keeps it running and routes into the re-subscribe branch, mirroring
+    // subscribeTaskTermination's live-seam guard.
+    const state = buildState(singleNodeGraph(), "rec-live-error");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    const registered: string[] = [];
+    let reads = 0;
+    const port = {
+      getTask: () => {
+        reads += 1;
+        return reads === 1
+          ? makeTask("task-A", "error", "transient")
+          : makeTask("task-A", "running");
+      },
+      onTaskTerminated: (id: string) => registered.push(id),
+    };
+    const subs: ReconcileSubscriptions = { listeners: [] };
+    const report = reconcileEngine(state, port as never, () => {}, subs);
+    // Node stays running — never escalated, never timed out.
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(report.reSubscribed).toEqual(["A"]);
+    expect(report.timedOut).toEqual([]);
+    expect(report.deferred).toEqual([]);
+    // The listener was re-subscribed (monitor M4: the {taskId, callback} pair
+    // is surfaced through the out-param so a caller can unregister it later).
+    expect(registered).toEqual(["task-A"]);
+    expect(subs.listeners).toHaveLength(1);
+    expect(subs.listeners[0].taskId).toBe("task-A");
+  });
+
+  it("still escalates a genuinely errored task whose authoritative read stays error (M8 regression)", () => {
+    // The liveness re-check confirms the task is NOT live (status error) — the
+    // M8 guard must NOT suppress the deferred escalate for a real error.
+    const state = buildState(singleNodeGraph(), "rec-live-error-genuine");
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    const port = {
+      getTask: () => makeTask("task-A", "error", "kaboom"),
+      onTaskTerminated: () => {},
+    };
+    const report = reconcileEngine(state, port as never, () => {});
+    expect(report.timedOut).toEqual([]);
+    expect(report.reSubscribed).toEqual([]);
+    expect(report.deferred).toHaveLength(1);
+    expect(report.deferred[0]).toMatchObject({ nodeId: "A", type: "escalate" });
+    expect((report.deferred[0].payload as { error: string }).error).toBe("kaboom");
+  });
 });
 
 // ── rebuildFrontier ─────────────────────────────────────────────────────────
@@ -637,6 +738,19 @@ describe("rebuildFrontier", () => {
     const rebuilt = rebuildFrontier(state);
     expect(rebuilt).toEqual(["A", "B"]);
   });
+
+  it("marks the state dirty when rebuilding the frontier (L21 choke-point)", () => {
+    // A recovered state starts clean (hydrateEngineState resets isDirty) — the
+    // frontier recomputation is a persistent-field mutation and must set the
+    // dirty flag so the next critical section persists it (05-F5: without this,
+    // recover()'s reconcile-failure catch path could drop the rebuilt frontier
+    // from disk when no other mutation sets the flag).
+    const state = buildState(linearGraph(), "frontier-dirty");
+    state.isDirty = false; // simulate a just-hydrated state
+    state.frontier = [];
+    rebuildFrontier(state);
+    expect(state.isDirty).toBe(true);
+  });
 });
 
 // ── clearStaleCriticalSection ───────────────────────────────────────────────
@@ -656,6 +770,20 @@ describe("clearStaleCriticalSection", () => {
     state.pendingCompletions = [];
     clearStaleCriticalSection(state);
     expect(state.advancingLock).toBe(false);
+  });
+
+  it("marks the state dirty when clearing a stale critical section (L21 choke-point)", () => {
+    // advancingLock + pendingCompletions are persistent fields — the release /
+    // clear must set the dirty flag (05-F5) so a subsequent critical section
+    // (or the recover() catch path) persists the cleared stale state.
+    const state = buildState(singleNodeGraph(), "stale-dirty");
+    state.isDirty = false; // simulate a just-hydrated state
+    state.advancingLock = true;
+    state.pendingCompletions = ["A"];
+    clearStaleCriticalSection(state);
+    expect(state.advancingLock).toBe(false);
+    expect(state.pendingCompletions).toEqual([]);
+    expect(state.isDirty).toBe(true);
   });
 });
 
@@ -949,6 +1077,49 @@ describe("engine.recover() integration", () => {
     expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Timeout);
     expect(engine.status().nodes.get("B")!.status).toBe(NodeStatus.Running);
   });
+
+  it("persists the stale-lock release + frontier rebuild after the reconcile-failure catch path (L21)", async () => {
+    const dir = makeTmpDir();
+    const graphId = "rec-l21-persist";
+    // Persist a crashed state: A running with a still-LIVE task, stale lock
+    // held. Recovery clears the lock (clearStaleCriticalSection) BEFORE the
+    // reconcile pass — which then aborts (re-subscription throws) with NO node
+    // timed out, so nothing else marks the state dirty. The catch path
+    // (rebuildFrontier + dispatchReady) must still persist the lock release +
+    // rebuilt frontier via the markDirty choke-point — without it the on-disk
+    // file would keep the stale lock (05-F5).
+    const crashed = buildState(singleNodeGraph(), graphId);
+    crashed.nodes.get("A")!.status = NodeStatus.Running;
+    crashed.nodes.get("A")!.dispatchTaskId = "task-A";
+    crashed.advancingLock = true;
+    new EnginePersistence(dir).save(crashed);
+
+    const throwingPort = {
+      getTask: () => makeTask("task-A", "running"), // task verifiably live
+      onTaskTerminated: () => {
+        throw new Error("port down"); // reconcile aborts mid-pass
+      },
+    };
+    const engine = createEngine(singleNodeGraph(), {
+      stateDir: dir,
+      graphId,
+      dispatch: throwingPort as unknown as NodeDispatchPort,
+    });
+    await engine.recover();
+
+    // In-memory: the stale lock was released; A stays running (never
+    // force-terminated by the failed reconcile).
+    expect(engine.status().advancingLock).toBe(false);
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // On-disk: the catch path's critical section persisted the mutation —
+    // the released lock and the rebuilt (empty) frontier are durable.
+    const loaded = new EnginePersistence(dir).load(graphId);
+    expect(loaded!.advancingLock).toBe(false);
+    expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(loaded!.frontier).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 // ── Integration: engine.cancel() ────────────────────────────────────────────
@@ -1050,6 +1221,70 @@ describe("H3 — checkpointHistory hydration & adoption", () => {
     expect(target.checkpointHistory).toEqual({
       A: [{ nodeId: "A", status: NodeStatus.Completed, at: 12 }],
       B: [{ nodeId: "B", status: NodeStatus.Ready, at: 11 }],
+    });
+  });
+
+  it("records a checkpoint for an adopted status change — no history gap (L15)", () => {
+    // Prior run: A completed. Fresh rebuild: A provisioned ready. Adoption
+    // writes A's status directly (Ready → Completed), bypassing
+    // transitionNode's auto-checkpoint — the direct write must be compensated
+    // so checkpointHistory records the adopt transition (03-F6).
+    const prior = buildState(singleNodeGraph(), "adopt-cp");
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+    const target = buildState(singleNodeGraph(), "adopt-cp");
+    // Fresh provision recorded a Ready checkpoint for the root.
+    expect(target.checkpointHistory!["A"]).toHaveLength(1);
+    expect(target.checkpointHistory!["A"][0].status).toBe(NodeStatus.Ready);
+
+    adoptPriorNodeStates(target, prior);
+
+    const history = target.checkpointHistory!["A"];
+    expect(history).toHaveLength(2); // [Ready (provision), Completed (adopt)]
+    expect(history[history.length - 1]).toMatchObject({
+      nodeId: "A",
+      status: NodeStatus.Completed,
+    });
+    expect(target.checkpoints!["A"]).toMatchObject({ status: NodeStatus.Completed });
+  });
+
+  it("does NOT fabricate a checkpoint when adoption changes no status (L15)", () => {
+    // A provisioned ready root adopting a prior ready root is a no-change
+    // adoption — no transition occurred, so no checkpoint is appended.
+    const prior = buildState(singleNodeGraph(), "adopt-cp-none");
+    const target = buildState(singleNodeGraph(), "adopt-cp-none");
+    const before = target.checkpointHistory!["A"].length;
+    adoptPriorNodeStates(target, prior);
+    expect(target.checkpointHistory!["A"]).toHaveLength(before);
+  });
+
+  it("records a checkpoint for the H2 in-degree demotion Ready → Pending (L15)", () => {
+    // Construction-tool ordering: the prior run provisioned WITHOUT the edge
+    // (B provisioned ready), then the edge was added for this rebuild (B is
+    // pending in the target). Adoption promotes B back to Ready, and the H2
+    // post-adoption reconciliation demotes it to Pending — the demote is a
+    // direct status write that must be checkpointed (03-F6:742).
+    const noEdge: GraphDeclaration = {
+      version: 2,
+      name: "adopt-demote",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [],
+    };
+    const withEdge: GraphDeclaration = {
+      ...noEdge,
+      edges: [{ from: "A", to: "B", type: "always" }],
+    };
+    const prior = buildState(noEdge, "adopt-demote"); // both provisioned ready
+    const target = buildState(withEdge, "adopt-demote"); // B pending (in-edge)
+    adoptPriorNodeStates(target, prior);
+
+    expect(target.nodes.get("B")!.status).toBe(NodeStatus.Pending);
+    const bHistory = target.checkpointHistory!["B"];
+    expect(bHistory[bHistory.length - 1]).toMatchObject({
+      nodeId: "B",
+      status: NodeStatus.Pending,
     });
   });
 });

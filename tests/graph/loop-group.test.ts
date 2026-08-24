@@ -25,12 +25,32 @@ import {
 
 class FakeDispatch implements NodeDispatchPort {
   calls: { nodeId: string; agent: string; prompt: string }[] = [];
+  private held = new Set<string>();
+  private releasers = new Map<string, Array<() => void>>();
+
+  /** Hold a node's next launch so the advancing critical section stays open. */
+  hold(nodeId: string): void {
+    this.held.add(nodeId);
+  }
+  release(nodeId: string): void {
+    this.held.delete(nodeId);
+    const rs = this.releasers.get(nodeId) ?? [];
+    this.releasers.delete(nodeId);
+    for (const r of rs) r();
+  }
 
   executeNode(
     node: NodeRuntimeState,
     _parentContext: DispatchParentContext,
   ): Promise<DispatchTask> {
     this.calls.push({ nodeId: node.nodeId, agent: node.agent, prompt: node.prompt });
+    if (this.held.has(node.nodeId)) {
+      return new Promise<DispatchTask>((resolve) => {
+        const rs = this.releasers.get(node.nodeId) ?? [];
+        rs.push(() => resolve(makeTask(node.nodeId)));
+        this.releasers.set(node.nodeId, rs);
+      });
+    }
     return Promise.resolve(makeTask(node.nodeId));
   }
 }
@@ -771,6 +791,63 @@ describe("engine-advance — answer downgrade skips forward activation (D2)", ()
     // Forward activation must be skipped: sink is NOT activated (regression —
     // before the fix the review→sink on_signal(answer) edge wrongly fired).
     expect(state.nodes.get("sink")!.status).toBe(NodeStatus.Pending);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H1 regression — a duplicate / replayed `revise_needed` on an already-
+// terminal loop member must NOT re-run the loop step. The double-delivery
+// seams (worker signal() + subscribeTaskTermination callback, or the
+// race-guard synthetic replay) can deliver the same terminating signal twice;
+// the first advances the node, the second is queued while the critical section
+// is held and replayed by the drain. The replay's lifecycle transition is a
+// no-op (the reviewer is already Completed), and the propagation side effects
+// — traversal counting, convergence tracking, upstream re-entry — must be
+// skipped for it (engine-advance _advance's `migrated` gate).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("engine-advance — duplicate revise counts only one traversal (H1)", () => {
+  it("a replayed revise_needed drained after the first does not double-count the traversal", async () => {
+    const { state, engine, fake } = buildEngine(reviewLoopGraph(3));
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("entry", "answer", "seed");
+    await engine.onNodeSignalEmitted("impl", "answer", "v1");
+
+    // Hold impl's re-entry dispatch so review's first revise critical section
+    // stays open (the re-entered impl is dispatched inside it).
+    fake.hold("impl");
+    const first = engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 1a"],
+    });
+
+    // While review's section is held, the SAME node double-delivers the same
+    // signal type (the H1 double-delivery seam). The lock is held → the second
+    // is queued to pendingCompletions and re-advanced by the section's drain.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 1b"],
+    });
+    expect(state.pendingCompletions).toEqual(["review"]);
+
+    fake.release("impl");
+    await first;
+
+    // The first revise consumed exactly one traversal; the replayed duplicate
+    // must NOT consume another (regression — before the H1 guard the replay
+    // re-ran executeLoopStep → incrementLoopTraversal a second time, draining
+    // max_traversals at double speed).
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    // Exactly one round was recorded for the single real revision.
+    expect(state.loopGroups.get("lg")!.rounds?.length).toBe(1);
+    // impl was re-entered exactly once (initial dispatch + one revise re-entry) —
+    // the duplicate replay must not re-dispatch it.
+    expect(state.nodes.get("impl")!.sessionsSpawned).toBe(2);
+    // review stays Completed from the first revise — the replay was a no-op
+    // transition and skipped the stuck / exhaustion early-exits too.
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Completed);
+    // The graph is still executing (impl running from the single re-entry).
+    expect(state.phase).toBe(EnginePhase.Executing);
+    expect(state.pendingCompletions).toEqual([]);
   });
 });
 

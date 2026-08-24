@@ -173,6 +173,30 @@ function makeRig(name: string) {
   return { graph_id: g.graph_id, ts, fake, client };
 }
 
+// ── Structured status readers (format: "json") ───────────────────────────────
+// Structural assertions over the machine-readable graph_status JSON — NOT the
+// human-readable summary render (string-contains assertions are brittle to
+// renderer formatting changes; see review L24).
+
+/** Parse a node-scoped `graph_status({ format: "json" })` view. */
+function nodeJson(ts: GraphToolSet, graphId: string, nodeId: string) {
+  return JSON.parse(
+    ts.graph_status({ graph_id: graphId, node_id: nodeId, format: "json" }),
+  ) as {
+    node_id: string;
+    status: string;
+    retry_count: number;
+  };
+}
+
+/** Parse a graph-scoped `graph_status({ format: "json" })` view. */
+function graphJson(ts: GraphToolSet, graphId: string) {
+  return JSON.parse(ts.graph_status({ graph_id: graphId, format: "json" })) as {
+    graph_id: string;
+    phase: string;
+  };
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("graph_run retry completion race (bug 3, part b)", () => {
@@ -202,9 +226,9 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
 
     // The retried node IS genuinely running with retry_count=1...
     expect(r.retry?.node_id).toBe("A");
-    const status = ts.graph_status({ graph_id, node_id: "A" });
-    expect(status).toContain("status: running");
-    expect(status).toContain("retry_count: 1");
+    const aStatus = nodeJson(ts, graph_id, "A");
+    expect(aStatus.status).toBe(NodeStatus.Running);
+    expect(aStatus.retry_count).toBe(1);
 
     // ...and NO premature [GRAPH COMPLETE] fired while it is running.
     // Pre-fix: adoptPrior(replayAnswers:true) re-advanced the adopted
@@ -216,7 +240,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("A");
     await settle();
     expect(countTerminalCompletes(client)).toBe(2);
-    expect(ts.graph_status({ graph_id, node_id: "A" })).toContain("status: completed");
+    expect(nodeJson(ts, graph_id, "A").status).toBe(NodeStatus.Completed);
   });
 
   it("single-node completed graph + added pending downstream: answer replay must NOT fire a premature COMPLETE before retryNode re-dispatches (deterministic race)", async () => {
@@ -228,7 +252,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("A");
     await settle();
     expect(countTerminalCompletes(client)).toBe(1);
-    expect(ts.graph_status({ graph_id, node_id: "A" })).toContain("status: completed");
+    expect(nodeJson(ts, graph_id, "A").status).toBe(NodeStatus.Completed);
 
     // Extend: add a downstream B (A→B always) — the declaration now has a
     // Pending downstream of the completed A. This is the field shape where
@@ -256,11 +280,11 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
 
     // The retried node is genuinely running with retry_count=1...
     expect(r.retry?.node_id).toBe("A");
-    const status = ts.graph_status({ graph_id, node_id: "A" });
-    expect(status).toContain("status: running");
-    expect(status).toContain("retry_count: 1");
+    const aStatus = nodeJson(ts, graph_id, "A");
+    expect(aStatus.status).toBe(NodeStatus.Running);
+    expect(aStatus.retry_count).toBe(1);
     // B was reset to pending by retryNode (re-executes after A re-completes).
-    expect(ts.graph_status({ graph_id, node_id: "B" })).toContain("status: pending");
+    expect(nodeJson(ts, graph_id, "B").status).toBe(NodeStatus.Pending);
 
     // ...and NO premature COMPLETE fired during the retry call. Pre-fix this
     // is 2 (the original + the adoptPrior-replay fire) — the stale
@@ -272,7 +296,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("A");
     await settle();
     expect(countTerminalCompletes(client)).toBe(2);
-    expect(ts.graph_status({ graph_id })).toContain("phase: complete");
+    expect(graphJson(ts, graph_id).phase).toBe(EnginePhase.Complete);
   });
 
   it("multi-node completed graph (A→B→C): NO [GRAPH COMPLETE] fires while the retried node is running (retry_count=1)", async () => {
@@ -292,7 +316,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("C");
     await settle();
     expect(countTerminalCompletes(client)).toBe(1);
-    expect(ts.graph_status({ graph_id })).toContain("phase: complete");
+    expect(graphJson(ts, graph_id).phase).toBe(EnginePhase.Complete);
 
     // Phase 2: hold the retried node running, then retry the middle node.
     fake.hold("B");
@@ -306,11 +330,11 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
 
     // The retried node IS genuinely running with retry_count=1...
     expect(r.retry?.node_id).toBe("B");
-    const status = ts.graph_status({ graph_id, node_id: "B" });
-    expect(status).toContain("status: running");
-    expect(status).toContain("retry_count: 1");
+    const bStatus = nodeJson(ts, graph_id, "B");
+    expect(bStatus.status).toBe(NodeStatus.Running);
+    expect(bStatus.retry_count).toBe(1);
     // Downstream C was reset to pending (fresh re-execution of the chain tail).
-    expect(ts.graph_status({ graph_id, node_id: "C" })).toContain("status: pending");
+    expect(nodeJson(ts, graph_id, "C").status).toBe(NodeStatus.Pending);
 
     // ...and NO premature [GRAPH COMPLETE] fired while it is running.
     expect(countTerminalCompletes(client)).toBe(1);
@@ -322,7 +346,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("C");
     await settle();
     expect(countTerminalCompletes(client)).toBe(2);
-    expect(ts.graph_status({ graph_id })).toContain("phase: complete");
+    expect(graphJson(ts, graph_id).phase).toBe(EnginePhase.Complete);
   });
 
   it("multi-node completed graph + added pending downstream: retrying the ROOT fires no premature COMPLETE either (deterministic race)", async () => {
@@ -338,7 +362,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("B");
     await settle();
     expect(countTerminalCompletes(client)).toBe(1);
-    expect(ts.graph_status({ graph_id })).toContain("phase: complete");
+    expect(graphJson(ts, graph_id).phase).toBe(EnginePhase.Complete);
 
     // Extend: add a downstream C (B→C always) — a Pending node downstream of
     // the completed chain. Retrying the root A with replayAnswers:true would
@@ -359,12 +383,12 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     await settle();
 
     expect(r.retry?.node_id).toBe("A");
-    const status = ts.graph_status({ graph_id, node_id: "A" });
-    expect(status).toContain("status: running");
-    expect(status).toContain("retry_count: 1");
+    const aStatus = nodeJson(ts, graph_id, "A");
+    expect(aStatus.status).toBe(NodeStatus.Running);
+    expect(aStatus.retry_count).toBe(1);
     // B and C were reset to pending by retryNode (re-execute after A re-completes).
-    expect(ts.graph_status({ graph_id, node_id: "B" })).toContain("status: pending");
-    expect(ts.graph_status({ graph_id, node_id: "C" })).toContain("status: pending");
+    expect(nodeJson(ts, graph_id, "B").status).toBe(NodeStatus.Pending);
+    expect(nodeJson(ts, graph_id, "C").status).toBe(NodeStatus.Pending);
 
     // No premature COMPLETE while the retried root is running.
     expect(countTerminalCompletes(client)).toBe(1);
@@ -376,7 +400,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("B");
     await settle();
     expect(countTerminalCompletes(client)).toBe(2);
-    expect(ts.graph_status({ graph_id })).toContain("phase: complete");
+    expect(graphJson(ts, graph_id).phase).toBe(EnginePhase.Complete);
   });
 
   it("non-retry path is preserved: extend-after-complete still activates a new downstream via answer replay", async () => {
@@ -391,7 +415,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("A");
     await settle();
     expect(countTerminalCompletes(client)).toBe(1);
-    expect(ts.graph_status({ graph_id, node_id: "A" })).toContain("status: completed");
+    expect(nodeJson(ts, graph_id, "A").status).toBe(NodeStatus.Completed);
 
     // Add downstream V with an always edge from the completed A, then a plain
     // (non-retry) graph_run — V must be dispatched via the replayed answer.
@@ -405,7 +429,7 @@ describe("graph_run retry completion race (bug 3, part b)", () => {
     fake.release("V");
     await settle();
     expect(countTerminalCompletes(client)).toBe(2);
-    expect(ts.graph_status({ graph_id })).toContain("phase: complete");
+    expect(graphJson(ts, graph_id).phase).toBe(EnginePhase.Complete);
   });
 
   it("redundant retry-less graph_run on a completed graph still fires no extra COMPLETE (sanity)", async () => {

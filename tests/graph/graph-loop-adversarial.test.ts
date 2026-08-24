@@ -20,25 +20,15 @@
  * (entry → impl → review with a `revise_needed` back-edge and an `answer`
  * forward edge to sink; loop group over [impl, review]; impl joins on `any`).
  *
- * ⚠ Tool-layer reality pinned by this file (VERIFIED against unmodified
- * production code — findings, not bugs introduced here):
+ * ⚠ Tool-layer reality pinned by this file: the tool layer now matches the
+ * engine layer's SINGLE-ADVANCE semantics. The production double-advance
+ * defect (H1) is fixed — engine-advance.ts `_advance` gates the loop-member
+ * escalate/revise propagation and convergence steps on `migrated` status, so
+ * a replayed/duplicate signal (the double-dispatch seam) is no longer
+ * processed a second time: it neither re-counts a traversal nor trips the
+ * stuck detector. Cases (a) and (b) below pin the FIXED behavior.
  *
- *  1. DOUBLE-ADVANCE (createEngine always calls `advance.register()`, and
- *     `onNodeSignalEmitted` both fires the registered bridge listener AND
- *     advances itself; the second advance is queued while the listener's
- *     critical section holds the lock and is re-run by the deferred drain —
- *     engine-advance.ts:629-631 + 730). Every dispatch-terminated signal is
- *     therefore processed TWICE with the same payload. For a loop
- *     `revise_needed` this is NOT idempotent: the second identical processing
- *     pushes `consecutiveStale` to CONSECUTIVE_STALE_THRESHOLD (2) and retires
- *     the reviewer `done` with reason "stuck" — so a single dispatched revise
- *     round ALWAYS ends in "stuck", and BOTH the multi-round revise loop and
- *     the `max_traversals exhausted` escalation are UNREACHABLE through the
- *     tool layer. The engine-level suite (loop-group.test.ts) drives
- *     `onNodeSignalEmitted` directly WITHOUT `register()`, so it sees the
- *     single-advance semantics and never exercises this path.
- *
- *  2. DUPLICATE LOOP MEMBERS ARE REJECTED: validator rule 5c
+ *  1. DUPLICATE LOOP MEMBERS ARE REJECTED: validator rule 5c
  *     (validator-v2.ts:196-212) treats a duplicated member id as multi-group
  *     membership, so `graph_add_loop` with nodes ["a","a","b"] throws
  *     "appears in multiple loop groups" — dedupe is NOT performed, but the
@@ -48,22 +38,25 @@
  * Cases (each pins the CURRENT production behavior and asserts it via
  * graph_status — TEST-ONLY, no production code changed):
  *
- *  (a) max_traversals: 1 — the first (and only) dispatched revise re-enters
- *      impl (traversalCount → 1), but the double-advance retires the reviewer
- *      `done` with reason "stuck" instead of "max_traversals exhausted"; the
- *      graph completes. Asserts the traversal counter and the reviewer's
+ *  (a) max_traversals: 1 — the first dispatched revise consumes the ONLY
+ *      traversal (impl re-enters, traversalCount → 1); the reviewer's second
+ *      round IS dispatched and the second revise is consumed, hitting the cap,
+ *      so the reviewer retires `done` with reason "max_traversals exhausted".
+ *      The graph completes. Asserts the traversal counter and the reviewer's
  *      escalate-equivalent status via graph_status, plus the dispatch ledger.
  *
  *  (b) max_traversals: 1_000_000_000 (absurdly large — the tool only enforces
  *      >= 1, so the declaration is ACCEPTED) — the loop STILL terminates:
- *      the reviewer retires with reason "stuck" (consecutiveStale hits
- *      CONSECUTIVE_STALE_THRESHOLD = 2, engine-state.ts:636-657) and the loop
- *      does NOT spin toward the cap (dispatch count stays at 4). Phase
- *      Complete.
+ *      review is dispatched twice and the two GENUINELY identical revise
+ *      records trip the designed stuck early-exit (consecutiveStale hits
+ *      CONSECUTIVE_STALE_THRESHOLD = 2, engine-state.ts:636-657) with no
+ *      further traversal consumed, and the loop does NOT spin toward the cap
+ *      (dispatch count stays at 5). Phase Complete.
  *
  *  (c) same huge cap but the FIRST review converges with `answer` — the loop
- *      exits on the happy path (no traversal consumed, the double-advance is
- *      idempotent for answers), sink activates exactly once, phase Complete.
+ *      exits on the happy path (no traversal consumed, each signal processed
+ *      exactly once under single-advance semantics), sink activates exactly
+ *      once, phase Complete.
  *
  *  (d) graph_add_loop nodes list with a duplicate member (["impl","impl",
  *      "review"]) — PINNED: the tool REJECTS the declaration with the rule-5c
@@ -213,15 +206,15 @@ describe("graph loop-group bound pathologies (tool layer)", () => {
     clearParentQueues();
   });
 
-  it("(a) max_traversals: 1 — first revise re-enters impl (traversal 1); reviewer retires done (double-advance → 'stuck'); graph completes", async () => {
+  it("(a) max_traversals: 1 — the first revise consumes the only traversal (impl re-enters, traversal 1); the second revise is consumed and hits the cap → reviewer retires done 'max_traversals exhausted'; graph completes", async () => {
     const fake = new ScriptedSignalDispatch();
     const ts = new GraphToolSet({ dispatch: fake });
     const g = ts.graph_create({ name: "loop-cap-1" });
     reviewLoop(ts, g.graph_id, 1);
 
-    // Script two revises with DIFFERENT payloads: the intended cap-exhaustion
-    // path needs the second dispatch. Pinned reality: only the first dispatched
-    // revise is ever consumed (see file header — tool-layer double-advance).
+    // Script two revises with DIFFERENT payloads: under single-advance
+    // semantics the second dispatch IS consumed — it re-enters impl (traversal
+    // 1) and exhausts the cap on the reviewer's second round.
     fake.script("impl", [
       { type: "answer", payload: "v1" },
       { type: "answer", payload: "v2" },
@@ -235,11 +228,11 @@ describe("graph loop-group bound pathologies (tool layer)", () => {
     await settle();
 
     // Dispatch ledger: entry once; impl initial + one revise re-entry; review
-    // dispatched ONCE (the second scripted revise is never consumed — the
-    // reviewer is already done before a second round could start).
+    // dispatched TWICE — the second scripted revise is consumed (the cap is
+    // reached, so no third round can start).
     expect(fake.dispatches("entry")).toBe(1);
     expect(fake.dispatches("impl")).toBe(2);
-    expect(fake.dispatches("review")).toBe(1);
+    expect(fake.dispatches("review")).toBe(2);
     expect(fake.dispatches("sink")).toBe(0);
 
     const json = graphJson(ts, g.graph_id);
@@ -252,18 +245,20 @@ describe("graph loop-group bound pathologies (tool layer)", () => {
     expect(byId.get("impl")!.status).toBe(NodeStatus.Completed);
     expect(json.loops![0].traversals).toBe("1/1");
     // Escalate-equivalent status via graph_status: the reviewer retired
-    // `completed → done`. FINDING: the double-advance (identical second
-    // processing of the same revise payload) trips the stuck detector first, so
-    // the reason is "stuck", NOT the intended "max_traversals exhausted" — the
-    // cap-exhaustion escalation is unreachable through the tool layer.
+    // `completed → done`. The two scripted revises carry DIFFERENT payloads,
+    // so no identical-record stuck detection fires — the reviewer hits the
+    // cap and retires with the designed reason "max_traversals exhausted"
+    // (reachable again under single-advance semantics).
     expect(byId.get("review")!.status).toBe(NodeStatus.Done);
-    expect(byId.get("review")!.error).toBe("stuck");
+    expect(byId.get("review")!.error).toBe("max_traversals exhausted");
+    // Different payloads → only one stale record was ever registered.
+    expect(json.loops![0].consecutive_stale).toBe(1);
     // The loop never converged — sink was never activated (the runtime
     // deadlock guard retired the still-pending sink after the reviewer stopped).
     expect(byId.get("sink")!.status).toBe(NodeStatus.Escalate);
   });
 
-  it("(b) max_traversals: 1e9 — identical revise payloads retire the reviewer 'stuck'; the loop does NOT spin to the cap", async () => {
+  it("(b) max_traversals: 1e9 — two genuinely identical revise rounds trip the designed stuck early-exit (consecutiveStale=2); the loop does NOT spin to the cap", async () => {
     const fake = new ScriptedSignalDispatch();
     const ts = new GraphToolSet({ dispatch: fake });
     const g = ts.graph_create({ name: "loop-huge-cap-stuck" });
@@ -286,11 +281,16 @@ describe("graph loop-group bound pathologies (tool layer)", () => {
     await ts.graph_run({ graph_id: g.graph_id });
     await settle();
 
-    // Stuck detection (CONSECUTIVE_STALE_THRESHOLD = 2) retired the reviewer
-    // after ONE dispatched revise round (the double-advance supplies the second
-    // identical record). Total ledger: entry(1) + impl(2) + review(1) = 4 — the
-    // loop did NOT spin anywhere near the 1e9 cap.
-    expect(fake.dispatchCount).toBe(4);
+    // Under single-advance semantics review is dispatched TWICE; the two REAL
+    // identical revise records push consecutiveStale to
+    // CONSECUTIVE_STALE_THRESHOLD (2) and retire the reviewer `done` with the
+    // DESIGNED "stuck" reason. This is a genuine stuck early-exit — NOT the
+    // old double-advance artifact (same error string, different cause: two
+    // real identical traversals, not one signal processed twice).
+    // Total ledger: entry(1) + impl(2) + review(2) = 5 — the loop did NOT spin
+    // anywhere near the 1e9 cap.
+    expect(fake.dispatchCount).toBe(5);
+    expect(fake.dispatches("review")).toBe(2);
 
     const json = graphJson(ts, g.graph_id);
     expect(json.phase).toBe(EnginePhase.Complete);
@@ -316,9 +316,9 @@ describe("graph loop-group bound pathologies (tool layer)", () => {
     await ts.graph_run({ graph_id: g.graph_id });
     await settle();
 
-    // Happy path: one dispatch per node, sink activated exactly once (the
-    // double-advance is idempotent for answers — a converged answer never
-    // re-activates an already-running sink).
+    // Happy path: one dispatch per node, sink activated exactly once (under
+    // single-advance semantics a converged answer never re-activates an
+    // already-running sink).
     expect(fake.dispatches("entry")).toBe(1);
     expect(fake.dispatches("impl")).toBe(1);
     expect(fake.dispatches("review")).toBe(1);

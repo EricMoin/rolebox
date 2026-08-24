@@ -324,6 +324,44 @@ describe("propagateEscalate (unit)", () => {
     expect(report.escalated).toEqual([]);
     expect(c.status).not.toBe(NodeStatus.Escalate);
   });
+
+  it("escalate-path EdgePayload carries the source node's tokensConsumed budget, not zeros (M1)", () => {
+    const state = buildState(convergeGraph("all"));
+    const node = state.nodes.get("B")!;
+    // A node that consumed real budget before escalating.
+    node.tokensConsumed = { inputTokens: 120, outputTokens: 40, cost: 0.25 };
+    node.sessionsSpawned = 3;
+    markEscalated(state, node, "branch B failed");
+
+    propagateEscalate(state, node, { reason: "branch B failed" });
+
+    // Mirrors _buildEdgePayload / approval-handler: tokens = input+output,
+    // cost and sessions read from the source node — no hardcoded zeros.
+    const payload = state.nodes.get("C")!.upstreamResults.get("B")!;
+    expect(payload.budgetConsumed).toEqual({
+      tokens: 160,
+      cost: 0.25,
+      sessions: 3,
+    });
+  });
+
+  it("reports a sink-side join failure via escalated/absorbed (rootReached removed, L8)", () => {
+    const state = buildState(convergeGraph("all"));
+    const node = state.nodes.get("B")!;
+    markEscalated(state, node, "branch B failed");
+
+    const report = propagateEscalate(state, node, { reason: "branch B failed" });
+
+    // C is a fan-in convergence node AND the graph sink (no outbound edges).
+    // Its all-join fails → C escalates and lands in report.escalated with
+    // nothing absorbed — the "graph will terminate with error" observable the
+    // removed `rootReached` field used to promise (forward propagation reaches
+    // sinks, never graph roots). The report carries no rootReached field.
+    expect(report.escalated).toEqual(["C"]);
+    expect(report.absorbed).toEqual([]);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
+    expect(report).not.toHaveProperty("rootReached");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

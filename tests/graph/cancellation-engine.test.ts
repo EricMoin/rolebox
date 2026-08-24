@@ -9,6 +9,7 @@ import {
   createEngine,
   type EngineRuntime,
 } from "../../src/graph/engine/index.ts";
+import { ScriptedDispatch } from "./helpers/scripted-dispatch.ts";
 
 // ── Fake dispatch seam (records execute + cancel) ───────────────────────────
 
@@ -145,5 +146,43 @@ describe("EngineRuntime.cancelNodes", () => {
     // asserts the public method surface is wired and returns a report.
     const report = engine.cancelNodes(["A"], { cascade: true });
     expect(report.cancelled.length).toBeGreaterThan(0);
+  });
+
+  it("refunds the graph-level session slot of a cancelled running node synchronously (M10)", async () => {
+    const fake = new FakeDispatch();
+    const engine = createEngine(linearABC(), { dispatch: fake, graphId: "g-m10" });
+
+    engine.provision();
+    await engine.run(); // A → running (task-A dispatched); B/C stay pending
+
+    expect(engine.status().budget.sessionsSpawned).toBe(1);
+
+    const report = engine.cancelNodes(["A"], { cascade: true });
+
+    // A's net-live slot is refunded on the direct cancel path; B/C never
+    // dispatched so they never consumed a slot (no refund for them).
+    expect(new Set(report.cancelled)).toEqual(new Set(["A", "B", "C"]));
+    expect(engine.status().budget.sessionsSpawned).toBe(0);
+    // The per-node cumulative counter (EdgePayload budgetConsumed.sessions
+    // source) is untouched by the graph-level net-live refund.
+    expect(engine.status().nodes.get("A")!.sessionsSpawned).toBe(1);
+  });
+
+  it("does NOT double-refund when the dispatch layer later reports the cancellation", async () => {
+    const fake = new ScriptedDispatch(["A"]); // A held running with a live termination listener
+    const engine = createEngine(linearABC(), { dispatch: fake, graphId: "g-m10b" });
+
+    engine.provision();
+    await engine.run();
+    expect(engine.status().budget.sessionsSpawned).toBe(1);
+
+    engine.cancelNodes(["A"]); // sync refund −1
+    expect(engine.status().budget.sessionsSpawned).toBe(0);
+
+    // The async task-terminated callback arrives AFTER the node advanced to
+    // `done` — the engine-recovery status guard bails, so the refund fires
+    // exactly once (here), never again (callback path).
+    fake.fireTermination(fake.taskIds[0], "cancelled");
+    expect(engine.status().budget.sessionsSpawned).toBe(0);
   });
 });

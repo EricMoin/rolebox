@@ -260,6 +260,9 @@ describe("M10 — terminalNotified persistence", () => {
     // Present → restored as a fresh object.
     const state = deserializeEngineState(file);
     expect(state.terminalNotified).toEqual({ complete: true, blocked: true });
+    // D3: the legacy top-level `edges` extra key (present in this fixture) is
+    // tolerated by deserialization but never hydrated onto the live state.
+    expect("edges" in state).toBe(false);
 
     // Absent → undefined (no default object fabricated).
     const { terminalNotified: _tn, ...without } = file;

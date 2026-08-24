@@ -8,6 +8,7 @@ import type { NodeRuntimeState, EngineState } from "../../src/types.engine-v2.ts
 import type { DispatchTask, DispatchTaskStatus, MaterializedResultRef } from "../../src/dispatch/types.ts";
 import type { DispatchParentContext, TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
+import { markEscalated } from "../../src/graph/engine/node-lifecycle.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
   AdvanceEngine,
@@ -16,7 +17,7 @@ import {
   type GraphBudgetPort,
   type GraphTerminalEvent,
 } from "../../src/graph/engine/engine-advance.ts";
-import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
+import { GraphEventRecorder } from "../../src/graph/engine/graph-events.ts";
 
 // ── Controllable fake dispatch port ────────────────────────────────────────
 
@@ -400,7 +401,7 @@ describe("result capture from dispatch task", () => {
     expect(node.result!.sidecarPath).toBe(sidecar);
   });
 
-  it("carries the node's materialized sidecar path through EdgePayload.artifacts into merged_artifacts", async () => {
+  it("carries the node's materialized sidecar path through EdgePayload.artifacts to the downstream node's upstreamResults", async () => {
     const { state, engine, fake } = buildEngineWithCapture(
       linearGraph(),
       sampleResult,
@@ -418,12 +419,6 @@ describe("result capture from dispatch task", () => {
     // The downstream EdgePayload routed to B carries the sidecar path.
     const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
     expect(payload.artifacts).toEqual([sidecar]);
-
-    // mergeFanInContext accumulates payload.artifacts into merged_artifacts.
-    const fanIn = mergeFanInContext(
-      state.nodes.get("B")!.upstreamResults,
-    );
-    expect(fanIn.merged_artifacts).toEqual([sidecar]);
   });
 
   it("leaves EdgePayload.artifacts empty when the node has no materialized result", async () => {
@@ -437,10 +432,6 @@ describe("result capture from dispatch task", () => {
 
     const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
     expect(payload.artifacts).toEqual([]);
-    const fanIn = mergeFanInContext(
-      state.nodes.get("B")!.upstreamResults,
-    );
-    expect(fanIn.merged_artifacts).toEqual([]);
   });
 
   it("fires onNodeCompletion seam even when dispatch task has no result", async () => {
@@ -462,6 +453,155 @@ describe("result capture from dispatch task", () => {
   });
 });
 
+// ── M3: EdgePayload.result real-output passthrough ──────────────────────────
+
+/**
+ * Regression (M3 / 01-F3): the EdgePayload routed downstream must carry the
+ * worker's REAL output. When the worker emits no payload (empty string /
+ * missing) or the engine inferred an answer on its behalf
+ * (`{ __inferred: true }`), `_buildEdgePayload` falls back to the node's
+ * materialized result sidecar text — replacing the previous `'""'` /
+ * `'{"__inferred":true}'` artifacts — so a fan-in convergence node sees the
+ * source node's actual output.
+ */
+describe("EdgePayload.result real-output passthrough (M3)", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "graph-edge-result-"));
+  const sidecar = join(tmpDir, "out.txt");
+  const SIDECAR_TEXT = "real worker output text from the sidecar";
+  const sidecarRef: MaterializedResultRef = {
+    sidecarPath: sidecar,
+    totalChars: SIDECAR_TEXT.length,
+    hadFence: false,
+    materializedAt: Date.now(),
+  };
+
+  beforeAll(() => {
+    writeFileSync(sidecar, SIDECAR_TEXT, "utf8");
+  });
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("uses the worker's real string payload verbatim (sidecar ignored)", async () => {
+    const { state, engine } = buildEngineWithCapture(linearGraph(), sidecarRef);
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "payload wins");
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.result).toBe("payload wins");
+  });
+
+  it("uses the worker's real object payload JSON-serialized (sidecar ignored)", async () => {
+    const { state, engine } = buildEngineWithCapture(linearGraph(), sidecarRef);
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", { summary: "done" });
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.result).toBe(JSON.stringify({ summary: "done" }));
+  });
+
+  it("falls back to the sidecar real text when the answer payload is an empty string", async () => {
+    const { state, engine } = buildEngineWithCapture(linearGraph(), sidecarRef);
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "");
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.result).toBe(SIDECAR_TEXT);
+  });
+
+  it("falls back to the sidecar real text when the answer payload is missing", async () => {
+    const { state, engine } = buildEngineWithCapture(linearGraph(), sidecarRef);
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", undefined);
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.result).toBe(SIDECAR_TEXT);
+  });
+
+  it("falls back to the sidecar real text for a synthetic inferred answer", async () => {
+    const { state, engine } = buildEngineWithCapture(linearGraph(), sidecarRef);
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", { __inferred: true });
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.result).toBe(SIDECAR_TEXT);
+  });
+
+  it("yields empty result (not a JSON artifact) for an empty payload with no sidecar", async () => {
+    const { state, engine } = buildEngineWithCapture(linearGraph(), null);
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "");
+
+    const payload = state.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload.result).toBe("");
+  });
+});
+
+// ── L1: severity ordering drives terminal-signal selection ──────────────────
+
+/**
+ * Regression (L1 / 01-F4): `_latestTerminating` picks the highest-severity
+ * recorded terminating signal (`escalate > revise_needed > answer`), sourced
+ * from the shared `TERMINATING_SIGNALS_BY_SEVERITY` constant. Pinned through
+ * the runtime-deadlock guard's `_isPendingDeadEnded` path: a pending node fed
+ * by an `on_signal` `["answer"]` edge from a terminal source is dead-ended iff
+ * the source's LATEST terminating signal is NOT in the filter — so with both
+ * an `answer` and an `escalate` recorded, the escalate must win.
+ */
+describe("severity ordering drives terminal-signal selection (L1)", () => {
+  /** A → B via on_signal ["answer"]; B any-join (single upstream, pass-through). */
+  function answerFilteredGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "answer-filtered",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2", join: { strategy: "any" } },
+      ],
+      edges: [{ from: "A", to: "B", type: "on_signal", signal_filter: ["answer"] }],
+    };
+  }
+
+  it("escalate wins over a recorded answer: the answer-filtered edge is dead-ended and the deadlock guard completes", async () => {
+    const { state, engine } = buildEngine(answerFilteredGraph());
+    await engine.dispatchReady(); // A running, B pending.
+
+    // Double-delivery seam: the worker emitted an answer, then escalated. Both
+    // are recorded on A; the higher-severity escalate must win.
+    const a = state.nodes.get("A")!;
+    a.signalsObserved["answer"] = { summary: "done" };
+    a.signalsObserved["escalate"] = { reason: "boom" };
+    markEscalated(state, a, "boom");
+    engine.checkTermination();
+
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
+    // A escalated → B's only incoming edge (filter ["answer"]) can never fire →
+    // B is dead-ended → the guard escalates it and the graph completes. If
+    // _latestTerminating wrongly preferred the recorded `answer`, the edge
+    // would still be satisfiable → B would never be escalated → the graph
+    // would hang in `executing`.
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.errorReason).toContain("graph deadlock");
+    expect(state.phase).toBe(EnginePhase.Complete);
+  });
+
+  it("without escalate, a recorded answer keeps the answer-filtered edge alive (not dead-ended)", async () => {
+    const { state, engine } = buildEngine(answerFilteredGraph());
+    await engine.dispatchReady();
+
+    // Only the answer was recorded (no escalate) — the filter includes it, so
+    // B is NOT dead-ended and the guard refuses to force-complete the graph.
+    const a = state.nodes.get("A")!;
+    a.signalsObserved["answer"] = { summary: "done" };
+    markEscalated(state, a, "boom");
+    engine.checkTermination();
+
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Pending);
+    expect(state.phase).toBe(EnginePhase.Executing);
+  });
+});
+
 // ── Budget pre-check: ready node escalated before dispatch ─────────────────
 
 describe("budget pre-check escalates an undispatched ready node", () => {
@@ -472,6 +612,7 @@ describe("budget pre-check escalates an undispatched ready node", () => {
     const fake = new FakeDispatch();
     const budget: GraphBudgetPort = {
       checkGraphBudget: () => ({ exceeded: true, reason: "graph budget exhausted" }),
+      checkNodeBudget: () => ({ exceeded: false }),
     };
     const engine = new AdvanceEngine({ state, signalBridge: bridge, dispatch: fake, budget });
 
@@ -710,6 +851,156 @@ describe("subtask 2: fire-and-forget advancement containment", () => {
       // The graph still reached a terminal phase.
       expect(state.phase).toBe(EnginePhase.Complete);
       expect(state.advancingLock).toBe(false);
+    } finally {
+      detach();
+    }
+  });
+
+  /**
+   * M7 fan-in topology: A →(on_condition "boom")→ J, B →(always)→ J, where J
+   * is a MULTI-INPUT `all` join. The dead-end predicate can never quiesce J
+   * (`always` edges never count as dead-ended), so only real escalate
+   * propagation can fail the join — this is the containment-propagates gap.
+   */
+  function throwingResolverJoinGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "throwing-resolver-join",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+        { id: "J", agent: "a3", prompt: "p3", join: { strategy: "all" } },
+      ],
+      edges: [
+        { from: "A", to: "J", type: "on_condition", condition: "boom" },
+        { from: "B", to: "J", type: "always" },
+      ],
+    };
+  }
+
+  it("M7: a throwing conditionResolver fails the downstream fan-in join and the graph terminates instead of hanging", async () => {
+    const state = createEngineState(throwingResolverJoinGraph(), "g-m7-resolver");
+    provision(state);
+    const bridge = new SignalBridge();
+    const fake = new FakeDispatch();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: fake,
+      // A broken resolver aborts the forward pass; the section containment
+      // must escalate A AND fail the downstream fan-in join J (multi-input,
+      // always-edge reachable → the deadlock guard refuses to quiesce it), so
+      // the graph terminates instead of hanging `executing` (M7).
+      conditionResolver: () => {
+        throw new Error("resolver boom");
+      },
+    });
+
+    const { list, detach } = captureUnhandledRejections();
+    try {
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "answer", "ok");
+      // Drain the containment's queued deferred completion + microtasks.
+      await tick();
+      await tick();
+
+      // No unhandled rejection from the fire-and-forget advancement.
+      expect(list).toEqual([]);
+      // The affected node escalated AND its escalate reached the ledger —
+      // mirroring the dispatch-failure path's race_guard record, so
+      // `_latestTerminating` / observability see the failure.
+      const a = state.nodes.get("A")!;
+      expect(a.status).toBe(NodeStatus.Escalate);
+      expect(a.errorReason).toMatch(/critical-section error/);
+      expect(
+        (a.signalsObserved["escalate"] as { error: string }).error,
+      ).toMatch(/critical-section error/);
+      // The multi-input fan-in join FAILED: the escalate was recorded into its
+      // upstreamResults (join `all` aborts on the first non-answer signal) and
+      // the propagation escalated it — it did NOT stay `pending` forever.
+      const j = state.nodes.get("J")!;
+      expect(j.status).toBe(NodeStatus.Escalate);
+      expect(j.upstreamResults.get("A")?.fromSignal).toBe("escalate");
+      // The graph terminated — no stuck `executing`, no lingering deferred
+      // completion, lock released.
+      expect(state.phase).toBe(EnginePhase.Complete);
+      expect(state.pendingCompletions).toEqual([]);
+      expect(state.advancingLock).toBe(false);
+    } finally {
+      detach();
+    }
+  });
+
+  it("M7: a throwing graph-events recorder (critical-section throw) never hangs a fan-in graph — the graph terminates", async () => {
+    // A →(always)→ J, B →(always)→ J — J is a multi-input `all` join. The
+    // recorder is documented total, but a CONTRACT-VIOLATING recorder throws
+    // from `_notifyCompletion` (the completion seam writes it for every
+    // terminal transition). A throw there must be contained like the notifier
+    // — otherwise the answer completion aborts the critical section and the
+    // containment's own completion notification re-throws before the escalate
+    // propagation runs, leaving the downstream fan-in join hanging forever.
+    const state = createEngineState(
+      {
+        version: 2,
+        name: "throwing-recorder-join",
+        nodes: [
+          { id: "A", agent: "a1", prompt: "p1" },
+          { id: "B", agent: "a2", prompt: "p2" },
+          { id: "J", agent: "a3", prompt: "p3", join: { strategy: "all" } },
+        ],
+        edges: [
+          { from: "A", to: "J", type: "always" },
+          { from: "B", to: "J", type: "always" },
+        ],
+      },
+      "g-m7-recorder",
+    );
+    provision(state);
+    const bridge = new SignalBridge();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: new FakeDispatch(),
+      // A persistently-throwing write-side recorder — the engine must keep
+      // advancing (observability is never a control path).
+      graphEvents: {
+        nodeDispatched: () => {},
+        nodeCompleted: () => {
+          throw new Error("recorder boom");
+        },
+        phaseChange: () => {},
+        budgetUpdate: () => {},
+        notificationDegraded: () => {},
+      } as unknown as GraphEventRecorder,
+    });
+
+    const { list, detach } = captureUnhandledRejections();
+    try {
+      await engine.dispatchReady();
+      // A completes normally (the recorder throw is contained at the
+      // completion seam) → J accumulates A's answer.
+      await engine.onNodeSignalEmitted("A", "answer", "a-ok");
+      await tick();
+      expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+      // B completes normally → J's `all` join satisfies → J activates and is
+      // dispatched.
+      await engine.onNodeSignalEmitted("B", "answer", "b-ok");
+      await tick();
+      expect(state.nodes.get("J")!.status).toBe(NodeStatus.Running);
+      // J completes (the recorder throw is contained at its completion seam
+      // too) → the graph quiesces.
+      await engine.onNodeSignalEmitted("J", "answer", "j-ok");
+      await tick();
+      await tick();
+
+      // No unhandled rejection.
+      expect(list).toEqual([]);
+      // The fan-in join resolved and the graph reached a terminal phase — the
+      // throwing recorder never hung it.
+      expect(state.nodes.get("J")!.status).toBe(NodeStatus.Completed);
+      expect(state.phase).toBe(EnginePhase.Complete);
+      expect(state.advancingLock).toBe(false);
+      expect(state.pendingCompletions).toEqual([]);
     } finally {
       detach();
     }

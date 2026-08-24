@@ -11,6 +11,7 @@ import { createEngineState, provision } from "../../src/graph/engine/engine-stat
 import {
   EnginePersistence,
   ENGINE_PERSISTENCE_VERSION,
+  NON_CRITICAL_DEBOUNCE_MS,
   serializeEngineState,
   loadEngineStateFromJson,
   engineStatePath,
@@ -138,14 +139,6 @@ function buildRichState(): EngineState {
     retryCount: 0,
   });
 
-  state.edges.set("A->B", {
-    fromNode: "A",
-    fromSignal: "answer",
-    result: "res",
-    artifacts: ["/a.txt", "/b.txt"],
-    budgetConsumed: { tokens: 3, cost: 0.05, sessions: 1 },
-  });
-
   state.loopGroups.set("lg1", {
     id: "lg1",
     maxTraversals: 3,
@@ -233,7 +226,6 @@ describe("EnginePersistence", () => {
 
     // Maps are reconstructed as real Maps.
     expect(l.nodes instanceof Map).toBe(true);
-    expect(l.edges instanceof Map).toBe(true);
     expect(l.loopGroups instanceof Map).toBe(true);
     expect(l.signalLedger instanceof Map).toBe(true);
 
@@ -275,14 +267,9 @@ describe("EnginePersistence", () => {
     expect(b.joinStrategy).toEqual({ quorum: 1 });
     expect(b.joinSatisfied).toBe(true);
 
-    // Edges.
-    expect(l.edges.get("A->B")).toEqual({
-      fromNode: "A",
-      fromSignal: "answer",
-      result: "res",
-      artifacts: ["/a.txt", "/b.txt"],
-      budgetConsumed: { tokens: 3, cost: 0.05, sessions: 1 },
-    });
+    // Edges: the dead `state.edges` map is gone (D3) — the loaded state must
+    // not carry an `edges` member at all.
+    expect("edges" in l).toBe(false);
 
     // Loop groups — termination + fingerprint + staleness.
     expect(l.loopGroups.get("lg1")).toEqual({
@@ -404,31 +391,163 @@ describe("EnginePersistence", () => {
     expect(store.load("graph-4")).toBeNull();
   });
 
+  // ── hasRequiredShape completeness (review 05-F2 / M15) ────────────────────
+  //
+  // hasRequiredShape must ALSO gate `graphDeclaration` (an object) and the
+  // scalar lifecycle fields `startedAt`/`updatedAt` (numbers) / `advancingLock`
+  // (boolean). A v2 file missing `graphDeclaration` previously passed the gate
+  // and let hydrateEngineState's clearUndeclaredLoopGroupIds throw a TypeError
+  // OUTSIDE the load try/catch — breaking the "never throws / permanently
+  // recoverable" contract. Missing/wrong-typed versions of these fields are
+  // CORRUPT (null), never a migration point.
+
+  it("returns null (not throw) for a v2 file missing `graphDeclaration`", () => {
+    const path = engineStatePath(dir, "graph-decl");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, v2FileWithout("graphDeclaration"));
+    expect(() => store.load("graph-decl")).not.toThrow();
+    expect(store.load("graph-decl")).toBeNull();
+  });
+
+  it("returns null (not throw) for a v2 file missing `startedAt` / `updatedAt`", () => {
+    const path = engineStatePath(dir, "graph-ts");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, v2FileWithout("startedAt"));
+    expect(() => store.load("graph-ts")).not.toThrow();
+    expect(store.load("graph-ts")).toBeNull();
+
+    const path2 = engineStatePath(dir, "graph-ts2");
+    mkdirSync(join(path2, ".."), { recursive: true });
+    writeFileSync(path2, v2FileWithout("updatedAt"));
+    expect(() => store.load("graph-ts2")).not.toThrow();
+    expect(store.load("graph-ts2")).toBeNull();
+  });
+
+  it("returns null (not throw) for a v2 file missing `advancingLock`", () => {
+    const path = engineStatePath(dir, "graph-lock");
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, v2FileWithout("advancingLock"));
+    expect(() => store.load("graph-lock")).not.toThrow();
+    expect(store.load("graph-lock")).toBeNull();
+  });
+
+  it("treats wrong-typed lifecycle scalars as corrupt: advancingLock string / startedAt string / graphDeclaration array", () => {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+
+    const badLock = engineStatePath(dir, "graph-badlock");
+    mkdirSync(join(badLock, ".."), { recursive: true });
+    writeFileSync(badLock, JSON.stringify({ ...dto, advancingLock: "yes" }));
+    expect(() => store.load("graph-badlock")).not.toThrow();
+    expect(store.load("graph-badlock")).toBeNull();
+
+    const badTs = engineStatePath(dir, "graph-badts");
+    mkdirSync(join(badTs, ".."), { recursive: true });
+    writeFileSync(badTs, JSON.stringify({ ...dto, startedAt: "100" }));
+    expect(() => store.load("graph-badts")).not.toThrow();
+    expect(store.load("graph-badts")).toBeNull();
+
+    const badDecl = engineStatePath(dir, "graph-baddecl");
+    mkdirSync(join(badDecl, ".."), { recursive: true });
+    writeFileSync(
+      badDecl,
+      JSON.stringify({ ...dto, graphDeclaration: ["not", "an", "object"] }),
+    );
+    expect(() => store.load("graph-baddecl")).not.toThrow();
+    expect(store.load("graph-baddecl")).toBeNull();
+  });
+
+  // ── load(): only ENOENT is a clean start (review 05-F6 / L22) ─────────────
+  //
+  // A non-ENOENT read failure (EACCES / EISDIR / ...) means the state file
+  // EXISTS but is unreadable — treating it as "no state" would silently
+  // re-provision a graph whose completed nodes would be re-executed. `load()`
+  // must rethrow these so the caller surfaces them explicitly.
+
+  it("rethrows a non-ENOENT read failure (EISDIR) instead of returning null", () => {
+    // A DIRECTORY at the state-file path makes readFileSync fail with EISDIR —
+    // the file exists but cannot be read as a file.
+    const path = engineStatePath(dir, "graph-1");
+    mkdirSync(path, { recursive: true });
+    expect(() => store.load("graph-1")).toThrow();
+  });
+
+  it("still returns null for ENOENT (clean start) — a missing file is not an error", () => {
+    expect(store.load("never-written")).toBeNull();
+  });
+
   it("loadEngineStateFromJson is total: a deep structurally-invalid v2 file returns null", () => {
     // Passes the required-field gate (all top-level fields present) but a
-    // nested edge payload is malformed — `artifacts` is absent, which makes
-    // deserializeEngineState's cloneEdgePayload throw on `[...p.artifacts]`.
+    // nested edge payload inside a node's `upstreamResults` is malformed —
+    // `artifacts` is absent, which makes deserializeEngineState's
+    // cloneEdgePayload throw on `[...p.artifacts]`.
     // The try/catch containment must return null, never throw.
     const dto = serializeEngineState(buildRichState()) as unknown as Record<
       string,
       unknown
     >;
-    const edges = dto.edges as Record<string, Record<string, unknown>>;
-    const edge = edges["A->B"];
+    const nodes = dto.nodes as Record<string, Record<string, unknown>>;
+    const upstream = nodes["A"]!.upstreamResults as Record<
+      string,
+      Record<string, unknown>
+    >;
     const poisoned = {
       ...dto,
-      edges: {
-        "A->B": {
-          fromNode: edge.fromNode,
-          fromSignal: edge.fromSignal,
-          result: edge.result,
-          budgetConsumed: edge.budgetConsumed,
-          // `artifacts` deliberately absent → structural invalidity
+      nodes: {
+        ...nodes,
+        A: {
+          ...nodes["A"],
+          upstreamResults: {
+            X: {
+              fromNode: upstream["X"].fromNode,
+              fromSignal: upstream["X"].fromSignal,
+              result: upstream["X"].result,
+              budgetConsumed: upstream["X"].budgetConsumed,
+              // `artifacts` deliberately absent → structural invalidity
+            },
+          },
         },
       },
     };
     expect(() => loadEngineStateFromJson(JSON.stringify(poisoned))).not.toThrow();
     expect(loadEngineStateFromJson(JSON.stringify(poisoned))).toBeNull();
+  });
+
+  it("serializeEngineState no longer writes the legacy `edges` key (D3)", () => {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(dto.edges).toBeUndefined();
+  });
+
+  it("a legacy v2 file with an extra top-level `edges` key still loads (backward compat)", () => {
+    // Files authored before the D3 dead-field removal carry a top-level
+    // `edges` object. It must be tolerated (passes the required-shape gate)
+    // and ignored — never hydrated back onto the live state.
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const legacy = {
+      ...dto,
+      edges: {
+        "A->B": {
+          fromNode: "A",
+          fromSignal: "answer",
+          result: "res",
+          artifacts: ["/a.txt"],
+          budgetConsumed: { tokens: 3, cost: 0.05, sessions: 1 },
+        },
+      },
+    };
+    const loaded = loadEngineStateFromJson(JSON.stringify(legacy));
+    expect(loaded).not.toBeNull();
+    expect("edges" in loaded!).toBe(false);
+    // The rest of the state hydrates normally.
+    expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Completed);
   });
 
   it("scheduleSave writes on flush() (debounced non-critical path)", () => {
@@ -444,6 +563,89 @@ describe("EnginePersistence", () => {
     expect(engineStatePath(dir, "a b/c:d").endsWith("engine-a-b-c-d.json")).toBe(true);
     // A safe id passes through verbatim.
     expect(engineStatePath(dir, "graph-1").endsWith("engine-graph-1.json")).toBe(true);
+  });
+});
+
+// ── EnginePersistence.dispose(): teardown for a replaced / discarded runtime ──
+//
+// Review 05-F1/F3 (M14/ML1): a runtime that is disposed must cancel its
+// pending debounced write — flushing stale state over the successor runtime's
+// newer state on the shared state file is the exact stale-write race the
+// review flagged. dispose() therefore cancels the debounce timer AND drops the
+// pending-to-flush state (it never flushes).
+
+describe("EnginePersistence.dispose()", () => {
+  let dir: string;
+  let store: EnginePersistence;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "engine-persist-dispose-"));
+    store = new EnginePersistence(dir);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("cancels a pending debounced write — a later flush() is a no-op (M14)", () => {
+    const state = buildRichState();
+    store.scheduleSave(state);
+    // Debounced: nothing on disk until flush() / the timer fires.
+    expect(existsSync(engineStatePath(dir, "graph-1"))).toBe(false);
+
+    store.dispose();
+    // The pending state was DROPPED — even an explicit flush must not write.
+    store.flush();
+    expect(existsSync(engineStatePath(dir, "graph-1"))).toBe(false);
+  });
+
+  it("clears the debounce timer — nothing lands after the window elapses", async () => {
+    const state = buildRichState();
+    store.scheduleSave(state);
+    store.dispose();
+    // Wait beyond the debounce window: the timer was cleared on dispose, so the
+    // stale state must never reach disk.
+    await new Promise((r) => setTimeout(r, NON_CRITICAL_DEBOUNCE_MS + 50));
+    expect(existsSync(engineStatePath(dir, "graph-1"))).toBe(false);
+  });
+
+  it("prevents a stale debounced write from overwriting newer state (M14 race model)", async () => {
+    // Old runtime's persistence has a pending non-critical write...
+    const oldStore = new EnginePersistence(dir);
+    const stale = buildRichState();
+    oldStore.scheduleSave(stale);
+
+    // ...while the new runtime has already written its NEWER state to the
+    // SAME file (graph-tools commit path: new runtime adopts + writes first,
+    // old runtime disposes after).
+    const newer = buildRichState();
+    newer.budget = {
+      sessionsSpawned: 9,
+      totalInputTokens: 90,
+      totalOutputTokens: 50,
+      totalCost: 1.5,
+    };
+    new EnginePersistence(dir).save(newer);
+
+    // Old runtime disposed — its pending write is cancelled, never flushed.
+    oldStore.dispose();
+
+    // After the debounce window, the on-disk state still reflects the NEWER
+    // write — the stale pending write never landed on top of it.
+    await new Promise((r) => setTimeout(r, NON_CRITICAL_DEBOUNCE_MS + 50));
+    const loaded = new EnginePersistence(dir).load("graph-1")!;
+    expect(loaded.budget.sessionsSpawned).toBe(9);
+    expect(loaded.budget.totalCost).toBe(1.5);
+  });
+
+  it("is idempotent — a second dispose is a no-op", () => {
+    store.scheduleSave(buildRichState());
+    store.dispose();
+    expect(() => store.dispose()).not.toThrow();
+  });
+
+  it("is a no-op when nothing is pending", () => {
+    expect(() => store.dispose()).not.toThrow();
   });
 });
 
