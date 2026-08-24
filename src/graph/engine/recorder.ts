@@ -29,6 +29,7 @@
  */
 
 import { NodeStatus } from "../../constants.ts";
+import { TERMINATING_SIGNALS_BY_SEVERITY } from "../../signal/signal-constants.ts";
 import type {
   CheckpointRecord,
   EngineState,
@@ -141,12 +142,10 @@ export function deriveNodeArtifacts(node: NodeRuntimeState): string[] {
  * most severe terminal payload's evidence wins.
  */
 export function deriveNodeEvidence(node: NodeRuntimeState): string[] {
-  const terminalOrder: ("escalate" | "revise_needed" | "answer")[] = [
-    "escalate",
-    "revise_needed",
-    "answer",
-  ];
-  for (const type of terminalOrder) {
+  // Severity order comes from the shared single source of truth
+  // (`signal-constants.ts` TERMINATING_SIGNALS_BY_SEVERITY, L1) so a new
+  // terminating signal type cannot silently fork this precedence.
+  for (const type of TERMINATING_SIGNALS_BY_SEVERITY) {
     const payload = node.signalsObserved[type];
     if (payload === null || payload === undefined) continue;
     if (typeof payload === "object" && !Array.isArray(payload)) {

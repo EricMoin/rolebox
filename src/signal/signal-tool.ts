@@ -9,7 +9,7 @@ import { createSubLogger } from "../logger.ts";
 
 const log = createSubLogger("signal-tool");
 
-import { TERMINATING_SIGNALS, PAUSING_SIGNALS, HANDOFF_SIGNALS, INFO_SIGNALS, ALL_SIGNAL_TYPES } from "./signal-constants.ts";
+import { SIGNAL_TYPES, TERMINATING_SIGNALS, PAUSING_SIGNALS, HANDOFF_SIGNALS, INFO_SIGNALS, ALL_SIGNAL_TYPES } from "./signal-constants.ts";
 
 export function createSignalTool() {
   return defineTool({
@@ -19,16 +19,7 @@ export function createSignalTool() {
       "The 'type' determines what state transition occurs; 'payload' carries optional structured data " +
       "for the signal consumer.",
     args: {
-      type: z.enum([
-        "answer",
-        "need_approval",
-        "blocked",
-        "need_clarification",
-        "handoff",
-        "progress",
-        "revise_needed",
-        "escalate",
-      ]),
+      type: z.enum(SIGNAL_TYPES),
       payload: z.record(z.string(), z.unknown()).optional(),
     },
     async execute(input, context) {

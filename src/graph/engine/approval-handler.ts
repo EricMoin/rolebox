@@ -48,7 +48,7 @@ import {
   getUpstreamNodeIds,
   joinSatisfied,
 } from "./join-evaluator.ts";
-import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
+import { addToFrontier, applyBudgetDelta, removeFromFrontier } from "./engine-state.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
 import { recordSignalToLedger } from "./signal-bridge.ts";
 import {
@@ -134,8 +134,8 @@ export function approveBlockedNode(
   // advancement critical section). The caller drives the forward answer flow.
   recordSignalToLedger(state, node.nodeId, "answer", answerOutput, "approval");
   // Ensure the node's genuinely produced artifacts are recorded before the
-  // EdgePayload is built, so the downstream merged_artifacts carry them (same
-  // data-flow gap as _buildEdgePayload — subtask C-RECORD).
+  // EdgePayload is built, so the downstream node's upstreamResults carry them
+  // (same data-flow gap as _buildEdgePayload — subtask C-RECORD).
   recordNodeArtifactsAndEvidence(state, node);
   markCompleted(state, node);
 
@@ -361,6 +361,12 @@ export function resetRejectedUpstreams(
  * Cancel a node's lifecycle (`pending | ready | running → cancelled → done`) and,
  * when a cancel seam is present and the node carries a dispatch task, tear it
  * down fire-and-forget (never awaited). Reuses the cascade-canceller convention.
+ *
+ * M10 session-slot refund: a RUNNING node with a live dispatch task decrements
+ * the graph-level `sessionsSpawned` counter synchronously — the termination
+ * callback (`engine-recovery.ts:402`) bails on the now-`done` node, so without
+ * this the partial-approve prune lane would leak the slot (same rationale as
+ * `cancelOne` in `cancellation.ts`).
  */
 function cancelNode(
   state: EngineState,
@@ -368,6 +374,9 @@ function cancelNode(
   dispatchPort?: CancelDispatchPort,
 ): void {
   if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
+  if (node.status === NodeStatus.Running && node.dispatchTaskId) {
+    applyBudgetDelta(state, { sessions: -1 });
+  }
   markCancelled(state, node, `cancelled by partial-approval pruning at "${state.graphId}"`);
   markDone(state, node);
   removeFromFrontier(state, node.nodeId);

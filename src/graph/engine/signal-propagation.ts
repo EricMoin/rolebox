@@ -70,8 +70,22 @@ import { deriveNodeArtifacts } from "./recorder.ts";
  * The fields are intentionally separate so a single call can be inspected
  * precisely: which upstream nodes were re-marked `ready` (revise), which nodes
  * were escalated (exhaustion / join failure), which node was re-marked `ready`
- * for an automatic retry (escalate), where the escalation was absorbed, and
- * where it reached the graph root.
+ * for an automatic retry (escalate), and where the escalation was absorbed.
+ *
+ * Note on the removed `rootReached` field (former review finding F3/L8): the
+ * interface used to promise "escalation reached the graph root (graph will
+ * terminate with error)", but the promise was never fulfilled. Escalation
+ * propagation is **forward-only** — {@link propagateEscalationForward} walks
+ * outbound edges from the escalating node toward graph *sinks* (nodes with no
+ * outbound edges), and a "graph root" in this codebase is a node with no
+ * *incoming* edges (`engine-state.ts:getRootNodeIds`, `join-evaluator.ts`).
+ * Forward propagation can therefore never reach a graph root: it starts
+ * downstream of the roots and moves further downstream. The only truthful
+ * sink-side observable — "the escalation reached the end of the line and the
+ * graph will terminate with error" — is already reported by {@link escalated}
+ * (the join-failed sink node lands there) plus an empty {@link absorbed};
+ * re-labeling that event "rootReached" would misname sinks as roots. The field
+ * had zero consumers, so it was removed rather than repurposed.
  */
 export interface SignalPropagationReport {
   /** Which propagation lane ran: `revise` or `escalate`. */
@@ -82,8 +96,6 @@ export interface SignalPropagationReport {
   escalated: string[];
   /** The escalating node that was re-marked `ready` for an automatic retry. */
   retried: string[];
-  /** Escalation reached the graph root (graph will terminate with error). */
-  rootReached: string[];
   /** Escalation absorbed — the convergence node's join is still satisfiable. */
   absorbed: string[];
   /** Machine-readable reason for an escalation (e.g. "max_traversals exhausted"). */
@@ -186,7 +198,6 @@ export function propagateRevise(
     revisedUpstream: [],
     escalated: [],
     retried: [],
-    rootReached: [],
     absorbed: [],
   };
 
@@ -298,7 +309,6 @@ export function propagateEscalate(
     revisedUpstream: [],
     escalated: [],
     retried: [],
-    rootReached: [],
     absorbed: [],
   };
 
@@ -332,7 +342,6 @@ function propagateEscalationForward(
 
   while (queue.length > 0) {
     const current = queue.shift() as NodeRuntimeState;
-    let advanced = false;
 
     for (const edge of state.graphDeclaration.edges) {
       if (edge.from !== current.nodeId) continue;
@@ -356,7 +365,6 @@ function propagateEscalationForward(
           markEscalated(state, target, extractReason(payload));
           report.escalated.push(target.nodeId);
           queue.push(target); // its failure may fail the next convergence node
-          advanced = true;
         }
       } else {
         // satisfied / waiting → partial failure absorbed; this branch stops.
@@ -373,6 +381,12 @@ function propagateEscalationForward(
  * node's `upstreamResults` and recompute its join satisfaction, so the join
  * evaluator (and the cascade canceller, which reads `upstreamResults` to
  * distinguish resolved from cancellable sources) sees the failure.
+ *
+ * The `budgetConsumed` projection mirrors {@link AdvanceEngine._buildEdgePayload}
+ * and `approval-handler.ts` so the escalate path no longer under-reports the
+ * source node's consumption (former review finding M1): tokens = input + output
+ * from `source.tokensConsumed`, cost from the same record, sessions from
+ * `source.sessionsSpawned`.
  */
 function recordEscalate(
   state: EngineState,
@@ -380,6 +394,7 @@ function recordEscalate(
   source: NodeRuntimeState,
   payload: unknown,
 ): void {
+  const tc = source.tokensConsumed;
   const edgePayload: EdgePayload = {
     fromNode: source.nodeId,
     fromSignal: "escalate",
@@ -388,8 +403,8 @@ function recordEscalate(
     // legitimately returns [] in that case; do not hardcode an empty list.
     artifacts: source.artifacts ?? deriveNodeArtifacts(source),
     budgetConsumed: {
-      tokens: 0,
-      cost: 0,
+      tokens: tc.inputTokens + tc.outputTokens,
+      cost: tc.cost,
       sessions: source.sessionsSpawned,
     },
   };

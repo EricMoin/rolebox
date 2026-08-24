@@ -5,7 +5,9 @@
  * handoff / info) live here exactly once. Every consumer imports from
  * this module so the vocabulary is never duplicated.
  *
- * The type order matches the Zod enum in src/signal/signal-tool.ts:53-62.
+ * The type order is canonical — src/signal/signal-tool.ts derives its runtime
+ * Zod enum from this array (`z.enum(SIGNAL_TYPES)`), so the validation
+ * boundary can never drift from the vocabulary.
  */
 
 /** The 8 valid signal types, in Zod-enum order. */
@@ -23,8 +25,15 @@ export const SIGNAL_TYPES = [
 /** Union of the 8 valid signal types. */
 export type SignalType = (typeof SIGNAL_TYPES)[number];
 
-/** Named signal type constants for ergonomic use (e.g. `SIGNAL_TYPE.ANSWER`). */
-export const SIGNAL_TYPE = {
+/**
+ * Named signal type constants for ergonomic use (e.g. `SIGNAL_TYPE.ANSWER`).
+ *
+ * Type-bound to the SIGNAL_TYPES tuple via
+ * `Record<Uppercase<SignalType>, SignalType>`: the compiler requires one key
+ * per signal type (exhaustiveness) and rejects any key or value that is not
+ * a valid signal type, so this object cannot drift from the vocabulary.
+ */
+export const SIGNAL_TYPE: Record<Uppercase<SignalType>, SignalType> = {
   ANSWER: "answer",
   NEED_APPROVAL: "need_approval",
   BLOCKED: "blocked",
@@ -33,7 +42,7 @@ export const SIGNAL_TYPE = {
   PROGRESS: "progress",
   REVISE_NEEDED: "revise_needed",
   ESCALATE: "escalate",
-} as const;
+};
 
 /** Signals that satisfy `continue_until` — terminate the node's run. */
 export const TERMINATING_SIGNALS = new Set<string>(["answer", "revise_needed", "escalate"]);

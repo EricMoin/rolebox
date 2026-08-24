@@ -156,7 +156,6 @@ export function createEngineState(
     graphId,
     graphDeclaration,
     nodes: new Map(),
-    edges: new Map(),
     loopGroups: new Map(),
     frontier: [],
     budget: emptyGraphBudget(),
@@ -316,9 +315,9 @@ export function provision(state: EngineState): void {
     if (incoming === 0) {
       markReady(state, node);
       addToFrontier(state, config.id);
-    } else {
-      node.status = NodeStatus.Pending;
     }
+    // Non-root nodes keep the `pending` status `registerNode` already assigned —
+    // no redundant re-assignment here (the former `else` branch was a no-op).
   }
 
   // Populate loop-group runtime state and tag member nodes (Phase 2).

@@ -65,7 +65,12 @@ import type {
 } from "../../types.engine-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier, applyBudgetDelta } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
-import { cloneCheckpointHistory, markNonCriticalDirty } from "./engine-persistence.ts";
+import {
+  cloneCheckpointHistory,
+  markDirty,
+  markNonCriticalDirty,
+} from "./engine-persistence.ts";
+import { recordCheckpointForNode } from "./recorder.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -379,6 +384,14 @@ export function captureNodeUsage(
  * skipped, the node stays `running`, and the listener is re-subscribed so a
  * genuine later termination still advances it.
  *
+ * M9 listener-ledger escape (review 04-F5): the transient-error re-subscription
+ * registers a NEW listener whose callback would otherwise escape the caller's
+ * subscription ledger — dispose() could never unregister it and the zombie
+ * callback would carry a disposed engine's `state`/`emitSignal` closures when it
+ * finally fired. The optional `out` collector captures every such re-subscribed
+ * `{ taskId, callback }` pair so the caller can register it into its ledger
+ * (engine-advance.ts `_dispatchNode` passes its `_terminationSubscriptions`).
+ *
  * Returns the exact callback handed to `port.onTaskTerminated` (monitor M4), so
  * a caller that no longer needs the subscription can pass it to
  * `removeTaskTerminatedListener(taskId, callback)`. Returns `undefined` when
@@ -390,6 +403,7 @@ export function subscribeTaskTermination(
   port: DispatchRecoveryPort,
   node: NodeRuntimeState,
   emitSignal: RecoveryEmitSignal,
+  out?: Array<{ taskId: string; callback: TaskTerminatedCallback }>,
 ): TaskTerminatedCallback | undefined {
   const taskId = node.dispatchTaskId;
   if (!taskId || !port.onTaskTerminated) return undefined;
@@ -429,7 +443,21 @@ export function subscribeTaskTermination(
         `(node ${nodeId}) but the task is still live — skipping escalate, ` +
         `keeping node running`,
       );
-      subscribeTaskTermination(state, port, current, emitSignal);
+      // M9: the re-subscription is a NEW `onTaskTerminated` registration that
+      // must be removable by the caller's teardown (dispose) exactly like the
+      // original — collect its `{ taskId, callback }` pair into the optional
+      // ledger instead of discarding it, so no zombie callback escapes the
+      // engine's subscription ledger (review 04-F5).
+      const reSubscribed = subscribeTaskTermination(
+        state,
+        port,
+        current,
+        emitSignal,
+        out,
+      );
+      if (reSubscribed && out) {
+        out.push({ taskId: completedTaskId, callback: reSubscribed });
+      }
       return;
     }
     const task = safeGetTask(port, completedTaskId);
@@ -500,6 +528,33 @@ export function reconcileEngine(
     }
 
     if (TERMINAL_DISPATCH_STATUSES.has(task.status)) {
+      // M8 transient-error guard (recovery parity): a reported `error` may be
+      // stale — the authoritative dispatch read (`isDispatchTaskLive`) shows
+      // the task still live (running / pending / awaiting_approval), i.e. the
+      // restart window overlapped a transient execution error whose session is
+      // still continuing. Committing the node to escalate here would latch it
+      // terminal and the genuine later termination could never advance it —
+      // the exact asymmetry review M8 / 04-F4 flagged against
+      // `subscribeTaskTermination`'s live-seam guard (lines 426-434) and
+      // `_dispatchNode`'s race-guard return (engine-advance.ts:1689-1694).
+      // Route into the re-subscribe branch instead: the node stays `running`
+      // and the listener (or a later reconcile) advances it on a real
+      // termination. The task is not terminated, so no usage capture runs.
+      if (task.status === "error" && isDispatchTaskLive(port, taskId)) {
+        logWarn(
+          `engine-recovery: reconcile saw error status for task ${taskId} ` +
+          `(node ${node.nodeId}) but the task is still live — skipping escalate, ` +
+          `keeping node running and re-subscribing`,
+        );
+        const callback = subscribeTaskTermination(state, port, node, emitSignal);
+        reSubscribed.push(node.nodeId);
+        // Surface the { taskId, callback } pair so the caller can later
+        // removeTaskTerminatedListener (monitor M4) once the node stops running.
+        if (callback && out) {
+          out.listeners.push({ taskId, callback });
+        }
+        continue;
+      }
       // Record the finished-during-restart task's consumption (Phase-7 gap)
       // before the deferred signal is emitted. Idempotent replace.
       captureNodeUsage(state, node, port);
@@ -551,6 +606,14 @@ export function rebuildFrontier(state: EngineState): string[] {
   }
   state.frontier = ready;
   state.updatedAt = Date.now();
+  // L21 (review 05-F5): `frontier` is a persistent field — the choke-point
+  // contract (engine-persistence.ts:73-83) requires markDirty after mutating
+  // it. Without this, a recover() whose reconcile-failure catch path
+  // (index.ts:1091-1093) runs rebuildFrontier + dispatchReady with no other
+  // mutation would drop the frontier recomputation from disk — the rebuilt
+  // ready set would only survive if an unrelated critical-section mutation
+  // happened to set the flag.
+  markDirty(state);
   return [...state.frontier];
 }
 
@@ -596,7 +659,6 @@ export function hydrateEngineState(
   target.graphId = source.graphId;
   target.graphDeclaration = source.graphDeclaration;
   target.nodes = source.nodes;
-  target.edges = source.edges;
   target.loopGroups = source.loopGroups;
   // Subtask-5 dangling-loop-group guard: a persisted state whose declaration
   // dropped a loop group may still carry member nodes tagged with the stale
@@ -680,7 +742,18 @@ export function adoptPriorNodeStates(
     if (prev.agent !== node.agent) continue; // identity changed — fresh run
 
     // Copy the prior run's execution state in place (keep the object bound).
+    const adoptedFrom = node.status;
     node.status = prev.status;
+    // L15 (review 03-F6): this direct status write bypasses transitionNode's
+    // single choke-point, so it never auto-records a checkpoint. Compensate
+    // when the write actually changed the status — the append-only
+    // checkpointHistory must not have a gap at the adopt/recover transition
+    // (recorder.ts:55-59 "complete ordered traceability" promise). No
+    // checkpoint is fabricated for a no-change adoption (e.g. a provisioned
+    // ready root adopting a prior ready root).
+    if (adoptedFrom !== node.status) {
+      recordCheckpointForNode(target, node, adoptedFrom, node.status, Date.now());
+    }
     node.prompt = prev.prompt; // preserves modify_prompt mutations
     node.signalsObserved = { ...prev.signalsObserved };
     node.result = prev.result ? { ...prev.result } : undefined;
@@ -741,6 +814,17 @@ export function adoptPriorNodeStates(
       if (incoming > 0) {
         node.status = NodeStatus.Pending;
         removeFromFrontier(target, nodeId);
+        // L15 (review 03-F6): the H2 demotion is another direct status write
+        // that bypasses transitionNode's choke-point — compensate with an
+        // explicit checkpoint so the node's rebuild history records the
+        // Ready → Pending demote (no traceability gap).
+        recordCheckpointForNode(
+          target,
+          node,
+          NodeStatus.Ready,
+          NodeStatus.Pending,
+          Date.now(),
+        );
       }
     }
   }
@@ -807,6 +891,13 @@ export function clearStaleCriticalSection(state: EngineState): void {
   }
   state.pendingCompletions = [];
   state.updatedAt = Date.now();
+  // L21 (review 05-F5): `advancingLock` and `pendingCompletions` are persistent
+  // fields — the choke-point contract (engine-persistence.ts:73-83) requires
+  // markDirty after mutating them. Without this, a recover() whose
+  // reconcile-failure catch path never runs a mutating critical section would
+  // leave the released lock / cleared queue unpersisted — a re-crash would
+  // resurrect the stale lock.
+  markDirty(state);
 }
 
 // ── Stale-lock sweeper ───────────────────────────────────────────────────────

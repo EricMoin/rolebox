@@ -59,22 +59,6 @@ export interface EngineState {
   graphDeclaration: GraphDeclaration;
   /** Per-node runtime state, keyed by node ID */
   nodes: Map<string, NodeRuntimeState>;
-  /**
-   * RESERVED — per-edge runtime state (active data payloads), keyed by
-   * "from->to".
-   *
-   * This field is currently UNUSED at runtime. It is initialized empty in
-   * {@link createEngineState} (engine-state.ts) and only ever populated during
-   * hydration from a persisted file (deserializeEngineState, engine-persistence.ts).
-   * No runtime code writes to it, so in practice it round-trips the persisted
-   * `file.edges` map verbatim and is carried through `snapshotEngineState`.
-   *
-   * It is retained (not removed) so the persisted schema and
-   * {@link ENGINE_PERSISTENCE_VERSION} stay unchanged. Do NOT start using it for
-   * live edge-payload tracking without first deciding whether it should be
-   * persisted — its current role is purely a schema-compatibility placeholder.
-   */
-  edges: Map<string, EdgePayload>;
   /** Per-loop-group runtime state */
   loopGroups: Map<string, LoopGroupRuntimeState>;
   /** Nodes ready for dispatch this tick (frontier set) */
@@ -308,38 +292,22 @@ export interface EdgePayload {
   fromNode: string;
   /** Signal type that triggered this payload (answer, revise_needed, escalate, progress) */
   fromSignal: string;
-  /** Output text from the source node */
+  /**
+   * Output text carried from the source node.
+   *
+   * The worker's terminating signal payload when one was emitted (string
+   * verbatim, object JSON-serialized). When the payload is missing, empty, or
+   * the synthetic `{ __inferred: true }` marker (the worker never emitted
+   * genuine output), this falls back to the source node's materialized result
+   * sidecar text (M3) — the real output the worker produced, when it was
+   * materialized (`totalChars > 0` and no `fetchError`); otherwise `""`.
+   * See `AdvanceEngine._buildEdgePayload` (`src/graph/engine/engine-advance.ts`).
+   */
   result: string;
   /** List of artifact file paths produced by the source node */
   artifacts: string[];
   /** Budget consumed by the source node in producing this result */
   budgetConsumed: {
-    tokens: number;
-    cost: number;
-    sessions: number;
-  };
-}
-
-// ── Fan-In Context ──────────────────────────────────────────────────────
-
-/**
- * Merged context delivered to a fan-in (convergence) node.
- *
- * When a convergence node activates (join strategy satisfied), upstream
- * EdgePayloads are merged into a single structured FanInContext delivered
- * as part of the node's input.
- */
-export interface FanInContext {
-  /** Results from each upstream source */
-  sources: {
-    node: string;
-    signal: string;
-    result: string;
-  }[];
-  /** Artifacts from all upstream sources (deduplicated) */
-  merged_artifacts: string[];
-  /** Total budget consumed by all upstream sources */
-  budget_consumed_total: {
     tokens: number;
     cost: number;
     sessions: number;

@@ -48,7 +48,7 @@
 
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import { removeFromFrontier } from "./engine-state.ts";
+import { applyBudgetDelta, removeFromFrontier } from "./engine-state.ts";
 import { canTransitionNode, markCancelled, markDone } from "./node-lifecycle.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
 
@@ -182,7 +182,10 @@ export function expandLoopMembers(state: EngineState, requested: readonly string
  * and, when a cancel seam is present and the node carries a dispatch task, tear
  * it down fire-and-forget (never awaited). Reuses the exact retirement pattern
  * shared by `cancelPendingUpstreams` (`cascade-canceller.ts:144-154`) and
- * `cancelNode` (`approval-handler.ts:333-345`).
+ * `cancelNode` (`approval-handler.ts:333-345`), plus the M10 session-slot
+ * refund: a running node with a live dispatch task decrements the graph-level
+ * `sessionsSpawned` counter synchronously (the async termination callback
+ * bails on the now-`done` node, so the refund must happen here or never).
  */
 function cancelOne(
   state: EngineState,
@@ -194,6 +197,19 @@ function cancelOne(
 ): void {
   // Double guard: transition-table legality + the Cancellable rule.
   if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
+  // M10 session-slot refund: a RUNNING node with a live dispatch task refunds
+  // its graph-level net-live session slot synchronously. The dispatch layer
+  // reports the cancellation asynchronously AFTER this node already advanced
+  // `cancelled → done`, so the termination callback's status guard
+  // (`engine-recovery.ts:402`, `current.status !== Running → return`) bails
+  // and its `applyBudgetDelta({sessions: -1})` (`engine-recovery.ts:413-415`)
+  // never fires on this path. Refunding exactly once HERE keeps
+  // `state.budget.sessionsSpawned` a net-live counter — without it the direct
+  // cancellation lane would only ever increment. `pending`/`ready` nodes have
+  // no dispatched session and never consume a slot.
+  if (node.status === NodeStatus.Running && node.dispatchTaskId) {
+    applyBudgetDelta(state, { sessions: -1 });
+  }
   markCancelled(state, node, reason);
   markDone(state, node);
   removeFromFrontier(state, node.nodeId);

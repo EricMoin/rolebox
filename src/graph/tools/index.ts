@@ -321,11 +321,11 @@ function createGraphAddEdgeTool(
       data_passthrough_exclude: z
         .array(z.string())
         .optional()
-        .describe("Blacklist of payload fields to omit (accepted for shape compat)."),
+        .describe("Blacklist of payload fields to omit from the passed context."),
       data_passthrough_max_chars: z
         .number()
         .optional()
-        .describe("Truncation limit for passed context (accepted for shape compat)."),
+        .describe("Truncation limit for the passed context."),
       retry: retrySchema.describe("Auto-retry count when the source node emits escalate."),
     },
     async execute(args, context) {

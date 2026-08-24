@@ -12,16 +12,19 @@
  *     run()        — transition `idle → executing` and dispatch the ready roots.
  *     status()     — read a snapshot of the {@link EngineState}.
  *
- * `recover()` and `cancel()` are Phase-3 stubs (resume / teardown).
+ * Beyond the core lifecycle, the full control surface is implemented:
+ * `recover()` resumes an interrupted graph from its persisted state,
+ * `cancel()` / `cancelNodes()` tear down running graphs, `approveNode()` /
+ * `rejectNode()` / `partialApprove()` drive the `needs_approval` gate,
+ * `retryNode()` re-opens a node for re-dispatch, and `dispose()` releases a
+ * replaced runtime (cancelling its debounced persistence timer).
  *
  * Design: the engine is a role-agnostic primitive. This barrel only wires the
  * runtime; it carries no dispatch or role logic itself. The dispatch surface
  * is an injected seam (see {@link EngineRuntimeOptions.dispatch}) so callers
- * and tests can avoid real sub-agent dispatch.
- *
- * Scope note (Phase 1): external integration — wiring this runtime into the
- * platform entry points and re-exporting it from the package root — is a later
- * subtask. This module exports exactly the public engine API surface.
+ * and tests can avoid real sub-agent dispatch. External integration (wiring
+ * this runtime into the platform entry points and re-exporting it from the
+ * package root) lives in `src/graph/tools/graph-tools.ts`.
  *
  * Design reference: `.rolebox/design/engine-state-machine.md`.
  */
@@ -57,7 +60,6 @@ import {
 import {
   DispatchBridge,
   type DispatchParentContext,
-  type TaskTerminatedCallback,
 } from "./dispatch-bridge.ts";
 import defaultConditionResolver from "./condition-resolver.ts";
 import {
@@ -336,8 +338,12 @@ export interface EngineRuntime {
    * Dispose the engine runtime (monitor M4). Unregisters every
    * task-terminated listener this engine registered with the dispatch seam
    * (`removeTaskTerminatedListener`) so a disposed runtime never receives (or
-   * leaks) stale dispatch→signal callbacks, and stops the opt-in staleness
-   * watcher (monitor M3) so a disposed runtime never keeps ticking. Idempotent
+   * leaks) stale dispatch→signal callbacks, stops the opt-in staleness
+   * watcher (monitor M3) so a disposed runtime never keeps ticking, and —
+   * when persistence is configured — disposes the {@link EnginePersistence}
+   * store (review 05-F1/M14): a replaced runtime's pending debounced write is
+   * CANCELLED and dropped (never flushed), so stale state can never overwrite
+   * the successor runtime's newer state on the shared state file. Idempotent
    * — a second dispose is a no-op.
    */
   dispose(): void;
@@ -543,12 +549,6 @@ function snapshotEngineState(state: EngineState): EngineState {
     graphDeclaration: state.graphDeclaration,
     nodes: new Map(
       [...state.nodes].map(([id, n]) => [id, cloneNode(n)]),
-    ),
-    edges: new Map(
-      [...state.edges].map(([key, p]) => [
-        key,
-        { ...p, artifacts: [...p.artifacts], budgetConsumed: { ...p.budgetConsumed } },
-      ]),
     ),
     loopGroups: new Map(
       [...state.loopGroups].map(([id, g]) => [
@@ -1224,11 +1224,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Monitor (M3): a cancelled graph must not keep ticking the opt-in
     // staleness watcher.
     this.staleWatcher?.stop();
-    // Subtask 6: a cancelled graph must not keep ticking the opt-in liveness
-    // monitor either (parity with the staleness watcher above and dispose()).
-    this.livenessMonitor?.stop();
-    // Subtask 5: stop the opt-in liveness monitor beside the watcher — a
-    // cancelled graph must not keep ticking its stall detection either.
+    // Subtask 5: stop the opt-in liveness monitor too (parity with the
+    // staleness watcher above and dispose()) — a cancelled graph must not
+    // keep ticking its stall detection.
     this.livenessMonitor?.stop();
 
     // Cancel in-flight dispatch tasks (best-effort), then cancel the nodes.
@@ -1352,16 +1350,16 @@ class EngineRuntimeImpl implements EngineRuntime {
     for (const sub of this.advance.getTerminationSubscriptions()) {
       this.dispatchPort.removeTaskTerminatedListener?.(sub.taskId, sub.callback);
     }
-    // Clear the engine's own subscription ledger. The accessor returns a
-    // defensive copy, so the ledger itself is cleared through the private
-    // field — a disposed runtime keeps no handles to stale callbacks and a
+    // Clear the engine's own subscription ledger through the public teardown
+    // entry (review 06-F1 / M16) — never `as unknown as` into the private
+    // field. A disposed runtime keeps no handles to stale callbacks and a
     // re-run re-registers fresh ones (a second dispose is then a no-op).
-    (this.advance as unknown as {
-      _terminationSubscriptions: Array<{
-        taskId: string;
-        callback: TaskTerminatedCallback;
-      }>;
-    })._terminationSubscriptions = [];
+    this.advance.clearTerminationSubscriptions();
+    // Review 05-F1/F3 (M14/ML1): a replaced / discarded runtime must cancel
+    // its pending debounced persistence write — flushing it would overwrite
+    // the successor runtime's newer state on the shared state file. dispose
+    // drops the pending write (it does NOT flush).
+    this.persistence?.dispose();
     // Monitor (M3): stop the opt-in staleness watcher — a disposed runtime
     // must not keep ticking.
     this.staleWatcher?.stop();

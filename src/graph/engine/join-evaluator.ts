@@ -6,9 +6,10 @@
  *
  * Pure graph-theoretic fan-in mechanism. A convergence node collects the
  * {@link EdgePayload}s arriving along its incoming edges and activates once
- * the declared join strategy is satisfied. What the node does with the merged
- * {@link FanInContext} (validate, synthesize, approve) is the agent's business —
- * this module only enforces the join and merges upstream data.
+ * the declared join strategy is satisfied. The accumulated upstream results
+ * stay exposed on `node.upstreamResults` for consumers to inspect (e.g.
+ * `approval-payload.ts` builds the human-facing approval context from them) —
+ * this module only enforces the join and records the upstream payloads.
  *
  * Design references:
  * - `.rolebox/design/graph-model.md` §3 (join semantics)
@@ -24,7 +25,7 @@
 import { JoinStrategy } from "../../constants.ts";
 import type { EdgeDeclaration, JoinConfig } from "../../types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import type { EdgePayload, FanInContext } from "../../types.engine-v2.ts";
+import type { EdgePayload } from "../../types.engine-v2.ts";
 
 // ── Join strategy resolution ────────────────────────────────────────────────
 
@@ -364,54 +365,7 @@ export function collectUpstreamResults(
   state.isDirty = true;
 }
 
-// ── Fan-in context merge ────────────────────────────────────────────────────
-
-/**
- * Merge a node's accumulated upstream results (a `Map<SourceNodeId, EdgePayload>`)
- * into a single structured {@link FanInContext} delivered as part of the node's
- * activation input.
- *
- * - `sources` — per-node provenance, in insertion order: `{node, signal, result}`.
- * - `merged_artifacts` — artifact paths from all sources, deduplicated in order
- *   of first appearance.
- * - `budget_consumed_total` — tokens / cost / sessions summed across sources.
- */
-export function mergeFanInContext(
-  results: ReadonlyMap<string, EdgePayload>,
-): FanInContext {
-  const sources: FanInContext["sources"] = [];
-  const artifactSeen = new Set<string>();
-  const mergedArtifacts: string[] = [];
-  let tokens = 0;
-  let cost = 0;
-  let sessions = 0;
-
-  for (const [fromNode, payload] of results) {
-    sources.push({
-      node: fromNode,
-      signal: payload.fromSignal,
-      result: payload.result,
-    });
-
-    for (const artifact of payload.artifacts) {
-      if (!artifactSeen.has(artifact)) {
-        artifactSeen.add(artifact);
-        mergedArtifacts.push(artifact);
-      }
-    }
-
-    tokens += payload.budgetConsumed.tokens;
-    cost += payload.budgetConsumed.cost;
-    sessions += payload.budgetConsumed.sessions;
-  }
-
-  return {
-    sources,
-    merged_artifacts: mergedArtifacts,
-    budget_consumed_total: {
-      tokens,
-      cost,
-      sessions,
-    },
-  };
-}
+// Upstream results are recorded per source by {@link collectUpstreamResults}
+// onto `node.upstreamResults` and consumed directly by join evaluation
+// ({@link evaluateJoin}), cascade cancellation, and approval-payload
+// construction — there is no separate merged fan-in context.

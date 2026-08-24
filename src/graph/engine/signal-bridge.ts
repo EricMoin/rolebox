@@ -164,8 +164,8 @@ export class SignalBridge {
    *   state is supplied.
    * - Returns `true` when the signal is terminating (a listener was fired).
    *
-   * @param state    Optional engine state — when provided, the graph-level
-   *                 `signalLedger` history entry is kept in sync.
+   * @param state    Engine state — required; the graph-level `signalLedger`
+   *                 history entry is kept in sync from it.
    * @param source   Origin discriminator for this signal event (dispatch /
    *                 recovery / deferred / race_guard).
    * @returns `true` if `type` is terminating, `false` otherwise.

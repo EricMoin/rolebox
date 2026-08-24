@@ -18,11 +18,16 @@
  *   tokensConsumed counters. Multiple rapid mutations coalesce into a single
  *   atomic write.
  * - `flush()` — force-drain a pending debounced write. Runs when the engine
- *   reaches a terminal phase (`complete`) or the runtime is torn
- *   down / replaced, so no debounced write is lost.
- * - `load(graphId)` — read + validate; returns `null` for a missing file or a
- *   schema-version mismatch (clean start / migration point), mirroring
- *   `TaskStateStore.load()` (`src/dispatch/persistence/task-store.ts:125`).
+ *   reaches a terminal phase (`complete`), so no debounced write is lost.
+ * - `dispose()` — teardown for a runtime that is being replaced / discarded.
+ *   Cancels the debounce timer and DROPS the pending write (no flush): the
+ *   disposed runtime's state is stale relative to the successor runtime, so
+ *   flushing it would overwrite newer state (review 05-F1/F3, M14/ML1).
+ * - `load(graphId)` — read + validate; returns `null` for a missing file (only
+ *   ENOENT) or a schema-version mismatch (clean start / migration point),
+ *   mirroring `TaskStateStore.load()` (`src/dispatch/persistence/task-store.ts:125`).
+ *   Any other read failure is rethrown — an unreadable state file is an
+ *   explicit error, never a silent clean start (review 05-F6, L22).
  *
  * Two-tier durability policy (Q2 Option A): critical mutations write through
  * synchronously so a crash never loses node/phase/frontier progress; non-critical
@@ -189,7 +194,15 @@ export interface EnginePersistenceFile {
   phase: EnginePhase;
   graphDeclaration: GraphDeclaration;
   nodes: Record<string, NodeRuntimeStateDTO>;
-  edges: Record<string, EdgePayload>;
+  /**
+   * LEGACY READ-COMPAT — the dead `EngineState.edges` map was removed (D3),
+   * so new files never carry this key. It is retained here (optional) so
+   * files authored before the removal — which DO carry a top-level `edges`
+   * object — still pass the required-shape gate and hydrate cleanly. The key
+   * is tolerated and ignored: it is never written and never hydrated back
+   * onto a live state.
+   */
+  edges?: Record<string, EdgePayload>;
   loopGroups: Record<string, LoopGroupRuntimeState>;
   frontier: string[];
   budget: GraphBudgetState;
@@ -293,10 +306,9 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     };
   }
 
-  const edges: Record<string, EdgePayload> = {};
-  for (const [key, p] of state.edges) {
-    edges[key] = cloneEdgePayload(p);
-  }
+  // D3: the dead `state.edges` map is gone — the persisted file deliberately
+  // carries no `edges` key (legacy files with one are tolerated on load, see
+  // `EnginePersistenceFile.edges`).
 
   const loopGroups: Record<string, LoopGroupRuntimeState> = {};
   for (const [id, g] of state.loopGroups) {
@@ -317,7 +329,6 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     phase: state.phase,
     graphDeclaration: state.graphDeclaration,
     nodes,
-    edges,
     loopGroups,
     frontier: [...state.frontier],
     budget: cloneBudgetState(state.budget),
@@ -361,10 +372,9 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     } as NodeRuntimeState);
   }
 
-  const edges = new Map<string, EdgePayload>();
-  for (const [key, p] of Object.entries(file.edges)) {
-    edges.set(key, cloneEdgePayload(p));
-  }
+  // D3: a legacy `file.edges` extra key (present in files authored before the
+  // dead-field removal) is deliberately NOT hydrated onto the live state —
+  // `EngineState` no longer has an `edges` member, and nothing reads it.
 
   const loopGroups = new Map<string, LoopGroupRuntimeState>();
   for (const [id, g] of Object.entries(file.loopGroups)) {
@@ -381,7 +391,6 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     graphId: file.graphId,
     graphDeclaration: file.graphDeclaration,
     nodes,
-    edges,
     loopGroups,
     frontier: [...file.frontier],
     budget: cloneBudgetState(file.budget),
@@ -443,12 +452,13 @@ export function engineStatePath(directory: string, graphId: string): string {
  * gate `clearDirty` on the outcome (M5); a write failure never silently drops
  * the pending state. Two-tier policy: critical transitions use the synchronous
  * {@link save}; non-critical churn uses the debounced {@link scheduleSave} and
- * is drained by {@link flush}.
+ * is drained by {@link flush} on terminal phases — a replaced / discarded
+ * runtime calls {@link dispose} instead (cancels the debounce, drops the
+ * pending write, never flushes stale state).
  */
 export class EnginePersistence {
   private readonly directory: string;
   private debounceTimer?: ReturnType<typeof setTimeout>;
-  private pendingWrite?: { state: EngineState };
 
   constructor(directory?: string) {
     this.directory = directory ?? process.cwd();
@@ -478,8 +488,9 @@ export class EnginePersistence {
    * mutations are coalesced into a single atomic write of the most recent
    * state. A final {@link save} / {@link flush} is still required to guarantee
    * durability before process exit (flush-on-terminate is wired into the
-   * engine when a section reaches a terminal phase or the runtime is
-   * torn down / replaced).
+   * engine when a section reaches a terminal phase). A runtime that is
+   * replaced / discarded must call {@link dispose} — which cancels the
+   * debounce and drops the pending write rather than flushing stale state.
    *
    * If the debounce timer's write fails, the pending state is RETAINED so the
    * next {@link flush} / {@link save} retries it — a failed debounced write is
@@ -528,6 +539,25 @@ export class EnginePersistence {
   }
 
   /**
+   * Teardown entry point (review 05-F1/F3, M14/ML1): cancel any pending
+   * debounce timer and DROP the pending-to-flush state — the runtime owning
+   * this store is being disposed / replaced, so its state is stale relative to
+   * whatever writes the successor runtime has already performed. Unlike
+   * {@link flush}, this deliberately does NOT write: flushing a stale snapshot
+   * over the new runtime's state is the exact stale-write race the review
+   * flagged (the "flush-on-replace" contract in the class header only applies
+   * when the engine itself reaches a terminal phase — a dispose is not that
+   * path).
+   *
+   * Idempotent — a second dispose is a no-op. After dispose, a late
+   * {@link scheduleSave} would re-arm the timer, so callers must not keep
+   * using a disposed store.
+   */
+  dispose(): void {
+    this._cancelDebounce();
+  }
+
+  /**
    * Load a graph's persisted engine state.
    *
    * Returns `null` (clean start / caller should provision a fresh engine) when:
@@ -537,15 +567,26 @@ export class EnginePersistence {
    * - the file is structurally invalid / missing a required field (total
    *   hydration — this method NEVER throws, so `recover()` can rely on `null`
    *   meaning "no valid persisted state").
+   *
+   * Non-ENOENT READ failures are NOT clean starts (review 05-F6 / L22): an
+   * unreadable-but-present state file (EACCES, EISDIR, ...) is rethrown so the
+   * caller surfaces the error explicitly instead of silently re-provisioning a
+   * graph whose completed nodes would be re-executed. The engine's `recover()`
+   * wraps this call in its own try/catch and logs the failure, matching the
+   * failure accounting of `recoverInterruptedGraphs` (engine-startup.ts).
    */
   load(graphId: string): EngineState | null {
     const filePath = engineStatePath(this.directory, graphId);
     let raw: string;
     try {
       raw = readFileSync(filePath, "utf-8");
-    } catch {
+    } catch (err) {
       // ENOENT — first run / never persisted. Clean start.
-      return null;
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      // Anything else means the file EXISTS but is unreadable — treat it as an
+      // explicit failure, never as "no state" (an EACCES/EISDIR file is not a
+      // clean start; treating it as one would re-execute completed nodes).
+      throw err;
     }
     try {
       return loadEngineStateFromJson(raw, filePath);
@@ -653,16 +694,33 @@ export function loadEngineStateFromJson(
   }
 }
 
-/** Structural presence gate for the required fields of a v2 engine-state file. */
+/**
+ * Structural presence gate for the required fields of a v2 engine-state file.
+ *
+ * Beyond the collection/array fields, this also gates `graphDeclaration` (an
+ * object — a missing declaration would otherwise let deserializeEngineState
+ * return a state whose `graphDeclaration` is `undefined`, and
+ * `hydrateEngineState`'s `clearUndeclaredLoopGroupIds` would throw a TypeError
+ * OUTSIDE the load try/catch, breaking the "never throws / permanently
+ * recoverable" contract — review 05-F2 / M15) and the scalar lifecycle fields
+ * `startedAt` / `updatedAt` (numbers) / `advancingLock` (boolean) — `undefined`
+ * timestamps would propagate into staleness math as `NaN` comparisons that
+ * never fire, silently disabling node timeout detection.
+ */
 function hasRequiredShape(file: Partial<EnginePersistenceFile>): boolean {
   return (
+    isPlainObject(file.graphDeclaration) &&
     isPlainObject(file.nodes) &&
-    isPlainObject(file.edges) &&
+    // D3: `file.edges` is NOT required — new files never carry it (the dead
+    // field was removed). A legacy `edges` extra key is tolerated and ignored.
     isPlainObject(file.loopGroups) &&
     isPlainObject(file.signalLedger) &&
     Array.isArray(file.frontier) &&
     Array.isArray(file.pendingCompletions) &&
-    isPlainObject(file.budget)
+    isPlainObject(file.budget) &&
+    typeof file.startedAt === "number" &&
+    typeof file.updatedAt === "number" &&
+    typeof file.advancingLock === "boolean"
   );
 }
 

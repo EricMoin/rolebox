@@ -24,10 +24,15 @@
  *   `engine-advance.ts`, decremented on cancelled/timeout termination in
  *   `engine-recovery.ts`), but no longer gates dispatch.
  *
- * - **Per-node** — `checkNodeBudget(node)` is a stub in this phase. Enforcement
+ * - **Per-node** — `checkNodeBudget(node)` is a **live port member**: the
+ *   advance engine invokes it through `GraphBudgetPort` as a pre-dispatch
+ *   pre-check alongside `checkGraphBudget` (`engine-advance.ts::_dispatchNode`).
+ *   In this phase it is an always-accept stub — it always returns
+ *   `{ exceeded: false }`, so no dispatch is ever gated — because enforcement
  *   of cumulative per-node consumption against per-graph `max_total_*` limits
  *   is deferred to Phase 7 (see the `applyBudgetDelta` stub note in
- *   `engine-state.ts`).
+ *   `engine-state.ts`). The stub exists so the engine's call site is stable
+ *   and typed when per-node ceiling logic lands.
  *
  * Invariant: import-only consumer of the *public* `BudgetTracker` API. Imports
  * only the `BudgetTracker` class type and the `BudgetCheckResult` / `UsageRecord`
@@ -75,22 +80,31 @@ export class BudgetBridge {
   /**
    * Cumulative request usage for a graph instance (all nodes dispatched under
    * that graph ID). Read-only — the engine reads it, never writes it.
+   *
+   * NOTE: consumer-facing query, NOT part of the {@link GraphBudgetPort}
+   * contract — the advance engine never invokes this (it touches only
+   * `checkGraphBudget` / `checkNodeBudget` through the port). It exists on the
+   * concrete bridge so status / monitor consumers can read cumulative usage
+   * without reaching into the tracker directly.
    */
   getGraphUsage(graphId: string): UsageRecord {
     return this.tracker.getRequestUsage(graphId);
   }
 
   /**
-   * Per-node budget check.
+   * Per-node budget check — invoked by the engine through
+   * {@link GraphBudgetPort} as a pre-dispatch pre-check
+   * (`engine-advance.ts::_dispatchNode`).
    *
    * STUB (Phase 7): Per-node cumulative consumption enforcement is out of
-   * scope for Phase 1. This always reports `{ exceeded: false }` and exists so
-   * the engine has a stable call site to upgrade once per-node ceiling logic
-   * lands (compare `engine-state.ts:applyBudgetDelta`'s stub note).
+   * scope for Phase 1. This always reports `{ exceeded: false }` — an
+   * always-accept stub — so no dispatch is ever gated. The typed call site
+   * (via `GraphBudgetPort.checkNodeBudget`) is already live; only the ceiling
+   * comparison needs to land here in Phase 7.
    *
    * @param node  The node's runtime state — carries `tokensConsumed`, the
    *              per-node cumulative usage this future check will compare
-   *              against a ceiling.
+   *              against a ceiling. Unused by the current stub.
    */
   checkNodeBudget(_node: NodeRuntimeState): BudgetCheckResult {
     return { exceeded: false };

@@ -253,10 +253,12 @@ function terminalDedupeKey(event: GraphTerminalEvent): string {
  */
 export function buildGraphTerminalText(event: GraphTerminalEvent): string {
   const marker = event.isBlocked ? GRAPH_BLOCKED_MARKER : GRAPH_COMPLETE_MARKER;
-  const { completed, escalate, timeout, blocked, running } = event.nodeStatusSummaries;
+  const { completed, done, cancelled, escalate, timeout, blocked, running } = event.nodeStatusSummaries;
 
   // Compact node-status summary: completed always shown; zero counts omitted.
   const summaryParts: string[] = [`completed=${completed}`];
+  if (done > 0) summaryParts.push(`done=${done}`);
+  if (cancelled > 0) summaryParts.push(`cancelled=${cancelled}`);
   if (escalate > 0) summaryParts.push(`escalated=${escalate}`);
   if (timeout > 0) summaryParts.push(`timeout=${timeout}`);
   if (blocked > 0) summaryParts.push(`blocked=${blocked}`);

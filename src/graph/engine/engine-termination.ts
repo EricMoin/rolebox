@@ -130,6 +130,16 @@ export interface GraphTerminalEvent {
   /** Counts of nodes in each terminal / notable status at emission time. */
   nodeStatusSummaries: {
     completed: number;
+    /**
+     * Nodes flipped to the terminal `done` state (escalate/timeout/cancelled/
+     * completed → done). Kept separate from `completed` (monitor-audit M4) so
+     * a failed/cancelled-then-retired node is never reported as a success.
+     */
+    done: number;
+    /** Nodes cancelled (`cancelled` → `done` predecessors). Visible in the
+     * summary so a cancelled graph is not reported as a clean completion
+     * (monitor-audit L17). */
+    cancelled: number;
     escalate: number;
     timeout: number;
     blocked: number;
@@ -201,8 +211,20 @@ export function checkGraphTermination(
 ): void {
   if (state.phase !== EnginePhase.Executing) return;
 
-  // Tally node statuses for the optional terminal-event summary.
-  const counts = { completed: 0, escalate: 0, timeout: 0, blocked: 0, running: 0 };
+  // Tally node statuses for the optional terminal-event summary. `done` and
+  // `cancelled` are counted in their own buckets (monitor-audit M4 / L17): a
+  // node retired via cascade-cancel or a loop limit/stuck flip lands in `done`
+  // (never in `completed`), and a cancelled node lands in `cancelled` — so the
+  // summary's `completed` stays semantically pure.
+  const counts = {
+    completed: 0,
+    done: 0,
+    cancelled: 0,
+    escalate: 0,
+    timeout: 0,
+    blocked: 0,
+    running: 0,
+  };
   // Scheduler-active nodes — `running` or `ready` — are nodes the engine will
   // progress on its own (a running node resolves via a signal; a ready node
   // is dispatched). Pending nodes are NOT scheduler-active: they merely wait
@@ -214,7 +236,8 @@ export function checkGraphTermination(
   for (const node of state.nodes.values()) {
     switch (node.status) {
       case NodeStatus.Completed: counts.completed += 1; break;
-      case NodeStatus.Done: counts.completed += 1; break;
+      case NodeStatus.Done: counts.done += 1; break;
+      case NodeStatus.Cancelled: counts.cancelled += 1; break;
       case NodeStatus.Escalate: counts.escalate += 1; break;
       case NodeStatus.Timeout: counts.timeout += 1; break;
       case NodeStatus.Blocked:
@@ -258,8 +281,20 @@ export function checkGraphTermination(
     markDirty(state);
   }
 
-  // Standard completion path: no active node remains.
-  if (!hasAnyActive && canTransitionPhase(state, EnginePhase.Complete)) {
+  // Standard completion path: no active node remains AND no deferred completion
+  // is still queued (quiesce-before-drain, M5). A terminating signal that
+  // arrived while the critical section was held is queued to
+  // `pendingCompletions` and re-advanced by the section's `finally` drain —
+  // that deferred re-advance may re-open the graph (a deferred escalate /
+  // answer replay can re-activate nodes), so completing here while the queue is
+  // non-empty would fire [GRAPH COMPLETE] and then re-dispatch nodes in the
+  // `complete` phase. The runtime-deadlock guard below already gates on
+  // `pendingCompletions.length === 0` — this aligns the standard path with it.
+  if (
+    !hasAnyActive &&
+    state.pendingCompletions.length === 0 &&
+    canTransitionPhase(state, EnginePhase.Complete)
+  ) {
     transitionPhase(state, EnginePhase.Complete);
     fireGraphTerminal(state, onGraphTerminal, counts, false, ctx);
   } else if (!hasSchedulerActive && hasBlocked) {
@@ -299,12 +334,27 @@ export function checkGraphTermination(
     // reachable only through a satisfied root that cannot feed it, or a
     // condition-gated downstream whose every incoming edge can never fire).
     //
-    // Escalate every pending node (`pending → escalate` is a legal transition,
-    // node-lifecycle.ts) so the graph quiesces, then transition to complete and
-    // fire the terminal event. Without this the engine would sit in `executing`
-    // forever and [GRAPH COMPLETE] would never fire. Each synthetic escalation
-    // is surfaced through `onSyntheticEscalate` (monitor-audit M1) so the
-    // caller can observe it; a no-op when not supplied.
+    // L9 (02-F4 order hardening): verify the terminal phase transition is legal
+    // BEFORE the irreversible escalate loop. `pending → escalate` cannot be
+    // undone (node-lifecycle.ts), so escalating a graph whose phase machine
+    // would reject `→ complete` would leave the pending nodes irreversibly
+    // escalated AND stuck in `executing` forever (the strict activation above
+    // would then skip the deadlock guard on every later check because
+    // `counts.escalate > 0`). When the transition is impossible, skip the
+    // ENTIRE branch — pending nodes stay pending, the graph stays re-entrant,
+    // and a later check can still recover. Today the phase is guaranteed
+    // `executing` at this point (see the early return above) so the guard
+    // always passes; the reorder keeps that safety even if a future change
+    // makes the phase transition conditional or phase-mutating.
+    if (!canTransitionPhase(state, EnginePhase.Complete)) {
+      return;
+    }
+    // Escalate every pending node so the graph quiesces, then transition to
+    // complete and fire the terminal event. Without this the engine would sit
+    // in `executing` forever and [GRAPH COMPLETE] would never fire. Each
+    // synthetic escalation is surfaced through `onSyntheticEscalate`
+    // (monitor-audit M1) so the caller can observe it; a no-op when not
+    // supplied.
     // Subtask S3: enrich the deadlock reason with the upstream causal chain —
     // every terminal source feeding a pending node, with its errorReason or
     // recorded terminating state. Computed ONCE for the whole deadlock so every
@@ -325,10 +375,8 @@ export function checkGraphTermination(
         }
       }
     }
-    if (canTransitionPhase(state, EnginePhase.Complete)) {
-      transitionPhase(state, EnginePhase.Complete);
-      fireGraphTerminal(state, onGraphTerminal, counts, false, ctx);
-    }
+    transitionPhase(state, EnginePhase.Complete);
+    fireGraphTerminal(state, onGraphTerminal, counts, false, ctx);
   }
 }
 
@@ -353,7 +401,15 @@ export function checkGraphTermination(
 function fireGraphTerminal(
   state: EngineState,
   onGraphTerminal: ((event: GraphTerminalEvent) => void) | undefined,
-  counts: { completed: number; escalate: number; timeout: number; blocked: number; running: number },
+  counts: {
+    completed: number;
+    done: number;
+    cancelled: number;
+    escalate: number;
+    timeout: number;
+    blocked: number;
+    running: number;
+  },
   isBlocked: boolean,
   ctx: TerminationContext,
 ): void {
@@ -382,6 +438,8 @@ function fireGraphTerminal(
     phase: state.phase,
     nodeStatusSummaries: {
       completed: counts.completed,
+      done: counts.done,
+      cancelled: counts.cancelled,
       escalate: counts.escalate,
       timeout: counts.timeout,
       blocked: counts.blocked,
