@@ -1,6 +1,6 @@
 {
   "name": "rolebox",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "OpenCode plugin — define custom AI agent roles via YAML with per-role prompts, models, skills, and permissions",
   "engines": {
     "opencode": "^1.0.0"
@@ -53,7 +53,7 @@
     "test": "bun run test:core && bun run test:tui",
     "test:core": "bun test --isolate --path-ignore-patterns=tests/tui",
     "test:tui": "bun test tests/tui/",
-    "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\""
+    "postinstall": "node -e \"try{require('./dist/cli/postinstall.js')}catch(e){}\" && node scripts/patch-opentui-native-entry.mjs"
   },
   "keywords": [
     "opencode",

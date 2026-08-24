@@ -127,8 +127,19 @@ class LogTransport {
     this.registerDrain();
   }
 
-  private openStream(): WriteStream {
-    return createWriteStream(this.filePath, { flags: "a" });
+  private openStream(): WriteStream | null {
+    // File logging is best-effort: a failed open (e.g. a transient
+    // Bun/macOS fs race under concurrent workers, or a read-only fs) must
+    // degrade to no file logging instead of crashing the process.
+    try {
+      const stream = createWriteStream(this.filePath, { flags: "a" });
+      stream.on("error", () => {
+        this.stream = null;
+      });
+      return stream;
+    } catch {
+      return null;
+    }
   }
 
   private registerDrain(): void {
