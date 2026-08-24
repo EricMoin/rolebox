@@ -21,7 +21,9 @@
  *
  *   1. cancel the dispatch task for each no-longer-needed upstream node
  *      (best-effort via an optional cancel seam — never awaited).
- *   2. those nodes transition `running|ready|pending → cancelled → done`.
+ *   2. those nodes transition `running|ready|pending → cancelled → done` via
+ *      the shared {@link retireCancelledNode} primitive (design §3.3 step 2),
+ *      so the node stops being an "active" node and the graph can terminate.
  *   3. the convergence node proceeds immediately; it does NOT wait for
  *      cancellation acknowledgements.
  *
@@ -39,12 +41,8 @@
 
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import {
-  evaluateJoin,
-  getUpstreamNodeIds,
-  type JoinVerdict,
-} from "./join-evaluator.ts";
-import { markCancelled, markDone } from "./node-lifecycle.ts";
+import { evaluateJoin, getUpstreamNodeIds, type JoinVerdict } from "./join-evaluator.ts";
+import { retireCancelledNode } from "./cancellation.ts";
 
 // ── Ports ──────────────────────────────────────────────────────────────────
 
@@ -98,8 +96,9 @@ export interface CascadeCancelReport {
  *
  * For every cancelled node:
  *   1. the node lifecycle advances `running | ready | pending → cancelled → done`
- *      via {@link markCancelled} / {@link markDone} (design §3.3 step 2), so the
- *      node stops being an "active" node and the graph can terminate.
+ *      via the shared {@link retireCancelledNode} primitive (design §3.3
+ *      step 2), so the node stops being an "active" node and the graph can
+ *      terminate.
  *   2. when a cancel seam is present and the node carries a `dispatchTaskId`,
  *      the dispatch task is cancelled fire-and-forget (`void` the promise).
  *      The canceller never awaits the acknowledgement — it returns immediately
@@ -152,17 +151,21 @@ export function cancelPendingUpstreams(
       continue;
     }
 
-    // Retire the node's lifecycle: running | ready | pending → cancelled → done.
-    markCancelled(state, upstream, `cancelled by join cascade at convergence node "${node.nodeId}"`);
-    markDone(state, upstream);
+    // Retire the node's lifecycle through the shared primitive: running | ready
+    // | pending → cancelled → done, removed from the frontier, plus best-effort
+    // dispatch teardown fire-and-forget (never await the ack — the convergence
+    // node proceeds immediately, §3.3 step 3). The M10 session-slot refund is
+    // deliberately OFF: this lane never touched the graph-level net-live
+    // counter (upstreams here are cancelled before their join ever resolves,
+    // and the refund is owned by the direct-cancel lanes — cancelOne /
+    // cancelNode — which reproduce their exact current behavior).
+    retireCancelledNode(
+      state,
+      upstream,
+      `cancelled by join cascade at convergence node "${node.nodeId}"`,
+      { refund: false, dispatchPort },
+    );
     cancelled.push(sourceId);
-
-    // Best-effort dispatch teardown, fire-and-forget. Never await the ack —
-    // the convergence node proceeds immediately (§3.3 step 3). Called as a
-    // method so class-based ports keep their `this` receiver.
-    if (dispatchPort?.cancelTask && upstream.dispatchTaskId) {
-      void dispatchPort.cancelTask(upstream.dispatchTaskId);
-    }
   }
 
   return { cancelled, alreadyResolved };

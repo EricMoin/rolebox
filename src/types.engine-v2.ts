@@ -183,6 +183,20 @@ export interface NodeRuntimeState {
   dispatchSessionId?: string;
   /** Reference to materialized node output (populated on completion) */
   result?: MaterializedResultRef;
+  /**
+   * Stashed text snapshot of the node's materialized result sidecar, read
+   * ONCE at completion time by `AdvanceEngine._captureNodeResult`
+   * (`src/graph/engine/engine-advance.ts`, subtask 2). Backs the EdgePayload
+   * `result` fallback in `_edgeResultText` so downstream data flow never
+   * performs a synchronous disk read while the advancement critical section
+   * holds the lock.
+   *
+   * OPTIONAL-ADDITIVE — absent until a completed node's sidecar was stashed
+   * (or when the node has no materialized result); the I/O-failure → ''
+   * degradation stashes an empty string. Absent in persisted files authored
+   * before this field existed — both cases deserialize cleanly (undefined).
+   */
+  resultText?: string;
 
   // ── Signals ──
   /** Signals observed for this node (signal type → payload) */

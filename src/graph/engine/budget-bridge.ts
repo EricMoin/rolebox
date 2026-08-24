@@ -51,7 +51,7 @@ import type { GraphDeclaration } from "../../types.graph-v2.ts";
  * Read-only wrapper over {@link BudgetTracker}'s budget-query surface.
  *
  * The `BudgetTracker` instance is injected (via
- * `DispatchBridge.getBudgetTracker()`) — it is never constructed here, and the
+ * `DispatchManager.getBudgetTracker()`) — it is never constructed here, and the
  * engine never mutates budget state through this bridge.
  */
 export class BudgetBridge {

@@ -19,6 +19,7 @@ import {
   propagateEscalate,
 } from "../../src/graph/engine/signal-propagation.ts";
 import { markEscalated, markRunning } from "../../src/graph/engine/node-lifecycle.ts";
+import { clearDirty } from "../../src/graph/engine/engine-persistence.ts";
 
 // ── Controllable fake dispatch port (mirrors engine-advance.test.ts) ───────
 
@@ -272,6 +273,22 @@ describe("propagateEscalate (unit)", () => {
     expect(report.escalated).toContain("C");
     expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
     // The escalation was recorded into C's upstream results for diagnostics.
+    expect(state.nodes.get("C")!.upstreamResults.get("B")!.fromSignal).toBe("escalate");
+  });
+
+  it("marks the state dirty when recording an escalate onto a convergence node (Y11)", () => {
+    const state = buildState(convergeGraph("all"));
+    const node = state.nodes.get("B")!;
+    markEscalated(state, node, "branch B failed");
+    // markEscalated already set the flag — reset it so this asserts that
+    // propagateEscalate → recordEscalate itself marks the state dirty when it
+    // mutates C's upstreamResults / joinSatisfied (Y11 choke-point contract).
+    clearDirty(state);
+
+    propagateEscalate(state, node, { reason: "branch B failed" });
+
+    expect(state.isDirty).toBe(true);
+    // The mutation that triggered the dirty-mark actually landed.
     expect(state.nodes.get("C")!.upstreamResults.get("B")!.fromSignal).toBe("escalate");
   });
 

@@ -1298,11 +1298,15 @@ describe("L7 — artifacts / evidence / convergenceFingerprint adoption", () => 
     pNode.status = NodeStatus.Completed;
     pNode.artifacts = ["out/a.txt", "out/b.txt"];
     pNode.evidence = ["ev/cite.md"];
+    pNode.resultText = "stashed sidecar text";
     const target = buildState(singleNodeGraph(), "adopt-l7");
     adoptPriorNodeStates(target, prior);
     const tNode = target.nodes.get("A")!;
     expect(tNode.artifacts).toEqual(["out/a.txt", "out/b.txt"]);
     expect(tNode.evidence).toEqual(["ev/cite.md"]);
+    // Subtask 2: the stashed result-text snapshot rides along (adopted nodes
+    // keep their EdgePayload `result` fallback without a sidecar re-read).
+    expect(tNode.resultText).toBe("stashed sidecar text");
     // Defensive copies — mutating the target arrays does not alias the prior.
     tNode.artifacts!.push("out/c.txt");
     expect(prior.nodes.get("A")!.artifacts).toEqual(["out/a.txt", "out/b.txt"]);

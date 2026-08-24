@@ -144,6 +144,10 @@ export interface EngineRuntime {
    * window → re-emit its signal, still-live → re-subscribe `onTaskTerminated`.
    * Rebuilds the frontier and drains the deferred completions. A no-op when no
    * persisted state exists (first run) or no persistence is configured.
+   *
+   * Rejects when the persisted state file exists but cannot be read (any
+   * non-ENOENT read failure): an unreadable state file is an explicit error,
+   * never a silent clean start (review 05-F6/L22).
    */
   recover(): Promise<void>;
 
@@ -546,7 +550,14 @@ function snapshotEngineState(state: EngineState): EngineState {
   return {
     phase: state.phase,
     graphId: state.graphId,
-    graphDeclaration: state.graphDeclaration,
+    // Y4: the graph declaration is a live, mutable object (the imperative
+    // toolset mutates it on every construction step) — deep-clone it so a
+    // snapshot consumer's in-place node/edge/loop/budget mutation can never
+    // alias the live declaration (status()'s deep-enough-clone promise,
+    // index.ts:166-174). GraphDeclaration is plain JSON data, so
+    // structuredClone covers every nested field (nodes/edges/loop_groups/
+    // budget/termination) for free.
+    graphDeclaration: structuredClone(state.graphDeclaration),
     nodes: new Map(
       [...state.nodes].map(([id, n]) => [id, cloneNode(n)]),
     ),
@@ -982,7 +993,10 @@ class EngineRuntimeImpl implements EngineRuntime {
    * failure-resilience.md §5.1-§5.6):
    *
    * 1. Load the persisted state — a missing/corrupt/version-mismatched file
-   *    returns `null` and recovery is a clean no-op (first run).
+   *    returns `null` and recovery is a clean no-op (first run). A non-ENOENT
+   *    read failure (unreadable-but-present file) propagates out of `recover()`
+   *    — recovery fails explicitly instead of silently re-provisioning a graph
+   *    whose completed nodes would be re-executed (review 05-F6/L22).
    * 2. Adopt the loaded state in place (the advance engine keeps referencing
    *    this object), clear the stale critical-section state the crashed
    *    process left behind (a stuck `advancingLock`, orphaned deferred
@@ -1002,20 +1016,15 @@ class EngineRuntimeImpl implements EngineRuntime {
    */
   async recover(): Promise<void> {
     if (!this.persistence) return; // no persistence → nothing to recover
-    // Total hydration: `load()` never throws (corrupt / structurally-invalid
-    // files return `null`), but the load is contained anyway so a bad state
-    // file can never escape recovery as a throw — a permanently unrecoverable
-    // graph would otherwise re-fail on every restart. A load failure degrades
-    // to a clean no-op (fresh start), matching the corrupt-to-null contract.
-    let loaded: EngineState | null;
-    try {
-      loaded = this.persistence.load(this.state.graphId);
-    } catch (err) {
-      logWarn(
-        `engine-recover: state load failed for graph "${this.state.graphId}": ${String(err)}`,
-      );
-      return;
-    }
+    // `load()` returns `null` for a missing / corrupt / version-mismatched
+    // file (clean start — first run) and rethrows any NON-ENOENT read failure
+    // (an unreadable-but-present state file is an explicit error, never a
+    // silent clean start — engine-persistence.ts:571-576). Let that error
+    // propagate: recovery fails explicitly so the caller surfaces it instead
+    // of silently re-provisioning a graph whose completed nodes would be
+    // re-executed (review 05-F6/L22). ENOENT / corrupt / version-mismatch
+    // remain clean no-ops.
+    const loaded = this.persistence.load(this.state.graphId);
     if (!loaded) return; // clean start (first run / version mismatch)
 
     // Adopt the persisted state in place; clear the crashed process's stale

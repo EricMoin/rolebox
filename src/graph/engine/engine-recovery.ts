@@ -66,6 +66,7 @@ import type {
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier, applyBudgetDelta } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
 import {
+  clearNonCriticalDirty,
   cloneCheckpointHistory,
   markDirty,
   markNonCriticalDirty,
@@ -757,6 +758,10 @@ export function adoptPriorNodeStates(
     node.prompt = prev.prompt; // preserves modify_prompt mutations
     node.signalsObserved = { ...prev.signalsObserved };
     node.result = prev.result ? { ...prev.result } : undefined;
+    // OPTIONAL-ADDITIVE (subtask 2): the stashed materialized-result text rides
+    // along so adopted nodes keep their EdgePayload `result` fallback without a
+    // sidecar re-read. JSON-primitive string — no defensive copy needed.
+    node.resultText = prev.resultText;
     node.dispatchTaskId = prev.dispatchTaskId;
     node.dispatchSessionId = prev.dispatchSessionId;
     node.errorReason = prev.errorReason;
@@ -873,8 +878,8 @@ export function adoptPriorNodeStates(
   // Node-state adoption is a critical transition — the caller persists
   // synchronously. Reset the non-critical flag (its churn is included in that
   // write) so the recovered runtime starts clean.
-  target.isDirty = true;
-  target.isNonCriticalDirty = false;
+  markDirty(target);
+  clearNonCriticalDirty(target);
 }
 
 /**

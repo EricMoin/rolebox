@@ -6,9 +6,8 @@
  *
  * A read-only seam over {@link DispatchManager}. The graph engine uses this
  * bridge as its *only* touchpoint into the dispatch subsystem. It wraps the
- * public methods (`launch`, `executeSync`, `onTaskTerminated`,
- * `removeTaskTerminatedListener`, `getResult`, `cancelTask`, `getTasksByParent`,
- * `getBudgetTracker`) with proper TS types
+ * public methods (`launch`, `onTaskTerminated`, `removeTaskTerminatedListener`,
+ * `getTask`, `cancelTask`, `getSessionUsage`) with proper TS types
  * so the engine never reaches into `DispatchManager` internals directly.
  *
  * Invariant: this module is an **import-only consumer** of the dispatch
@@ -24,7 +23,7 @@
 
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { DispatchInput, DispatchTask } from "../../dispatch/types.ts";
-import type { BudgetTracker, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
+import type { UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
 import type { NodeRuntimeState } from "../../types.engine-v2.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -49,19 +48,6 @@ export interface DispatchParentContext {
    * and keep dispatch-layer notifications exactly as before.
    */
   graphScoped?: boolean;
-}
-
-/**
- * Structured payload returned by `DispatchManager.getResult`.
- * Mirrors the inline return type at `src/dispatch/core/manager.ts:266-275`.
- */
-export interface DispatchResultPayload {
-  kind: "ok" | "expired" | "not_found" | "fetch_error";
-  text: string;
-  resultText: string;
-  hadFence: boolean;
-  totalChars: number;
-  error?: string;
 }
 
 /** Options for building the parent context of a graph-level dispatch. */
@@ -125,11 +111,6 @@ export class DispatchBridge {
     return this.manager.launch(input, parentContext);
   }
 
-  /** Dispatch a task synchronously (blocks until it completes, returns its text). */
-  executeSync(input: DispatchInput, parentContext: DispatchParentContext): Promise<string> {
-    return this.manager.executeSync(input, parentContext);
-  }
-
   /** Register a one-time listener fired when a task enters a terminal state. */
   onTaskTerminated(
     taskId: string,
@@ -163,24 +144,9 @@ export class DispatchBridge {
     return this.manager.getTask(taskId);
   }
 
-  /** Fetch the materialized output of a completed task. */
-  getResult(taskId: string): Promise<DispatchResultPayload> {
-    return this.manager.getResult(taskId);
-  }
-
   /** Cancel a running task. Returns `true` if the cancellation was issued. */
   cancelTask(taskId: string): Promise<boolean> {
     return this.manager.cancelTask(taskId);
-  }
-
-  /** List the tasks dispatched by the given parent session. */
-  getTasksByParent(parentSessionId: string): DispatchTask[] {
-    return this.manager.getTasksByParent(parentSessionId);
-  }
-
-  /** Access the shared budget tracker (read-only budget queries live in `budget-bridge.ts`). */
-  getBudgetTracker(): BudgetTracker {
-    return this.manager.getBudgetTracker();
   }
 
   /**

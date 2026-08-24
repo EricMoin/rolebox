@@ -49,7 +49,12 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { EnginePhase } from "../../constants.ts";
+import {
+  ENGINE_PHASE_VALUES,
+  JOIN_STRATEGY_VALUES,
+  NODE_STATUS_VALUES,
+} from "../../constants.ts";
+import type { EnginePhase, NodeStatus } from "../../constants.ts";
 import type { GraphDeclaration } from "../../types.graph-v2.ts";
 import type {
   CheckpointRecord,
@@ -166,6 +171,10 @@ export interface NodeRuntimeStateDTO {
     fetchError?: string;
     materializedAt: number;
   };
+  // OPTIONAL-ADDITIVE (subtask 2): stashed materialized-result text snapshot —
+  // JSON-primitive string, absent → undefined. Mirrors the liveness/artifacts
+  // pattern (files authored before the field existed lack it).
+  resultText?: string;
   signalsObserved: Record<string, unknown>;
   sessionsSpawned: number;
   tokensConsumed: { inputTokens: number; outputTokens: number; cost: number };
@@ -302,6 +311,11 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
       // liveness carrier so the DTO never aliases the live state's object.
       // Absent → undefined (files authored before the field existed).
       liveness: n.liveness ? { ...n.liveness } : undefined,
+      // OPTIONAL-ADDITIVE (subtask 2): the stashed result-text snapshot is a
+      // plain JSON-primitive string, carried by `...rest` above; the explicit
+      // line documents the persistence contract — recovered/adopted nodes keep
+      // their stashed text. Absent → undefined (no fabrication).
+      resultText: n.resultText,
       upstreamResults: ur,
     };
   }
@@ -350,6 +364,12 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
 
 /** Hydrate a live {@link EngineState} from a versioned, plain DTO. */
 export function deserializeEngineState(file: EnginePersistenceFile): EngineState {
+  // R2 defensive gate: direct callers cannot hydrate out-of-vocabulary enums.
+  // This function's contract returns a state (not `null`), so a violation
+  // THROWS — the never-throw loader (`loadEngineStateFromJson`) pre-validates
+  // and maps the same violation to `null` instead, keeping its containment
+  // try/catch total (see below).
+  assertValidEnums(file);
   const nodes = new Map<string, NodeRuntimeState>();
   for (const [id, dto] of Object.entries(file.nodes)) {
     const upstreamResults = new Map<string, EdgePayload>();
@@ -368,6 +388,11 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
       // liveness carrier back as a fresh object (no shared reference with the
       // parsed DTO). Absent → undefined — old v2 files stay loadable.
       liveness: rest.liveness ? { ...rest.liveness } : undefined,
+      // OPTIONAL-ADDITIVE (subtask 2): carry the stashed result-text snapshot
+      // back (a JSON-primitive string — no clone needed). Absent → undefined —
+      // old v2 files stay loadable and the EdgePayload result fallback yields
+      // '' for them (the stashed text is stashed again at next completion).
+      resultText: rest.resultText,
       upstreamResults,
     } as NodeRuntimeState);
   }
@@ -566,7 +591,11 @@ export class EnginePersistence {
    * - the schema version does not match `ENGINE_PERSISTENCE_VERSION`;
    * - the file is structurally invalid / missing a required field (total
    *   hydration — this method NEVER throws, so `recover()` can rely on `null`
-   *   meaning "no valid persisted state").
+   *   meaning "no valid persisted state");
+   * - the file carries an out-of-vocabulary enum value — `node.status` /
+   *   `node.joinStrategy` / `file.phase` not in their runtime vocabularies
+   *   (R2: a corrupt-but-shape-valid file must not hydrate and crash later in
+   *   `canTransitionNode`).
    *
    * Non-ENOENT READ failures are NOT clean starts (review 05-F6 / L22): an
    * unreadable-but-present state file (EACCES, EISDIR, ...) is rethrown so the
@@ -656,9 +685,10 @@ export class EnginePersistence {
  * without touching the filesystem.
  *
  * **Total hydration**: this function NEVER throws. A file that is corrupt JSON,
- * a schema-version mismatch, missing a required field, or structurally invalid
- * at any deeper level returns `null` (the documented corrupt-to-null contract
- * in the class header — `load()` doc at `EnginePersistence.load`). A
+ * a schema-version mismatch, missing a required field, structurally invalid
+ * at any deeper level, or carrying an out-of-vocabulary enum value (`status` /
+ * `joinStrategy` / `phase`) returns `null` (the documented corrupt-to-null
+ * contract in the class header — `load()` doc at `EnginePersistence.load`). A
  * parseable-but-field-incomplete file must never make recovery throw, because
  * that would leave the graph permanently unrecoverable (re-failing every
  * restart). Missing required fields are treated as CORRUPT, not as a
@@ -686,10 +716,15 @@ export function loadEngineStateFromJson(
   // here keeps the corrupt-to-null contract total (never throws).
   if (!hasRequiredShape(file)) return null;
   try {
+    // R2: reject out-of-vocabulary enums BEFORE hydration — a
+    // corrupt-but-shape-valid file (`status:'bogus'`) must surface as `null`
+    // (clean start), never as a state that crashes later in canTransitionNode.
+    assertValidEnums(file);
     return deserializeEngineState(file as EnginePersistenceFile);
   } catch {
-    // Deep structural invalidity (malformed nested shapes) is still corrupt —
-    // contained to `null`, never thrown past the loader.
+    // Deep structural invalidity (malformed nested shapes) or an
+    // out-of-vocabulary enum value is still corrupt — contained to `null`,
+    // never thrown past the loader.
     return null;
   }
 }
@@ -727,6 +762,66 @@ function hasRequiredShape(file: Partial<EnginePersistenceFile>): boolean {
 /** A JSON object (non-null, non-array). */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// ── Enum vocabulary validation (R2) ─────────────────────────────────────────
+
+/**
+ * Whether a persisted `joinStrategy` value is a member of the runtime
+ * vocabulary: one of {@link JOIN_STRATEGY_VALUES} (`"all"` / `"any"` /
+ * `"quorum"`) or a `{ quorum: number }` object whose quorum is a positive
+ * integer. Mirrors {@link ResolvedJoinStrategy} in join-evaluator.ts — the
+ * object form is what `resolveJoinStrategy` produces for a `quorum:N` config,
+ * and `evaluateJoin` reads only `.quorum` off the object at runtime.
+ */
+function isValidJoinStrategy(v: unknown): boolean {
+  if (typeof v === "string") {
+    return (JOIN_STRATEGY_VALUES as readonly string[]).includes(v);
+  }
+  if (isPlainObject(v) && "quorum" in v) {
+    const q = (v as { quorum: unknown }).quorum;
+    return typeof q === "number" && Number.isInteger(q) && q > 0;
+  }
+  return false;
+}
+
+/**
+ * Assert that every persisted enum-valued field is a member of its vocabulary.
+ *
+ * R2 (corrupt-but-shape-valid files): `deserializeEngineState` previously
+ * hydrated `status: "bogus"` / `joinStrategy: "bogus"` / `phase: "bogus"`
+ * unchecked, crashing LATER with a TypeError in `canTransitionNode`
+ * (node-lifecycle.ts — `VALID_NODE_TRANSITIONS[from]` on `undefined`). This
+ * gate rejects out-of-vocabulary values up front:
+ * - every node `status` ∈ {@link NODE_STATUS_VALUES};
+ * - every node `joinStrategy` ∈ {@link JOIN_STRATEGY_VALUES} or a
+ *   `{ quorum: number }` object with a positive integer quorum;
+ * - `file.phase` ∈ {@link ENGINE_PHASE_VALUES}.
+ *
+ * Throws a descriptive Error on the first violation, so
+ * `deserializeEngineState` (whose contract returns a hydrated state, not
+ * `null`) cannot silently hydrate an invalid enum. The never-throw loader
+ * calls this BEFORE deserializing and maps any violation to `null` (clean
+ * start) — see `loadEngineStateFromJson`.
+ */
+function assertValidEnums(file: Partial<EnginePersistenceFile>): void {
+  if (!ENGINE_PHASE_VALUES.includes(file.phase as EnginePhase)) {
+    throw new Error(
+      `engine-persist: phase "${String(file.phase)}" is not a valid EnginePhase`,
+    );
+  }
+  for (const [id, node] of Object.entries(file.nodes ?? {})) {
+    if (!NODE_STATUS_VALUES.includes(node.status as NodeStatus)) {
+      throw new Error(
+        `engine-persist: node "${id}" status "${String(node.status)}" is not a valid NodeStatus`,
+      );
+    }
+    if (!isValidJoinStrategy(node.joinStrategy)) {
+      throw new Error(
+        `engine-persist: node "${id}" joinStrategy is not valid (expected one of ${JOIN_STRATEGY_VALUES.join("/")} or a { quorum: positive-int } object)`,
+      );
+    }
+  }
 }
 
 /** Minimal, dependency-free warning logger (no createSubLogger import cycle). */

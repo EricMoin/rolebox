@@ -80,6 +80,7 @@ import {
   removeFromFrontier,
 } from "./engine-state.ts";
 import { markReady } from "./node-lifecycle.ts";
+import { markDirty } from "./engine-persistence.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -293,7 +294,7 @@ export function resetNodeForRetry(
   if (state.phase === EnginePhase.Complete) {
     state.phase = EnginePhase.Executing;
     state.updatedAt = Date.now();
-    state.isDirty = true;
+    markDirty(state);
   }
 
   return {

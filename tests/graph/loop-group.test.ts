@@ -184,6 +184,32 @@ describe("convergence fingerprinting", () => {
     expect(fingerprintPayload("  same issue  ")).toBe("same issue");
     expect(fingerprintPayload("same issue")).toBe("same issue");
   });
+
+  it("bounds canonicalization on deeply nested payloads instead of overflowing the stack", () => {
+    // 10k-deep nested array — unbounded recursion produced a RangeError
+    // (confirmed at ~20k depth pre-fix) and a giant string at 10k.
+    let deep: unknown = [];
+    for (let i = 0; i < 10_000; i++) deep = [deep];
+    expect(() => fingerprintPayload(deep)).not.toThrow();
+    const fp = fingerprintPayload(deep);
+    expect(typeof fp).toBe("string");
+    expect(fp.length).toBeLessThan(1000);
+
+    // Same prefix depth → identical bounded fingerprint (stability at the bound).
+    let deep2: unknown = [];
+    for (let i = 0; i < 10_000; i++) deep2 = [deep2];
+    expect(fingerprintPayload(deep2)).toBe(fp);
+
+    // Deep object nesting is bounded too.
+    let deepObj: unknown = { leaf: true };
+    for (let i = 0; i < 10_000; i++) deepObj = { nested: deepObj };
+    expect(() => fingerprintPayload(deepObj)).not.toThrow();
+    expect(fingerprintPayload(deepObj).length).toBeLessThan(2000);
+
+    // The truncation marker is a bare token — it can never be produced by
+    // JSON.stringify of real content (strings are always quoted).
+    expect(fp).toContain("...<truncated>");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

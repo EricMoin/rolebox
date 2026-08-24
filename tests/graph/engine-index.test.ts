@@ -584,6 +584,34 @@ describe("engine.status()", () => {
     expect(s2.signalLedger.get("A")!.history).not.toBe(s1.signalLedger.get("A")!.history);
     expect(s2.loopGroups.get("lg")!.rounds).not.toBe(s1.loopGroups.get("lg")!.rounds);
   });
+
+  it("deep-clones graphDeclaration (in-place node/edge mutation does not affect the live engine) [Y4]", async () => {
+    const fake = new FakeDispatch();
+    const engine = createEngine(linearGraph(), { dispatch: fake });
+    engine.provision();
+
+    const s1 = engine.status();
+    // The snapshot must carry its own declaration object — never the live
+    // reference: identity differs between snapshots (and from the live
+    // state), which a reference-shared `graphDeclaration: state.graphDeclaration`
+    // would violate.
+    expect(s1.graphDeclaration).not.toBe(engine.status().graphDeclaration);
+
+    // Tamper with the snapshot's declaration in place: change a node's agent
+    // and push a bogus edge. Pre-fix these would alias the live declaration.
+    const origAgent = s1.graphDeclaration.nodes[0].agent;
+    const origEdgeCount = s1.graphDeclaration.edges.length;
+    s1.graphDeclaration.nodes[0].agent = "tampered-agent";
+    s1.graphDeclaration.edges.push({ from: "GHOST", to: "C", type: "always" });
+
+    // A fresh snapshot reads the live declaration — a shared reference would
+    // observe the tampered values, so the assertions prove the live engine's
+    // graphDeclaration is unchanged.
+    const s2 = engine.status();
+    expect(s2.graphDeclaration).not.toBe(s1.graphDeclaration);
+    expect(s2.graphDeclaration.nodes[0].agent).toBe(origAgent);
+    expect(s2.graphDeclaration.edges).toHaveLength(origEdgeCount);
+  });
 });
 
 // ── Phase-3 stubs: recover() / cancel() resolve without throwing ───────────
@@ -808,14 +836,14 @@ describe("engine.dispose() cancels the pending debounced persistence write (M14)
 
 // ── recover(): non-ENOENT load failures surface explicitly (review 05-F6/L22) ──
 
-describe("engine.recover() contains non-ENOENT load failures", () => {
-  it("does not throw and does not treat an unreadable state file as a clean start", async () => {
+describe("engine.recover() surfaces non-ENOENT load failures", () => {
+  it("rejects with the underlying error for an unreadable (EISDIR) state path", async () => {
     const dir = mkdtempSync(join(tmpdir(), "engine-recover-eisdir-"));
     try {
       // A DIRECTORY at the state-file path → readFileSync fails with EISDIR
       // (the file "exists" but is unreadable). recover() must NOT silently
-      // clean-start (re-provisioning completed nodes); it surfaces the failure
-      // through its own catch and returns.
+      // clean-start (re-provisioning completed nodes) — the non-ENOENT error
+      // propagates out of recover() so the caller surfaces it explicitly.
       const path = engineStatePath(dir, "g-eisdir");
       mkdirSync(path, { recursive: true });
 
@@ -824,8 +852,24 @@ describe("engine.recover() contains non-ENOENT load failures", () => {
         dispatch: new FakeDispatch(),
         stateDir: dir,
       });
+      await expect(engine.recover()).rejects.toMatchObject({ code: "EISDIR" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a missing state file still resolves as a clean start (ENOENT → null)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-recover-missing-"));
+    try {
+      // No state file at all → load() returns null (ENOENT) and recovery is a
+      // clean no-op. The engine stays fresh — no state adopted, nothing
+      // dispatched.
+      const engine = createEngine(singleNodeGraph(), {
+        graphId: "g-missing",
+        dispatch: new FakeDispatch(),
+        stateDir: dir,
+      });
       await expect(engine.recover()).resolves.toBeUndefined();
-      // No state was adopted — the engine stays fresh.
       expect(engine.status().phase).toBe(EnginePhase.Idle);
     } finally {
       rmSync(dir, { recursive: true, force: true });

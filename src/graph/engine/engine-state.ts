@@ -585,21 +585,43 @@ export function getNode(state: EngineState, nodeId: string): NodeRuntimeState {
 // ── Convergence-output fingerprinting (stuck detection) ─────────────────────
 
 /**
+ * Fixed depth bound for canonicalization. Signal payloads are agent-controlled
+ * and can nest arbitrarily deep; unbounded recursion would overflow the call
+ * stack (RangeError). At this depth canonicalization stops and emits a stable
+ * truncation marker instead of recursing further — never throws.
+ */
+const CANONICALIZE_MAX_DEPTH = 32;
+
+/**
+ * Stable marker emitted when canonicalization reaches {@link CANONICALIZE_MAX_DEPTH}.
+ * Serialized as a bare token (never valid JSON output — JSON.stringify always
+ * quotes strings), so it cannot collide with any real payload content.
+ */
+const CANONICALIZE_TRUNCATED = "...<truncated>";
+
+/**
  * Stable, order-insensitive canonical string for an arbitrary JSON payload.
  *
  * Keys are sorted recursively so `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce
  * the same fingerprint — the convergence output's *content* is what matters for
  * staleness, not the incidental key order the reviewer happened to emit.
+ *
+ * Recursion is bounded by {@link CANONICALIZE_MAX_DEPTH}: payloads nested deeper
+ * than that are truncated with {@link CANONICALIZE_TRUNCATED}. Deeply nested
+ * agent-controlled payloads therefore fingerprint to a bounded string instead of
+ * overflowing the stack, and all structures sharing a prefix down to the bound
+ * fingerprint identically.
  */
-function canonicalize(value: unknown): string {
+function canonicalize(value: unknown, depth = 0): string {
+  if (depth >= CANONICALIZE_MAX_DEPTH) return CANONICALIZE_TRUNCATED;
   if (value === null || value === undefined) return "null";
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalize).join(",")}]`;
+    return `[${value.map((v) => canonicalize(v, depth + 1)).join(",")}]`;
   }
   if (typeof value === "object") {
     const entries = Object.keys(value as Record<string, unknown>)
       .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k])}`);
+      .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k], depth + 1)}`);
     return `{${entries.join(",")}}`;
   }
   return JSON.stringify(value);

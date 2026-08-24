@@ -26,6 +26,7 @@ import { JoinStrategy } from "../../constants.ts";
 import type { EdgeDeclaration, JoinConfig } from "../../types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import type { EdgePayload } from "../../types.engine-v2.ts";
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Join strategy resolution ────────────────────────────────────────────────
 
@@ -362,7 +363,7 @@ export function collectUpstreamResults(
 ): void {
   node.upstreamResults.set(edgePayload.fromNode, edgePayload);
   node.joinSatisfied = joinSatisfied(state, node);
-  state.isDirty = true;
+  markDirty(state);
 }
 
 // Upstream results are recorded per source by {@link collectUpstreamResults}

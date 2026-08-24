@@ -38,8 +38,6 @@ import type { EdgePayload, EngineState, NodeRuntimeState } from "../../types.eng
 import {
   canTransitionNode,
   markCompleted,
-  markDone,
-  markCancelled,
   markEscalated,
   markReady,
 } from "./node-lifecycle.ts";
@@ -48,8 +46,9 @@ import {
   getUpstreamNodeIds,
   joinSatisfied,
 } from "./join-evaluator.ts";
-import { addToFrontier, applyBudgetDelta, removeFromFrontier } from "./engine-state.ts";
+import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
+import { retireCancelledNode } from "./cancellation.ts";
 import { recordSignalToLedger } from "./signal-bridge.ts";
 import {
   deriveNodeArtifacts,
@@ -360,12 +359,12 @@ export function resetRejectedUpstreams(
 /**
  * Cancel a node's lifecycle (`pending | ready | running → cancelled → done`) and,
  * when a cancel seam is present and the node carries a dispatch task, tear it
- * down fire-and-forget (never awaited). Reuses the cascade-canceller convention.
- *
- * M10 session-slot refund: a RUNNING node with a live dispatch task decrements
- * the graph-level `sessionsSpawned` counter synchronously — the termination
- * callback (`engine-recovery.ts:402`) bails on the now-`done` node, so without
- * this the partial-approve prune lane would leak the slot (same rationale as
+ * down fire-and-forget (never awaited). Delegates to the shared
+ * {@link retireCancelledNode} primitive with the M10 session-slot refund ON —
+ * a RUNNING node with a live dispatch task decrements the graph-level
+ * `sessionsSpawned` counter synchronously (the termination callback
+ * `engine-recovery.ts:416` bails on the now-`done` node, so without this the
+ * partial-approve prune lane would leak the slot — same rationale as
  * `cancelOne` in `cancellation.ts`).
  */
 function cancelNode(
@@ -373,14 +372,10 @@ function cancelNode(
   node: NodeRuntimeState,
   dispatchPort?: CancelDispatchPort,
 ): void {
-  if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
-  if (node.status === NodeStatus.Running && node.dispatchTaskId) {
-    applyBudgetDelta(state, { sessions: -1 });
-  }
-  markCancelled(state, node, `cancelled by partial-approval pruning at "${state.graphId}"`);
-  markDone(state, node);
-  removeFromFrontier(state, node.nodeId);
-  if (dispatchPort?.cancelTask && node.dispatchTaskId) {
-    void dispatchPort.cancelTask(node.dispatchTaskId);
-  }
+  retireCancelledNode(
+    state,
+    node,
+    `cancelled by partial-approval pruning at "${state.graphId}"`,
+    { refund: true, dispatchPort },
+  );
 }

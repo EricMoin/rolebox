@@ -425,6 +425,21 @@ function logWarn(message: string): void {
   console.warn(message);
 }
 
+/**
+ * Bound on the number of timer-turn attempts a user-triggered control-path
+ * operation (approve / reject / partial-approve / retry) makes to acquire the
+ * advancement lock before surfacing an explicit error (see
+ * {@link AdvanceEngine._runControlOperation}). Each attempt yields to a
+ * macrotask boundary so an in-flight critical section can exit and drain; a
+ * healthy engine frees the lock within a few turns (`_runCriticalSection`'s
+ * `finally` releases before `_drainDeferred` re-acquires per deferred
+ * completion). With a ~1ms turn this bounds the whole wait to roughly half a
+ * second — generous over the legitimate case (a section only holds the lock
+ * for the dispatch launches it awaits) while surfacing a genuinely stuck lock
+ * promptly. The bound is a safety net, not the normal path.
+ */
+const CONTROL_PATH_LOCK_RETRY_ATTEMPTS = 500;
+
 export type { GraphTerminalEvent } from "./engine-termination.ts";
 export type { TerminationContext } from "./engine-termination.ts";
 
@@ -700,12 +715,67 @@ export class AdvanceEngine {
   }
 
   /**
+   * Run a user-triggered control-path operation (approve / reject /
+   * partial-approve / retry) under the advancement lock, deferring the WHOLE
+   * operation when the lock is held by an in-flight critical section.
+   *
+   * The four imperative control paths call this instead of invoking
+   * `_runCriticalSection` directly: `_runCriticalSection`'s `finally`
+   * unconditionally releases the lock (engine-state.ts:544-547), so a section
+   * entered WITHOUT acquiring it would release an owner-less lock — letting a
+   * signal-driven section interleave mid-body instead of deferring. Here,
+   * `acquireAdvancingLock(this.state)` strictly precedes the critical section,
+   * mirroring {@link dispatchReady} and {@link _advanceSignal}.
+   *
+   * Unlike the signal path, which defers by queueing a pending completion, a
+   * control-path operation carries a user decision that must NEVER be lost —
+   * silently dropping it or running it without the lock would both corrupt the
+   * approval / retry semantics. When `acquireAdvancingLock` returns `false`
+   * (an in-flight section holds the lock), this awaits a macrotask boundary
+   * (a 0ms timer) so the section's `finally` can release the lock and
+   * drain, then re-attempts. The retry is bounded by
+   * {@link CONTROL_PATH_LOCK_RETRY_ATTEMPTS}; on exhaustion an explicit error
+   * is surfaced rather than a silent drop or an unlocked mutation.
+   */
+  private async _runControlOperation<T>(work: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      if (acquireAdvancingLock(this.state)) {
+        return this._runCriticalSection(work);
+      }
+      if (attempt >= CONTROL_PATH_LOCK_RETRY_ATTEMPTS) {
+        throw new Error(
+          `engine: control-path operation could not acquire the advancing lock ` +
+            `after ${CONTROL_PATH_LOCK_RETRY_ATTEMPTS} attempts ` +
+            `(graph "${this.state.graphId}")`,
+        );
+      }
+      // Macrotask boundary: yields to the in-flight section's `finally`, which
+      // releases the lock BEFORE `_drainDeferred` re-acquires it per deferred
+      // completion — so the next attempt races only genuine lock transitions.
+      // A TIMER (not `setImmediate`) is used deliberately: `setImmediate`
+      // callbacks queued from within a check-phase callback are processed in
+      // the SAME phase, so a `setImmediate`-based retry chain would hot-spin
+      // through the whole bound in one event-loop turn (starving the very
+      // section it waits for). A 0ms timer lands in a fresh timer phase, giving
+      // the held section's release + drain a genuine turn to complete first.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  /**
    * Body shared by every critical section: ensure the engine is `executing`,
    * run the work, then — in `finally` — release the lock and drain any
    * completions deferred while the section was held. Resolves with the work's
    * return value (`T`), so callers like `retryNode` can report what the
    * section produced (e.g. a retry count). Existing `() => Promise<void>`
    * callers are unaffected.
+   *
+   * INVARIANT: every `_runCriticalSection` invocation holds the advancement
+   * lock. The callers acquire it beforehand (`dispatchReady`,
+   * `_advanceSignal`, and the four control-path methods via
+   * {@link _runControlOperation}) and this method's `finally` releases it —
+   * ownership is never tracked inside the section itself, and no caller may
+   * invoke it without first acquiring.
    */
   private async _runCriticalSection<T>(
     work: () => Promise<T>,
@@ -1050,24 +1120,62 @@ export class AdvanceEngine {
    *
    * Called after `markCompleted` in every completion path (answer / revise /
    * approval-resume) so `node.result` is populated before downstream
-   * consumers (graph_status include_output, export_path) read it.
+   * consumers (graph_status include_output, export_path) read it. Also stashes
+   * the materialized sidecar text once (see {@link _stashResultText}) so the
+   * EdgePayload `result` fallback never touches disk inside the critical
+   * section (subtask 2).
    */
   private _captureNodeResult(node: NodeRuntimeState): void {
-    if (node.result) return; // already captured (prior run, adoptPrior, etc.)
-    const taskId = node.dispatchTaskId;
-    if (!taskId) return;
-    const port = this.dispatchPort as {
-      getTask?: (taskId: string) => DispatchTask | undefined;
-    };
-    if (!port.getTask) return;
-    try {
-      const task = port.getTask(taskId);
-      if (task?.result && !task.result.fetchError) {
-        node.result = { ...task.result };
-        markDirty(this.state);
+    if (!node.result) {
+      const taskId = node.dispatchTaskId;
+      if (taskId) {
+        const port = this.dispatchPort as {
+          getTask?: (taskId: string) => DispatchTask | undefined;
+        };
+        if (port.getTask) {
+          try {
+            const task = port.getTask(taskId);
+            if (task?.result && !task.result.fetchError) {
+              node.result = { ...task.result };
+              markDirty(this.state);
+            }
+          } catch {
+            // best-effort — a throwing getTask must never corrupt advancement
+          }
+        }
       }
+    }
+    this._stashResultText(node);
+  }
+
+  /**
+   * Stash the node's materialized-result sidecar text ONCE at completion time
+   * (subtask 2 — Y1: synchronous `readFileSync` removed from the advancement
+   * critical section). `_edgeResultText` returns this stashed text for
+   * downstream EdgePayloads instead of reading the sidecar while the advancing
+   * lock is held.
+   *
+   * Best-effort, preserving the removed `_edgeResultText` read's I/O-failure →
+   * '' degradation: a missing/unreadable sidecar stashes `''` (never throws
+   * into advancement). Idempotent — skips when already stashed, so the sidecar
+   * is read at most once per node lifetime.
+   */
+  private _stashResultText(node: NodeRuntimeState): void {
+    const ref = node.result;
+    if (
+      node.resultText !== undefined ||
+      !ref ||
+      ref.totalChars <= 0 ||
+      ref.fetchError
+    ) {
+      return;
+    }
+    try {
+      node.resultText = readFileSync(ref.sidecarPath, "utf8");
+      markDirty(this.state);
     } catch {
-      // best-effort — a throwing getTask must never corrupt advancement
+      node.resultText = ""; // I/O-failure → '' degradation preserved
+      markDirty(this.state);
     }
   }
 
@@ -1430,34 +1538,31 @@ export class AdvanceEngine {
    * 3. Missing / empty / synthetic-`__inferred` payloads — the worker never
    *    emitted genuine output, or the engine inferred an answer on its behalf
    *    (`engine-recovery.ts` `{ __inferred: true }`) — → fall back to the
-   *    node's materialized result sidecar text: the real output the worker
-   *    produced, read when it was genuinely materialized (`totalChars > 0` and
-   *    no `fetchError`, per `dispatch/types.ts:MaterializedResultRef`).
+   *    node's materialized result text: the real output the worker produced.
    *
-   * Without a materialized sidecar the empty string is used, replacing the
-   * previous `'""'` (JSON-quoted empty string) / `'{"__inferred":true}'`
-   * artifacts so downstream fan-in consumers see the node's actual output.
+   * The materialized text is NOT read from disk here (subtask 2 — Y1). The
+   * sidecar was read ONCE at completion time by `_captureNodeResult` →
+   * `_stashResultText` (which preserves the I/O-failure → '' degradation) and
+   * stashed on `node.resultText`; this method returns the stash. The advancing
+   * lock is held while this runs, so a synchronous disk read in the
+   * advancement critical section was the defect being removed.
+   *
+   * Without a stashed text the empty string is used, replacing the previous
+   * `'""'` (JSON-quoted empty string) / `'{"__inferred":true}'` artifacts so
+   * downstream fan-in consumers see the node's actual output.
    */
   private _edgeResultText(source: NodeRuntimeState, signalPayload: unknown): string {
     if (typeof signalPayload === "string") {
       if (signalPayload !== "") return signalPayload;
-      // Empty string payload → the worker emitted no text → sidecar fallback.
+      // Empty string payload → the worker emitted no text → stash fallback.
     } else if (signalPayload !== undefined && signalPayload !== null) {
       const obj = signalPayload as { __inferred?: unknown };
       if (typeof obj !== "object" || Array.isArray(obj) || obj.__inferred !== true) {
         return JSON.stringify(signalPayload);
       }
-      // Synthetic inferred marker → sidecar fallback.
+      // Synthetic inferred marker → stash fallback.
     }
-    const ref = source.result;
-    if (ref && ref.totalChars > 0 && !ref.fetchError) {
-      try {
-        return readFileSync(ref.sidecarPath, "utf8");
-      } catch {
-        return ""; // best-effort — a missing/unreadable sidecar degrades to empty
-      }
-    }
-    return "";
+    return source.resultText ?? "";
   }
 
   /**
@@ -2069,9 +2174,15 @@ export class AdvanceEngine {
    * satisfied downstream joins become `ready` (§1.3 resume-on-approval).
    * Freshly-ready nodes are dispatched and termination re-checked inside the
    * same section (durable via the write-through persistence seam).
+   *
+   * Control-path lock: the section is entered only after
+   * `acquireAdvancingLock` succeeds. When an in-flight critical section holds
+   * the lock, the WHOLE operation defers (macrotask-bound retry in
+   * {@link _runControlOperation}) instead of running unlocked — a user
+   * approval is never lost and never interleaved with a signal-driven section.
    */
   approveNode(nodeId: string, payload?: unknown): Promise<void> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const node = getNode(this.state, nodeId);
       // Capture the dispatch task's materialized result (if available) BEFORE
       // building the EdgePayload, so recordNodeArtifactsAndEvidence (invoked
@@ -2122,9 +2233,13 @@ export class AdvanceEngine {
    * signal-driven conventions (a notify only accompanies an actual lifecycle
    * completion). The synthetic `revise_needed` ledger entry recorded by
    * `rejectBlockedNode` already gives observers the rejection fact.
+   *
+   * Control-path lock: the section is entered only after `acquireAdvancingLock`
+   * succeeds (see {@link _runControlOperation}); under contention the whole
+   * rejection defers rather than running unlocked.
    */
   rejectNode(nodeId: string, reason?: string): Promise<void> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const node = getNode(this.state, nodeId);
       const report = rejectBlockedNode(this.state, node, reason);
       if (report.kind === "escalate") {
@@ -2153,14 +2268,18 @@ export class AdvanceEngine {
    * - If the approval node's join is still satisfied by the surviving approved
    *   sources (e.g. `any`), it re-enters `ready` to re-render immediately;
    *   otherwise it stays `blocked` awaiting the re-executed branches.
+   *
+   * Control-path lock: the section is entered only after `acquireAdvancingLock`
+   * succeeds (see {@link _runControlOperation}); under contention the whole
+   * partial approval defers rather than running unlocked.
    */
   partialApprove(
     nodeId: string,
-    _approved: string[],
+    approved: string[],
     rejected: string[],
     reason?: string,
   ): Promise<void> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const node = getNode(this.state, nodeId);
       if (node.status === NodeStatus.Blocked) {
         pruneDownstreamSubgraph(this.state, rejected, nodeId, this.dispatchPort);
@@ -2185,7 +2304,7 @@ export class AdvanceEngine {
         // is cleared when the node re-pauses for a NEW gate presentation
         // (`_pauseForApproval`), so even an identical verdict notifies again on
         // the next episode.
-        const verdict: PartialApproveVerdict = { approved: _approved, rejected, reason };
+        const verdict: PartialApproveVerdict = { approved, rejected, reason };
         const prior = node.signalsObserved["partial_approve"] as
           | PartialApproveVerdict
           | undefined;
@@ -2230,9 +2349,13 @@ export class AdvanceEngine {
    * target re-completes and re-emits — only the target is re-dispatched here, so
    * {@link RetryReport.reDispatched} is the number of reset nodes that ended this
    * call in `running` (normally the single target).
+   *
+   * Control-path lock: the section is entered only after `acquireAdvancingLock`
+   * succeeds (see {@link _runControlOperation}); under contention the whole
+   * retry defers rather than running unlocked.
    */
   retryNode(nodeId: string, opts?: RetryNodeOptions): Promise<RetryReport> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const report = resetNodeForRetry(this.state, nodeId, opts);
       // M11 (zombie-listener cleanup): resetNodeForRetry cleared the reset
       // scope's previous dispatch task ids. Unregister the matching

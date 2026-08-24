@@ -13,6 +13,7 @@ import {
   ENGINE_PERSISTENCE_VERSION,
   NON_CRITICAL_DEBOUNCE_MS,
   serializeEngineState,
+  deserializeEngineState,
   loadEngineStateFromJson,
   engineStatePath,
   markDirty,
@@ -701,6 +702,8 @@ function populateAdditiveFields(state: EngineState): void {
   const a = state.nodes.get("A")!;
   a.artifacts = ["/out/a.ts", "/out/a.md"];
   a.evidence = ["/ev/a.test.ts"];
+  // NodeRuntimeState.resultText (subtask 2): stashed materialized-result text.
+  a.resultText = "stashed text for A";
   const b = state.nodes.get("B")!;
   b.evidence = [];
 
@@ -744,6 +747,7 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     expect(parsed.checkpointHistory).toBeUndefined();
     expect(parsed.nodes.A.artifacts).toBeUndefined();
     expect(parsed.nodes.A.evidence).toBeUndefined();
+    expect(parsed.nodes.A.resultText).toBeUndefined();
     expect(parsed.loopGroups.lg1.rounds).toBeUndefined();
     expect(parsed.signalLedger.A.history).toBeUndefined();
 
@@ -756,6 +760,7 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     expect(l.checkpointHistory).toBeUndefined();
     expect(l.nodes.get("A")!.artifacts).toBeUndefined();
     expect(l.nodes.get("A")!.evidence).toBeUndefined();
+    expect(l.nodes.get("A")!.resultText).toBeUndefined();
     expect(l.loopGroups.get("lg1")!.rounds).toBeUndefined();
     expect(l.signalLedger.get("A")!.history).toBeUndefined();
     // Pre-existing fields are untouched.
@@ -795,6 +800,8 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     expect(loaded.nodes.get("A")!.artifacts).toEqual(["/out/a.ts", "/out/a.md"]);
     expect(loaded.nodes.get("A")!.evidence).toEqual(["/ev/a.test.ts"]);
     expect(loaded.nodes.get("B")!.evidence).toEqual([]);
+    // The stashed result-text snapshot survives (recovered nodes keep their text).
+    expect(loaded.nodes.get("A")!.resultText).toBe("stashed text for A");
 
     // Loop-group round history survives in order.
     expect(loaded.loopGroups.get("lg1")!.rounds).toEqual([
@@ -1247,5 +1254,96 @@ describe("atomic write: no ENOENT read window (rename-over)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── R2: out-of-vocabulary persisted enums are corrupt (null), never hydrated ─
+//
+// A corrupt-but-shape-valid file (`status: "bogus"` / `joinStrategy: "bogus"` /
+// `phase: "bogus"`) previously hydrated unchecked and crashed LATER with a
+// TypeError in `canTransitionNode` (node-lifecycle.ts —
+// `VALID_NODE_TRANSITIONS[from]` on undefined). The load path must reject
+// out-of-vocabulary enum values up front: `loadEngineStateFromJson` returns
+// null (the documented corrupt-to-null contract), and `deserializeEngineState`
+// (whose contract returns a state) throws rather than hydrate an invalid enum.
+
+describe("R2 — out-of-vocabulary persisted enums are corrupt (null)", () => {
+  /** Serialize the rich state with one node-level field overridden. */
+  function fileWithNodeField(field: string, value: unknown): string {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const nodes = dto.nodes as Record<string, Record<string, unknown>>;
+    return JSON.stringify({
+      ...dto,
+      nodes: { ...nodes, A: { ...nodes["A"], [field]: value } },
+    });
+  }
+
+  it("returns null from loadEngineStateFromJson when a node status is 'bogus'", () => {
+    const raw = fileWithNodeField("status", "bogus");
+    expect(() => loadEngineStateFromJson(raw)).not.toThrow();
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("returns null when a node status is outside NODE_STATUS_VALUES (case mismatch)", () => {
+    expect(loadEngineStateFromJson(fileWithNodeField("status", "RUNNING"))).toBeNull();
+  });
+
+  it("returns null when a node joinStrategy is a bogus string (not in JOIN_STRATEGY_VALUES)", () => {
+    expect(loadEngineStateFromJson(fileWithNodeField("joinStrategy", "bogus"))).toBeNull();
+  });
+
+  it("returns null when a node joinStrategy object lacks a positive-integer quorum", () => {
+    for (const bad of [
+      { quorum: 0 },
+      { quorum: -2 },
+      { quorum: 1.5 },
+      { quorum: "2" },
+      { quorum: NaN },
+    ]) {
+      expect(loadEngineStateFromJson(fileWithNodeField("joinStrategy", bad))).toBeNull();
+    }
+    // A valid positive-integer quorum still loads.
+    expect(
+      loadEngineStateFromJson(fileWithNodeField("joinStrategy", { quorum: 2 })),
+    ).not.toBeNull();
+  });
+
+  it("returns null when file.phase is 'bogus'", () => {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const raw = JSON.stringify({ ...dto, phase: "bogus" });
+    expect(() => loadEngineStateFromJson(raw)).not.toThrow();
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("a valid file still hydrates with exact enum values", () => {
+    const loaded = loadEngineStateFromJson(
+      JSON.stringify(serializeEngineState(buildRichState())),
+    );
+    expect(loaded).not.toBeNull();
+    const l = loaded!;
+    expect(l.phase).toBe(EnginePhase.Executing);
+    expect(l.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    expect(l.nodes.get("A")!.joinStrategy).toBe("all");
+    expect(l.nodes.get("B")!.status).toBe(NodeStatus.Ready);
+    expect(l.nodes.get("B")!.joinStrategy).toEqual({ quorum: 1 });
+  });
+
+  it("deserializeEngineState's defensive path throws on an invalid enum (never hydrates)", () => {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const nodes = dto.nodes as Record<string, Record<string, unknown>>;
+    const poisoned = {
+      ...dto,
+      nodes: { ...nodes, A: { ...nodes["A"], status: "bogus" } },
+    } as unknown as Parameters<typeof deserializeEngineState>[0];
+    expect(() => deserializeEngineState(poisoned)).toThrow(/not a valid NodeStatus/);
   });
 });

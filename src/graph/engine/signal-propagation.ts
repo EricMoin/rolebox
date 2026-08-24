@@ -61,6 +61,7 @@ import {
   isReviseBackEdge,
 } from "./join-evaluator.ts";
 import { deriveNodeArtifacts } from "./recorder.ts";
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Report ──────────────────────────────────────────────────────────────────
 
@@ -410,6 +411,10 @@ function recordEscalate(
   };
   target.upstreamResults.set(source.nodeId, edgePayload);
   target.joinSatisfied = joinSatisfied(state, target);
+  // The upstreamResults / joinSatisfied mutation above is persistent graph
+  // state — route it through the markDirty choke-point so the advancement
+  // critical section persists the recorded escalate (Y11).
+  markDirty(state);
 }
 
 /**
