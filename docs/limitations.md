@@ -24,3 +24,11 @@ Pi runs `PiLightweightServiceStack` instead of the full PluginCore service stack
 - Extensions (the PluginCore `ExtensionService` extension loader)
 - Recovery engine (`RecoveryService` / `RecoveryEngine` crash and error-recovery strategies; only graph-engine startup recovery runs on Pi)
 - TUI (the interactive terminal UI binary is opencode-only)
+
+## hashline_edit concurrency semantics
+
+`hashline_edit` serializes edits to the same file **within a single process** (per-path async mutex covering the full read → validate → compute → recheck → write cycle) and rejects duplicate file paths in one batch, including platform-appropriate case aliases on case-insensitive filesystems (darwin/win32).
+
+- **In-process safety**: concurrent `hashline_edit` calls to the same file cannot lost-update each other — they serialize, and the stale caller fails with a version-mismatch error. Overlapping multi-file batches acquire locks in a global sorted order, so they cannot deadlock.
+- **External / cross-process changes** are only caught by a best-effort pre-write re-check: each file's content version is recomputed immediately before writing and compared to the version observed during the read phase (to-be-created files must still be absent). A file changed between that re-check and the rename (a small window) is not detected — this is **not** a strict cross-process CAS. On any detected conflict the whole batch fails with zero writes; re-run `hashline_read` and retry.
+- **A batch is not a cross-file transaction**: files are written one at a time (per-file temp + atomic rename), so a write failure or crash mid-batch can leave earlier files updated and later files untouched. Writes are not fsync-durable; they protect against torn/partial writes within the process, not power loss.
