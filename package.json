@@ -42,7 +42,8 @@
     "dsh",
     "examples",
     "functions",
-    "tui"
+    "tui",
+    "scripts/patch-opentui-native-entry.mjs"
   ],
   "scripts": {
     "build": "tsc && bun run build:tui && bun run build:dsh-web-client",
