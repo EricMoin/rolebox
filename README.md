@@ -332,6 +332,7 @@ Run the same task across fresh sessions and iterate automatically — useful for
 - **Desktop notifications** — native OS notifications with idle detection, quiet hours, event filtering, and smart throttling. See [docs/hooks.md](docs/hooks.md).
 - **Session management** — 10 tools for searching, exporting, forking, diffing, and inspecting session history. See [docs/session-tools-strategy.md](docs/session-tools-strategy.md).
 - **Function state machine** — functions have active, gated, and dormant phases with evidence observation and artifact tracking. See [docs/functions.md](docs/functions.md).
+- **Copilot turn-end decisions** — at `session.idle`, an opt-in pipeline decides whether to inject a continuation user message or hand control back to the human: the always-on builtin function-continuation source, user-declared heuristic rules, and an optional LLM verdict role. See [docs/copilot.md](docs/copilot.md).
 - **Context assembly** — cross-domain search across memory, assets, tasks, and sessions with token-bounded result blocks.
 - **Asset management** — hot-reload roles, skills, and references at runtime; asset search, inspection, validation, and composition analysis. `reference_search` keeps no module-level index — its per-tool-instance closure snapshot is rebuilt by the awaited hot-reload restart cascade, so no cache-invalidation hook is needed (and there is no "Agent not found" race after reload).
 
@@ -427,6 +428,7 @@ Edits to `role_config.yaml` take effect on the next hot-reload cycle or role boo
 | role.yaml Reference | [docs/role-yaml.md](docs/role-yaml.md) |
 | Directory Structure | [docs/directory-structure.md](docs/directory-structure.md) |
 | Functions | [docs/functions.md](docs/functions.md) |
+| Copilot (Turn-End Decisions) | [docs/copilot.md](docs/copilot.md) |
 | Skills | [docs/skills.md](docs/skills.md) |
 | References | [docs/references.md](docs/references.md) |
 | Subagents | [docs/subagents.md](docs/subagents.md) |
