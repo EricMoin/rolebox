@@ -40,6 +40,7 @@ import type { ResolvedFunction, ResolvedRole } from "../src/types.ts";
 import { functionSessionState } from "../src/function/session-state.ts";
 import { functionRuntime } from "../src/function/runtime-state.ts";
 import { graphSessionState } from "../src/graph/collaboration-state.ts";
+import { COPILOT_MARKER } from "../src/copilot/constants.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -343,9 +344,10 @@ describe("runPiChatActivation — JSONL fallback", () => {
     expect(functionSessionState.getActive(SID).size).toBe(0);
   });
 
-  it("skips auto-continue and dispatch-notification markers in the fallback too", async () => {
+  it("skips auto-continue, copilot, and dispatch-notification markers in the fallback too", async () => {
     for (const text of [
       "[auto-continue] check status (1/3)",
+      `${COPILOT_MARKER} pi] check status (1/3)`,
       "[GRAPH COMPLETE] node done",
     ]) {
       resetPiChatActivationDedup();

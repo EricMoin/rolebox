@@ -6,6 +6,7 @@ import { functionSessionState } from "../../src/function/session-state.ts";
 import { functionRuntime } from "../../src/function/runtime-state.ts";
 import { graphSessionState } from "../../src/graph/collaboration-state.ts";
 import { GRAPH_COMPLETE_MARKER, GRAPH_BLOCKED_MARKER, isDispatchNotification } from "../../src/dispatch/notification.ts";
+import { COPILOT_MARKER } from "../../src/copilot/constants.ts";
 
 // ── Cleanup between tests ───────────────────────────────────────────────────
 
@@ -121,6 +122,42 @@ describe("handleChatMessage — synthetic injection filtering", () => {
     );
 
     expect(state.userMessagedSessions.has("sess-1")).toBe(false);
+  });
+
+  it("classifies COPILOT_MARKER messages as synthetic injection", async () => {
+    const cancelNow = mock(() => Promise.resolve());
+    const shouldCancelOnUserMessage = mock(() => true);
+    const state = makeState();
+    state.activeLoopManager = {
+      shouldCancelOnUserMessage,
+      cancelNow,
+      isLoopSession: mock(() => false),
+      getLoopState: mock(() => null),
+      register: mock(() => {}),
+    } as any;
+
+    // Activate a function with a non-zero continuation counter.
+    functionSessionState.activate("sess-1", ["synthesize"]);
+    const st = functionRuntime.init("sess-1", "synthesize", 1);
+    st.continuationCount = 2;
+    st.cooldownUntilTurn = 7;
+
+    await handleChatMessage(
+      { agent: "test-agent", sessionID: "sess-1" },
+      makeTextOutput(`${COPILOT_MARKER} pi] continue the task`),
+      state,
+      minimalDeps(),
+    );
+
+    // Continuation counter NOT reset — synthetic injection must not defeat the
+    // builtin continuation caps (unbounded auto-continue spin).
+    expect(st.continuationCount).toBe(2);
+    expect(st.cooldownUntilTurn).toBe(7);
+    // Session NOT registered as user-messaged.
+    expect(state.userMessagedSessions.has("sess-1")).toBe(false);
+    // Loops NOT cancelled.
+    expect(shouldCancelOnUserMessage).not.toHaveBeenCalled();
+    expect(cancelNow).not.toHaveBeenCalled();
   });
 
   it("registers real user messages in userMessagedSessions", async () => {
