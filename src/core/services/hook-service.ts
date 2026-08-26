@@ -30,6 +30,8 @@ import type { RecoveryService } from "./recovery-service.ts";
 import type { ExtensionService } from "./extension-service.ts";
 import type { ToolService } from "./tool-service.ts";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../utils/timeout.ts";
+import { parseCopilotConfig } from "../../copilot/config.ts";
+import type { CopilotConfig } from "../../copilot/types.ts";
 
 const log = createSubLogger("hook-service");
 
@@ -147,6 +149,14 @@ export class HookService implements PluginService {
 
     const roleMap = new Map(resolvedRoles.map((r) => [r.id, r]));
 
+    // Unified turn-end pipeline deps: per-role parsed copilot config + the
+    // resolved-subagent registry (LLM-role verdict source). Both derived at
+    // assembly so the idle path never re-parses config per event.
+    const copilotConfigs = new Map<string, CopilotConfig>();
+    for (const resolved of resolvedRoles) {
+      copilotConfigs.set(resolved.id, parseCopilotConfig(resolved.config.copilot));
+    }
+
     this.deps = {
       session: ctx.session,
       roleFunctionsMap,
@@ -162,6 +172,12 @@ export class HookService implements PluginService {
       extensionRegistry: extensionService?.getExtensionRegistry(),
       builtinConfig: recoveryService?.getBuiltinConfig(),
       graphTools: toolService.getGraphToolSet(),
+      copilotConfigs,
+      // Optional-call guard: dispatch services assembled before this subtask
+      // (or mocks in tests) may not expose getResolvedSubagents(). Absent →
+      // the LLM-role verdict source is skipped (HookDeps.resolvedSubagents is
+      // optional by contract).
+      resolvedSubagents: dispatchService.getResolvedSubagents?.() ?? undefined,
     };
     log.debug("HookDeps assembled", { graphTools: Boolean(this.deps.graphTools) });
 

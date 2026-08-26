@@ -7,6 +7,7 @@ import type { RecoveryEngine } from "../recovery/engine.ts";
 import type { BuiltInHookRegistry } from "../recovery/builtin/registry.ts";
 import type { NotificationManager } from "../notifications/manager.ts";
 import type { ExtensionRegistry } from "../extensions/registry.ts";
+import type { CopilotConfig } from "../copilot/types.ts";
 
 export interface HookDeps {
   /** Platform-agnostic session client. */
@@ -32,4 +33,17 @@ export interface HookDeps {
    * absent on platforms/setups that do not assemble graph tools.
    */
   graphTools?: { hasInflightGraphsForSession(sessionID: string): boolean };
+  /**
+   * Parsed copilot config per role id (built at deps assembly from each
+   * role's raw `copilot:` block). Absent → the unified turn-end pipeline
+   * treats every role as having no copilot config (builtin source only).
+   * Optional for backward compatibility.
+   */
+  copilotConfigs?: Map<string, CopilotConfig>;
+  /**
+   * Resolved subagent registry (subagent id → owning parent) — the same map
+   * `buildSubagentLineage` produces, consumed by the copilot LLM-role verdict
+   * source (src/copilot/llm.ts). Absent → the LLM source is skipped.
+   */
+  resolvedSubagents?: Map<string, { parentFullId: string }>;
 }

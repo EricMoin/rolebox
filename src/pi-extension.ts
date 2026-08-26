@@ -1043,6 +1043,9 @@ export default async function (pi: any): Promise<void> {
       // backing the graph_* tools) — lets the auto-continue path observe
       // executing graphs before continuing.
       graphTools: serviceStack.getGraphToolSet(),
+      // Copilot LLM-role verdict source: the subagent lineage built above
+      // (line 540) — the configured llm.role must be a key of this map.
+      resolvedSubagents,
       dir: process.cwd(),
     });
     piHookPipeline = hookPipeline;

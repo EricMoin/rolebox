@@ -7,6 +7,7 @@ import { collectAllFunctions, appendCorrection } from "./context.ts";
 import { isDispatchNotification } from "../dispatch/notification.ts";
 import { parseLoopParams } from "../loop/params.ts";
 import { LOOP_PROGRESS_MARKER, LOOP_FUNCTION_NAME } from "../loop/constants.ts";
+import { COPILOT_MARKER } from "../copilot/constants.ts";
 import { createSubLogger } from "../logger.ts";
 import type { HookState } from "./state.ts";
 import type { HookDeps } from "./deps.ts";
@@ -26,6 +27,7 @@ export async function handleChatMessage(
   const isSyntheticInjection =
     firstTextStr.includes("[auto-continue") ||
     firstTextStr.includes(LOOP_PROGRESS_MARKER) ||
+    firstTextStr.includes(COPILOT_MARKER) ||
     isDispatchNotification(firstTextStr);
 
   // Custom hooks: before phase
