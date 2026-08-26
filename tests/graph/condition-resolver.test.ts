@@ -122,6 +122,19 @@ describe("defaultConditionResolver", () => {
     expect(defaultConditionResolver("signal_observed()", source)).toBe(false);
   });
 
+  it("signal_observed normalizes the arg: lowercased and whitespace-trimmed", () => {
+    const source = makeSource({ answer: "done", need_approval: "pending" });
+    // Uppercase type name → matches the lowercase ledger key.
+    expect(defaultConditionResolver("signal_observed(ANSWER)", source)).toBe(true);
+    // Mixed case.
+    expect(defaultConditionResolver("signal_observed(Need_Approval)", source)).toBe(true);
+    // Whitespace around the arg (the resolver trims it).
+    expect(defaultConditionResolver("signal_observed( answer )", source)).toBe(true);
+    expect(defaultConditionResolver("signal_observed(  need_approval  )", source)).toBe(true);
+    // Normalization never fabricates a match for an unrecorded signal.
+    expect(defaultConditionResolver("signal_observed(ESCALATE)", source)).toBe(false);
+  });
+
   it("artifact_exists(<name>) is true for an existing file relative to cwd", () => {
     const source = makeSource();
     // Pass a name RELATIVE to cwd — the resolver joins it onto process.cwd().
@@ -151,6 +164,25 @@ describe("defaultConditionResolver", () => {
     // on a CondEnv/FnState the engine does not have → unsupported → false.
     expect(defaultConditionResolver("user_approval()", source)).toBe(false);
     expect(defaultConditionResolver("tool_observed(grep)", source)).toBe(false);
+    // Compound / boolean expressions are unsupported: only single-argument
+    // `name(arg)` calls are recognized (CALL_RE), so the whole string never
+    // matches and falls through to the default branch → false. There is no
+    // boolean algebra over conditions (documented contract).
+    expect(
+      defaultConditionResolver(
+        "signal_observed(answer) and artifact_exists(report.md)",
+        source,
+      ),
+    ).toBe(false);
+    expect(
+      defaultConditionResolver(
+        "signal_observed(answer) or signal_observed(progress)",
+        source,
+      ),
+    ).toBe(false);
+    // Names are case-sensitive — an uppercase name is not in the vocabulary
+    // (only the signal_observed *argument* is normalized, not the name).
+    expect(defaultConditionResolver("Signal_Observed(answer)", source)).toBe(false);
   });
 });
 

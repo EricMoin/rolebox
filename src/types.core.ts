@@ -7,6 +7,7 @@ import type {
 import type { DispatchManagerConfig } from "./dispatch/config.ts";
 import type { HooksBlock } from "./hooks/custom/types.ts";
 import type { NotificationConfig } from "./notifications/types.ts";
+import type { CopilotConfig } from "./copilot/types.ts";
 import type { ExtensionConfig } from "./extensions/types.ts";
 import type {
   ResolvedGraph,
@@ -140,6 +141,8 @@ export interface RoleConfig {
   version?: string;
   /** Notification configuration for session lifecycle events */
   notifications?: NotificationConfig;
+  /** Copilot configuration for the unified turn-end decision pipeline */
+  copilot?: CopilotConfig;
   /** Custom hook declarations for lifecycle event hooks */
   hooks?: HooksBlock;
   /** Extension modules to register custom conditions, topologies, channels, etc. */

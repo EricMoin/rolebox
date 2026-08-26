@@ -38,8 +38,6 @@ import type { EdgePayload, EngineState, NodeRuntimeState } from "../../types.eng
 import {
   canTransitionNode,
   markCompleted,
-  markDone,
-  markCancelled,
   markEscalated,
   markReady,
 } from "./node-lifecycle.ts";
@@ -50,6 +48,7 @@ import {
 } from "./join-evaluator.ts";
 import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
+import { retireCancelledNode } from "./cancellation.ts";
 import { recordSignalToLedger } from "./signal-bridge.ts";
 import {
   deriveNodeArtifacts,
@@ -134,8 +133,8 @@ export function approveBlockedNode(
   // advancement critical section). The caller drives the forward answer flow.
   recordSignalToLedger(state, node.nodeId, "answer", answerOutput, "approval");
   // Ensure the node's genuinely produced artifacts are recorded before the
-  // EdgePayload is built, so the downstream merged_artifacts carry them (same
-  // data-flow gap as _buildEdgePayload — subtask C-RECORD).
+  // EdgePayload is built, so the downstream node's upstreamResults carry them
+  // (same data-flow gap as _buildEdgePayload — subtask C-RECORD).
   recordNodeArtifactsAndEvidence(state, node);
   markCompleted(state, node);
 
@@ -360,18 +359,23 @@ export function resetRejectedUpstreams(
 /**
  * Cancel a node's lifecycle (`pending | ready | running → cancelled → done`) and,
  * when a cancel seam is present and the node carries a dispatch task, tear it
- * down fire-and-forget (never awaited). Reuses the cascade-canceller convention.
+ * down fire-and-forget (never awaited). Delegates to the shared
+ * {@link retireCancelledNode} primitive with the M10 session-slot refund ON —
+ * a RUNNING node with a live dispatch task decrements the graph-level
+ * `sessionsSpawned` counter synchronously (the termination callback
+ * `engine-recovery.ts:416` bails on the now-`done` node, so without this the
+ * partial-approve prune lane would leak the slot — same rationale as
+ * `cancelOne` in `cancellation.ts`).
  */
 function cancelNode(
   state: EngineState,
   node: NodeRuntimeState,
   dispatchPort?: CancelDispatchPort,
 ): void {
-  if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
-  markCancelled(state, node, `cancelled by partial-approval pruning at "${state.graphId}"`);
-  markDone(state, node);
-  removeFromFrontier(state, node.nodeId);
-  if (dispatchPort?.cancelTask && node.dispatchTaskId) {
-    void dispatchPort.cancelTask(node.dispatchTaskId);
-  }
+  retireCancelledNode(
+    state,
+    node,
+    `cancelled by partial-approval pruning at "${state.graphId}"`,
+    { refund: true, dispatchPort },
+  );
 }

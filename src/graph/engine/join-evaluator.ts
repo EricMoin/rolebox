@@ -6,9 +6,10 @@
  *
  * Pure graph-theoretic fan-in mechanism. A convergence node collects the
  * {@link EdgePayload}s arriving along its incoming edges and activates once
- * the declared join strategy is satisfied. What the node does with the merged
- * {@link FanInContext} (validate, synthesize, approve) is the agent's business —
- * this module only enforces the join and merges upstream data.
+ * the declared join strategy is satisfied. The accumulated upstream results
+ * stay exposed on `node.upstreamResults` for consumers to inspect (e.g.
+ * `approval-payload.ts` builds the human-facing approval context from them) —
+ * this module only enforces the join and records the upstream payloads.
  *
  * Design references:
  * - `.rolebox/design/graph-model.md` §3 (join semantics)
@@ -24,7 +25,8 @@
 import { JoinStrategy } from "../../constants.ts";
 import type { EdgeDeclaration, JoinConfig } from "../../types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import type { EdgePayload, FanInContext } from "../../types.engine-v2.ts";
+import type { EdgePayload } from "../../types.engine-v2.ts";
+import { markDirty } from "./engine-persistence.ts";
 
 // ── Join strategy resolution ────────────────────────────────────────────────
 
@@ -67,15 +69,19 @@ export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
  * The declared join strategy for a node, read from its {@link JoinConfig} in
  * the graph declaration.
  *
- * Thin wrapper that locates the node's declared config, then delegates to
- * {@link resolveJoinStrategy} — the same resolver that populates the node's
- * runtime `joinStrategy` field in {@link registerNode}. Keeping both paths on
- * one resolver guarantees they stay in lockstep.
+ * Prefers the node's cached runtime `joinStrategy` field — populated at
+ * provision time by {@link registerNode} from the very same
+ * {@link resolveJoinStrategy} resolver and validated on persisted-state load —
+ * so the per-call O(V) declaration lookup is skipped. Falls back to locating
+ * the node's declared config and delegating to {@link resolveJoinStrategy}
+ * only when the cache is absent (nodes hydrated from older persisted state).
+ * Both paths resolve through the same resolver, so they stay in lockstep.
  */
 export function getJoinStrategy(
   state: EngineState,
   node: NodeRuntimeState,
 ): ResolvedJoinStrategy {
+  if (node.joinStrategy !== undefined) return node.joinStrategy;
   const config = state.graphDeclaration.nodes.find((n) => n.id === node.nodeId);
   return resolveJoinStrategy(config?.join);
 }
@@ -361,57 +367,10 @@ export function collectUpstreamResults(
 ): void {
   node.upstreamResults.set(edgePayload.fromNode, edgePayload);
   node.joinSatisfied = joinSatisfied(state, node);
-  state.isDirty = true;
+  markDirty(state);
 }
 
-// ── Fan-in context merge ────────────────────────────────────────────────────
-
-/**
- * Merge a node's accumulated upstream results (a `Map<SourceNodeId, EdgePayload>`)
- * into a single structured {@link FanInContext} delivered as part of the node's
- * activation input.
- *
- * - `sources` — per-node provenance, in insertion order: `{node, signal, result}`.
- * - `merged_artifacts` — artifact paths from all sources, deduplicated in order
- *   of first appearance.
- * - `budget_consumed_total` — tokens / cost / sessions summed across sources.
- */
-export function mergeFanInContext(
-  results: ReadonlyMap<string, EdgePayload>,
-): FanInContext {
-  const sources: FanInContext["sources"] = [];
-  const artifactSeen = new Set<string>();
-  const mergedArtifacts: string[] = [];
-  let tokens = 0;
-  let cost = 0;
-  let sessions = 0;
-
-  for (const [fromNode, payload] of results) {
-    sources.push({
-      node: fromNode,
-      signal: payload.fromSignal,
-      result: payload.result,
-    });
-
-    for (const artifact of payload.artifacts) {
-      if (!artifactSeen.has(artifact)) {
-        artifactSeen.add(artifact);
-        mergedArtifacts.push(artifact);
-      }
-    }
-
-    tokens += payload.budgetConsumed.tokens;
-    cost += payload.budgetConsumed.cost;
-    sessions += payload.budgetConsumed.sessions;
-  }
-
-  return {
-    sources,
-    merged_artifacts: mergedArtifacts,
-    budget_consumed_total: {
-      tokens,
-      cost,
-      sessions,
-    },
-  };
-}
+// Upstream results are recorded per source by {@link collectUpstreamResults}
+// onto `node.upstreamResults` and consumed directly by join evaluation
+// ({@link evaluateJoin}), cascade cancellation, and approval-payload
+// construction — there is no separate merged fan-in context.

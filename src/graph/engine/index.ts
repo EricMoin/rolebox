@@ -12,16 +12,19 @@
  *     run()        — transition `idle → executing` and dispatch the ready roots.
  *     status()     — read a snapshot of the {@link EngineState}.
  *
- * `recover()` and `cancel()` are Phase-3 stubs (resume / teardown).
+ * Beyond the core lifecycle, the full control surface is implemented:
+ * `recover()` resumes an interrupted graph from its persisted state,
+ * `cancel()` / `cancelNodes()` tear down running graphs, `approveNode()` /
+ * `rejectNode()` / `partialApprove()` drive the `needs_approval` gate,
+ * `retryNode()` re-opens a node for re-dispatch, and `dispose()` releases a
+ * replaced runtime (cancelling its debounced persistence timer).
  *
  * Design: the engine is a role-agnostic primitive. This barrel only wires the
  * runtime; it carries no dispatch or role logic itself. The dispatch surface
  * is an injected seam (see {@link EngineRuntimeOptions.dispatch}) so callers
- * and tests can avoid real sub-agent dispatch.
- *
- * Scope note (Phase 1): external integration — wiring this runtime into the
- * platform entry points and re-exporting it from the package root — is a later
- * subtask. This module exports exactly the public engine API surface.
+ * and tests can avoid real sub-agent dispatch. External integration (wiring
+ * this runtime into the platform entry points and re-exporting it from the
+ * package root) lives in `src/graph/tools/graph-tools.ts`.
  *
  * Design reference: `.rolebox/design/engine-state-machine.md`.
  */
@@ -57,7 +60,6 @@ import {
 import {
   DispatchBridge,
   type DispatchParentContext,
-  type TaskTerminatedCallback,
 } from "./dispatch-bridge.ts";
 import defaultConditionResolver from "./condition-resolver.ts";
 import {
@@ -142,6 +144,10 @@ export interface EngineRuntime {
    * window → re-emit its signal, still-live → re-subscribe `onTaskTerminated`.
    * Rebuilds the frontier and drains the deferred completions. A no-op when no
    * persisted state exists (first run) or no persistence is configured.
+   *
+   * Rejects when the persisted state file exists but cannot be read (any
+   * non-ENOENT read failure): an unreadable state file is an explicit error,
+   * never a silent clean start (review 05-F6/L22).
    */
   recover(): Promise<void>;
 
@@ -336,8 +342,12 @@ export interface EngineRuntime {
    * Dispose the engine runtime (monitor M4). Unregisters every
    * task-terminated listener this engine registered with the dispatch seam
    * (`removeTaskTerminatedListener`) so a disposed runtime never receives (or
-   * leaks) stale dispatch→signal callbacks, and stops the opt-in staleness
-   * watcher (monitor M3) so a disposed runtime never keeps ticking. Idempotent
+   * leaks) stale dispatch→signal callbacks, stops the opt-in staleness
+   * watcher (monitor M3) so a disposed runtime never keeps ticking, and —
+   * when persistence is configured — disposes the {@link EnginePersistence}
+   * store (review 05-F1/M14): a replaced runtime's pending debounced write is
+   * CANCELLED and dropped (never flushed), so stale state can never overwrite
+   * the successor runtime's newer state on the shared state file. Idempotent
    * — a second dispose is a no-op.
    */
   dispose(): void;
@@ -540,15 +550,16 @@ function snapshotEngineState(state: EngineState): EngineState {
   return {
     phase: state.phase,
     graphId: state.graphId,
-    graphDeclaration: state.graphDeclaration,
+    // Y4: the graph declaration is a live, mutable object (the imperative
+    // toolset mutates it on every construction step) — deep-clone it so a
+    // snapshot consumer's in-place node/edge/loop/budget mutation can never
+    // alias the live declaration (status()'s deep-enough-clone promise,
+    // index.ts:166-174). GraphDeclaration is plain JSON data, so
+    // structuredClone covers every nested field (nodes/edges/loop_groups/
+    // budget/termination) for free.
+    graphDeclaration: structuredClone(state.graphDeclaration),
     nodes: new Map(
       [...state.nodes].map(([id, n]) => [id, cloneNode(n)]),
-    ),
-    edges: new Map(
-      [...state.edges].map(([key, p]) => [
-        key,
-        { ...p, artifacts: [...p.artifacts], budgetConsumed: { ...p.budgetConsumed } },
-      ]),
     ),
     loopGroups: new Map(
       [...state.loopGroups].map(([id, g]) => [
@@ -689,9 +700,9 @@ class EngineRuntimeImpl implements EngineRuntime {
       opts.dispatch ??
       (opts.manager ? new DispatchBridge(opts.manager) : throwOnDispatch);
 
-    // 3. Resolve the budget seam: explicit > manager-backed > absent (Phase 1
-    //    never enforces ceilings — the advance engine treats `undefined` as a
-    //    no-op port).
+    // 3. Resolve the budget seam: explicit > manager-backed > absent (the
+    //    advance engine treats `undefined` as a no-op port — an engine without
+    //    a budget seam never enforces ceilings).
     const budget: GraphBudgetPort | undefined =
       opts.budget ?? (opts.manager ? new BudgetBridge(opts.manager.getBudgetTracker(), graphDeclaration) : undefined);
 
@@ -982,7 +993,10 @@ class EngineRuntimeImpl implements EngineRuntime {
    * failure-resilience.md §5.1-§5.6):
    *
    * 1. Load the persisted state — a missing/corrupt/version-mismatched file
-   *    returns `null` and recovery is a clean no-op (first run).
+   *    returns `null` and recovery is a clean no-op (first run). A non-ENOENT
+   *    read failure (unreadable-but-present file) propagates out of `recover()`
+   *    — recovery fails explicitly instead of silently re-provisioning a graph
+   *    whose completed nodes would be re-executed (review 05-F6/L22).
    * 2. Adopt the loaded state in place (the advance engine keeps referencing
    *    this object), clear the stale critical-section state the crashed
    *    process left behind (a stuck `advancingLock`, orphaned deferred
@@ -1002,20 +1016,15 @@ class EngineRuntimeImpl implements EngineRuntime {
    */
   async recover(): Promise<void> {
     if (!this.persistence) return; // no persistence → nothing to recover
-    // Total hydration: `load()` never throws (corrupt / structurally-invalid
-    // files return `null`), but the load is contained anyway so a bad state
-    // file can never escape recovery as a throw — a permanently unrecoverable
-    // graph would otherwise re-fail on every restart. A load failure degrades
-    // to a clean no-op (fresh start), matching the corrupt-to-null contract.
-    let loaded: EngineState | null;
-    try {
-      loaded = this.persistence.load(this.state.graphId);
-    } catch (err) {
-      logWarn(
-        `engine-recover: state load failed for graph "${this.state.graphId}": ${String(err)}`,
-      );
-      return;
-    }
+    // `load()` returns `null` for a missing / corrupt / version-mismatched
+    // file (clean start — first run) and rethrows any NON-ENOENT read failure
+    // (an unreadable-but-present state file is an explicit error, never a
+    // silent clean start — engine-persistence.ts:571-576). Let that error
+    // propagate: recovery fails explicitly so the caller surfaces it instead
+    // of silently re-provisioning a graph whose completed nodes would be
+    // re-executed (review 05-F6/L22). ENOENT / corrupt / version-mismatch
+    // remain clean no-ops.
+    const loaded = this.persistence.load(this.state.graphId);
     if (!loaded) return; // clean start (first run / version mismatch)
 
     // Adopt the persisted state in place; clear the crashed process's stale
@@ -1101,6 +1110,23 @@ class EngineRuntimeImpl implements EngineRuntime {
       this.advance.notifyNodeTimeout(id);
     }
 
+    // Subtask 2 (Y2): tear down crash-window orphan sessions fire-and-forget —
+    // a node persisted `running` with no `dispatchTaskId` had its session
+    // launched anyway (the crash hit between the running-write and
+    // `executeNode` resolving the task handle); reconcile matched it back by
+    // parent + description and recovery must cancel it so it stops burning
+    // budget with its result lost. Never awaited — mirrors the
+    // cancellation.ts fire-and-forget precedent; a rejected cancel is logged
+    // and swallowed.
+    for (const oc of report.orphanCancellations ?? []) {
+      void port.cancelTask?.(oc.taskId).catch((err) => {
+        logWarn(
+          `engine-recover: cancelTask failed for orphaned task ${oc.taskId} ` +
+            `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${String(err)}`,
+        );
+      });
+    }
+
     // Drain deferred completions: re-emit each finished-during-restart node's
     // terminating signal through the public advance entry, running the
     // critical section (the re-entrancy guard makes the follow-up advance of
@@ -1158,6 +1184,18 @@ class EngineRuntimeImpl implements EngineRuntime {
         );
         for (const id of report.timedOut) {
           this.advance.notifyNodeTimeout(id);
+        }
+        // Subtask 2 (Y2): tear down crash-window orphan sessions fire-and-forget
+        // (parity with recover() — an adopted `running` node with no
+        // `dispatchTaskId` had its session launched anyway; cancel it so it
+        // stops burning budget). Never awaited; a rejected cancel is logged.
+        for (const oc of report.orphanCancellations ?? []) {
+          void port.cancelTask?.(oc.taskId).catch((err) => {
+            logWarn(
+              `engine-adopt: cancelTask failed for orphaned task ${oc.taskId} ` +
+                `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${String(err)}`,
+            );
+          });
         }
         for (const d of report.deferred) {
           await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload, "recovery");
@@ -1224,11 +1262,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Monitor (M3): a cancelled graph must not keep ticking the opt-in
     // staleness watcher.
     this.staleWatcher?.stop();
-    // Subtask 6: a cancelled graph must not keep ticking the opt-in liveness
-    // monitor either (parity with the staleness watcher above and dispose()).
-    this.livenessMonitor?.stop();
-    // Subtask 5: stop the opt-in liveness monitor beside the watcher — a
-    // cancelled graph must not keep ticking its stall detection either.
+    // Subtask 5: stop the opt-in liveness monitor too (parity with the
+    // staleness watcher above and dispose()) — a cancelled graph must not
+    // keep ticking its stall detection.
     this.livenessMonitor?.stop();
 
     // Cancel in-flight dispatch tasks (best-effort), then cancel the nodes.
@@ -1352,16 +1388,16 @@ class EngineRuntimeImpl implements EngineRuntime {
     for (const sub of this.advance.getTerminationSubscriptions()) {
       this.dispatchPort.removeTaskTerminatedListener?.(sub.taskId, sub.callback);
     }
-    // Clear the engine's own subscription ledger. The accessor returns a
-    // defensive copy, so the ledger itself is cleared through the private
-    // field — a disposed runtime keeps no handles to stale callbacks and a
+    // Clear the engine's own subscription ledger through the public teardown
+    // entry (review 06-F1 / M16) — never `as unknown as` into the private
+    // field. A disposed runtime keeps no handles to stale callbacks and a
     // re-run re-registers fresh ones (a second dispose is then a no-op).
-    (this.advance as unknown as {
-      _terminationSubscriptions: Array<{
-        taskId: string;
-        callback: TaskTerminatedCallback;
-      }>;
-    })._terminationSubscriptions = [];
+    this.advance.clearTerminationSubscriptions();
+    // Review 05-F1/F3 (M14/ML1): a replaced / discarded runtime must cancel
+    // its pending debounced persistence write — flushing it would overwrite
+    // the successor runtime's newer state on the shared state file. dispose
+    // drops the pending write (it does NOT flush).
+    this.persistence?.dispose();
     // Monitor (M3): stop the opt-in staleness watcher — a disposed runtime
     // must not keep ticking.
     this.staleWatcher?.stop();

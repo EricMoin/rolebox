@@ -156,7 +156,6 @@ export function createEngineState(
     graphId,
     graphDeclaration,
     nodes: new Map(),
-    edges: new Map(),
     loopGroups: new Map(),
     frontier: [],
     budget: emptyGraphBudget(),
@@ -283,13 +282,7 @@ export function computeInDegrees(state: EngineState): Map<string, number> {
 }
 /** Return the node IDs that have no incoming edges (graph roots). */
 export function getRootNodeIds(state: EngineState): string[] {
-  const upstream = new Map<string, number>();
-  const loopGroupMap = buildLoopGroupMap(state);
-  for (const edge of state.graphDeclaration.edges) {
-    if (isReviseBackEdge(edge)) continue;
-    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
-    upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
-  }
+  const upstream = computeInDegrees(state);
   const roots: string[] = [];
   for (const config of state.graphDeclaration.nodes) {
     if ((upstream.get(config.id) ?? 0) === 0) {
@@ -316,9 +309,9 @@ export function provision(state: EngineState): void {
     if (incoming === 0) {
       markReady(state, node);
       addToFrontier(state, config.id);
-    } else {
-      node.status = NodeStatus.Pending;
     }
+    // Non-root nodes keep the `pending` status `registerNode` already assigned —
+    // no redundant re-assignment here (the former `else` branch was a no-op).
   }
 
   // Populate loop-group runtime state and tag member nodes (Phase 2).
@@ -586,21 +579,43 @@ export function getNode(state: EngineState, nodeId: string): NodeRuntimeState {
 // ── Convergence-output fingerprinting (stuck detection) ─────────────────────
 
 /**
+ * Fixed depth bound for canonicalization. Signal payloads are agent-controlled
+ * and can nest arbitrarily deep; unbounded recursion would overflow the call
+ * stack (RangeError). At this depth canonicalization stops and emits a stable
+ * truncation marker instead of recursing further — never throws.
+ */
+const CANONICALIZE_MAX_DEPTH = 32;
+
+/**
+ * Stable marker emitted when canonicalization reaches {@link CANONICALIZE_MAX_DEPTH}.
+ * Serialized as a bare token (never valid JSON output — JSON.stringify always
+ * quotes strings), so it cannot collide with any real payload content.
+ */
+const CANONICALIZE_TRUNCATED = "...<truncated>";
+
+/**
  * Stable, order-insensitive canonical string for an arbitrary JSON payload.
  *
  * Keys are sorted recursively so `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce
  * the same fingerprint — the convergence output's *content* is what matters for
  * staleness, not the incidental key order the reviewer happened to emit.
+ *
+ * Recursion is bounded by {@link CANONICALIZE_MAX_DEPTH}: payloads nested deeper
+ * than that are truncated with {@link CANONICALIZE_TRUNCATED}. Deeply nested
+ * agent-controlled payloads therefore fingerprint to a bounded string instead of
+ * overflowing the stack, and all structures sharing a prefix down to the bound
+ * fingerprint identically.
  */
-function canonicalize(value: unknown): string {
+function canonicalize(value: unknown, depth = 0): string {
+  if (depth >= CANONICALIZE_MAX_DEPTH) return CANONICALIZE_TRUNCATED;
   if (value === null || value === undefined) return "null";
   if (Array.isArray(value)) {
-    return `[${value.map(canonicalize).join(",")}]`;
+    return `[${value.map((v) => canonicalize(v, depth + 1)).join(",")}]`;
   }
   if (typeof value === "object") {
     const entries = Object.keys(value as Record<string, unknown>)
       .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k])}`);
+      .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k], depth + 1)}`);
     return `{${entries.join(",")}}`;
   }
   return JSON.stringify(value);
@@ -663,7 +678,10 @@ export function recordConvergenceOutput(
  * so no output history needs to carry into a fresh group run.
  */
 export function resetConvergenceTracker(state: EngineState, groupId: string): void {
-  const group = state.loopGroups.get(groupId)!;
+  const group = state.loopGroups.get(groupId);
+  if (!group) {
+    throw new Error(`Unknown loop group "${groupId}" in graph "${state.graphId}"`);
+  }
   group.convergenceFingerprint = undefined;
   group.consecutiveStale = 0;
   state.updatedAt = Date.now();

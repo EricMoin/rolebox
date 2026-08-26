@@ -29,6 +29,7 @@
  */
 
 import { NodeStatus } from "../../constants.ts";
+import { TERMINATING_SIGNALS_BY_SEVERITY } from "../../signal/signal-constants.ts";
 import type {
   CheckpointRecord,
   EngineState,
@@ -39,6 +40,16 @@ import type {
 import { markDirty } from "./engine-persistence.ts";
 
 // ── Checkpoints (EngineState.checkpoints) ───────────────────────────────────
+
+/**
+ * Maximum number of checkpoint-history entries retained per node.
+ *
+ * The history (`EngineState.checkpointHistory[nodeId]`) is an append-only
+ * traceability list; bounding it keeps long loop/retry chains from growing it
+ * without limit. Only the history is trimmed — the latest snapshot in
+ * `EngineState.checkpoints[nodeId]` is never dropped.
+ */
+const CHECKPOINT_HISTORY_CAP = 50;
 
 /**
  * Auto-save a {@link CheckpointRecord} into the owning state's
@@ -80,6 +91,12 @@ export function recordCheckpointForNode(
   }
   const history = state.checkpointHistory[node.nodeId] ?? [];
   history.push(record);
+  // Retain only the most recent CHECKPOINT_HISTORY_CAP entries — the history
+  // is traceability, not the latest snapshot, so trimming the front keeps it
+  // bounded in long loop/retry chains without losing the newest transitions.
+  if (history.length > CHECKPOINT_HISTORY_CAP) {
+    history.splice(0, history.length - CHECKPOINT_HISTORY_CAP);
+  }
   state.checkpointHistory[node.nodeId] = history;
   state.updatedAt = at;
   markDirty(state);
@@ -141,12 +158,10 @@ export function deriveNodeArtifacts(node: NodeRuntimeState): string[] {
  * most severe terminal payload's evidence wins.
  */
 export function deriveNodeEvidence(node: NodeRuntimeState): string[] {
-  const terminalOrder: ("escalate" | "revise_needed" | "answer")[] = [
-    "escalate",
-    "revise_needed",
-    "answer",
-  ];
-  for (const type of terminalOrder) {
+  // Severity order comes from the shared single source of truth
+  // (`signal-constants.ts` TERMINATING_SIGNALS_BY_SEVERITY, L1) so a new
+  // terminating signal type cannot silently fork this precedence.
+  for (const type of TERMINATING_SIGNALS_BY_SEVERITY) {
     const payload = node.signalsObserved[type];
     if (payload === null || payload === undefined) continue;
     if (typeof payload === "object" && !Array.isArray(payload)) {

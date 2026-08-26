@@ -331,6 +331,9 @@ function buildRoleConfig(
     ...(resolved.hooks != null && typeof resolved.hooks === "object"
       ? { hooks: resolved.hooks as RoleConfig["hooks"] }
       : {}),
+    ...(resolved.copilot != null && typeof resolved.copilot === "object"
+      ? { copilot: resolved.copilot as RoleConfig["copilot"] }
+      : {}),
   };
 }
 

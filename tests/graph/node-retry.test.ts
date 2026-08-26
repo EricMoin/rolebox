@@ -7,6 +7,10 @@
  * - {@link resetNodeForRetry} (pure) — target + downstream reset to `pending`,
  *   `modify_prompt` prepended, target re-`ready`/frontier, terminal phase re-opened,
  *   counters preserved.
+ * - M11 retry guard — retrying a `running` / `blocked` node (target or any
+ *   downstream) is REJECTED before any mutation (no session leak); repeated
+ *   `modify_prompt` is replace-style deduplicated (no unbounded prompt growth);
+ *   superseded `onTaskTerminated` subscriptions are unregistered + dropped.
  * - `AdvanceEngine.retryNode` — failed node re-dispatches on retry; downstream
  *   states reset; `modify_prompt` prepended.
  * - `EngineRuntime.retryNode` — the public method exists and drives a real
@@ -38,7 +42,13 @@ import {
   type NodeDispatchPort,
 } from "../../src/graph/engine/engine-advance.ts";
 import { resetNodeForRetry } from "../../src/graph/engine/node-retry.ts";
-import { markEscalated } from "../../src/graph/engine/node-lifecycle.ts";
+import {
+  markCompleted,
+  markEscalated,
+  markNodeBlocked,
+  markReady,
+  markRunning,
+} from "../../src/graph/engine/node-lifecycle.ts";
 import {
   GraphToolSet,
   type GraphToolSetDeps,
@@ -70,6 +80,8 @@ class FiringDispatch implements NodeDispatchPort {
   private seq = 0;
   constructor(
     private behavior: (nodeId: string) => "completed" | "error" = () => "completed",
+    /** nodeIds whose tasks stay running forever (never auto-fired). */
+    private readonly hold: Set<string> = new Set(),
   ) {}
 
   executeNode(
@@ -80,8 +92,9 @@ class FiringDispatch implements NodeDispatchPort {
     const id = `task-${node.nodeId}-${++this.seq}`;
     const task = makeTask(id, node);
     // Fire the terminal transition after subscribeTaskTermination registers the
-    // listener (a macrotask guarantees ordering).
+    // listener (a macrotask guarantees ordering) — unless the node is held.
     setTimeout(() => {
+      if (this.hold.has(node.nodeId)) return; // stays running
       const cb = this.subs.get(id);
       if (cb) cb(id, this.behavior(node.nodeId));
     }, 0);
@@ -241,6 +254,103 @@ describe("resetNodeForRetry (pure state mutation)", () => {
     // A (untouched upstream) never emitted — still absent from the ledger.
     expect(state.signalLedger.has("A")).toBe(false);
   });
+
+  it("rejects retry of a running target before mutating anything (M11 state guard)", () => {
+    const { state } = buildAdvance(linearABC());
+    const B = state.nodes.get("B")!;
+    // B is Running with a live dispatch task.
+    markReady(state, B);
+    markRunning(state, B, {
+      dispatchTaskId: "task-B-1",
+      dispatchSessionId: "sess-B-1",
+    });
+    expect(B.status).toBe(NodeStatus.Running);
+    const phaseBefore = state.phase;
+
+    expect(() =>
+      resetNodeForRetry(state, "B", { modifyPrompt: "redo" }),
+    ).toThrow(/live node\(s\) in the retry scope/);
+    expect(() =>
+      resetNodeForRetry(state, "B", { modifyPrompt: "redo" }),
+    ).toThrow(/running/);
+
+    // Nothing was mutated: still running with the same task, prompt and
+    // counters untouched, phase unchanged — a rejected retry is a no-op.
+    expect(B.status).toBe(NodeStatus.Running);
+    expect(B.dispatchTaskId).toBe("task-B-1");
+    expect(B.dispatchSessionId).toBe("sess-B-1");
+    expect(B.prompt).toBe("pB");
+    expect(B.retryCount).toBe(0);
+    expect(B.signalsObserved).toEqual({});
+    expect(state.phase).toBe(phaseBefore);
+    // Downstream untouched too.
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Pending);
+  });
+
+  it("rejects retry when a downstream node is running (M11 scope guard)", () => {
+    const { state } = buildAdvance(linearABC());
+    const B = state.nodes.get("B")!;
+    const C = state.nodes.get("C")!;
+    // B is terminal (completed) but its downstream C is still mid-execution.
+    markReady(state, B);
+    markRunning(state, B, { dispatchTaskId: "task-B-1" });
+    markCompleted(state, B, {
+      result: { sidecarPath: "/tmp/t", totalChars: 1, hadFence: false, materializedAt: 1 },
+    });
+    markReady(state, C);
+    markRunning(state, C, {
+      dispatchTaskId: "task-C-1",
+      dispatchSessionId: "sess-C-1",
+    });
+    expect(B.status).toBe(NodeStatus.Completed);
+
+    expect(() => resetNodeForRetry(state, "B")).toThrow(/"C" \(running\)/);
+
+    // The terminal target and the running downstream are both untouched.
+    expect(B.status).toBe(NodeStatus.Completed);
+    expect(B.prompt).toBe("pB");
+    expect(B.retryCount).toBe(0);
+    expect(C.status).toBe(NodeStatus.Running);
+    expect(C.dispatchTaskId).toBe("task-C-1");
+  });
+
+  it("rejects retry of a blocked (HITL) target (M11 state guard)", () => {
+    const { state } = buildAdvance(linearABC());
+    const B = state.nodes.get("B")!;
+    markReady(state, B);
+    markRunning(state, B, { dispatchTaskId: "task-B-1" });
+    markNodeBlocked(state, B);
+    expect(B.status).toBe(NodeStatus.Blocked);
+
+    expect(() => resetNodeForRetry(state, "B")).toThrow(/blocked/);
+    expect(B.status).toBe(NodeStatus.Blocked);
+    expect(B.prompt).toBe("pB");
+    expect(B.retryCount).toBe(0);
+  });
+
+  it("re-applying the same modify_prompt does not accumulate (M11 replace-dedup)", () => {
+    const { state } = buildAdvance(linearABC());
+    const B = state.nodes.get("B")!;
+    markEscalated(state, B, "boom");
+    state.phase = EnginePhase.Complete as EnginePhase;
+
+    // First retry prepends the block once.
+    resetNodeForRetry(state, "B", { modifyPrompt: "redo" });
+    expect(B.prompt).toBe("redo\n\npB");
+    expect(B.retryCount).toBe(1);
+
+    // Terminal again, retry with the SAME block — no second copy.
+    markEscalated(state, B, "boom again");
+    resetNodeForRetry(state, "B", { modifyPrompt: "redo" });
+    expect(B.prompt).toBe("redo\n\npB"); // NOT "redo\n\nredo\n\npB"
+    expect(B.retryCount).toBe(2);
+
+    // A DIFFERENT modify_prompt prepends on top (the latest instruction wins),
+    // but the previously-injected block is not duplicated by this call.
+    resetNodeForRetry(state, "B", { modifyPrompt: "redo harder" });
+    expect(B.prompt).toBe("redo harder\n\nredo\n\npB");
+    expect(B.retryCount).toBe(3);
+  });
 });
 
 // ── AdvanceEngine.retryNode: behavioral core ───────────────────────────────
@@ -294,6 +404,108 @@ describe("AdvanceEngine.retryNode", () => {
     expect(report.reDispatched).toBe(1);
     expect(state.phase).toBe(EnginePhase.Executing);
   });
+
+  it("rejects retryNode on a running node without re-dispatching it (M11 guard)", async () => {
+    const { state, engine, fake } = buildAdvance(linearABC());
+    // Dispatch the root A — FakeDispatch resolves the task but never fires a
+    // terminal transition, so A stays Running with a live dispatch task.
+    await engine.dispatchReady();
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    const aDispatchesBefore = fake.calls.filter((c) => c.nodeId === "A").length;
+
+    await expect(engine.retryNode("A", { modifyPrompt: "redo" })).rejects.toThrow(
+      /running/,
+    );
+
+    // No re-dispatch, no state mutation, no session leak.
+    expect(fake.calls.filter((c) => c.nodeId === "A").length).toBe(aDispatchesBefore);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("A")!.prompt).toBe("pA");
+    expect(state.nodes.get("A")!.retryCount).toBe(0);
+    expect(state.phase).toBe(EnginePhase.Executing);
+  });
+});
+
+// ── AdvanceEngine.retryNode — M11 dedup & subscription cleanup (dispatch-driven) ──
+
+/** FiringDispatch + the optional `removeTaskTerminatedListener` removal surface. */
+class RemovingFiringDispatch extends FiringDispatch {
+  removals: Array<{ taskId: string; callback: TaskTerminatedCallback }> = [];
+  removeTaskTerminatedListener(
+    taskId: string,
+    callback: TaskTerminatedCallback,
+  ): void {
+    this.removals.push({ taskId, callback });
+  }
+}
+
+/** Build an AdvanceEngine over a dispatch seam that auto-completes tasks. */
+function buildFiringAdvance(fake: FiringDispatch, name = "g-fire") {
+  const state = createEngineState(linearABC(), name);
+  provision(state);
+  const engine = new AdvanceEngine({
+    state,
+    signalBridge: new SignalBridge(),
+    dispatch: fake,
+  });
+  return { state, engine, fake };
+}
+
+describe("AdvanceEngine.retryNode — modify_prompt dedup & superseded-subscription cleanup", () => {
+  it("repeated retries with the same modify_prompt keep a single injected block", async () => {
+    const { state, engine } = buildFiringAdvance(new FiringDispatch());
+
+    // Run the whole chain A → B → C to completion via the dispatch seam.
+    await engine.dispatchReady();
+    await settle();
+    await settle();
+    expect(state.phase).toBe(EnginePhase.Complete);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Completed);
+
+    // Retry #1 prepends the block once.
+    await engine.retryNode("B", { modifyPrompt: "fix it" });
+    expect(state.nodes.get("B")!.prompt).toBe("fix it\n\npB");
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // Let the retried B re-complete and C re-run to quiescence.
+    await settle();
+    await settle();
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Completed);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Completed);
+
+    // Retry #2 with the SAME block — no accumulation (M11 replace-dedup).
+    await engine.retryNode("B", { modifyPrompt: "fix it" });
+    expect(state.nodes.get("B")!.prompt).toBe("fix it\n\npB"); // NOT "fix it\n\nfix it\n\npB"
+    expect(state.nodes.get("B")!.retryCount).toBe(2);
+    expect(state.phase).toBe(EnginePhase.Executing);
+  });
+
+  it("retry unregisters the superseded task's onTaskTerminated subscription (M11 zombie cleanup)", async () => {
+    const fake = new RemovingFiringDispatch();
+    const { state, engine } = buildFiringAdvance(fake);
+
+    // Run the chain to completion — B and C each registered a subscription.
+    await engine.dispatchReady();
+    await settle();
+    await settle();
+    expect(state.phase).toBe(EnginePhase.Complete);
+    const subsBefore = engine.getTerminationSubscriptions();
+    const bSub = subsBefore.find((s) => s.taskId.startsWith("task-B-"));
+    const cSub = subsBefore.find((s) => s.taskId.startsWith("task-C-"));
+    expect(bSub).toBeDefined();
+    expect(cSub).toBeDefined();
+
+    await engine.retryNode("B", { modifyPrompt: "fix it" });
+
+    // The superseded B + C subscriptions were unregistered from the port...
+    expect(fake.removals.some((r) => r.taskId === bSub!.taskId)).toBe(true);
+    expect(fake.removals.some((r) => r.taskId === cSub!.taskId)).toBe(true);
+    // ...and dropped from the ledger; B's fresh re-dispatch task keeps its own.
+    const subsAfter = engine.getTerminationSubscriptions();
+    expect(subsAfter.some((s) => s.taskId === bSub!.taskId)).toBe(false);
+    expect(subsAfter.some((s) => s.taskId === cSub!.taskId)).toBe(false);
+    expect(subsAfter.some((s) => s.taskId.startsWith("task-B-"))).toBe(true);
+  });
 });
 
 // ── EngineRuntime.retryNode (public method) ────────────────────────────────
@@ -327,8 +539,11 @@ describe("EngineRuntime.retryNode", () => {
 
 // ── GraphToolSet.graph_run wiring ──────────────────────────────────────────
 
-function makeToolset(): { ts: GraphToolSet; fake: FakeDispatch } {
-  const fake = new FakeDispatch();
+function makeToolset(): { ts: GraphToolSet; fake: FiringDispatch } {
+  // R is held running forever (never auto-completes) so `run()` only ever
+  // dispatches R; the retried sink A auto-completes between retries, keeping
+  // every retry target terminal (M11 guard: retry requires a quiescent node).
+  const fake = new FiringDispatch(() => "completed", new Set(["R"]));
   const deps: GraphToolSetDeps = { dispatch: fake };
   return { ts: new GraphToolSet(deps), fake };
 }
@@ -357,6 +572,9 @@ describe("graph_run retry wiring", () => {
     expect(r2.retry!.node_id).toBe("A");
     expect(r2.retry!.re_dispatched).toBeGreaterThan(0);
     expect(fake.calls.filter((c) => c.nodeId === "A").length).toBe(before + 1);
+    // Let the retried A complete so the next retry sees a terminal target
+    // (M11 guard refuses retrying a still-running node).
+    await settle();
 
     // modify_prompt alone also triggers the retry path and prepends the prompt.
     const r3 = await ts.graph_run({

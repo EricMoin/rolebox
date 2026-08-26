@@ -52,6 +52,7 @@ import type { HookDeps } from "../../../hooks/deps.ts";
 import type { HookState } from "../../../hooks/state.ts";
 import { isDispatchNotification } from "../../../dispatch/notification.ts";
 import { LOOP_PROGRESS_MARKER } from "../../../loop/constants.ts";
+import { COPILOT_MARKER } from "../../../copilot/constants.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { extractPiSessionId, extractPiAgent } from "./system-transform.ts";
 
@@ -87,6 +88,7 @@ function isSyntheticInjection(text: string): boolean {
   return (
     text.includes("[auto-continue") ||
     text.includes(LOOP_PROGRESS_MARKER) ||
+    text.includes(COPILOT_MARKER) ||
     isDispatchNotification(text)
   );
 }

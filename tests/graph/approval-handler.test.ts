@@ -11,12 +11,12 @@ import type { DispatchParentContext } from "../../src/graph/engine/dispatch-brid
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 import {
   AdvanceEngine,
+  type NodeCompletionEvent,
   type NodeDispatchPort,
 } from "../../src/graph/engine/engine-advance.ts";
-import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
+import { createEngineState, provision, applyBudgetDelta } from "../../src/graph/engine/engine-state.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
   approveBlockedNode,
@@ -92,14 +92,26 @@ interface Rig {
   state: EngineState;
   engine: AdvanceEngine;
   fake: FakeDispatch;
+  events: NodeCompletionEvent[];
 }
 
-function buildEngine(decl: GraphDeclaration, fake = new FakeDispatch()): Rig {
+function buildEngine(
+  decl: GraphDeclaration,
+  fake = new FakeDispatch(),
+  events: NodeCompletionEvent[] = [],
+): Rig {
   const state = createEngineState(decl, "g-1");
   provision(state);
   const bridge = new SignalBridge();
-  const engine = new AdvanceEngine({ state, signalBridge: bridge, dispatch: fake });
-  return { state, engine, fake };
+  const engine = new AdvanceEngine({
+    state,
+    signalBridge: bridge,
+    dispatch: fake,
+    // Recording completion seam — existing assertions never read it, so the
+    // always-on recorder is behavior-neutral for the pre-existing tests.
+    onNodeCompletion: (e) => events.push(e),
+  });
+  return { state, engine, fake, events };
 }
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -182,7 +194,7 @@ describe("approve (engine path)", () => {
     expect(rig.state.nodes.get("D")!.upstreamResults.get("P")!.fromSignal).toBe("answer");
   });
 
-  it("approve-path EdgePayload carries the node's artifacts into downstream merged_artifacts", async () => {
+  it("approve-path EdgePayload carries the node's artifacts to the downstream node's upstreamResults", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "graph-approve-artifacts-"));
     const sidecar = join(tmpDir, "p-result.txt");
     writeFileSync(sidecar, "Approval result", "utf8");
@@ -206,8 +218,6 @@ describe("approve (engine path)", () => {
       expect(p.artifacts).toEqual([sidecar]);
       const payload = rig.state.nodes.get("D")!.upstreamResults.get("P")!;
       expect(payload.artifacts).toEqual([sidecar]);
-      const fanIn = mergeFanInContext(rig.state.nodes.get("D")!.upstreamResults);
-      expect(fanIn.merged_artifacts).toEqual([sidecar]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -243,6 +253,24 @@ describe("approve (engine path)", () => {
 
     expect(approveBlockedNode(rig.state, p, "x")).toBeNull();
     expect(p.status).toBe(NodeStatus.Running);
+  });
+
+  it("EdgePayload budgetConsumed.sessions mirrors the per-node cumulative spawn counter (M10 refund never touches it)", () => {
+    const rig = buildEngine(gateGraph());
+    const p = rig.state.nodes.get("P")!;
+    p.status = NodeStatus.Blocked;
+    p.sessionsSpawned = 2; // cumulative across retries
+
+    // Simulate a direct-cancellation refund (M10): a sibling running node was
+    // cancelled, decrementing ONLY the graph-level net-live counter.
+    rig.state.budget.sessionsSpawned = 1;
+    applyBudgetDelta(rig.state, { sessions: -1 });
+    expect(rig.state.budget.sessionsSpawned).toBe(0);
+
+    // The EdgePayload's sessions come from the node's cumulative counter,
+    // which the graph-level refund must never decrement.
+    const payload = approveBlockedNode(rig.state, p, "accepted");
+    expect(payload!.budgetConsumed.sessions).toBe(2);
   });
 });
 
@@ -284,6 +312,51 @@ describe("reject (engine path)", () => {
     expect(report.kind).toBe("already_resolved");
     expect(report.actualStatus).toBe(NodeStatus.Escalate);
     expect(p.status).toBe(NodeStatus.Escalate);
+  });
+
+  it("rejectNode fires an escalate completion event on blocked → escalate (M13)", async () => {
+    const events: NodeCompletionEvent[] = [];
+    const rig = buildEngine(gateGraph(), new FakeDispatch(), events);
+    // Only the gate's own events matter — A fired its own answer event earlier.
+    const gateEvents = () => events.filter((e) => e.nodeId === "P");
+    await pauseAtGate(rig);
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    // Pausing for approval is not terminal → no completion event yet.
+    expect(gateEvents()).toHaveLength(0);
+
+    await rig.engine.rejectNode("P", "not good enough");
+
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Escalate);
+    expect(rig.state.nodes.get("P")!.errorReason).toBe("not good enough");
+    // The terminal escalate transition surfaces through the completion seam
+    // exactly once — the last silent HITL lane (approve/partialApprove notify).
+    expect(gateEvents()).toHaveLength(1);
+    expect(gateEvents()[0].signalType).toBe("escalate");
+    expect(gateEvents()[0].nodeStatus).toBe(NodeStatus.Escalate);
+    expect(gateEvents()[0].payload).toBe("not good enough");
+
+    // Replay of reject on the already-escalated node → no second event.
+    await rig.engine.rejectNode("P", "not good enough");
+    expect(gateEvents()).toHaveLength(1);
+  });
+
+  it("rejectNode revise lane (loop-backed re-entry) stays silent — the re-run's own signal fires the event (M13)", async () => {
+    const events: NodeCompletionEvent[] = [];
+    const rig = buildEngine(gateGraph(), new FakeDispatch(), events);
+    const gateEvents = () => events.filter((e) => e.nodeId === "P");
+    await pauseAtGate(rig);
+    const p = rig.state.nodes.get("P")!;
+    p.loopGroupId = "loop-1"; // a feeding loop group exists to re-open
+
+    await rig.engine.rejectNode("P", "redo the analysis");
+
+    // blocked → ready re-entry is NOT a terminal transition — no completion
+    // event here; the node re-runs and its eventual terminating signal fires
+    // its own event (the ledger records the synthetic revise_needed). The
+    // re-entered node is immediately re-dispatched by _dispatchReadyNodes.
+    expect(p.status).toBe(NodeStatus.Running);
+    expect(p.prompt).toContain("redo the analysis");
+    expect(gateEvents()).toHaveLength(0);
   });
 });
 
@@ -381,6 +454,32 @@ describe("partial-approval pruning", () => {
     const report = pruneDownstreamSubgraph(rig.state, [], "P");
     expect(report).toEqual({ cancelled: [], surviving: [] });
   });
+
+  it("refunds the graph-level session slot of a pruned running node (M10)", () => {
+    const rig = buildEngine(partialGraph());
+    // X is mid-flight: dispatched once, carrying a live dispatch task.
+    const x = rig.state.nodes.get("X")!;
+    x.status = NodeStatus.Running;
+    x.dispatchTaskId = "task-X";
+    x.sessionsSpawned = 1; // cumulative per-node counter
+    rig.state.budget.sessionsSpawned = 1; // X's net-live slot
+
+    const report = pruneDownstreamSubgraph(
+      rig.state,
+      ["S2"],
+      "P",
+      rig.fake as CancelDispatchPort,
+    );
+
+    expect(report.cancelled.sort()).toEqual(["X", "Y"]);
+    // X's net-live slot is refunded synchronously on the prune path; Y (pending)
+    // never dispatched so nothing to refund.
+    expect(rig.state.budget.sessionsSpawned).toBe(0);
+    expect(rig.state.nodes.get("X")!.status).toBe(NodeStatus.Done);
+    expect(rig.fake.cancelled).toContain("task-X");
+    // The per-node cumulative counter is untouched by the net-live refund.
+    expect(rig.state.nodes.get("X")!.sessionsSpawned).toBe(1);
+  });
 });
 
 // ── Partial approval: re-entry primitives ──────────────────────────────────
@@ -439,17 +538,131 @@ describe("partialApprove (engine path)", () => {
     // P pauses for approval.
     await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary");
     expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    // Live slots: S1, S2, Z, P, X = 5.
+    expect(rig.state.budget.sessionsSpawned).toBe(5);
 
     // Partial: approve S1, reject S2.
     await rig.engine.partialApprove("P", ["S1"], ["S2"], "fix branch 2");
 
     // X (rejected branch's dependent) is cancelled → done.
     expect(rig.state.nodes.get("X")!.status).toBe(NodeStatus.Done);
+    // M10: X's cancelled running slot refunded (−1) and S2's re-dispatch
+    // re-added one (+1) → net-live count returns to 5. Without the prune-path
+    // refund X's slot would leak and the counter would rest at 6.
+    expect(rig.state.budget.sessionsSpawned).toBe(5);
+    // The per-node cumulative counter survives the cancellation (EdgePayload
+    // source — untouched by the net-live refund).
+    expect(rig.state.nodes.get("X")!.sessionsSpawned).toBe(1);
     // S2 re-entered ready → re-dispatched running.
     expect(rig.state.nodes.get("S2")!.status).toBe(NodeStatus.Running);
     expect(rig.state.nodes.get("S2")!.prompt).toContain("fix branch 2");
     // P re-waits for the re-executed S2 → stays blocked (join not re-satisfied).
     expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
     expect(rig.state.nodes.get("P")!.upstreamResults.has("S2")).toBe(false);
+  });
+
+  it("notifies the completion seam exactly once across a replay of partialApprove (M12)", async () => {
+    const events: NodeCompletionEvent[] = [];
+    const rig = buildEngine(partialGraph(), new FakeDispatch(), events);
+    // Only the gate's own events matter — S1/S2 fire their own answer events.
+    const gateEvents = () => events.filter((e) => e.nodeId === "P");
+    // Drive to the gate: S1, S2 complete → P dispatched and paused.
+    await rig.engine.dispatchReady();
+    await rig.engine.onNodeSignalEmitted("S1", "answer", "r1");
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2");
+    await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+
+    // First partial verdict → exactly one completion event.
+    await rig.engine.partialApprove("P", ["S1"], ["S2"], "fix branch 2");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked); // re-waits
+    expect(gateEvents()).toHaveLength(1);
+    expect(gateEvents()[0].signalType).toBe("answer");
+    const payload = gateEvents()[0].payload as {
+      partial_approve: { approved: string[]; rejected: string[] };
+    };
+    expect(payload.partial_approve.approved).toEqual(["S1"]);
+    expect(payload.partial_approve.rejected).toEqual(["S2"]);
+
+    // Replay / duplicate call carrying the SAME verdict on the same blocked
+    // episode: the state mutations are idempotent no-ops, but the completion
+    // seam must NOT re-fire.
+    await rig.engine.partialApprove("P", ["S1"], ["S2"], "fix branch 2");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    expect(rig.state.nodes.get("X")!.status).toBe(NodeStatus.Done); // prune already applied
+    expect(rig.state.nodes.get("S2")!.prompt).toContain("fix branch 2"); // feedback not duplicated
+    expect(gateEvents()).toHaveLength(1);
+  });
+
+  it("notifies again for a NEW verdict on the same blocked episode (M12 verdict-scoped dedup)", async () => {
+    const events: NodeCompletionEvent[] = [];
+    const rig = buildEngine(partialGraph(), new FakeDispatch(), events);
+    const gateEvents = () => events.filter((e) => e.nodeId === "P");
+    // Drive to the gate.
+    await rig.engine.dispatchReady();
+    await rig.engine.onNodeSignalEmitted("S1", "answer", "r1");
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2");
+    await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+
+    // Round 1: partial verdict → one gate event; the marker is stashed.
+    await rig.engine.partialApprove("P", ["S1"], ["S2"], "round 1");
+    expect(gateEvents()).toHaveLength(1);
+
+    // The rejected branch re-executes and re-answers → P's join re-satisfies,
+    // but a blocked gate is not auto-re-entered (it awaits a human verdict).
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2-again");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    expect(rig.state.nodes.get("P")!.upstreamResults.has("S2")).toBe(true);
+
+    // Round 2: a DIFFERENT verdict (approve everything) is a genuine new
+    // decision on the same episode → notifies again and re-enters P ready.
+    await rig.engine.partialApprove("P", ["S1", "S2"], [], "round 2");
+    expect(gateEvents()).toHaveLength(2);
+    expect(gateEvents()[1].signalType).toBe("answer");
+    expect(
+      (gateEvents()[1].payload as { partial_approve: { reason?: string } })
+        .partial_approve.reason,
+    ).toBe("round 2");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Running); // re-dispatched
+
+    // Replay of the round-2 verdict → still no extra event.
+    await rig.engine.partialApprove("P", ["S1", "S2"], [], "round 2");
+    expect(gateEvents()).toHaveLength(2);
+  });
+
+  it("notifies again on a NEW blocked episode even for an identical verdict (M12 per-episode scope)", async () => {
+    const events: NodeCompletionEvent[] = [];
+    const rig = buildEngine(partialGraph(), new FakeDispatch(), events);
+    const gateEvents = () => events.filter((e) => e.nodeId === "P");
+    // Drive to the gate.
+    await rig.engine.dispatchReady();
+    await rig.engine.onNodeSignalEmitted("S1", "answer", "r1");
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2");
+    await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+
+    // Round 1: partial verdict → one gate event.
+    await rig.engine.partialApprove("P", ["S1"], ["S2"], "v1");
+    expect(gateEvents()).toHaveLength(1);
+
+    // Rejected branch re-answers → P re-enters ready, re-renders, and
+    // re-pauses: a NEW gate presentation (`_pauseForApproval` clears the
+    // marker).
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2-again");
+    await rig.engine.partialApprove("P", ["S1", "S2"], [], "v2");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Running);
+    await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary-2");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    // The re-pause itself is not terminal → no new gate event yet.
+    expect(gateEvents()).toHaveLength(2);
+
+    // Round 2 with the IDENTICAL round-1 verdict → new episode → notifies.
+    await rig.engine.partialApprove("P", ["S1"], ["S2"], "v1");
+    expect(gateEvents()).toHaveLength(3);
+    expect(
+      (gateEvents()[2].payload as { partial_approve: { reason?: string } })
+        .partial_approve.reason,
+    ).toBe("v1");
   });
 });

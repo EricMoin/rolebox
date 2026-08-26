@@ -17,7 +17,6 @@ import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
 import { applyDataMapping } from "../../src/graph/engine/data-mapping-transform.ts";
-import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
@@ -184,10 +183,11 @@ describe("engine integration — exclude from merged fan-in", () => {
     const bResult = state.nodes.get("F")!.upstreamResults.get("B")!.result;
     expect(JSON.parse(bResult)).toEqual({ note: "plain" });
 
-    // The merged fan-in context contains neither a `secret` source nor the key.
-    const merged = mergeFanInContext(state.nodes.get("F")!.upstreamResults);
-    expect(merged.sources).toHaveLength(2);
-    expect(JSON.stringify(merged.sources)).not.toContain("secret");
+    // The per-source results collected on the fan-in node contain neither a
+    // `secret` key nor the excluded source data.
+    const collected = [...state.nodes.get("F")!.upstreamResults.values()];
+    expect(collected).toHaveLength(2);
+    expect(JSON.stringify(collected.map((p) => p.result))).not.toContain("secret");
   });
 
   it("applies different transforms per edge leaving the same source", async () => {

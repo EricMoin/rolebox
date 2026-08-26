@@ -10,7 +10,6 @@ import {
   type JoinVerdict,
 } from "../../src/graph/engine/join-evaluator.ts";
 import { markReady, markRunning } from "../../src/graph/engine/node-lifecycle.ts";
-import { mergeFanInContext } from "../../src/graph/engine/join-evaluator.ts";
 import {
   cancelPendingUpstreams,
   type CancelDispatchPort,
@@ -258,11 +257,9 @@ describe("partial-failure retention", () => {
     expect(report.cancelled).toEqual([]);
     expect(port.calls).toEqual([]);
 
-    // The escalate entry survives into the fan-in context for diagnostics.
-    const ctx = mergeFanInContext(sink.upstreamResults);
-    const bSource = ctx.sources.find((s) => s.node === "b");
-    expect(bSource?.signal).toBe("escalate");
-    expect(bSource?.result).toBe("result-b");
+    // The escalate entry survives on upstreamResults for the convergence node
+    // to inspect, with its payload intact.
+    expect(sink.upstreamResults.get("b")!.result).toBe("result-b");
   });
 });
 

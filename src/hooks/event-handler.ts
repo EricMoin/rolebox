@@ -4,9 +4,8 @@ import { functionRuntime } from "../function/runtime-state.ts";
 import { ArtifactStore } from "../function/artifact-store.ts";
 import { loadHandlers, safeCall } from "../function/handlers-loader.ts";
 import { FunctionContext } from "../function/context.ts";
-import { evaluateCondition, type CondEnv } from "../function/conditions.ts";
-import { decideContinuation } from "../function/continuation.ts";
 import { runTextCapture } from "../function/observe.ts";
+import { runTurnEndPipeline } from "../copilot/pipeline.ts";
 import { collectAllFunctions, fetchLastAssistantText, appendCorrection } from "./context.ts";
 import { drainHandlerContext } from "./drain-handler.ts";
 import { createSubLogger } from "../logger.ts";
@@ -144,116 +143,30 @@ export async function handleEvent(
         functionRuntime.markDirty();
       }
 
-      // --- Continuation (Phase 2 — ONE continuation per idle) ---
-      let sentContinuation = false;
-      let burst = 0;
-      for (const st of functionRuntime.all(sid).values()) burst += st.continuationCount;
-      for (const name of activeSet) {
-        // Re-check active (onIdle may have deactivated)
-        if (!functionSessionState.getActive(sid).has(name)) continue;
-        const fn = allFns.find((f) => f.name === name);
-        if (!fn) continue;
-        const st = functionRuntime.get(sid, name);
-        if (!st || st.phase === "complete") continue;
-        if (st.phase === "gated") {
-          // Bounded backstop: if blockedAt is set and the wall-clock timeout
-          // has expired, force-unblock so the next idle cycle re-evaluates
-          // continue_until rather than parking the orchestrator forever.
-          if (
-            st.blockedAt != null &&
-            Date.now() - st.blockedAt > (st.blockedTimeoutMs ?? 120_000)
-          ) {
-            st.phase = "active";
-            st.evidenceObserved["paused"] = false;
-            st.blockedAt = undefined;
-            functionRuntime.markDirty();
-            log.info("force-unblocked gated function (blocked timeout)", {
-              sessionID: sid,
-              fnName: name,
-            });
-            // fall through to continuation logic below
-          } else {
-            continue; // still gated, skip continuation
-          }
-        }
-
-        // Skip continuation entirely if requires_evidence is declared but not yet met.
-        // This prevents e.g. synthesize from auto-continuing on DIRECT-path responses
-        // where dispatch_output was never called and evidence was never observed.
-        const requiredEvidence = fn.requires_evidence ?? [];
-        if (requiredEvidence.length > 0) {
-          const allMet = requiredEvidence.every((t) => st.evidenceObserved[t] === true);
-          if (!allMet) continue;
-        }
-
-        let wantsContinue = false;
-        let reason = "completion condition not yet met";
-
-        // Declarative: continue_until
-        if (fn.continue_until) {
-          const env: CondEnv = { sessionID: sid, fnName: name, state: st, artifacts,
-            requiredEvidence, userMessagedThisTurn: false, workspaceDir: deps.dir };
-          if (evaluateCondition(fn.continue_until, env)) {
-            st.phase = "complete"; functionRuntime.markDirty(); continue;
-          }
-          wantsContinue = true;
-        }
-
-        // Imperative: shouldContinue (additive — can request but cannot veto declarative)
-        if (fn.handlers && hasHandlers) {
-          const mod = await loadHandlers(fn.filePath, fn.handlers);
-          if (mod?.shouldContinue) {
-            const ctx = new FunctionContext(
-              sid, fn.name, functionRuntime, artifacts,
-              lastText, fn.state_schema_version ?? 1,
-            );
-            const handlerWants = await safeCall(() => mod.shouldContinue!(ctx));
-            if (handlerWants === true) {
-              wantsContinue = true;
-              const stashed = (st.kv.__pendingContinuationReasons as string[]) ?? [];
-              reason = stashed.length > 0 ? stashed.join("; ") : "handler requested continuation";
-            } else if (handlerWants === false && !fn.continue_until) {
-              st.phase = "complete"; functionRuntime.markDirty(); continue;
-            }
-          }
-        }
-
-        delete st.kv.__pendingContinuationReasons;
-        if (!wantsContinue) continue;
-
-        // Snapshot cooldown before decideContinuation so a failed prompt send
-        // can roll back BOTH of its mutations (continuationCount increment and
-        // a possible cooldownUntilTurn arming) atomically.
-        const cooldownBeforeDecision = st.cooldownUntilTurn;
-        const decision = decideContinuation({
-          fnName: name, st, reason,
-          cfg: { globalMaxTurns: 25, perFnMax: fn.continue_max ?? 5 },
-          totalContinuationsThisBurst: burst,
-        });
-        if (decision.shouldContinue && decision.reminder) {
-          const sessionAgent = state.sessionAgentRegistry.get(sid);
-          try {
-            await deps.session.prompt(sid, {
-              parts: [{ type: "text", text: decision.reminder }],
-              agent: sessionAgent || undefined,
-            });
-            // Only persist and mark as sent on success
-            functionRuntime.markDirty();
-            sentContinuation = true;
-            break; // ONE continuation per idle event
-          } catch (err) {
-            log.warn("Failed to send continuation prompt", { sessionID: sid, err });
-            // Rollback the continuation count that decideContinuation incremented
-            st.continuationCount -= 1;
-            // Restore the cooldown snapshot: decideContinuation may have armed a
-            // cooldown rule at the (now rolled-back) count. A transient prompt
-            // failure must not leave a stale cooldown that suppresses future
-            // continuations — keep continuationCount and cooldownUntilTurn consistent.
-            st.cooldownUntilTurn = cooldownBeforeDecision;
-            // Do NOT mark dirty — no state change to persist on failure
-          }
-        }
-      }
+      // --- Turn-end decision (Phase 2 — ONE injection per idle) ---
+      // Unified pipeline (subtask 8): the builtin continuation policy is
+      // always the first source (extracted verbatim into
+      // src/copilot/sources/builtin.ts), followed by user heuristic rules and
+      // the LLM-role verdict when copilot is enabled for the session's role.
+      // When copilot is absent/disabled the pipeline runs ONLY the builtin
+      // source — byte-identical legacy behavior.
+      await runTurnEndPipeline(
+        {
+          session: deps.session,
+          dir: deps.dir,
+          copilotConfigs: deps.copilotConfigs,
+          resolvedSubagents: deps.resolvedSubagents,
+        },
+        sid,
+        {
+          activeSet,
+          allFns,
+          hasHandlers,
+          lastText,
+          artifacts,
+          sessionAgentRegistry: state.sessionAgentRegistry,
+        },
+      );
       break;
     }
     case "session.status": {

@@ -6,10 +6,10 @@
  *
  * A read-only seam over {@link DispatchManager}. The graph engine uses this
  * bridge as its *only* touchpoint into the dispatch subsystem. It wraps the
- * public methods (`launch`, `executeSync`, `onTaskTerminated`,
- * `removeTaskTerminatedListener`, `getResult`, `cancelTask`, `getTasksByParent`,
- * `getBudgetTracker`) with proper TS types
- * so the engine never reaches into `DispatchManager` internals directly.
+ * public methods (`launch`, `onTaskTerminated`, `removeTaskTerminatedListener`,
+ * `getTask`, `getTasksByParent`, `cancelTask`, `getSessionUsage`) with proper
+ * TS types so the engine never reaches into `DispatchManager` internals
+ * directly.
  *
  * Invariant: this module is an **import-only consumer** of the dispatch
  * subsystem's *public* API. It imports only the `DispatchManager` class type
@@ -24,7 +24,7 @@
 
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { DispatchInput, DispatchTask } from "../../dispatch/types.ts";
-import type { BudgetTracker, UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
+import type { UsageRecord } from "../../dispatch/budget/budget-tracker.ts";
 import type { NodeRuntimeState } from "../../types.engine-v2.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -49,19 +49,6 @@ export interface DispatchParentContext {
    * and keep dispatch-layer notifications exactly as before.
    */
   graphScoped?: boolean;
-}
-
-/**
- * Structured payload returned by `DispatchManager.getResult`.
- * Mirrors the inline return type at `src/dispatch/core/manager.ts:266-275`.
- */
-export interface DispatchResultPayload {
-  kind: "ok" | "expired" | "not_found" | "fetch_error";
-  text: string;
-  resultText: string;
-  hadFence: boolean;
-  totalChars: number;
-  error?: string;
 }
 
 /** Options for building the parent context of a graph-level dispatch. */
@@ -125,11 +112,6 @@ export class DispatchBridge {
     return this.manager.launch(input, parentContext);
   }
 
-  /** Dispatch a task synchronously (blocks until it completes, returns its text). */
-  executeSync(input: DispatchInput, parentContext: DispatchParentContext): Promise<string> {
-    return this.manager.executeSync(input, parentContext);
-  }
-
   /** Register a one-time listener fired when a task enters a terminal state. */
   onTaskTerminated(
     taskId: string,
@@ -163,24 +145,21 @@ export class DispatchBridge {
     return this.manager.getTask(taskId);
   }
 
-  /** Fetch the materialized output of a completed task. */
-  getResult(taskId: string): Promise<DispatchResultPayload> {
-    return this.manager.getResult(taskId);
+  /**
+   * List every task launched under a given parent session id (the graph id
+   * seeds the dispatch parent session via {@link graphParentContext}). Used by
+   * recovery to sweep the crash-window orphan: a node persisted `running`
+   * before `executeNode` resolved its task handle carries no `dispatchTaskId`,
+   * so the live session is matched by parent session + node-scoped description
+   * instead (`engine-recovery.ts::reconcileEngine`).
+   */
+  getTasksByParent(parentSessionId: string): DispatchTask[] {
+    return this.manager.getTasksByParent(parentSessionId);
   }
 
   /** Cancel a running task. Returns `true` if the cancellation was issued. */
   cancelTask(taskId: string): Promise<boolean> {
     return this.manager.cancelTask(taskId);
-  }
-
-  /** List the tasks dispatched by the given parent session. */
-  getTasksByParent(parentSessionId: string): DispatchTask[] {
-    return this.manager.getTasksByParent(parentSessionId);
-  }
-
-  /** Access the shared budget tracker (read-only budget queries live in `budget-bridge.ts`). */
-  getBudgetTracker(): BudgetTracker {
-    return this.manager.getBudgetTracker();
   }
 
   /**
@@ -189,7 +168,8 @@ export class DispatchBridge {
    *
    * This is the per-node usage surface: a node's `dispatchSessionId` identifies
    * exactly one dispatched session, so the engine reads this at task termination
-   * to populate `node.tokensConsumed` (the Phase-7 per-node consumption gap).
+   * to populate `node.tokensConsumed` and feed the graph-level budget counters
+   * (`engine-recovery.ts::captureNodeUsage`).
    * Returns a zeroed `UsageRecord` when the tracker has no record for the
    * session (e.g. usage was never sampled or the session was reset).
    */

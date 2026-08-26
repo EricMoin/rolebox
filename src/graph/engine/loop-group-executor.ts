@@ -79,13 +79,17 @@ import {
  *   node escalated with the structured exhaustion payload.
  * - `escalating` — the node signalled `escalate`; the worst signal propagated
  *   forward and failed convergence nodes had their pending upstreams cancelled.
+ * - `ignored` — the node was not a loop-group member; the defensive non-member
+ *   guard short-circuited and NO loop semantics ran (no traversal accounting,
+ *   no convergence-tracker touch, no propagation).
  */
 export type LoopOutcome =
   | "converged"
   | "revising"
   | "stuck"
   | "max_traversals_exhausted"
-  | "escalating";
+  | "escalating"
+  | "ignored";
 
 /** The structured escalation payload mandated by failure-resilience.md §1.6 / §4.3. */
 export interface LoopEscalatePayload {
@@ -325,9 +329,13 @@ export function executeLoopStep(
   if (!groupId) {
     // Guard: this module only orchestrates loop-group members. A caller that
     // routes a non-member here gets an explicit non-loop outcome rather than a
-    // silent mis-execution.
-    const report: LoopStepReport = {
-      outcome: "revising",
+    // silent mis-execution. The outcome is the distinct `ignored` — NOT the
+    // misleading `converged` — so a mis-routed signal is never misread as a
+    // loop that converged (no traversal accounting, tracker touch, or
+    // propagation ran; engine-advance's forward activation gates on exactly
+    // `converged`, so a non-member is never forward-activated as if it were).
+    return {
+      outcome: "ignored",
       traversals: 0,
       revisedUpstream: [],
       escalated: [],
@@ -335,9 +343,6 @@ export function executeLoopStep(
       cancelled: [],
       alreadyResolved: [],
     };
-    report.outcome = "converged"; // nominal — non-loop nodes are not the executor's concern
-    report.revisedUpstream = [];
-    return report;
   }
   const group = state.loopGroups.get(groupId)!;
   const report = initReport(group);

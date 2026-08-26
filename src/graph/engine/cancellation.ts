@@ -48,7 +48,7 @@
 
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
-import { removeFromFrontier } from "./engine-state.ts";
+import { applyBudgetDelta, removeFromFrontier } from "./engine-state.ts";
 import { canTransitionNode, markCancelled, markDone } from "./node-lifecycle.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
 
@@ -177,12 +177,115 @@ export function expandLoopMembers(state: EngineState, requested: readonly string
   return expanded;
 }
 
+// ── Shared retire primitive ─────────────────────────────────────────────────
+
+/**
+ * Options for {@link retireCancelledNode}.
+ */
+export interface RetireCancelledNodeOptions {
+  /**
+   * M10 session-slot refund. When true (default), a `running` node with a live
+   * dispatch task decrements the graph-level `sessionsSpawned` counter
+   * synchronously BEFORE the `cancelled` transition. The dispatch layer reports
+   * the cancellation asynchronously AFTER the node already advanced
+   * `cancelled → done`, so the termination callback's status guard
+   * (`engine-recovery.ts:416`, `current.status !== Running → return`) bails and
+   * its `applyBudgetDelta({sessions: -1})` (`engine-recovery.ts:427-429`) never
+   * fires on this path — the refund must happen here or never. Turn OFF only to
+   * reproduce the no-refund cascade lane behavior (`cancelPendingUpstreams`),
+   * which today retires upstreams without touching the net-live counter.
+   */
+  refund?: boolean;
+  /**
+   * Optional cancellation seam. When the port provides `cancelTask` and the
+   * node carries a `dispatchTaskId`, the task is handed off fire-and-forget
+   * (`void`, never awaited, never acked).
+   */
+  dispatchPort?: CancelDispatchPort;
+  /**
+   * Optional collector for the dispatch task ids handed to `cancelTask`
+   * (reporting — the `CancelScopeReport.cancelCalls` source). Only populated
+   * for nodes whose task was actually torn down.
+   */
+  cancelCalls?: string[];
+  /**
+   * Optional per-node notification hook (monitor H4) invoked with
+   * `(nodeId, reason)` AFTER the node's lifecycle advanced to
+   * `cancelled → done`. Callers that don't need observation omit it.
+   */
+  onCancelled?: CancelNodeNotifier;
+}
+
+/**
+ * Retire one node's lifecycle to `cancelled → done` and tear down its dispatch
+ * task fire-and-forget. THE single shared implementation of the triplicated
+ * "retire node + M10 session-slot refund + cancelTask fire-and-forget" pattern
+ * previously copied across `cancelOne` (`cancellation.ts`), `cancelNode`
+ * (`approval-handler.ts`), and the inline block in `cancelPendingUpstreams`
+ * (`cascade-canceller.ts`) — so the session-refund logic cannot drift between
+ * the three cancellation lanes.
+ *
+ * Steps, in order:
+ *   1. `canTransitionNode(status, Cancelled)` guard — double-guard with the
+ *      Cancellable rule (the transition table would throw on an illegal
+ *      transition, so we guard before calling).
+ *   2. M10 session-slot refund — when `opts.refund` is on (default), a RUNNING
+ *      node with a live dispatch task decrements the graph-level
+ *      `sessionsSpawned` counter synchronously, BEFORE the transition
+ *      (refund-before-transition ordering is load-bearing: the async
+ *      termination callback bails on the now-`done` node and would never
+ *      refund).
+ *   3. `markCancelled` then `markDone` — the node lands terminal `done`.
+ *   4. `removeFromFrontier` — the retired node stops being a dispatch
+ *      candidate.
+ *   5. `cancelTask` fire-and-forget — when a port is provided and the node has
+ *      a `dispatchTaskId`; never awaited, never acked. When `opts.cancelCalls`
+ *      is present, the task id is recorded into it.
+ *   6. Optional `onCancelled` hook — surfaces the retirement to the caller
+ *      (monitor H4) identically to signal-driven transitions.
+ */
+export function retireCancelledNode(
+  state: EngineState,
+  node: NodeRuntimeState,
+  reason: string,
+  opts: RetireCancelledNodeOptions = {},
+): void {
+  // Double guard: transition-table legality + the Cancellable rule.
+  if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
+  // M10 session-slot refund — BEFORE the transition (ordering is load-bearing).
+  // `pending`/`ready` nodes have no dispatched session and never consume a slot.
+  if (opts.refund !== false && node.status === NodeStatus.Running && node.dispatchTaskId) {
+    applyBudgetDelta(state, { sessions: -1 });
+  }
+  markCancelled(state, node, reason);
+  markDone(state, node);
+  removeFromFrontier(state, node.nodeId);
+  if (opts.dispatchPort?.cancelTask && node.dispatchTaskId) {
+    opts.cancelCalls?.push(node.dispatchTaskId);
+    // Fire-and-forget with rejection containment — a rejected cancel promise
+    // must not surface as an unhandled rejection (best-effort teardown).
+    void opts.dispatchPort.cancelTask(node.dispatchTaskId).catch(() => {
+      // best-effort — cancellation continues without a cancellation ack
+    });
+  }
+  // Monitor (H4): a scoped cancellation is a lifecycle transition performed
+  // OUTSIDE the signal-driven advancement — surface the retirement through the
+  // caller-provided hook (the engine runtime routes it to
+  // `advance.notifyNodeTerminal`) so the monitor sees the per-node completion
+  // event + durable event log line, identical to signal-driven transitions.
+  opts.onCancelled?.(node.nodeId, reason);
+}
+
 /**
  * Cancel one node's lifecycle (`pending | ready | running → cancelled → done`)
  * and, when a cancel seam is present and the node carries a dispatch task, tear
- * it down fire-and-forget (never awaited). Reuses the exact retirement pattern
- * shared by `cancelPendingUpstreams` (`cascade-canceller.ts:144-154`) and
- * `cancelNode` (`approval-handler.ts:333-345`).
+ * it down fire-and-forget (never awaited). Thin wrapper over the shared
+ * {@link retireCancelledNode} primitive — carries the M10 session-slot refund
+ * ON (a running node with a live dispatch task decrements the graph-level
+ * `sessionsSpawned` counter synchronously; the async termination callback bails
+ * on the now-`done` node, so the refund must happen here or never), records the
+ * handed-off task ids into `cancelCalls`, and forwards the optional monitor
+ * hook `onCancelled`.
  */
 function cancelOne(
   state: EngineState,
@@ -192,21 +295,12 @@ function cancelOne(
   cancelCalls: string[],
   onCancelled?: CancelNodeNotifier,
 ): void {
-  // Double guard: transition-table legality + the Cancellable rule.
-  if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
-  markCancelled(state, node, reason);
-  markDone(state, node);
-  removeFromFrontier(state, node.nodeId);
-  if (dispatchPort?.cancelTask && node.dispatchTaskId) {
-    cancelCalls.push(node.dispatchTaskId);
-    void dispatchPort.cancelTask(node.dispatchTaskId);
-  }
-  // Monitor (H4): a scoped cancellation is a lifecycle transition performed
-  // OUTSIDE the signal-driven advancement — surface the retirement through the
-  // caller-provided hook (the engine runtime routes it to
-  // `advance.notifyNodeTerminal`) so the monitor sees the per-node completion
-  // event + durable event log line, identical to signal-driven transitions.
-  onCancelled?.(node.nodeId, reason);
+  retireCancelledNode(state, node, reason, {
+    refund: true,
+    dispatchPort,
+    cancelCalls,
+    onCancelled,
+  });
 }
 
 /**

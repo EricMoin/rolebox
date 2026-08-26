@@ -18,16 +18,27 @@
  *   `isRequestBudgetExceeded` already covers both the request and session
  *   tiers from one `DispatchManagerConfig` (`src/dispatch/budget/budget-tracker.ts:148-176`).
  *
- *   The graph-declared session cap was removed — the bridge now delegates
- *   solely to the tracker. `EngineState.budget.sessionsSpawned` remains a
- *   NET-LIVE display counter (incremented per successful dispatch in
- *   `engine-advance.ts`, decremented on cancelled/timeout termination in
- *   `engine-recovery.ts`), but no longer gates dispatch.
+ *   On top of the tracker, the bridge enforces the graph declaration's OWN
+ *   ceilings (`GraphDeclaration.budget.max_total_*`) against the cumulative
+ *   `EngineState.budget` counters, which are fed by
+ *   `engine-recovery.ts::captureNodeUsage` (`applyBudgetDelta`) at task
+ *   termination. The declaration ceilings use `>=` (at-the-ceiling is a
+ *   breach); when no declaration budget is present, the tracker result is the
+ *   only gate.
  *
- * - **Per-node** — `checkNodeBudget(node)` is a stub in this phase. Enforcement
- *   of cumulative per-node consumption against per-graph `max_total_*` limits
- *   is deferred to Phase 7 (see the `applyBudgetDelta` stub note in
- *   `engine-state.ts`).
+ *   `EngineState.budget.sessionsSpawned` remains a NET-LIVE display counter
+ *   (incremented per successful dispatch in `engine-advance.ts`, decremented
+ *   on cancelled/timeout termination in `engine-recovery.ts`) and no longer
+ *   gates dispatch.
+ *
+ * - **Per-node** — `checkNodeBudget(node)` is a live port member: the
+ *   advance engine invokes it through `GraphBudgetPort` as a pre-dispatch
+ *   pre-check alongside `checkGraphBudget` (`engine-advance.ts::_dispatchNode`).
+ *   It compares the node's DECLARED per-node ceilings
+ *   (`node.budget.max_input_tokens` / `max_output_tokens` / `max_cost_usd`,
+ *   carried from `NodeConfig.budget` by `registerNode`) against the node's
+ *   cumulative `tokensConsumed` (`>=` means breach). No declared per-node
+ *   budget → accept. A breach escalates the ready node without dispatching it.
  *
  * Invariant: import-only consumer of the *public* `BudgetTracker` API. Imports
  * only the `BudgetTracker` class type and the `BudgetCheckResult` / `UsageRecord`
@@ -46,7 +57,7 @@ import type { GraphDeclaration } from "../../types.graph-v2.ts";
  * Read-only wrapper over {@link BudgetTracker}'s budget-query surface.
  *
  * The `BudgetTracker` instance is injected (via
- * `DispatchBridge.getBudgetTracker()`) — it is never constructed here, and the
+ * `DispatchManager.getBudgetTracker()`) — it is never constructed here, and the
  * engine never mutates budget state through this bridge.
  */
 export class BudgetBridge {
@@ -58,41 +69,119 @@ export class BudgetBridge {
   /**
    * Graph-level budget check.
    *
-   * Delegates to `BudgetTracker.isRequestBudgetExceeded(graphId)` — the graph
-   * ID is the request scope (see `dispatch-bridge.graphParentContext`), so the
-   * tracker check returns `{ exceeded: true, reason }` when the graph instance
-   * has breached any configured request-level ceiling.
+   * Two-layer check:
    *
-   * The graph-declared session cap was removed, so this is the only check —
-   * `state.budget.sessionsSpawned` (a NET-LIVE display counter, incremented
-   * per successful dispatch and decremented on cancelled/timeout termination)
-   * no longer gates dispatch.
+   * 1. Delegates to `BudgetTracker.isRequestBudgetExceeded(graphId)` — the
+   *    graph ID is the request scope (see `dispatch-bridge.graphParentContext`),
+   *    so the tracker check returns `{ exceeded: true, reason }` when the
+   *    graph instance has breached any configured request-level ceiling.
+   * 2. When the graph declaration declares its own ceilings
+   *    (`GraphDeclaration.budget.max_total_input_tokens` /
+   *    `max_total_output_tokens` / `max_total_cost_usd`), compares the
+   *    cumulative `EngineState.budget` counters (`>=` means breach) and
+   *    returns the first breach with a descriptive reason. The counters are
+   *    fed by `engine-recovery.ts::captureNodeUsage` at task termination.
+   *
+   * No declared graph budget → the tracker result is the only gate (and
+   * `state.budget.sessionsSpawned`, a NET-LIVE display counter, never gates).
    */
   checkGraphBudget(graphId: string, state: EngineState): BudgetCheckResult {
-    return this.tracker.isRequestBudgetExceeded(graphId);
+    const trackerResult = this.tracker.isRequestBudgetExceeded(graphId);
+    if (trackerResult.exceeded) return trackerResult;
+
+    const budget = this.graphDeclaration.budget;
+    if (!budget) return trackerResult;
+    if (
+      budget.max_total_input_tokens !== undefined &&
+      state.budget.totalInputTokens >= budget.max_total_input_tokens
+    ) {
+      return {
+        exceeded: true,
+        reason: `graph budget exhausted: inputTokens ${state.budget.totalInputTokens}/${budget.max_total_input_tokens}`,
+      };
+    }
+    if (
+      budget.max_total_output_tokens !== undefined &&
+      state.budget.totalOutputTokens >= budget.max_total_output_tokens
+    ) {
+      return {
+        exceeded: true,
+        reason: `graph budget exhausted: outputTokens ${state.budget.totalOutputTokens}/${budget.max_total_output_tokens}`,
+      };
+    }
+    if (
+      budget.max_total_cost_usd !== undefined &&
+      state.budget.totalCost >= budget.max_total_cost_usd
+    ) {
+      return {
+        exceeded: true,
+        reason: `graph budget exhausted: cost ${state.budget.totalCost}/${budget.max_total_cost_usd}`,
+      };
+    }
+    return trackerResult;
   }
 
   /**
    * Cumulative request usage for a graph instance (all nodes dispatched under
    * that graph ID). Read-only — the engine reads it, never writes it.
+   *
+   * NOTE: consumer-facing query, NOT part of the {@link GraphBudgetPort}
+   * contract — the advance engine never invokes this (it touches only
+   * `checkGraphBudget` / `checkNodeBudget` through the port). It exists on the
+   * concrete bridge so status / monitor consumers can read cumulative usage
+   * without reaching into the tracker directly.
    */
   getGraphUsage(graphId: string): UsageRecord {
     return this.tracker.getRequestUsage(graphId);
   }
 
   /**
-   * Per-node budget check.
+   * Per-node budget check — invoked by the engine through
+   * {@link GraphBudgetPort} as a pre-dispatch pre-check
+   * (`engine-advance.ts::_dispatchNode`).
    *
-   * STUB (Phase 7): Per-node cumulative consumption enforcement is out of
-   * scope for Phase 1. This always reports `{ exceeded: false }` and exists so
-   * the engine has a stable call site to upgrade once per-node ceiling logic
-   * lands (compare `engine-state.ts:applyBudgetDelta`'s stub note).
+   * Compares the node's DECLARED per-node ceilings (`node.budget.max_input_tokens`
+   * / `max_output_tokens` / `max_cost_usd`, carried into runtime state from
+   * `NodeConfig.budget` by `registerNode`) against the node's cumulative
+   * `tokensConsumed`. `>=` means breach — the first breached ceiling is
+   * returned with a descriptive reason. No declared per-node budget → accept
+   * (`{ exceeded: false }`).
    *
-   * @param node  The node's runtime state — carries `tokensConsumed`, the
-   *              per-node cumulative usage this future check will compare
-   *              against a ceiling.
+   * @param node  The node's runtime state — carries `tokensConsumed` (the
+   *              per-node cumulative usage) and `budget` (the declared
+   *              per-node ceilings).
    */
-  checkNodeBudget(_node: NodeRuntimeState): BudgetCheckResult {
+  checkNodeBudget(node: NodeRuntimeState): BudgetCheckResult {
+    const budget = node.budget;
+    if (!budget) return { exceeded: false };
+    const consumed = node.tokensConsumed;
+    if (
+      budget.max_input_tokens !== undefined &&
+      consumed.inputTokens >= budget.max_input_tokens
+    ) {
+      return {
+        exceeded: true,
+        reason: `node budget exhausted: inputTokens ${consumed.inputTokens}/${budget.max_input_tokens}`,
+      };
+    }
+    if (
+      budget.max_output_tokens !== undefined &&
+      consumed.outputTokens >= budget.max_output_tokens
+    ) {
+      return {
+        exceeded: true,
+        reason: `node budget exhausted: outputTokens ${consumed.outputTokens}/${budget.max_output_tokens}`,
+      };
+    }
+    if (
+      budget.max_cost_usd !== undefined &&
+      consumed.cost >= budget.max_cost_usd
+    ) {
+      return {
+        exceeded: true,
+        reason: `node budget exhausted: cost ${consumed.cost}/${budget.max_cost_usd}`,
+      };
+    }
     return { exceeded: false };
   }
 }

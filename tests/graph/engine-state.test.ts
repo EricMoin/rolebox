@@ -76,6 +76,13 @@ describe("createEngineState", () => {
     expect(typeof state.startedAt).toBe("number");
     expect(typeof state.updatedAt).toBe("number");
   });
+
+  it("carries no dead `edges` member (D3 — field removed)", () => {
+    const state = createEngineState(linearGraph(), "g-1");
+    // The RESERVED per-edge runtime map was deleted (D3 / gap c): a fresh
+    // state must not expose it, so nothing can be tempted to write to it.
+    expect("edges" in state).toBe(false);
+  });
 });
 
 // ── Provision ─────────────────────────────────────────────────────────────

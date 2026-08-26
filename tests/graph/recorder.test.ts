@@ -18,6 +18,7 @@ import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
+import { TERMINATING_SIGNALS_BY_SEVERITY } from "../../src/signal/signal-constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
@@ -34,6 +35,7 @@ import {
 import {
   executeLoopStep,
 } from "../../src/graph/engine/loop-group-executor.ts";
+import { deriveNodeEvidence } from "../../src/graph/engine/recorder.ts";
 
 // ── Controllable fake dispatch port (mirrors signal-history.test.ts) ────────
 class FakeDispatch implements NodeDispatchPort {
@@ -272,5 +274,49 @@ describe("artifacts and evidence (NodeRuntimeState.artifacts / evidence)", () =>
     // Honest empty — the optional fields stay absent.
     expect(a.artifacts).toBeUndefined();
     expect(a.evidence).toBeUndefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (d) Severity ordering — deriveNodeEvidence uses the shared constant (L1)
+// ═══════════════════════════════════════════════════════════════════════════
+describe("severity ordering (L1 / 01-F4)", () => {
+  /** A node-shaped object carrying only the observed signals (pure derivation). */
+  function nodeWithSignals(signals: Record<string, unknown>): NodeRuntimeState {
+    return { signalsObserved: signals } as unknown as NodeRuntimeState;
+  }
+
+  it("pins the shared TERMINATING_SIGNALS_BY_SEVERITY order (escalate > revise_needed > answer)", () => {
+    // The single source of truth every consumer imports — a reorder here
+    // silently changes _latestTerminating / deriveNodeEvidence precedence.
+    expect(TERMINATING_SIGNALS_BY_SEVERITY).toEqual([
+      "escalate",
+      "revise_needed",
+      "answer",
+    ]);
+  });
+
+  it("deriveNodeEvidence picks evidence from the highest-severity terminal signal (escalate beats answer)", () => {
+    const node = nodeWithSignals({
+      answer: { evidence: ["tests/a.test.ts"] },
+      escalate: { reason: "boom", evidence: ["tests/e.test.ts"] },
+    });
+    expect(deriveNodeEvidence(node)).toEqual(["tests/e.test.ts"]);
+  });
+
+  it("deriveNodeEvidence picks revise_needed evidence over a recorded answer", () => {
+    const node = nodeWithSignals({
+      answer: { evidence: ["tests/a.test.ts"] },
+      revise_needed: { findings: ["fix"], evidence: ["tests/r.test.ts"] },
+    });
+    expect(deriveNodeEvidence(node)).toEqual(["tests/r.test.ts"]);
+  });
+
+  it("deriveNodeEvidence picks escalate evidence over revise_needed", () => {
+    const node = nodeWithSignals({
+      revise_needed: { findings: ["fix"], evidence: ["tests/r.test.ts"] },
+      escalate: { reason: "boom", evidence: ["tests/e.test.ts"] },
+    });
+    expect(deriveNodeEvidence(node)).toEqual(["tests/e.test.ts"]);
   });
 });

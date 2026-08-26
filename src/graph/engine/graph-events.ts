@@ -220,11 +220,10 @@ export class GraphEventRecorder {
   }
 
   /** Record an engine lifecycle phase transition (`idle → executing → complete`). */
-  phaseChange(graphId: string, from: EnginePhase, to: EnginePhase): void {
+  phaseChange(graphId: string, _from: EnginePhase, to: EnginePhase): void {
     // `status` carries the target phase (the resulting engine phase, which is
-    // the meaningful state). `from` is retained by the engine sink but is not
+    // the meaningful state). `_from` is retained by the engine sink but is not
     // part of the serialized record shape.
-    void from;
     this._append({
       ts: Date.now(),
       graphId,

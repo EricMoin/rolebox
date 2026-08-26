@@ -159,6 +159,8 @@ function makeTerminalEvent(overrides: Partial<GraphTerminalEvent> = {}): GraphTe
     phase: overrides.isBlocked ? "executing" : "complete",
     nodeStatusSummaries: {
       completed: 1,
+      done: 0,
+      cancelled: 0,
       escalate: 0,
       timeout: 0,
       blocked: overrides.isBlocked ? 1 : 0,

@@ -65,7 +65,13 @@ import type {
 } from "../../types.engine-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier, applyBudgetDelta } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
-import { cloneCheckpointHistory, markNonCriticalDirty } from "./engine-persistence.ts";
+import {
+  clearNonCriticalDirty,
+  cloneCheckpointHistory,
+  markDirty,
+  markNonCriticalDirty,
+} from "./engine-persistence.ts";
+import { recordCheckpointForNode } from "./recorder.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -116,6 +122,24 @@ export interface DispatchRecoveryPort {
    * to populate `node.tokensConsumed` at task termination.
    */
   getSessionUsage?(sessionId: string): UsageRecord;
+  /**
+   * List every task launched under a given parent session id. The graph id
+   * seeds the dispatch parent session (`dispatch-bridge.ts:graphParentContext`),
+   * so passing `state.graphId` returns every session this graph launched.
+   * OPTIONAL-ADDITIVE — a port without it cannot sweep crash-window orphans (a
+   * node persisted `running` with no `dispatchTaskId`), so the recovery sweep
+   * degrades to record-nothing. Structurally satisfied by {@link DispatchBridge}
+   * (`dispatch-bridge.ts:getTasksByParent`).
+   */
+  getTasksByParent?(parentSessionId: string): DispatchTask[];
+  /**
+   * Cancel a dispatched task. OPTIONAL-ADDITIVE — mirrors
+   * `NodeDispatchPort.cancelTask` (`engine-advance.ts`); recovery uses it to
+   * tear down the orphaned live session whose node recorded no `dispatchTaskId`
+   * (it would otherwise keep burning budget with its result lost). Issued
+   * fire-and-forget by the caller — never awaited.
+   */
+  cancelTask?(taskId: string): Promise<boolean>;
 }
 
 /** A dispatch status mapped to a terminating engine signal (answer | escalate). */
@@ -139,6 +163,18 @@ export interface ReconcileReport {
   timedOut: string[];
   /** Nodes that finished during the window → their terminating signal re-emitted. */
   deferred: DeferredSignal[];
+  /**
+   * Crash-window orphan matches (Y2). A node is persisted `running` BEFORE
+   * `_dispatchNode`'s `await executeNode(...)` resolves the task handle, so a
+   * crash in that window leaves disk state `running` with NO `dispatchTaskId` —
+   * yet the session was launched and is still live in the dispatch system.
+   * Each entry pairs the orphaned node with the task id of the matched live
+   * session (parent = graph id, description = `graph node ${nodeId}`); the
+   * caller issues a fire-and-forget `cancelTask` so the orphan stops burning
+   * budget. Record-only — reconcile never awaits and never cancels. Absent
+   * when the port lacks `getTasksByParent` or no live task matched.
+   */
+  orphanCancellations?: Array<{ nodeId: string; taskId: string }>;
 }
 
 /**
@@ -338,6 +374,18 @@ export function captureNodeUsage(
     if (usage.inputTokens === 0 && usage.outputTokens === 0 && usage.cost === 0) {
       return; // zero-guard — never clobber an adopted/prior value with a zero read
     }
+    // Graph-total accumulation (Y4): feed the same usage into the graph-level
+    // budget counters so a declared `budget.max_total_*` ceiling gates
+    // dispatch (checked in budget-bridge.ts::checkGraphBudget). Known
+    // approximation: the live-seam and recovery reconcile may BOTH observe the
+    // same termination; the per-node write above is a replace (idempotent),
+    // but this graph-total ADD can over-count once across a crash-restart
+    // overlap — conservative (rejects earlier), acceptable.
+    applyBudgetDelta(state, {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cost: usage.cost,
+    });
     node.tokensConsumed.inputTokens = usage.inputTokens;
     node.tokensConsumed.outputTokens = usage.outputTokens;
     node.tokensConsumed.cost = usage.cost;
@@ -379,6 +427,14 @@ export function captureNodeUsage(
  * skipped, the node stays `running`, and the listener is re-subscribed so a
  * genuine later termination still advances it.
  *
+ * M9 listener-ledger escape (review 04-F5): the transient-error re-subscription
+ * registers a NEW listener whose callback would otherwise escape the caller's
+ * subscription ledger — dispose() could never unregister it and the zombie
+ * callback would carry a disposed engine's `state`/`emitSignal` closures when it
+ * finally fired. The optional `out` collector captures every such re-subscribed
+ * `{ taskId, callback }` pair so the caller can register it into its ledger
+ * (engine-advance.ts `_dispatchNode` passes its `_terminationSubscriptions`).
+ *
  * Returns the exact callback handed to `port.onTaskTerminated` (monitor M4), so
  * a caller that no longer needs the subscription can pass it to
  * `removeTaskTerminatedListener(taskId, callback)`. Returns `undefined` when
@@ -390,6 +446,7 @@ export function subscribeTaskTermination(
   port: DispatchRecoveryPort,
   node: NodeRuntimeState,
   emitSignal: RecoveryEmitSignal,
+  out?: Array<{ taskId: string; callback: TaskTerminatedCallback }>,
 ): TaskTerminatedCallback | undefined {
   const taskId = node.dispatchTaskId;
   if (!taskId || !port.onTaskTerminated) return undefined;
@@ -400,8 +457,9 @@ export function subscribeTaskTermination(
     if (!current) return;
     if (current.dispatchTaskId !== completedTaskId) return; // superseded task
     if (current.status !== NodeStatus.Running) return; // already advanced / cancelled
-    // Record the terminated task's token/cost consumption (Phase-7 gap) before
-    // the node advances. Idempotent replace — safe across the live-seam /
+    // Record the terminated task's token/cost consumption (per-node
+    // `tokensConsumed` + graph-level budget totals) before the node advances.
+    // Idempotent replace on the node — safe across the live-seam /
     // race-guard double-observation of the same termination.
     captureNodeUsage(state, current, port);
     // Session-slot refund (the graph-level mirror of S4's `decRequestSessions`):
@@ -429,7 +487,21 @@ export function subscribeTaskTermination(
         `(node ${nodeId}) but the task is still live — skipping escalate, ` +
         `keeping node running`,
       );
-      subscribeTaskTermination(state, port, current, emitSignal);
+      // M9: the re-subscription is a NEW `onTaskTerminated` registration that
+      // must be removable by the caller's teardown (dispose) exactly like the
+      // original — collect its `{ taskId, callback }` pair into the optional
+      // ledger instead of discarding it, so no zombie callback escapes the
+      // engine's subscription ledger (review 04-F5).
+      const reSubscribed = subscribeTaskTermination(
+        state,
+        port,
+        current,
+        emitSignal,
+        out,
+      );
+      if (reSubscribed && out) {
+        out.push({ taskId: completedTaskId, callback: reSubscribed });
+      }
       return;
     }
     const task = safeGetTask(port, completedTaskId);
@@ -451,6 +523,11 @@ export function subscribeTaskTermination(
  * - no `dispatchTaskId`, or `getTask` returns undefined → orphaned → the node
  *   is marked `timeout` with {@link ORPHAN_REASON} and queued for an `escalate`
  *   re-emit so its failure propagates (it must not silently stall a join).
+ *   When the node was persisted `running` without a `dispatchTaskId` (the
+ *   crash-window orphan), the pass additionally sweeps the dispatch parent
+ *   session for the still-live task (`getTasksByParent` + the node-scoped
+ *   description) and records it in {@link ReconcileReport.orphanCancellations}
+ *   so the caller can cancel the orphaned session fire-and-forget.
  * - terminal dispatch status → the termination was missed during the window:
  *   `cancelled` cancels the node in place; `completed` / `error` / `timeout`
  *   queue the mapped terminating signal for re-emission.
@@ -458,9 +535,10 @@ export function subscribeTaskTermination(
  *   running and will advance when the task finally terminates).
  *
  * This is a **pure decision pass** — it marks terminal nodes and records
- * re-subscriptions, but never dispatches and never awaits. The caller re-emits
- * {@link ReconcileReport.deferred} (awaiting each) and then dispatches the
- * rebuilt frontier.
+ * re-subscriptions (and orphan-cancellation matches), but never dispatches and
+ * never awaits. The caller re-emits {@link ReconcileReport.deferred} (awaiting
+ * each), issues the recorded orphan cancellations fire-and-forget, and then
+ * dispatches the rebuilt frontier.
  */
 export function reconcileEngine(
   state: EngineState,
@@ -471,12 +549,33 @@ export function reconcileEngine(
   const reSubscribed: string[] = [];
   const timedOut: string[] = [];
   const deferred: DeferredSignal[] = [];
+  const orphanCancellations: Array<{ nodeId: string; taskId: string }> = [];
 
   for (const node of state.nodes.values()) {
     if (node.status !== NodeStatus.Running) continue;
 
     const taskId = node.dispatchTaskId;
     if (!taskId) {
+      // Y2 crash-window orphan sweep: the node was persisted `running` BEFORE
+      // `_dispatchNode`'s `await executeNode(...)` resolved the task handle, so
+      // disk state has no `dispatchTaskId` — but the session WAS launched and
+      // is still live in the dispatch system. Match it back by parent session
+      // (the graph id seeds the dispatch parent context) + the node-scoped task
+      // description (`dispatch-bridge.ts:executeNode`), and record it for the
+      // caller to cancel fire-and-forget. Record-only — this pass never awaits
+      // and never cancels; a port without `getTasksByParent` degrades to the
+      // pre-Y2 behavior (no matches, nothing recorded).
+      const matches =
+        port
+          .getTasksByParent?.(state.graphId)
+          ?.filter(
+            (t) =>
+              t.description === `graph node ${node.nodeId}` &&
+              LIVE_DISPATCH_STATUSES.has(t.status),
+          ) ?? [];
+      for (const m of matches) {
+        orphanCancellations.push({ nodeId: node.nodeId, taskId: m.id });
+      }
       markTimedOut(state, node, ORPHAN_REASON);
       timedOut.push(node.nodeId);
       deferred.push({
@@ -500,6 +599,33 @@ export function reconcileEngine(
     }
 
     if (TERMINAL_DISPATCH_STATUSES.has(task.status)) {
+      // M8 transient-error guard (recovery parity): a reported `error` may be
+      // stale — the authoritative dispatch read (`isDispatchTaskLive`) shows
+      // the task still live (running / pending / awaiting_approval), i.e. the
+      // restart window overlapped a transient execution error whose session is
+      // still continuing. Committing the node to escalate here would latch it
+      // terminal and the genuine later termination could never advance it —
+      // the exact asymmetry review M8 / 04-F4 flagged against
+      // `subscribeTaskTermination`'s live-seam guard (lines 426-434) and
+      // `_dispatchNode`'s race-guard return (engine-advance.ts:1689-1694).
+      // Route into the re-subscribe branch instead: the node stays `running`
+      // and the listener (or a later reconcile) advances it on a real
+      // termination. The task is not terminated, so no usage capture runs.
+      if (task.status === "error" && isDispatchTaskLive(port, taskId)) {
+        logWarn(
+          `engine-recovery: reconcile saw error status for task ${taskId} ` +
+          `(node ${node.nodeId}) but the task is still live — skipping escalate, ` +
+          `keeping node running and re-subscribing`,
+        );
+        const callback = subscribeTaskTermination(state, port, node, emitSignal);
+        reSubscribed.push(node.nodeId);
+        // Surface the { taskId, callback } pair so the caller can later
+        // removeTaskTerminatedListener (monitor M4) once the node stops running.
+        if (callback && out) {
+          out.listeners.push({ taskId, callback });
+        }
+        continue;
+      }
       // Record the finished-during-restart task's consumption (Phase-7 gap)
       // before the deferred signal is emitted. Idempotent replace.
       captureNodeUsage(state, node, port);
@@ -528,7 +654,7 @@ export function reconcileEngine(
     }
   }
 
-  return { reSubscribed, timedOut, deferred };
+  return { reSubscribed, timedOut, deferred, orphanCancellations };
 }
 
 // ── Frontier rebuild ─────────────────────────────────────────────────────────
@@ -551,6 +677,14 @@ export function rebuildFrontier(state: EngineState): string[] {
   }
   state.frontier = ready;
   state.updatedAt = Date.now();
+  // L21 (review 05-F5): `frontier` is a persistent field — the choke-point
+  // contract (engine-persistence.ts:73-83) requires markDirty after mutating
+  // it. Without this, a recover() whose reconcile-failure catch path
+  // (index.ts:1091-1093) runs rebuildFrontier + dispatchReady with no other
+  // mutation would drop the frontier recomputation from disk — the rebuilt
+  // ready set would only survive if an unrelated critical-section mutation
+  // happened to set the flag.
+  markDirty(state);
   return [...state.frontier];
 }
 
@@ -596,7 +730,6 @@ export function hydrateEngineState(
   target.graphId = source.graphId;
   target.graphDeclaration = source.graphDeclaration;
   target.nodes = source.nodes;
-  target.edges = source.edges;
   target.loopGroups = source.loopGroups;
   // Subtask-5 dangling-loop-group guard: a persisted state whose declaration
   // dropped a loop group may still carry member nodes tagged with the stale
@@ -680,10 +813,25 @@ export function adoptPriorNodeStates(
     if (prev.agent !== node.agent) continue; // identity changed — fresh run
 
     // Copy the prior run's execution state in place (keep the object bound).
+    const adoptedFrom = node.status;
     node.status = prev.status;
+    // L15 (review 03-F6): this direct status write bypasses transitionNode's
+    // single choke-point, so it never auto-records a checkpoint. Compensate
+    // when the write actually changed the status — the append-only
+    // checkpointHistory must not have a gap at the adopt/recover transition
+    // (recorder.ts:55-59 "complete ordered traceability" promise). No
+    // checkpoint is fabricated for a no-change adoption (e.g. a provisioned
+    // ready root adopting a prior ready root).
+    if (adoptedFrom !== node.status) {
+      recordCheckpointForNode(target, node, adoptedFrom, node.status, Date.now());
+    }
     node.prompt = prev.prompt; // preserves modify_prompt mutations
     node.signalsObserved = { ...prev.signalsObserved };
     node.result = prev.result ? { ...prev.result } : undefined;
+    // OPTIONAL-ADDITIVE (subtask 2): the stashed materialized-result text rides
+    // along so adopted nodes keep their EdgePayload `result` fallback without a
+    // sidecar re-read. JSON-primitive string — no defensive copy needed.
+    node.resultText = prev.resultText;
     node.dispatchTaskId = prev.dispatchTaskId;
     node.dispatchSessionId = prev.dispatchSessionId;
     node.errorReason = prev.errorReason;
@@ -741,6 +889,17 @@ export function adoptPriorNodeStates(
       if (incoming > 0) {
         node.status = NodeStatus.Pending;
         removeFromFrontier(target, nodeId);
+        // L15 (review 03-F6): the H2 demotion is another direct status write
+        // that bypasses transitionNode's choke-point — compensate with an
+        // explicit checkpoint so the node's rebuild history records the
+        // Ready → Pending demote (no traceability gap).
+        recordCheckpointForNode(
+          target,
+          node,
+          NodeStatus.Ready,
+          NodeStatus.Pending,
+          Date.now(),
+        );
       }
     }
   }
@@ -789,8 +948,8 @@ export function adoptPriorNodeStates(
   // Node-state adoption is a critical transition — the caller persists
   // synchronously. Reset the non-critical flag (its churn is included in that
   // write) so the recovered runtime starts clean.
-  target.isDirty = true;
-  target.isNonCriticalDirty = false;
+  markDirty(target);
+  clearNonCriticalDirty(target);
 }
 
 /**
@@ -807,6 +966,13 @@ export function clearStaleCriticalSection(state: EngineState): void {
   }
   state.pendingCompletions = [];
   state.updatedAt = Date.now();
+  // L21 (review 05-F5): `advancingLock` and `pendingCompletions` are persistent
+  // fields — the choke-point contract (engine-persistence.ts:73-83) requires
+  // markDirty after mutating them. Without this, a recover() whose
+  // reconcile-failure catch path never runs a mutating critical section would
+  // leave the released lock / cleared queue unpersisted — a re-crash would
+  // resurrect the stale lock.
+  markDirty(state);
 }
 
 // ── Stale-lock sweeper ───────────────────────────────────────────────────────

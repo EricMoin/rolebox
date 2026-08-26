@@ -81,6 +81,8 @@ function makeTerminalEvent(
     phase: "complete",
     nodeStatusSummaries: {
       completed: 1,
+      done: 0,
+      cancelled: 0,
       escalate: 0,
       timeout: 0,
       blocked: 0,

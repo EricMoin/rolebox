@@ -33,6 +33,10 @@ import {
   type GraphTerminalEvent,
   type EdgeConditionResolver,
 } from "../../src/graph/engine/engine-advance.ts";
+import {
+  checkGraphTermination,
+  type TerminationContext,
+} from "../../src/graph/engine/engine-termination.ts";
 
 // ── Fake dispatch seam (injectable into AdvanceEngine) ─────────────────────
 
@@ -473,6 +477,62 @@ describe("runtime deadlock termination", () => {
     expect(state.phase).toBe(EnginePhase.Executing);
     expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
     expect(events).toHaveLength(0);
+  });
+});
+
+// ── Quiesce-before-drain (M5) ──────────────────────────────────────────────
+//
+// The standard completion path must not fire while deferred completions are
+// still queued. A terminating signal that arrives while the critical section
+// is held is queued to `pendingCompletions` and re-advanced by the section's
+// `finally` drain; that deferred replay may re-open the graph (a deferred
+// escalate/answer re-advance can re-activate nodes), so completing before the
+// drain would fire [GRAPH COMPLETE] and then re-dispatch nodes in the
+// `complete` phase. The deadlock guard always gated on the queue — the
+// standard path now aligns with it.
+
+describe("quiesce-before-drain (M5): completion is gated on an empty pendingCompletions queue", () => {
+  it("does NOT complete while deferred completions are queued; completes exactly once after drain", () => {
+    const state = createEngineState(singleNode("A", "a1"), "g-1");
+    provision(state);
+    // A is terminal and no scheduler-active node remains, but one deferred
+    // completion is still queued — a signal that arrived while the critical
+    // section was held and has not yet been re-advanced by the drain.
+    state.nodes.get("A")!.status = NodeStatus.Completed;
+    state.phase = EnginePhase.Executing;
+    state.pendingCompletions = ["A"];
+
+    const ctx: TerminationContext = {
+      terminalComplete: false,
+      terminalBlocked: false,
+    };
+    const events: GraphTerminalEvent[] = [];
+    const onTerminal = (e: GraphTerminalEvent) => events.push(e);
+
+    // Pre-drain: the standard completion path must NOT fire (queue non-empty).
+    checkGraphTermination(state, onTerminal, ctx);
+    expect(state.phase as EnginePhase).toBe(EnginePhase.Executing);
+    expect(events).toHaveLength(0);
+
+    // Post-drain: the queue is empty → the next check completes exactly once.
+    state.pendingCompletions = [];
+    checkGraphTermination(state, onTerminal, ctx);
+    expect(state.phase as EnginePhase).toBe(EnginePhase.Complete);
+    expect(events).toHaveLength(1);
+    expect(events[0].isBlocked).toBe(false);
+    expect(events[0].nodeStatusSummaries.completed).toBe(1);
+  });
+
+  it("completes immediately when the queue is already empty (no false gate)", async () => {
+    const events: GraphTerminalEvent[] = [];
+    const { engine, state } = buildEngine(singleNode("A", "a1"), events);
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "done");
+
+    // The normal single-signal flow is unaffected by the gate.
+    expect(state.phase).toBe(EnginePhase.Complete);
+    expect(events).toHaveLength(1);
   });
 });
 

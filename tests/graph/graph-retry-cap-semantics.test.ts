@@ -37,9 +37,11 @@
  *      then the answer flows forward and the graph completes. A 3-escalate
  *      script (retry max exhausted) makes the escalation travel DOWNSTREAM
  *      (join-all convergence node escalates) instead of re-dispatching.
- *  (c) manual retry on an already-running graph — retrying a node that is
- *      currently `Running` re-opens and re-dispatches it (status is not
- *      checked by `resetNodeForRetry`); counters and dispatch counts pinned.
+ *  (c) M11 retry guard on a running node — retrying a node that is currently
+ *      `Running` is REFUSED with an actionable error (`resetNodeForRetry`
+ *      state-guards the reset scope); the node keeps running, no re-dispatch,
+ *      no abandoned task / leaked session. (Supersedes the pre-fix pin, which
+ *      re-opened and re-dispatched a Running node, abandoning its live task.)
  *  (d) `retry: { max: -1 }` accepted by the tool → behaves like disabled
  *      (never retries, escalate propagates on the first dispatch).
  *
@@ -306,13 +308,13 @@ describe("graph retry-cap semantics", () => {
     });
   });
 
-  // ── (c) manual retry on an already-running graph (node currently Running) ──
+  // ── (c) M11 guard: retrying a currently-Running node is refused ────────────
 
-  describe("(c) retryNode on a currently-Running node re-opens it", () => {
-    it("graph_run(node_id, retry:true) on a held (Running) node clears the run state, re-dispatches it and keeps the graph executing", async () => {
+  describe("(c) retryNode on a currently-Running node is refused (M11 state guard)", () => {
+    it("graph_run(node_id, retry:true) on a held (Running) node rejects, leaves the node running, and does not re-dispatch (no session leak)", async () => {
       const fake = new ScriptedDispatch(["A"]); // hold A → stays Running
       const ts = new GraphToolSet({ dispatch: fake });
-      const g = ts.graph_create({ name: "retry-running" });
+      const g = ts.graph_create({ name: "retry-running-guard" });
       ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
 
       const r1 = await ts.graph_run({ graph_id: g.graph_id });
@@ -323,19 +325,20 @@ describe("graph retry-cap semantics", () => {
       const firstTaskId = fake.taskIds[0];
       expect(nodeStatus(ts, g.graph_id, "A").status).toBe(NodeStatus.Running);
 
-      // Manual retry while A is still Running: resetNodeForRetry does NOT check
-      // the node's status — it clears the per-run artifacts (including the old
-      // dispatchTaskId), re-readies the node and re-dispatches it (node-retry.ts
-      // resetNodeRun / markReady). The old held task is simply abandoned.
-      const r2 = await ts.graph_run({ graph_id: g.graph_id, node_id: "A", retry: true });
-      expect(r2.retry!.node_id).toBe("A");
-      expect(r2.retry!.re_dispatched).toBeGreaterThanOrEqual(1);
-      expect(fake.dispatches("A")).toBe(2); // re-opened → re-dispatched
-      expect(fake.taskIds.length).toBe(2); // a fresh dispatch task was created
-      expect(fake.taskIds[1]).not.toBe(firstTaskId);
+      // M11 guard (supersedes the pre-fix pin): retrying a LIVE node is refused
+      // with an actionable error. The old behavior re-opened the node and
+      // simply abandoned the old held task — leaking the running dispatch
+      // session (tokens/cost keep flowing, the net-live sessions slot never
+      // refunded) and leaving a zombie onTaskTerminated listener behind.
+      await expect(
+        ts.graph_run({ graph_id: g.graph_id, node_id: "A", retry: true }),
+      ).rejects.toThrow(/running/);
+      expect(fake.dispatches("A")).toBe(1); // never re-dispatched
+      expect(fake.taskIds.length).toBe(1); // the old task is still the only one
+      expect(fake.taskIds[0]).toBe(firstTaskId);
       const a = nodeStatus(ts, g.graph_id, "A");
-      expect(a.status).toBe(NodeStatus.Running); // back into running
-      expect(a.retry_count).toBe(1); // reset incremented the counter
+      expect(a.status).toBe(NodeStatus.Running); // still running untouched
+      expect(a.retry_count).toBe(0); // the reset never ran
       expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Executing);
     });
   });

@@ -11,6 +11,7 @@ import {
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
   AdvanceEngine,
+  type NodeCompletionEvent,
   type NodeDispatchPort,
 } from "../../src/graph/engine/engine-advance.ts";
 import {
@@ -25,12 +26,32 @@ import {
 
 class FakeDispatch implements NodeDispatchPort {
   calls: { nodeId: string; agent: string; prompt: string }[] = [];
+  private held = new Set<string>();
+  private releasers = new Map<string, Array<() => void>>();
+
+  /** Hold a node's next launch so the advancing critical section stays open. */
+  hold(nodeId: string): void {
+    this.held.add(nodeId);
+  }
+  release(nodeId: string): void {
+    this.held.delete(nodeId);
+    const rs = this.releasers.get(nodeId) ?? [];
+    this.releasers.delete(nodeId);
+    for (const r of rs) r();
+  }
 
   executeNode(
     node: NodeRuntimeState,
     _parentContext: DispatchParentContext,
   ): Promise<DispatchTask> {
     this.calls.push({ nodeId: node.nodeId, agent: node.agent, prompt: node.prompt });
+    if (this.held.has(node.nodeId)) {
+      return new Promise<DispatchTask>((resolve) => {
+        const rs = this.releasers.get(node.nodeId) ?? [];
+        rs.push(() => resolve(makeTask(node.nodeId)));
+        this.releasers.set(node.nodeId, rs);
+      });
+    }
     return Promise.resolve(makeTask(node.nodeId));
   }
 }
@@ -163,6 +184,32 @@ describe("convergence fingerprinting", () => {
   it("trims string fingerprints", () => {
     expect(fingerprintPayload("  same issue  ")).toBe("same issue");
     expect(fingerprintPayload("same issue")).toBe("same issue");
+  });
+
+  it("bounds canonicalization on deeply nested payloads instead of overflowing the stack", () => {
+    // 10k-deep nested array — unbounded recursion produced a RangeError
+    // (confirmed at ~20k depth pre-fix) and a giant string at 10k.
+    let deep: unknown = [];
+    for (let i = 0; i < 10_000; i++) deep = [deep];
+    expect(() => fingerprintPayload(deep)).not.toThrow();
+    const fp = fingerprintPayload(deep);
+    expect(typeof fp).toBe("string");
+    expect(fp.length).toBeLessThan(1000);
+
+    // Same prefix depth → identical bounded fingerprint (stability at the bound).
+    let deep2: unknown = [];
+    for (let i = 0; i < 10_000; i++) deep2 = [deep2];
+    expect(fingerprintPayload(deep2)).toBe(fp);
+
+    // Deep object nesting is bounded too.
+    let deepObj: unknown = { leaf: true };
+    for (let i = 0; i < 10_000; i++) deepObj = { nested: deepObj };
+    expect(() => fingerprintPayload(deepObj)).not.toThrow();
+    expect(fingerprintPayload(deepObj).length).toBeLessThan(2000);
+
+    // The truncation marker is a bare token — it can never be produced by
+    // JSON.stringify of real content (strings are always quoted).
+    expect(fp).toContain("...<truncated>");
   });
 });
 
@@ -632,7 +679,7 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
     expect(rounds[0].nodeIds).toContain("A");
   });
 
-  it("always-cycle bounded by max_traversals: answer-driven re-entry increments each round and escalates at cap", async () => {
+  it("always-cycle bounded by max_traversals: answer-driven re-entry increments each round and retires the re-entry target done at cap", async () => {
     const { state, engine, fake } = buildEngine(alwaysCycleGraph(3));
 
     // dispatchReady dispatches both frontier nodes → A and B both Running.
@@ -661,7 +708,8 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
 
-    // Signal 5: A answers → tries to re-enter B → cap (3 ≥ 3) → B escalates.
+    // Signal 5: A answers → tries to re-enter B → cap (3 ≥ 3) → B is retired
+    // done (markDone) instead of being re-entered.
     await engine.onNodeSignalEmitted("A", "answer", "a3");
     // Traversal counter unchanged at cap — no traversal consumed.
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
@@ -679,6 +727,53 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
 
     // Graph reaches complete — no active nodes remain.
     expect(state.phase).toBe(EnginePhase.Complete);
+  });
+
+  it("always-cycle cap exhaustion fires the completion seam exactly once for the retired target (no duplicate on replay)", async () => {
+    // Recording seam (engine-node-completion.test.ts pattern).
+    const events: NodeCompletionEvent[] = [];
+    const state = createEngineState(alwaysCycleGraph(3), "g-1");
+    provision(state);
+    const bridge = new SignalBridge();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: new FakeDispatch(),
+      onNodeCompletion: (e) => events.push(e),
+    });
+
+    // Drive the always cycle to the cap, mirroring the retirement test above.
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "a1");
+    await engine.onNodeSignalEmitted("B", "answer", "b1");
+    await engine.onNodeSignalEmitted("A", "answer", "a2");
+    await engine.onNodeSignalEmitted("B", "answer", "b2");
+
+    // Cap exhausted: A's next answer tries to re-enter B but the cap (3 ≥ 3)
+    // retires B `completed → done` — the completion seam must surface B's
+    // retirement exactly once, escalate-signal-with-actual-status convention
+    // (mirroring _notifyPropagatedEscalations: signalType "escalate" with the
+    // post-transition NodeStatus.Done and the machine-readable reason).
+    await engine.onNodeSignalEmitted("A", "answer", "a3");
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
+
+    const retired = events.filter(
+      (e) => e.nodeId === "B" && e.signalType === "escalate",
+    );
+    expect(retired).toHaveLength(1);
+    expect(retired[0].signalType).toBe("escalate");
+    expect(retired[0].nodeStatus).toBe(NodeStatus.Done);
+    expect(retired[0].payload).toBe("max_traversals exhausted");
+    expect(retired[0].nodeAgent).toBe("a1");
+    expect(retired[0].graphId).toBe("g-1");
+
+    // Re-advancing / replaying the same answer on the already-completed A is a
+    // no-op transition → no duplicate retirement event for B.
+    await engine.onNodeSignalEmitted("A", "answer", "a3");
+    expect(
+      events.filter((e) => e.nodeId === "B" && e.signalType === "escalate"),
+    ).toHaveLength(1);
   });
 
   it("executeLoopStep on always-cycle revise surfaces the exhaustion payload", () => {
@@ -771,6 +866,63 @@ describe("engine-advance — answer downgrade skips forward activation (D2)", ()
     // Forward activation must be skipped: sink is NOT activated (regression —
     // before the fix the review→sink on_signal(answer) edge wrongly fired).
     expect(state.nodes.get("sink")!.status).toBe(NodeStatus.Pending);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H1 regression — a duplicate / replayed `revise_needed` on an already-
+// terminal loop member must NOT re-run the loop step. The double-delivery
+// seams (worker signal() + subscribeTaskTermination callback, or the
+// race-guard synthetic replay) can deliver the same terminating signal twice;
+// the first advances the node, the second is queued while the critical section
+// is held and replayed by the drain. The replay's lifecycle transition is a
+// no-op (the reviewer is already Completed), and the propagation side effects
+// — traversal counting, convergence tracking, upstream re-entry — must be
+// skipped for it (engine-advance _advance's `migrated` gate).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("engine-advance — duplicate revise counts only one traversal (H1)", () => {
+  it("a replayed revise_needed drained after the first does not double-count the traversal", async () => {
+    const { state, engine, fake } = buildEngine(reviewLoopGraph(3));
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("entry", "answer", "seed");
+    await engine.onNodeSignalEmitted("impl", "answer", "v1");
+
+    // Hold impl's re-entry dispatch so review's first revise critical section
+    // stays open (the re-entered impl is dispatched inside it).
+    fake.hold("impl");
+    const first = engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 1a"],
+    });
+
+    // While review's section is held, the SAME node double-delivers the same
+    // signal type (the H1 double-delivery seam). The lock is held → the second
+    // is queued to pendingCompletions and re-advanced by the section's drain.
+    await engine.onNodeSignalEmitted("review", "revise_needed", {
+      findings: ["fix 1b"],
+    });
+    expect(state.pendingCompletions).toEqual(["review"]);
+
+    fake.release("impl");
+    await first;
+
+    // The first revise consumed exactly one traversal; the replayed duplicate
+    // must NOT consume another (regression — before the H1 guard the replay
+    // re-ran executeLoopStep → incrementLoopTraversal a second time, draining
+    // max_traversals at double speed).
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    // Exactly one round was recorded for the single real revision.
+    expect(state.loopGroups.get("lg")!.rounds?.length).toBe(1);
+    // impl was re-entered exactly once (initial dispatch + one revise re-entry) —
+    // the duplicate replay must not re-dispatch it.
+    expect(state.nodes.get("impl")!.sessionsSpawned).toBe(2);
+    // review stays Completed from the first revise — the replay was a no-op
+    // transition and skipped the stuck / exhaustion early-exits too.
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Completed);
+    // The graph is still executing (impl running from the single re-entry).
+    expect(state.phase).toBe(EnginePhase.Executing);
+    expect(state.pendingCompletions).toEqual([]);
   });
 });
 

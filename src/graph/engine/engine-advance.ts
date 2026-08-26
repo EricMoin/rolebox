@@ -32,7 +32,9 @@
  * Design reference: `.rolebox/design/engine-state-machine.md` §3.3.
  */
 
+import { readFileSync } from "node:fs";
 import { EnginePhase, NodeStatus } from "../../constants.ts";
+import { TERMINATING_SIGNALS_BY_SEVERITY } from "../../signal/signal-constants.ts";
 import type { GraphBudgetState, EdgePayload, RoundHistoryEntry } from "../../types.engine-v2.ts";
 import type { EngineState, NodeRuntimeState, NodeLivenessState } from "../../types.engine-v2.ts";
 import type { EdgeDeclaration } from "../../types.graph-v2.ts";
@@ -63,7 +65,6 @@ import {
   canTransitionPhase,
   transitionPhase,
   incrementLoopTraversal,
-  isLoopExhausted,
 } from "./engine-state.ts";
 import {
   markCompleted,
@@ -73,6 +74,7 @@ import {
   markEscalated,
   markTimedOut,
   markNodeBlocked,
+  markCancelled,
   canTransitionNode,
 } from "./node-lifecycle.ts";
 import {
@@ -249,11 +251,24 @@ export interface NodeLivenessFeed {
 /**
  * The budget-query surface the engine touches. Structurally satisfied by
  * {@link BudgetBridge} (`src/graph/engine/budget-bridge.ts`). Optional —
- * omitted in tests, and Phase 1 never enforces ceilings (see the Phase-7 stub
- * note in `budget-bridge.ts`).
+ * omitted in tests, and an engine without a port never enforces ceilings.
+ *
+ * Both checks are invoked as pre-dispatch pre-checks in `_dispatchNode`: the
+ * graph-level check first, then the per-node check. The real bridge compares
+ * the graph declaration's `max_total_*` ceilings against the cumulative
+ * `EngineState.budget` counters, and each node's declared per-node ceilings
+ * against its `tokensConsumed`.
  */
 export interface GraphBudgetPort {
   checkGraphBudget(graphId: string, state: EngineState): BudgetCheckResult;
+  /**
+   * Per-node budget check — invoked pre-dispatch alongside
+   * {@link checkGraphBudget}. The real {@link BudgetBridge} implementation
+   * compares the node's declared per-node ceilings (`node.budget.*`) against
+   * its cumulative `tokensConsumed`; a breach returns `exceeded: true`, and
+   * the engine escalates the ready node without dispatching it.
+   */
+  checkNodeBudget(node: NodeRuntimeState): BudgetCheckResult;
 }
 
 /** Evaluates a named `on_condition` edge condition. Phase 2 vocabulary. */
@@ -302,7 +317,7 @@ export interface AdvanceEngineOptions {
   signalBridge: SignalBridge;
   /** Dispatch seam — `executeNode` dispatches ready nodes to their agents. */
   dispatch: NodeDispatchPort;
-  /** Optional budget seam — pre-dispatch graph-budget check (Phase 7). */
+  /** Optional budget seam — pre-dispatch graph- and per-node budget checks. */
   budget?: GraphBudgetPort;
   /** Parent context for node dispatches (defaults to a graph-scoped one). */
   parentContext?: DispatchParentContext;
@@ -393,17 +408,6 @@ export interface AdvanceEngineOptions {
 }
 
 /**
- * Severity ordering for picking which recorded terminating signal to replay
- * when a deferred completion is drained. Follows the signal escalation lattice
- * (`progress < answer < revise_needed < escalate`). See `graph-model.md §5.1`.
- */
-const TERMINATING_SEVERITY: readonly SignalType[] = [
-  "escalate",
-  "revise_needed",
-  "answer",
-];
-
-/**
  * Detect the default throw-on-use dispatch stub (`index.ts:throwOnDispatch`).
  * The stub carries the `isNoDispatchSeamStub` marker so `_dispatchNode` can
  * rethrow ITS rejection — the "no dispatch seam" misconfiguration must surface
@@ -419,8 +423,58 @@ function logWarn(message: string): void {
   console.warn(message);
 }
 
+/**
+ * Bound on the number of timer-turn attempts a user-triggered control-path
+ * operation (approve / reject / partial-approve / retry) makes to acquire the
+ * advancement lock before surfacing an explicit error (see
+ * {@link AdvanceEngine._runControlOperation}). Each attempt yields to a
+ * macrotask boundary so an in-flight critical section can exit and drain; a
+ * healthy engine frees the lock within a few turns (`_runCriticalSection`'s
+ * `finally` releases before `_drainDeferred` re-acquires per deferred
+ * completion). With a ~1ms turn this bounds the whole wait to roughly half a
+ * second — generous over the legitimate case (a section only holds the lock
+ * for the dispatch launches it awaits) while surfacing a genuinely stuck lock
+ * promptly. The bound is a safety net, not the normal path.
+ */
+const CONTROL_PATH_LOCK_RETRY_ATTEMPTS = 500;
+
 export type { GraphTerminalEvent } from "./engine-termination.ts";
 export type { TerminationContext } from "./engine-termination.ts";
+
+// ── Partial-approval exactly-once marker (M12) ──────────────────────────────
+
+/**
+ * The partial-approval verdict recorded as the exactly-once notification
+ * marker. Stashed on `NodeRuntimeState.signalsObserved["partial_approve"]`
+ * through the shared ledger-write path (a NON-signal stash key, mirroring
+ * `approval_payload` — no ledger history event is synthesized).
+ */
+interface PartialApproveVerdict {
+  approved: string[];
+  rejected: string[];
+  reason?: string;
+}
+
+/**
+ * Whether two partial-approval verdicts are the SAME decision. Branch lists
+ * compare as sets (order-insensitive); `reason` compares as-is with
+ * `undefined` ≈ absent. A replay that reproduces an already-notified verdict
+ * must not re-fire the completion seam; a genuinely different verdict is a new
+ * decision and notifies again.
+ */
+function samePartialVerdict(
+  a: PartialApproveVerdict | undefined,
+  b: PartialApproveVerdict,
+): boolean {
+  if (!a) return false;
+  if ((a.reason ?? "") !== (b.reason ?? "")) return false;
+  const sameMembers = (x: string[], y: string[]): boolean => {
+    if (x.length !== y.length) return false;
+    const ys = new Set(y);
+    return x.every((id) => ys.has(id));
+  };
+  return sameMembers(a.approved, b.approved) && sameMembers(a.rejected, b.rejected);
+}
 
 // ── AdvanceEngine ───────────────────────────────────────────────────────────
 
@@ -611,6 +665,24 @@ export class AdvanceEngine {
     return [...this._terminationSubscriptions];
   }
 
+  /**
+   * Clear the task-termination subscription ledger (review 06-F1 / M16).
+   *
+   * A teardown path (dispose) iterates {@link getTerminationSubscriptions} to
+   * unregister every listener from the dispatch port, then MUST also empty the
+   * ledger itself — otherwise a disposed engine keeps handles to stale
+   * callbacks and a second dispose re-issues removals (no longer a no-op).
+   * This is the only legitimate writer of the ledger from outside the class:
+   * previously the caller reached in via `as unknown as`, which bypassed the
+   * compiler entirely (a renamed/retyped field would silently create a new
+   * property and the real ledger would never clear).
+   *
+   * Idempotent — clearing an already-empty ledger is a no-op.
+   */
+  clearTerminationSubscriptions(): void {
+    this._terminationSubscriptions.length = 0;
+  }
+
   // ── Re-entrancy guard (coordinator.ts:397-404 + 450-462 pattern) ──────────
 
   /**
@@ -641,12 +713,67 @@ export class AdvanceEngine {
   }
 
   /**
+   * Run a user-triggered control-path operation (approve / reject /
+   * partial-approve / retry) under the advancement lock, deferring the WHOLE
+   * operation when the lock is held by an in-flight critical section.
+   *
+   * The four imperative control paths call this instead of invoking
+   * `_runCriticalSection` directly: `_runCriticalSection`'s `finally`
+   * unconditionally releases the lock (engine-state.ts:544-547), so a section
+   * entered WITHOUT acquiring it would release an owner-less lock — letting a
+   * signal-driven section interleave mid-body instead of deferring. Here,
+   * `acquireAdvancingLock(this.state)` strictly precedes the critical section,
+   * mirroring {@link dispatchReady} and {@link _advanceSignal}.
+   *
+   * Unlike the signal path, which defers by queueing a pending completion, a
+   * control-path operation carries a user decision that must NEVER be lost —
+   * silently dropping it or running it without the lock would both corrupt the
+   * approval / retry semantics. When `acquireAdvancingLock` returns `false`
+   * (an in-flight section holds the lock), this awaits a macrotask boundary
+   * (a 0ms timer) so the section's `finally` can release the lock and
+   * drain, then re-attempts. The retry is bounded by
+   * {@link CONTROL_PATH_LOCK_RETRY_ATTEMPTS}; on exhaustion an explicit error
+   * is surfaced rather than a silent drop or an unlocked mutation.
+   */
+  private async _runControlOperation<T>(work: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      if (acquireAdvancingLock(this.state)) {
+        return this._runCriticalSection(work);
+      }
+      if (attempt >= CONTROL_PATH_LOCK_RETRY_ATTEMPTS) {
+        throw new Error(
+          `engine: control-path operation could not acquire the advancing lock ` +
+            `after ${CONTROL_PATH_LOCK_RETRY_ATTEMPTS} attempts ` +
+            `(graph "${this.state.graphId}")`,
+        );
+      }
+      // Macrotask boundary: yields to the in-flight section's `finally`, which
+      // releases the lock BEFORE `_drainDeferred` re-acquires it per deferred
+      // completion — so the next attempt races only genuine lock transitions.
+      // A TIMER (not `setImmediate`) is used deliberately: `setImmediate`
+      // callbacks queued from within a check-phase callback are processed in
+      // the SAME phase, so a `setImmediate`-based retry chain would hot-spin
+      // through the whole bound in one event-loop turn (starving the very
+      // section it waits for). A 0ms timer lands in a fresh timer phase, giving
+      // the held section's release + drain a genuine turn to complete first.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  /**
    * Body shared by every critical section: ensure the engine is `executing`,
    * run the work, then — in `finally` — release the lock and drain any
    * completions deferred while the section was held. Resolves with the work's
    * return value (`T`), so callers like `retryNode` can report what the
    * section produced (e.g. a retry count). Existing `() => Promise<void>`
    * callers are unaffected.
+   *
+   * INVARIANT: every `_runCriticalSection` invocation holds the advancement
+   * lock. The callers acquire it beforehand (`dispatchReady`,
+   * `_advanceSignal`, and the four control-path methods via
+   * {@link _runControlOperation}) and this method's `finally` releases it —
+   * ownership is never tracked inside the section itself, and no caller may
+   * invoke it without first acquiring.
    */
   private async _runCriticalSection<T>(
     work: () => Promise<T>,
@@ -781,13 +908,35 @@ export class AdvanceEngine {
    * - Escalate the node when its lifecycle permits (`running` / `ready` /
    *   `pending` / `completed` / `blocked` → `escalate`), carrying the error
    *   reason, and surface it through the completion seam like a live escalate.
-   * - Fall back to `timeout` when the node is stuck `running` and escalation
-   *   is somehow not legal (defense-in-depth for the "stuck running" case).
    * - When the node is already terminal, just log — there is no transition
    *   left to apply.
    *
+   * There is NO `timeout` fallback branch (L18): per the lifecycle table
+   * (`node-lifecycle.ts` VALID_NODE_TRANSITIONS), every status from which
+   * `timeout` is legal (`running`) also admits `escalate`, so the escalate
+   * branch above always hits — the former "stuck running" fallback was
+   * unreachable dead code.
+   *
+   * M7 (containment escalate propagation): the escalate branch mirrors the
+   * dispatch-failure path (`_dispatchNode`, engine-advance.ts:1465-1473) —
+   * the escalate is recorded to the ledger (source `race_guard`) and a
+   * deferred completion is queued, so the failure is visible to
+   * `_latestTerminating` / the F3 dead-end predicate / the signal ledger and
+   * the drain re-runs the termination check after the lock releases. The
+   * downstream fan-in joins are failed INLINE via
+   * {@link _propagateEscalateSignal} (the shared live-escalate propagation
+   * block): a deferred re-advance cannot re-run propagation for an
+   * already-terminal node (`_applySignalTransition` only transitions
+   * `running`, so the H1 migrated gate skips it), and a multi-input fan-in
+   * downstream would otherwise stay `pending` forever — its join never sees
+   * the failure, and the deadlock guard explicitly refuses to quiesce a
+   * pending node reached via `always` edges (engine-advance.ts:1709) — the
+   * graph hangs in `executing` until manual intervention (M7).
+   *
    * Finally re-checks graph termination so the terminal transition (GRAPH
-   * COMPLETE / BLOCKED) is never silently dropped by the containment.
+   * COMPLETE / BLOCKED) is never silently dropped by the containment — this
+   * holds even when the affected node has vanished from `state.nodes` (L19):
+   * the `!node` early-exit also runs the re-check.
    */
   private _containAdvanceError(nodeId: string, err: unknown): void {
     const node = this.state.nodes.get(nodeId);
@@ -796,20 +945,43 @@ export class AdvanceEngine {
       logWarn(
         `engine: cannot contain advancement error for unknown node "${nodeId}" in graph "${this.state.graphId}": ${reason}`,
       );
+      // L19: the containment must still re-check termination when the affected
+      // node is gone — otherwise a graph whose section aborted with a vanished
+      // node could stay `executing` with no terminal event (contradicting the
+      // "never silently dropped" promise above).
+      this._recheckTerminationAfterContainment();
       return;
     }
     if (canTransitionNode(node.status, NodeStatus.Escalate)) {
       markEscalated(this.state, node, reason);
       removeFromFrontier(this.state, nodeId);
+      // M7: mirror the dispatch-failure path (engine-advance.ts:1465-1473) —
+      // record the escalate to the ledger so `_latestTerminating` / the F3
+      // dead-end predicate / observability see the failure, and queue a
+      // deferred completion so the drain re-runs the termination check after
+      // the lock releases.
+      recordSignalToLedger(this.state, node.nodeId, "escalate", { error: reason }, "race_guard");
+      queuePendingCompletion(this.state, node.nodeId);
       this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
-    } else if (canTransitionNode(node.status, NodeStatus.Timeout)) {
-      markTimedOut(this.state, node, reason);
-      this._notifyCompletion(node, "timeout", reason, NodeStatus.Timeout);
+      // M7: fail the downstream convergence joins (shared live-escalate
+      // propagation) so a multi-input fan-in downstream terminates instead of
+      // hanging `pending` forever (see the method doc above).
+      this._propagateEscalateSignal(node, { error: reason });
     } else {
       logWarn(
         `engine: node "${nodeId}" in "${node.status}" after section error — cannot escalate (graph "${this.state.graphId}"): ${reason}`,
       );
     }
+    this._recheckTerminationAfterContainment();
+  }
+
+  /**
+   * Re-run the graph termination check after a containment pass, containing any
+   * throw from the checker itself (a broken notifier must never escape the
+   * containment hook — it is already inside `_runCriticalSection`'s onError
+   * containment, but belt-and-braces keeps the promise absolute).
+   */
+  private _recheckTerminationAfterContainment(): void {
     try {
       this._checkTermination();
     } catch (termErr) {
@@ -849,8 +1021,18 @@ export class AdvanceEngine {
       return;
     }
 
-    // Step 2: transition the node's lifecycle (generic state machine).
-    this._applySignalTransition(node, signalType, signalPayload);
+    // Step 2: transition the node's lifecycle (generic state machine). The
+    // return value gates the propagation side-effect branches below (H1): a
+    // duplicate / replayed signal whose transition was a no-op (the node was
+    // already terminal) must NOT re-run escalate/revise propagation or the
+    // loop-member convergence step — the double-delivery seams (signalBridge
+    // listener + subscribeTaskTermination, or the race-guard synthetic signal)
+    // would otherwise double-count loop traversals, mis-trigger the stuck
+    // early-exit, and re-enter upstreams on an already-quiesced graph. The
+    // transition itself is idempotent; the propagation side effects are not.
+    // The NON-loop answer forward flow is deliberately left ungated — it is
+    // load-bearing for adoptPrior's answer replay (see the answer block below).
+    const migrated = this._applySignalTransition(node, signalType, signalPayload);
 
     // Loop-group awareness: convergence decisions inside a bounded cycle are
     // orchestrated by the loop-group executor, which coalesces the Phase 2
@@ -860,35 +1042,14 @@ export class AdvanceEngine {
     const loopMember = node.loopGroupId !== undefined;
 
     // escalate / revise propagation.
-    if (signalType === "escalate") {
-      if (loopMember) {
-        executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
-      } else {
-        const report = this._propagateEscalate(node, signalPayload);
-        // Non-loop mirror of loop-group-executor's §3.3 cascade: every
-        // join-failed NON-loop convergence node's still-pending upstreams are
-        // no longer needed and must be retired so they stop consuming dispatch
-        // budget. Loop-group members are skipped — their cascade is owned by
-        // executeLoopStep, and the revise back-edge topology makes a blind
-        // cascade here unsafe (it would wrongly retire the still-needed
-        // back-edge source).
-        for (const escalatedId of report.escalated) {
-          const target = state.nodes.get(escalatedId);
-          if (!target || target.loopGroupId !== undefined) continue;
-          cancelPendingUpstreams(
-            state,
-            target,
-            evaluateJoin(state, target),
-            this.dispatchPort,
-          );
-        }
-        // Monitor (M1b): escalate propagation escalated downstream convergence
-        // node(s) inside signal-propagation.ts — those markEscalated calls are
-        // lifecycle transitions, not signals, so surface each through the
-        // completion seam / event log exactly once.
-        this._notifyPropagatedEscalations(report, signalPayload);
-      }
-    } else if (signalType === "revise_needed") {
+    if (migrated && signalType === "escalate") {
+      // Shared with the containment path (M7): forward the worst signal to the
+      // nearest fan-in convergence node(s), retire the no-longer-needed pending
+      // upstreams of every join that failed, and surface the propagation's
+      // escalations through the completion seam exactly once (see
+      // {@link _propagateEscalateSignal}).
+      this._propagateEscalateSignal(node, signalPayload);
+    } else if (migrated && signalType === "revise_needed") {
       if (loopMember) {
         executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
       } else {
@@ -902,6 +1063,18 @@ export class AdvanceEngine {
     }
 
     // Steps 3-5: forward data flow on `answer`.
+    //
+    // The loop-member step is gated on `migrated` — a duplicate answer on an
+    // already-terminal loop member must not re-run the convergence decision
+    // (executeLoopStep would re-touch the tracker / re-account the round). The
+    // NON-loop forward activation below is deliberately NOT gated: it is
+    // load-bearing for the adoptPrior / extend-after-complete answer replay
+    // (index.ts:1186-1202 re-emits a completed node's recorded answer so a
+    // downstream node ADDED after completion still activates), and for a
+    // genuine duplicate it is benign — `_forwardActivation` only re-enters
+    // `pending` targets (a target that already received the payload is
+    // `running`/`completed` and skipped) and `addToFrontier` dedups, while M5
+    // keeps the graph `executing` until the deferred replay is drained.
     if (signalType === "answer") {
       // Loop convergence: a loop member's answer step decides whether forward
       // data flow runs. Only a `converged` answer flows forward (the loop exits
@@ -912,8 +1085,14 @@ export class AdvanceEngine {
       // would be wrongly activated while the loop is still churning.
       let forwardActivate = true;
       if (loopMember) {
-        const report = executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
-        forwardActivate = report.outcome === "converged";
+        if (migrated) {
+          const report = executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
+          forwardActivate = report.outcome === "converged";
+        } else {
+          // Duplicate answer on an already-terminal loop member: the loop step
+          // already decided this round — never re-run it (H1).
+          forwardActivate = false;
+        }
       }
       if (forwardActivate) {
         const basePayload = this._buildEdgePayload(node, signalType, signalPayload);
@@ -939,24 +1118,62 @@ export class AdvanceEngine {
    *
    * Called after `markCompleted` in every completion path (answer / revise /
    * approval-resume) so `node.result` is populated before downstream
-   * consumers (graph_status include_output, export_path) read it.
+   * consumers (graph_status include_output, export_path) read it. Also stashes
+   * the materialized sidecar text once (see {@link _stashResultText}) so the
+   * EdgePayload `result` fallback never touches disk inside the critical
+   * section (subtask 2).
    */
   private _captureNodeResult(node: NodeRuntimeState): void {
-    if (node.result) return; // already captured (prior run, adoptPrior, etc.)
-    const taskId = node.dispatchTaskId;
-    if (!taskId) return;
-    const port = this.dispatchPort as {
-      getTask?: (taskId: string) => DispatchTask | undefined;
-    };
-    if (!port.getTask) return;
-    try {
-      const task = port.getTask(taskId);
-      if (task?.result && !task.result.fetchError) {
-        node.result = { ...task.result };
-        markDirty(this.state);
+    if (!node.result) {
+      const taskId = node.dispatchTaskId;
+      if (taskId) {
+        const port = this.dispatchPort as {
+          getTask?: (taskId: string) => DispatchTask | undefined;
+        };
+        if (port.getTask) {
+          try {
+            const task = port.getTask(taskId);
+            if (task?.result && !task.result.fetchError) {
+              node.result = { ...task.result };
+              markDirty(this.state);
+            }
+          } catch {
+            // best-effort — a throwing getTask must never corrupt advancement
+          }
+        }
       }
+    }
+    this._stashResultText(node);
+  }
+
+  /**
+   * Stash the node's materialized-result sidecar text ONCE at completion time
+   * (subtask 2 — Y1: synchronous `readFileSync` removed from the advancement
+   * critical section). `_edgeResultText` returns this stashed text for
+   * downstream EdgePayloads instead of reading the sidecar while the advancing
+   * lock is held.
+   *
+   * Best-effort, preserving the removed `_edgeResultText` read's I/O-failure →
+   * '' degradation: a missing/unreadable sidecar stashes `''` (never throws
+   * into advancement). Idempotent — skips when already stashed, so the sidecar
+   * is read at most once per node lifetime.
+   */
+  private _stashResultText(node: NodeRuntimeState): void {
+    const ref = node.result;
+    if (
+      node.resultText !== undefined ||
+      !ref ||
+      ref.totalChars <= 0 ||
+      ref.fetchError
+    ) {
+      return;
+    }
+    try {
+      node.resultText = readFileSync(ref.sidecarPath, "utf8");
+      markDirty(this.state);
     } catch {
-      // best-effort — a throwing getTask must never corrupt advancement
+      node.resultText = ""; // I/O-failure → '' degradation preserved
+      markDirty(this.state);
     }
   }
 
@@ -966,12 +1183,22 @@ export class AdvanceEngine {
    * Idempotent by construction: a transition is only applied when the node is
    * actually in the from-state, so re-advancing an already-processed node is a
    * harmless no-op (this also makes deferred-completion replay safe).
+   *
+   * Returns whether a transition was ACTUALLY applied. This is the
+   * propagation/forward-activation guard (H1): a duplicate / replayed
+   * terminating signal on an already-terminal node must not re-run the
+   * side-effect branches in {@link _advance} — double-delivery through the
+   * `signalBridge` listener + `subscribeTaskTermination` seams (or a
+   * race-guard synthetic signal) would otherwise double-count loop traversals,
+   * mis-trigger the stuck early-exit, and re-activate downstream nodes on an
+   * already-quiesced graph. The caller skips propagation / forward activation
+   * when this returns `false`.
    */
   private _applySignalTransition(
     node: NodeRuntimeState,
     signalType: SignalType,
     signalPayload: unknown,
-  ): void {
+  ): boolean {
     switch (signalType) {
       case "answer":
         if (node.status === NodeStatus.Running) {
@@ -986,8 +1213,9 @@ export class AdvanceEngine {
           recordNodeArtifactsAndEvidence(this.state, node);
           // Subtask 1: notify exactly once — `answer → completed`.
           this._notifyCompletion(node, "answer", signalPayload, NodeStatus.Completed);
+          return true;
         }
-        break;
+        return false;
       case "revise_needed":
         // The reviewing node finished its pass; its own lifecycle completes.
         // Back-edge re-activation of the upstream node is Phase 2.
@@ -998,19 +1226,21 @@ export class AdvanceEngine {
           recordNodeArtifactsAndEvidence(this.state, node);
           // Subtask 1: notify exactly once — reviewer finished → completed.
           this._notifyCompletion(node, "revise_needed", signalPayload, NodeStatus.Completed);
+          return true;
         }
-        break;
+        return false;
       case "escalate":
         if (node.status === NodeStatus.Running) {
           this._detachLiveness(node);
           markEscalated(this.state, node, this._extractErrorMessage(signalPayload));
           // Subtask 1: notify exactly once — `escalate`.
           this._notifyCompletion(node, "escalate", signalPayload, NodeStatus.Escalate);
+          return true;
         }
-        break;
+        return false;
       default:
         // Pausing / handoff / info signals never reach here (guarded upstream).
-        break;
+        return false;
     }
   }
 
@@ -1068,9 +1298,20 @@ export class AdvanceEngine {
       }
     }
     // Write-side durable log: record the terminal transition alongside the
-    // notifier. The recorder is total (never throws), so no extra guard needed
-    // beyond the notifier's.
-    this.graphEvents?.nodeCompleted(event);
+    // notifier. The recorder is documented total (never throws), but a
+    // CONTRACT-VIOLATING recorder must not abort the advancing critical
+    // section — the M7 containment-trigger list names a throwing recorder
+    // (engine-advance.ts:777-778), and an unguarded throw here would abort the
+    // containment's own completion notification before the escalation
+    // propagation runs, hanging a downstream fan-in join in `executing`.
+    // Contained like the notifier above.
+    try {
+      this.graphEvents?.nodeCompleted(event);
+    } catch (err) {
+      logWarn(
+        `engine: graph-events recorder threw for node "${node.nodeId}" in graph "${this.state.graphId}": ${this._errorString(err)}`,
+      );
+    }
   }
 
   /**
@@ -1271,10 +1512,7 @@ export class AdvanceEngine {
     signalType: SignalType,
     signalPayload: unknown,
   ): EdgePayload {
-    const result =
-      typeof signalPayload === "string"
-        ? signalPayload
-        : JSON.stringify(signalPayload ?? "");
+    const result = this._edgeResultText(source, signalPayload);
     const tc = source.tokensConsumed;
     return {
       fromNode: source.nodeId,
@@ -1290,9 +1528,47 @@ export class AdvanceEngine {
   }
 
   /**
+   * Edge payload `result` text for a source node's terminating signal (M3).
+   *
+   * Precedence:
+   * 1. A real string payload → verbatim.
+   * 2. A real object payload → JSON-serialized.
+   * 3. Missing / empty / synthetic-`__inferred` payloads — the worker never
+   *    emitted genuine output, or the engine inferred an answer on its behalf
+   *    (`engine-recovery.ts` `{ __inferred: true }`) — → fall back to the
+   *    node's materialized result text: the real output the worker produced.
+   *
+   * The materialized text is NOT read from disk here (subtask 2 — Y1). The
+   * sidecar was read ONCE at completion time by `_captureNodeResult` →
+   * `_stashResultText` (which preserves the I/O-failure → '' degradation) and
+   * stashed on `node.resultText`; this method returns the stash. The advancing
+   * lock is held while this runs, so a synchronous disk read in the
+   * advancement critical section was the defect being removed.
+   *
+   * Without a stashed text the empty string is used, replacing the previous
+   * `'""'` (JSON-quoted empty string) / `'{"__inferred":true}'` artifacts so
+   * downstream fan-in consumers see the node's actual output.
+   */
+  private _edgeResultText(source: NodeRuntimeState, signalPayload: unknown): string {
+    if (typeof signalPayload === "string") {
+      if (signalPayload !== "") return signalPayload;
+      // Empty string payload → the worker emitted no text → stash fallback.
+    } else if (signalPayload !== undefined && signalPayload !== null) {
+      const obj = signalPayload as { __inferred?: unknown };
+      if (typeof obj !== "object" || Array.isArray(obj) || obj.__inferred !== true) {
+        return JSON.stringify(signalPayload);
+      }
+      // Synthetic inferred marker → stash fallback.
+    }
+    return source.resultText ?? "";
+  }
+
+  /**
    * Whether an outbound edge activates for the given signal.
    *
-   * - `always` → true (any terminating signal).
+   * - `always` → true for the activating signal (only reached on the answer
+   *   forward-flow — escalate/revise_needed propagate through their own
+   *   propagators and never evaluate outbound edges here).
    * - `on_signal` → true when the signal is in the edge's `signal_filter`.
    * - `on_condition` → delegates to the injected resolver; with no
    *   resolver the edge never activates.
@@ -1336,27 +1612,38 @@ export class AdvanceEngine {
     state: EngineState,
     node: NodeRuntimeState,
   ): Promise<void> {
-    // Budget pre-check (Phase 1: stub port; Phase 7 enforces ceilings).
+    // Budget pre-checks (graph-level first, then per-node — both live through
+    // `GraphBudgetPort`, see `budget-bridge.ts`). A breached ceiling escalates
+    // the ready node — it is never dispatched. A GRAPH-level breach additionally
+    // sweeps every pending downstream to cancelled (see
+    // `_cancelBudgetStrandedNodes`); a per-node breach retires only the node.
     if (this.budgetPort) {
-      const check = this.budgetPort.checkGraphBudget(state.graphId, state);
-      if (check.exceeded) {
-        if (node.status === NodeStatus.Ready) {
-          markEscalated(this.state, node, check.reason ?? "graph budget exhausted");
-          // The node is escalated, not dispatched — drop it from the frontier so
-          // it is not left lingering as a ready entry (see budget pre-check).
-          removeFromFrontier(state, node.nodeId);
-          // Monitor (M1a): the budget pre-check escalated a ready node that was
-          // never dispatched — surface it through the completion seam / durable
-          // event log exactly like a live `escalate` signal (markEscalated is a
-          // lifecycle transition, not a signal, so _applySignalTransition never
-          // sees it).
-          this._notifyCompletion(
-            node,
-            "escalate",
-            check.reason ?? "graph budget exhausted",
-            NodeStatus.Escalate,
-          );
-        }
+      const graphCheck = this.budgetPort.checkGraphBudget(state.graphId, state);
+      if (graphCheck.exceeded) {
+        const reason = graphCheck.reason ?? "graph budget exhausted";
+        this._escalateBudgetRejected(
+          state,
+          node,
+          reason,
+        );
+        // Graph-level breach kills the whole graph: an escalated source never
+        // forward-activates its always edges, and the F3 dead-end predicate
+        // never counts an always edge as dead-ended — so every pending
+        // downstream would otherwise hang the graph in `executing` forever.
+        // Sweep them to cancelled so the standard termination path fires
+        // ({escalate: N, cancelled: M} → phase Complete).
+        this._cancelBudgetStrandedNodes(state, reason);
+        return;
+      }
+      const nodeCheck = this.budgetPort.checkNodeBudget(node);
+      if (nodeCheck.exceeded) {
+        this._escalateBudgetRejected(
+          state,
+          node,
+          nodeCheck.reason ?? "node budget exhausted",
+        );
+        // Per-node breach retires ONLY the offending node — downstream pending
+        // nodes are NOT swept (their other upstreams may still fire).
         return;
       }
     }
@@ -1477,6 +1764,15 @@ export class AdvanceEngine {
     // can unregister every listener this engine wired — exposed via
     // {@link getTerminationSubscriptions} (S7 dispose iterates it and calls
     // `port.removeTaskTerminatedListener(taskId, callback)`).
+    //
+    // M9 listener-ledger escape (review 04-F5): the transient-error guard
+    // inside the listener re-subscribes a NEW callback when the dispatch
+    // reports `error` while the task is verifiably live. That re-subscription
+    // happens asynchronously (whenever the termination notification fires), so
+    // the engine's OWN subscription ledger is passed as the collector — the
+    // re-subscribed `{ taskId, callback }` pair lands directly in the array at
+    // the moment it is registered, and dispose()'s getTerminationSubscriptions()
+    // pass can unregister it. No zombie callback escapes the ledger.
     const terminationCb = subscribeTaskTermination(
       this.state,
       this.dispatchPort,
@@ -1502,6 +1798,7 @@ export class AdvanceEngine {
           },
         );
       },
+      this._terminationSubscriptions,
     );
     if (terminationCb) {
       this._terminationSubscriptions.push({
@@ -1571,6 +1868,56 @@ export class AdvanceEngine {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Escalate a ready node that failed a budget pre-check and drop it from the
+   * frontier, surfacing the rejection through the completion seam / durable
+   * event log exactly like a live `escalate` signal (markEscalated is a
+   * lifecycle transition, not a signal, so _applySignalTransition never sees
+   * it). Shared by the graph-level and per-node budget pre-checks in
+   * {@link _dispatchNode}. A no-op when the node is no longer `ready`.
+   */
+  private _escalateBudgetRejected(
+    state: EngineState,
+    node: NodeRuntimeState,
+    reason: string,
+  ): void {
+    if (node.status !== NodeStatus.Ready) return;
+    markEscalated(this.state, node, reason);
+    // The node is escalated, not dispatched — drop it from the frontier so
+    // it is not left lingering as a ready entry (see budget pre-check).
+    removeFromFrontier(state, node.nodeId);
+    this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
+  }
+
+  /**
+   * Cancel every remaining `pending` node after a GRAPH-level budget breach.
+   *
+   * Rationale (must hold): an escalated source never forward-activates its
+   * `always` edges (escalation is not an `answer`), and the F3 dead-end
+   * predicate ({@link _isPendingDeadEnded}) never counts an `always` edge as
+   * dead-ended — so without this sweep a pending downstream node would hang
+   * the graph in `executing` forever. Each pending node is marked cancelled,
+   * dropped from the frontier (a no-op — pending nodes are not frontier
+   * members — but idempotent), and surfaced through the completion seam.
+   *
+   * Idempotent across per-node dispatch passes: the status guard
+   * (`status === Pending`) means a node already advanced by a prior pass is
+   * never re-cancelled, and `Pending → Cancelled` is a legal transition
+   * (node-lifecycle.ts:61). The PER-NODE breach path does NOT sweep — only
+   * the graph-level path calls this.
+   */
+  private _cancelBudgetStrandedNodes(
+    state: EngineState,
+    reason: string,
+  ): void {
+    for (const node of state.nodes.values()) {
+      if (node.status !== NodeStatus.Pending) continue;
+      markCancelled(this.state, node, reason);
+      removeFromFrontier(state, node.nodeId);
+      this._notifyCompletion(node, "cancelled", reason, NodeStatus.Cancelled);
     }
   }
 
@@ -1692,7 +2039,7 @@ export class AdvanceEngine {
   private _latestTerminating(
     node: NodeRuntimeState,
   ): { type: SignalType; payload: unknown } | null {
-    for (const t of TERMINATING_SEVERITY) {
+    for (const t of TERMINATING_SIGNALS_BY_SEVERITY) {
       if (node.signalsObserved[t] !== undefined) {
         return { type: t, payload: node.signalsObserved[t] };
       }
@@ -1728,6 +2075,42 @@ export class AdvanceEngine {
     signalPayload: unknown,
   ): SignalPropagationReport {
     return propagateEscalate(this.state, node, signalPayload);
+  }
+
+  /**
+   * Shared escalate-propagation block for a just-escalated source node (M7).
+   *
+   * Used by BOTH the live escalate path ({@link _advance}) and the
+   * containment path ({@link _containAdvanceError}) so the two never drift:
+   *
+   * - Loop-group members route through {@link executeLoopStep} (which owns the
+   *   loop's own §3.3 cascade + traversal accounting).
+   * - Non-loop nodes propagate via {@link _propagateEscalate}, then every
+   *   join-failed NON-loop convergence node's still-pending upstreams are
+   *   retired via the cascade canceller so they stop consuming dispatch
+   *   budget. Loop-group targets are skipped — their cascade is owned by
+   *   executeLoopStep, and the revise back-edge topology makes a blind
+   *   cascade here unsafe (it would wrongly retire the still-needed back-edge
+   *   source). Finally the propagation's escalations are surfaced through the
+   *   completion seam exactly once (monitor M1b).
+   */
+  private _propagateEscalateSignal(node: NodeRuntimeState, payload: unknown): void {
+    const state = this.state;
+    if (node.loopGroupId !== undefined) {
+      executeLoopStep(state, node, "escalate", payload, this.dispatchPort);
+      return;
+    }
+    const report = this._propagateEscalate(node, payload);
+    for (const escalatedId of report.escalated) {
+      const target = state.nodes.get(escalatedId);
+      if (!target || target.loopGroupId !== undefined) continue;
+      cancelPendingUpstreams(state, target, evaluateJoin(state, target), this.dispatchPort);
+    }
+    // Monitor (M1b): escalate propagation escalated downstream convergence
+    // node(s) inside signal-propagation.ts — those markEscalated calls are
+    // lifecycle transitions, not signals, so surface each through the
+    // completion seam / event log exactly once.
+    this._notifyPropagatedEscalations(report, payload);
   }
 
   /**
@@ -1806,6 +2189,12 @@ export class AdvanceEngine {
     if (!node.needsApproval) return;
     markNodeBlocked(this.state, node);
     removeFromFrontier(this.state, node.nodeId);
+    // M12: a NEW blocked episode begins — reset the partial-approve
+    // once-notified marker so a genuine second decision round on this gate
+    // (after the rejected branches re-execute and the node re-pauses)
+    // notifies the completion seam again. Exactly-once is scoped per blocked
+    // episode, not per node lifetime.
+    delete node.signalsObserved["partial_approve"];
     // Assemble the human-facing decision context from the frozen upstream state.
     // Routed through the shared helper (writes node.signalsObserved; a non-signal
     // stash like approval_payload does NOT enter the ledger history).
@@ -1822,14 +2211,20 @@ export class AdvanceEngine {
    * satisfied downstream joins become `ready` (§1.3 resume-on-approval).
    * Freshly-ready nodes are dispatched and termination re-checked inside the
    * same section (durable via the write-through persistence seam).
+   *
+   * Control-path lock: the section is entered only after
+   * `acquireAdvancingLock` succeeds. When an in-flight critical section holds
+   * the lock, the WHOLE operation defers (macrotask-bound retry in
+   * {@link _runControlOperation}) instead of running unlocked — a user
+   * approval is never lost and never interleaved with a signal-driven section.
    */
   approveNode(nodeId: string, payload?: unknown): Promise<void> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const node = getNode(this.state, nodeId);
       // Capture the dispatch task's materialized result (if available) BEFORE
       // building the EdgePayload, so recordNodeArtifactsAndEvidence (invoked
       // inside approveBlockedNode) can derive the node's genuine artifacts into
-      // the downstream merged_artifacts.
+      // the downstream node's upstreamResults.
       this._captureNodeResult(node);
       const edgePayload = approveBlockedNode(
         this.state,
@@ -1861,10 +2256,37 @@ export class AdvanceEngine {
    * lane reuse): `blocked → ready` re-enter with the rejection feedback merged
    * into the re-execution prompt, or `blocked → escalate` when the node has no
    * loop group to re-open. No forward data flow runs on reject.
+   *
+   * M13: the `blocked → escalate` lane is a TERMINAL transition — the
+   * completion seam fires an `escalate` event so the monitor can perceive "the
+   * gate was rejected and escalated" (the last silent HITL lane; approve and
+   * partialApprove already notify). Guarded on the {@link RejectReport} kind —
+   * a replayed reject on an already-resolved node is a no-op that must not
+   * re-fire.
+   *
+   * The revise lane (`blocked → ready` re-entry) intentionally stays silent:
+   * it is NOT a terminal transition — the node re-runs and its eventual
+   * terminating signal fires its own completion event, matching the
+   * signal-driven conventions (a notify only accompanies an actual lifecycle
+   * completion). The synthetic `revise_needed` ledger entry recorded by
+   * `rejectBlockedNode` already gives observers the rejection fact.
+   *
+   * Control-path lock: the section is entered only after `acquireAdvancingLock`
+   * succeeds (see {@link _runControlOperation}); under contention the whole
+   * rejection defers rather than running unlocked.
    */
   rejectNode(nodeId: string, reason?: string): Promise<void> {
-    return this._runCriticalSection(async () => {
-      rejectBlockedNode(this.state, getNode(this.state, nodeId), reason);
+    return this._runControlOperation(async () => {
+      const node = getNode(this.state, nodeId);
+      const report = rejectBlockedNode(this.state, node, reason);
+      if (report.kind === "escalate") {
+        this._notifyCompletion(
+          node,
+          "escalate",
+          node.errorReason ?? "rejected",
+          NodeStatus.Escalate,
+        );
+      }
       await this._dispatchReadyNodes();
       this._checkTermination();
     });
@@ -1883,14 +2305,18 @@ export class AdvanceEngine {
    * - If the approval node's join is still satisfied by the surviving approved
    *   sources (e.g. `any`), it re-enters `ready` to re-render immediately;
    *   otherwise it stays `blocked` awaiting the re-executed branches.
+   *
+   * Control-path lock: the section is entered only after `acquireAdvancingLock`
+   * succeeds (see {@link _runControlOperation}); under contention the whole
+   * partial approval defers rather than running unlocked.
    */
   partialApprove(
     nodeId: string,
-    _approved: string[],
+    approved: string[],
     rejected: string[],
     reason?: string,
   ): Promise<void> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const node = getNode(this.state, nodeId);
       if (node.status === NodeStatus.Blocked) {
         pruneDownstreamSubgraph(this.state, rejected, nodeId, this.dispatchPort);
@@ -1903,17 +2329,42 @@ export class AdvanceEngine {
           markReady(this.state, node);
           addToFrontier(this.state, nodeId);
         }
-        // Notify external observers: partial approval resolved the gate for
-        // the approved branches (their downstream edges fire); the rejected
-        // branches have been pruned + re-entered. The node's current status
-        // (Blocked while waiting for re-execution, or Ready to re-render)
-        // is the authoritative signal.
-        this._notifyCompletion(
-          node,
-          "answer",
-          { partial_approve: { approved: _approved, rejected, reason } },
-          node.status,
-        );
+        // M12: notify exactly once PER PARTIAL VERDICT. A replay / duplicate
+        // call carrying the SAME approved/rejected/reason verdict as an
+        // already-notified one re-runs only the idempotent state mutations
+        // above (prune / reset / reenter are all no-ops on replay) and does
+        // NOT re-fire the completion seam — matching the subtask-1 "notify
+        // exactly once" contract that `approveNode` honors via its
+        // `edgePayload` null-guard. A NEW verdict (different branch lists or
+        // reason) — a genuine second decision on the same still-blocked
+        // episode — notifies again and replaces the stashed marker. The marker
+        // is cleared when the node re-pauses for a NEW gate presentation
+        // (`_pauseForApproval`), so even an identical verdict notifies again on
+        // the next episode.
+        const verdict: PartialApproveVerdict = { approved, rejected, reason };
+        const prior = node.signalsObserved["partial_approve"] as
+          | PartialApproveVerdict
+          | undefined;
+        if (!samePartialVerdict(prior, verdict)) {
+          recordSignalToLedger(
+            this.state,
+            node.nodeId,
+            "partial_approve",
+            verdict,
+            "approval",
+          );
+          // Notify external observers: partial approval resolved the gate for
+          // the approved branches (their downstream edges fire); the rejected
+          // branches have been pruned + re-entered. The node's current status
+          // (Blocked while waiting for re-execution, or Ready to re-render)
+          // is the authoritative signal.
+          this._notifyCompletion(
+            node,
+            "answer",
+            { partial_approve: verdict },
+            node.status,
+          );
+        }
       }
       await this._dispatchReadyNodes();
       this._checkTermination();
@@ -1935,10 +2386,21 @@ export class AdvanceEngine {
    * target re-completes and re-emits — only the target is re-dispatched here, so
    * {@link RetryReport.reDispatched} is the number of reset nodes that ended this
    * call in `running` (normally the single target).
+   *
+   * Control-path lock: the section is entered only after `acquireAdvancingLock`
+   * succeeds (see {@link _runControlOperation}); under contention the whole
+   * retry defers rather than running unlocked.
    */
   retryNode(nodeId: string, opts?: RetryNodeOptions): Promise<RetryReport> {
-    return this._runCriticalSection(async () => {
+    return this._runControlOperation(async () => {
       const report = resetNodeForRetry(this.state, nodeId, opts);
+      // M11 (zombie-listener cleanup): resetNodeForRetry cleared the reset
+      // scope's previous dispatch task ids. Unregister the matching
+      // `onTaskTerminated` subscriptions from the port and drop them from the
+      // ledger — an already-fired (terminal task) or superseded-task inert
+      // listener must not linger across retries. Runs BEFORE the re-dispatch
+      // below, so the fresh task's own subscription is never purged.
+      this._purgeSupersededTerminationSubscriptions(report.supersededTaskIds);
       // 5. Reset terminal dedupe guards — `resetNodeForRetry` re-opens a
       //    terminal graph phase (Complete → Executing). Without this reset,
       //    the one-shot guards from the prior completion block the legitimate
@@ -1965,6 +2427,30 @@ export class AdvanceEngine {
       }
       return { ...report, reDispatched };
     });
+  }
+
+  /**
+   * Unregister + drop the `onTaskTerminated` subscriptions of dispatch tasks a
+   * retry just superseded (M11). `resetNodeForRetry` cleared those task ids
+   * from the reset nodes; their listeners — already fired (terminal tasks) or
+   * inert (the `current.dispatchTaskId !== completedTaskId` superseded-task
+   * guard in `subscribeTaskTermination`) — must not linger in the port or the
+   * {@link _terminationSubscriptions} ledger. A no-op when the list is empty
+   * or the port lacks the removal surface (optional chaining).
+   */
+  private _purgeSupersededTerminationSubscriptions(supersededTaskIds: string[]): void {
+    if (supersededTaskIds.length === 0) return;
+    const doomed = new Set(supersededTaskIds);
+    const kept: Array<{ taskId: string; callback: TaskTerminatedCallback }> = [];
+    for (const sub of this._terminationSubscriptions) {
+      if (doomed.has(sub.taskId)) {
+        this.dispatchPort.removeTaskTerminatedListener?.(sub.taskId, sub.callback);
+      } else {
+        kept.push(sub);
+      }
+    }
+    this._terminationSubscriptions.length = 0;
+    this._terminationSubscriptions.push(...kept);
   }
 
   /**
@@ -2088,14 +2574,23 @@ export class AdvanceEngine {
           if (isLoopReentry && source.loopGroupId === target.loopGroupId && edge.type === "always") {
             const groupId = target.loopGroupId!;
             if (!incrementLoopTraversal(state, groupId)) {
-              // Hard cap reached: escalate the target instead of re-entering.
-              // `completed → escalate` is valid per the lifecycle table
-              // (node-lifecycle.ts §2). The target escalates with reason
-              // `"max_traversals exhausted"`, matching the revise-driven
-              // exhaustion path so the graph's termination logic sees a
-              // consistent outcome. No traversal was consumed — the cap
-              // was already at maxTraversals from a prior re-entry.
+              // Hard cap reached: retire the re-entry target instead of
+              // re-entering it. The cap marks it `completed → done` with
+              // reason `"max_traversals exhausted"` — the same outcome the
+              // revise-driven exhaustion path produces
+              // (signal-propagation.ts propagateRevise, surfaced via
+              // _notifyPropagatedEscalations) and the stuck path, so the
+              // graph's termination logic sees a consistent outcome: the
+              // node is counted in the `done` bucket and surfaced through
+              // the completion seam exactly like propagation-escalated
+              // nodes. No traversal was consumed — the cap was already at
+              // maxTraversals from a prior re-entry.
               markDone(this.state, target, "max_traversals exhausted");
+              // Surface the retirement through the completion seam + durable
+              // event log, mirroring _notifyPropagatedEscalations's
+              // escalate-signal-with-actual-status convention (target.status
+              // is NodeStatus.Done post-markDone).
+              this._notifyCompletion(target, "escalate", "max_traversals exhausted", target.status);
               blockedByCap = true;
             } else {
               // Per-node traversal count for loop re-entry diagnostics
