@@ -1,0 +1,107 @@
+name: Publish
+
+# Release pipeline: pushing a v* tag publishes the package to npm and cuts a
+# GitHub Release with the matching CHANGELOG section as the release notes.
+#
+# Required secret (configure once, repo Settings → Secrets → Actions):
+#   NPM_TOKEN — an npm "Automation" access token with publish rights on the
+#   rolebox package (npmjs.com → Access Tokens → Generate New Token →
+#   type "Automation"). Plain `NODE_AUTH_TOKEN` is injected via setup-node.
+#
+# Release procedure (unchanged from before — the tag IS the release button):
+#   git tag -a vX.Y.Z -m "vX.Y.Z" <prepare-commit>
+#   git push origin vX.Y.Z
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # `gh release create` needs write access to the repo contents.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # setup-node writes .npmrc so `npm publish` authenticates with the
+          # NODE_AUTH_TOKEN env var below.
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        # --frozen-lockfile: the release artifact must come from the committed
+        # lockfile, never from a silently updated one.
+        run: bun install --frozen-lockfile
+
+      - name: Verify release metadata (tag == package.json == CHANGELOG)
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match package.json version v$version"
+            exit 1
+          fi
+          if ! grep -q "^## $version$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $version' section"
+            exit 1
+          fi
+          echo "Release metadata OK: $tag"
+
+      - name: Build (tsc + TUI bundle + dsh web client)
+        # Full build, not just tsc: dist/tui.js and dist/dsh-web-client.js are
+        # bundle outputs that tsc alone does not produce, and both are shipped
+        # in the npm package (files: dist).
+        run: bun run build
+
+      - name: Run full test suite (core + tui)
+        run: bun run test
+
+      - name: Verify npm package contents
+        # Guard against shipping a package that would fail at install time or
+        # at runtime. This catches the class of bug where a file referenced by
+        # postinstall/exports is absent from the files whitelist (the
+        # postinstall patch script was missing from the 1.5.0/1.6.0 package
+        # until caught by this check).
+        shell: bash
+        run: |
+          listing="$(npm pack --dry-run 2>&1)"
+          for needle in \
+            "dist/cli/main.js" \
+            "dist/cli/postinstall.js" \
+            "dist/tui.js" \
+            "dist/dsh-web-client.js" \
+            "scripts/patch-opentui-native-entry.mjs"; do
+            if ! grep -qF "$needle" <<<"$listing"; then
+              echo "::error::missing from npm package: $needle"
+              exit 1
+            fi
+          done
+          echo "Package contents OK."
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Extract CHANGELOG section for release notes
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          awk -v target="^## $version\$" '
+            $0 ~ target { flag=1; next }
+            flag && /^## / { exit }
+            flag { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          test -s /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        run: gh release create "${{ github.ref_name }}" --notes-file /tmp/release-notes.md --title "rolebox ${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ github.token }}
