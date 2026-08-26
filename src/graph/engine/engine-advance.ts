@@ -74,6 +74,7 @@ import {
   markEscalated,
   markTimedOut,
   markNodeBlocked,
+  markCancelled,
   canTransitionNode,
 } from "./node-lifecycle.ts";
 import {
@@ -250,24 +251,22 @@ export interface NodeLivenessFeed {
 /**
  * The budget-query surface the engine touches. Structurally satisfied by
  * {@link BudgetBridge} (`src/graph/engine/budget-bridge.ts`). Optional —
- * omitted in tests, and Phase 1 never enforces ceilings (see the Phase-7 stub
- * note in `budget-bridge.ts`).
+ * omitted in tests, and an engine without a port never enforces ceilings.
  *
  * Both checks are invoked as pre-dispatch pre-checks in `_dispatchNode`: the
- * graph-level check first, then the per-node check. The real bridge's
- * per-node check is a Phase-7 always-accept stub, so no dispatch is ever
- * gated today — the member exists as the typed contract for the future
- * per-node ceiling logic.
+ * graph-level check first, then the per-node check. The real bridge compares
+ * the graph declaration's `max_total_*` ceilings against the cumulative
+ * `EngineState.budget` counters, and each node's declared per-node ceilings
+ * against its `tokensConsumed`.
  */
 export interface GraphBudgetPort {
   checkGraphBudget(graphId: string, state: EngineState): BudgetCheckResult;
   /**
-   * Per-node budget check — reserved Phase-7 contract member. Invoked
-   * pre-dispatch alongside {@link checkGraphBudget}; the real
-   * {@link BudgetBridge} implementation is a stub that always returns
-   * `{ exceeded: false }` (per-node ceiling enforcement lands in Phase 7, see
-   * `budget-bridge.ts:checkNodeBudget`). A future implementation that returns
-   * `exceeded: true` escalates the ready node without dispatching it.
+   * Per-node budget check — invoked pre-dispatch alongside
+   * {@link checkGraphBudget}. The real {@link BudgetBridge} implementation
+   * compares the node's declared per-node ceilings (`node.budget.*`) against
+   * its cumulative `tokensConsumed`; a breach returns `exceeded: true`, and
+   * the engine escalates the ready node without dispatching it.
    */
   checkNodeBudget(node: NodeRuntimeState): BudgetCheckResult;
 }
@@ -318,7 +317,7 @@ export interface AdvanceEngineOptions {
   signalBridge: SignalBridge;
   /** Dispatch seam — `executeNode` dispatches ready nodes to their agents. */
   dispatch: NodeDispatchPort;
-  /** Optional budget seam — pre-dispatch graph-budget check (Phase 7). */
+  /** Optional budget seam — pre-dispatch graph- and per-node budget checks. */
   budget?: GraphBudgetPort;
   /** Parent context for node dispatches (defaults to a graph-scoped one). */
   parentContext?: DispatchParentContext;
@@ -1613,19 +1612,27 @@ export class AdvanceEngine {
     state: EngineState,
     node: NodeRuntimeState,
   ): Promise<void> {
-    // Budget pre-checks (Phase 1: the per-node check is an always-accept stub;
-    // Phase 7 enforces ceilings). Both checks escalate the ready node when a
-    // ceiling is breached — it is never dispatched. The per-node check is a
-    // live typed call through `GraphBudgetPort` so the Phase-7 stub has a real
-    // invocation site to upgrade (see `budget-bridge.ts:checkNodeBudget`).
+    // Budget pre-checks (graph-level first, then per-node — both live through
+    // `GraphBudgetPort`, see `budget-bridge.ts`). A breached ceiling escalates
+    // the ready node — it is never dispatched. A GRAPH-level breach additionally
+    // sweeps every pending downstream to cancelled (see
+    // `_cancelBudgetStrandedNodes`); a per-node breach retires only the node.
     if (this.budgetPort) {
       const graphCheck = this.budgetPort.checkGraphBudget(state.graphId, state);
       if (graphCheck.exceeded) {
+        const reason = graphCheck.reason ?? "graph budget exhausted";
         this._escalateBudgetRejected(
           state,
           node,
-          graphCheck.reason ?? "graph budget exhausted",
+          reason,
         );
+        // Graph-level breach kills the whole graph: an escalated source never
+        // forward-activates its always edges, and the F3 dead-end predicate
+        // never counts an always edge as dead-ended — so every pending
+        // downstream would otherwise hang the graph in `executing` forever.
+        // Sweep them to cancelled so the standard termination path fires
+        // ({escalate: N, cancelled: M} → phase Complete).
+        this._cancelBudgetStrandedNodes(state, reason);
         return;
       }
       const nodeCheck = this.budgetPort.checkNodeBudget(node);
@@ -1635,6 +1642,8 @@ export class AdvanceEngine {
           node,
           nodeCheck.reason ?? "node budget exhausted",
         );
+        // Per-node breach retires ONLY the offending node — downstream pending
+        // nodes are NOT swept (their other upstreams may still fire).
         return;
       }
     }
@@ -1881,6 +1890,35 @@ export class AdvanceEngine {
     // it is not left lingering as a ready entry (see budget pre-check).
     removeFromFrontier(state, node.nodeId);
     this._notifyCompletion(node, "escalate", reason, NodeStatus.Escalate);
+  }
+
+  /**
+   * Cancel every remaining `pending` node after a GRAPH-level budget breach.
+   *
+   * Rationale (must hold): an escalated source never forward-activates its
+   * `always` edges (escalation is not an `answer`), and the F3 dead-end
+   * predicate ({@link _isPendingDeadEnded}) never counts an `always` edge as
+   * dead-ended — so without this sweep a pending downstream node would hang
+   * the graph in `executing` forever. Each pending node is marked cancelled,
+   * dropped from the frontier (a no-op — pending nodes are not frontier
+   * members — but idempotent), and surfaced through the completion seam.
+   *
+   * Idempotent across per-node dispatch passes: the status guard
+   * (`status === Pending`) means a node already advanced by a prior pass is
+   * never re-cancelled, and `Pending → Cancelled` is a legal transition
+   * (node-lifecycle.ts:61). The PER-NODE breach path does NOT sweep — only
+   * the graph-level path calls this.
+   */
+  private _cancelBudgetStrandedNodes(
+    state: EngineState,
+    reason: string,
+  ): void {
+    for (const node of state.nodes.values()) {
+      if (node.status !== NodeStatus.Pending) continue;
+      markCancelled(this.state, node, reason);
+      removeFromFrontier(state, node.nodeId);
+      this._notifyCompletion(node, "cancelled", reason, NodeStatus.Cancelled);
+    }
   }
 
   /**
@@ -2536,14 +2574,23 @@ export class AdvanceEngine {
           if (isLoopReentry && source.loopGroupId === target.loopGroupId && edge.type === "always") {
             const groupId = target.loopGroupId!;
             if (!incrementLoopTraversal(state, groupId)) {
-              // Hard cap reached: escalate the target instead of re-entering.
-              // `completed → escalate` is valid per the lifecycle table
-              // (node-lifecycle.ts §2). The target escalates with reason
-              // `"max_traversals exhausted"`, matching the revise-driven
-              // exhaustion path so the graph's termination logic sees a
-              // consistent outcome. No traversal was consumed — the cap
-              // was already at maxTraversals from a prior re-entry.
+              // Hard cap reached: retire the re-entry target instead of
+              // re-entering it. The cap marks it `completed → done` with
+              // reason `"max_traversals exhausted"` — the same outcome the
+              // revise-driven exhaustion path produces
+              // (signal-propagation.ts propagateRevise, surfaced via
+              // _notifyPropagatedEscalations) and the stuck path, so the
+              // graph's termination logic sees a consistent outcome: the
+              // node is counted in the `done` bucket and surfaced through
+              // the completion seam exactly like propagation-escalated
+              // nodes. No traversal was consumed — the cap was already at
+              // maxTraversals from a prior re-entry.
               markDone(this.state, target, "max_traversals exhausted");
+              // Surface the retirement through the completion seam + durable
+              // event log, mirroring _notifyPropagatedEscalations's
+              // escalate-signal-with-actual-status convention (target.status
+              // is NodeStatus.Done post-markDone).
+              this._notifyCompletion(target, "escalate", "max_traversals exhausted", target.status);
               blockedByCap = true;
             } else {
               // Per-node traversal count for loop re-entry diagnostics

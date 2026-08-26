@@ -11,6 +11,7 @@ import {
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import {
   AdvanceEngine,
+  type NodeCompletionEvent,
   type NodeDispatchPort,
 } from "../../src/graph/engine/engine-advance.ts";
 import {
@@ -678,7 +679,7 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
     expect(rounds[0].nodeIds).toContain("A");
   });
 
-  it("always-cycle bounded by max_traversals: answer-driven re-entry increments each round and escalates at cap", async () => {
+  it("always-cycle bounded by max_traversals: answer-driven re-entry increments each round and retires the re-entry target done at cap", async () => {
     const { state, engine, fake } = buildEngine(alwaysCycleGraph(3));
 
     // dispatchReady dispatches both frontier nodes → A and B both Running.
@@ -707,7 +708,8 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
 
-    // Signal 5: A answers → tries to re-enter B → cap (3 ≥ 3) → B escalates.
+    // Signal 5: A answers → tries to re-enter B → cap (3 ≥ 3) → B is retired
+    // done (markDone) instead of being re-entered.
     await engine.onNodeSignalEmitted("A", "answer", "a3");
     // Traversal counter unchanged at cap — no traversal consumed.
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(3);
@@ -725,6 +727,53 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
 
     // Graph reaches complete — no active nodes remain.
     expect(state.phase).toBe(EnginePhase.Complete);
+  });
+
+  it("always-cycle cap exhaustion fires the completion seam exactly once for the retired target (no duplicate on replay)", async () => {
+    // Recording seam (engine-node-completion.test.ts pattern).
+    const events: NodeCompletionEvent[] = [];
+    const state = createEngineState(alwaysCycleGraph(3), "g-1");
+    provision(state);
+    const bridge = new SignalBridge();
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: bridge,
+      dispatch: new FakeDispatch(),
+      onNodeCompletion: (e) => events.push(e),
+    });
+
+    // Drive the always cycle to the cap, mirroring the retirement test above.
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "a1");
+    await engine.onNodeSignalEmitted("B", "answer", "b1");
+    await engine.onNodeSignalEmitted("A", "answer", "a2");
+    await engine.onNodeSignalEmitted("B", "answer", "b2");
+
+    // Cap exhausted: A's next answer tries to re-enter B but the cap (3 ≥ 3)
+    // retires B `completed → done` — the completion seam must surface B's
+    // retirement exactly once, escalate-signal-with-actual-status convention
+    // (mirroring _notifyPropagatedEscalations: signalType "escalate" with the
+    // post-transition NodeStatus.Done and the machine-readable reason).
+    await engine.onNodeSignalEmitted("A", "answer", "a3");
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
+
+    const retired = events.filter(
+      (e) => e.nodeId === "B" && e.signalType === "escalate",
+    );
+    expect(retired).toHaveLength(1);
+    expect(retired[0].signalType).toBe("escalate");
+    expect(retired[0].nodeStatus).toBe(NodeStatus.Done);
+    expect(retired[0].payload).toBe("max_traversals exhausted");
+    expect(retired[0].nodeAgent).toBe("a1");
+    expect(retired[0].graphId).toBe("g-1");
+
+    // Re-advancing / replaying the same answer on the already-completed A is a
+    // no-op transition → no duplicate retirement event for B.
+    await engine.onNodeSignalEmitted("A", "answer", "a3");
+    expect(
+      events.filter((e) => e.nodeId === "B" && e.signalType === "escalate"),
+    ).toHaveLength(1);
   });
 
   it("executeLoopStep on always-cycle revise surfaces the exhaustion payload", () => {

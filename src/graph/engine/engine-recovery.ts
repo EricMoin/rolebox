@@ -122,6 +122,24 @@ export interface DispatchRecoveryPort {
    * to populate `node.tokensConsumed` at task termination.
    */
   getSessionUsage?(sessionId: string): UsageRecord;
+  /**
+   * List every task launched under a given parent session id. The graph id
+   * seeds the dispatch parent session (`dispatch-bridge.ts:graphParentContext`),
+   * so passing `state.graphId` returns every session this graph launched.
+   * OPTIONAL-ADDITIVE — a port without it cannot sweep crash-window orphans (a
+   * node persisted `running` with no `dispatchTaskId`), so the recovery sweep
+   * degrades to record-nothing. Structurally satisfied by {@link DispatchBridge}
+   * (`dispatch-bridge.ts:getTasksByParent`).
+   */
+  getTasksByParent?(parentSessionId: string): DispatchTask[];
+  /**
+   * Cancel a dispatched task. OPTIONAL-ADDITIVE — mirrors
+   * `NodeDispatchPort.cancelTask` (`engine-advance.ts`); recovery uses it to
+   * tear down the orphaned live session whose node recorded no `dispatchTaskId`
+   * (it would otherwise keep burning budget with its result lost). Issued
+   * fire-and-forget by the caller — never awaited.
+   */
+  cancelTask?(taskId: string): Promise<boolean>;
 }
 
 /** A dispatch status mapped to a terminating engine signal (answer | escalate). */
@@ -145,6 +163,18 @@ export interface ReconcileReport {
   timedOut: string[];
   /** Nodes that finished during the window → their terminating signal re-emitted. */
   deferred: DeferredSignal[];
+  /**
+   * Crash-window orphan matches (Y2). A node is persisted `running` BEFORE
+   * `_dispatchNode`'s `await executeNode(...)` resolves the task handle, so a
+   * crash in that window leaves disk state `running` with NO `dispatchTaskId` —
+   * yet the session was launched and is still live in the dispatch system.
+   * Each entry pairs the orphaned node with the task id of the matched live
+   * session (parent = graph id, description = `graph node ${nodeId}`); the
+   * caller issues a fire-and-forget `cancelTask` so the orphan stops burning
+   * budget. Record-only — reconcile never awaits and never cancels. Absent
+   * when the port lacks `getTasksByParent` or no live task matched.
+   */
+  orphanCancellations?: Array<{ nodeId: string; taskId: string }>;
 }
 
 /**
@@ -344,6 +374,18 @@ export function captureNodeUsage(
     if (usage.inputTokens === 0 && usage.outputTokens === 0 && usage.cost === 0) {
       return; // zero-guard — never clobber an adopted/prior value with a zero read
     }
+    // Graph-total accumulation (Y4): feed the same usage into the graph-level
+    // budget counters so a declared `budget.max_total_*` ceiling gates
+    // dispatch (checked in budget-bridge.ts::checkGraphBudget). Known
+    // approximation: the live-seam and recovery reconcile may BOTH observe the
+    // same termination; the per-node write above is a replace (idempotent),
+    // but this graph-total ADD can over-count once across a crash-restart
+    // overlap — conservative (rejects earlier), acceptable.
+    applyBudgetDelta(state, {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cost: usage.cost,
+    });
     node.tokensConsumed.inputTokens = usage.inputTokens;
     node.tokensConsumed.outputTokens = usage.outputTokens;
     node.tokensConsumed.cost = usage.cost;
@@ -415,8 +457,9 @@ export function subscribeTaskTermination(
     if (!current) return;
     if (current.dispatchTaskId !== completedTaskId) return; // superseded task
     if (current.status !== NodeStatus.Running) return; // already advanced / cancelled
-    // Record the terminated task's token/cost consumption (Phase-7 gap) before
-    // the node advances. Idempotent replace — safe across the live-seam /
+    // Record the terminated task's token/cost consumption (per-node
+    // `tokensConsumed` + graph-level budget totals) before the node advances.
+    // Idempotent replace on the node — safe across the live-seam /
     // race-guard double-observation of the same termination.
     captureNodeUsage(state, current, port);
     // Session-slot refund (the graph-level mirror of S4's `decRequestSessions`):
@@ -480,6 +523,11 @@ export function subscribeTaskTermination(
  * - no `dispatchTaskId`, or `getTask` returns undefined → orphaned → the node
  *   is marked `timeout` with {@link ORPHAN_REASON} and queued for an `escalate`
  *   re-emit so its failure propagates (it must not silently stall a join).
+ *   When the node was persisted `running` without a `dispatchTaskId` (the
+ *   crash-window orphan), the pass additionally sweeps the dispatch parent
+ *   session for the still-live task (`getTasksByParent` + the node-scoped
+ *   description) and records it in {@link ReconcileReport.orphanCancellations}
+ *   so the caller can cancel the orphaned session fire-and-forget.
  * - terminal dispatch status → the termination was missed during the window:
  *   `cancelled` cancels the node in place; `completed` / `error` / `timeout`
  *   queue the mapped terminating signal for re-emission.
@@ -487,9 +535,10 @@ export function subscribeTaskTermination(
  *   running and will advance when the task finally terminates).
  *
  * This is a **pure decision pass** — it marks terminal nodes and records
- * re-subscriptions, but never dispatches and never awaits. The caller re-emits
- * {@link ReconcileReport.deferred} (awaiting each) and then dispatches the
- * rebuilt frontier.
+ * re-subscriptions (and orphan-cancellation matches), but never dispatches and
+ * never awaits. The caller re-emits {@link ReconcileReport.deferred} (awaiting
+ * each), issues the recorded orphan cancellations fire-and-forget, and then
+ * dispatches the rebuilt frontier.
  */
 export function reconcileEngine(
   state: EngineState,
@@ -500,12 +549,33 @@ export function reconcileEngine(
   const reSubscribed: string[] = [];
   const timedOut: string[] = [];
   const deferred: DeferredSignal[] = [];
+  const orphanCancellations: Array<{ nodeId: string; taskId: string }> = [];
 
   for (const node of state.nodes.values()) {
     if (node.status !== NodeStatus.Running) continue;
 
     const taskId = node.dispatchTaskId;
     if (!taskId) {
+      // Y2 crash-window orphan sweep: the node was persisted `running` BEFORE
+      // `_dispatchNode`'s `await executeNode(...)` resolved the task handle, so
+      // disk state has no `dispatchTaskId` — but the session WAS launched and
+      // is still live in the dispatch system. Match it back by parent session
+      // (the graph id seeds the dispatch parent context) + the node-scoped task
+      // description (`dispatch-bridge.ts:executeNode`), and record it for the
+      // caller to cancel fire-and-forget. Record-only — this pass never awaits
+      // and never cancels; a port without `getTasksByParent` degrades to the
+      // pre-Y2 behavior (no matches, nothing recorded).
+      const matches =
+        port
+          .getTasksByParent?.(state.graphId)
+          ?.filter(
+            (t) =>
+              t.description === `graph node ${node.nodeId}` &&
+              LIVE_DISPATCH_STATUSES.has(t.status),
+          ) ?? [];
+      for (const m of matches) {
+        orphanCancellations.push({ nodeId: node.nodeId, taskId: m.id });
+      }
       markTimedOut(state, node, ORPHAN_REASON);
       timedOut.push(node.nodeId);
       deferred.push({
@@ -584,7 +654,7 @@ export function reconcileEngine(
     }
   }
 
-  return { reSubscribed, timedOut, deferred };
+  return { reSubscribed, timedOut, deferred, orphanCancellations };
 }
 
 // ── Frontier rebuild ─────────────────────────────────────────────────────────

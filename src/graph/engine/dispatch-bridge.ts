@@ -7,8 +7,9 @@
  * A read-only seam over {@link DispatchManager}. The graph engine uses this
  * bridge as its *only* touchpoint into the dispatch subsystem. It wraps the
  * public methods (`launch`, `onTaskTerminated`, `removeTaskTerminatedListener`,
- * `getTask`, `cancelTask`, `getSessionUsage`) with proper TS types
- * so the engine never reaches into `DispatchManager` internals directly.
+ * `getTask`, `getTasksByParent`, `cancelTask`, `getSessionUsage`) with proper
+ * TS types so the engine never reaches into `DispatchManager` internals
+ * directly.
  *
  * Invariant: this module is an **import-only consumer** of the dispatch
  * subsystem's *public* API. It imports only the `DispatchManager` class type
@@ -144,6 +145,18 @@ export class DispatchBridge {
     return this.manager.getTask(taskId);
   }
 
+  /**
+   * List every task launched under a given parent session id (the graph id
+   * seeds the dispatch parent session via {@link graphParentContext}). Used by
+   * recovery to sweep the crash-window orphan: a node persisted `running`
+   * before `executeNode` resolved its task handle carries no `dispatchTaskId`,
+   * so the live session is matched by parent session + node-scoped description
+   * instead (`engine-recovery.ts::reconcileEngine`).
+   */
+  getTasksByParent(parentSessionId: string): DispatchTask[] {
+    return this.manager.getTasksByParent(parentSessionId);
+  }
+
   /** Cancel a running task. Returns `true` if the cancellation was issued. */
   cancelTask(taskId: string): Promise<boolean> {
     return this.manager.cancelTask(taskId);
@@ -155,7 +168,8 @@ export class DispatchBridge {
    *
    * This is the per-node usage surface: a node's `dispatchSessionId` identifies
    * exactly one dispatched session, so the engine reads this at task termination
-   * to populate `node.tokensConsumed` (the Phase-7 per-node consumption gap).
+   * to populate `node.tokensConsumed` and feed the graph-level budget counters
+   * (`engine-recovery.ts::captureNodeUsage`).
    * Returns a zeroed `UsageRecord` when the tracker has no record for the
    * session (e.g. usage was never sampled or the session was reset).
    */

@@ -700,9 +700,9 @@ class EngineRuntimeImpl implements EngineRuntime {
       opts.dispatch ??
       (opts.manager ? new DispatchBridge(opts.manager) : throwOnDispatch);
 
-    // 3. Resolve the budget seam: explicit > manager-backed > absent (Phase 1
-    //    never enforces ceilings — the advance engine treats `undefined` as a
-    //    no-op port).
+    // 3. Resolve the budget seam: explicit > manager-backed > absent (the
+    //    advance engine treats `undefined` as a no-op port — an engine without
+    //    a budget seam never enforces ceilings).
     const budget: GraphBudgetPort | undefined =
       opts.budget ?? (opts.manager ? new BudgetBridge(opts.manager.getBudgetTracker(), graphDeclaration) : undefined);
 
@@ -1110,6 +1110,23 @@ class EngineRuntimeImpl implements EngineRuntime {
       this.advance.notifyNodeTimeout(id);
     }
 
+    // Subtask 2 (Y2): tear down crash-window orphan sessions fire-and-forget —
+    // a node persisted `running` with no `dispatchTaskId` had its session
+    // launched anyway (the crash hit between the running-write and
+    // `executeNode` resolving the task handle); reconcile matched it back by
+    // parent + description and recovery must cancel it so it stops burning
+    // budget with its result lost. Never awaited — mirrors the
+    // cancellation.ts fire-and-forget precedent; a rejected cancel is logged
+    // and swallowed.
+    for (const oc of report.orphanCancellations ?? []) {
+      void port.cancelTask?.(oc.taskId).catch((err) => {
+        logWarn(
+          `engine-recover: cancelTask failed for orphaned task ${oc.taskId} ` +
+            `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${String(err)}`,
+        );
+      });
+    }
+
     // Drain deferred completions: re-emit each finished-during-restart node's
     // terminating signal through the public advance entry, running the
     // critical section (the re-entrancy guard makes the follow-up advance of
@@ -1167,6 +1184,18 @@ class EngineRuntimeImpl implements EngineRuntime {
         );
         for (const id of report.timedOut) {
           this.advance.notifyNodeTimeout(id);
+        }
+        // Subtask 2 (Y2): tear down crash-window orphan sessions fire-and-forget
+        // (parity with recover() — an adopted `running` node with no
+        // `dispatchTaskId` had its session launched anyway; cancel it so it
+        // stops burning budget). Never awaited; a rejected cancel is logged.
+        for (const oc of report.orphanCancellations ?? []) {
+          void port.cancelTask?.(oc.taskId).catch((err) => {
+            logWarn(
+              `engine-adopt: cancelTask failed for orphaned task ${oc.taskId} ` +
+                `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${String(err)}`,
+            );
+          });
         }
         for (const d of report.deferred) {
           await this.advance.onNodeSignalEmitted(d.nodeId, d.type, d.payload, "recovery");

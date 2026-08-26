@@ -573,6 +573,12 @@ describe("reconcileEngine", () => {
       taskId?: string;
       status?: NodeRuntimeState["status"];
       sessionUsage?: UsageRecord;
+      /**
+       * Y2: tasks the fake port's `getTasksByParent` returns for the graph's
+       * parent session. When provided, the port exposes `getTasksByParent`;
+       * when omitted the port omits it entirely (the guard-on-presence path).
+       */
+      parentTasks?: DispatchTask[];
     } = {},
   ): {
     state: EngineState;
@@ -589,6 +595,11 @@ describe("reconcileEngine", () => {
       getTask: (_id: string) => task,
       onTaskTerminated: (id: string) => subTasks.push(id),
       getSessionUsage: () => opts.sessionUsage ?? { inputTokens: 0, outputTokens: 0, cost: 0 },
+      // Y2: OPTIONAL-ADDITIVE — only present when the test supplies parentTasks,
+      // so the no-port path (guard-on-presence) stays byte-identical.
+      ...(opts.parentTasks !== undefined
+        ? { getTasksByParent: () => opts.parentTasks }
+        : {}),
     };
     const report = reconcileEngine(
       state,
@@ -615,6 +626,67 @@ describe("reconcileEngine", () => {
     const { state, report } = runReconcile(undefined, { taskId: undefined });
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
     expect(report.deferred[0].nodeId).toBe("A");
+  });
+
+  it("Y2: crash-window orphan — live parent task matches a running node with no dispatchTaskId → recorded for cancellation, node still times out", () => {
+    // The crash hit between the running-write and executeNode resolving the
+    // task handle: disk state has no dispatchTaskId, but the session WAS
+    // launched and is still live. The sweep matches it by parent + the
+    // node-scoped description and records it in orphanCancellations.
+    const live = makeTask("task-live", "running");
+    live.description = "graph node A";
+    live.parentSessionId = "rec"; // buildState's graphId → the dispatch parent
+    const { state, report } = runReconcile(undefined, {
+      taskId: undefined,
+      parentTasks: [live],
+    });
+    // Recorded for fire-and-forget cancellation by the caller.
+    expect(report.orphanCancellations).toEqual([
+      { nodeId: "A", taskId: "task-live" },
+    ]);
+    // Node disposition is UNCHANGED: timeout + orphan reason + deferred escalate.
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(state.nodes.get("A")!.errorReason).toBe(ORPHAN_REASON);
+    expect(report.timedOut).toEqual(["A"]);
+    expect(report.deferred).toHaveLength(1);
+    expect(report.deferred[0]).toMatchObject({
+      nodeId: "A",
+      type: "escalate",
+    });
+    expect(report.reSubscribed).toEqual([]);
+  });
+
+  it("Y2: the only matching parent task is terminal → no orphan cancellation recorded", () => {
+    // A completed task is not live — the crashed window's session already
+    // finished, so there is nothing to cancel (its termination was simply
+    // missed; the node still times out as an orphan).
+    const done = makeTask("task-done", "completed");
+    done.description = "graph node A";
+    done.parentSessionId = "rec";
+    const { state, report } = runReconcile(undefined, {
+      taskId: undefined,
+      parentTasks: [done],
+    });
+    expect(report.orphanCancellations).toEqual([]);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(state.nodes.get("A")!.errorReason).toBe(ORPHAN_REASON);
+    expect(report.timedOut).toEqual(["A"]);
+    expect(report.deferred).toHaveLength(1);
+  });
+
+  it("Y2: a port WITHOUT getTasksByParent → orphan branch records nothing extra (pre-Y2 byte-identical)", () => {
+    // The new members are OPTIONAL-ADDITIVE: a minimal port that omits
+    // getTasksByParent must behave exactly as before — no matches, no
+    // orphanCancellations entries, same timeout + deferred escalate.
+    const { state, report } = runReconcile(undefined, { taskId: undefined });
+    expect(report.orphanCancellations).toEqual([]);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(state.nodes.get("A")!.errorReason).toBe(ORPHAN_REASON);
+    expect(report.timedOut).toEqual(["A"]);
+    expect(report.deferred[0]).toMatchObject({
+      nodeId: "A",
+      type: "escalate",
+    });
   });
 
   it("running node that completed during restart → answer deferred", () => {
@@ -843,6 +915,7 @@ describe("engine.recover() integration", () => {
   class RecoveryFake implements NodeDispatchPort {
     tasks = new Map<string, DispatchTask>();
     calls: string[] = [];
+    cancelled: string[] = [];
     private listeners = new Map<string, Array<(id: string, st: string) => void>>();
 
     setStatus(id: string, status: DispatchTask["status"], error?: string): void {
@@ -851,12 +924,20 @@ describe("engine.recover() integration", () => {
     getTask(id: string): DispatchTask | undefined {
       return this.tasks.get(id);
     }
+    // Y2: the crash-window orphan sweep surface — every task launched under a
+    // parent session (the graph id seeds the dispatch parent context).
+    getTasksByParent(parentSessionId: string): DispatchTask[] {
+      return [...this.tasks.values()].filter(
+        (t) => t.parentSessionId === parentSessionId,
+      );
+    }
     onTaskTerminated(id: string, cb: (tid: string, st: string) => void): void {
       const arr = this.listeners.get(id) ?? [];
       arr.push(cb);
       this.listeners.set(id, arr);
     }
     cancelTask(id: string): Promise<boolean> {
+      this.cancelled.push(id);
       return Promise.resolve(true);
     }
     executeNode(
@@ -900,6 +981,41 @@ describe("engine.recover() integration", () => {
     expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
     expect(snap.nodes.get("A")!.errorReason).toBe(ORPHAN_REASON);
     expect(snap.phase).toBe(EnginePhase.Complete);
+  });
+
+  it("Y2: recover() cancels the orphaned live session of a running node with no dispatchTaskId", async () => {
+    const dir = makeTmpDir();
+    const graphId = "rec-y2-orphan";
+    // Crash-window orphan: the node was persisted `running` BEFORE executeNode
+    // resolved its task handle — no dispatchTaskId on disk, but the session
+    // WAS launched and is still live in the dispatch system.
+    const crashed = buildState(singleNodeGraph(), graphId);
+    crashed.nodes.get("A")!.status = NodeStatus.Running;
+    crashed.nodes.get("A")!.dispatchTaskId = undefined;
+    new EnginePersistence(dir).save(crashed);
+
+    const fake = new RecoveryFake();
+    const live = makeTask("task-orphan", "running");
+    live.parentSessionId = graphId; // the graph id is the dispatch parent
+    live.description = "graph node A";
+    fake.tasks.set("task-orphan", live);
+
+    const engine = createEngine(singleNodeGraph(), {
+      stateDir: dir,
+      graphId,
+      dispatch: fake,
+    });
+    await engine.recover();
+
+    // The orphaned live session was cancelled fire-and-forget (best-effort
+    // teardown — the session would otherwise keep burning budget).
+    expect(fake.cancelled).toEqual(["task-orphan"]);
+    // The node disposition is unchanged: timeout + orphan reason, engine done.
+    const snap = engine.status();
+    expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(snap.nodes.get("A")!.errorReason).toBe(ORPHAN_REASON);
+    expect(snap.phase).toBe(EnginePhase.Complete);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("task completed during restart → answer re-emitted, node completed", async () => {
