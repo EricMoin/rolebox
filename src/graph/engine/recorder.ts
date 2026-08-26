@@ -42,6 +42,16 @@ import { markDirty } from "./engine-persistence.ts";
 // ── Checkpoints (EngineState.checkpoints) ───────────────────────────────────
 
 /**
+ * Maximum number of checkpoint-history entries retained per node.
+ *
+ * The history (`EngineState.checkpointHistory[nodeId]`) is an append-only
+ * traceability list; bounding it keeps long loop/retry chains from growing it
+ * without limit. Only the history is trimmed — the latest snapshot in
+ * `EngineState.checkpoints[nodeId]` is never dropped.
+ */
+const CHECKPOINT_HISTORY_CAP = 50;
+
+/**
  * Auto-save a {@link CheckpointRecord} into the owning state's
  * `EngineState.checkpoints[nodeId]` for a lifecycle status change.
  *
@@ -81,6 +91,12 @@ export function recordCheckpointForNode(
   }
   const history = state.checkpointHistory[node.nodeId] ?? [];
   history.push(record);
+  // Retain only the most recent CHECKPOINT_HISTORY_CAP entries — the history
+  // is traceability, not the latest snapshot, so trimming the front keeps it
+  // bounded in long loop/retry chains without losing the newest transitions.
+  if (history.length > CHECKPOINT_HISTORY_CAP) {
+    history.splice(0, history.length - CHECKPOINT_HISTORY_CAP);
+  }
   state.checkpointHistory[node.nodeId] = history;
   state.updatedAt = at;
   markDirty(state);

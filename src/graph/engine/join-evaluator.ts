@@ -69,15 +69,19 @@ export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
  * The declared join strategy for a node, read from its {@link JoinConfig} in
  * the graph declaration.
  *
- * Thin wrapper that locates the node's declared config, then delegates to
- * {@link resolveJoinStrategy} — the same resolver that populates the node's
- * runtime `joinStrategy` field in {@link registerNode}. Keeping both paths on
- * one resolver guarantees they stay in lockstep.
+ * Prefers the node's cached runtime `joinStrategy` field — populated at
+ * provision time by {@link registerNode} from the very same
+ * {@link resolveJoinStrategy} resolver and validated on persisted-state load —
+ * so the per-call O(V) declaration lookup is skipped. Falls back to locating
+ * the node's declared config and delegating to {@link resolveJoinStrategy}
+ * only when the cache is absent (nodes hydrated from older persisted state).
+ * Both paths resolve through the same resolver, so they stay in lockstep.
  */
 export function getJoinStrategy(
   state: EngineState,
   node: NodeRuntimeState,
 ): ResolvedJoinStrategy {
+  if (node.joinStrategy !== undefined) return node.joinStrategy;
   const config = state.graphDeclaration.nodes.find((n) => n.id === node.nodeId);
   return resolveJoinStrategy(config?.join);
 }

@@ -262,7 +262,11 @@ export function retireCancelledNode(
   removeFromFrontier(state, node.nodeId);
   if (opts.dispatchPort?.cancelTask && node.dispatchTaskId) {
     opts.cancelCalls?.push(node.dispatchTaskId);
-    void opts.dispatchPort.cancelTask(node.dispatchTaskId);
+    // Fire-and-forget with rejection containment — a rejected cancel promise
+    // must not surface as an unhandled rejection (best-effort teardown).
+    void opts.dispatchPort.cancelTask(node.dispatchTaskId).catch(() => {
+      // best-effort — cancellation continues without a cancellation ack
+    });
   }
   // Monitor (H4): a scoped cancellation is a lifecycle transition performed
   // OUTSIDE the signal-driven advancement — surface the retirement through the

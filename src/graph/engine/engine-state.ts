@@ -282,13 +282,7 @@ export function computeInDegrees(state: EngineState): Map<string, number> {
 }
 /** Return the node IDs that have no incoming edges (graph roots). */
 export function getRootNodeIds(state: EngineState): string[] {
-  const upstream = new Map<string, number>();
-  const loopGroupMap = buildLoopGroupMap(state);
-  for (const edge of state.graphDeclaration.edges) {
-    if (isReviseBackEdge(edge)) continue;
-    if (isIntraLoopGroupAlwaysEdge(edge, loopGroupMap)) continue;
-    upstream.set(edge.to, (upstream.get(edge.to) ?? 0) + 1);
-  }
+  const upstream = computeInDegrees(state);
   const roots: string[] = [];
   for (const config of state.graphDeclaration.nodes) {
     if ((upstream.get(config.id) ?? 0) === 0) {
@@ -684,7 +678,10 @@ export function recordConvergenceOutput(
  * so no output history needs to carry into a fresh group run.
  */
 export function resetConvergenceTracker(state: EngineState, groupId: string): void {
-  const group = state.loopGroups.get(groupId)!;
+  const group = state.loopGroups.get(groupId);
+  if (!group) {
+    throw new Error(`Unknown loop group "${groupId}" in graph "${state.graphId}"`);
+  }
   group.convergenceFingerprint = undefined;
   group.consecutiveStale = 0;
   state.updatedAt = Date.now();

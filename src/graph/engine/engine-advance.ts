@@ -65,7 +65,6 @@ import {
   canTransitionPhase,
   transitionPhase,
   incrementLoopTraversal,
-  isLoopExhausted,
 } from "./engine-state.ts";
 import {
   markCompleted,

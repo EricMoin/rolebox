@@ -88,6 +88,85 @@ export const GRAPH_NOTIFY_MAX_ATTEMPTS = 3;
 export const GRAPH_NOTIFY_BASE_DELAY_MS = 500;
 export const GRAPH_NOTIFY_MAX_DELAY_MS = 5000;
 
+// ── Shared retry / enqueue helper ────────────────────────────────────────────
+
+/** Parameters for {@link enqueueWithRetry}. */
+interface EnqueueWithRetryParams {
+  client: ISessionClient;
+  sessionId: string;
+  /** Reminder text injected as the single text part. */
+  text: string;
+  /** Optional agent tag forwarded to the prompt. */
+  agent?: string;
+  /** Max total `client.prompt` attempts (1 initial + up to N-1 retries). */
+  maxAttempts: number;
+  /** Backoff base delay in ms (`delay = min(baseDelayMs * 2^attempt, maxDelayMs)`). */
+  baseDelayMs: number;
+  /** Backoff cap in ms. */
+  maxDelayMs: number;
+  /** `noReply` flag forwarded to the prompt (true = silent inject). */
+  noReply: boolean;
+  /** Message for the exhaustion warn log (built by the caller with event context). */
+  failMessage: string;
+}
+
+/**
+ * Enqueue a notification send through the per-session serialized send queue,
+ * retrying `client.prompt` failures with bounded exponential backoff.
+ *
+ * Shared skeleton behind all three notifier factories
+ * ({@link createGraphNotifier}, {@link createGraphTerminalNotifier},
+ * {@link createGraphStallNotifier}) — they differ only in the reminder text,
+ * the `noReply` flag, and the failure log message. Mirrors `notifyParent`'s
+ * retry discipline (`src/dispatch/notification.ts`): each failed attempt retries
+ * with `min(baseDelayMs * 2^attempt, maxDelayMs)` backoff up to `maxAttempts`
+ * total attempts; only exhaustion falls through to the failure path (metric +
+ * warn log, resolves `false`).
+ */
+function enqueueWithRetry(params: EnqueueWithRetryParams): Promise<boolean> {
+  const {
+    client,
+    sessionId,
+    text,
+    agent,
+    maxAttempts,
+    baseDelayMs,
+    maxDelayMs,
+    noReply,
+    failMessage,
+  } = params;
+  return enqueueNotify(sessionId, async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await client.prompt(sessionId, {
+          ...(agent ? { agent } : {}),
+          parts: [{ type: "text", text }],
+          noReply,
+        });
+        metrics.counter("graph_notify_sent_total").inc();
+        return true;
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxAttempts - 1) {
+          metrics.counter("graph_notify_retry_total").inc();
+          const delay = Math.min(
+            baseDelayMs * Math.pow(2, attempt),
+            maxDelayMs,
+          );
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
+    metrics.counter("graph_notify_failed_total").inc();
+    log.warn(
+      failMessage,
+      lastError instanceof Error ? lastError.message : String(lastError),
+    );
+    return false;
+  });
+}
+
 /**
  * The completion handler the factory returns. It satisfies the engine seam
  * `(event: NodeCompletionEvent) => void` structurally (a return value is
@@ -188,38 +267,17 @@ export function createGraphNotifier(
     notified.add(key);
 
     const text = buildGraphCompletionText(event);
-    return enqueueNotify(emperorSessionId, async () => {
-      // Bounded retry loop, mirroring notifyParent (dispatch/notification.ts):
-      // each failed attempt retries with exponential backoff up to maxAttempts
-      // total; only exhaustion falls through to the failure path.
-      let lastError: unknown;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          await client.prompt(emperorSessionId, {
-            ...(opts.agent ? { agent: opts.agent } : {}),
-            parts: [{ type: "text", text }],
-            noReply: true,
-          });
-          metrics.counter("graph_notify_sent_total").inc();
-          return true;
-        } catch (err) {
-          lastError = err;
-          if (attempt < maxAttempts - 1) {
-            metrics.counter("graph_notify_retry_total").inc();
-            const delay = Math.min(
-              baseDelayMs * Math.pow(2, attempt),
-              maxDelayMs,
-            );
-            await new Promise((r) => setTimeout(r, delay));
-          }
-        }
-      }
-      metrics.counter("graph_notify_failed_total").inc();
-      log.warn(
-        `Failed to notify emperor session ${emperorSessionId} about graph node ${event.graphId}::${event.nodeId}`,
-        lastError instanceof Error ? lastError.message : String(lastError),
-      );
-      return false;
+    return enqueueWithRetry({
+      client,
+      sessionId: emperorSessionId,
+      text,
+      agent: opts.agent,
+      maxAttempts,
+      baseDelayMs,
+      maxDelayMs,
+      // Per-node completion is informational — inject silently (noReply: true).
+      noReply: true,
+      failMessage: `Failed to notify emperor session ${emperorSessionId} about graph node ${event.graphId}::${event.nodeId}`,
     });
   };
 }
@@ -340,44 +398,24 @@ export function createGraphTerminalNotifier(
     notified.add(key);
 
     const text = buildGraphTerminalText(event);
-    return enqueueNotify(emperorSessionId, async () => {
-      // Bounded retry loop, mirroring notifyParent (dispatch/notification.ts).
-      let lastError: unknown;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          await client.prompt(emperorSessionId, {
-            ...(opts.agent ? { agent: opts.agent } : {}),
-            parts: [{ type: "text", text }],
-            // Terminal events (GRAPH COMPLETE / BLOCKED) MUST wake the
-            // orchestrator so it collects node results and advances (or handles
-            // the approval gate). This mirrors the FINAL dispatch notification in
-            // `notifyParent` (noReply:false when remaining===0). Without this the
-            // reminder lands in the session but never triggers a turn, so the
-            // graph appears "stuck" until the user manually prompts. The marker is
-            // still a member of DISPATCH_NOTIFICATION_MARKERS, so the re-entering
-            // chat.message hook does NOT reset the auto-continue counter.
-            noReply: false,
-          });
-          metrics.counter("graph_notify_sent_total").inc();
-          return true;
-        } catch (err) {
-          lastError = err;
-          if (attempt < maxAttempts - 1) {
-            metrics.counter("graph_notify_retry_total").inc();
-            const delay = Math.min(
-              baseDelayMs * Math.pow(2, attempt),
-              maxDelayMs,
-            );
-            await new Promise((r) => setTimeout(r, delay));
-          }
-        }
-      }
-      metrics.counter("graph_notify_failed_total").inc();
-      log.warn(
-        `Failed to notify emperor session ${emperorSessionId} about graph terminal ${event.graphId}`,
-        lastError instanceof Error ? lastError.message : String(lastError),
-      );
-      return false;
+    return enqueueWithRetry({
+      client,
+      sessionId: emperorSessionId,
+      text,
+      agent: opts.agent,
+      maxAttempts,
+      baseDelayMs,
+      maxDelayMs,
+      // Terminal events (GRAPH COMPLETE / BLOCKED) MUST wake the orchestrator
+      // so it collects node results and advances (or handles the approval
+      // gate) — noReply:false mirrors the FINAL dispatch notification in
+      // `notifyParent`. Without this the reminder lands in the session but
+      // never triggers a turn, so the graph appears "stuck" until the user
+      // manually prompts. The marker is still a member of
+      // DISPATCH_NOTIFICATION_MARKERS, so the re-entering chat.message hook
+      // does NOT reset the auto-continue counter.
+      noReply: false,
+      failMessage: `Failed to notify emperor session ${emperorSessionId} about graph terminal ${event.graphId}`,
     });
   };
 }
@@ -479,40 +517,20 @@ export function createGraphStallNotifier(
     notified.add(key);
 
     const text = buildGraphStallText(event);
-    return enqueueNotify(emperorSessionId, async () => {
-      // Bounded retry loop, mirroring notifyParent (dispatch/notification.ts).
-      let lastError: unknown;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          await client.prompt(emperorSessionId, {
-            ...(opts.agent ? { agent: opts.agent } : {}),
-            parts: [{ type: "text", text }],
-            // Stall is informational — inject silently (noReply: true, same
-            // as per-node completion). The marker is still a member of
-            // DISPATCH_NOTIFICATION_MARKERS, so the re-entering chat.message
-            // hook does NOT reset the auto-continue counter.
-            noReply: true,
-          });
-          metrics.counter("graph_notify_sent_total").inc();
-          return true;
-        } catch (err) {
-          lastError = err;
-          if (attempt < maxAttempts - 1) {
-            metrics.counter("graph_notify_retry_total").inc();
-            const delay = Math.min(
-              baseDelayMs * Math.pow(2, attempt),
-              maxDelayMs,
-            );
-            await new Promise((r) => setTimeout(r, delay));
-          }
-        }
-      }
-      metrics.counter("graph_notify_failed_total").inc();
-      log.warn(
-        `Failed to notify emperor session ${emperorSessionId} about graph node stall ${event.graphId}::${event.nodeId}`,
-        lastError instanceof Error ? lastError.message : String(lastError),
-      );
-      return false;
+    return enqueueWithRetry({
+      client,
+      sessionId: emperorSessionId,
+      text,
+      agent: opts.agent,
+      maxAttempts,
+      baseDelayMs,
+      maxDelayMs,
+      // Stall is informational — inject silently (noReply: true, same as
+      // per-node completion). The marker is still a member of
+      // DISPATCH_NOTIFICATION_MARKERS, so the re-entering chat.message hook
+      // does NOT reset the auto-continue counter.
+      noReply: true,
+      failMessage: `Failed to notify emperor session ${emperorSessionId} about graph node stall ${event.graphId}::${event.nodeId}`,
     });
   };
 }
