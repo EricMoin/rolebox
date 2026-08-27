@@ -61,8 +61,16 @@ const nodeBudgetSchema = z
     max_input_tokens: z.number().optional(),
     max_output_tokens: z.number().optional(),
     max_cost_usd: z.number().optional(),
-    timeout_ms: z.number().optional(),
-    max_retries: z.number().optional(),
+    // 0 is VALID — the documented per-node "disable staleness watchdog"
+    // opt-out sentinel (engine-recovery.ts deadline resolution, pinned by
+    // engine-recovery.test.ts "skips a running node whose per-node budget
+    // disables staleness (timeout_ms 0)"). Only negatives are rejected: a
+    // negative timeout would silently disable the watchdog for a node that is
+    // NOT opting out, letting it hang forever.
+    timeout_ms: z.number().nonnegative().optional(),
+    // Retry counts are integer thresholds at runtime — fractional is
+    // meaningless, negative is invalid.
+    max_retries: z.number().int().nonnegative().optional(),
   })
   .optional();
 
@@ -70,7 +78,12 @@ const nodeBudgetSchema = z
 const joinSchema = z
   .object({
     strategy: z.enum(JOIN_STRATEGY_VALUES),
-    quorum: z.number().optional(),
+    // quorum:N is a required-answer COUNT: it must be a positive integer. A
+    // 0/negative quorum would let a fan-in join be satisfied with ZERO
+    // upstream answers (`answerCount >= n` with n <= 0, join-evaluator.ts:245)
+    // — a DAG-order violation where a convergence node dispatches at graph
+    // start ignoring its declared upstreams. A fractional quorum is meaningless.
+    quorum: z.number().int().positive().optional(),
   })
   .optional();
 
@@ -272,10 +285,13 @@ function createGraphAddNodeTool(
       budget: nodeBudgetSchema.describe("Per-node resource limits."),
       timeout_ms: z
         .number()
+        .nonnegative()
         .optional()
-        .describe("Wall-clock timeout for this node (ms)."),
+        .describe("Wall-clock timeout for this node (ms). 0 is the documented per-node 'disable staleness watchdog' opt-out."),
       max_retries: z
         .number()
+        .int()
+        .nonnegative()
         .optional()
         .describe("Auto-retry count on escalate."),
     },

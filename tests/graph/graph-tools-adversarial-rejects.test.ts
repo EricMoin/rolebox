@@ -22,10 +22,12 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import {
   createGraphToolSet,
   type GraphToolSet,
 } from "../../src/graph/tools/graph-tools";
+import { createGraphTools } from "../../src/graph/tools/index";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -227,5 +229,228 @@ describe("graph_create — name collision suffixing", () => {
     expect(second.graph_id).toBe("collide-2");
     // Third collision — each registry slot stays independently addressable.
     expect(third.graph_id).toBe("collide-3");
+  });
+});
+
+// ── (g) join quorum numeric bounds (commit-time reject via validator rule 9) ─
+
+describe("join quorum bounds — validator rule 9", () => {
+  it("rejects quorum 0, negative, and fractional at node-add (atomic)", () => {
+    for (const quorum of [0, -1, 1.5]) {
+      const ts = createGraphToolSet();
+      const { graph_id } = ts.graph_create({ name: "bad-quorum" });
+      const before = declarationSnapshot(ts, graph_id);
+
+      // validator-v2.ts checkJoinQuorumBounds — a non-positive-integer quorum
+      // would let the fan-in join be satisfied with ZERO upstream answers.
+      const message = expectThrows(
+        () =>
+          ts.graph_add_node({
+            graph_id,
+            id: "sink",
+            agent: "agent-s",
+            prompt: "p",
+            join: { strategy: "quorum", quorum },
+          }),
+        [/failed structural validation/, /quorum must be a positive integer/],
+      );
+      expect(message).toContain('node "sink"');
+
+      // Atomicity: the node was never committed.
+      expect(declarationSnapshot(ts, graph_id)).toBe(before);
+      expect(ts["getEntry"](graph_id).declaration.nodes).toHaveLength(0);
+    }
+  });
+
+  it("rejects quorum exceeding the node's in-degree once its first incoming edge exists (atomic)", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "quorum-arity" });
+    ts.graph_add_node({ graph_id, id: "U1", agent: "agent-u", prompt: "p" });
+    ts.graph_add_node({ graph_id, id: "U2", agent: "agent-u", prompt: "p" });
+    // Accepted at add time: in-degree is 0 and the arity upper bound is
+    // DEFERRED for incremental construction (validator rule 9).
+    ts.graph_add_node({
+      graph_id,
+      id: "sink",
+      agent: "agent-s",
+      prompt: "p",
+      join: { strategy: "quorum", quorum: 5 },
+    });
+    const before = declarationSnapshot(ts, graph_id);
+
+    // The FIRST incoming edge makes the unsatisfiable quorum visible:
+    // quorum:5 > in-degree 1 → commit-time reject, atomic.
+    const message = expectThrows(
+      () => ts.graph_add_edge({ graph_id, from: "U1", to: "sink", type: "always" }),
+      [/failed structural validation/, /exceeds its in-degree \(1\)/],
+    );
+    expect(message).toContain('node "sink"');
+
+    // Atomicity: the edge was never committed.
+    expect(declarationSnapshot(ts, graph_id)).toBe(before);
+    expect(ts["getEntry"](graph_id).declaration.edges).toHaveLength(0);
+  });
+});
+
+// ── (h) per-node budget numeric bounds (commit-time reject via validator rule 10) ─
+
+describe("per-node budget bounds — validator rule 10", () => {
+  it("rejects negative budget.timeout_ms and non-nonnegative-integer budget.max_retries (atomic)", () => {
+    const cases: { budget: Record<string, number>; patterns: RegExp[] }[] = [
+      { budget: { timeout_ms: -1 }, patterns: [/failed structural validation/, /budget.timeout_ms must be a non-negative/] },
+      { budget: { max_retries: -1 }, patterns: [/failed structural validation/, /budget.max_retries must be a non-negative integer/] },
+      { budget: { max_retries: 1.5 }, patterns: [/failed structural validation/, /budget.max_retries must be a non-negative integer/] },
+    ];
+    for (const { budget, patterns } of cases) {
+      const ts = createGraphToolSet();
+      const { graph_id } = ts.graph_create({ name: "bad-budget" });
+      const before = declarationSnapshot(ts, graph_id);
+
+      const message = expectThrows(
+        () =>
+          ts.graph_add_node({
+            graph_id,
+            id: "a",
+            agent: "agent-a",
+            prompt: "p",
+            budget,
+          }),
+        patterns,
+      );
+      expect(message).toContain('node "a"');
+
+      // Atomicity: the node was never committed.
+      expect(declarationSnapshot(ts, graph_id)).toBe(before);
+      expect(ts["getEntry"](graph_id).declaration.nodes).toHaveLength(0);
+    }
+  });
+
+  it("rejects negative top-level timeout_ms / max_retries args (atomic)", () => {
+    for (const extra of [{ timeout_ms: -1 }, { max_retries: -1 }]) {
+      const ts = createGraphToolSet();
+      const { graph_id } = ts.graph_create({ name: "bad-arg" });
+      const before = declarationSnapshot(ts, graph_id);
+
+      // graph-tools.ts merges the top-level args into node.budget, so the
+      // same validator rule 10 fires.
+      const message = expectThrows(
+        () =>
+          ts.graph_add_node({
+            graph_id,
+            id: "a",
+            agent: "agent-a",
+            prompt: "p",
+            ...extra,
+          }),
+        [/failed structural validation/],
+      );
+      expect(message).toContain('node "a"');
+
+      expect(declarationSnapshot(ts, graph_id)).toBe(before);
+      expect(ts["getEntry"](graph_id).declaration.nodes).toHaveLength(0);
+    }
+  });
+
+  it("accepts timeout_ms 0 as the documented disable-watchdog opt-out (budget form AND top-level arg)", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "timeout-zero" });
+    ts.graph_add_node({
+      graph_id,
+      id: "a",
+      agent: "agent-a",
+      prompt: "p",
+      budget: { timeout_ms: 0 },
+    });
+    ts.graph_add_node({
+      graph_id,
+      id: "b",
+      agent: "agent-b",
+      prompt: "p",
+      timeout_ms: 0,
+    });
+    const state = ts["getEntry"](graph_id).runtime.status();
+    // 0 is the documented per-node "disable staleness" sentinel
+    // (engine-recovery.test.ts pins the runtime behavior) — it must stay valid.
+    expect(state.graphDeclaration.nodes[0].budget).toEqual({ timeout_ms: 0 });
+    expect(state.graphDeclaration.nodes[1].budget).toEqual({ timeout_ms: 0 });
+  });
+
+  it("accepts a valid quorum:1 and quorum:2 nodes without incoming edges (incremental construction)", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "ok-quorum" });
+    ts.graph_add_node({
+      graph_id,
+      id: "q1",
+      agent: "agent-a",
+      prompt: "p",
+      join: { strategy: "quorum", quorum: 1 },
+    });
+    // quorum:2 with no incoming edges yet — upper bound deferred (rule 9).
+    ts.graph_add_node({
+      graph_id,
+      id: "q2",
+      agent: "agent-b",
+      prompt: "p",
+      join: { strategy: "quorum", quorum: 2 },
+    });
+    const state = ts["getEntry"](graph_id).runtime.status();
+    expect(state.graphDeclaration.nodes).toHaveLength(2);
+  });
+});
+
+// ── (i) zod primary guard — join quorum + budget bounds ────────────────────
+
+describe("zod primary guard — graph_add_node args schema", () => {
+  // Assemble the full args schema the platform compiles from
+  // (createGraphTools wraps each GraphToolSet method with zod).
+  const { graph_add_node } = createGraphTools(undefined, { directory: "/tmp" });
+  const addNodeSchema = z.object(graph_add_node.args as z.ZodRawShape);
+
+  function rejects(patch: Record<string, unknown>): void {
+    const res = addNodeSchema.safeParse({
+      graph_id: "g",
+      id: "n",
+      agent: "a",
+      prompt: "p",
+      ...patch,
+    });
+    expect(res.success).toBe(false);
+  }
+
+  it("rejects quorum 0, negative, and fractional", () => {
+    for (const quorum of [0, -1, 1.5]) {
+      rejects({ join: { strategy: "quorum", quorum } });
+    }
+  });
+
+  it("rejects negative timeout_ms (budget and top-level) and negative/fractional max_retries", () => {
+    rejects({ budget: { timeout_ms: -1 } });
+    rejects({ timeout_ms: -1 });
+    rejects({ budget: { max_retries: -1 } });
+    rejects({ max_retries: -1 });
+    rejects({ max_retries: 1.5 });
+  });
+
+  it("accepts timeout_ms 0 (documented sentinel) and a positive-integer quorum", () => {
+    expect(
+      addNodeSchema.safeParse({
+        graph_id: "g",
+        id: "n",
+        agent: "a",
+        prompt: "p",
+        budget: { timeout_ms: 0 },
+        timeout_ms: 0,
+        join: { strategy: "quorum", quorum: 1 },
+      }).success,
+    ).toBe(true);
+    expect(
+      addNodeSchema.safeParse({
+        graph_id: "g",
+        id: "n",
+        agent: "a",
+        prompt: "p",
+        join: { strategy: "quorum", quorum: 2 },
+      }).success,
+    ).toBe(true);
   });
 });

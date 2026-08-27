@@ -23,6 +23,14 @@
  *      group exists (pure-cycle deadlock). WARNING when no roots exist
  *      but no loop groups are declared. Additionally flags loop groups
  *      whose member nodes have no incoming edges from outside the group.
+ *   9. `join.quorum` bounds for quorum-strategy nodes — quorum must be a
+ *      positive integer, and must not exceed the node's in-degree (the
+ *      join would be unsatisfiable). The upper-bound check is deferred
+ *      while a node has no incoming edges yet (incremental construction).
+ *  10. per-node `budget.timeout_ms` / `budget.max_retries` bounds —
+ *      mirroring the `data_passthrough.max_chars` pattern (see rule 7):
+ *      negative `timeout_ms` and non-nonnegative-integer `max_retries`
+ *      are rejected. `timeout_ms: 0` is VALID (documented opt-out).
  *
  * ## Cycle-containment semantics (check 4)
  *
@@ -89,6 +97,8 @@ export function validateGraphDeclaration(
   checkApprovalNodeOutgoing(graph, errors);
   checkDataPassthrough(graph, errors);
   checkLoopGroupRoots(graph, errors, warnings);
+  checkJoinQuorumBounds(graph, errors);
+  checkNodeBudgetBounds(graph, errors);
 
   return { valid: errors.length === 0, errors, warnings };
 }
@@ -419,6 +429,107 @@ function checkLoopGroupRoots(
         `loop group "${group.id}" has no external entry — ` +
           "all incoming edges of member nodes originate from within the loop group; " +
           "the group is unreachable and will deadlock",
+      );
+    }
+  }
+}
+
+// ── Rule 9: join quorum bounds ─────────────────────────────────────────────
+
+/**
+ * Enforce numeric bounds on `join.quorum` for quorum-strategy nodes.
+ *
+ * The zod tool layer already rejects non-positive-integer quorums up front,
+ * but this validator is the defense-in-depth gate for non-zod callers (direct
+ * `GraphToolSet` usage, persisted-state loads) — a structurally-broken quorum
+ * would otherwise pass validation and misbehave at runtime:
+ *   - quorum <= 0 → `evaluateJoin` (join-evaluator.ts:245) is satisfied by
+ *     ZERO upstream answers (`answerCount >= n` with n <= 0), so a fan-in
+ *     convergence node dispatches at graph start, ignoring its declared
+ *     upstreams — a DAG-order violation.
+ *   - quorum > in-degree → the join is unsatisfiable; the runtime force-fails
+ *     the node ("quorum impossible", join-evaluator.ts:255) on every run.
+ *
+ * In-degree here is the number of DISTINCT upstream source ids over ALL
+ * incoming edges (mirroring join-evaluator `getUpstreamNodeIds` with default
+ * opts — revise back-edges and intra-loop-group edges are NOT excluded,
+ * because a later loop traversal can legitimately count them as upstreams).
+ * This is deliberately different from the root-discovery in-degree in
+ * `checkLoopGroupRoots`, which excludes those edges to expose entry points.
+ *
+ * The upper-bound check is DEFERRED while a node has no incoming edges yet:
+ * construction is incremental (`graph_add_node` always precedes the
+ * `graph_add_edge` calls that create its in-degree), so a freshly-added quorum
+ * node must not be rejected for an arity it cannot have acquired yet. A quorum
+ * node with zero upstreams is also immediately satisfied at runtime
+ * (join-evaluator.ts:230-235), so accepting it is harmless. The upper bound
+ * fires from the moment the node's first incoming edge exists.
+ */
+function checkJoinQuorumBounds(graph: GraphDocument, errors: string[]): void {
+  // Distinct upstream source ids per node over ALL incoming edges.
+  const upstreamSources = new Map<string, Set<string>>();
+  for (const edge of graph.edges) {
+    const set = upstreamSources.get(edge.to) ?? new Set<string>();
+    set.add(edge.from);
+    upstreamSources.set(edge.to, set);
+  }
+
+  for (const node of graph.nodes) {
+    const join = node.join;
+    if (join === undefined || join.strategy !== "quorum") continue;
+    const quorum = join.quorum ?? 1; // documented default (join-evaluator.ts:65)
+
+    if (!Number.isInteger(quorum) || quorum < 1) {
+      errors.push(
+        `node "${node.id}" join quorum must be a positive integer (got ${quorum})`,
+      );
+      continue;
+    }
+
+    const inDegree = upstreamSources.get(node.id)?.size ?? 0;
+    if (inDegree > 0 && quorum > inDegree) {
+      errors.push(
+        `node "${node.id}" join quorum:${quorum} exceeds its in-degree (${inDegree}) ` +
+          `— the join can never be satisfied by its declared upstreams`,
+      );
+    }
+  }
+}
+
+// ── Rule 10: per-node budget numeric bounds ────────────────────────────────
+
+/**
+ * Enforce numeric bounds on per-node `budget.timeout_ms` / `budget.max_retries`,
+ * mirroring the `checkDataPassthrough` (`max_chars >= 0`) pattern.
+ *
+ * The zod tool layer enforces the same bounds up front; this is the
+ * defense-in-depth gate for non-zod callers and persisted-state loads:
+ *   - a NEGATIVE `timeout_ms` would silently disable the staleness watchdog
+ *     for that node (engine-recovery.ts:1166-1167 `deadline <= 0` → skip) —
+ *     the node could hang forever, defeating the documented "a graph never
+ *     hangs" invariant. `0` is VALID: it is the documented per-node opt-out
+ *     sentinel (pinned by engine-recovery.test.ts "skips a running node whose
+ *     per-node budget disables staleness (timeout_ms 0)").
+ *   - a NEGATIVE or fractional `max_retries` is meaningless — retry counts
+ *     are integer thresholds at runtime.
+ */
+function checkNodeBudgetBounds(graph: GraphDocument, errors: string[]): void {
+  for (const node of graph.nodes) {
+    const budget = node.budget;
+    if (budget === undefined) continue;
+    if (budget.timeout_ms !== undefined && !(budget.timeout_ms >= 0)) {
+      errors.push(
+        `node "${node.id}" budget.timeout_ms must be a non-negative number ` +
+          `(got ${budget.timeout_ms}); 0 is the documented "disable staleness watchdog" opt-out`,
+      );
+    }
+    if (
+      budget.max_retries !== undefined &&
+      (!Number.isInteger(budget.max_retries) || budget.max_retries < 0)
+    ) {
+      errors.push(
+        `node "${node.id}" budget.max_retries must be a non-negative integer ` +
+          `(got ${budget.max_retries})`,
       );
     }
   }

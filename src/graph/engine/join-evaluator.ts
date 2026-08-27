@@ -62,7 +62,14 @@ export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
     return JoinStrategy.Any;
   }
   // quorum:N — the quorum count lives on the JoinConfig, not the strategy string.
-  return { quorum: join.quorum ?? 1 };
+  // Defensive clamp: validation now rejects quorum < 1 up front (zod +
+  // validator-v2 rule 9), but a non-zod caller or hydrated persisted state
+  // could still carry a non-positive quorum, which would make `evaluateJoin`
+  // treat the join as satisfied with ZERO upstream answers (a DAG-order
+  // violation). Clamp to the documented default of 1 so a broken declaration
+  // degrades to "any"-like semantics instead of an early dispatch.
+  const quorum = join.quorum ?? 1;
+  return { quorum: quorum >= 1 ? quorum : 1 };
 }
 
 /**

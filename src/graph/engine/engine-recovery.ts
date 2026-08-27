@@ -1117,8 +1117,13 @@ export interface NodeStalenessWatcherOptions {
  * - a node with a declared per-node budget (`node.budget?.timeout_ms`) uses
  *   that value as its staleness deadline — the declaration wins;
  * - every other node uses the watcher-wide `nodeStaleTimeoutMs`;
- * - a non-positive deadline means the node never goes stale (defensive — a
- *   `0`/negative per-node override or watcher-wide value disables staleness).
+ * - a per-node `0` disables staleness for THAT node (the documented per-node
+ *   opt-out sentinel, pinned by engine-recovery.test.ts); a non-positive
+ *   watcher-wide `nodeStaleTimeoutMs` disables staleness for every node;
+ * - a NEGATIVE per-node override is invalid input (rejected by zod +
+ *   validator-v2 rule 10); defensively it is NOT treated as an opt-out —
+ *   it falls back to the watcher-wide default so a malformed override can
+ *   never silently disable the watchdog for a node that did not opt out.
  *
  * Dispatch-liveness gate (S2): when the optional {@link NodeStalenessWatcherOptions
  * .isDispatchAlive} probe is present and verifiably reports the node's task
@@ -1163,8 +1168,25 @@ export class NodeStalenessWatcher {
     const timedOut: string[] = [];
     for (const node of state.nodes.values()) {
       if (node.status !== NodeStatus.Running) continue;
-      const deadline = node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs;
-      if (deadline <= 0) continue; // no staleness deadline — never stale
+      // Deadline resolution (see class doc): a declared per-node
+      // `budget.timeout_ms` wins; `0` is the documented per-node opt-out
+      // ("disable staleness"); a NEGATIVE per-node value is invalid input —
+      // validation rejects it, but for non-zod/hydrated states it must not
+      // silently disable the watchdog either, so it falls back to the
+      // watcher-wide default. Only an explicitly zero per-node value or a
+      // non-positive watcher-wide `nodeStaleTimeoutMs` opts out.
+      const declared = node.budget?.timeout_ms;
+      let deadline: number;
+      if (declared === undefined) {
+        deadline = this.nodeStaleTimeoutMs;
+      } else if (declared === 0) {
+        continue; // per-node opt-out sentinel — never stale
+      } else if (declared > 0) {
+        deadline = declared;
+      } else {
+        deadline = this.nodeStaleTimeoutMs; // negative override → fall back
+      }
+      if (deadline <= 0) continue; // watcher-wide opt-out — never stale
       if (now - node.startedAt >= deadline) {
         // Dispatch-liveness gate (quiet-but-alive): when the optional probe
         // verifiably reports the node's task in-flight, the wall-clock
