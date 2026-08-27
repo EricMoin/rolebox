@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText } from "./hash.ts";
+import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText, splitLines } from "./hash.ts";
 import { normalizeEdits, applyEditsWithReport } from "./edit-primitives.ts";
 import { validateVersion } from "./validation.ts";
 import { reanchorChangedLines, generateUnifiedDiff, countLineDiffs } from "./diff.ts";
@@ -51,10 +51,13 @@ export interface ProcessedFileResult {
 
 function remapEditAnchors(edits: EditOp[], corrections: Map<string, string>): EditOp[] {
   return edits.map((edit) => {
-    if (edit.op !== "replace") return edit;
+    // D-g: fuzzy corrections apply to ALL ops with a pos anchor, not just
+    // replace — append-with-pos and prepend-with-pos go stale the same way.
     const newPos = edit.pos && corrections.has(edit.pos) ? corrections.get(edit.pos)! : edit.pos;
-    const newEnd = edit.end && corrections.has(edit.end) ? corrections.get(edit.end)! : edit.end;
-    if (newPos === edit.pos && newEnd === edit.end) return edit;
+    // `end` only exists on replace ops (range replace is exclusive to it).
+    const oldEnd = "end" in edit ? edit.end : undefined;
+    const newEnd = oldEnd && corrections.has(oldEnd) ? corrections.get(oldEnd)! : oldEnd;
+    if (newPos === edit.pos && newEnd === oldEnd) return edit;
     return { ...edit, pos: newPos, end: newEnd } as EditOp;
   });
 }
@@ -141,7 +144,12 @@ async function processSingleFile(
     }
   }
 
-  const lineCount = canonicalContent === "" ? 0 : canonicalContent.split("\n").length;
+  // Line count must come from the SAME shared line model as hashline_read
+  // (splitLines strips a single trailing "\n"). Otherwise a file with exactly
+  // SMALL_FILE_THRESHOLD lines that ends in "\n" would report 1001 lines here
+  // (split("\n").length) vs 1000 in read — escalating hashWidth and making the
+  // read-returned anchors permanently unvalidatable.
+  const lineCount = splitLines(canonicalContent).length;
   const hashWidth = hashWidthForLineCount(lineCount);
 
   // Validate per-file hashWidth if provided
@@ -210,12 +218,28 @@ async function processSingleFile(
   }
 
   finalContent = restoreFileText(finalContent, envelope);
-  const newVersion = computeFileVersion(resultContent);
-  const oldLines = canonicalContent === "" ? [] : canonicalContent.split("\n");
-  const newLines = resultContent === "" ? [] : resultContent.split("\n");
+  // D1 fix: the returned version must equal what a fresh hashline_read computes
+  // for the file just written. read derives the version from the canonical form
+  // of the on-disk content (hashline-read.ts:65), which retains the original
+  // trailing newlines and re-normalizes BOM/CRLF. Computing from resultContent
+  // (the line-join WITHOUT trailing newlines) skewed the version for any file
+  // ending in "\n". Canonicalizing the restored final content makes the edit
+  // contract match the read contract exactly.
+  const newVersion = computeFileVersion(canonicalizeFileText(finalContent).content);
+  const oldLines = splitLines(canonicalContent);
+  const newLines = splitLines(resultContent);
+  // D6c fix: reanchored anchors must be computed with the POST-EDIT width.
+  // A fresh hashline_read of the written file derives its hashWidth from the
+  // new line count (hashline-read.ts:73). When an edit crosses a width
+  // threshold (e.g. 999 → 1002 lines escalates width 2 → 3), reanchoring with
+  // the PRE-EDIT width yields anchors that can never match a fresh read. Same
+  // width band → no-op; crossed band → reanchored anchors match width-upgraded
+  // fresh reads exactly. splitLines is the shared line model (hashline-read
+  // uses it too), so newLines.length is exactly the post-edit line count.
+  const postHashWidth = hashWidthForLineCount(newLines.length);
   const diff = generateUnifiedDiff(canonicalContent, resultContent, filePath);
   const { additions, deletions } = countLineDiffs(canonicalContent, resultContent);
-  const reanchoredLines = reanchorChangedLines(oldLines, newLines, hashWidth);
+  const reanchoredLines = reanchorChangedLines(oldLines, newLines, postHashWidth);
 
   const reanchoredStr = reanchoredLines
     .map((r) => {

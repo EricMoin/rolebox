@@ -1,4 +1,4 @@
-import { computeLineHash } from "./hash.ts";
+import { computeLineHash, splitLines } from "./hash.ts";
 import type { ReanchoredLine } from "./types.ts";
 import { myersDiff } from "./myers-diff.ts";
 
@@ -39,8 +39,8 @@ export function reanchorChangedLines(
     if (entry.op === "insert" && entry.newLine) {
       const newHash = computeLineHash(entry.content, hashWidth, entry.newLine);
       const oldContent =
-        entry.oldLine !== undefined && entry.oldLine <= oldLines.length
-          ? oldLines[entry.oldLine - 1]
+        entry.newLine !== undefined && entry.newLine - 1 < oldLines.length
+          ? oldLines[entry.newLine - 1]
           : "";
       const oldHash = computeLineHash(oldContent, hashWidth, entry.newLine);
 
@@ -82,8 +82,8 @@ export function generateUnifiedDiff(
   newContent: string,
   filePath: string,
 ): string {
-  const oldLines = oldContent.length === 0 ? [] : oldContent.split("\n");
-  const newLines = newContent.length === 0 ? [] : newContent.split("\n");
+  const oldLines = splitLines(oldContent);
+  const newLines = splitLines(newContent);
   const diff = myersDiff(oldLines, newLines);
 
   if (diff.length === 0) return "";
@@ -221,8 +221,8 @@ export function countLineDiffs(
   oldContent: string,
   newContent: string,
 ): { additions: number; deletions: number } {
-  const oldLines = oldContent.length === 0 ? [] : oldContent.split("\n");
-  const newLines = newContent.length === 0 ? [] : newContent.split("\n");
+  const oldLines = splitLines(oldContent);
+  const newLines = splitLines(newContent);
   const diff = myersDiff(oldLines, newLines);
 
   let additions = 0;

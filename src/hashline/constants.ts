@@ -14,11 +14,12 @@ export const MEDIUM_FILE_THRESHOLD = 10000;
 export const HASH_WIDTH_ENV_VAR = "ROLEBOX_HASHLINE_WIDTH";
 
 // Regex patterns for parsing line references
-// Format: {line_number}#{hash_id} where hash_id is 2-4 chars from BASE64_DICT
-export const HASHLINE_REF_PATTERN = /^(\d+)#([A-Za-z0-9_-]{2,4})$/;
+// Format: {line_number}#{hash_id} where hash_id is 2-8 chars from BASE64_DICT
+// (matches the edit schema's hashWidth bounds, min 2 max 8)
+export const HASHLINE_REF_PATTERN = /^(\d+)#([A-Za-z0-9_-]{2,8})$/;
 
 // Pattern to extract a hash ref from arbitrary text (for tolerant parsing)
-export const HASHLINE_REF_EXTRACT_PATTERN = /(\d+#[A-Za-z0-9_-]{2,4})/;
+export const HASHLINE_REF_EXTRACT_PATTERN = /(\d+#[A-Za-z0-9_-]{2,8})/;
 
 // Mismatch context lines (lines before/after a mismatch to show)
 export const MISMATCH_CONTEXT = 3;
