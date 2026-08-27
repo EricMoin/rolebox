@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, mkdirSync, unlinkSync, renameSync, openSync, readSync, statSync, closeSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, unlinkSync, renameSync, statSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export const RESULT_FENCE = "result";
@@ -132,17 +132,16 @@ export function formatResultEnvelope(opts: EnvelopeOpts): string {
 }
 
 /**
- * Read a window from a sidecar file without loading the entire file into memory.
- * Uses `openSync` + `readSync` to seek and read only the requested byte range.
+ * Read a window from a sidecar file by CHARACTER offset and limit.
  *
- * For ASCII content (the common case for session output), byte offset accurately
- * maps to character offset. For multi-byte UTF-8, a +4 safety margin handles
- * boundary alignment; any leading replacement character from a split sequence
- * at the offset boundary is stripped.
+ * `offset` and `limit` follow the `applyWindow` contract: both are character
+ * counts (UTF-16 code units), never byte offsets. The file is read in full
+ * and sliced by character, so multi-byte UTF-8 content (CJK, emoji, etc.)
+ * is never split mid-sequence: returned windows are always precise
+ * contiguous character slices with no replacement characters.
  *
  * @param sidecarPath - Absolute path to the sidecar file
- * @param offset - Approximate byte offset to start reading (character offset
- *                 for ASCII; multi-byte content may shift this)
+ * @param offset - Character offset to start reading
  * @param limit - Maximum number of characters to return
  * @returns The windowed substring, or `null` if file is missing (ENOENT)
  */
@@ -151,109 +150,59 @@ export function readSidecarWindow(
   offset: number,
   limit: number,
 ): string | null {
-  let fd: number | null = null;
   try {
     if (!existsSync(sidecarPath)) return null;
 
-    fd = openSync(sidecarPath, "r");
-    const stat = statSync(sidecarPath);
+    const fullText = readFileSync(sidecarPath, "utf-8");
 
-    if (offset >= stat.size) return "";
+    if (offset >= fullText.length) return "";
 
-    // UTF-8 safety: read limit + 4 extra bytes to handle multi-byte boundaries
-    const readSize = Math.min(limit + 4, stat.size - offset);
-    const buf = Buffer.alloc(readSize);
-    const bytesRead = readSync(fd, buf, 0, readSize, offset);
-
-    if (bytesRead === 0) return "";
-
-    // Decode the buffer to string (replaces broken multi-byte sequences at boundaries)
-    let text = buf.toString("utf-8", 0, bytesRead);
-
-    // If the offset was mid-character, the first char may be a replacement (U+FFFD).
-    // Strip it so the returned window looks clean.
-    if (text.length > 0 && text.codePointAt(0) === 0xFFFD) {
-      text = text.slice(1);
-    }
-
-    // Trim to exactly `limit` characters
-    if (text.length > limit) {
-      text = text.slice(0, limit);
-    }
-
-    return text;
+    return fullText.slice(offset, offset + limit);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
     throw err;
-  } finally {
-    if (fd !== null) closeSync(fd);
   }
 }
 
 /**
- * Read the last N characters from a sidecar file (tail mode) without loading
- * the entire file. Uses `statSync` for file size, then seeks backward.
+ * Read the last N characters from a sidecar file (tail mode).
+ *
+ * `tailChars` is a character count (UTF-16 code units), never a byte count.
+ * The file is read in full and sliced by character, so multi-byte UTF-8
+ * content (CJK, emoji, etc.) is never split mid-sequence and the result is
+ * always exactly `tailChars` characters when the file is long enough.
  *
  * @param sidecarPath - Absolute path to the sidecar file
- * @param tailBytes - Number of characters to read from the end
+ * @param tailChars - Number of characters to read from the end
  * @returns The last N characters, or `null` if file is missing
  */
 export function readSidecarTail(
   sidecarPath: string,
-  tailBytes: number,
+  tailChars: number,
 ): string | null {
-  let fd: number | null = null;
   try {
     if (!existsSync(sidecarPath)) return null;
 
-    fd = openSync(sidecarPath, "r");
-    const stat = statSync(sidecarPath);
+    const fullText = readFileSync(sidecarPath, "utf-8");
 
-    if (stat.size === 0) return "";
+    if (tailChars >= fullText.length) return fullText;
 
-    if (tailBytes >= stat.size) {
-      const buf = Buffer.alloc(stat.size);
-      readSync(fd, buf, 0, stat.size, 0);
-      return buf.toString("utf-8");
-    }
-
-    // UTF-8 safety: read tailBytes + 4 extra bytes from before the target
-    // to handle multi-byte boundaries
-    const readStart = Math.max(0, stat.size - tailBytes - 4);
-    const readLen = stat.size - readStart;
-    const buf = Buffer.alloc(readLen);
-    const bytesRead = readSync(fd, buf, 0, readLen, readStart);
-
-    if (bytesRead === 0) return "";
-
-    let text = buf.toString("utf-8", 0, bytesRead);
-
-    // Drop any leading replacement char from a split multi-byte sequence
-    if (readStart > 0 && text.length > 0 && text.codePointAt(0) === 0xFFFD) {
-      text = text.slice(1);
-    }
-
-    // Take the last `tailBytes` characters
-    if (text.length > tailBytes) {
-      text = text.slice(text.length - tailBytes);
-    }
-
-    return text;
+    return fullText.slice(fullText.length - tailChars);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
     throw err;
-  } finally {
-    if (fd !== null) closeSync(fd);
   }
 }
 
 /**
- * Apply windowing (offset/limit or tail) directly from a sidecar file,
- * streaming only the requested portion from disk. Falls back to returning
- * `null` when the sidecar file is missing.
+ * Apply windowing (offset/limit or tail) directly from a sidecar file.
+ * Falls back to returning `null` when the sidecar file is missing.
  *
  * This is the sidecar-aware variant of `applyWindow`.  The sidecar stores
  * the full session text; `totalChars` comes from `MaterializedResultRef.totalChars`.
+ * `offset`, `limit`, `maxChars`, and `nextOffset` all follow the character
+ * (UTF-16 code unit) contract of `applyWindow` — multi-byte UTF-8 content is
+ * sliced precisely, never by byte.
  *
  * @param sidecarPath - Absolute path to the sidecar file
  * @param opts - Windowing options (offset, limit, tail, maxChars)
