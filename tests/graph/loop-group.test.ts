@@ -1020,3 +1020,101 @@ describe("loop-group executor — dangling loopGroupId (subtask 5)", () => {
     expect(report.traversals).toBe(0);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// loop-group member escalate — automatic retry budget (escalate-retry-bypass
+// fix, regression coverage)
+//
+// A loop-group member's `escalate` is routed through `executeLoopStep`
+// (engine-advance `_propagateEscalateSignal` → `executeLoopStep` →
+// `propagateEscalate`), so the automatic-retry gate applies to loop members
+// exactly as it does to plain nodes. These tests pin the contract:
+//
+//  - while the member's effective budget (here: the declared
+//    `budget.max_retries`) still has allowance, each escalate is absorbed —
+//    the node is re-marked ready and RE-DISPATCHED by the same advance pass;
+//    no loop traversal is consumed and the escalate never propagates
+//    downstream (the convergence node's join is NOT failed while budget
+//    remains).
+//  - on exhaustion the escalate is terminal: it propagates forward, the
+//    convergence node's join:all fails, the still-running peer is cascade-
+//    cancelled — and loop `traversalCount` accounting is UNCHANGED by the
+//    whole retry chain (traversals are only consumed by revise re-entry).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("loop-group member escalate — retry budget honored (escalate-retry-bypass fix)", () => {
+  /** convergeLoopGraph variant: loop member A declares budget.max_retries. */
+  function escalateRetryLoopGraph(maxRetries: number): GraphDeclaration {
+    return {
+      version: 2,
+      name: "loop-member-escalate-retry",
+      nodes: [
+        { id: "R", agent: "a0", prompt: "root" },
+        { id: "A", agent: "a1", prompt: "a", budget: { max_retries: maxRetries } },
+        { id: "B", agent: "a2", prompt: "b" },
+        { id: "C", agent: "a3", prompt: "c", join: { strategy: "all" } },
+      ],
+      edges: [
+        { from: "R", to: "A", type: "always" },
+        { from: "R", to: "B", type: "always" },
+        { from: "A", to: "C", type: "on_signal", signal_filter: ["answer"] },
+        { from: "B", to: "C", type: "on_signal", signal_filter: ["answer"] },
+      ],
+      loop_groups: [{ id: "lg", nodes: ["A", "B", "C"], max_traversals: 5 }],
+    };
+  }
+
+  it("re-dispatches a loop member within its declared retry budget, then escalates terminally on exhaustion with loop traversal accounting unchanged", async () => {
+    const { state, engine, fake } = buildEngine(escalateRetryLoopGraph(2));
+    const aDispatches = () => fake.calls.filter((c) => c.nodeId === "A").length;
+
+    await engine.dispatchReady(); // R dispatched (Running)
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0);
+
+    // R completes — its answer activates A and B (R → A / R → B always edges),
+    // leaving C's join:all waiting on both fan-in branches.
+    await engine.onNodeSignalEmitted("R", "answer", "root");
+    expect(aDispatches()).toBe(1);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    // ── Escalate #1: absorbed into automatic retry #1 (retryCount 0 → 1).
+    // The loop-member escalate routes through executeLoopStep →
+    // propagateEscalate: the retry gate re-marks A ready and the same advance
+    // pass re-dispatches it (no backoff declared) → Running again. The
+    // absorbed escalate must NOT propagate: C's join stays waiting, B stays
+    // running, and no loop traversal is consumed.
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom-1" });
+    const a = state.nodes.get("A")!;
+    expect(a.status).toBe(NodeStatus.Running); // re-dispatched within budget
+    expect(a.retryCount).toBe(1);
+    expect(aDispatches()).toBe(2);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Pending); // join NOT failed
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0); // unchanged
+    // The absorbed escalate recording was cleared — no deferred-drain replay
+    // re-escalates the re-dispatched node (drain-replay race guard).
+    expect(a.signalsObserved["escalate"]).toBeUndefined();
+    expect(state.signalLedger.has("A")).toBe(false);
+
+    // ── Escalate #2: absorbed into retry #2 (retryCount 1 → 2).
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom-2" });
+    expect(a.status).toBe(NodeStatus.Running);
+    expect(a.retryCount).toBe(2);
+    expect(aDispatches()).toBe(3);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Pending); // still not failed
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0);
+
+    // ── Escalate #3: budget exhausted (retryCount 2 !< max 2) → terminal.
+    // The escalation propagates forward: C's join:all fails → C escalates and
+    // the cascade canceller retires the still-running B. Loop traversal
+    // accounting remains unchanged across the entire retry chain.
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom-3" });
+    expect(a.status).toBe(NodeStatus.Escalate);
+    expect(a.retryCount).toBe(2); // capped at the declared budget
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate); // join failed
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done); // cascade-cancelled
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(0); // unchanged
+    expect(aDispatches()).toBe(3); // no dispatch past the budget
+  });
+});

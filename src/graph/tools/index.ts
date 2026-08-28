@@ -293,7 +293,7 @@ function createGraphAddNodeTool(
         .int()
         .nonnegative()
         .optional()
-        .describe("Auto-retry count on escalate."),
+        .describe("Auto-retry count on escalate. Now enforced by the engine (previously parsed but ignored)."),
     },
     async execute(args, context) {
       try {
@@ -342,7 +342,9 @@ function createGraphAddEdgeTool(
         .number()
         .optional()
         .describe("Truncation limit for the passed context."),
-      retry: retrySchema.describe("Auto-retry count when the source node emits escalate."),
+      retry: retrySchema.describe(
+        "Auto-retry count on escalate for either incident node (the source node, or the target when it escalates); backoff_ms honored between attempts.",
+      ),
     },
     async execute(args, context) {
       try {

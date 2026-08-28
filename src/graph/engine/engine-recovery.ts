@@ -839,6 +839,10 @@ export function adoptPriorNodeStates(
     node.joinSatisfied = prev.joinSatisfied;
     node.traversalCount = prev.traversalCount;
     node.retryCount = prev.retryCount;
+    // OPTIONAL-ADDITIVE (escalate-retry backoff): carry the withheld-dispatch
+    // deadline across rebuilds so a rebuilt engine never re-dispatches a
+    // backoff-pending retry early. Absent → undefined (no fabrication).
+    node.retryBackoffUntil = prev.retryBackoffUntil;
     node.sessionsSpawned = prev.sessionsSpawned;
     node.tokensConsumed = { ...prev.tokensConsumed };
     node.startedAt = prev.startedAt;

@@ -232,6 +232,17 @@ export interface NodeRuntimeState {
   completedAt?: number;
   /** Number of retries attempted */
   retryCount: number;
+  /**
+   * Epoch ms until which the node's automatic escalate-retry dispatch is
+   * withheld (the retry backoff window). Written by the escalate retry gate
+   * (signal-propagation.ts) as `now + backoff_ms` when the qualifying retry
+   * edge declares `backoff_ms`; the dispatch step consumes it before
+   * re-dispatching a re-marked-ready node.
+   * OPTIONAL-ADDITIVE — absent until a retry edge declares a backoff, and in
+   * persisted files authored before the field existed (both deserialize to
+   * `undefined` via the DTO's `...rest` spread).
+   */
+  retryBackoffUntil?: number;
   /** Error reason when status is escalate, timeout, or done (error) */
   errorReason?: string;
 

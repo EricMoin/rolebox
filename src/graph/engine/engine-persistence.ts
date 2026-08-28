@@ -186,6 +186,13 @@ export interface NodeRuntimeStateDTO {
   startedAt: number;
   completedAt?: number;
   retryCount: number;
+  // OPTIONAL-ADDITIVE (escalate-retry backoff): epoch-ms deadline until which
+  // a re-marked-ready retry node's dispatch is withheld. JSON-primitive
+  // number, absent → undefined. Mirrors the resultText/liveness pattern —
+  // files authored before the field existed lack it; the `...rest` spread
+  // carries it both ways and the explicit serialize/deserialize lines pin the
+  // contract.
+  retryBackoffUntil?: number;
   errorReason?: string;
   // OPTIONAL-ADDITIVE (subtask 1): JSON-primitive, absent → undefined.
   artifacts?: string[];
@@ -316,6 +323,13 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
       // line documents the persistence contract — recovered/adopted nodes keep
       // their stashed text. Absent → undefined (no fabrication).
       resultText: n.resultText,
+      // OPTIONAL-ADDITIVE (escalate-retry backoff): the epoch-ms deadline
+      // until which a re-marked-ready retry node's dispatch is withheld. Plain
+      // JSON-primitive number carried by `...rest` above; the explicit line
+      // documents the persistence contract — recovered/adopted nodes keep
+      // their backoff deadline so a restart never re-dispatches early. Absent
+      // → undefined (no fabrication).
+      retryBackoffUntil: n.retryBackoffUntil,
       upstreamResults: ur,
     };
   }
@@ -393,6 +407,11 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
       // old v2 files stay loadable and the EdgePayload result fallback yields
       // '' for them (the stashed text is stashed again at next completion).
       resultText: rest.resultText,
+      // OPTIONAL-ADDITIVE (escalate-retry backoff): carry the withheld-dispatch
+      // deadline back (JSON-primitive number — no clone needed). Absent →
+      // undefined — old v2 files stay loadable and their Ready nodes dispatch
+      // immediately (no backoff was ever declared for them).
+      retryBackoffUntil: rest.retryBackoffUntil,
       upstreamResults,
     } as NodeRuntimeState);
   }
