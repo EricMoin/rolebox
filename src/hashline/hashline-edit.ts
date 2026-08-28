@@ -5,8 +5,8 @@ import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restor
 import { normalizeEdits, applyEditsWithReport } from "./edit-primitives.ts";
 import { validateVersion } from "./validation.ts";
 import { reanchorChangedLines, generateUnifiedDiff, countLineDiffs } from "./diff.ts";
-import { detectUniformOffset, suggestCorrectAnchor } from "./fuzzy.ts";
-import { atomicWriteFile, atomicWriteBatch, verifyFileUnchanged } from "./atomic-write.ts";
+import { detectUniformOffset, suggestCorrectAnchor, AmbiguousAnchorError } from "./fuzzy.ts";
+import { atomicWriteFile, atomicWriteBatch, verifyFileUnchanged, BatchWriteError } from "./atomic-write.ts";
 import { normalizeLockKey, withPathLocks } from "./path-lock.ts";
 import { collectLineRefs } from "./edit-ordering.ts";
 import type { EditOp, HashMismatch, RawEditOp, FileEditRequest } from "./types.ts";
@@ -174,7 +174,23 @@ async function processSingleFile(
     dedupEditCount = editResult.deduplicatedEdits;
   } catch (err: unknown) {
     if (isHashMismatchError(err)) {
-      const corrections = detectUniformOffset(err.mismatches, err.fileLines, hashWidth);
+      let corrections: Map<string, string> | null;
+      try {
+        corrections = detectUniformOffset(err.mismatches, err.fileLines, hashWidth);
+      } catch (caught: unknown) {
+        if (caught instanceof AmbiguousAnchorError) {
+          // Ambiguity is a per-file failure, not a batch abort. Return it in
+          // the same shape as the other per-file error results so it renders
+          // under "Failed files:" with the standard "Error:" header. The
+          // message already starts with the ambiguity detail and ends with the
+          // hashline_read re-read guidance.
+          return {
+            filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+            error: caught.message,
+          };
+        }
+        throw caught;
+      }
       if (corrections && corrections.size > 0) {
         correctionsApplied = Array.from(corrections.entries()).map(([oldRef, newRef]) => ({ old: oldRef, new: newRef }));
         const correctedEdits = remapEditAnchors(normalizedEdits, corrections);
@@ -416,7 +432,31 @@ export function createHashlineEditTool(hooks: HashlineEditToolHooks = {}) {
                 await atomicWriteBatch(writes);
               }
             } catch (err) {
-              return `Write failed: file system error (${err instanceof Error ? err.message : String(err)}).`;
+              // D4/D1/D5 fix: always use the "Error:" prefix (every other
+              // failure path does) while KEEPING the "Write failed" substring
+              // and the underlying errno text. For a batch (BatchWriteError),
+              // append honest file accounting: which file failed, whether any
+              // bytes landed, what was written before the failure, and what was
+              // not written. In-place single-file writes are non-atomic, so a
+              // plain error (atomicWriteFile path) makes NO zero-write claim.
+              const causeText = err instanceof Error ? err.message : String(err);
+              const lines = [`Error: Write failed: file system error (${causeText}).`];
+              if (err instanceof BatchWriteError) {
+                lines.push(`Failed file: ${err.failed}.`);
+                if (err.written.length === 0) {
+                  lines.push("No files were written.");
+                } else {
+                  lines.push(`Files written before the failure: ${err.written.join(", ")}.`);
+                }
+                const writtenSet = new Set(err.written);
+                const notWritten = writes
+                  .map((w) => w.filePath)
+                  .filter((fp) => fp !== err.failed && !writtenSet.has(fp));
+                lines.push(`Files not written: ${notWritten.join(", ")}`);
+              } else {
+                lines.push(`Failed file: ${writes[0].filePath}.`);
+              }
+              return lines.join("\n");
             }
 
             const output: string[] = [];

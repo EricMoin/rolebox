@@ -188,8 +188,10 @@ describe("hashline adversarial batch & concurrency", () => {
 
     // The second temp write fails (ENOENT); atomicWriteBatch must clean the
     // first temp and report a write failure — no partial rename may survive.
-    // Note: the write-failure path returns "Write failed: ..." without the
-    // "Error:" prefix used by all other error paths (hashline-edit.ts:394-396).
+    // The write-failure path uses the "Error:" prefix consistent with every
+    // other error path (hashline-edit.ts), so a caller grepping for /^Error:/
+    // catches it — regression guard against the prefixed-prefix regression.
+    expect(r.startsWith("Error:")).toBe(true);
     expect(r).toContain("Write failed");
     expect(r).toContain("ENOENT");
     // Zero writes: the to-be-created file in the existing dir must not exist.

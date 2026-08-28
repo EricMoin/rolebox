@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **`hashline_edit` duplicate-alias folding, transactional staging, and failure diagnostics hardened** — Duplicate paths in a batch are now folded by filesystem identity (dev+inode) rather than raw spelling, so symlink aliases, hardlink aliases, case aliases on case-insensitive filesystems (darwin/win32), and trailing-slash spellings of the same file are all caught with zero side effects. Hardlinked (in-place) members are now written in the COMMIT phase after every temp file is staged, so a staging failure leaves zero writes instead of a partial batch; a commit-phase (rename) failure can still leave earlier files updated and later files untouched, and in-place writes remain non-atomic. Write-failure messages name the failed file together with which files were and were not written, all `hashline_edit` failure results begin with `Error:` and identify the affected file (including pre-write re-check I/O errors such as `EISDIR`), and an ambiguous fuzzy anchor correction — multiple hash-equal candidate lines with differing content (a width-2 hash collision) — is rejected with an explicit re-read error instead of silently nearest-matching (same-position collisions stay accepted by the position+hash anchor contract).
+
+---
+
 ## 1.7.0
 
 ### Bug Fixes

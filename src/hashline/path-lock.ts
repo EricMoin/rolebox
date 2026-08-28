@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -18,27 +18,54 @@ import { resolve } from "node:path";
 const queues = new Map<string, Promise<unknown>>();
 
 /**
+ * Strip trailing path-separator runs from a file path, preserving a bare root.
+ *
+ * Both POSIX `/` and Windows `\` are treated as separators (Windows accepts
+ * both at the filesystem level). Used so that `dir/f.txt` and `dir/f.txt/`
+ * spell the same lock key: `realpathSync` throws ENOTDIR on the trailing-slash
+ * form of a regular file, which previously forced a string-key fallback that
+ * diverged from the resolved form when a parent segment was a symlink
+ * (e.g. `/var` -> `/private/var` on darwin), bypassing duplicate detection.
+ */
+function stripTrailingSeparators(filePath: string): string {
+  const stripped = filePath.replace(/[\\/]+$/, "");
+  // Preserve a bare root ("/" or "C:\") — stripping it to "" would make the
+  // realpath probe meaningless and the fallback wrong.
+  return stripped.length === 0 ? filePath : stripped;
+}
+
+/**
  * Normalize a file path into a lock key.
  *
- * `realpathSync` resolves symlink chains so a file and a symlink alias of it
- * contend on the same lock and are recognized as the same file (D15: a batch
- * holding both must be rejected as duplicate). Non-existent paths (to-be-
- * created files) cannot be realpath'd — ENOENT falls back to `path.resolve`,
- * which still collapses relative paths and `..`/`.` segments so different
- * spellings of the same (future) file contend on the same lock. On darwin and
- * win32 (case-insensitive by default) the key is additionally lowercased so
- * case aliases of the same file serialize against each other.
+ * For a path that EXISTS on disk, the key is a filesystem-identity token
+ * (`ino:${dev}:${ino}`) derived from `realpathSync` + `statSync` on the
+ * trailing-slash-stripped path. Because the identity is the inode, every peer
+ * directory entry of the same file — a symlink chain (D15), a hardlink alias
+ * (D2), or a trailing-slash spelling (D3) — folds to the SAME key and is
+ * rejected as a duplicate within one batch, while distinct files never collide.
+ *
+ * For a path that does NOT exist yet (a to-be-created file), or when the
+ * `realpathSync`/`statSync` probe fails or races the filesystem (ENOENT/
+ * ENOTDIR, or the file vanishing between the two calls), the key falls back to
+ * the normalized string of the trailing-slash-stripped path: `resolve()`
+ * collapses relative paths and `..`/`.` segments, and on darwin/win32
+ * (case-insensitive by default) the result is additionally lowercased so case
+ * aliases of the same future file serialize against each other.
  */
 export function normalizeLockKey(filePath: string): string {
-  let resolved: string;
+  const stripped = stripTrailingSeparators(filePath);
   try {
-    resolved = realpathSync(filePath);
+    const resolvedPath = realpathSync(stripped);
+    const st = statSync(resolvedPath);
+    return `ino:${st.dev}:${st.ino}`;
   } catch {
-    resolved = resolve(filePath);
+    // ENOENT/ENOTDIR (to-be-created file), a realpath/stat race, or any other
+    // probe failure: fall back to a normalized string key of the stripped path.
   }
+  const fallback = resolve(stripped);
   return process.platform === "darwin" || process.platform === "win32"
-    ? resolved.toLowerCase()
-    : resolved;
+    ? fallback.toLowerCase()
+    : fallback;
 }
 
 /** A held path lock. Call `release()` exactly when the critical section ends. */
