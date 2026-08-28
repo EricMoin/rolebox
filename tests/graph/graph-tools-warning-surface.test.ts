@@ -9,8 +9,16 @@
  * (graph-tools.ts:1109-1120), which returns the full validation result —
  * `valid` / `errors` / `warnings` — verbatim.
  *
+ * dry_run validates under EXECUTION severity (graph-tools.ts:1100-1107), so an
+ * uncontained revise-free cycle — only a WARNING at construct time — is
+ * promoted to a fatal error there: no edge within the SCC can ever be excluded
+ * from root discovery, so the cycle can never activate and the graph deadlocks
+ * at runtime. Cases (a) and (b) pin that promotion: construction still accepts
+ * the cycle (edge ids returned, commit does not throw), while the dry_run
+ * result reports `valid: false` with the cycle error in `validation.errors`.
+ *
  * A model building a graph therefore gets construction feedback ONLY for
- * ERRORS; structural WARNINGS (e.g. an uncovered cycle) require an explicit
+ * ERRORS; structural diagnostics (e.g. an uncovered cycle) require an explicit
  * dry_run to surface. `graph_status` renders exclusively from EngineState
  * (graph-tools.ts:2063-2123) and never consults validator warnings — the
  * observability gap pinned in case (a) below.
@@ -26,30 +34,34 @@ import { createGraphToolSet } from "../../src/graph/tools/graph-tools";
 
 // ── (a) 2-node always-cycle A<->B with NO loop group ───────────────────────
 
-describe("warning pass-through — 2-node always-cycle A<->B, no loop group", () => {
-  it("accepts the cycle at construction, surfaces the uncovered-cycle warning on dry_run, and hides it from graph_status", async () => {
+describe("construct vs dry_run — 2-node always-cycle A<->B, no loop group", () => {
+  it("accepts the cycle at construction, reports the uncontained-cycle error on dry_run, and hides it from graph_status", async () => {
     const ts = createGraphToolSet();
     const { graph_id } = ts.graph_create({ name: "cycle-ab" });
     ts.graph_add_node({ graph_id, id: "A", agent: "agent-a", prompt: "p" });
     ts.graph_add_node({ graph_id, id: "B", agent: "agent-b", prompt: "p" });
 
-    // The cycle-forming edges are a WARNING (not an error) in validator-v2
-    // (src/graph/validator-v2.ts:448-460) — commit must NOT throw. Assert the
+    // The cycle-forming edges are a construct-mode WARNING in validator-v2
+    // (src/graph/validator-v2.ts:620-674) — commit must NOT throw. Assert the
     // returned edge ids so a no-op/silent-drop would also fail.
     const first = ts.graph_add_edge({ graph_id, from: "A", to: "B", type: "always" });
     expect(first.edge_id).toBe("A->B");
     const second = ts.graph_add_edge({ graph_id, from: "B", to: "A", type: "always" });
     expect(second.edge_id).toBe("B->A");
 
-    // dry_run is the ONLY channel that surfaces the warning — verbatim.
+    // dry_run validates under EXECUTION severity (graph-tools.ts:1104-1107):
+    // the uncontained revise-free cycle is promoted to a fatal error, so the
+    // run result reports valid=false with the cycle error in validation.errors.
     const r = await ts.graph_run({ graph_id, dry_run: true });
     expect(r.dry_run).toBe(true);
-    expect(r.phase).toBe("validating");
-    expect(r.validation?.valid).toBe(true);
-    expect(r.validation?.errors).toEqual([]);
-    expect(r.validation?.warnings).toContain(
-      "cycle detected involving node(s) [A, B] that are not contained in any declared loop group",
+    expect(r.phase).toBe("invalid");
+    expect(r.validation?.valid).toBe(false);
+    const cycleError = r.validation?.errors.find(
+      (msg) => msg.includes("cycle detected") && msg.includes("deadlocks at runtime"),
     );
+    expect(cycleError).toBeDefined();
+    expect(cycleError).toContain("[A, B]");
+    expect(cycleError).toContain("not contained in any declared loop group");
 
     // graph_status never consults validator warnings — pin the observability
     // gap: neither the summary nor the json render mentions the cycle warning.
@@ -64,23 +76,29 @@ describe("warning pass-through — 2-node always-cycle A<->B, no loop group", ()
 
 // ── (b) single-node self-loop A->A with NO loop group ───────────────────────
 
-describe("warning pass-through — single-node self-loop A->A, no loop group", () => {
-  it("accepts the self-loop at construction and surfaces the uncovered-cycle warning on dry_run", async () => {
+describe("construct vs dry_run — single-node self-loop A->A, no loop group", () => {
+  it("accepts the self-loop at construction and reports the uncontained-cycle error on dry_run", async () => {
     const ts = createGraphToolSet();
     const { graph_id } = ts.graph_create({ name: "self-loop" });
     ts.graph_add_node({ graph_id, id: "A", agent: "agent-a", prompt: "p" });
 
     // A self-loop is an SCC of size 1 — validator-v2 flags it via Tarjan
-    // selfLoop detection (src/graph/validator-v2.ts:487, 537-540) as a WARNING.
+    // selfLoop detection (src/graph/validator-v2.ts:653, 700-702) as a
+    // construct-mode WARNING, so commit accepts it and returns the edge id.
     const edge = ts.graph_add_edge({ graph_id, from: "A", to: "A", type: "always" });
     expect(edge.edge_id).toBe("A->A");
 
+    // dry_run promotes the uncontained revise-free self-loop to an ERROR.
     const r = await ts.graph_run({ graph_id, dry_run: true });
-    expect(r.validation?.valid).toBe(true);
-    expect(r.validation?.errors).toEqual([]);
-    expect(r.validation?.warnings).toContain(
-      "cycle detected involving node(s) [A] that are not contained in any declared loop group",
+    expect(r.dry_run).toBe(true);
+    expect(r.phase).toBe("invalid");
+    expect(r.validation?.valid).toBe(false);
+    const cycleError = r.validation?.errors.find(
+      (msg) => msg.includes("cycle detected") && msg.includes("deadlocks at runtime"),
     );
+    expect(cycleError).toBeDefined();
+    expect(cycleError).toContain("[A]");
+    expect(cycleError).toContain("not contained in any declared loop group");
   });
 });
 

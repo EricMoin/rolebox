@@ -17,6 +17,10 @@
  * GraphToolSet({}) suffices because every case here is construction-only
  * (no graph_run, so no engine timers are ever started and no dispose is
  * required — the staleness watcher starts on run()/recover(), not on build).
+ * The one exception is the graph_run execution-gate rejection case, where
+ * graph_run refuses the graph BEFORE building an engine — the throw happens
+ * in the fresh-build validation gate, so no engine/timers are ever created
+ * there either.
  *
  * No production code under src/ is modified; nothing here edits the engine.
  */
@@ -28,6 +32,7 @@ import {
   type GraphToolSet,
 } from "../../src/graph/tools/graph-tools";
 import { createGraphTools } from "../../src/graph/tools/index";
+import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -452,5 +457,117 @@ describe("zod primary guard — graph_add_node args schema", () => {
         join: { strategy: "quorum", quorum: 2 },
       }).success,
     ).toBe(true);
+  });
+});
+
+// ── (j) on_condition edge — condition-vocabulary rule (validator rule 3b) ──
+
+describe("graph_add_edge — on_condition condition vocabulary", () => {
+  it("rejects an on_condition edge whose condition is not in the registered vocabulary (atomic)", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "cond-unknown" });
+    ts.graph_add_node({ graph_id, id: "a", agent: "agent-a", prompt: "p" });
+    ts.graph_add_node({ graph_id, id: "b", agent: "agent-b", prompt: "p" });
+    const before = declarationSnapshot(ts, graph_id);
+
+    // Bug #1 repro: the condition name is extracted with the resolver's
+    // CALL_RE pattern; "totally_made_up_condition_xyz" has no `name(arg)`
+    // shape, so the whole string is the name — and it is not in
+    // KNOWN_CONDITIONS. The rejection surfaces at commit →
+    // validateGraphDeclaration → checkEdgeConditionVocabulary
+    // (validator-v2.ts, rule 3b).
+    const message = expectThrows(
+      () =>
+        ts.graph_add_edge({
+          graph_id,
+          from: "a",
+          to: "b",
+          type: "on_condition",
+          condition: "totally_made_up_condition_xyz",
+        }),
+      [/failed structural validation/, /unknown condition "totally_made_up_condition_xyz"/],
+    );
+    expect(message).toContain('edge from="a" -> "b" is type "on_condition"');
+
+    // Atomicity: the failed commit left the registry declaration untouched.
+    expect(declarationSnapshot(ts, graph_id)).toBe(before);
+    expect(ts["getEntry"](graph_id).declaration.edges).toHaveLength(0);
+  });
+
+  it("accepts an on_condition edge whose condition is in the registered vocabulary", () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "cond-known" });
+    ts.graph_add_node({ graph_id, id: "a", agent: "agent-a", prompt: "p" });
+    ts.graph_add_node({ graph_id, id: "b", agent: "agent-b", prompt: "p" });
+
+    // `signal_observed(answer)` matches the CALL_RE `name(arg)` pattern with
+    // name `signal_observed` ∈ KNOWN_CONDITIONS — accepted at commit.
+    const res = ts.graph_add_edge({
+      graph_id,
+      from: "a",
+      to: "b",
+      type: "on_condition",
+      condition: "signal_observed(answer)",
+    });
+    expect(res.type).toBe("on_condition");
+    expect(ts["getEntry"](graph_id).declaration.edges).toHaveLength(1);
+    expect(ts["getEntry"](graph_id).declaration.edges[0].condition).toBe(
+      "signal_observed(answer)",
+    );
+  });
+});
+
+// ── (k) graph_run execution-mode validation gate ─────────────────────────
+
+describe("graph_run — execution-mode validation", () => {
+  it("dry_run reports valid=false with the uncontained self-loop cycle error", async () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "dry-selfloop" });
+    ts.graph_add_node({ graph_id, id: "a", agent: "agent-a", prompt: "p" });
+    // Self-loop is construct-valid (only a WARNING in construct mode — the
+    // builder may declare a loop group afterwards), so commit succeeds.
+    ts.graph_add_edge({ graph_id, from: "a", to: "a", type: "always" });
+
+    // Bug #2 repro: dry_run validates under execution severity → the
+    // uncontained revise-free self-loop is promoted to an ERROR.
+    const r = await ts.graph_run({ graph_id, dry_run: true });
+    expect(r.dry_run).toBe(true);
+    expect(r.phase).toBe("invalid");
+    expect(r.validation?.valid).toBe(false);
+    const cycleError = r.validation?.errors.find(
+      (msg) => msg.includes("cycle detected") && msg.includes("deadlocks at runtime"),
+    );
+    expect(cycleError).toBeDefined();
+    expect(cycleError).toContain("[a]");
+    expect(cycleError).toContain("not contained in any declared loop group");
+  });
+
+  it("rejects execution of an uncontained always-cycle before any node is dispatched", async () => {
+    let dispatched = 0;
+    const seam: NodeDispatchPort = {
+      async executeNode() {
+        dispatched += 1;
+        return { id: `t${dispatched}`, sessionId: `s${dispatched}` } as never;
+      },
+    };
+    const ts = createGraphToolSet({ dispatch: seam });
+    const { graph_id } = ts.graph_create({ name: "run-uncontained-cycle" });
+    ts.graph_add_node({ graph_id, id: "a", agent: "agent-a", prompt: "p" });
+    ts.graph_add_node({ graph_id, id: "b", agent: "agent-b", prompt: "p" });
+    // a ⇄ b always-cycle: construct-valid (WARNINGs only) — the graph builds,
+    // but a real run must refuse it.
+    ts.graph_add_edge({ graph_id, from: "a", to: "b", type: "always" });
+    ts.graph_add_edge({ graph_id, from: "b", to: "a", type: "always" });
+
+    await expect(ts.graph_run({ graph_id })).rejects.toThrow(
+      /cycle detected/,
+    );
+    // The rejection names the graph id and lists the validation errors.
+    await expect(ts.graph_run({ graph_id })).rejects.toThrow(
+      /failed execution validation/,
+    );
+    // Zero nodes dispatched: the gate throws BEFORE createEngine runs, so no
+    // engine is ever built and no root node is launched.
+    expect(dispatched).toBe(0);
   });
 });

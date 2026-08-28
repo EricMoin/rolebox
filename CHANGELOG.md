@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0
+
+### Bug Fixes
+
+- **Graph validation now rejects unknown `on_condition` condition names and blocks uncontained revise-free cycles** — `validator-v2.ts` check 11 rejects any `on_condition` edge whose `condition` is missing or names a condition outside the registered vocabulary (`KNOWN_CONDITIONS`, the same source `asset_validate` uses), so a never-satisfiable edge can no longer silently deadlock the graph at run; and uncovered-cycle severity is now mode-split: `"construct"` (the default) keeps the WARNING so incremental building (add the cycle-closing edge, then declare the loop group) works in either ordering, while `"execution"` promotes an uncovered cycle with no revise back-edge to an ERROR, since no edge in it can ever be excluded from root discovery and the graph deadlocks at runtime. The execution-mode gate is wired into all three run-adjacent paths — `graph_run` `dry_run`, fresh-engine `graph_run` (both `src/graph/tools/graph-tools.ts`, the latter throwing the validation errors), and `importGraphFromFile` (`src/graph/parser-v2.ts`, returning null) — so a construction-valid-but-unrunnable graph is refused before dispatch instead of deadlock-escalating at run.
+
+---
+
 ## 1.6.1
 
 ### Bug Fixes

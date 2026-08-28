@@ -31,6 +31,11 @@
  *      mirroring the `data_passthrough.max_chars` pattern (see rule 7):
  *      negative `timeout_ms` and non-nonnegative-integer `max_retries`
  *      are rejected. `timeout_ms: 0` is VALID (documented opt-out).
+ *  11. `on_condition` edges must name a condition from the registered
+ *      condition vocabulary (the same `KNOWN_CONDITIONS` source
+ *      `asset_validate` uses) — an unknown name or a missing/empty
+ *      `condition` is rejected, so a never-satisfiable edge cannot
+ *      silently deadlock the graph at run.
  *
  * ## Cycle-containment semantics (check 4)
  *
@@ -42,19 +47,31 @@
  *       cycle over its declared nodes (via Tarjan on the induced subgraph).
  *       Declaring a "loop" over an acyclic node set is a structural error.
  *
- *   (b) WARNING — every directed cycle in the full graph (a Tarjan SCC with
- *       >1 node or a self-loop) must be covered by at least one loop group.
- *       Nodes participating in a cycle yet absent from every loop group are
- *       reported as a warning, not an error.
+ *   (b) WARNING/ERROR (mode-split) — every directed cycle in the full graph
+ *       (a Tarjan SCC with >1 node or a self-loop) must be covered by at
+ *       least one loop group. Each uncovered cyclic SCC is reported
+ *       independently (see the mode split below).
  *
- * Direction (b) is deliberately a WARNING rather than an ERROR: the canonical
- * example in dag-yaml-schema.md Appendix B declares a single loop group
- * `review-cycle = [implementer, reviewer]`, yet its graph contains a
- * `final-gate -> implementer` (revise_needed) back-edge that pulls
- * `final-gate` into the SCC {implementer, reviewer, final-gate} without it
- * being declared in any loop group. Failing that document as an ERROR would
- * contradict the documented canonical graph; surfacing it as a warning
- * preserves the diagnostic while keeping the canonical graph valid.
+ * ### Direction (b) severity split by mode
+ *
+ * `validateGraphDeclaration` takes an optional `mode`:
+ *   - `"construct"` (default) — incremental building. An uncovered cycle is
+ *     a WARNING: the builder may add the cycle-closing edge first and declare
+ *     the loop group afterward, so neither edge-first nor loop-first ordering
+ *     may fail. Fully backward-compatible for existing callers.
+ *   - `"execution"` — the graph is about to run. An uncovered cycle that
+ *     contains a revise back-edge (an `on_signal` edge with
+ *     `signal_filter: [revise_needed]`) stays a WARNING: that is exactly the
+ *     canonical dag-yaml-schema.md Appendix B pattern, where a revise
+ *     back-edge pulls a node (e.g. `final-gate`) into a loop group's SCC
+ *     without declaring it in any loop group. Failing that document as an
+ *     ERROR would contradict the documented canonical graph; surfacing it as
+ *     a warning preserves the diagnostic while keeping the canonical graph
+ *     valid. An uncovered cycle with NO revise back-edge (pure `always`-edge
+ *     cycles, self-loops, non-revise signal/condition cycles) is promoted to
+ *     an ERROR: no edge within the SCC can ever be excluded from root
+ *     discovery (`checkLoopGroupRoots`), so the cycle can never activate and
+ *     the graph deadlocks at runtime.
  *
  * Reuses the Tarjan SCC approach from ./loop-detector.ts (which operates on v1
  * FlowEdge) by way of a self-contained v2 EdgeDeclaration adaptation.
@@ -64,6 +81,15 @@
 
 import type { EdgeDeclaration } from "../types.graph-v2.ts";
 import type { GraphDocument } from "./parser-v2.ts";
+import { KNOWN_CONDITIONS } from "../function/conditions.ts";
+
+/**
+ * Matches a `name(arg)` condition call — mirrors `CALL_RE` in
+ * engine/condition-resolver.ts:60 (the resolver's own extraction is the source
+ * of truth; this inline copy avoids a layering violation — validators live
+ * above the engine module).
+ */
+const CALL_RE = /^([a-z][a-z0-9_]*)\(([^)]*)\)$/;
 
 /** Result of structural validation — errors are fatal, warnings are not. */
 export interface GraphValidationResult {
@@ -79,21 +105,30 @@ export interface GraphValidationResult {
  * Validate the structure of a graph document. Never throws.
  *
  * @param graph - a parsed graph document (see parser-v2.ts `parseGraph`).
+ * @param opts - optional validation context.
+ * @param opts.mode - severity context: `"construct"` (default) treats
+ *   uncovered cycles as warnings so incremental building (add the
+ *   cycle-closing edge, then declare the loop group) keeps working;
+ *   `"execution"` promotes uncovered cycles with no revise back-edge to
+ *   errors, since such a cycle can never activate and deadlocks at runtime.
  * @returns a `GraphValidationResult` with independent messages per rule.
  */
 export function validateGraphDeclaration(
   graph: GraphDocument,
+  opts?: { mode?: "construct" | "execution" },
 ): GraphValidationResult {
+  const mode = opts?.mode ?? "construct";
   const errors: string[] = [];
   const warnings: string[] = [];
 
   checkVersion(graph, errors);
   checkNodeIdUniqueness(graph, errors);
   checkEdgeEndpoints(graph, errors);
+  checkEdgeConditionVocabulary(graph, errors);
   checkLoopGroupIdUniqueness(graph, errors);
   checkLoopGroupNodeRefs(graph, errors);
   checkLoopGroupOverlap(graph, errors);
-  checkCycleContainment(graph, errors, warnings);
+  checkCycleContainment(graph, errors, warnings, mode);
   checkApprovalNodeOutgoing(graph, errors);
   checkDataPassthrough(graph, errors);
   checkLoopGroupRoots(graph, errors, warnings);
@@ -144,6 +179,51 @@ function checkEdgeEndpoints(graph: GraphDocument, errors: string[]): void {
     if (!declared.has(edge.to)) {
       errors.push(
         `edge from="${edge.from}" -> "${edge.to}" references an undeclared node in "to"`,
+      );
+    }
+  }
+}
+
+// ── Rule 3b: on_condition edges must name a registered condition ──────────
+
+/**
+ * Reject `on_condition` edges whose `condition` names a function outside the
+ * registered condition vocabulary.
+ *
+ * The engine's `defaultConditionResolver` (engine/condition-resolver.ts:97-98)
+ * treats unknown condition names as always-false — so an `on_condition` edge
+ * gated on a made-up condition can NEVER activate, deadlocking any downstream
+ * node that depends solely on it ("graph deadlock: no active upstream can
+ * satisfy pending node(s)"). Rejecting unknown names here surfaces the typo
+ * at validation/construction time instead of at runtime.
+ *
+ * The vocabulary is the same `KNOWN_CONDITIONS` set the asset validator uses
+ * (src/function/conditions.ts:100) — derived from the `NAMED_CONDITIONS`
+ * implementations, so it can never drift from what actually evaluates. The
+ * condition name is extracted with the same `name(arg)` pattern as the
+ * resolver (engine/condition-resolver.ts:60): `name` = match[1] when the
+ * condition matches `/^([a-z][a-z0-9_]*)\(([^)]*)\)$/`, else the whole string.
+ * A missing/empty `condition` is likewise rejected (mirrors the tool-level
+ * guard at graph-tools.ts:996-1001 for non-tool entry points like
+ * parseGraph / importGraphFromFile).
+ */
+function checkEdgeConditionVocabulary(graph: GraphDocument, errors: string[]): void {
+  for (const edge of graph.edges) {
+    if (edge.type !== "on_condition") continue;
+    if (!edge.condition || edge.condition.trim() === "") {
+      errors.push(
+        `edge from="${edge.from}" -> "${edge.to}" is type "on_condition" ` +
+          `but no "condition" was provided`,
+      );
+      continue;
+    }
+    const call = edge.condition.match(CALL_RE);
+    const name = call ? call[1] : edge.condition;
+    if (!KNOWN_CONDITIONS.has(name)) {
+      errors.push(
+        `edge from="${edge.from}" -> "${edge.to}" is type "on_condition" ` +
+          `with unknown condition "${name}" — expected a name from the ` +
+          `registered condition vocabulary (${[...KNOWN_CONDITIONS].sort().join(", ")})`,
       );
     }
   }
@@ -541,6 +621,7 @@ function checkCycleContainment(
   graph: GraphDocument,
   errors: string[],
   warnings: string[],
+  mode: "construct" | "execution",
 ): void {
   // (a) ERROR — a declared loop group must actually induce a cycle.
   for (const group of graph.loop_groups ?? []) {
@@ -556,18 +637,39 @@ function checkCycleContainment(
     }
   }
 
-  // (b) WARNING — every full-graph cycle must be covered by a loop group.
+  // (b) Every full-graph cycle must be covered by a loop group. Iterate the
+  // Tarjan SCCs of the FULL graph and judge each uncovered cyclic SCC on its
+  // own: an SCC that contains a revise back-edge is the canonical
+  // dag-yaml-schema.md Appendix B pattern (a revise edge pulls a node into a
+  // loop group's SCC without declaring it) and stays a warning in BOTH modes.
+  // An SCC with no revise back-edge can never be excluded from root discovery,
+  // so in execution mode it is promoted to a fatal error; construct mode keeps
+  // it a warning so incremental building (add cycle-closing edge, then declare
+  // the loop group) works in either ordering.
   const covered = new Set<string>();
   for (const group of graph.loop_groups ?? []) {
     for (const nodeId of group.nodes) covered.add(nodeId);
   }
-  const uncoveredCycleNodes = findCycleParticipatingNodes(graph.edges);
-  const uncovered = [...uncoveredCycleNodes].filter((node) => !covered.has(node));
-  if (uncovered.length > 0) {
-    warnings.push(
-      `cycle detected involving node(s) [${[...uncovered].sort().join(", ")}] ` +
-        `that are not contained in any declared loop group`,
+  const { components, selfLoop } = tarjanScc(graph.edges);
+  for (const component of components.values()) {
+    if (!isCyclicComponent(component, selfLoop)) continue;
+    const nodes = new Set(component);
+    if ([...nodes].every((node) => covered.has(node))) continue;
+    const hasReviseBackEdge = graph.edges.some(
+      (edge) =>
+        nodes.has(edge.from) && nodes.has(edge.to) && isReviseBackEdge(edge),
     );
+    const baseMessage =
+      `cycle detected involving node(s) [${[...nodes].sort().join(", ")}] ` +
+      `that are not contained in any declared loop group`;
+    if (mode === "execution" && !hasReviseBackEdge) {
+      errors.push(
+        `${baseMessage} and contain no revise back-edge — the graph can ` +
+          `never activate and deadlocks at runtime`,
+      );
+    } else {
+      warnings.push(baseMessage);
+    }
   }
 }
 
@@ -657,16 +759,4 @@ export function hasCycle(edges: EdgeDeclaration[]): boolean {
     if (isCyclicComponent(component, selfLoop)) return true;
   }
   return false;
-}
-
-/** Node ids that participate in at least one directed cycle in the edge set. */
-function findCycleParticipatingNodes(edges: EdgeDeclaration[]): Set<string> {
-  const { components, selfLoop } = tarjanScc(edges);
-  const out = new Set<string>();
-  for (const component of components.values()) {
-    if (isCyclicComponent(component, selfLoop)) {
-      for (const node of component) out.add(node);
-    }
-  }
-  return out;
 }

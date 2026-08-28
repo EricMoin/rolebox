@@ -1097,9 +1097,14 @@ export class GraphToolSet {
   ): Promise<GraphRunResult> {
     const entry = this.getEntry(args.graph_id);
 
-    // dry_run: validate structure without executing.
+    // dry_run: validate structure without executing. Execution-mode severity:
+    // a dry run answers "would this graph actually run?" — an uncontained
+    // revise-free cycle (Bug #2) or an unknown on_condition name (Bug #1)
+    // must report valid=false here rather than pass and deadlock at run.
     if (args.dry_run) {
-      const validation = validateGraphDeclaration(entry.declaration);
+      const validation = validateGraphDeclaration(entry.declaration, {
+        mode: "execution",
+      });
       return {
         graph_id: args.graph_id,
         phase: validation.valid ? "validating" : "invalid",
@@ -1209,6 +1214,26 @@ export class GraphToolSet {
     // runtime graph_run builds (absent → the engine's default no-op seam).
     // `sessionId` (the graph-captured / invoking execution session) is forwarded
     // so the emperor-session resolver can target the orchestrator at runtime.
+
+    // Subtask 3 (execution-mode validation): the graph is about to be built
+    // into a fresh engine and run — re-validate under execution severity. A
+    // declaration can be construction-valid (an uncontained cycle is only a
+    // construct-mode WARNING) yet un-runnable: an uncontained revise-free
+    // cycle can never activate, so graph_run must refuse it here instead of
+    // deadlock-escalating at runtime with 'graph deadlock: no active upstream
+    // can satisfy pending node(s)'. Skipped on the mid-flight / completed-idle
+    // short-circuit paths above — those graphs already passed this gate on
+    // their first run.
+    const validation = validateGraphDeclaration(entry.declaration, {
+      mode: "execution",
+    });
+    if (!validation.valid) {
+      throw new Error(
+        `graph "${args.graph_id}" failed execution validation:\n` +
+          validation.errors.map((e) => `  - ${e}`).join("\n"),
+      );
+    }
+
     const completion = this.completionHandler(args.graph_id, sessionId);
     const terminal = this.terminalHandler(args.graph_id, sessionId);
     const stall = this.stallHandler(args.graph_id, sessionId);
