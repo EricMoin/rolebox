@@ -190,10 +190,20 @@ export function restoreFileText(content: string, envelope: FileTextEnvelope): st
   const segments = content.split("\n");
   let result = "";
   for (let i = 0; i < segments.length; i++) {
-    result += segments[i];
+    let segment = segments[i];
     if (i < segments.length - 1) {
       const eol = i < eols.length && eols[i] !== "" ? eols[i] : envelope.lineEnding;
-      result += eol;
+      // D13: when the terminator is CRLF, a trailing "\r" left in the segment
+      // (the residue of replacement content like "x\r\ny" split on "\n") is
+      // the first half of the CRLF pair being assembled — drop exactly one, or
+      // it doubles ("x\r" + "\r\n" → "x\r\r\n"). LF envelopes keep the "\r"
+      // as byte-fidelity content (control case: LF file, replace "x\r").
+      if (eol === "\r\n" && segment.endsWith("\r")) {
+        segment = segment.slice(0, -1);
+      }
+      result += segment + eol;
+    } else {
+      result += segment;
     }
   }
   if (envelope.hadBom) {

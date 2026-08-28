@@ -203,11 +203,16 @@ async function processSingleFile(
     }
   }
 
-  const trailingNewlineCount = canonicalContent.match(/\n+$/)?.[0].length ?? 0;
-  let finalContent = resultContent;
-  // Strip all trailing newlines, then reapply exactly the original count
-  finalContent = finalContent.replace(/\n+$/, "");
-  finalContent = finalContent + "\n".repeat(trailingNewlineCount);
+  // D12: the result's trailing-newline state is BOOLEAN, not a count.
+  // restoreFileText (hash.ts:188-202) re-applies each ORIGINAL line's per-line
+  // terminator, so the only thing needed here is to terminate the LAST logical
+  // line when the original file ended in "\n" (its last line was terminated).
+  // Re-applying the original COUNT (e.g. 2 for "a\n\n") double-counts when the
+  // result's last line is a NEW line — anchorless append, prepend past the old
+  // EOF, or a replace of the final blank line — gaining phantom blank line(s)
+  // at EOF ("a\n\n" + append "x" → "a\n\nx\n\n" instead of "a\n\nx\n").
+  const hadTrailingNewline = canonicalContent.endsWith("\n");
+  let finalContent = hadTrailingNewline ? resultContent + "\n" : resultContent;
 
   if (finalContent === canonicalContent) {
     return {

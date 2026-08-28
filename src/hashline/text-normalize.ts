@@ -37,9 +37,27 @@ export function toNewLines(input: string | string[]): string[] {
 /**
  * Strip any "LINE#HASH|" prefix from lines if present.
  * The model sometimes includes annotated hashline format in its replacement content.
+ *
+ * D14: when `refLineCount` (the target file's line count) is provided, a
+ * prefix is stripped ONLY if its line number is a real line of that file
+ * ([1, refLineCount]) — a look-alike prefix pointing at a line that cannot
+ * exist in the file is legitimate user content and survives verbatim.
+ * Anchor-validity is decided by LINE RANGE, not hash match: the pipeline
+ * feeds the working range to apply* (edit-engine test 18 feeds pseudo-anchor
+ * "1#abc|B!" into a 3-line replace and expects the strip), and the hash could
+ * belong to a line the model echoed correctly. Direct calls without a ref
+ * keep the legacy unconditional strip (the bare unit-test contract).
  */
-export function stripLinePrefixes(lines: string[]): string[] {
-  return lines.map((line) => line.replace(LINE_HASH_PREFIX_PATTERN, ""));
+export function stripLinePrefixes(lines: string[], refLineCount?: number): string[] {
+  return lines.map((line) => {
+    const match = line.match(LINE_HASH_PREFIX_PATTERN);
+    if (match === null) return line;
+    if (refLineCount !== undefined) {
+      const lineNum = parseInt(line.slice(0, line.indexOf("#")), 10);
+      if (lineNum < 1 || lineNum > refLineCount) return line;
+    }
+    return line.replace(LINE_HASH_PREFIX_PATTERN, "");
+  });
 }
 
 /**

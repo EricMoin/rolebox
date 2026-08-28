@@ -50,7 +50,9 @@ export function applyReplaceSingle(
   const ref = originalLines ?? lines;
   validateLineRef(ref, anchor, hashWidth);
   let newLines = toNewLines(newText);
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip — only prefixes whose line number is a real line of the
+  // referenced snapshot are anchors; out-of-range look-alikes survive verbatim.
+  newLines = stripLinePrefixes(newLines, ref.length);
 
   // Restore leading indent for the first replacement line
   if (newLines.length > 0 && ref[lineIndex] !== undefined) {
@@ -101,7 +103,8 @@ export function applyReplaceRange(
   // D4: echo-strip FIRST — it needs the literal "LINE#HASH|" prefix form, which
   // stripLinePrefixes would erase before the match could be made.
   newLines = stripRangeBoundaryEcho(ref, startParsed.line, endParsed.line, newLines);
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip against the referenced snapshot's line count.
+  newLines = stripLinePrefixes(newLines, ref.length);
 
   // Restore leading indent for first replacement line
   if (newLines.length > 0 && ref[startIndex] !== undefined) {
@@ -151,7 +154,8 @@ export function applyInsertAfter(
   // D4: echo-strip FIRST — it needs the literal "LINE#HASH|" prefix form, which
   // stripLinePrefixes would erase before the match could be made.
   newLines = stripInsertAnchorEcho(ref[lineIndex], newLines);
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip against the referenced snapshot's line count.
+  newLines = stripLinePrefixes(newLines, ref.length);
 
   if (newLines.length === 0) return lines; // became noop after echo strip
 
@@ -186,7 +190,8 @@ export function applyInsertBefore(
   // D4: echo-strip FIRST — it needs the literal "LINE#HASH|" prefix form, which
   // stripLinePrefixes would erase before the match could be made.
   newLines = stripInsertBeforeEcho(ref[lineIndex], newLines);
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip against the referenced snapshot's line count.
+  newLines = stripLinePrefixes(newLines, ref.length);
 
   if (newLines.length === 0) return lines; // became noop after echo strip
 
@@ -206,13 +211,16 @@ export function applyInsertBefore(
  */
 export function applyAppend(
   lines: string[],
-  text: string | string[]
+  text: string | string[],
+  refLineCount?: number
 ): string[] {
   let newLines = toNewLines(text);
   if (newLines.length === 0 || (newLines.length === 1 && newLines[0] === "")) {
     return lines; // noop
   }
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip when the pipeline knows the file's line count; direct
+  // unit calls without a ref keep the legacy unconditional strip.
+  newLines = stripLinePrefixes(newLines, refLineCount);
 
   const result = [...lines];
   if (result.length === 1 && result[0] === "") {
@@ -227,13 +235,16 @@ export function applyAppend(
  */
 export function applyPrepend(
   lines: string[],
-  text: string | string[]
+  text: string | string[],
+  refLineCount?: number
 ): string[] {
   let newLines = toNewLines(text);
   if (newLines.length === 0 || (newLines.length === 1 && newLines[0] === "")) {
     return lines; // noop
   }
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip when the pipeline knows the file's line count; direct
+  // unit calls without a ref keep the legacy unconditional strip.
+  newLines = stripLinePrefixes(newLines, refLineCount);
 
   const result = [...lines];
   result.unshift(...newLines);
@@ -323,7 +334,8 @@ function normalizeAttachedInsert(
   } else {
     newLines = stripInsertBeforeEcho(anchorLine, newLines);
   }
-  newLines = stripLinePrefixes(newLines);
+  // D14: scoped strip against the original snapshot's line count.
+  newLines = stripLinePrefixes(newLines, originalLines.length);
   return newLines;
 }
 
@@ -403,14 +415,14 @@ export function applyEditsWithReport(
         if (edit.pos) {
           currentLines = applyInsertAfter(currentLines, edit.pos, edit.lines, hashWidth, lines);
         } else {
-          currentLines = applyAppend(currentLines, edit.lines);
+          currentLines = applyAppend(currentLines, edit.lines, lines.length);
         }
         break;
       case "prepend":
         if (edit.pos) {
           currentLines = applyInsertBefore(currentLines, edit.pos, edit.lines, hashWidth, lines);
         } else {
-          currentLines = applyPrepend(currentLines, edit.lines);
+          currentLines = applyPrepend(currentLines, edit.lines, lines.length);
         }
         break;
     }

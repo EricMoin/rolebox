@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
@@ -19,13 +20,22 @@ const queues = new Map<string, Promise<unknown>>();
 /**
  * Normalize a file path into a lock key.
  *
- * `path.resolve` collapses relative paths and `..` segments so different
- * spellings of the same file contend on the same lock. On darwin and win32
- * (case-insensitive by default) the key is additionally lowercased so case
- * aliases of the same file serialize against each other.
+ * `realpathSync` resolves symlink chains so a file and a symlink alias of it
+ * contend on the same lock and are recognized as the same file (D15: a batch
+ * holding both must be rejected as duplicate). Non-existent paths (to-be-
+ * created files) cannot be realpath'd — ENOENT falls back to `path.resolve`,
+ * which still collapses relative paths and `..`/`.` segments so different
+ * spellings of the same (future) file contend on the same lock. On darwin and
+ * win32 (case-insensitive by default) the key is additionally lowercased so
+ * case aliases of the same file serialize against each other.
  */
 export function normalizeLockKey(filePath: string): string {
-  const resolved = resolve(filePath);
+  let resolved: string;
+  try {
+    resolved = realpathSync(filePath);
+  } catch {
+    resolved = resolve(filePath);
+  }
   return process.platform === "darwin" || process.platform === "win32"
     ? resolved.toLowerCase()
     : resolved;
