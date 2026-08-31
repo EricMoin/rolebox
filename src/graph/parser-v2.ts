@@ -459,9 +459,11 @@ const log = createSubLogger("graph-parser");
  *
  * Reads the file, deserializes it via the v2 parser (`parseGraph` in this
  * module — YAML and JSON are both accepted), then runs structural validation
- * (`validateGraphDeclaration` in ./validator-v2.ts). Returns the validated
+ * (`validateGraphDeclaration` in ./validator-v2.ts) in EXECUTION mode — a
+ * graph that could not actually run (an uncontained revise-free cycle, an
+ * unknown `on_condition` name) is rejected. Returns the validated
  * `GraphDeclaration`, or `null` when the file is unreadable, fails to
- * deserialize, or fails structural validation.
+ * deserialize, or fails execution-mode structural validation.
  *
  * @param filePath - absolute or relative path to a `.yaml`/`.yml`/`.json` graph file.
  * @returns the validated v2 graph declaration, or `null` on any failure.
@@ -488,7 +490,11 @@ export function importGraphFromFile(filePath: string): GraphDeclaration | null {
   }
 
   const document: GraphDocument = parsed.graph;
-  const validation = validateGraphDeclaration(document);
+  // Execution-mode validation: a serialized graph file that CANNOT run — an
+  // uncontained revise-free cycle (deadlocks at run) or an unknown
+  // on_condition name (never-satisfiable edge) — is rejected here (null)
+  // instead of validating clean and deadlocking when the graph is executed.
+  const validation = validateGraphDeclaration(document, { mode: "execution" });
   for (const warning of validation.warnings) {
     log.info(warning);
   }

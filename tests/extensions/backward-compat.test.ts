@@ -28,9 +28,9 @@ describe("Backward Compatibility", () => {
     expect(values).toContain("log");
   });
 
-  it("NOTIFICATION_EVENT_TYPES has 9 built-in event types", () => {
+  it("NOTIFICATION_EVENT_TYPES has 10 built-in event types", () => {
     const values = Object.values(NOTIFICATION_EVENT_TYPES);
-    expect(values.length).toBe(9);
+    expect(values.length).toBe(10);
     expect(values).toContain("idle");
     expect(values).toContain("question");
     expect(values).toContain("error");

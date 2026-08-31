@@ -21,13 +21,15 @@
  *      once the 25th answer arrives — sink dispatch count === 1 (and its call
  *      is the LAST dispatch, after all 25 roots), phase Complete.
  *
- *  (c) UNSATISFIABLE QUORUM: sink with `join {strategy:"quorum", quorum:3}` fed
- *      by only 2 upstreams. `evaluateJoin` returns `failed` once the quorum
- *      becomes impossible (join-evaluator.ts:249: `answerCount + pendingCount
- *      < n`), so the sink never activates; after both upstreams complete, the
- *      runtime deadlock guard (engine-termination.ts) escalates the sink with
- *      "graph deadlock" and the graph completes. Assert the sink was never
- *      dispatched.
+ *  (c) UNSATISFIABLE QUORUM — REJECTED AT CONSTRUCTION: sink with
+ *      `join {strategy:"quorum", quorum:3}` fed by only 2 upstreams. The
+ *      arity guard (validator-v2 rule 9) rejects the declaration once the
+ *      sink's first incoming edge exists: `quorum > in-degree` is
+ *      unsatisfiable, so it is a structural error, not a runtime force-fail.
+ *      The edge-add commit throws and the registry is left unchanged.
+ *      (Previously pinned the old runtime behavior — evaluateJoin force-
+ *      failing "quorum impossible" and the deadlock guard escalating the
+ *      sink; that path is now unreachable through the tools.)
  *
  *  (d) DUPLICATE / CONTRADICTORY EDGES: A→B twice — `always` + `on_signal(answer)`.
  *      Both edges activate on A's answer, but the reEnter guard
@@ -66,8 +68,6 @@ import type {
   TaskTerminatedCallback,
 } from "../../src/graph/engine/dispatch-bridge.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
-
-const DEADLOCK_REASON = "graph deadlock: no active upstream can satisfy pending node(s)";
 
 /**
  * Scripted-dispatch variant for case (e): tasks for node ids in `fail` are
@@ -234,9 +234,8 @@ describe("graph scale + duplicate/contradictory wiring", () => {
     expect(json.nodes.every((n) => n.status === NodeStatus.Completed)).toBe(true);
   });
 
-  it("(c) unsatisfiable quorum: sink quorum:3 fed by only 2 upstreams never activates; deadlock guard escalates it, phase Complete", async () => {
-    const fake = new ScriptedDispatch();
-    const ts = new GraphToolSet({ dispatch: fake });
+  it("(c) unsatisfiable quorum: sink quorum:3 fed by only 2 upstreams is REJECTED at construction (arity guard, atomic)", () => {
+    const ts = new GraphToolSet({ dispatch: new ScriptedDispatch() });
     const g = ts.graph_create({ name: "quorum-impossible" });
     ts.graph_add_node({ graph_id: g.graph_id, id: "U1", agent: "a", prompt: "p-U1" });
     ts.graph_add_node({ graph_id: g.graph_id, id: "U2", agent: "a", prompt: "p-U2" });
@@ -247,27 +246,19 @@ describe("graph scale + duplicate/contradictory wiring", () => {
       prompt: "p-sink",
       join: { strategy: "quorum", quorum: 3 },
     });
-    ts.graph_add_edge({ graph_id: g.graph_id, from: "U1", to: "sink", type: "always" });
-    ts.graph_add_edge({ graph_id: g.graph_id, from: "U2", to: "sink", type: "always" });
+    const before = JSON.stringify(ts["getEntry"](g.graph_id).declaration);
 
-    await ts.graph_run({ graph_id: g.graph_id });
-    await settle();
+    // The arity upper bound is deferred while the sink has no incoming edges
+    // (incremental construction), so the node-add above was accepted. The
+    // FIRST incoming edge makes the unsatisfiable quorum visible:
+    // quorum:3 > in-degree 1 → validator rule 9 rejects at commit, and the
+    // registry is left byte-identical (atomicity).
+    expect(() =>
+      ts.graph_add_edge({ graph_id: g.graph_id, from: "U1", to: "sink", type: "always" }),
+    ).toThrow(/quorum:3 exceeds its in-degree \(1\)/);
 
-    // evaluateJoin turns `failed` once the quorum is unreachable
-    // (join-evaluator.ts:249: answerCount + pendingCount < 3) — the sink never
-    // becomes ready, so it is never dispatched. After both upstreams complete,
-    // the runtime deadlock guard escalates the pending sink with the guard's
-    // reason and the graph completes.
-    expect(fake.dispatches("sink")).toBe(0);
-    expect(fake.dispatchCount).toBe(2); // only the two upstreams ever ran
-
-    const json = statusJson(ts, g.graph_id);
-    expect(json.phase).toBe(EnginePhase.Complete);
-    const nodes = byId(json);
-    expect(nodes.get("U1")!.status).toBe(NodeStatus.Completed);
-    expect(nodes.get("U2")!.status).toBe(NodeStatus.Completed);
-    expect(nodes.get("sink")!.status).toBe(NodeStatus.Escalate);
-    expect(nodes.get("sink")!.error).toContain(DEADLOCK_REASON);
+    expect(JSON.stringify(ts["getEntry"](g.graph_id).declaration)).toBe(before);
+    expect(ts["getEntry"](g.graph_id).declaration.edges).toHaveLength(0);
   });
 
   it("(d) duplicate/contradictory edges A->B (always + on_signal answer) — B activates exactly once, no duplicate dispatch", async () => {

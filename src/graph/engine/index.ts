@@ -1324,6 +1324,12 @@ class EngineRuntimeImpl implements EngineRuntime {
       transitionPhase(this.state, EnginePhase.Complete);
     }
 
+    // Subtask 2 (escalate-retry backoff): the graph is terminal — no withheld
+    // retry re-dispatch can be pending. Clear the wake-up timer (the
+    // `_checkTermination` guard already clears it when the standard completion
+    // path fires; this covers the manual-transition fallback above).
+    this.advance.clearBackoffTimer();
+
     this.persistence?.save(this.state);
     // flush-on-terminate: the graph reached `complete` (cancel teardown) — drain
     // any pending debounced non-critical write so the on-disk state is complete.
@@ -1393,6 +1399,9 @@ class EngineRuntimeImpl implements EngineRuntime {
     // field. A disposed runtime keeps no handles to stale callbacks and a
     // re-run re-registers fresh ones (a second dispose is then a no-op).
     this.advance.clearTerminationSubscriptions();
+    // Subtask 2 (escalate-retry backoff): cancel the pending backoff wake-up
+    // timer — a disposed runtime must never fire a dispatch pass.
+    this.advance.clearBackoffTimer();
     // Review 05-F1/F3 (M14/ML1): a replaced / discarded runtime must cancel
     // its pending debounced persistence write — flushing it would overwrite
     // the successor runtime's newer state on the shared state file. dispose

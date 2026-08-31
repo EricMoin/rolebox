@@ -1194,6 +1194,65 @@ describe("NotificationManager", () => {
     await mgr.dispose();
   });
 
+  it("handleApprovalPending fires notification routed through channels", async () => {
+    const logFile = join(tmpDir, "log_ap.jsonl");
+    const mgr = createManager({
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
+    });
+
+    mgr.handleApprovalPending("ses_ap", "graph_1", "node_a");
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(existsSync(logFile)).toBe(true);
+    const lines = readFileSync(logFile, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(1);
+    const parsed = JSON.parse(lines[0]);
+    expect(parsed.eventType).toBe("approval_pending");
+
+    await mgr.dispose();
+  });
+
+  it("handleApprovalPending renders graph_id/node_id into the title template", async () => {
+    const logFile = join(tmpDir, "log_ap_title.jsonl");
+    const mgr = createManager({
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
+    });
+
+    mgr.handleApprovalPending("ses_ap2", "graph_2", "node_b");
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(existsSync(logFile)).toBe(true);
+    const parsed = JSON.parse(readFileSync(logFile, "utf-8").trim());
+    // Default event config title template: "Approval gate waiting: {graph_id}/{node_id}".
+    expect(parsed.title).toBe("Approval gate waiting: graph_2/node_b");
+
+    await mgr.dispose();
+  });
+
+  it("handleApprovalPending respects the per-event throttle guard", async () => {
+    const logFile = join(tmpDir, "log_ap_throttle.jsonl");
+    const mgr = createManager({
+      channels: [{ kind: NOTIFICATION_CHANNEL_KINDS.File, enabled: true, path: logFile }],
+      throttle: {
+        windowMs: 10000,
+        maxPerWindow: 100,
+        perEventType: {
+          approval_pending: { windowMs: 10000, maxPerWindow: 1 },
+        },
+      },
+    });
+
+    mgr.handleApprovalPending("ses_ap_throttle", "graph_3", "node_c");
+    mgr.handleApprovalPending("ses_ap_throttle", "graph_3", "node_c"); // throttled
+
+    await new Promise((r) => setTimeout(r, 200));
+    expect(existsSync(logFile)).toBe(true);
+    const lines = readFileSync(logFile, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(1);
+
+    await mgr.dispose();
+  });
+
   it("handles chat message and marks activity", () => {
     const mgr = createManager();
     // Should not throw

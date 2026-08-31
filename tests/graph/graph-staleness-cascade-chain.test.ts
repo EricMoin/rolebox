@@ -362,7 +362,10 @@ function parentCtx(graphId: string): DispatchParentContext {
 /**
  * The ①→②→③→④ chain topology (no fan-out beyond the join): B, C roots;
  * S join-all fed by B and C; D fed by S via a never-firing `on_condition`
- * edge (condition "never" — the default resolver always returns false).
+ * edge (condition "signal_observed(never)" — no node ever records a signal
+ * of type "never", so the default resolver always returns false). The
+ * registered-name spelling keeps the fixture compatible with the validator's
+ * condition-vocabulary rule (unknown names now fail at commit).
  */
 function buildChain(fake: ChainDispatch): { ts: GraphToolSet; graphId: string } {
   const ts = new GraphToolSet({ dispatch: fake });
@@ -384,7 +387,7 @@ function buildChain(fake: ChainDispatch): { ts: GraphToolSet; graphId: string } 
     from: "S",
     to: "D",
     type: "on_condition",
-    condition: "never",
+    condition: "signal_observed(never)",
   });
   return { ts, graphId: g.graph_id };
 }

@@ -15,6 +15,7 @@ import {
 import type {
   NotificationConfig,
   NotificationChannelConfig,
+  NotificationTemplateVars,
   PlatformInfo,
 } from "./types.ts";
 import { mergeNotificationConfigs } from "./config.ts";
@@ -114,8 +115,10 @@ export class NotificationManager {
     agent?: string;
     roleName?: string;
     questionText?: string;
+    /** Extra template variables merged over the base vars (e.g. graph_id / node_id). */
+    templateVars?: NotificationTemplateVars;
   }): Promise<void> {
-    const { sessionID, eventType, agent, roleName, questionText } = opts;
+    const { sessionID, eventType, agent, roleName, questionText, templateVars } = opts;
 
     if (!VALID_NOTIFICATION_EVENT_TYPES.has(eventType)) {
       log.warn(`Unknown notification event type: "${eventType}"`);
@@ -147,6 +150,7 @@ export class NotificationManager {
         agent,
         roleName,
         dir: this.dir,
+        extraVars: templateVars,
       });
 
       if (questionText) {
@@ -323,6 +327,39 @@ export class NotificationManager {
       agent,
     }).catch((err) => {
       log.warn("Loop-complete notification failed", { sessionID, err });
+    });
+  }
+
+  /**
+   * Handle a graph reaching a quiescent-blocked state (one or more nodes await
+   * approval) by firing an ApprovalPending notification. Mirrors
+   * {@link handleDispatchComplete}: goes through the standard `notify` path so
+   * channel routing, quiet-hours, and throttle all apply. Passes `graph_id` /
+   * `node_id` as template vars so the title/message templates can reference
+   * them (e.g. "Approval gate waiting: {graph_id}/{node_id}").
+   *
+   * @param sessionID - Owning (emperor/orchestrator) session id.
+   * @param graphId - The blocked graph's id.
+   * @param nodeId - The blocked node id, when known. The graph-terminal seam
+   *   is graph-level and may not carry a single node id, so this is optional.
+   * @param agent - Optional agent tag for role-scoped config resolution.
+   */
+  handleApprovalPending(
+    sessionID: string,
+    graphId: string,
+    nodeId?: string,
+    agent?: string,
+  ): void {
+    this.notify({
+      sessionID,
+      eventType: NOTIFICATION_EVENT_TYPES.ApprovalPending,
+      agent,
+      templateVars: {
+        graph_id: graphId,
+        node_id: nodeId ?? "",
+      },
+    }).catch((err) => {
+      log.warn("Approval-pending notification failed", { sessionID, err });
     });
   }
 

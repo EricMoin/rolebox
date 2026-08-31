@@ -18,7 +18,7 @@ import {
   propagateRevise,
   propagateEscalate,
 } from "../../src/graph/engine/signal-propagation.ts";
-import { markEscalated, markRunning } from "../../src/graph/engine/node-lifecycle.ts";
+import { markEscalated, markReady, markRunning } from "../../src/graph/engine/node-lifecycle.ts";
 import { clearDirty } from "../../src/graph/engine/engine-persistence.ts";
 
 // ── Controllable fake dispatch port (mirrors engine-advance.test.ts) ───────
@@ -94,17 +94,47 @@ function convergeGraph(strategy: "all" | "any"): GraphDeclaration {
 }
 
 /** Linear A → B, optionally with a retry policy on the outbound edge. */
-function linearGraph(retryMax = 0): GraphDeclaration {
+function linearGraph(
+  retryMax = 0,
+  budget?: { max_retries?: number },
+  backoffMs?: number,
+): GraphDeclaration {
   return {
     version: 2,
     name: "linear",
     nodes: [
-      { id: "A", agent: "a1", prompt: "p1" },
+      {
+        id: "A",
+        agent: "a1",
+        prompt: "p1",
+        ...(budget ? { budget } : {}),
+      },
       { id: "B", agent: "a2", prompt: "p2" },
     ],
     edges: retryMax > 0
-      ? [{ from: "A", to: "B", type: "always", retry: { max: retryMax } }]
+      ? [{
+          from: "A",
+          to: "B",
+          type: "always",
+          retry: {
+            max: retryMax,
+            ...(backoffMs !== undefined ? { backoff_ms: backoffMs } : {}),
+          },
+        }]
       : [{ from: "A", to: "B", type: "always" }],
+  };
+}
+
+/** X → A where the ONLY retry policy is on the INCOMING edge to A. */
+function incomingRetryGraph(retryMax: number): GraphDeclaration {
+  return {
+    version: 2,
+    name: "incoming-retry",
+    nodes: [
+      { id: "X", agent: "a0", prompt: "x" },
+      { id: "A", agent: "a1", prompt: "a" },
+    ],
+    edges: [{ from: "X", to: "A", type: "always", retry: { max: retryMax } }],
   };
 }
 
@@ -378,6 +408,133 @@ describe("propagateEscalate (unit)", () => {
     expect(report.absorbed).toEqual([]);
     expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
     expect(report).not.toHaveProperty("rootReached");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// propagateEscalate — effective escalate-retry budget
+//
+// The retry gate is NOT limited to outbound-edge retry policies. The node's
+// effective escalate-retry budget is the max of its declared
+// `budget.max_retries`, the `retry.max` of any OUTBOUND edge, and the
+// `retry.max` of any INCOMING edge. These tests pin the budget-driven and
+// incoming-edge-driven retry lanes (regression: escalate used to bypass any
+// declared retry budget that was not an outbound edge property).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("propagateEscalate — retry budget policy", () => {
+  it("re-marks the node ready on the 1st and 2nd escalates from budget.max_retries=2 and stays escalated on the 3rd", () => {
+    // Node A declares budget.max_retries=2; the A→B edge carries NO retry.
+    const state = buildState(linearGraph(0, { max_retries: 2 }));
+    const node = state.nodes.get("A")!;
+
+    // 1st escalate: budget 2 > retryCount 0 → retry #1.
+    markRunning(state, node);
+    markEscalated(state, node, "boom-1");
+    let report = propagateEscalate(state, node, { reason: "boom-1" });
+    expect(node.status).toBe(NodeStatus.Ready);
+    expect(node.retryCount).toBe(1);
+    expect(isInFrontier(state, "A")).toBe(true);
+    expect(node.prompt).toContain("boom-1");
+    expect(report.retried).toEqual(["A"]);
+    expect(report.escalated).toEqual([]);
+
+    // 2nd escalate: budget 2 > retryCount 1 → retry #2.
+    markRunning(state, node);
+    markEscalated(state, node, "boom-2");
+    report = propagateEscalate(state, node, { reason: "boom-2" });
+    expect(node.status).toBe(NodeStatus.Ready);
+    expect(node.retryCount).toBe(2);
+    expect(report.retried).toEqual(["A"]);
+
+    // 3rd escalate: retryCount 2 is no longer < budget 2 → forward propagation,
+    // A stays escalated (the declared retry budget is honored, not bypassed).
+    markRunning(state, node);
+    markEscalated(state, node, "boom-3");
+    report = propagateEscalate(state, node, { reason: "boom-3" });
+    expect(node.status).toBe(NodeStatus.Escalate);
+    expect(node.retryCount).toBe(2);
+    expect(report.retried).toEqual([]);
+    // Downstream B untouched — the exhausted escalate simply walked forward.
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Pending);
+  });
+
+  it("makes the node retry-eligible from an INCOMING edge retry policy when it escalates", () => {
+    // A has NO outbound retry edge and NO budget; only the incoming X→A edge
+    // carries retry {max: 3}. A is a non-root node (starts pending) — bring it
+    // through the ready → running cycle as the engine would.
+    const state = buildState(incomingRetryGraph(3));
+    const node = state.nodes.get("A")!;
+
+    // 1st escalate: incoming-edge budget 3 > retryCount 0 → retry #1.
+    markReady(state, node);
+    markRunning(state, node);
+    markEscalated(state, node, "boom-1");
+    let report = propagateEscalate(state, node, { reason: "boom-1" });
+    expect(node.status).toBe(NodeStatus.Ready);
+    expect(node.retryCount).toBe(1);
+    expect(isInFrontier(state, "A")).toBe(true);
+    expect(report.retried).toEqual(["A"]);
+
+    // Retries #2 and #3 consume the incoming edge's max.
+    for (let i = 2; i <= 3; i++) {
+      markRunning(state, node);
+      markEscalated(state, node, `boom-${i}`);
+      report = propagateEscalate(state, node, { reason: `boom-${i}` });
+      expect(node.status).toBe(NodeStatus.Ready);
+      expect(node.retryCount).toBe(i);
+      expect(report.retried).toEqual(["A"]);
+    }
+
+    // 4th escalate: retryCount 3 is no longer < 3 → forward propagation.
+    markRunning(state, node);
+    markEscalated(state, node, "boom-4");
+    report = propagateEscalate(state, node, { reason: "boom-4" });
+    expect(node.status).toBe(NodeStatus.Escalate);
+    expect(node.retryCount).toBe(3);
+    expect(report.retried).toEqual([]);
+  });
+
+  it("takes the max across budget and edge policies (budget wins when larger)", () => {
+    // Outbound edge retry {max: 1} + budget.max_retries=3 → effective max 3.
+    const state = buildState(linearGraph(1, { max_retries: 3 }));
+    const node = state.nodes.get("A")!;
+
+    for (let i = 1; i <= 3; i++) {
+      markRunning(state, node);
+      markEscalated(state, node, `boom-${i}`);
+      const report = propagateEscalate(state, node, { reason: `boom-${i}` });
+      expect(node.status).toBe(NodeStatus.Ready);
+      expect(node.retryCount).toBe(i);
+      expect(report.retried).toEqual(["A"]);
+    }
+  });
+
+  it("sets retryBackoffUntil = now + backoff_ms when the highest-max retry edge declares backoff_ms", () => {
+    const state = buildState(linearGraph(2, undefined, 500));
+    const node = state.nodes.get("A")!;
+    const before = Date.now();
+    markRunning(state, node);
+    markEscalated(state, node, "boom");
+
+    propagateEscalate(state, node, { reason: "boom" });
+
+    expect(node.retryBackoffUntil).toBeDefined();
+    expect(node.retryBackoffUntil!).toBeGreaterThanOrEqual(before + 500);
+    expect(node.retryBackoffUntil!).toBeLessThanOrEqual(Date.now() + 500);
+  });
+
+  it("leaves retryBackoffUntil undefined when the retry allowance comes only from node budget (no retry edge)", () => {
+    const state = buildState(linearGraph(0, { max_retries: 2 }));
+    const node = state.nodes.get("A")!;
+    markRunning(state, node);
+    markEscalated(state, node, "boom");
+
+    propagateEscalate(state, node, { reason: "boom" });
+
+    expect(node.status).toBe(NodeStatus.Ready);
+    expect(node.retryCount).toBe(1);
+    expect(node.retryBackoffUntil).toBeUndefined();
   });
 });
 

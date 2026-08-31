@@ -8,6 +8,7 @@ export const NOTIFICATION_EVENT_TYPES = {
   DispatchComplete: "dispatch_complete",
   DispatchProgress: "dispatch_progress",
   LoopComplete: "loop_complete",
+  ApprovalPending: "approval_pending",
   SessionDeleted: "session_deleted",
   Custom: "custom",
 } as const;

@@ -536,6 +536,71 @@ describe("quiesce-before-drain (M5): completion is gated on an empty pendingComp
   });
 });
 
+// ── Escalate retry — drain-replay race guard ────────────────────────────────
+//
+// When an escalate is absorbed into an automatic retry (propagateEscalate
+// re-marks the escalating node ready), the escalate signal was already recorded
+// into the node's `signalsObserved["escalate"]` AND the graph-level
+// `signalLedger` entry by the delivery seam. If that recording survives while
+// the node re-dispatches, a deferred drain (`_drainDeferred` →
+// `_latestTerminating`) would replay it against the re-dispatched (Running)
+// node and re-escalate it — defeating the retry. The absorption branch must
+// clear the absorbed escalate recording so the drain skips the retried node.
+//
+// The race is driven through the engine's real double-delivery shape: a single
+// `onNodeSignalEmitted` call records once, then advances TWICE — once via the
+// registered signalBridge listener and once via its own `_advanceSignal`. The
+// second advance is deferred (`queuePendingCompletion`) because the lock is
+// held while the first advance re-dispatches the node; the drain then decides
+// whether to replay the recorded escalate.
+
+describe("escalate retry — drain-replay race guard", () => {
+  it("a duplicate escalate deferred while the retried node is Running again is NOT re-applied (node stays Running, retryCount unchanged)", async () => {
+    const events: GraphTerminalEvent[] = [];
+    // A → B with retry { max: 1 } on the outbound edge: exactly one automatic
+    // retry before the escalate is allowed to propagate.
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "retry-drain-race",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+      ],
+      edges: [{ from: "A", to: "B", type: "always", retry: { max: 1 } }],
+    };
+    const { engine, state } = buildEngine(decl, events);
+    // Wire the signalBridge listener — without it a single delivery advances
+    // exactly once and the deferred-duplicate race never occurs.
+    engine.register();
+
+    await engine.dispatchReady(); // A dispatched (Running)
+    // First escalate: absorbed into the automatic retry → A re-dispatched
+    // (Running), retryCount 0 → 1. The duplicate advance for the SAME delivery
+    // is deferred while the lock is held during the re-dispatch.
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "transient" });
+
+    // Yield past the microtask chain so the section's `finally` drain has run.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const a = state.nodes.get("A")!;
+    // The deferred replay must NOT re-escalate the re-dispatched node.
+    expect(a.status).toBe(NodeStatus.Running);
+    expect(a.retryCount).toBe(1); // unchanged — no second retry consumed
+    expect(a.sessionsSpawned).toBe(2); // exactly one re-dispatch
+    // The absorbed escalate recording was cleared: no replay material for the
+    // drain and no stale graph-level ledger entry.
+    expect(a.signalsObserved["escalate"]).toBeUndefined();
+    expect(state.signalLedger.has("A")).toBe(false);
+    // The deferred completion was consumed by the drain (skipped, not stuck).
+    expect(state.pendingCompletions).toHaveLength(0);
+    // B untouched — the escalation never propagated forward.
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Pending);
+    // Graph still executing — the retried node is scheduler-active.
+    expect(state.phase).toBe(EnginePhase.Executing);
+    expect(events).toHaveLength(0);
+  });
+});
+
 // ── No-op and safety ────────────────────────────────────────────────────────
 
 describe("onGraphTerminal safety", () => {

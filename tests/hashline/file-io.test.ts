@@ -262,11 +262,12 @@ describe("formatReadOutput", () => {
     expect(lines.length).toBe(3); // header only, no annotated lines
   });
 
-  it("handles file with just a newline (treated as empty)", () => {
+  it("handles file with just a newline (one empty line)", () => {
     const output = formatReadOutput("\n", "/fake/path");
     const lines = output.split("\n");
-    expect(lines[2]).toBe("totalLines: 0");
-    expect(lines.length).toBe(3); // header only
+    expect(lines[2]).toBe("totalLines: 1");
+    expect(lines[3]).toMatch(/^1#[A-Za-z0-9_-]{2}\|$/);
+    expect(lines.length).toBe(4); // 3 header + 1 annotated empty line
   });
 });
 

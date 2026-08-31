@@ -15,6 +15,7 @@ import {
   GRAPH_COMPLETE_MARKER,
   GRAPH_BLOCKED_MARKER,
   GRAPH_STALL_MARKER,
+  PENDING_APPROVALS_MARKER,
   DISPATCH_NOTIFICATION_MARKERS,
   isDispatchNotification,
   buildNotificationText,
@@ -73,7 +74,8 @@ describe("T1 Spike — Dispatch notification discriminator", () => {
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_COMPLETE_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_BLOCKED_MARKER);
     expect(DISPATCH_NOTIFICATION_MARKERS).toContain(GRAPH_STALL_MARKER);
-    expect(DISPATCH_NOTIFICATION_MARKERS.length).toBe(8);
+    expect(DISPATCH_NOTIFICATION_MARKERS).toContain(PENDING_APPROVALS_MARKER);
+    expect(DISPATCH_NOTIFICATION_MARKERS.length).toBe(9);
   });
 
   it("completion notification uses noReply:false (assert via text format)", () => {

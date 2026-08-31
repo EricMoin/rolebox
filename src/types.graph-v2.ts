@@ -118,8 +118,12 @@ export interface EdgeDeclaration {
   data_passthrough?: DataMapping;
   /**
    * Retry policy on escalate.
-   * Retry is an edge property, not a node property — it governs
-   * what happens when the upstream node signals escalate.
+   * Retry is an edge property, not a node property — it covers
+   * automatic retries of BOTH incident nodes on escalate: its source
+   * node, AND its target when the target itself escalates. The engine
+   * honors `backoff_ms` between attempts, and an effective per-node
+   * retry budget is resolved as the max of the node's own
+   * `budget.max_retries` and the `retry.max` of its incident edges.
    */
   retry?: RetryConfig;
 }
@@ -140,7 +144,7 @@ export interface DataMapping {
 
 /** Retry configuration embedded on an edge. */
 export interface RetryConfig {
-  /** Maximum number of automatic retries when upstream signals escalate */
+  /** Maximum number of automatic retries per incident node on escalate */
   max: number;
   /** Backoff in milliseconds between retries */
   backoff_ms?: number;

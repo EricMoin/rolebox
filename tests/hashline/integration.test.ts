@@ -317,7 +317,8 @@ describe("hashline integration", () => {
       });
       expect(result).not.toContain("Error:");
       const finalContent = await readFile(fp, "utf-8");
-      expect(finalContent).toBe("keep this\n\nkeep this too\n");
+      // D5: replace with empty content deletes the line — no blank line remains
+      expect(finalContent).toBe("keep this\nkeep this too\n");
     });
   });
 
@@ -393,11 +394,12 @@ describe("hashline integration", () => {
       const { version, lines, hw } = await readFileContent(fp);
       const hash1 = computeLineHashFor(lines[0], hw, 1);
       const hash2 = computeLineHashFor(lines[1], hw, 2);
-      // Replace line 1 changes content; append echo of line 2 becomes noop
+      // Replace line 1 changes content; append echo of line 2 in annotated
+      // LINE#HASH| form (D4: echo stripping requires the literal prefix) → noop
       const result = await createHashlineEditTool().execute({
         files: [{ filePath: fp, version, edits: [
           { pos: `1#${hash1}`, lines: "MODIFIED A" },
-          { op: "append" as const, pos: `2#${hash2}`, lines: "line B" },
+          { op: "append" as const, pos: `2#${hash2}`, lines: `2#${hash2}|line B` },
         ] }],
       });
       expect(result).not.toContain("Error:");

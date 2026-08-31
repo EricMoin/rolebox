@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import { canonicalizeFileText, computeFileVersion, computeLineHash, hashWidthForLineCount, formatHashLine } from "./hash.ts";
+import { canonicalizeFileText, computeFileVersion, computeLineHash, hashWidthForLineCount, formatHashLine, splitLines } from "./hash.ts";
 
 export function createHashlineReadTool() {
   return defineTool({
@@ -64,13 +64,10 @@ export function formatReadOutput(
   // Compute version from canonical content
   const version = computeFileVersion(content);
 
-  // Split into lines, stripping trailing newline to avoid empty trailing element
-  const normalized = content.endsWith("\n") ? content.slice(0, -1) : content;
-  const allLines = normalized === "" ? [] : normalized.split("\n");
-
-  // If the file ends with a trailing newline, the last element after split
-  // is an empty string — that's a valid empty trailing line. Keep it.
-  // But if the file is empty or has a single newline, handle correctly.
+  // Split into lines using the shared line model: a single trailing "\n" is
+  // the terminator of the last line, not an extra empty line. A file whose
+  // content is exactly "\n" is one (empty) line, not zero lines.
+  const allLines = splitLines(content);
   const totalLines = allLines.length;
 
   const hashWidth = hashWidthForLineCount(totalLines);
@@ -83,8 +80,9 @@ export function formatReadOutput(
   result.push(`hashWidth: ${hashWidth}`);
   result.push(`totalLines: ${totalLines}`);
 
-  // Determine window
-  const effectiveStart = offset ?? 1;
+  // Determine window. Clamp the start so offset > totalLines cannot produce
+  // endLine < startLine with zero annotated lines (D9).
+  const effectiveStart = totalLines > 0 ? Math.min(offset ?? 1, totalLines) : 1;
   const effectiveEnd = limit
     ? Math.min(effectiveStart + limit - 1, totalLines)
     : totalLines;

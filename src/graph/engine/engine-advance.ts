@@ -532,6 +532,17 @@ export class AdvanceEngine {
     taskId: string;
     callback: TaskTerminatedCallback;
   }> = [];
+  /**
+   * Single pending wake-up timer for escalate-retry backoff (subtask 2). Armed
+   * by {@link _rescheduleBackoffDispatch} at the end of every dispatch pass
+   * for the EARLIEST pending `retryBackoffUntil` deadline among Ready frontier
+   * nodes; firing re-enters the advancement lock and re-runs the dispatch pass
+   * plus the termination check. Exactly one handle per engine: re-scheduling
+   * clears the previous timer, teardown (S7 dispose) clears it, and reaching
+   * the terminal phase clears it — so a stale fire can never dispatch on a
+   * completed / disposed graph. Absent (undefined) when no backoff is pending.
+   */
+  private _backoffTimer?: ReturnType<typeof setTimeout>;
 
   constructor(opts: AdvanceEngineOptions) {
     this.state = opts.state;
@@ -989,6 +1000,14 @@ export class AdvanceEngine {
         `engine: termination re-check after containment threw for graph "${this.state.graphId}": ${this._errorString(termErr)}`,
       );
     }
+    // Subtask 2 (escalate-retry backoff): the containment path never ran a
+    // dispatch pass (work() threw before it), so `_propagateEscalateSignal` may
+    // have re-marked the escalated node `ready` with a FUTURE retryBackoffUntil
+    // (the shared retry gate) — no pass, no timer. Re-arm here so a
+    // backoff-withheld Ready node is never stranded without a wake-up timer
+    // (which would hang the graph in `executing` forever). No-op when no Ready
+    // frontier node is inside its backoff window.
+    this._rescheduleBackoffDispatch();
   }
 
   /** Best-effort error message from an unknown throw value. */
@@ -1596,15 +1615,29 @@ export class AdvanceEngine {
    * Dispatch every node currently `ready` in the frontier (design §3.3 step 6).
    * Each becomes `running` atomically inside the critical section and is
    * removed from the frontier, then dispatched to its bound agent.
+   *
+   * Subtask 2 (escalate-retry backoff): a Ready node whose retry-backoff
+   * deadline has not yet passed (`retryBackoffUntil > now`) is SKIPPED on this
+   * pass — it stays Ready in the frontier, is never `markRunning`-ed, and is
+   * never launched. Because a Ready node is scheduler-active to
+   * `checkGraphTermination`, the graph phase stays `executing` through the
+   * backoff window; `_rescheduleBackoffDispatch` (called below) arms the
+   * single wake-up timer that re-runs this pass at the earliest deadline.
    */
   private async _dispatchReadyNodes(): Promise<void> {
     const state = this.state;
     const readyIds = [...state.frontier];
+    const now = Date.now();
     for (const id of readyIds) {
       const node = state.nodes.get(id);
       if (!node || node.status !== NodeStatus.Ready) continue;
+      if (this._isBackoffPending(node, now)) continue;
       await this._dispatchNode(state, node);
     }
+    // Subtask 2 (escalate-retry backoff): (re)arm the single wake-up timer for
+    // the earliest pending backoff deadline — a pass that found no pending
+    // backoff clears any stale timer instead.
+    this._rescheduleBackoffDispatch();
   }
 
   /** Dispatch a single ready node: budget pre-check, mark running, launch. */
@@ -1612,6 +1645,19 @@ export class AdvanceEngine {
     state: EngineState,
     node: NodeRuntimeState,
   ): Promise<void> {
+    // Subtask 2 (escalate-retry backoff): defense-in-depth — a backoff-pending
+    // Ready node is never dispatched by a direct caller either (the pass guard
+    // in `_dispatchReadyNodes` already skips it). Leave it Ready in the
+    // frontier; the wake-up timer re-runs the pass at its deadline.
+    if (this._isBackoffPending(node, Date.now())) return;
+    // Consume the backoff deadline: the node is now actually being dispatched,
+    // so the withheld-until marker has served its purpose. Cleared before the
+    // launch so a later retry round computes a FRESH deadline from the retry
+    // gate; the surrounding critical section's persistence picks the clear up
+    // (markRunning below marks the state dirty regardless).
+    if (node.retryBackoffUntil !== undefined) {
+      node.retryBackoffUntil = undefined;
+    }
     // Budget pre-checks (graph-level first, then per-node — both live through
     // `GraphBudgetPort`, see `budget-bridge.ts`). A breached ceiling escalates
     // the ready node — it is never dispatched. A GRAPH-level breach additionally
@@ -1959,6 +2005,100 @@ export class AdvanceEngine {
       // deadlock guard may fire even when an escalated/timed-out node exists.
       (nodeId) => this._isPendingDeadEnded(nodeId),
     );
+    // Subtask 2 (escalate-retry backoff): a graph that reached its terminal
+    // phase (`complete`) has no Ready nodes left to dispatch — clear the
+    // wake-up timer so a stale fire can never run a dispatch pass on the
+    // completed graph. During a backoff window the graph stays `executing`
+    // (the withheld Ready node counts scheduler-active to
+    // `checkGraphTermination`), so this only fires when the window is genuinely
+    // over or the withheld node was retired through another path.
+    if (this.state.phase === EnginePhase.Complete) {
+      this._clearBackoffTimer();
+    }
+  }
+
+  /**
+   * Whether a Ready node's automatic escalate-retry dispatch is currently
+   * withheld by an unexpired backoff deadline (subtask 2). A node re-marked
+   * `ready` by the escalate retry gate (signal-propagation.ts) with
+   * `retryBackoffUntil > now` must not be dispatched until the deadline
+   * passes — it stays Ready in the frontier, keeping the graph `executing`
+   * (a Ready node is scheduler-active to `checkGraphTermination`).
+   */
+  private _isBackoffPending(node: NodeRuntimeState, now: number): boolean {
+    return node.retryBackoffUntil !== undefined && node.retryBackoffUntil > now;
+  }
+
+  /**
+   * (Re)arm the single wake-up timer for the earliest pending backoff deadline.
+   *
+   * Called at the end of every dispatch pass ({@link _dispatchReadyNodes}):
+   * clears any previously-armed timer, then — when at least one Ready frontier
+   * node is still inside its retry-backoff window — schedules ONE setTimeout
+   * for the earliest deadline. The timer callback re-enters the advancement
+   * lock via {@link _runControlOperation} (the same bounded lock-acquisition
+   * retry used by the approve/reject control paths) and re-runs the dispatch
+   * pass plus the termination check, so a backoff-withheld retry node is
+   * re-dispatched the moment its window closes — with no polling and no lock
+   * held between passes (a setTimeout callback is a fresh macrotask, never
+   * inside a dispatch await — the "no await inside dispatch" constraint).
+   *
+   * A pass that finds no pending backoff leaves no timer armed: a stale timer
+   * from an earlier pass would otherwise fire a dispatch pass on a graph that
+   * no longer needs one. The timer is unref'd so it never keeps the process
+   * alive on its own.
+   */
+  private _rescheduleBackoffDispatch(): void {
+    this._clearBackoffTimer();
+    let earliest: number | undefined;
+    const now = Date.now();
+    for (const id of this.state.frontier) {
+      const node = this.state.nodes.get(id);
+      if (!node || node.status !== NodeStatus.Ready) continue;
+      const until = node.retryBackoffUntil;
+      if (until === undefined || until <= now) continue;
+      if (earliest === undefined || until < earliest) earliest = until;
+    }
+    if (earliest === undefined) return;
+    const delay = Math.max(0, earliest - Date.now());
+    this._backoffTimer = setTimeout(() => {
+      this._backoffTimer = undefined;
+      // The graph may have reached its terminal phase while the timer was
+      // pending (cancellation / completion raced the deadline) — a completed
+      // graph has no Ready nodes left to dispatch, so skip the lock churn.
+      if (this.state.phase !== EnginePhase.Executing) return;
+      void this._runControlOperation(async () => {
+        await this._dispatchReadyNodes();
+        this._checkTermination();
+      }).catch((err) => {
+        logWarn(
+          `engine: backoff re-dispatch failed for graph "${this.state.graphId}": ${this._errorString(err)}`,
+        );
+      });
+    }, delay);
+    (
+      this._backoffTimer as (typeof this._backoffTimer) & {
+        unref?: () => unknown;
+      }
+    )?.unref?.();
+  }
+
+  /**
+   * Clear the pending backoff wake-up timer (no-op when none is armed).
+   * Public — the S7 dispose path (`src/graph/engine/index.ts` dispose) and the
+   * manual terminal-transition paths (cancel) call it so a disposed /
+   * completed engine never fires a dispatch pass.
+   */
+  clearBackoffTimer(): void {
+    this._clearBackoffTimer();
+  }
+
+  /** Clear the armed wake-up timer (no-op when none is armed). */
+  private _clearBackoffTimer(): void {
+    if (this._backoffTimer !== undefined) {
+      clearTimeout(this._backoffTimer);
+      this._backoffTimer = undefined;
+    }
   }
 
   /**

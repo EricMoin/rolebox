@@ -74,13 +74,19 @@ import {
 import {
   seedSentFinalNotifies,
   getSentFinalNotifies,
+  enqueueNotify,
+  PENDING_APPROVALS_MARKER,
 } from "./dispatch/notification.ts";
+import { buildReminder } from "./prompt/reminder.ts";
+import { scanPersistedStates } from "./graph/tools/persisted-state.ts";
+import { listPendingApprovals } from "./graph/tools/status-queries.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
 import { recoverInterruptedGraphs } from "./graph/engine/engine-startup.ts";
 import {
   GraphEventRecorder,
   createGraphNotifier,
   createGraphTerminalNotifier,
+  type GraphTerminalEvent,
   type NodeLivenessFeed,
 } from "./graph/engine/index.ts";
 import {
@@ -144,6 +150,47 @@ let piNotificationManager: NotificationManager | undefined;
  */
 export function getPiNotificationManager(): NotificationManager | undefined {
   return piNotificationManager;
+}
+
+/**
+ * Scan the on-disk persisted engine store and enumerate every graph gate still
+ * awaiting a human approval decision (a `blocked` node with `needsApproval`).
+ * This is the authoritative cross-session source at startup — it holds gates
+ * persisted by earlier sessions and every graph recovered this boot. The pure
+ * `listPendingApprovals` helper (subtask 1) does the enumeration; this wrapper
+ * owns only the `scanPersistedStates` read. Returns an empty array when the
+ * store is empty or no gate is blocked (never an invented row).
+ */
+export function collectStartupPendingApprovals(
+  stateDir: string,
+): ReturnType<typeof listPendingApprovals> {
+  const states = scanPersistedStates(stateDir).loaded;
+  return listPendingApprovals(states);
+}
+
+/**
+ * Build the single aggregated `[PENDING APPROVALS]` system-reminder body for a
+ * non-empty set of pending-approval entries. Each gate is listed with its graph
+ * id, node id, agent, and a paste-ready `graph_approve` call. Empty input yields
+ * an empty string (caller treats it as a silent no-op).
+ */
+export function buildPendingApprovalsReminder(
+  pending: ReturnType<typeof listPendingApprovals>,
+): string {
+  if (pending.length === 0) return "";
+  const gatesBody = pending
+    .map(
+      (e) =>
+        `- ${e.nodeId} (graph: ${e.graphId}, agent: ${e.agent}) → ${e.approveCall}`,
+    )
+    .join("\n");
+  return buildReminder({
+    marker: PENDING_APPROVALS_MARKER,
+    fields: [{ label: "count", value: String(pending.length) }],
+    action:
+      "Review each blocked gate and run its graph_approve call to resolve the pending decision.",
+    body: gatesBody,
+  });
 }
 
 // ── Canonical event property helpers ──────────────────────────────────────
@@ -705,8 +752,13 @@ export default async function (pi: any): Promise<void> {
     });
     const dispatchManager = result.manager;
 
+    // Graceful degradation: recover() failure → log error + use empty state.
+    // Mirrors the opencode path (dispatch-service.ts:120-126) so a pre-fix lock
+    // EPERM throw (or any recover() failure) no longer aborts Pi initialization.
     if (result.recoverError) {
-      throw result.recoverError;
+      log.error("DispatchManager.recover() failed, continuing with empty state", {
+        error: result.recoverError.message,
+      });
     }
 
     log.info("Dispatch manager initialized", {
@@ -818,9 +870,26 @@ export default async function (pi: any): Promise<void> {
             onNodeCompletion: createGraphNotifier(notifyClient, {
               emperorSessionId: recoveredEmperorSessionId,
             }),
-            onGraphTerminal: createGraphTerminalNotifier(notifyClient, {
-              emperorSessionId: recoveredEmperorSessionId,
-            }),
+            // Wrap the terminal notifier so a quiescent-BLOCKED graph ALSO fires
+            // an OS-level ApprovalPending notification (desktop toast / sound /
+            // webhook via the shared NotificationManager, honoring quiet-hours +
+            // throttle). Purely additive — the underlying session-reminder
+            // behavior of the non-blocked branch is unchanged.
+            onGraphTerminal: ((inner) => {
+              return async (event: GraphTerminalEvent) => {
+                if (event.isBlocked) {
+                  getPiNotificationManager()?.handleApprovalPending(
+                    recoveredEmperorSessionId,
+                    event.graphId,
+                  );
+                }
+                return inner(event);
+              };
+            })(
+              createGraphTerminalNotifier(notifyClient, {
+                emperorSessionId: recoveredEmperorSessionId,
+              }),
+            ),
           }
         : {}),
     });
@@ -831,6 +900,48 @@ export default async function (pi: any): Promise<void> {
         recovered: graphRecoveryReport.recovered,
         failed: graphRecoveryReport.failed.length,
       });
+    }
+
+    // ── Startup "pending approvals" aggregate reminder ──────────────────
+    //
+    // After recovery, surface every gate still awaiting a human decision. The
+    // on-disk persisted store scanned below is the authoritative cross-session
+    // source at boot: it holds any blocked graph persisted by an earlier
+    // session AND every graph just recovered (recovery loads from — and re-
+    // flushes to — this same store), so `scanPersistedStates` sees them all.
+    // We enumerate the gates via the pure `listPendingApprovals` helper
+    // (subtask 1) and inject exactly ONE [PENDING APPROVALS] system-reminder
+    // into the emperor session listing each blocked gate and its graph_approve
+    // call. `noReply: false` so the emperor wakes to decide. When no gate is
+    // pending or no session is resolvable, this is a silent no-op. The marker
+    // is registered in DISPATCH_NOTIFICATION_MARKERS so it counts as a non-user
+    // turn and never resets the auto-continue counter.
+    if (notifyClient && recoveredEmperorSessionId) {
+      try {
+        const pending = collectStartupPendingApprovals(graphRecoveryStateDir);
+        const reminder = buildPendingApprovalsReminder(pending);
+
+        if (reminder !== "") {
+          await enqueueNotify(recoveredEmperorSessionId, async () => {
+            await notifyClient.prompt(recoveredEmperorSessionId, {
+              parts: [{ type: "text", text: reminder }],
+              noReply: false,
+            });
+            return true;
+          });
+          log.info("Injected startup pending-approvals reminder", {
+            count: pending.length,
+          });
+        }
+      } catch (err) {
+        log.debug("startup pending-approvals reminder failed", {
+          error: formatError(err),
+        });
+      }
+    } else if (!notifyClient) {
+      log.debug("startup pending-approvals reminder skipped — no notify client");
+    } else if (!recoveredEmperorSessionId) {
+      log.debug("startup pending-approvals reminder skipped — no emperor session");
     }
 
 

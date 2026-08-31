@@ -74,7 +74,9 @@ export class GraphStore {
   }
 
   private _commitSave(statePath: string, tmp: string): void {
-    try { unlinkSync(statePath); } catch {}
+    // Atomic replace: rename-over the destination. POSIX rename is atomic, so
+    // a concurrent reader never observes an ENOENT window and a crash never
+    // leaves the target missing.
     renameSync(tmp, statePath);
   }
 

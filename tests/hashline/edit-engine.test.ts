@@ -261,12 +261,12 @@ describe("toNewLines", () => {
     expect(toNewLines(["a", "b"])).toEqual(["a", "b"]);
   });
 
-  it("handles empty string as single empty line", () => {
-    expect(toNewLines("")).toEqual([""]);
+  it("maps empty string to empty array (D5 deletion)", () => {
+    expect(toNewLines("")).toEqual([]);
   });
 
-  it("handles empty array as single empty line", () => {
-    expect(toNewLines([])).toEqual([""]);
+  it("maps empty array to empty array (D5 deletion)", () => {
+    expect(toNewLines([])).toEqual([]);
   });
 });
 
@@ -332,12 +332,13 @@ describe("restoreLeadingIndent", () => {
 // ════════════════════════════════════════════════════════════════════
 
 describe("stripInsertAnchorEcho", () => {
-  it("strips anchor echo from start of newLines", () => {
+  it("keeps bare content-equal first line (echo needs annotated prefix form)", () => {
     const result = stripInsertAnchorEcho("const x = 1;", [
       "const x = 1;",
       "const y = 2;",
     ]);
-    expect(result).toEqual(["const y = 2;"]);
+    // D4: a bare content line that merely equals the anchor is NOT an echo
+    expect(result).toEqual(["const x = 1;", "const y = 2;"]);
   });
 
   it("returns newLines unchanged when no echo", () => {
@@ -353,9 +354,9 @@ describe("stripInsertAnchorEcho", () => {
     expect(result).toEqual(["new line"]);
   });
 
-  it("returns empty array when all lines are echo", () => {
+  it("keeps bare content-equal single line (no longer stripped)", () => {
     const result = stripInsertAnchorEcho("hello", ["hello"]);
-    expect(result).toEqual([]);
+    expect(result).toEqual(["hello"]);
   });
 
   it("does NOT strip echo when anchor has whitespace difference (exact-match only)", () => {
@@ -365,9 +366,9 @@ describe("stripInsertAnchorEcho", () => {
     expect(result).toEqual(["hello", "world"]);
   });
 
-  it("strips echo on exact match (whitespace-sensitive)", () => {
+  it("keeps bare content-equal first line even on exact match", () => {
     const result = stripInsertAnchorEcho("hello", ["hello", "world"]);
-    expect(result).toEqual(["world"]);
+    expect(result).toEqual(["hello", "world"]);
   });
 });
 
@@ -376,12 +377,12 @@ describe("stripInsertAnchorEcho", () => {
 // ════════════════════════════════════════════════════════════════════
 
 describe("stripInsertBeforeEcho", () => {
-  it("strips anchor echo from end of newLines", () => {
+  it("keeps bare content-equal last line (echo needs annotated prefix form)", () => {
     const result = stripInsertBeforeEcho("const z = 3;", [
       "const x = 1;",
       "const z = 3;",
     ]);
-    expect(result).toEqual(["const x = 1;"]);
+    expect(result).toEqual(["const x = 1;", "const z = 3;"]);
   });
 
   it("returns newLines unchanged when no echo", () => {
@@ -389,9 +390,9 @@ describe("stripInsertBeforeEcho", () => {
     expect(result).toEqual(["const x = 1;"]);
   });
 
-  it("returns empty array when all lines are echo", () => {
+  it("keeps bare content-equal single line (no longer stripped)", () => {
     const result = stripInsertBeforeEcho("hello", ["hello"]);
-    expect(result).toEqual([]);
+    expect(result).toEqual(["hello"]);
   });
 });
 
@@ -406,22 +407,22 @@ describe("stripRangeBoundaryEcho", () => {
     "end",
   ];
 
-  it("strips start boundary echo from beginning", () => {
+  it("keeps bare boundary-content lines (echo needs annotated prefix form)", () => {
     const result = stripRangeBoundaryEcho(lines, 1, 3, [
       "start",
       "new content",
       "end",
     ]);
-    // "start" echoed, "end" echoed → only "new content" remains
-    expect(result).toEqual(["new content"]);
+    // D4: bare "start"/"end" merely equal the boundaries — not echoes
+    expect(result).toEqual(["start", "new content", "end"]);
   });
 
-  it("strips end boundary echo from end", () => {
+  it("keeps bare end-boundary-content line (no longer stripped)", () => {
     const result = stripRangeBoundaryEcho(lines, 1, 3, [
       "new content only",
       "end",
     ]);
-    expect(result).toEqual(["new content only"]);
+    expect(result).toEqual(["new content only", "end"]);
   });
 
   it("returns unchanged when no echo", () => {
@@ -726,12 +727,12 @@ describe("applyInsertAfter", () => {
     expect(result).toEqual(["a", "b", "x", "y", "c"]);
   });
 
-  it("strips anchor echo from inserted content", () => {
+  it("keeps bare content-equal line in inserted content (echo needs prefix form)", () => {
     const lines = ["a", "b", "c"];
     const hash = computeLineHash("b", 3, 2);
     const result = applyInsertAfter(lines, `2#${hash}`, ["b", "x", "y"], 3);
-    // The leading "b" is the anchor echo, should be stripped
-    expect(result).toEqual(["a", "b", "x", "y", "c"]);
+    // D4: a bare "b" that merely equals the anchor is NOT an echo — inserted as-is
+    expect(result).toEqual(["a", "b", "b", "x", "y", "c"]);
   });
 
   it("returns original lines for empty insert", () => {
@@ -754,12 +755,12 @@ describe("applyInsertBefore", () => {
     expect(result).toEqual(["a", "x", "y", "b", "c"]);
   });
 
-  it("strips anchor echo from inserted content", () => {
+  it("keeps bare content-equal line in inserted content (echo needs prefix form)", () => {
     const lines = ["a", "b", "c"];
     const hash = computeLineHash("b", 3, 2);
     const result = applyInsertBefore(lines, `2#${hash}`, ["x", "y", "b"], 3);
-    // The trailing "b" is the anchor echo, should be stripped
-    expect(result).toEqual(["a", "x", "y", "b", "c"]);
+    // D4: a bare "b" that merely equals the anchor is NOT an echo — inserted as-is
+    expect(result).toEqual(["a", "x", "y", "b", "b", "c"]);
   });
 });
 

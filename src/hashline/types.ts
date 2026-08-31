@@ -91,6 +91,10 @@ export interface FileTextEnvelope {
   content: string;
   hadBom: boolean;
   lineEnding: "\n" | "\r\n";
+  /** Per-line original terminator: entry i is the terminator that followed the
+   * original (i+1)-th logical line. "\r\n" = CRLF, "\n" = bare LF, "" = last
+   * line had no terminator. Preserves mixed CRLF+LF files on restore (D10). */
+  lineEols: Array<"\r\n" | "\n" | "">;
 }
 
 /** A hash mismatch for error reporting */

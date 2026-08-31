@@ -3,6 +3,7 @@ import type { PluginContext } from "./context.ts";
 import { EventBus } from "./event-bus.ts";
 import { createSubLogger } from "../logger.ts";
 import { StartupChecker } from "../recovery/startup-check.ts";
+import type { StartupHealth } from "../recovery/startup-check.ts";
 import { stateDirFor } from "../utils/state-paths.ts";
 import { ServiceSupervisor } from "./service-supervisor.ts";
 
@@ -63,7 +64,20 @@ export class PluginCore implements PluginCoreLike {
   async init(ctx: PluginContext): Promise<void> {
     this.ctx = { ...ctx, bus: this.bus };
     // Run startup consistency check before initializing services
-    const health = StartupChecker.checkAll(ctx.directory, stateDirFor(ctx.directory));
+    let health: StartupHealth;
+    try {
+      health = StartupChecker.checkAll(ctx.directory, stateDirFor(ctx.directory));
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.warn(`Startup check failed: ${errMsg}`);
+      health = {
+        healthy: false,
+        quarantined: [],
+        staleLocksBroken: 0,
+        orphanTmpsRemoved: 0,
+        warnings: [`startup check failed: ${errMsg}`],
+      };
+    }
     if (health.warnings.length > 0) {
       log.info(`Startup check completed: ${health.warnings.length} warning(s)`, {
         quarantined: health.quarantined.length,

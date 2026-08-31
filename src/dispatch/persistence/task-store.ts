@@ -103,8 +103,9 @@ export class TaskStateStore {
       const tmp = statePath + ".tmp";
       await writeFile(tmp, json, "utf-8");
 
-      try { unlinkSync(statePath); } catch {}
-
+      // Atomic replace: rename-over the destination. POSIX rename is atomic,
+      // so a concurrent reader never observes an ENOENT window and a crash
+      // never leaves the target missing.
       renameSync(tmp, statePath);
     } catch (err) {
       log.warn("Failed to persist dispatch state", err);
@@ -244,8 +245,7 @@ export class TaskStateStore {
       const tmp = statePath + ".tmp";
       writeFileSync(tmp, json, "utf-8");
 
-      try { unlinkSync(statePath); } catch {}
-
+      // Atomic replace: rename-over the destination (see _doSave note above).
       renameSync(tmp, statePath);
     } catch (err) {
       log.warn("Failed to persist dispatch state (sync)", err);

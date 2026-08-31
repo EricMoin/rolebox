@@ -18,12 +18,14 @@
  *
  * - {@link propagateEscalate} — a node signals `escalate`; the worst signal
  *   (escalate > revise_needed > answer, graph-model.md §5.1) travels *forward*
- *   along outbound edges to the nearest fan-in convergence node. Each outbound
- *   edge's `retry` policy is consulted: `retry: N > 0` re-marks the source
- *   node `ready` for an automatic retry (bounded by `retryCount`); otherwise
- *   the escalation lands on the convergence node, whose join re-evaluates and
- *   fails → that node escalates too, and the walk continues. Single-input
- *   (non-convergence) nodes are transparent pass-throughs.
+ *   along outbound edges to the nearest fan-in convergence node. The node's
+ *   effective escalate-retry budget is resolved first — the max of its
+ *   `budget.max_retries` and the `retry.max` of any OUTBOUND or INCOMING edge
+ *   (graph-model.md §5.3): while `retryCount` is below the budget, the node is
+ *   re-marked `ready` for an automatic retry; otherwise the escalation lands
+ *   on the convergence node, whose join re-evaluates and fails → that node
+ *   escalates too, and the walk continues. Single-input (non-convergence)
+ *   nodes are transparent pass-throughs.
  *
  * Both functions are **pure state-mutation** steps. They mutate node lifecycle
  * status and the frontier only — they never dispatch. Dispatch of the
@@ -254,23 +256,62 @@ export function propagateRevise(
 // ── Escalate propagation ────────────────────────────────────────────────────
 
 /**
- * Whether `node` has any outbound edge whose `retry` policy allows another
- * automatic retry (retry is an edge property — graph-model.md §5.3). A single
- * retryable outbound edge is sufficient: the retried node re-runs and
- * re-emits along all its outbound edges.
+ * Effective escalate-retry policy for a node.
+ *
+ * `max` is the node's escalate-retry budget — the maximum of the node's
+ * declared `budget.max_retries`, the `retry.max` of any OUTBOUND edge, and
+ * the `retry.max` of any INCOMING edge. `backoffMs` is the `backoff_ms`
+ * declared on the highest-max retry-bearing edge (the first such edge in
+ * declaration order that declares one).
  */
-function findRetryEdge(
+interface EscalateRetryPolicy {
+  /** Effective escalate-retry budget (0 = no automatic retry). */
+  max: number;
+  /** Backoff (ms) declared by the highest-max qualifying retry edge, if any. */
+  backoffMs?: number;
+}
+
+/**
+ * Resolve the node's effective escalate-retry budget.
+ *
+ * Retry is declared as an edge property (graph-model.md §5.3 — the `retry`
+ * block on any edge incident to the node) AND as a per-node budget
+ * (`budget.max_retries`, carried onto the runtime state by `registerNode`).
+ * The effective budget is the max over all three sources:
+ *
+ * - `node.budget.max_retries` — the node's own declared retry allowance,
+ * - `edge.retry.max` on OUTBOUND edges — the legacy edge-driven retry
+ *   (an upstream node is retried when an edge it feeds declares the policy),
+ * - `edge.retry.max` on INCOMING edges — a downstream node is retried when
+ *   the edge feeding it declares the policy.
+ *
+ * A single retryable edge (either direction) is sufficient: the retried node
+ * re-runs and re-emits along all its edges. `backoffMs` — the `backoff_ms` of
+ * the highest-max retry-bearing edge — is returned so the retry gate can
+ * withhold the re-dispatch for that window (graph-model.md §6.3).
+ */
+function resolveEscalateRetryPolicy(
   state: EngineState,
   node: NodeRuntimeState,
-): EdgeDeclaration | undefined {
+): EscalateRetryPolicy {
+  let effectiveMax = node.budget?.max_retries ?? 0;
+  let edgeMax = 0;
+  let backoffMs: number | undefined;
+
   for (const edge of state.graphDeclaration.edges) {
-    if (edge.from !== node.nodeId) continue;
+    if (edge.from !== node.nodeId && edge.to !== node.nodeId) continue;
     const retry = edge.retry;
-    if (retry && retry.max > 0 && node.retryCount < retry.max) {
-      return edge;
+    if (!retry || retry.max <= 0) continue;
+    if (retry.max > edgeMax) {
+      edgeMax = retry.max;
+      backoffMs = retry.backoff_ms;
+    } else if (retry.max === edgeMax && backoffMs === undefined) {
+      // Same max, later edge — capture its backoff if the earlier one lacked one.
+      backoffMs = retry.backoff_ms;
     }
   }
-  return undefined;
+
+  return { max: Math.max(effectiveMax, edgeMax), backoffMs };
 }
 
 /**
@@ -278,11 +319,20 @@ function findRetryEdge(
  * the nearest fan-in convergence node(s), per the signal escalation lattice
  * (graph-model.md §5.1) and retry policy (§5.3).
  *
- * 1. **Retry gate:** consult the node's outbound edges. If any declares
- *    `retry: N > 0` and `retryCount < N`, increment `retryCount` and re-mark
- *    the node `ready` (escalate → ready) so it re-runs — no upward
- *    propagation this round. Backoff/budget for the retry dispatch is handled
- *    by the caller's dispatch step (graph-model.md §6.3).
+ * 1. **Retry gate:** resolve the node's effective escalate-retry budget — the
+ *    max of its declared `budget.max_retries`, the `retry.max` of any OUTBOUND
+ *    edge, and the `retry.max` of any INCOMING edge (graph-model.md §5.3). If
+ *    the budget allows another attempt (`retryCount < max`), increment
+ *    `retryCount` and re-mark the node `ready` (escalate → ready) so it
+ *    re-runs — no upward propagation this round. The absorbed escalate's
+ *    dual-write recording (`node.signalsObserved["escalate"]` + the graph
+ *    `signalLedger` entry) is cleared at absorption so a deferred drain
+ *    (`AdvanceEngine._drainDeferred` → `_latestTerminating`) cannot replay it
+ *    against the re-dispatched (Running) node and re-escalate the retry. When
+ *    the qualifying retry edge declares `backoff_ms`, the retry is withheld
+ *    until `now + backoff_ms` (`retryBackoffUntil`); backoff/budget for the
+ *    retry dispatch is otherwise handled by the caller's dispatch step
+ *    (graph-model.md §6.3).
  * 2. **Forward propagation:** otherwise walk the node's outbound edges.
  *    Single-input (non-convergence) nodes are transparent pass-throughs.
  *    At the first multi-input fan-in node, record the `escalate` as an upstream
@@ -313,10 +363,36 @@ export function propagateEscalate(
     absorbed: [],
   };
 
-  // 1. Retry gate — re-mark the source node ready for an automatic retry.
-  if (findRetryEdge(state, node) && canTransitionNode(node.status, NodeStatus.Ready)) {
+  // 1. Retry gate — re-mark the source node ready for an automatic retry when
+  //    its effective escalate-retry budget (node budget.max_retries, or the
+  //    retry.max of an outbound/incoming edge) still has allowance.
+  const policy = resolveEscalateRetryPolicy(state, node);
+  if (
+    policy.max > 0 &&
+    node.retryCount < policy.max &&
+    canTransitionNode(node.status, NodeStatus.Ready)
+  ) {
     node.retryCount += 1;
     node.prompt = `${node.prompt}\n\n[Automatic retry ${node.retryCount}]: previous attempt escalated — ${extractReason(payload)}`;
+    // Backoff: withhold the re-dispatch until now + backoff_ms when the
+    // qualifying retry edge declares one. Written here so no policy info is
+    // lost; the dispatch step consumes it before re-dispatching.
+    if (policy.backoffMs !== undefined) {
+      node.retryBackoffUntil = Date.now() + policy.backoffMs;
+    }
+    // Drain-replay race guard: the escalate that triggered this retry was
+    // already recorded into both ledgers — `node.signalsObserved["escalate"]`
+    // and the graph-level `state.signalLedger` entry (`signalBridge.record` →
+    // `recordSignalToLedger`, or a synthetic `recordSignalToLedger` call from
+    // the race-guard / M7-containment path). If it survived while the node
+    // re-dispatches, a deferred drain (`_drainDeferred` → `_latestTerminating`)
+    // would replay it and re-escalate the re-dispatched (Running) node —
+    // defeating the retry. Clear the absorbed recording (mirrors
+    // `clearSignalLedgerEntry` in node-retry.ts) so `_latestTerminating`
+    // returns null and the drain skips the retried node; the ledger entry is
+    // lazily re-created by `signal-bridge.ts:record` when the node emits again.
+    delete node.signalsObserved["escalate"];
+    state.signalLedger.delete(node.nodeId);
     markReady(state, node);
     addToFrontier(state, node.nodeId);
     report.retried.push(node.nodeId);

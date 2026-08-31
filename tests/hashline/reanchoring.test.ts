@@ -234,9 +234,10 @@ describe("reanchorChangedLines", () => {
     expect(result).toHaveLength(1);
     expect(result[0].line).toBe(2);
     expect(result[0].newContent).toBe("b");
-    // oldAnchor should be the hash of whatever was at line 2 before (empty string)
+    // D6b: oldAnchor is the hash of the OLD line at the insert position
+    // (line 2 in oldLines was "c"), not the pre-insert empty placeholder
     expect(result[0].oldAnchor).toBe(
-      computeLineHash("", 3, 2),
+      computeLineHash("c", 3, 2),
     );
     // newAnchor should be the hash of "b" at line 2
     expect(result[0].newAnchor).toBe(

@@ -196,11 +196,7 @@ export class MetricsPersister {
       const tmp = filePath + ".tmp";
       await writeFile(tmp, json, "utf-8");
 
-      try {
-        unlinkSync(filePath);
-      } catch {
-        // File may not exist yet — ignore
-      }
+      // Atomic replace: rename-over the destination (see task-store pattern).
       renameSync(tmp, filePath);
 
       // Append NDJSON event log line
@@ -222,11 +218,7 @@ export class MetricsPersister {
     const tmp = filePath + ".tmp";
     writeFileSync(tmp, json, "utf-8");
 
-    try {
-      unlinkSync(filePath);
-    } catch {
-      // File may not exist yet — ignore
-    }
+    // Atomic replace: rename-over the destination (see task-store pattern).
     renameSync(tmp, filePath);
   }
 

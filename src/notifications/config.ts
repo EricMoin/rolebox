@@ -36,6 +36,22 @@ const log: Logger<ILogObj> = createSubLogger("notification-config");
 // ── Defaults ────────────────────────────────────────────────────────
 
 /**
+ * Default per-event notification configs, seeded into every parsed config so
+ * events like the graph approval gate have a sensible enabled state and title
+ * template without requiring explicit user config. A user config entry for the
+ * same event key overrides the whole entry at the event-key level (see
+ * `parseNotificationConfig` / `mergeNotificationConfigs`).
+ */
+export const DEFAULT_NOTIFICATION_EVENT_CONFIGS: Readonly<
+  Partial<Record<NotificationEventType, NotificationEventConfig>>
+> = Object.freeze({
+  [NOTIFICATION_EVENT_TYPES.ApprovalPending]: Object.freeze({
+    enabled: true,
+    titleTemplate: "Approval gate waiting: {graph_id}/{node_id}",
+  }),
+});
+
+/**
  * Frozen default notification configuration.
  * All optional-adjacent fields have explicit defaults so consumers
  * never need null checks for the top-level shape.
@@ -46,7 +62,7 @@ export const DEFAULT_NOTIFICATION_CONFIG: Readonly<NotificationConfig> = Object.
   idleDelayMs: DEFAULT_NOTIFICATION_IDLE_DELAY_MS,
   questionToolNames: [...DEFAULT_QUESTION_TOOL_NAMES],
   channels: [] as NotificationChannelConfig[],
-  events: undefined,
+  events: DEFAULT_NOTIFICATION_EVENT_CONFIGS as NotificationConfig["events"],
   quietHours: {
     enabled: false,
     ranges: [],
@@ -135,8 +151,12 @@ export function parseNotificationConfig(raw: unknown): NotificationConfig {
     log.warn(`Invalid "channels" value; expected array, got ${typeof raw.channels}`);
   }
   const events = parseEventConfigs(raw.events, Object.values(NOTIFICATION_EVENT_TYPES) as string[]);
-  if (events) {
-    result.events = events;
+  // Seed default per-event configs (e.g. approval_pending title template) so an
+  // event has a sensible default even when the user does not configure it. A
+  // user entry for the same key (parsed `events`) overrides the default whole.
+  const mergedEvents = { ...DEFAULT_NOTIFICATION_EVENT_CONFIGS, ...(events ?? {}) };
+  if (Object.keys(mergedEvents).length > 0) {
+    result.events = mergedEvents as NotificationConfig["events"];
   } else if (raw.events !== undefined) {
     log.warn(`Invalid "events" value; expected object, got ${typeof raw.events}`);
   }

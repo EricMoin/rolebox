@@ -31,8 +31,10 @@
  *  its `revise_needed` pass but the loop group's `max_traversals` is already
  *  exhausted, the revision escalates instead of looping (failure-resilience.md
  *  §1.6). `escalate → ready` is the automatic-retry edge: an escalating node
- *  re-enters `ready` for a retry when an outbound edge declares `retry: N > 0`
- *  and `retryCount < N` (graph-model.md §5.3). `pending → escalate` is the
+ *  re-enters `ready` for a retry when its effective escalate-retry budget — the
+ *  max of `budget.max_retries` and the `retry.max` of any OUTBOUND or INCOMING
+ *  edge — still allows another attempt (`retryCount < max`, graph-model.md
+ *  §5.3). `pending → escalate` is the
  *  cascade-abort edge: a node that never started is escalated by an escalation
  *  cascading into its convergence node, so it stops blocking termination.
  *

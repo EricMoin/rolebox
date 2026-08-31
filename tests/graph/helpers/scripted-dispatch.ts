@@ -125,5 +125,88 @@ export class ScriptedDispatch implements NodeDispatchPort {
   }
 }
 
+// ── Scripted-status variant ─────────────────────────────────────────────────
+
+export type ScriptedStatus = "completed" | "error";
+
+/**
+ * Scripted-status variation of the shared `ScriptedDispatch` harness: identical
+ * auto-complete-on-next-tick delivery seam and per-node dispatch counting, but
+ * the terminal status is scripted per dispatch
+ * (`(nodeId, ordinal) => status`). Status "error" routes through the real
+ * dispatch→signal mapping to the `escalate` signal (engine-recovery.ts
+ * `mapDispatchStatusToSignal`); "error" is not in `LIVE_DISPATCH_STATUSES`
+ * (engine-recovery.ts:88-92), so the transient-error guard lets it advance.
+ *
+ * Established by graph-retry-cap-semantics.test.ts (where it originated) and
+ * moved here so the escalate-retry regression suite shares one definition.
+ */
+export class ScriptedDispatchScript implements NodeDispatchPort {
+  calls: { nodeId: string; prompt: string }[] = [];
+  private subs = new Map<string, TaskTerminatedCallback>();
+  private tasks = new Map<string, DispatchTask>();
+  private seq = 0;
+
+  constructor(
+    private readonly script: (nodeId: string, ordinal: number) => ScriptedStatus,
+  ) {}
+
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    const ordinal = this.calls.filter((c) => c.nodeId === node.nodeId).length;
+    this.calls.push({ nodeId: node.nodeId, prompt: node.prompt });
+    const id = `task-${node.nodeId}-${++this.seq}`;
+    const task: DispatchTask = {
+      id,
+      sessionId: `sess-${id}`,
+      parentSessionId: "g",
+      depth: 1,
+      status: "running",
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    };
+    this.tasks.set(id, task);
+    setTimeout(() => {
+      const status = this.script(node.nodeId, ordinal);
+      task.status = status;
+      this.subs.get(id)?.(id, status);
+    }, 0);
+    return Promise.resolve(task);
+  }
+
+  onTaskTerminated(
+    taskId: string,
+    cb: TaskTerminatedCallback,
+  ): TaskTerminatedCallback {
+    this.subs.set(taskId, cb);
+    return cb;
+  }
+
+  removeTaskTerminatedListener(
+    taskId: string,
+    cb: TaskTerminatedCallback,
+  ): void {
+    if (this.subs.get(taskId) === cb) this.subs.delete(taskId);
+  }
+
+  getTask(taskId: string): DispatchTask | undefined {
+    return this.tasks.get(taskId);
+  }
+
+  /** How many times `nodeId` was dispatched. */
+  dispatches(nodeId: string): number {
+    return this.calls.filter((c) => c.nodeId === nodeId).length;
+  }
+
+  get dispatchCount(): number {
+    return this.calls.length;
+  }
+}
+
 /** Let chained `setTimeout`-driven task completions drain. */
 export const settle = () => new Promise((r) => setTimeout(r, 25));

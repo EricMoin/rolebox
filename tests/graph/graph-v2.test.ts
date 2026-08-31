@@ -441,8 +441,10 @@ describe("validateGraphDeclaration — structural checks", () => {
     expect(result.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
   });
 
-  it("validator warns when a back-edge-filtered graph has zero roots", () => {
-    // All-always cycle: no edge is a revise back-edge → no root after filtering → warning.
+  it("validator rejects an all-always cycle in execution mode while a revise back-edge cycle stays valid in both", () => {
+    // All-always cycle: no edge is a revise back-edge → no root after
+    // filtering. Construct mode keeps it a warning; execution mode promotes
+    // the uncontained revise-free cycle to a fatal error.
     const alwaysCycle = {
       version: 2 as const,
       name: "always-cycle",
@@ -455,11 +457,19 @@ describe("validateGraphDeclaration — structural checks", () => {
         edge("b", "a"),
       ],
     };
-    const r1 = validateGraphDeclaration(alwaysCycle);
-    expect(r1.valid).toBe(true);
-    expect(r1.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(true);
+    const construct = validateGraphDeclaration(alwaysCycle);
+    expect(construct.valid).toBe(true);
+    expect(construct.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(true);
+    const execution = validateGraphDeclaration(alwaysCycle, { mode: "execution" });
+    expect(execution.valid).toBe(false);
+    expect(
+      execution.errors.some(
+        (e) => e.includes("cycle detected") && e.includes("deadlocks at runtime"),
+      ),
+    ).toBe(true);
 
-    // Revise-back-edge cycle: b → a is filtered → a has in-degree 0 → no warning.
+    // Revise-back-edge cycle: b → a is filtered → a has in-degree 0 → no
+    // warning, and the revise edge keeps the SCC a warning in BOTH modes.
     const reviseCycle = {
       version: 2 as const,
       name: "revise-cycle",
@@ -472,9 +482,15 @@ describe("validateGraphDeclaration — structural checks", () => {
         { from: "b", to: "a", type: "on_signal" as const, signal_filter: ["revise_needed"] },
       ],
     };
-    const r2 = validateGraphDeclaration(reviseCycle);
-    expect(r2.valid).toBe(true);
-    expect(r2.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
+    const constructRevise = validateGraphDeclaration(reviseCycle);
+    expect(constructRevise.valid).toBe(true);
+    expect(constructRevise.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(false);
+    const executionRevise = validateGraphDeclaration(reviseCycle, { mode: "execution" });
+    expect(executionRevise.valid).toBe(true);
+    expect(executionRevise.errors).toEqual([]);
+    expect(
+      executionRevise.warnings.some((w) => w.includes("no unblocked entry point")),
+    ).toBe(false);
   });
 
   // ── rule 8 — deadlock ERROR for pure cycles with loop groups ───────────
@@ -581,7 +597,7 @@ describe("validateGraphDeclaration — structural checks", () => {
     expect(result.errors.some((e) => e.includes("no external entry"))).toBe(false);
   });
 
-  it("rule 8 — WARNING for pure cycle WITHOUT loop group (existing behavior preserved)", () => {
+  it("rule 8 — pure cycle WITHOUT loop group: construct warns, execution mode errors", () => {
     const graph: GraphDocument = {
       version: 2,
       name: "cycle-no-lg",
@@ -595,9 +611,19 @@ describe("validateGraphDeclaration — structural checks", () => {
       ],
       // No loop_groups declared.
     };
-    const result = validateGraphDeclaration(graph);
-    expect(result.valid).toBe(true);
-    expect(result.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(true);
+    // Construct mode (default) preserves the legacy warning-only behavior.
+    const construct = validateGraphDeclaration(graph);
+    expect(construct.valid).toBe(true);
+    expect(construct.warnings.some((w) => w.includes("no unblocked entry point"))).toBe(true);
+
+    // Execution mode promotes the uncontained revise-free cycle to an ERROR.
+    const execution = validateGraphDeclaration(graph, { mode: "execution" });
+    expect(execution.valid).toBe(false);
+    expect(
+      execution.errors.some(
+        (e) => e.includes("cycle detected") && e.includes("deadlocks at runtime"),
+      ),
+    ).toBe(true);
   });
 });
 

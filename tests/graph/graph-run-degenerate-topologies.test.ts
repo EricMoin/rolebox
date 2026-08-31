@@ -19,12 +19,12 @@
  *      nodes (engine-termination.ts `checkGraphTermination`, `!hasAnyActive`).
  *      Nothing is ever dispatched.
  *
- *  (b) Pure always-cycle A<->B with NO loop group: no roots → nothing to
- *      dispatch → the runtime deadlock guard (engine-termination.ts, "Runtime
- *      deadlock guard" branch) synthetically escalates every pending node with
- *      reason "graph deadlock: no active upstream can satisfy pending node(s)"
- *      and the graph terminates Complete. Both nodes must read `escalate` and
- *      carry the deadlock reason through `graph_status`.
+ *  (b) Pure always-cycle A<->B with NO loop group: the uncontained
+ *      revise-free cycle is construct-valid (WARNING) but fails execution-mode
+ *      validation, so graph_run REJECTS before any engine is built — nothing
+ *      is ever dispatched. (Engine-level deadlock-guard coverage for this
+ *      topology lives in engine-terminal.test.ts / engine-termination-s4.test.ts,
+ *      which drive createEngine directly and bypass this validation gate.)
  *
  *  (c) Single-node self-loop A->A inside loop group {A}: the self-loop edge is
  *      excluded from in-degree root discovery (intra-loop-group always edge),
@@ -43,12 +43,10 @@
  */
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { EnginePhase, NodeStatus } from "../../src/constants.ts";
+import { EnginePhase } from "../../src/constants.ts";
 import { GraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { clearParentQueues } from "../../src/dispatch/notification.ts";
 import { ScriptedDispatch, settle } from "./helpers/scripted-dispatch.ts";
-
-const DEADLOCK_REASON = "graph deadlock: no active upstream can satisfy pending node(s)";
 
 describe("graph_run degenerate topologies", () => {
   beforeEach(() => {
@@ -68,7 +66,7 @@ describe("graph_run degenerate topologies", () => {
     expect(fake.dispatchCount).toBe(0);
   });
 
-  it("(b) a pure always-cycle A<->B with NO loop group deadlock-guards every node to escalate and completes", async () => {
+  it("(b) a pure always-cycle A<->B with NO loop group is rejected by the execution-validation gate before any dispatch", async () => {
     const fake = new ScriptedDispatch();
     const ts = new GraphToolSet({ dispatch: fake });
     const g = ts.graph_create({ name: "always-cycle" });
@@ -77,26 +75,16 @@ describe("graph_run degenerate topologies", () => {
     ts.graph_add_edge({ graph_id: g.graph_id, from: "A", to: "B", type: "always" });
     ts.graph_add_edge({ graph_id: g.graph_id, from: "B", to: "A", type: "always" });
 
-    // No roots → nothing is ever dispatched; the deadlock guard fires inside
-    // the run's advancement critical section (synchronously quiescent).
-    const r = await ts.graph_run({ graph_id: g.graph_id });
-
-    expect(r.phase).toBe(EnginePhase.Complete);
+    // Execution-mode validation (graph-tools.ts:1227-1235) promotes the
+    // uncontained revise-free always-cycle to a fatal error BEFORE an engine
+    // is built — graph_run rejects and zero nodes are ever dispatched.
+    await expect(ts.graph_run({ graph_id: g.graph_id })).rejects.toThrow(
+      /cycle detected/,
+    );
+    await expect(ts.graph_run({ graph_id: g.graph_id })).rejects.toThrow(
+      /not contained in any declared loop group/,
+    );
     expect(fake.dispatchCount).toBe(0);
-
-    // Both nodes synthetically escalated by the runtime deadlock guard, with
-    // the guard's reason surfaced through graph_status output.
-    const out = ts.graph_status({ graph_id: g.graph_id, format: "json" });
-    const json = JSON.parse(out) as {
-      phase: string;
-      nodes: { node_id: string; status: string; error: string | undefined }[];
-    };
-    expect(json.phase).toBe(EnginePhase.Complete);
-    const byId = new Map(json.nodes.map((n) => [n.node_id, n]));
-    expect(byId.get("A")!.status).toBe(NodeStatus.Escalate);
-    expect(byId.get("B")!.status).toBe(NodeStatus.Escalate);
-    expect(byId.get("A")!.error).toContain(DEADLOCK_REASON);
-    expect(byId.get("B")!.error).toContain(DEADLOCK_REASON);
   });
 
   it("(c) a single-node self-loop A->A in loop group {A} dispatches exactly once and completes", async () => {

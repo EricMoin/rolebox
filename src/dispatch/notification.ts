@@ -59,6 +59,16 @@ export const GRAPH_BLOCKED_MARKER = "[GRAPH BLOCKED]";
  * counter.
  */
 export const GRAPH_STALL_MARKER = "[GRAPH NODE STALLED]";
+/**
+ * Marker for the startup-time "pending approvals" aggregation reminder injected
+ * into the emperor session once when the Pi extension boots (subtask 4). It
+ * summarizes every `blocked` `needs_approval` gate recovered from the persisted
+ * store so a restart never silently drops an awaiting-human decision. Like every
+ * other parent-targeted reminder, it is part of
+ * {@link DISPATCH_NOTIFICATION_MARKERS} so the re-entering chat.message hook
+ * recognizes it as a non-user turn and does NOT reset the auto-continue counter.
+ */
+export const PENDING_APPROVALS_MARKER = "[PENDING APPROVALS]";
 
 export const DISPATCH_NOTIFICATION_MARKERS = [
   DISPATCH_COMPLETION_MARKER,
@@ -69,6 +79,7 @@ export const DISPATCH_NOTIFICATION_MARKERS = [
   GRAPH_COMPLETE_MARKER,
   GRAPH_BLOCKED_MARKER,
   GRAPH_STALL_MARKER,
+  PENDING_APPROVALS_MARKER,
 ] as const;
 
 export function isDispatchNotification(text: string): boolean {

@@ -1,37 +1,43 @@
 /**
  * Graph Execution Engine v2 — Retry-cap semantics (pinning round)
  *
- * PINS the CURRENT retry-cap behavior of the graph engine end-to-end through
+ * PINS the retry-cap behavior of the graph engine end-to-end through
  * the public tool surface (`GraphToolSet` + the shared scripted-dispatch
  * harness from `tests/graph/helpers/scripted-dispatch.ts`). TEST-ONLY — no
- * production code under `src/` is modified; the two findings below are
- * DOCUMENTED, not fixed.
+ * production code under `src/` is modified.
  *
- * FINDING 1 — `budget.max_retries` is inert.
+ * FINDING 1 — FIXED (this round): `budget.max_retries` is now honored.
  *   `graph_add_node({ max_retries: N })` stores `N` on the node's budget
- *   (graph-tools.ts:984 `budget.max_retries = args.max_retries`), but NO
- *   engine module ever reads it. The only retry-count consumers in the engine
- *   are `resetNodeForRetry` (node-retry.ts:206 `target.retryCount += 1` —
- *   unconditional) and the edge-retry gate `findRetryEdge`
- *   (signal-propagation.ts:250-262 — reads `edge.retry`, never `budget`).
- *   Declaring a per-node retry cap has zero effect on any retry path.
+ *   (graph-tools.ts:975 `budget.max_retries = args.max_retries`), and the
+ *   escalate-retry gate now resolves an EFFECTIVE budget per node
+ *   (`resolveEscalateRetryPolicy`, signal-propagation.ts) = the max of the
+ *   node's declared `budget.max_retries`, the `retry.max` of any OUTBOUND
+ *   edge, and the `retry.max` of any INCOMING edge. `propagateEscalate`
+ *   re-dispatches an escalating node while `retryCount < effective max`
+ *   (automatic retry), and only after exhaustion lets the escalation terminate
+ *   the node / travel downstream. A node with no declared retry anywhere
+ *   escalates terminally on its first dispatch (retry_count stays 0).
  *
- * FINDING 2 — manual retry (`graph_run(node_id, retry:true)`) is UNCAPPED.
- *   The imperative retry surface re-opens a node via `resetNodeForRetry` with
- *   no upper bound: retryCount keeps incrementing for as long as the caller
- *   keeps calling. Nothing (budget, edge policy, declaration) stops it.
- *
- * By contrast, the EDGE retry policy (`graph_add_edge({ retry: { max: N } })`)
- * IS enforced: `propagateEscalate` (signal-propagation.ts:305-313) only
- * re-dispatches an escalating node while `node.retryCount < retry.max`, and
- * `findRetryEdge` requires `retry.max > 0` — so `retry: { max: -1 }` (accepted
- * by the tool schema without validation, tools/index.ts:80-88) behaves exactly
- * like retry-disabled.
+ * FINDING 2 — still OPEN (out of scope for this round): manual retry
+ *   (`graph_run(node_id, retry:true)`) is UNCAPPED.
+ *   The imperative retry surface re-opens a node via `resetNodeForRetry`
+ *   (node-retry.ts `target.retryCount += 1` — unconditional) with no upper
+ *   bound: retryCount keeps incrementing for as long as the caller keeps
+ *   calling. Nothing (budget, edge policy, declaration) stops it.
  *
  * Cases:
- *  (a) FINDING pin — node declares `budget.max_retries: 2`, the graph runs to
- *      Complete, then `graph_run(node_id, retry:true)` keeps succeeding past
- *      the cap; retryCount grows 0 → 1 → 2 → 3 and every retry re-dispatches.
+ *  (a) FINDING 1 FIXED — escalate-retry budget semantics: a node declaring
+ *      `budget.max_retries: 2` whose scripted dispatch escalates is dispatched
+ *      3 times total (initial + 2 automatic retries) then terminates Escalate
+ *      with retry_count=2; the reproduction shape — flaky with max_retries: 2
+ *      AND an incoming edge `proc->flaky retry {max:3}` — consumes retries up
+ *      to the EFFECTIVE max (3) and the graph terminates only after
+ *      exhaustion; a no-budget control escalates with no declared retry
+ *      anywhere → immediately terminal, retry_count=0 (unchanged behavior).
+ *  (a2) FINDING 2 pin (still open) — a node declaring `max_retries: 2` whose
+ *      graph runs to Complete keeps being retried PAST the cap via
+ *      `graph_run(node_id, retry:true)`; retryCount grows 0 → 1 → 2 → 3 and
+ *      every retry re-dispatches.
  *  (b) edge retry enforcement — A→B `retry {max:2}`; A escalates twice then
  *      answers: exactly 3 dispatches of A (initial + 2 automatic retries),
  *      then the answer flows forward and the graph completes. A 3-escalate
@@ -47,104 +53,17 @@
  *
  * Harness: `ScriptedDispatch` auto-completes every dispatched task on the next
  * tick through the real `onTaskTerminated` seam; `ScriptedDispatchScript`
- * (below) is a test-local variant that scripts the terminal STATUS per node
- * dispatch ("error" maps to the escalate signal via
- * `mapDispatchStatusToSignal`, engine-recovery.ts:241-245) so edge-retry and
- * escalation behavior can be exercised deterministically.
+ * (tests/graph/helpers/scripted-dispatch.ts) is the scripted-status variant
+ * that scripts the terminal STATUS per node dispatch ("error" maps to the
+ * escalate signal via `mapDispatchStatusToSignal`, engine-recovery.ts:241-245)
+ * so edge-retry and escalation behavior can be exercised deterministically.
  */
 
 import { describe, it, expect, beforeEach } from "bun:test";
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
-import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
-import type { DispatchTask } from "../../src/dispatch/types.ts";
-import type {
-  DispatchParentContext,
-  TaskTerminatedCallback,
-} from "../../src/graph/engine/dispatch-bridge.ts";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import { GraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import { clearParentQueues } from "../../src/dispatch/notification.ts";
-import { ScriptedDispatch, settle } from "./helpers/scripted-dispatch.ts";
-
-// ── Scripted-status dispatch seam ────────────────────────────────────────────
-
-type ScriptedStatus = "completed" | "error";
-
-/**
- * Test-local variation of the shared `ScriptedDispatch` harness: identical
- * auto-complete-on-next-tick delivery seam and per-node dispatch counting, but
- * the terminal status is scripted per dispatch
- * (`(nodeId, ordinal) => status`). Status "error" routes through the real
- * dispatch→signal mapping to the `escalate` signal (engine-recovery.ts
- * `mapDispatchStatusToSignal`); "error" is not in `LIVE_DISPATCH_STATUSES`
- * (engine-recovery.ts:88-92), so the transient-error guard lets it advance.
- */
-class ScriptedDispatchScript implements NodeDispatchPort {
-  calls: { nodeId: string; prompt: string }[] = [];
-  private subs = new Map<string, TaskTerminatedCallback>();
-  private tasks = new Map<string, DispatchTask>();
-  private seq = 0;
-
-  constructor(
-    private readonly script: (nodeId: string, ordinal: number) => ScriptedStatus,
-  ) {}
-
-  executeNode(
-    node: NodeRuntimeState,
-    _ctx: DispatchParentContext,
-  ): Promise<DispatchTask> {
-    const ordinal = this.calls.filter((c) => c.nodeId === node.nodeId).length;
-    this.calls.push({ nodeId: node.nodeId, prompt: node.prompt });
-    const id = `task-${node.nodeId}-${++this.seq}`;
-    const task: DispatchTask = {
-      id,
-      sessionId: `sess-${id}`,
-      parentSessionId: "g",
-      depth: 1,
-      status: "running",
-      agent: node.agent,
-      prompt: node.prompt,
-      startedAt: new Date(),
-      progress: { lastUpdate: new Date(), toolCalls: 0 },
-      priority: 0,
-    };
-    this.tasks.set(id, task);
-    setTimeout(() => {
-      const status = this.script(node.nodeId, ordinal);
-      task.status = status;
-      this.subs.get(id)?.(id, status);
-    }, 0);
-    return Promise.resolve(task);
-  }
-
-  onTaskTerminated(
-    taskId: string,
-    cb: TaskTerminatedCallback,
-  ): TaskTerminatedCallback {
-    this.subs.set(taskId, cb);
-    return cb;
-  }
-
-  removeTaskTerminatedListener(
-    taskId: string,
-    cb: TaskTerminatedCallback,
-  ): void {
-    if (this.subs.get(taskId) === cb) this.subs.delete(taskId);
-  }
-
-  getTask(taskId: string): DispatchTask | undefined {
-    return this.tasks.get(taskId);
-  }
-
-  /** How many times `nodeId` was dispatched. */
-  dispatches(nodeId: string): number {
-    return this.calls.filter((c) => c.nodeId === nodeId).length;
-  }
-
-  get dispatchCount(): number {
-    return this.calls.length;
-  }
-}
+import { ScriptedDispatch, ScriptedDispatchScript, settle } from "./helpers/scripted-dispatch.ts";
 
 // ── graph_status JSON helpers ───────────────────────────────────────────────
 
@@ -173,14 +92,121 @@ function nodeStatus(
   return node;
 }
 
+/** Poll a condition every 10ms until it holds or the timeout expires. */
+async function waitFor(cond: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 describe("graph retry-cap semantics", () => {
   beforeEach(() => {
     clearParentQueues();
   });
 
-  // ── (a) FINDING pin: budget.max_retries is inert — manual retry is uncapped ──
+  // ── (a) FINDING 1 FIXED: escalate-retry budget (max of node budget + edge retry) ──
 
-  describe("(a) budget.max_retries is inert; manual retry uncapped", () => {
+  describe("(a) escalate-retry budget semantics (FINDING 1 FIXED)", () => {
+    it("a node declaring max_retries: 2 whose scripted dispatch escalates is dispatched 3 times total (initial + 2 automatic retries), then terminates Escalate with retry_count=2", async () => {
+      const fake = new ScriptedDispatchScript(() => "error"); // A always escalates
+      const ts = new GraphToolSet({ dispatch: fake });
+      const g = ts.graph_create({ name: "budget-retry-honored" });
+      // Declared cap lands on node.budget.max_retries (graph-tools.ts:975) and
+      // now feeds resolveEscalateRetryPolicy (signal-propagation.ts). No edges
+      // declared, so the effective budget is exactly the node's own 2.
+      ts.graph_add_node({
+        graph_id: g.graph_id,
+        id: "A",
+        agent: "a",
+        prompt: "pA",
+        max_retries: 2,
+      });
+
+      await ts.graph_run({ graph_id: g.graph_id });
+      await settle();
+      await settle(); // let the automatic retry chain (A×3) drain
+
+      // Effective budget 2: the first two escalates are absorbed as automatic
+      // retries; the third (retryCount === max) is terminal.
+      expect(fake.dispatches("A")).toBe(3); // initial + 2 automatic retries
+      const a = nodeStatus(ts, g.graph_id, "A");
+      expect(a.retry_count).toBe(2); // capped at the declared budget
+      expect(a.status).toBe(NodeStatus.Escalate);
+      // Single-node graph: all nodes terminal → Complete only after exhaustion.
+      expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Complete);
+    });
+
+    it("reproduction-shaped: flaky with max_retries: 2 AND incoming edge proc->flaky retry {max:3} — retries consumed up to the effective max (3), graph terminates only after exhaustion", async () => {
+      // Both retry sources are declared: the node budget (2) and the incoming
+      // edge policy (3). The effective budget is the MAX = 3
+      // (resolveEscalateRetryPolicy, signal-propagation.ts), so the edge's
+      // allowance wins and flaky is auto-retried 3 times (4 dispatches total).
+      const fake = new ScriptedDispatchScript((nodeId) =>
+        nodeId === "flaky" ? "error" : "completed",
+      );
+      const ts = new GraphToolSet({ dispatch: fake });
+      const g = ts.graph_create({ name: "effective-budget-max" });
+      ts.graph_add_node({ graph_id: g.graph_id, id: "proc", agent: "p", prompt: "pP" });
+      ts.graph_add_node({
+        graph_id: g.graph_id,
+        id: "flaky",
+        agent: "f",
+        prompt: "pF",
+        max_retries: 2,
+      });
+      ts.graph_add_edge({
+        graph_id: g.graph_id,
+        from: "proc",
+        to: "flaky",
+        type: "always",
+        retry: { max: 3 },
+      });
+
+      await ts.graph_run({ graph_id: g.graph_id });
+      await settle();
+      await settle();
+      await settle(); // let the 4-dispatch retry chain drain
+
+      // Effective max = max(2, 3) = 3 → 3 automatic retries consumed, then the
+      // 4th escalate is terminal (retryCount === max) — no 5th dispatch.
+      expect(fake.dispatches("flaky")).toBe(4); // initial + 3 automatic retries
+      const f = nodeStatus(ts, g.graph_id, "flaky");
+      expect(f.retry_count).toBe(3); // consumed up to the effective max
+      expect(f.status).toBe(NodeStatus.Escalate);
+      // Graph terminates only after exhaustion: proc completed, flaky escalated
+      // → all nodes terminal → Complete.
+      expect(fake.dispatches("proc")).toBe(1);
+      expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Complete);
+    });
+
+    it("no-budget control: escalate with no declared retry anywhere terminates immediately with retry_count=0 (unchanged behavior)", async () => {
+      const fake = new ScriptedDispatchScript(() => "error"); // A always escalates
+      const ts = new GraphToolSet({ dispatch: fake });
+      const g = ts.graph_create({ name: "no-budget-control" });
+      // No max_retries and no retry-bearing edge → effective budget 0.
+      ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
+
+      await ts.graph_run({ graph_id: g.graph_id });
+      await settle();
+      await settle();
+
+      // Unchanged pre/post-fix behavior: the first escalate is immediately
+      // terminal — no automatic retry, retry_count stays 0.
+      expect(fake.dispatches("A")).toBe(1);
+      const a = nodeStatus(ts, g.graph_id, "A");
+      expect(a.retry_count).toBe(0);
+      expect(a.status).toBe(NodeStatus.Escalate);
+      expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Complete);
+    });
+  });
+
+  // ── (a2) FINDING 2 pin (still open): manual retry via graph_run(retry:true) is uncapped ──
+
+  describe("(a2) FINDING 2 (open): manual retry via graph_run(node_id, retry:true) is uncapped", () => {
     it("a node declaring max_retries: 2 keeps retrying past the cap via graph_run(node_id, retry:true)", async () => {
       const fake = new ScriptedDispatch();
       const ts = new GraphToolSet({ dispatch: fake });
@@ -304,6 +330,77 @@ describe("graph retry-cap semantics", () => {
       expect(fake.dispatches("B")).toBe(0); // B escalated via join failure, never dispatched
       const b = nodeStatus(ts, g.graph_id, "B");
       expect(b.status).toBe(NodeStatus.Escalate);
+      expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Complete);
+    });
+  });
+
+  // ── (d) join interaction: a retried escalate must NOT fail the downstream ──
+  //     join-all while budget remains; it fails the join only on exhaustion.
+
+  describe("(d) join interaction — retried escalate defers the join failure until the budget is exhausted", () => {
+    it("R→B (always) + A→B retry {max:1, backoff_ms:250} with B join:all — B stays Pending through the backoff window (escalate absorbed), then B escalates once A's budget is spent", async () => {
+      // A always escalates; the 250ms backoff opens a deterministic
+      // observation window between the absorbed first escalate and the
+      // withheld re-dispatch — exactly the state a fast drain would skip.
+      const fake = new ScriptedDispatchScript((nodeId) =>
+        nodeId === "A" ? "error" : "completed",
+      );
+      const ts = new GraphToolSet({ dispatch: fake });
+      const g = ts.graph_create({ name: "join-retry-window" });
+      ts.graph_add_node({ graph_id: g.graph_id, id: "R", agent: "r", prompt: "pR" });
+      ts.graph_add_node({ graph_id: g.graph_id, id: "A", agent: "a", prompt: "pA" });
+      ts.graph_add_node({
+        graph_id: g.graph_id,
+        id: "B",
+        agent: "b",
+        prompt: "pB",
+        join: { strategy: "all" },
+      });
+      ts.graph_add_edge({ graph_id: g.graph_id, from: "R", to: "B", type: "always" });
+      ts.graph_add_edge({
+        graph_id: g.graph_id,
+        from: "A",
+        to: "B",
+        type: "always",
+        retry: { max: 1, backoff_ms: 250 },
+      });
+
+      await ts.graph_run({ graph_id: g.graph_id });
+      await settle(); // R completes; A's first escalate is absorbed + withheld
+
+      // ── Mid-retry window (budget remains: retry 1/1 pending) ──────────────
+      // A's escalate was absorbed into the automatic retry and is withheld by
+      // the 250ms backoff — A is Ready, never re-dispatched early. The
+      // absorbed escalate must NOT have failed B's join-all: R answered, A is
+      // retrying, so B is still Pending (join waiting), never dispatched, and
+      // the graph keeps executing.
+      expect(fake.dispatches("A")).toBe(1); // withheld — no early re-dispatch
+      const aMid = nodeStatus(ts, g.graph_id, "A");
+      expect(aMid.status).toBe(NodeStatus.Ready);
+      expect(aMid.retry_count).toBe(1);
+      const bMid = nodeStatus(ts, g.graph_id, "B");
+      expect(bMid.status).toBe(NodeStatus.Pending); // join NOT failed while budget remains
+      expect(fake.dispatches("B")).toBe(0); // never dispatched
+      expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Executing);
+
+      // ── After exhaustion: the window closes, A re-dispatches and escalates
+      // again (retry max 1 spent) → the escalation travels to B, whose join:all
+      // now fails → B escalates terminally without ever being dispatched.
+      await waitFor(
+        () =>
+          statusJson(ts, g.graph_id).nodes.some(
+            (n) => n.node_id === "B" && n.status === NodeStatus.Escalate,
+          ),
+        2000,
+      );
+      const aFin = nodeStatus(ts, g.graph_id, "A");
+      expect(aFin.status).toBe(NodeStatus.Escalate);
+      expect(aFin.retry_count).toBe(1); // capped at the edge max
+      expect(fake.dispatches("A")).toBe(2); // initial + exactly 1 automatic retry
+      const bFin = nodeStatus(ts, g.graph_id, "B");
+      expect(bFin.status).toBe(NodeStatus.Escalate); // join failed only after exhaustion
+      expect(fake.dispatches("B")).toBe(0);
+      // R completed, A + B escalated — all terminal → Complete.
       expect(statusJson(ts, g.graph_id).phase).toBe(EnginePhase.Complete);
     });
   });

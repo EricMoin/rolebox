@@ -129,7 +129,7 @@ export function validateVersion(expected: string, actual: string): void {
 
 // ── Structured mismatch error ──────────────────────────────────────
 
-const HASHLINE_ANNOTATED_LINE = /^\d+#[A-Za-z0-9_-]{2,4}\|/;
+const HASHLINE_ANNOTATED_LINE = /^\d+#[A-Za-z0-9_-]{2,8}\|/;
 
 export class HashlineMismatchError extends Error {
   mismatches: HashMismatch[];

@@ -35,6 +35,7 @@ import {
   EngineLockSweeper,
   NodeStalenessWatcher,
   hydrateEngineState,
+  clearRecoveredQuiescentBlockedGuard,
   ORPHAN_REASON,
   type ReconcileReport,
   type ReconcileSubscriptions,
@@ -1234,6 +1235,98 @@ describe("engine.recover() integration", () => {
     expect(loaded!.advancingLock).toBe(false);
     expect(loaded!.nodes.get("A")!.status).toBe(NodeStatus.Running);
     expect(loaded!.frontier).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── restart-refire correction: recover() re-fires a quiescent-blocked terminal ──
+
+/**
+ * M10 restart-refire correction. A graph recovered in a QUIESCENT-BLOCKED state
+ * (≥1 blocked node, no running/ready/pending) had its `terminalNotified.blocked`
+ * claim delivered by the crashed process but never by the restarting one. The
+ * recover-side termination check must re-fire the `blocked` terminal exactly
+ * once through `onGraphTerminal` — the two-layer guard (per-instance ctx +
+ * durable claim) must not permanently suppress it.
+ */
+describe("clearRecoveredQuiescentBlockedGuard + recover() restart-refire", () => {
+  /** Minimal dispatch port with getTask so recover() takes the reconcile path. */
+  class BlockedRecoveryFake implements NodeDispatchPort {
+    getTask(_id: string): DispatchTask | undefined {
+      return undefined; // the blocked node is not running — never reconciled
+    }
+    executeNode(
+      node: NodeRuntimeState,
+      _p: DispatchParentContext,
+    ): Promise<DispatchTask> {
+      return Promise.resolve(makeTask(`task-${node.nodeId}`));
+    }
+  }
+
+  it("unit: clears the durable blocked claim only for a quiescent-blocked graph", () => {
+    // Quiescent-blocked: cleared.
+    const blocked = buildState(singleNodeGraph(), "h-quiesce");
+    blocked.phase = EnginePhase.Executing;
+    blocked.nodes.get("A")!.status = NodeStatus.Blocked;
+    blocked.terminalNotified = { complete: false, blocked: true };
+    expect(clearRecoveredQuiescentBlockedGuard(blocked)).toBe(true);
+    expect(blocked.terminalNotified.blocked).toBe(false);
+    expect(blocked.terminalNotified.complete).toBe(false); // complete claim untouched
+
+    // Not quiescent (a ready node present) → no reset even with a blocked node.
+    const notQuiescent = buildState(linearGraph(), "h-nonquiesce");
+    notQuiescent.phase = EnginePhase.Executing;
+    notQuiescent.nodes.get("A")!.status = NodeStatus.Ready;
+    notQuiescent.nodes.get("B")!.status = NodeStatus.Blocked;
+    notQuiescent.terminalNotified = { complete: false, blocked: true };
+    expect(clearRecoveredQuiescentBlockedGuard(notQuiescent)).toBe(false);
+    expect(notQuiescent.terminalNotified.blocked).toBe(true); // untouched
+
+    // Quiescent-blocked but the durable claim is absent → nothing to clear.
+    const noClaim = buildState(singleNodeGraph(), "h-noclaim");
+    noClaim.phase = EnginePhase.Executing;
+    noClaim.nodes.get("A")!.status = NodeStatus.Blocked;
+    expect(clearRecoveredQuiescentBlockedGuard(noClaim)).toBe(false);
+
+    // Quiescent but NOT blocked (a pending-only / empty graph) → no reset.
+    const noBlocked = buildState(singleNodeGraph(), "h-noblocked");
+    noBlocked.nodes.get("A")!.status = NodeStatus.Completed;
+    noBlocked.terminalNotified = { complete: true, blocked: false };
+    expect(clearRecoveredQuiescentBlockedGuard(noBlocked)).toBe(false);
+  });
+
+  it("recover(): a persisted quiescent-blocked state re-fires onGraphTerminal exactly once (isBlocked=true)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rec-restart-blocked-"));
+    const graphId = "rec-restart-blocked";
+    // Simulate a crash that persisted the graph paused on a blocked node, with
+    // the terminal reminder already claimed durably (blocked=true) — the exact
+    // state that would otherwise suppress the restart re-fire.
+    const crashed = buildState(singleNodeGraph(), graphId);
+    crashed.phase = EnginePhase.Executing;
+    crashed.nodes.get("A")!.status = NodeStatus.Blocked;
+    crashed.terminalNotified = { complete: false, blocked: true };
+    new EnginePersistence(dir).save(crashed);
+
+    const terminals: Array<{ isBlocked: boolean }> = [];
+    const fake = new BlockedRecoveryFake();
+    const engine = createEngine(singleNodeGraph(), {
+      stateDir: dir,
+      graphId,
+      dispatch: fake,
+      onGraphTerminal: (event) => {
+        terminals.push({ isBlocked: event.isBlocked });
+      },
+    });
+    await engine.recover();
+
+    // Exactly one terminal event, and it is the blocked reminder.
+    expect(terminals).toEqual([{ isBlocked: true }]);
+    // Graph stays paused (still executing, waiting on the human) — no phase
+    // transition for the quiescent-blocked terminal.
+    expect(engine.status().phase).toBe(EnginePhase.Executing);
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Blocked);
+    // The reminder re-claimed the durable layer (exactly-once for the new epoch).
+    expect(engine.status().terminalNotified?.blocked).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
 });

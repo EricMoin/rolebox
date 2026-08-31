@@ -223,21 +223,57 @@ describe("orphanTmpCleanup", () => {
 });
 
 // ── breakStaleLocks ─────────────────────────────────────────────────────────
-// Note: breakStaleLocks calls stateDirFor(process.cwd()), so it operates on
-// the test runner's workspace. For a hermetic test we would need to chdir or
-// mock — these tests verify the function does not throw and correctly detects
-// locking scenarios.
+// breakStaleLocks(stateDir) operates on an explicit state directory, so these
+// tests are hermetic (no dependence on the real .rolebox/state).
 
 describe("breakStaleLocks", () => {
   it("does not throw when state directory exists", () => {
-    // Operates on the real project's .rolebox/state — if it exists, runs;
-    // if it doesn't, it's a silent no-op. Either way, no throw.
-    expect(() => breakStaleLocks()).not.toThrow();
+    const stateDir = tmpDir();
+    expect(() => breakStaleLocks(stateDir)).not.toThrow();
   });
 
   it("returns a numeric count", () => {
-    const count = breakStaleLocks();
+    const stateDir = tmpDir();
+    const count = breakStaleLocks(stateDir);
     expect(typeof count).toBe("number");
+  });
+
+  it("is a no-op when the state directory does not exist", () => {
+    expect(breakStaleLocks("/tmp/nonexistent-state-dir-xyz-789")).toBe(0);
+  });
+
+  it("deletes a leftover .lock file whose recorded PID is dead", async () => {
+    const stateDir = tmpDir();
+    // PID 2147483647 is out of the valid range and effectively never alive.
+    const deadPid = 2_147_483_647;
+    writeRawFile(
+      stateDir,
+      "loops-dead.json.lock",
+      JSON.stringify({ pid: deadPid, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+    );
+    const lockPath = join(stateDir, "loops-dead.json.lock");
+
+    const broken = breakStaleLocks(stateDir);
+
+    expect(broken).toBeGreaterThanOrEqual(1);
+    expect(existsSync(lockPath)).toBe(false); // stale lock file removed
+  });
+
+  it("leaves a .lock file whose recorded PID is alive (the test runner)", () => {
+    const stateDir = tmpDir();
+    writeRawFile(
+      stateDir,
+      "loops-live.json.lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+    );
+    // Pair it with a fresh .json so pass 2 might also consider it — but the lock
+    // is held by a live, non-timed-out process, so it must be preserved.
+    writeStateFile(stateDir, "loops-live.json", { version: 5, loops: [] });
+    const lockPath = join(stateDir, "loops-live.json.lock");
+
+    breakStaleLocks(stateDir);
+
+    expect(existsSync(lockPath)).toBe(true); // live lock untouched
   });
 });
 
@@ -339,6 +375,48 @@ describe("StartupChecker", () => {
     const result = StartupChecker.checkAll(tmpDir(), stateDir);
 
     expect(result.healthy).toBe(true);
+  });
+
+  it("recognizes dispatch-, engine-, collaboration-, budget- prefixes as version-gated", () => {
+    const stateDir = tmpDir();
+    // Corrupt (version out of range) files under each new/real prefix.
+    writeStateFile(stateDir, "dispatch-abc.json", { version: 100, tasks: [] });
+    writeStateFile(stateDir, "engine-g.json", { version: 100 });
+    writeStateFile(stateDir, "collaboration-abc.json", { version: 100 });
+    writeStateFile(stateDir, "budget-abc.json", { version: 100 });
+
+    const result = StartupChecker.checkAll(tmpDir(), stateDir);
+
+    expect(result.healthy).toBe(false);
+    expect(result.quarantined).toContain("dispatch-abc.json");
+    expect(result.quarantined).toContain("engine-g.json");
+    expect(result.quarantined).toContain("collaboration-abc.json");
+    expect(result.quarantined).toContain("budget-abc.json");
+  });
+
+  it("accepts a valid dispatch- file even though the old dispatch-tasks- prefix is gone", () => {
+    const stateDir = tmpDir();
+    // A historically-named dispatch file still matches the shorter dispatch-.
+    writeStateFile(stateDir, "dispatch-tasks-abc.json", { version: 5, tasks: [] });
+
+    const result = StartupChecker.checkAll(tmpDir(), stateDir);
+
+    expect(result.healthy).toBe(true);
+    expect(result.quarantined).toEqual([]);
+  });
+
+  it("validates recovery- files versionlessly (object only, no version required)", () => {
+    const stateDir = tmpDir();
+    // recovery- state carries no version field — must NOT be quarantined.
+    writeStateFile(stateDir, "recovery-sess1.json", { sessionID: "sess1", attempts: [] });
+    // But a non-object recovery- file IS corrupt.
+    writeRawFile(stateDir, "recovery-bad.json", '"just-a-string"');
+
+    const result = StartupChecker.checkAll(tmpDir(), stateDir);
+
+    expect(result.quarantined).toContain("recovery-bad.json");
+    expect(result.quarantined).not.toContain("recovery-sess1.json");
+    expect(existsSync(join(stateDir, "recovery-sess1.json"))).toBe(true);
   });
 
   it("orphanTmpCleanup returns 0 when no .tmp files exist", () => {

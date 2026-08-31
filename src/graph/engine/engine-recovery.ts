@@ -773,6 +773,70 @@ export function hydrateEngineState(
   target.terminalNotified = source.terminalNotified
     ? { ...source.terminalNotified }
     : undefined;
+  // M10 restart-refire correction: a graph the persisted state shows as
+  // QUIESCENT-BLOCKED (≥1 blocked node, no running/ready/pending) survives a
+  // restart with its durable `terminalNotified.blocked` claim still true, so
+  // the recover-side termination check would suppress the reminder that the
+  // operator never received from this restarted process. Clear the durable
+  // `blocked` claim so the recover-path `_checkTermination` can legally
+  // re-fire it exactly once through the already-wired `onGraphTerminal` seam.
+  // A non-quiescent-blocked graph (or one whose `blocked` claim is absent) is
+  // left untouched. `hydrateEngineState` is only ever called from
+  // `EngineRuntimeImpl.recover()` (and tests), so this reset is strictly
+  // recover-scoped and never touches the normal-session dedupe path.
+  clearRecoveredQuiescentBlockedGuard(target);
+}
+
+/**
+ * Clear the durable `terminalNotified.blocked` claim for a graph whose hydrated
+ * state is QUIESCENT-BLOCKED — no `running` / `ready` / `pending` node remains
+ * and at least one node is `blocked`.
+ *
+ * Restart-refire correction (M10): the two-layer terminal dedupe (per-instance
+ * {@link TerminationContext} + persisted `state.terminalNotified`) exists so a
+ * terminal event fires exactly once across a rebuild/restart. But a
+ * quiescent-blocked graph is a LIVE pause waiting on a human, not a completed
+ * terminal — the crash that ended the previous process delivered its reminder,
+ * while the restarting process has not. Because the restarted engine is freshly
+ * constructed, its per-instance `ctx.terminalBlocked` is already `false`
+ * (`engine-startup.ts` builds a new `EngineRuntimeImpl`); only the durable
+ * layer survives and suppresses the re-fire. Clearing it here (leaving the
+ * `complete` claim intact) lets the recover-side termination check re-fire the
+ * `blocked` terminal exactly once.
+ *
+ * Strictly recover-scoped: called from {@link hydrateEngineState}, which is only
+ * reached via `recover()` (plus tests), so the normal-session two-layer dedupe
+ * semantics are never altered.
+ *
+ * @returns `true` when a quiescent-blocked `blocked` claim was cleared.
+ */
+export function clearRecoveredQuiescentBlockedGuard(
+  state: EngineState,
+): boolean {
+  let hasBlocked = false;
+  for (const node of state.nodes.values()) {
+    switch (node.status) {
+      case NodeStatus.Running:
+      case NodeStatus.Ready:
+      case NodeStatus.Pending:
+        // A scheduler-active or upstream-waiting node => the graph is NOT
+        // quiescent, so its terminal dedupe state must not be disturbed.
+        return false;
+      case NodeStatus.Blocked:
+        hasBlocked = true;
+        break;
+      default:
+        break;
+    }
+  }
+  if (!hasBlocked) return false;
+  // Nothing to clear — the cross-restart layer already treats `blocked` as
+  // unclaimed, so the recover-side fire would not be suppressed anyway.
+  if (!state.terminalNotified?.blocked) return false;
+  // Clear ONLY the blocked claim; the complete claim (if any) stays durable so
+  // a later genuine quiescent-complete still fires exactly once.
+  state.terminalNotified.blocked = false;
+  return true;
 }
 
 // ── Prior-state adoption (incremental graph rebuild) ────────────────────────
@@ -839,6 +903,10 @@ export function adoptPriorNodeStates(
     node.joinSatisfied = prev.joinSatisfied;
     node.traversalCount = prev.traversalCount;
     node.retryCount = prev.retryCount;
+    // OPTIONAL-ADDITIVE (escalate-retry backoff): carry the withheld-dispatch
+    // deadline across rebuilds so a rebuilt engine never re-dispatches a
+    // backoff-pending retry early. Absent → undefined (no fabrication).
+    node.retryBackoffUntil = prev.retryBackoffUntil;
     node.sessionsSpawned = prev.sessionsSpawned;
     node.tokensConsumed = { ...prev.tokensConsumed };
     node.startedAt = prev.startedAt;
@@ -1117,8 +1185,13 @@ export interface NodeStalenessWatcherOptions {
  * - a node with a declared per-node budget (`node.budget?.timeout_ms`) uses
  *   that value as its staleness deadline — the declaration wins;
  * - every other node uses the watcher-wide `nodeStaleTimeoutMs`;
- * - a non-positive deadline means the node never goes stale (defensive — a
- *   `0`/negative per-node override or watcher-wide value disables staleness).
+ * - a per-node `0` disables staleness for THAT node (the documented per-node
+ *   opt-out sentinel, pinned by engine-recovery.test.ts); a non-positive
+ *   watcher-wide `nodeStaleTimeoutMs` disables staleness for every node;
+ * - a NEGATIVE per-node override is invalid input (rejected by zod +
+ *   validator-v2 rule 10); defensively it is NOT treated as an opt-out —
+ *   it falls back to the watcher-wide default so a malformed override can
+ *   never silently disable the watchdog for a node that did not opt out.
  *
  * Dispatch-liveness gate (S2): when the optional {@link NodeStalenessWatcherOptions
  * .isDispatchAlive} probe is present and verifiably reports the node's task
@@ -1163,8 +1236,25 @@ export class NodeStalenessWatcher {
     const timedOut: string[] = [];
     for (const node of state.nodes.values()) {
       if (node.status !== NodeStatus.Running) continue;
-      const deadline = node.budget?.timeout_ms ?? this.nodeStaleTimeoutMs;
-      if (deadline <= 0) continue; // no staleness deadline — never stale
+      // Deadline resolution (see class doc): a declared per-node
+      // `budget.timeout_ms` wins; `0` is the documented per-node opt-out
+      // ("disable staleness"); a NEGATIVE per-node value is invalid input —
+      // validation rejects it, but for non-zod/hydrated states it must not
+      // silently disable the watchdog either, so it falls back to the
+      // watcher-wide default. Only an explicitly zero per-node value or a
+      // non-positive watcher-wide `nodeStaleTimeoutMs` opts out.
+      const declared = node.budget?.timeout_ms;
+      let deadline: number;
+      if (declared === undefined) {
+        deadline = this.nodeStaleTimeoutMs;
+      } else if (declared === 0) {
+        continue; // per-node opt-out sentinel — never stale
+      } else if (declared > 0) {
+        deadline = declared;
+      } else {
+        deadline = this.nodeStaleTimeoutMs; // negative override → fall back
+      }
+      if (deadline <= 0) continue; // watcher-wide opt-out — never stale
       if (now - node.startedAt >= deadline) {
         // Dispatch-liveness gate (quiet-but-alive): when the optional probe
         // verifiably reports the node's task in-flight, the wall-clock

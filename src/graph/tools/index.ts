@@ -61,8 +61,16 @@ const nodeBudgetSchema = z
     max_input_tokens: z.number().optional(),
     max_output_tokens: z.number().optional(),
     max_cost_usd: z.number().optional(),
-    timeout_ms: z.number().optional(),
-    max_retries: z.number().optional(),
+    // 0 is VALID — the documented per-node "disable staleness watchdog"
+    // opt-out sentinel (engine-recovery.ts deadline resolution, pinned by
+    // engine-recovery.test.ts "skips a running node whose per-node budget
+    // disables staleness (timeout_ms 0)"). Only negatives are rejected: a
+    // negative timeout would silently disable the watchdog for a node that is
+    // NOT opting out, letting it hang forever.
+    timeout_ms: z.number().nonnegative().optional(),
+    // Retry counts are integer thresholds at runtime — fractional is
+    // meaningless, negative is invalid.
+    max_retries: z.number().int().nonnegative().optional(),
   })
   .optional();
 
@@ -70,7 +78,12 @@ const nodeBudgetSchema = z
 const joinSchema = z
   .object({
     strategy: z.enum(JOIN_STRATEGY_VALUES),
-    quorum: z.number().optional(),
+    // quorum:N is a required-answer COUNT: it must be a positive integer. A
+    // 0/negative quorum would let a fan-in join be satisfied with ZERO
+    // upstream answers (`answerCount >= n` with n <= 0, join-evaluator.ts:245)
+    // — a DAG-order violation where a convergence node dispatches at graph
+    // start ignoring its declared upstreams. A fractional quorum is meaningless.
+    quorum: z.number().int().positive().optional(),
   })
   .optional();
 
@@ -272,12 +285,15 @@ function createGraphAddNodeTool(
       budget: nodeBudgetSchema.describe("Per-node resource limits."),
       timeout_ms: z
         .number()
+        .nonnegative()
         .optional()
-        .describe("Wall-clock timeout for this node (ms)."),
+        .describe("Wall-clock timeout for this node (ms). 0 is the documented per-node 'disable staleness watchdog' opt-out."),
       max_retries: z
         .number()
+        .int()
+        .nonnegative()
         .optional()
-        .describe("Auto-retry count on escalate."),
+        .describe("Auto-retry count on escalate. Now enforced by the engine (previously parsed but ignored)."),
     },
     async execute(args, context) {
       try {
@@ -326,7 +342,9 @@ function createGraphAddEdgeTool(
         .number()
         .optional()
         .describe("Truncation limit for the passed context."),
-      retry: retrySchema.describe("Auto-retry count when the source node emits escalate."),
+      retry: retrySchema.describe(
+        "Auto-retry count on escalate for either incident node (the source node, or the target when it escalates); backoff_ms honored between attempts.",
+      ),
     },
     async execute(args, context) {
       try {
@@ -602,6 +620,18 @@ function createGraphStatusTool(
           "ISO-8601 lower bound — when stream (or alone) is set, include only " +
             "signal events at or after this timestamp. Events before since are " +
             "filtered out; if none remain, an explicit 'no events since <ts>' note.",
+        ),
+      pending_approvals: z
+        .boolean()
+        .optional()
+        .describe(
+          "First-class 'awaiting human' view: list every blocked needs_approval " +
+            "node across the resolved scope (registry only for scope=session; " +
+            "persisted only for scope=persisted; merged for scope=all). Each row " +
+            "carries the owning graph, the blocked-since timestamp, a truncated " +
+            "approval_payload summary, and a paste-ready graph_approve call. An " +
+            "empty result renders an honest 'no pending approvals' note — never " +
+            "fabricated rows. A distinct view mode; default off.",
         ),
       max_chars: z
         .number()

@@ -202,7 +202,9 @@ export async function readSessionInfo(
  * On any error, returns a minimal `NotificationMessage` with the raw fields.
  *
  * @param params - Parameters including session ID, event type, optional
- *                 event config, client, agent, role name, and directory.
+ *                 event config, client, agent, role name, directory, and
+ *                 any extra template variables (e.g. graph_id / node_id for
+ *                 structured events) merged over the base vars before rendering.
  * @returns A fully populated `NotificationMessage`.
  */
 export async function buildNotificationContent(params: {
@@ -213,6 +215,7 @@ export async function buildNotificationContent(params: {
   agent?: string;
   roleName?: string;
   dir?: string;
+  extraVars?: NotificationTemplateVars;
 }): Promise<NotificationMessage> {
   const {
     sessionID,
@@ -222,6 +225,7 @@ export async function buildNotificationContent(params: {
     agent,
     roleName,
     dir,
+    extraVars,
   } = params;
 
   let sessionTitle: string | undefined;
@@ -242,7 +246,7 @@ export async function buildNotificationContent(params: {
 
   const timestamp = new Date().toISOString();
 
-  const vars = buildTemplateVars({
+  const baseVars = buildTemplateVars({
     sessionId: sessionID,
     eventType,
     agent,
@@ -251,6 +255,9 @@ export async function buildNotificationContent(params: {
     lastUserMessage,
     lastAssistantMessage,
   });
+  // Extra vars (e.g. graph_id / node_id for structured events) override the
+  // base vars so event-specific templates can reference them.
+  const vars = extraVars ? { ...baseVars, ...extraVars } : baseVars;
 
   try {
     const titleTemplate =

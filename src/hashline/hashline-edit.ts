@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { z } from "zod";
-import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText } from "./hash.ts";
+import { canonicalizeFileText, computeFileVersion, hashWidthForLineCount, restoreFileText, splitLines } from "./hash.ts";
 import { normalizeEdits, applyEditsWithReport } from "./edit-primitives.ts";
 import { validateVersion } from "./validation.ts";
 import { reanchorChangedLines, generateUnifiedDiff, countLineDiffs } from "./diff.ts";
-import { detectUniformOffset, suggestCorrectAnchor } from "./fuzzy.ts";
-import { atomicWriteFile, atomicWriteBatch, verifyFileUnchanged } from "./atomic-write.ts";
+import { detectUniformOffset, suggestCorrectAnchor, AmbiguousAnchorError } from "./fuzzy.ts";
+import { atomicWriteFile, atomicWriteBatch, verifyFileUnchanged, BatchWriteError } from "./atomic-write.ts";
 import { normalizeLockKey, withPathLocks } from "./path-lock.ts";
 import { collectLineRefs } from "./edit-ordering.ts";
 import type { EditOp, HashMismatch, RawEditOp, FileEditRequest } from "./types.ts";
@@ -51,10 +51,13 @@ export interface ProcessedFileResult {
 
 function remapEditAnchors(edits: EditOp[], corrections: Map<string, string>): EditOp[] {
   return edits.map((edit) => {
-    if (edit.op !== "replace") return edit;
+    // D-g: fuzzy corrections apply to ALL ops with a pos anchor, not just
+    // replace — append-with-pos and prepend-with-pos go stale the same way.
     const newPos = edit.pos && corrections.has(edit.pos) ? corrections.get(edit.pos)! : edit.pos;
-    const newEnd = edit.end && corrections.has(edit.end) ? corrections.get(edit.end)! : edit.end;
-    if (newPos === edit.pos && newEnd === edit.end) return edit;
+    // `end` only exists on replace ops (range replace is exclusive to it).
+    const oldEnd = "end" in edit ? edit.end : undefined;
+    const newEnd = oldEnd && corrections.has(oldEnd) ? corrections.get(oldEnd)! : oldEnd;
+    if (newPos === edit.pos && newEnd === oldEnd) return edit;
     return { ...edit, pos: newPos, end: newEnd } as EditOp;
   });
 }
@@ -141,7 +144,12 @@ async function processSingleFile(
     }
   }
 
-  const lineCount = canonicalContent === "" ? 0 : canonicalContent.split("\n").length;
+  // Line count must come from the SAME shared line model as hashline_read
+  // (splitLines strips a single trailing "\n"). Otherwise a file with exactly
+  // SMALL_FILE_THRESHOLD lines that ends in "\n" would report 1001 lines here
+  // (split("\n").length) vs 1000 in read — escalating hashWidth and making the
+  // read-returned anchors permanently unvalidatable.
+  const lineCount = splitLines(canonicalContent).length;
   const hashWidth = hashWidthForLineCount(lineCount);
 
   // Validate per-file hashWidth if provided
@@ -166,7 +174,23 @@ async function processSingleFile(
     dedupEditCount = editResult.deduplicatedEdits;
   } catch (err: unknown) {
     if (isHashMismatchError(err)) {
-      const corrections = detectUniformOffset(err.mismatches, err.fileLines, hashWidth);
+      let corrections: Map<string, string> | null;
+      try {
+        corrections = detectUniformOffset(err.mismatches, err.fileLines, hashWidth);
+      } catch (caught: unknown) {
+        if (caught instanceof AmbiguousAnchorError) {
+          // Ambiguity is a per-file failure, not a batch abort. Return it in
+          // the same shape as the other per-file error results so it renders
+          // under "Failed files:" with the standard "Error:" header. The
+          // message already starts with the ambiguity detail and ends with the
+          // hashline_read re-read guidance.
+          return {
+            filePath, existed: fileExisted, version: computeFileVersion(canonicalContent), diff: "", additions: 0, deletions: 0, reanchored: "",
+            error: caught.message,
+          };
+        }
+        throw caught;
+      }
       if (corrections && corrections.size > 0) {
         correctionsApplied = Array.from(corrections.entries()).map(([oldRef, newRef]) => ({ old: oldRef, new: newRef }));
         const correctedEdits = remapEditAnchors(normalizedEdits, corrections);
@@ -195,11 +219,16 @@ async function processSingleFile(
     }
   }
 
-  const trailingNewlineCount = canonicalContent.match(/\n+$/)?.[0].length ?? 0;
-  let finalContent = resultContent;
-  // Strip all trailing newlines, then reapply exactly the original count
-  finalContent = finalContent.replace(/\n+$/, "");
-  finalContent = finalContent + "\n".repeat(trailingNewlineCount);
+  // D12: the result's trailing-newline state is BOOLEAN, not a count.
+  // restoreFileText (hash.ts:188-202) re-applies each ORIGINAL line's per-line
+  // terminator, so the only thing needed here is to terminate the LAST logical
+  // line when the original file ended in "\n" (its last line was terminated).
+  // Re-applying the original COUNT (e.g. 2 for "a\n\n") double-counts when the
+  // result's last line is a NEW line — anchorless append, prepend past the old
+  // EOF, or a replace of the final blank line — gaining phantom blank line(s)
+  // at EOF ("a\n\n" + append "x" → "a\n\nx\n\n" instead of "a\n\nx\n").
+  const hadTrailingNewline = canonicalContent.endsWith("\n");
+  let finalContent = hadTrailingNewline ? resultContent + "\n" : resultContent;
 
   if (finalContent === canonicalContent) {
     return {
@@ -210,12 +239,28 @@ async function processSingleFile(
   }
 
   finalContent = restoreFileText(finalContent, envelope);
-  const newVersion = computeFileVersion(resultContent);
-  const oldLines = canonicalContent === "" ? [] : canonicalContent.split("\n");
-  const newLines = resultContent === "" ? [] : resultContent.split("\n");
+  // D1 fix: the returned version must equal what a fresh hashline_read computes
+  // for the file just written. read derives the version from the canonical form
+  // of the on-disk content (hashline-read.ts:65), which retains the original
+  // trailing newlines and re-normalizes BOM/CRLF. Computing from resultContent
+  // (the line-join WITHOUT trailing newlines) skewed the version for any file
+  // ending in "\n". Canonicalizing the restored final content makes the edit
+  // contract match the read contract exactly.
+  const newVersion = computeFileVersion(canonicalizeFileText(finalContent).content);
+  const oldLines = splitLines(canonicalContent);
+  const newLines = splitLines(resultContent);
+  // D6c fix: reanchored anchors must be computed with the POST-EDIT width.
+  // A fresh hashline_read of the written file derives its hashWidth from the
+  // new line count (hashline-read.ts:73). When an edit crosses a width
+  // threshold (e.g. 999 → 1002 lines escalates width 2 → 3), reanchoring with
+  // the PRE-EDIT width yields anchors that can never match a fresh read. Same
+  // width band → no-op; crossed band → reanchored anchors match width-upgraded
+  // fresh reads exactly. splitLines is the shared line model (hashline-read
+  // uses it too), so newLines.length is exactly the post-edit line count.
+  const postHashWidth = hashWidthForLineCount(newLines.length);
   const diff = generateUnifiedDiff(canonicalContent, resultContent, filePath);
   const { additions, deletions } = countLineDiffs(canonicalContent, resultContent);
-  const reanchoredLines = reanchorChangedLines(oldLines, newLines, hashWidth);
+  const reanchoredLines = reanchorChangedLines(oldLines, newLines, postHashWidth);
 
   const reanchoredStr = reanchoredLines
     .map((r) => {
@@ -387,7 +432,31 @@ export function createHashlineEditTool(hooks: HashlineEditToolHooks = {}) {
                 await atomicWriteBatch(writes);
               }
             } catch (err) {
-              return `Write failed: file system error (${err instanceof Error ? err.message : String(err)}).`;
+              // D4/D1/D5 fix: always use the "Error:" prefix (every other
+              // failure path does) while KEEPING the "Write failed" substring
+              // and the underlying errno text. For a batch (BatchWriteError),
+              // append honest file accounting: which file failed, whether any
+              // bytes landed, what was written before the failure, and what was
+              // not written. In-place single-file writes are non-atomic, so a
+              // plain error (atomicWriteFile path) makes NO zero-write claim.
+              const causeText = err instanceof Error ? err.message : String(err);
+              const lines = [`Error: Write failed: file system error (${causeText}).`];
+              if (err instanceof BatchWriteError) {
+                lines.push(`Failed file: ${err.failed}.`);
+                if (err.written.length === 0) {
+                  lines.push("No files were written.");
+                } else {
+                  lines.push(`Files written before the failure: ${err.written.join(", ")}.`);
+                }
+                const writtenSet = new Set(err.written);
+                const notWritten = writes
+                  .map((w) => w.filePath)
+                  .filter((fp) => fp !== err.failed && !writtenSet.has(fp));
+                lines.push(`Files not written: ${notWritten.join(", ")}`);
+              } else {
+                lines.push(`Failed file: ${writes[0].filePath}.`);
+              }
+              return lines.join("\n");
             }
 
             const output: string[] = [];
