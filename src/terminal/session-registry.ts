@@ -67,13 +67,20 @@ interface Backend {
   kill(signal?: string): void;
 }
 
+// Optional native module. Imported via a variable instead of a string literal
+// so tsc does not statically resolve "node-pty": it is an optionalDependency
+// whose native build can fail on some CI runners, which would make its type
+// declarations absent and turn `import("node-pty")` into a TS2307 build break
+// even though the runtime import is guarded by try/catch. Same module at runtime.
+const NODE_PTY_MODULE = "node-pty";
+
 // Lazy, cached node-pty module resolution. `undefined` = not yet attempted.
 let ptyModule: unknown | null | undefined = undefined;
 async function loadPty(): Promise<Record<string, unknown> | null> {
   if (ptyModule !== undefined) return ptyModule as Record<string, unknown> | null;
   try {
     // Optional dependency — may be absent.
-    ptyModule = (await import("node-pty")) as unknown as Record<string, unknown>;
+    ptyModule = (await import(NODE_PTY_MODULE)) as unknown as Record<string, unknown>;
     log.debug("node-pty loaded — PTY backend available");
   } catch {
     ptyModule = null;
