@@ -180,10 +180,13 @@ export const ENGINE_PHASE_VALUES: readonly EnginePhase[] = Object.values(EngineP
  *              running → timeout → done (or ready, if retry)
  * Cancel path: pending/ready → cancelled → done
  *
- * TODO(Phase 3): blocked status mechanics for needs_approval pause.
- * The `blocked` state is reserved for human-in-the-loop approval;
- * full engine-advancement pausing for approval nodes will be
- * implemented in Phase 3.
+ * The `blocked` state is the human-in-the-loop approval pause: a node
+ * entering it from `running` (via a `need_approval` / `blocked` /
+ * `need_clarification` signal) halts downstream dispatch until the human
+ * resolves the gate through the approval lifecycle (Phase 3 —
+ * engine-advance.ts "Phase 3 approval lifecycle" + graph_approve/
+ * approval-handler.ts), after which the node resumes to `completed` (or
+ * `ready` on retry).
  */
 export const NodeStatus = {
   Pending: "pending",

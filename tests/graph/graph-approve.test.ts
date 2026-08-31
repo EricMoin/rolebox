@@ -21,10 +21,17 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { createGraphToolSet, type GraphToolSet } from "../../src/graph/tools/graph-tools";
 import { createGraphTools } from "../../src/graph/tools/index";
-import { NodeStatus } from "../../src/constants";
+import { createEngineState, provision } from "../../src/graph/engine/engine-state";
+import { EnginePersistence } from "../../src/graph/engine/engine-persistence";
+import { EnginePhase, NodeStatus } from "../../src/constants";
 import type { EngineState } from "../../src/types.engine-v2";
+import type { GraphDeclaration } from "../../src/types.graph-v2";
 import type { DispatchTask } from "../../src/dispatch/types";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
 
@@ -201,5 +208,68 @@ describe("graph_approve (reject action)", () => {
     await expect(
       ts.graph_approve({ graph_id: "missing", node_id: "P", action: "approve" }),
     ).rejects.toThrow(/does not exist/);
+  });
+});
+
+// ── Restart recovery: a persisted blocked graph is approvable in a fresh toolset ──
+
+describe("graph_approve (restart recovery from persisted state)", () => {
+  it("approves a blocked persisted node from an empty registry", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "graph-approve-recover-"));
+    try {
+      // 1. Seed the on-disk engine-state store the way `graph_run` would leave it:
+      //    a needs_approval node paused at `blocked` in a non-complete phase.
+      const graphId = "g-recover";
+      const state = createEngineState(
+        {
+          id: graphId,
+          name: "gate",
+          nodes: [{ id: "P", agent: "emperor--jinyiwei", prompt: "Approve.", needs_approval: true }],
+          edges: [],
+        } as unknown as GraphDeclaration,
+        graphId,
+      );
+      provision(state);
+      state.phase = EnginePhase.Executing;
+      const node = state.nodes.get("P")!;
+      node.status = NodeStatus.Blocked;
+      node.needsApproval = true;
+      node.signalsObserved["need_approval"] = "durable summary";
+      new EnginePersistence(dir).save(state);
+
+      // 2. A BRAND-NEW toolset over the same stateDir — the in-memory registry is
+      //    empty, simulating a plugin restart. No `graph_create` calls happened.
+      const ts = createGraphToolSet({ stateDir: dir, dispatch: fakeDispatchSeam() });
+
+      // 3. The approval resolves the persisted gate instead of throwing.
+      const res = await ts.graph_approve({
+        graph_id: graphId,
+        node_id: "P",
+        action: "approve",
+      });
+
+      expect(res.action).toBe("approve");
+      expect(res.node_id).toBe("P");
+      expect(res.node_status).toBe(NodeStatus.Completed);
+      expect(res.phase).toBe("complete");
+
+      // The rebuilt engine was registered so a subsequent call reuses it.
+      const { state: liveState } = liveRuntime(ts, graphId);
+      expect(liveState.nodes.get("P")!.status).toBe(NodeStatus.Completed);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still rejects a graph missing from both registry and persisted store", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "graph-approve-absent-"));
+    try {
+      const ts = createGraphToolSet({ stateDir: dir });
+      await expect(
+        ts.graph_approve({ graph_id: "nope", node_id: "P", action: "approve" }),
+      ).rejects.toThrow(/does not exist/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

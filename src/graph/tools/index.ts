@@ -621,6 +621,18 @@ function createGraphStatusTool(
             "signal events at or after this timestamp. Events before since are " +
             "filtered out; if none remain, an explicit 'no events since <ts>' note.",
         ),
+      pending_approvals: z
+        .boolean()
+        .optional()
+        .describe(
+          "First-class 'awaiting human' view: list every blocked needs_approval " +
+            "node across the resolved scope (registry only for scope=session; " +
+            "persisted only for scope=persisted; merged for scope=all). Each row " +
+            "carries the owning graph, the blocked-since timestamp, a truncated " +
+            "approval_payload summary, and a paste-ready graph_approve call. An " +
+            "empty result renders an honest 'no pending approvals' note — never " +
+            "fabricated rows. A distinct view mode; default off.",
+        ),
       max_chars: z
         .number()
         .optional()

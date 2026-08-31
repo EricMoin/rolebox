@@ -128,6 +128,7 @@ import {
   filterNodes,
   groupCompletedNodes,
   limitNodes,
+  listPendingApprovals,
   toEpochMs,
   type GroupByMode,
   type StatusQuery,
@@ -416,6 +417,13 @@ export interface GraphStatusArgs {
    * signal events at or after this timestamp. Events before `since` are
    * filtered out; if none remain, an explicit "no events since <ts>" note. */
   since?: string;
+  /** First-class "awaiting human" view: list every `blocked` `needs_approval`
+   * node across the resolved scope (registry only for `session`; persisted only
+   * for `persisted`; merged for `all`). Each row carries the owning graph, the
+   * blocked-since timestamp, a truncated `approval_payload` summary, and a
+   * paste-ready `graph_approve` call. A distinct view mode — an empty result
+   * renders an honest "no pending approvals" note, never fabricated rows. */
+  pending_approvals?: boolean;
   max_chars?: number;
   offset?: number;
   tail?: boolean;
@@ -833,6 +841,71 @@ export class GraphToolSet {
       );
     }
     return entry;
+  }
+
+  /**
+   * Resolve an entry for `graph_approve` / `graph_reject` that survives a plugin
+   * restart (subtask 2).
+   *
+   * The in-memory registry is empty after a restart, but a graph paused at a
+   * `blocked` `needs_approval` node persists its state on disk. `recoverInterruptedGraphs`
+   * (engine-startup.ts) rebuilds such graphs as independent `createEngine`
+   * instances that are never placed into this toolset's registry — so a plain
+   * `getEntry` throws "graph X does not exist" even though the gate is durably
+   * resumable.
+   *
+   * Order of resolution:
+   * 1. Registry hit → return it unchanged (the normal in-memory path).
+   * 2. Persisted hit at a non-`complete` phase with a `blocked` target node →
+   *    rebuild a fresh engine from the persisted declaration, adopt the on-disk
+   *    per-node progress with `adoptPrior` semantics (so the `blocked` gate is
+   *    carried across instead of reset to `ready`), register it, and return.
+   * 3. Neither present → throw the same descriptive error `getEntry` throws.
+   *
+   * Additive and non-destructive: the registry path is untouched; the persisted
+   * path only rebuilds when the registry has no entry for `graphId`.
+   */
+  private async resolveApprovalEntry(
+    graphId: string,
+    nodeId: string,
+  ): Promise<GraphEntry> {
+    const existing = this.registry.get(graphId);
+    if (existing) return existing;
+
+    const found = this.persistedScan().loaded.find((s) => s.graphId === graphId);
+    const target = found?.nodes.get(nodeId);
+    // Only a resumable gate is worth rebuilding: a non-complete persisted phase
+    // (idle/executing — "blocked" is a node status, not a phase) whose target
+    // node is blocked. Anything else falls through to the descriptive error so
+    // the registry remains the source of truth for the normal paths.
+    if (found && found.phase !== EnginePhase.Complete && target?.status === NodeStatus.Blocked) {
+      const runtime = this.buildEngine(found.graphDeclaration, graphId);
+      // Fire-and-forget is unacceptable here (constructors are sync), but
+      // adoption's async half is only the dispatch reconcile — safe to await:
+      // no node is re-dispatched, only the `blocked` gate is carried across.
+      // A throwing adoptPrior is contained (logged), never surfaced raw.
+      try {
+        await runtime.adoptPrior(found);
+      } catch (err) {
+        log.warn(
+          `graph-tools: adoptPrior (approval recovery) failed for graph "${graphId}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      const entry: GraphEntry = {
+        declaration: found.graphDeclaration,
+        runtime,
+      };
+      this.registry.set(graphId, entry);
+      return entry;
+    }
+
+    // Registry miss and no resumable persisted state → the same descriptive
+    // error `getEntry` throws today.
+    throw new Error(
+      `graph "${graphId}" does not exist. Call graph_create first to open a graph registry slot.`,
+    );
   }
 
   /** Commit a candidate declaration: validate → store → rebuild runtime.
@@ -1466,6 +1539,14 @@ export class GraphToolSet {
     const scope: GraphStatusScope = args.scope ?? "session";
     const noTarget = !args.graph_id && !args.node_id && !args.loop_id;
 
+    // ── Pending-approvals view (first-class "awaiting human" surface) ─────────
+    // A distinct view mode that resolves the blocked+needsApproval nodes across
+    // the requested scope. Runs before every other branch so it composes with
+    // any scope (session / persisted / all) and an optional graph_id filter.
+    if (args.pending_approvals === true) {
+      return this.renderPendingApprovals(args, scope);
+    }
+
     // ── Cross-session views (scope persisted/all) ─────────────────────────────
     // Merge the scanned persisted EngineStates (subtask 3) into the render/query
     // pipeline: the no-target list shows persisted graphs, and a filter/group_by/
@@ -1563,6 +1644,88 @@ export class GraphToolSet {
       }
     }
     return out;
+  }
+
+  /** The in-memory registry states, in registry order (graph_create order). */
+  private registryStates(): EngineState[] {
+    const out: EngineState[] = [];
+    for (const [, entry] of this.registry) out.push(entry.runtime.status());
+    return out;
+  }
+
+  /**
+   * Pending-approvals render: enumerate every `blocked` `needs_approval` node
+   * across the resolved scope (registry for `session`; persisted for
+   * `persisted`; merged for `all`, deduped registry-wins) via the pure
+   * `status-queries.ts` {@link listPendingApprovals} helper. An optional
+   * `graph_id` narrows the scan to a single graph. Every row carries the owning
+   * graph, blocked-since timestamp, a truncated approval_payload summary, and a
+   * paste-ready `graph_approve` call — all sourced from REAL recorded state,
+   * never fabricated. An empty result yields an honest note.
+   */
+  private renderPendingApprovals(args: GraphStatusArgs, scope: GraphStatusScope): string {
+    const scan = this.persistedScan();
+    let states: EngineState[];
+    if (scope === "persisted") {
+      states = scan.loaded;
+    } else if (scope === "all") {
+      states = this.collectAllStates();
+    } else {
+      states = this.registryStates();
+    }
+    if (args.graph_id) {
+      states = states.filter((s) => s.graphId === args.graph_id);
+    }
+
+    const entries = listPendingApprovals(states);
+    const scopedArgs: GraphStatusArgs = { ...args };
+
+    if (args.format === "json") {
+      return this.paginate(
+        JSON.stringify(
+          {
+            scope,
+            pending_approvals: entries.map((e) => ({
+              graph_id: e.graphId,
+              node_id: e.nodeId,
+              agent: e.agent,
+              ...(e.blockedSince !== undefined ? { blocked_since: e.blockedSince } : {}),
+              ...(e.approvalPayloadSummary !== undefined
+                ? { approval_payload_summary: e.approvalPayloadSummary }
+                : {}),
+              approve_call: e.approveCall,
+            })),
+            count: entries.length,
+          },
+          null,
+          2,
+        ),
+        scopedArgs,
+      );
+    }
+
+    if (entries.length === 0) {
+      // Honest empty state: distinguishes a genuinely empty store.
+      if (scope === "persisted" && scan.count === 0) {
+        return (
+          `No pending approvals.\n\n` + this.persistedEmptyNote(scan)
+        );
+      }
+      return `Pending approvals (0)  [scope: ${scope}]\n  no pending approvals`;
+    }
+
+    const lines: string[] = [`Pending approvals (${entries.length})  [scope: ${scope}]`];
+    for (const e of entries) {
+      const since = e.blockedSince !== undefined ? new Date(e.blockedSince).toISOString() : "—";
+      lines.push(`  ${e.nodeId}  (graph: ${e.graphId})`);
+      lines.push(`    agent: ${e.agent}`);
+      lines.push(`    blocked-since: ${since}`);
+      lines.push(`    approve: ${e.approveCall}`);
+      if (e.approvalPayloadSummary !== undefined) {
+        lines.push(`    payload: ${e.approvalPayloadSummary}`);
+      }
+    }
+    return this.paginate(lines.join("\n"), scopedArgs);
   }
 
   /** Honest-empty note for a persisted store that yielded no hydrated graph. */
@@ -1919,7 +2082,7 @@ export class GraphToolSet {
    * {@link EngineRuntime} API (protected engine files are untouched).
    */
   async graph_approve(args: GraphApproveArgs): Promise<GraphApproveResult> {
-    const entry = this.getEntry(args.graph_id);
+    const entry = await this.resolveApprovalEntry(args.graph_id, args.node_id);
     const runtime = entry.runtime;
 
     if (args.action === "approve") {

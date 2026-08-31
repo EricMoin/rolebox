@@ -773,6 +773,70 @@ export function hydrateEngineState(
   target.terminalNotified = source.terminalNotified
     ? { ...source.terminalNotified }
     : undefined;
+  // M10 restart-refire correction: a graph the persisted state shows as
+  // QUIESCENT-BLOCKED (≥1 blocked node, no running/ready/pending) survives a
+  // restart with its durable `terminalNotified.blocked` claim still true, so
+  // the recover-side termination check would suppress the reminder that the
+  // operator never received from this restarted process. Clear the durable
+  // `blocked` claim so the recover-path `_checkTermination` can legally
+  // re-fire it exactly once through the already-wired `onGraphTerminal` seam.
+  // A non-quiescent-blocked graph (or one whose `blocked` claim is absent) is
+  // left untouched. `hydrateEngineState` is only ever called from
+  // `EngineRuntimeImpl.recover()` (and tests), so this reset is strictly
+  // recover-scoped and never touches the normal-session dedupe path.
+  clearRecoveredQuiescentBlockedGuard(target);
+}
+
+/**
+ * Clear the durable `terminalNotified.blocked` claim for a graph whose hydrated
+ * state is QUIESCENT-BLOCKED — no `running` / `ready` / `pending` node remains
+ * and at least one node is `blocked`.
+ *
+ * Restart-refire correction (M10): the two-layer terminal dedupe (per-instance
+ * {@link TerminationContext} + persisted `state.terminalNotified`) exists so a
+ * terminal event fires exactly once across a rebuild/restart. But a
+ * quiescent-blocked graph is a LIVE pause waiting on a human, not a completed
+ * terminal — the crash that ended the previous process delivered its reminder,
+ * while the restarting process has not. Because the restarted engine is freshly
+ * constructed, its per-instance `ctx.terminalBlocked` is already `false`
+ * (`engine-startup.ts` builds a new `EngineRuntimeImpl`); only the durable
+ * layer survives and suppresses the re-fire. Clearing it here (leaving the
+ * `complete` claim intact) lets the recover-side termination check re-fire the
+ * `blocked` terminal exactly once.
+ *
+ * Strictly recover-scoped: called from {@link hydrateEngineState}, which is only
+ * reached via `recover()` (plus tests), so the normal-session two-layer dedupe
+ * semantics are never altered.
+ *
+ * @returns `true` when a quiescent-blocked `blocked` claim was cleared.
+ */
+export function clearRecoveredQuiescentBlockedGuard(
+  state: EngineState,
+): boolean {
+  let hasBlocked = false;
+  for (const node of state.nodes.values()) {
+    switch (node.status) {
+      case NodeStatus.Running:
+      case NodeStatus.Ready:
+      case NodeStatus.Pending:
+        // A scheduler-active or upstream-waiting node => the graph is NOT
+        // quiescent, so its terminal dedupe state must not be disturbed.
+        return false;
+      case NodeStatus.Blocked:
+        hasBlocked = true;
+        break;
+      default:
+        break;
+    }
+  }
+  if (!hasBlocked) return false;
+  // Nothing to clear — the cross-restart layer already treats `blocked` as
+  // unclaimed, so the recover-side fire would not be suppressed anyway.
+  if (!state.terminalNotified?.blocked) return false;
+  // Clear ONLY the blocked claim; the complete claim (if any) stays durable so
+  // a later genuine quiescent-complete still fires exactly once.
+  state.terminalNotified.blocked = false;
+  return true;
 }
 
 // ── Prior-state adoption (incremental graph rebuild) ────────────────────────
