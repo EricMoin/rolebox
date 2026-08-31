@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { createSubLogger } from "../../logger.ts";
+import { atomicWriteSync } from "../../function/fs-util.ts";
 
 const log = createSubLogger("state-lock");
 
@@ -40,7 +41,16 @@ function readLockFile(path: string): LockData | null {
   }
 }
 
-function pidAlive(pid: number): boolean {
+/**
+ * Probe whether a PID is alive.
+ *
+ * Returns `true` (alive), `false` (definitively dead — ESRCH), or `null`
+ * (unverifiable — the kill syscall failed with a non-ESRCH error such as EPERM
+ * from a recycled PID now owned by another user, or a restricted process).
+ * This function is total: it never rethrows, so lock acquisition can never
+ * wedge startup on an unexpected errno.
+ */
+function pidAlive(pid: number): boolean | null {
   try {
     process.kill(pid, 0);
     return true;
@@ -52,13 +62,15 @@ function pidAlive(pid: number): boolean {
     ) {
       return false;
     }
-    throw err;
+    // Non-ESRCH errno (EPERM, EINVAL, etc.): PID state cannot be verified.
+    // Fall through to the staleness check rather than throwing.
+    return null;
   }
 }
 
 function writeNewLock(path: string): LockData {
   const data: LockData = { pid: process.pid, startedAt: Date.now(), lastHeartbeat: Date.now() };
-  writeFileSync(path, JSON.stringify(data), "utf-8");
+  atomicWriteSync(path, JSON.stringify(data));
   return data;
 }
 
@@ -95,7 +107,19 @@ export function acquireStateLock(statePath: string): LockResult {
     };
   }
 
-  if (!pidAlive(existing.pid)) {
+  // Reclaim only when the PID is definitively dead. If pidAlive is unverifiable
+  // (null) or throws unexpectedly, we do NOT reclaim here — we fall through to
+  // the staleness check below, so a recycled/restricted PID can never wedge
+  // startup by blocking the definitive-dead path.
+  let pidIsDead = false;
+  try {
+    pidIsDead = pidAlive(existing.pid) === false;
+  } catch {
+    // Defensive: pidAlive is total, but guard against any unexpected throw so
+    // acquireStateLock itself remains a total, never-throw function.
+    pidIsDead = false;
+  }
+  if (pidIsDead) {
     const data = writeNewLock(lp);
     return {
       ok: true,
@@ -103,7 +127,7 @@ export function acquireStateLock(statePath: string): LockResult {
     };
   }
 
-  // Stale lock recovery: pid alive but lock age exceeds timeout
+  // Stale lock recovery: pid alive or unverifiable, but lock age exceeds timeout
   if (Date.now() - existing.startedAt > StaleLockTimeoutMs) {
     log.warn(`Stale lock reclaimed: "${statePath}" held by pid ${existing.pid} for >${StaleLockTimeoutMs}ms`);
     const data = writeNewLock(lp);

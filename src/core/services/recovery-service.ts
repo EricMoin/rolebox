@@ -101,7 +101,20 @@ export class RecoveryService implements PluginService {
     // Defense-in-depth: run StartupChecker again at service init
     // PluginCore.init() at the top already runs this, but here at the
     // service layer we catch anything that might have been missed.
-    const health = StartupChecker.checkAll(dir, stateDirFor(dir));
+    let health: StartupHealth;
+    try {
+      health = StartupChecker.checkAll(dir, stateDirFor(dir));
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.warn(`Startup check failed: ${errMsg}`);
+      health = {
+        healthy: false,
+        quarantined: [],
+        staleLocksBroken: 0,
+        orphanTmpsRemoved: 0,
+        warnings: [`startup check failed: ${errMsg}`],
+      };
+    }
     this.startupHealth = health;
 
     if (health.quarantined.length > 0 && !RecoveryService.notifiedQuarantine) {

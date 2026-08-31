@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -154,5 +154,81 @@ describe("acquireStateLock", () => {
     const lock = acquireStateLock(path);
     expect(lock.ok).toBe(false);
     expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  it("truncated lock content (partial JSON) is treated as absent — fresh acquire succeeds", () => {
+    const path = makePath();
+    // Truncated/corrupted JSON — readLockFile returns null — treated as no lock.
+    writeFileSync(path + ".lock", '{"pid": 1234, "sta', "utf-8");
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+
+    const raw = readFileSync(path + ".lock", "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+
+    lock.release();
+    expect(existsSync(path + ".lock")).toBe(false);
+  });
+
+  it("non-ESRCH error from process.kill (EPERM simulation) — unverifiable pid falls through to staleness check", () => {
+    const path = makePath();
+    // A recycled/alive pid whose state we cannot verify (EPERM).
+    const recycledPid = 99999;
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: recycledPid, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+      "utf-8",
+    );
+
+    const killSpy = spyOn(process, "kill").mockImplementation(() => {
+      const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    });
+
+    try {
+      // Fresh (not stale) lock — unverifiable pid must NOT be reclaimed on the
+      // dead-pid path; it is held (ok:false) rather than wedging startup.
+      const lock = acquireStateLock(path);
+      expect(lock.ok).toBe(false);
+      expect(lock.heldByPid).toBe(recycledPid);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("non-ESRCH error (EPERM) on a genuinely stale lock is reclaimed via staleness check", () => {
+    const path = makePath();
+    // Recycled/alive pid, unverifiable state, but lock age exceeds the timeout.
+    const recycledPid = 99998;
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: recycledPid, startedAt: Date.now() - StaleLockTimeoutMs - 10_000, lastHeartbeat: Date.now() - StaleLockTimeoutMs - 10_000 }),
+      "utf-8",
+    );
+
+    const killSpy = spyOn(process, "kill").mockImplementation(() => {
+      const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    });
+
+    try {
+      // Unverifiable pid + stale age → reclaimed through the staleness path,
+      // not the dead-pid path. Startup is never thrown.
+      const lock = acquireStateLock(path);
+      expect(lock.ok).toBe(true);
+
+      const raw = readFileSync(path + ".lock", "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.pid).toBe(process.pid);
+
+      lock.release();
+      expect(existsSync(path + ".lock")).toBe(false);
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 });

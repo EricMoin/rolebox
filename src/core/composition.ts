@@ -21,6 +21,43 @@ import { HealthMonitorService } from "./services/health-monitor-service.ts";
 
 const log = createSubLogger("plugin-hooks");
 
+/**
+ * List the names of every service PluginCore marked as degraded during init.
+ * A service lands here when it declares a degraded dependency or its optional
+ * init threw — see PluginCore.init (src/core/plugin-core.ts:78-105).
+ */
+function listDegradedServices(core: PluginCore): string[] {
+  const degraded: string[] = [];
+  for (const name of core.getServices().keys()) {
+    if (core.isDegraded(name)) degraded.push(name);
+  }
+  return degraded;
+}
+
+/**
+ * Minimal no-op hook handlers returned when HookService is unavailable (never
+ * initialized because a dependency was degraded, or its handler assembly was
+ * skipped). Keeping opencode alive beats a hard crash on startup; the genuine
+ * diagnostic is the error log emitted by the caller, not a thrown Error that
+ * would take the whole plugin (and server) down. Never return undefined —
+ * opencode iterates the handler map, so absent keys must be real no-ops and
+ * `tool` must be a usable (empty) tool map.
+ */
+function buildNoOpHandlers(): Record<string, unknown> {
+  const noop = async () => {};
+  return {
+    tool: {},
+    event: noop,
+    config: noop,
+    "chat.message": noop,
+    "tool.execute.after": noop,
+    "tool.execute.before": noop,
+    "experimental.chat.system.transform": noop,
+    "experimental.session.compacting": noop,
+    dispose: noop,
+  };
+}
+
 // Re-exports backed by hookState (unchanged — consumers import these directly)
 export const managerMap = hookState.managerMap;
 export const loopManagerMap = hookState.loopManagerMap;
@@ -100,5 +137,32 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
     activeLoopManager = loopService.getLoopManager();
   }
 
-  return core.getService<HookService>("hook-service")!.getHandlers()!;
+  const hookService = core.getService<HookService>("hook-service");
+  if (!hookService) {
+    // hook-service was never registered — unexpected in this composition (it is
+    // always registered), but never return undefined to opencode.
+    log.error(
+      "hook-service unavailable (not registered); returning no-op handlers to keep opencode alive",
+      { degradedServices: listDegradedServices(core) },
+    );
+    return buildNoOpHandlers();
+  }
+
+  const handlers = hookService.getHandlers();
+  if (!handlers || Object.keys(handlers).length === 0) {
+    // hook-service was skipped or degraded (init never ran, so its handler
+    // wrapper is empty). Log the degraded service chain and fall back to no-op
+    // handlers — never return undefined, which would break opencode's hook
+    // registration.
+    log.error(
+      "hook-service unavailable: handlers not initialized (degraded or skipped init); returning no-op handlers to keep opencode alive",
+      {
+        degradedServices: listDegradedServices(core),
+        failedServiceChain: ["hook-service", ...listDegradedServices(core)],
+      },
+    );
+    return buildNoOpHandlers();
+  }
+
+  return handlers;
 }

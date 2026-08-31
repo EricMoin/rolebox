@@ -752,8 +752,13 @@ export default async function (pi: any): Promise<void> {
     });
     const dispatchManager = result.manager;
 
+    // Graceful degradation: recover() failure → log error + use empty state.
+    // Mirrors the opencode path (dispatch-service.ts:120-126) so a pre-fix lock
+    // EPERM throw (or any recover() failure) no longer aborts Pi initialization.
     if (result.recoverError) {
-      throw result.recoverError;
+      log.error("DispatchManager.recover() failed, continuing with empty state", {
+        error: result.recoverError.message,
+      });
     }
 
     log.info("Dispatch manager initialized", {
