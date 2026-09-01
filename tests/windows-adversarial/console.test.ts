@@ -671,4 +671,180 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
 
     expect(violations).toEqual([]);
   });
+
+  // ── Scenario 7: TERM=dumb → no SGR (the format.ts unconditional-color defect) ──
+
+  test("scenario-7: list/status/info with TERM=dumb emit no ANSI SGR bytes", async () => {
+    const sb = makeSandbox();
+    const commands: string[][] = [
+      ["list"],
+      ["status"],
+      ["info", ROLE_ID],
+    ];
+    const violations: string[] = [];
+
+    for (const args of commands) {
+      const r = await runCli(args, {
+        dataDir: sb.dataDir,
+        configDir: sb.configDir,
+        keepTempDirs: true,
+        timeout: 30_000,
+        env: { TERM: "dumb" },
+      });
+      const matches = r.stdout.match(ANSI_SGR_G) ?? [];
+      if (matches.length > 0) {
+        const first = matches[0]!;
+        const offset = r.stdout.indexOf(first);
+        recordDefect("term-dumb-sgr-leak", {
+          scenario: `\`rolebox ${args.join(" ")}\` with TERM=dumb and stdout piped`,
+          command: r.command,
+          expected: "TERM=dumb (equates to no color) suppresses ANSI SGR",
+          actual:
+            `${matches.length} SGR seq(s) still emitted with TERM=dumb; first=${JSON.stringify(first)}; ` +
+            `context_hex=${hexContext(r.stdout, offset)}; exit=${r.exitCode}`,
+          exit_code: r.exitCode,
+          stdout_tail: r.stdoutTail,
+          stderr_tail: r.stderrTail,
+          file_line_refs: ["src/cli/format.ts:13-28"],
+          cluster: CLUSTER,
+        });
+        violations.push(
+          `\`rolebox ${args.join(" ")}\`: ${matches.length} SGR seq(s) under TERM=dumb; first=${JSON.stringify(first)}`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  // ── Scenario 8: TERM empty / unset → no SGR ──────────────────────────
+
+  test("scenario-8: list/status/info with TERM empty emit no ANSI SGR bytes", async () => {
+    const sb = makeSandbox();
+    const commands: string[][] = [
+      ["list"],
+      ["status"],
+      ["info", ROLE_ID],
+    ];
+    const violations: string[] = [];
+
+    for (const args of commands) {
+      const r = await runCli(args, {
+        dataDir: sb.dataDir,
+        configDir: sb.configDir,
+        keepTempDirs: true,
+        timeout: 30_000,
+        env: { TERM: "" },
+      });
+      const matches = r.stdout.match(ANSI_SGR_G) ?? [];
+      if (matches.length > 0) {
+        const first = matches[0]!;
+        const offset = r.stdout.indexOf(first);
+        recordDefect("term-empty-sgr-leak", {
+          scenario: `\`rolebox ${args.join(" ")}\` with TERM empty (unset) and stdout piped`,
+          command: r.command,
+          expected: "TERM empty (no terminal capability) suppresses ANSI SGR",
+          actual:
+            `${matches.length} SGR seq(s) still emitted with TERM empty; first=${JSON.stringify(first)}; ` +
+            `context_hex=${hexContext(r.stdout, offset)}; exit=${r.exitCode}`,
+          exit_code: r.exitCode,
+          stdout_tail: r.stdoutTail,
+          stderr_tail: r.stderrTail,
+          file_line_refs: ["src/cli/format.ts:13-28"],
+          cluster: CLUSTER,
+        });
+        violations.push(
+          `\`rolebox ${args.join(" ")}\`: ${matches.length} SGR seq(s) with TERM empty; first=${JSON.stringify(first)}`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  // ── Scenario 9: NO_COLOR + FORCE_COLOR precedence (common CI footgun) ──
+
+  test("scenario-9: NO_COLOR=1 + FORCE_COLOR=1 → NO_COLOR wins, no ANSI SGR", async () => {
+    // Documented precedence: an explicit opt-out (NO_COLOR) must win over an
+    // opt-in (FORCE_COLOR). A Windows CI that exports both must not recolorize.
+    const sb = makeSandbox();
+    const commands: string[][] = [
+      ["list"],
+      ["status"],
+      ["info", ROLE_ID],
+    ];
+    const violations: string[] = [];
+
+    for (const args of commands) {
+      const r = await runCli(args, {
+        dataDir: sb.dataDir,
+        configDir: sb.configDir,
+        keepTempDirs: true,
+        timeout: 30_000,
+        env: { NO_COLOR: "1", FORCE_COLOR: "1" },
+      });
+      const matches = r.stdout.match(ANSI_SGR_G) ?? [];
+      if (matches.length > 0) {
+        const first = matches[0]!;
+        const offset = r.stdout.indexOf(first);
+        recordDefect("no-color-force-color-precedence", {
+          scenario: `\`rolebox ${args.join(" ")}\` with NO_COLOR=1 AND FORCE_COLOR=1 both set and stdout piped`,
+          command: r.command,
+          expected: "NO_COLOR (explicit opt-out) takes precedence over FORCE_COLOR → no SGR",
+          actual:
+            `${matches.length} SGR seq(s) still emitted; first=${JSON.stringify(first)}; ` +
+            `context_hex=${hexContext(r.stdout, offset)}; exit=${r.exitCode}`,
+          exit_code: r.exitCode,
+          stdout_tail: r.stdoutTail,
+          stderr_tail: r.stderrTail,
+          file_line_refs: ["src/cli/format.ts:13-28", "src/cli/config.ts"],
+          cluster: CLUSTER,
+        });
+        violations.push(
+          `\`rolebox ${args.join(" ")}\`: ${matches.length} SGR seq(s) despite NO_COLOR=1; first=${JSON.stringify(first)}`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  // ── Scenario 10: chcp 437 (US-ASCII) codepage → no corruption (win32-only) ──
+
+  test("scenario-10: rolebox list under cmd chcp 437 preserves a plain ASCII role name (no corruption)", async () => {
+    if (process.platform !== "win32") {
+      console.log(
+        `SKIP scenario-10: chcp 437 / cmd.exe unavailable on ${process.platform} (windows-latest-only). ` +
+          `Reproduces as \`cmd /c "chcp 437 >nul && bun dist/cli/main.js list"\` and asserts the ASCII role id survives intact.`,
+      );
+      return;
+    }
+
+    const sb = makeSandbox();
+    const env = shellEnv(sb.dataDir, sb.configDir);
+    const expectedAscii = Buffer.from(ROLE_ID, "utf-8");
+    const cmdLine = `chcp 437 >nul && ${winQuote(process.execPath)} ${winQuote(CLI_PATH)} list`;
+    const r = await runShell("cmd.exe", ["/c", cmdLine], env, REPO_ROOT, 30_000);
+
+    // Locks the GBK defect (scenario-4) to non-ASCII content only: under a plain
+    // US-ASCII codepage a pure-ASCII role id must survive byte-for-byte.
+    const includesAscii = r.stdoutBuf.includes(expectedAscii);
+    const exitOk = r.code === 0;
+    if (!includesAscii || !exitOk) {
+      recordDefect("chp437-ascii-corruption", {
+        scenario: "`chcp 437` then `rolebox list` with a plain ASCII role id",
+        command: cmdLine,
+        expected: "ASCII role id bytes survive a 437 (US-ASCII) codepage; exit 0",
+        actual:
+          `includes_ascii=${includesAscii}; exit=${r.code}; ` +
+          `stdout_hex=${hexContext(r.stdout, 0, 48)}; stdout_len=${r.stdout.length}`,
+        exit_code: r.code,
+        stdout_tail: r.stdout.slice(-2000),
+        stderr_tail: r.stderr.slice(-2000),
+        file_line_refs: ["src/cli/commands/list.ts:7-25", "src/cli/commands/info.ts:1-8"],
+        cluster: CLUSTER,
+      });
+      throw new Error(`[console] chcp 437 ASCII corruption: includes_ascii=${includesAscii}; exit=${r.code}`);
+    }
+  });
 });

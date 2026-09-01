@@ -938,6 +938,64 @@ describe("windows-adversarial: symlink lifecycle (sync/uninstall/symlink)", () =
       },
     );
   });
+
+  // ── Round 2: re-sync idempotency to pi / dsh targets (not just opencode) ──
+  it("round2: re-sync to pi and dsh targets is idempotent (3 runs) with no EPERM/EEXIST crash", async () => {
+    const fx = makeFixture();
+    createdFixtures.push(fx);
+
+    for (const target of ["pi", "dsh"] as const) {
+      const targetPath = syncTargetFor(target, {
+        xdgConfig: fx.xdgConfig,
+        piAgentDir: fx.piAgentDir,
+        dshHome: fx.dshHome,
+      });
+      mkdirSync(targetPath, { recursive: true });
+
+      for (let run = 1; run <= 3; run++) {
+        const r = await runCli(["sync", target], {
+          cwd: fx.dataDir,
+          dataDir: fx.dataDir,
+          configDir: fx.configDir,
+          env: cliEnv(fx),
+          keepTempDirs: true,
+          timeout: 30_000,
+        });
+        const hasRawFsError = /EEXIST|EISDIR|EPERM/i.test(r.stderr);
+        assertNoDefect(
+          r.exitCode === 0 && !r.timedOut && !hasRawFsError,
+          `round2-${target}-sync-run${run}-crash`,
+          {
+            scenario: `running rolebox sync ${target} (run ${run}) on an existing junction must not hard-crash (unlinkSync EPERM at sync.ts:56)`,
+            command: r.command,
+            expected: "exit 0, no EEXIST/EISDIR/EPERM crash",
+            actual: `exitCode=${r.exitCode} timedOut=${r.timedOut} stderrTail=${r.stderrTail.trim().slice(-300) || "(empty)"}`,
+            exit_code: r.exitCode,
+            stdout_tail: r.stdoutTail,
+            stderr_tail: r.stderrTail,
+            file_line_refs: ["src/cli/commands/sync.ts:56", "src/cli/commands/sync.ts:57"],
+          },
+        );
+      }
+
+      // The junction must still be valid after three re-syncs.
+      const dirLink = join(targetPath, ROLE_ID);
+      assertNoDefect(
+        isSymlink(dirLink) && readlinkSync(dirLink) === fx.rolePath,
+        `round2-${target}-junction-valid`,
+        {
+          scenario: `sync ${target} x3 must leave a valid junction pointing at the role source`,
+          command: `(sync ${target} x3)`,
+          expected: `junction present and readlink === ${fx.rolePath}`,
+          actual: `isSymlink=${isSymlink(dirLink)} readlink=${isSymlink(dirLink) ? readlinkSync(dirLink) : "(missing)"}`,
+          exit_code: null,
+          stdout_tail: "",
+          stderr_tail: "",
+          file_line_refs: ["src/cli/commands/sync.ts:56-58"],
+        },
+      );
+    }
+  });
 });
 
 // ── Parsing helpers for status/info JSON ─────────────────────────────────

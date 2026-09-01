@@ -611,6 +611,72 @@ describe("windows-adversarial: cluster env (config + environment resolution)", (
     });
   });
 
+  // ── Scenario 4b (round 2): quoted ROLEBOX_DATA_DIR with SPACES ─────
+  it("S4b: quoted ROLEBOX_DATA_DIR with spaces retains literal quotes (Windows `set \"C:\\path with spaces\\\"` quirk)", () => {
+    const base = tmpName("rb-encoding2-");
+    withWin32Sim({}, () => {
+      // A cmd.exe-style `set VAR="C:\path with spaces\"` value that a user pastes
+      // verbatim. Windows env semantics are that the surrounding quotes are
+      // part of the value unless stripped; a robust resolver strips them.
+      const raw = `"${base} with spaces\\"`;
+      process.env.ROLEBOX_DATA_DIR = raw;
+      let resolved = "";
+      try {
+        resolved = getDataDir();
+      } finally {
+        delete process.env.ROLEBOX_DATA_DIR;
+      }
+      // The quote must be stripped AND the path must be usable (spaces intact).
+      const stillHasQuote = resolved.includes('"');
+      const normalized = winNormalize(resolved);
+      const expected = winNormalize(`${base} with spaces`);
+      if (stillHasQuote || normalized !== expected) {
+        recordAndFail({
+          testId: "s4b-quotes-with-spaces-not-stripped",
+          scenario:
+            "QUOTED ROLEBOX_DATA_DIR with spaces contains literal quotes -> invalid/useless dir (cmd.exe set quirk; Windows strips surrounding quotes)",
+          command: `ROLEBOX_DATA_DIR=${JSON.stringify(raw)}`,
+          expected: `quotes stripped, resolves to ${expected}`,
+          actual: `getDataDir()=${JSON.stringify(resolved)} (literal quotes retained), normalized=${normalized}`,
+          fileLineRefs: REFS_OVERRIDE_RAW,
+          severity: "medium",
+        });
+      }
+    });
+    bestRm(base);
+  });
+
+  // ── Scenario 7 (round 2): config quote + spaces, case-insensitive override ──
+  it("S7: ROLEBOX_CONFIG_DIR quoted-with-spaces retains literal quotes (config-dir analog)", () => {
+    const base = tmpName("rb-cfg-");
+    withWin32Sim({}, () => {
+      const raw = `"${base} cfg dir\\"`;
+      process.env.ROLEBOX_CONFIG_DIR = raw;
+      let resolved = "";
+      try {
+        resolved = getConfigDir();
+      } finally {
+        delete process.env.ROLEBOX_CONFIG_DIR;
+      }
+      const stillHasQuote = resolved.includes('"');
+      const normalized = winNormalize(resolved);
+      const expected = winNormalize(`${base} cfg dir`);
+      if (stillHasQuote || normalized !== expected) {
+        recordAndFail({
+          testId: "s7-config-quotes-with-spaces-not-stripped",
+          scenario:
+            "QUOTED ROLEBOX_CONFIG_DIR with spaces retains literal quotes -> invalid config dir on Windows",
+          command: `ROLEBOX_CONFIG_DIR=${JSON.stringify(raw)}`,
+          expected: `quotes stripped, normalizes to ${expected}`,
+          actual: `getConfigDir()=${JSON.stringify(resolved)} (literal quotes retained), normalized=${normalized}`,
+          fileLineRefs: ["src/cli/paths.ts:99-100"],
+          severity: "medium",
+        });
+      }
+    });
+    bestRm(base);
+  });
+
   // ── Scenario 5 ──────────────────────────────────────────────────
   it("S5: PI_CODING_AGENT_DIR / DSH_HOME blank-vs-unset treated as unset", () => {
     withWin32Sim({}, () => {

@@ -21,7 +21,7 @@
 // Evidence cluster: "paths" → .rolebox/evidence/windows-campaign/paths/*.json
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { sep, join, win32 as pathWin32 } from "node:path";
 import { tmpdir } from "node:os";
 import { recordDefect } from "./helpers/evidence";
@@ -514,6 +514,44 @@ describe("2. Windows reserved names & invalid chars as roleId — clean rejectio
       expect(skipped).toBe(true);
     }
   });
+
+  it("GUARD MISS (round 2): Windows-normalized reserved-name forms are admitted verbatim", () => {
+    // Windows STRIPS trailing dots/spaces BEFORE matching the reserved device
+    // name set (CON, PRN, AUX, NUL, COM1-9, LPT1-9) and ALSO treats a reserved
+    // name WITH an extension (CON.txt) as reserved. assertSafePathSegment only
+    // holds the bare names (paths.ts:187-191) and checks them with NO
+    // normalization first, so every one of these slips through as a valid path
+    // segment -> a mangling / collision vector. Each admitted vector records a
+    // separate defect, then the test fails once.
+    const vectors = ["CON.", "con.", "NUL.txt", "COM3.", "LPT9.", "CON. ", "CON .", "LPT1.txt"];
+    const violated: string[] = [];
+    for (const v of vectors) {
+      let threw = false;
+      let msg = "";
+      try {
+        getRolePath("oh-my-role", v, "1.0.0");
+      } catch (e) {
+        threw = true;
+        msg = String((e as Error).message ?? e);
+      }
+      if (threw && msg.includes("Windows reserved device name")) continue;
+      recordDefect(`guardmiss-r2-reserved-${v.replace(/[^a-zA-Z0-9]+/g, "_")}`, {
+        cluster: CLUSTER,
+        scenario: `roleId '${v}' (Windows-normalized reserved form) must be rejected by assertSafePathSegment`,
+        command: `getRolePath(${JSON.stringify("oh-my-role")}, ${JSON.stringify(v)}, "1.0.0")`,
+        expected: `reject with message containing "Windows reserved device name"`,
+        actual: threw
+          ? `rejected but with a different message: ${JSON.stringify(msg)}`
+          : `NOT rejected — guard admitted the Windows-reserved form verbatim`,
+        exit_code: threw ? null : 0,
+        stdout_tail: "",
+        stderr_tail: threw ? msg : "",
+        file_line_refs: ["src/cli/paths.ts:187-191", "src/cli/paths.ts:219-223"],
+      });
+      violated.push(`'${v}' admitted`);
+    }
+    expect(violated).toEqual([]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -757,6 +795,165 @@ describe("4. Case-insensitivity collision: myrole vs MyRole", () => {
       });
       throw new Error(
         `[paths] case-collision defect: reported ${reported} synced, ${reachable} reachable (${JSON.stringify(onDisk)})`,
+      );
+    }
+  });
+
+  it("DEFECT (round 2): sync clobbers a case collision ACROSS role AND version (multi-cluster)", async () => {
+    if (!CASE_INSENSITIVE_FS) {
+      console.warn(
+        `[paths][skip] multi-cluster case collision is only meaningful on a case-insensitive FS (host=${getPlatform()}); recording fact.`,
+      );
+      return;
+    }
+    const dataDir = mkdtempSync(join(tmpRoot, "data-"));
+    const reg = "oh-my-role";
+    // Collide across BOTH dimensions: Role@v1 vs role@V1 (role AND version).
+    makeRoleDir(dataDir, reg, "Role", "v1");
+    makeRoleDir(dataDir, reg, "role", "V1");
+    const cfgDir = mkdtempSync(join(tmpRoot, "cfg-"));
+    writeFileSync(
+      join(cfgDir, "rolebox.lock"),
+      lockYaml([
+        { role: "Role", registry: reg, version: "v1" },
+        { role: "role", registry: reg, version: "V1" },
+      ]),
+      "utf-8",
+    );
+    const xdgRoot = mkdtempSync(join(tmpRoot, "xdg-"));
+    seedVersionCache(dataDir);
+    const r = await runCli(["sync", "opencode"], {
+      cwd: mkdtempSync(join(tmpRoot, "cwd-")),
+      dataDir,
+      configDir: cfgDir,
+      env: { XDG_CONFIG_HOME: xdgRoot },
+      keepTempDirs: true,
+      timeout: 30_000,
+    });
+
+    const syncTarget = syncTargetPath(xdgRoot);
+    const onDisk = existsSync(syncTarget) ? readdirSync(syncTarget) : [];
+    const reported = Number((/Synced (\d+)/.exec(r.stdout) ?? [])[1] ?? NaN);
+    const reachable = onDisk.filter((e) => {
+      try {
+        return lstatSync(join(syncTarget, e)).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    }).length;
+
+    const violates = reported !== reachable || reachable !== 2;
+    if (violates) {
+      recordDefect("case-collision-multiclust-clobber", {
+        cluster: CLUSTER,
+        scenario: "lock has roles 'Role@v1' and 'role@V1' (case collision across role AND version); sync opencode",
+        command: r.command,
+        expected:
+          "both case-variant roles stay reachable, OR the case collision is detected/refused (no silent drop)",
+        actual: `reported "Synced ${reported}" but only ${reachable} reachable symlink(s) on disk (${JSON.stringify(onDisk)})`,
+        exit_code: r.exitCode,
+        stdout_tail: r.stdoutTail,
+        stderr_tail: r.stderrTail,
+        file_line_refs: ["src/cli/commands/sync.ts:31-34", "src/cli/commands/sync.ts:44-58", "src/cli/commands/sync.ts:95"],
+      });
+      throw new Error(
+        `[paths] multi-cluster case-collision defect: ${reported} synced, ${reachable} reachable (${JSON.stringify(onDisk)})`,
+      );
+    }
+  });
+
+  it("DEFECT (round 2): uninstalling one case-variant clobbers the other's source (data loss)", async () => {
+    if (!CASE_INSENSITIVE_FS) {
+      console.warn(
+        `[paths][skip] case-collision uninstall is only meaningful on a case-insensitive FS (host=${getPlatform()}); recording fact.`,
+      );
+      return;
+    }
+    const dataDir = mkdtempSync(join(tmpRoot, "data-"));
+    const reg = "oh-my-role";
+    // Both case-variant roles exist as ONE physical source dir on a
+    // case-insensitive FS (myrole@1.0.0 ≡ MyRole@1.0.0).
+    makeRoleDir(dataDir, reg, "myrole", "1.0.0");
+    makeRoleDir(dataDir, reg, "MyRole", "1.0.0");
+    const cfgDir = mkdtempSync(join(tmpRoot, "cfg-"));
+    writeFileSync(
+      join(cfgDir, "rolebox.lock"),
+      lockYaml([
+        { role: "myrole", registry: reg },
+        { role: "MyRole", registry: reg },
+      ]),
+      "utf-8",
+    );
+    const xdgRoot = mkdtempSync(join(tmpRoot, "xdg-"));
+    seedVersionCache(dataDir);
+    const common = {
+      cwd: mkdtempSync(join(tmpRoot, "cwd-")),
+      dataDir,
+      configDir: cfgDir,
+      env: { XDG_CONFIG_HOME: xdgRoot },
+      keepTempDirs: true,
+      timeout: 30_000,
+    } as const;
+    // Precondition: sync must run (collapses to a single symlink) so uninstall
+    // operates on a real state. If sync itself crashes, record that as the
+    // blocker rather than silently producing an empty target.
+    const syncR = await runCli(["sync", "opencode"], common);
+    if (syncR.exitCode !== 0) {
+      recordDefect("case-collision-uninstall-sync-precondition", {
+        cluster: CLUSTER,
+        scenario: "precondition sync for the case-collision uninstall probe",
+        command: syncR.command,
+        expected: "sync exit 0 before uninstall",
+        actual: `exitCode=${syncR.exitCode} stderrTail=${JSON.stringify(syncR.stderrTail)}`,
+        exit_code: syncR.exitCode,
+        stdout_tail: syncR.stdoutTail,
+        stderr_tail: syncR.stderrTail,
+        file_line_refs: ["src/cli/commands/sync.ts:21-70"],
+      });
+      throw new Error(`[paths] case-collision uninstall precondition sync failed: ${syncR.exitCode}`);
+    }
+
+    const unR = await runCli(["uninstall", "MyRole"], common);
+
+    // INVARIANT: uninstalling 'MyRole' must NOT remove 'myrole' reachability /
+    // source (the two are distinct lock entries, even though they resolve to the
+    // same physical dir on a case-insensitive FS).
+    const myRoleSource = join(dataDir, "roles", reg, "myrole@1.0.0");
+    const syncTarget = syncTargetPath(xdgRoot);
+    const myRoleLink = join(syncTarget, "myrole");
+    const linkReachable = (() => {
+      try {
+        return lstatSync(myRoleLink).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    })();
+    const sourceGone = !existsSync(myRoleSource);
+    const linkGone = !linkReachable;
+    const lockStillHasMyRole = readFileSync(join(cfgDir, "rolebox.lock"), "utf-8").includes("myrole");
+
+    const violated = sourceGone || linkGone || !lockStillHasMyRole;
+    if (violated) {
+      recordDefect("case-collision-uninstall-clobber", {
+        cluster: CLUSTER,
+        scenario: "uninstall 'MyRole' when both 'myrole' and 'MyRole' share one source dir on a case-insensitive FS",
+        command: unR.command,
+        expected:
+          "uninstalling MyRole leaves 'myrole' source dir + symlink reachable and its lock entry resolvable",
+        actual:
+          `sourceGone=${sourceGone} myroleLinkReachable=${!linkGone} lockStillHasMyRole=${lockStillHasMyRole} ` +
+          `uninstallExit=${unR.exitCode} (lower-case lock entry must survive the upper-case uninstall)`,
+        exit_code: unR.exitCode,
+        stdout_tail: unR.stdoutTail,
+        stderr_tail: unR.stderrTail,
+        file_line_refs: [
+          "src/cli/commands/uninstall.ts:52-54",
+          "src/cli/commands/uninstall.ts:66-71",
+          "src/cli/config.ts:103-110",
+        ],
+      });
+      throw new Error(
+        `[paths] case-collision uninstall defect: sourceGone=${sourceGone} myRoleLinkReachable=${!linkGone} lockStillHasMyRole=${lockStillHasMyRole}`,
       );
     }
   });

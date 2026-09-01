@@ -254,6 +254,66 @@ describe("file-io: migrate preserves CRLF residue on split('\\n')", () => {
       `migrate left ${trailingCrLines.length} line(s) with trailing \\r (first at line ${trailingCrLines[0]})`,
     ).toBe(0);
   });
+
+  it("MIXED CRLF/LF: migrate output lines carry trailing \\r on CRLF lines (split-on-'\\n' residue)", async () => {
+    const dataDir = tmpDir("sc2mix");
+    const configDir = tmpDir("sc2mix");
+    const roleDir = tmpDir("sc2mix");
+    const rolePath = join(roleDir, "role.yaml");
+
+    const roleYaml = [
+      "name: Mixed",
+      "description: desc",
+      "model: claude",
+      "collaboration:",
+      "  topology: t",
+      "  max_iterations: 3",
+      "",
+    ].join("\n");
+    // Alternating endings: even lines CRLF, odd lines LF — the worst case for a
+    // split-on-'\n' algorithm (every CRLF line keeps its trailing \r).
+    const mixed = roleYaml
+      .split("\n")
+      .map((l, i) => (i % 2 === 0 ? l + "\r\n" : l + "\n"))
+      .join("");
+
+    writeBytes(rolePath, Buffer.from(mixed, "utf-8"));
+    seedData(dataDir);
+
+    const r = await runCli(["migrate", rolePath], {
+      dataDir,
+      configDir,
+      keepTempDirs: true,
+      timeout: 30_000,
+    });
+
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Migrated:");
+
+    const migrated = readFileSync(rolePath, "utf-8");
+    const lines = migrated.split("\n");
+    const trailingCrLines = lines.map((l, i) => (l.endsWith("\r") ? i : -1)).filter((i) => i !== -1);
+
+    if (trailingCrLines.length > 0) {
+      recordDefect("migrate-mixed-crlf-residue", {
+        scenario:
+          "role.yaml with MIXED CRLF/LF line endings migrated in place by `rolebox migrate`",
+        command: r.command,
+        expected: "migrated output has no line ending in '\\r' regardless of mixed input endings",
+        actual: `${trailingCrLines.length}/${lines.length} output lines still end with '\\r' (first at line ${trailingCrLines[0]})`,
+        exit_code: r.exitCode,
+        stdout_tail: r.stdoutTail,
+        stderr_tail: r.stderrTail,
+        file_line_refs: ["src/cli/commands/migrate.ts:100", "src/cli/commands/migrate.ts:124"],
+        cluster: CLUSTER,
+      });
+    }
+
+    expect(
+      trailingCrLines.length,
+      `migrate left ${trailingCrLines.length} line(s) with trailing \\r on a mixed-CRLF file (first at line ${trailingCrLines[0]})`,
+    ).toBe(0);
+  });
 });
 
 // ── Scenario 3: CRLF SKILL.md frontmatter + reference search line numbers ────
@@ -375,9 +435,56 @@ describe("file-io: CRLF role markdown (frontmatter + reference search)", () => {
     }
     expect(residueLines).toBe(false);
   });
+
+  it("MARKDOWN format: reference_search over a CRLF+BOM doc leaks \\r into matched context", async () => {
+    const roleDir = tmpDir("mdref");
+    const refPath = join(roleDir, "core-theory.md");
+
+    const refContent = ["# Core Theory", "", "This is the target line.", "More text follows.", ""].join("\n");
+    writeBytes(refPath, Buffer.from(crlfBom(refContent), "utf-8"));
+
+    const ref: unknown = {
+      name: "references/core-theory",
+      filePath: refPath,
+      description: "desc",
+      scope: "role",
+      relativePath: "references/core-theory.md",
+    };
+    const role = {
+      id: "probe-role",
+      config: {},
+      prompt: "probe",
+      skills: [],
+      functions: [],
+      references: [ref],
+      subagents: [],
+    } as unknown as ResolvedRole;
+
+    const tool = createReferenceSearchTool([role]) as unknown as {
+      execute: (input: Record<string, unknown>) => Promise<unknown>;
+    };
+    const raw = await tool.execute({ query: "target", format: "markdown", context_lines: 2 });
+    const outText = typeof raw === "string" ? raw : String((raw as { output?: string }).output ?? "");
+
+    // JSON-text residue is caught by the json scenario; this asserts the
+    // markdown renderer ALSO carries \r characters out of a CRLF source doc.
+    if (/\r/.test(outText)) {
+      recordDefect("reference-search-markdown-crlf-residue", {
+        scenario: "reference_search format:markdown over a CRLF+BOM reference document",
+        command: "createReferenceSearchTool.execute({ query: 'target', format: 'markdown' })",
+        expected: "markdown output contains no \\r residue (source CRLF normalized)",
+        actual: `markdown output contains \\r; outTextPreview=${JSON.stringify(outText.slice(0, 160))}`,
+        exit_code: 0,
+        stdout_tail: outText,
+        stderr_tail: "",
+        file_line_refs: ["src/utils/reference-search.ts:84", "src/utils/reference-search.ts:90"],
+        cluster: CLUSTER,
+      });
+    }
+    expect(/\r/.test(outText)).toBe(false);
+  });
 });
 
-// ── Scenario 4: moveDir under an open handle (windows-latest-only) ──────────
 
 describe("file-io: moveDir under a live handle (locking)", () => {
   // Lock semantics only exist on Windows — skip elsewhere with an explicit reason.
