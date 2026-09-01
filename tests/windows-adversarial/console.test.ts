@@ -481,9 +481,13 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
     const expectedCjk = Buffer.from(CJK_DESC, "utf-8");
     const violations: string[] = [];
 
-    const cases: Array<{ label: string; cliArgs: string }> = [
-      { label: "list", cliArgs: "list" },
-      { label: `info ${CJK_ROLE_ID}`, cliArgs: `info ${CJK_ROLE_ID}` },
+    const cases: Array<{ label: string; cliArgs: string; expectCjk: boolean }> = [
+      // `list` prints role ids / versions / registry (ASCII) — it never renders
+      // the CJK description, so there is no CJK byte to assert; just require the
+      // GBK-codepage run to exit 0 (no crash). The CJK-description round-trip is
+      // the `info` case below (info renders the description).
+      { label: "list", cliArgs: "list", expectCjk: false },
+      { label: `info ${CJK_ROLE_ID}`, cliArgs: `info ${CJK_ROLE_ID}`, expectCjk: true },
     ];
 
     for (const c of cases) {
@@ -493,17 +497,22 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
       // intact instead of the exe path being mangled (see runShell's verbatim).
       const r = await runShell("cmd.exe", ["/d", "/s", "/c", `"${cmdLine}"`], env, REPO_ROOT, 30_000);
 
-      // No mojibake: the exact UTF-8 bytes of the CJK description must appear.
+      // No mojibake: the exact UTF-8 bytes of the CJK description must appear for
+      // a command that renders it (`info`). `list` emits only ASCII role ids, so
+      // under the GBK codepage it only has to exit 0 without corrupting anything.
       const includesCjk = r.stdoutBuf.includes(expectedCjk);
       // Also require a clean exit (0) — chcp must not break the run.
       const exitOk = r.code === 0;
+      const violates = c.expectCjk ? !includesCjk || !exitOk : !exitOk;
 
-      if (!includesCjk || !exitOk) {
+      if (violates) {
         recordDefect("gbk-codepage-mojibake", {
           scenario: `\`chcp 936\` (GBK) then \`rolebox ${c.cliArgs}\` with a CJK description`,
           command: cmdLine,
           expected:
-            "UTF-8 bytes of the CJK description survive a GBK console codepage; exit 0",
+            c.expectCjk
+              ? "UTF-8 bytes of the CJK description survive a GBK console codepage; exit 0"
+              : "rolebox list exits 0 under a GBK console codepage (no crash / no failure)",
           actual:
             `includes_utf8_cjk=${includesCjk}; exit=${r.code}; ` +
             `stdout_hex=${hexContext(r.stdout, 0, 48)}; ` +
