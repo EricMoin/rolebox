@@ -486,32 +486,32 @@ describe("2. Windows reserved names & invalid chars as roleId — clean rejectio
     );
   });
 
-  it("real-CLI evidence: guard-miss vectors are actually admitted by sync (not rejected)", async () => {
-    // Confirm the guard-miss is observable through the real CLI: these roles
-    // are NOT rejected; sync reports "skipped" (source missing) rather than a
-    // hard rejection — proving the Windows-safe contract is not enforced.
+  it("WIN-007 FIXED: guard-miss vectors are now rejected by sync (not admitted)", async () => {
+    // The guard-miss vectors (trailing dot/space, reserved device name + an
+    // extension) were previously admitted verbatim by sync, reaching the sync
+    // target without validation. assertSafePathSegment now normalizes before
+    // matching (winReservedBase) and rejects a trailing dot/space, so getRolePath
+    // — which sync calls per lock entry — throws and the CLI must fail cleanly
+    // rather than admit the vector as an observable "skipped, exit 0" path
+    // segment. This is the fixed Windows-safe contract.
     for (const role of ["foo.", "foo ", "CON.txt", "CON "]) {
       const { r } = await runSyncWithLock([{ role }]);
-      if (r.exitCode !== 0) {
-        // It actually rejected — reject that as a mismatch with our observation,
-        // so the evidence stays accurate.
-        recordDefect(`realguard-audit-${role.replace(/[^a-zA-Z0-9]+/g, "_")}`, {
+      if (r.exitCode === 0) {
+        // A regression to the pre-fix admission — record it so verification keeps
+        // an evidence trail instead of failing silently.
+        recordDefect(`realguard-fixed-${role.replace(/[^a-zA-Z0-9]+/g, "_")}`, {
           cluster: CLUSTER,
           scenario: `sync with roleId='${role}' (guard-miss vector)`,
           command: r.command,
-          expected: "admitted (guard-miss) for observation; NOT a clean reject",
-          actual: `unexpectedly rejected: exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderrTail)}`,
+          expected: "rejected with a non-zero exit (Windows-safe path contract enforced)",
+          actual: `admitted: exitCode=${r.exitCode} stderr=${JSON.stringify(r.stderrTail)}`,
           exit_code: r.exitCode,
           stdout_tail: r.stdoutTail,
           stderr_tail: r.stderrTail,
-          file_line_refs: ["src/cli/paths.ts:178-183"],
+          file_line_refs: ["src/cli/paths.ts:210-213", "src/cli/paths.ts:263-280"],
         });
-        throw new Error(`[paths] guard-miss vector '${role}' was unexpectedly rejected (${r.exitCode})`);
       }
-      // Expected observable: guard did not reject → sync skips (no source) and
-      // exits 0. That is the documented defect: no clean rejection.
-      const skipped = /skipped/.test(r.stdout);
-      expect(skipped).toBe(true);
+      expect(r.exitCode).not.toBe(0);
     }
   });
 
@@ -738,7 +738,7 @@ describe("4. Case-insensitivity collision: myrole vs MyRole", () => {
     }
   });
 
-  it("DEFECT: sync silently clobbers a case-colliding role's symlink on a case-insensitive FS", async () => {
+  it("WIN-008 FIXED: sync refuses a case-colliding role's symlink instead of silently clobbering it", async () => {
     if (!CASE_INSENSITIVE_FS) {
       // Not exerciseable on this host. Never skip silently.
       console.warn(`[paths][skip] case-collision sync is only meaningful on a case-insensitive FS (host=${getPlatform()}); recording fact.`);
@@ -772,34 +772,35 @@ describe("4. Case-insensitivity collision: myrole vs MyRole", () => {
       }
     }).length;
 
-    // INVARIANT: sync must not silently collapse two case-distinct locked roles
-    // into a single symlink, nor report a synced count larger than the roles it
-    // actually made reachable.
-    const violates = reported !== reachable || reachable !== 2;
+    // WIN-008 FIXED: the case collision must be DETECTED and refused, not
+    // silently clobbered. After the fix the later entry is skipped (never
+    // unlinks the earlier link), so the reported Synced count must equal the
+    // reachable count (no over-report), exactly one link survives, and the
+    // stdout must carry an explicit collision warning.
+    const overReports = reported !== reachable;
+    const notRefused = reachable !== 1;
+    const collisionDetected = /case-collision/i.test(r.stdout) || /collides case-insensitively/i.test(r.stdout);
+    const violates = overReports || notRefused || !collisionDetected;
     if (violates) {
-      recordDefect("case-collision-sync-clobber", {
+      recordDefect("case-collision-sync-clobber-fixed", {
         cluster: CLUSTER,
         scenario: "lock has roles 'myrole' and 'MyRole' (case-colliding); sync opencode",
         command: r.command,
         expected:
-          "both locked case-variant roles stay reachable, OR the case collision is detected/refused (no silent drop)",
-        actual: `reported "Synced ${reported}" but only ${reachable} reachable symlink(s) on disk (${JSON.stringify(onDisk)}); on a case-insensitive FS the earlier 'myrole' target is silently overwritten by 'MyRole'`,
+          "case collision detected and refused: Synced count == reachable count (no over-report), one link survives, stdout warns",
+        actual: `reported "Synced ${reported}" reachable=${reachable} onDisk=${JSON.stringify(onDisk)} collisionDetected=${collisionDetected}`,
         exit_code: r.exitCode,
         stdout_tail: r.stdoutTail,
         stderr_tail: r.stderrTail,
-        file_line_refs: [
-          "src/cli/commands/sync.ts:31-34",
-          "src/cli/commands/sync.ts:44-58",
-          "src/cli/commands/sync.ts:95",
-        ],
+        file_line_refs: ["src/cli/commands/sync.ts:32-38", "src/cli/commands/sync.ts:56-67"],
       });
       throw new Error(
-        `[paths] case-collision defect: reported ${reported} synced, ${reachable} reachable (${JSON.stringify(onDisk)})`,
+        `[paths] WIN-008 not honoured: reported ${reported}, reachable ${reachable}, collisionDetected=${collisionDetected} (${JSON.stringify(onDisk)})`,
       );
     }
   });
 
-  it("DEFECT (round 2): sync clobbers a case collision ACROSS role AND version (multi-cluster)", async () => {
+  it("WIN-008 FIXED (round 2): sync refuses a case collision ACROSS role AND version (multi-cluster)", async () => {
     if (!CASE_INSENSITIVE_FS) {
       console.warn(
         `[paths][skip] multi-cluster case collision is only meaningful on a case-insensitive FS (host=${getPlatform()}); recording fact.`,
@@ -842,22 +843,28 @@ describe("4. Case-insensitivity collision: myrole vs MyRole", () => {
       }
     }).length;
 
-    const violates = reported !== reachable || reachable !== 2;
+    // WIN-008 FIXED (round 2): the cross-cluster case collision must be detected
+    // and refused, not silently clobbered. Reported count must equal reachable
+    // (no over-report), exactly one link survives, and stdout warns explicitly.
+    const overReports = reported !== reachable;
+    const notRefused = reachable !== 1;
+    const collisionDetected = /case-collision/i.test(r.stdout) || /collides case-insensitively/i.test(r.stdout);
+    const violates = overReports || notRefused || !collisionDetected;
     if (violates) {
-      recordDefect("case-collision-multiclust-clobber", {
+      recordDefect("case-collision-multiclust-clobber-fixed", {
         cluster: CLUSTER,
         scenario: "lock has roles 'Role@v1' and 'role@V1' (case collision across role AND version); sync opencode",
         command: r.command,
         expected:
-          "both case-variant roles stay reachable, OR the case collision is detected/refused (no silent drop)",
-        actual: `reported "Synced ${reported}" but only ${reachable} reachable symlink(s) on disk (${JSON.stringify(onDisk)})`,
+          "case collision detected and refused: Synced count == reachable count (no over-report), one link survives, stdout warns",
+        actual: `reported "Synced ${reported}" reachable=${reachable} onDisk=${JSON.stringify(onDisk)} collisionDetected=${collisionDetected}`,
         exit_code: r.exitCode,
         stdout_tail: r.stdoutTail,
         stderr_tail: r.stderrTail,
-        file_line_refs: ["src/cli/commands/sync.ts:31-34", "src/cli/commands/sync.ts:44-58", "src/cli/commands/sync.ts:95"],
+        file_line_refs: ["src/cli/commands/sync.ts:32-38", "src/cli/commands/sync.ts:56-67"],
       });
       throw new Error(
-        `[paths] multi-cluster case-collision defect: ${reported} synced, ${reachable} reachable (${JSON.stringify(onDisk)})`,
+        `[paths] WIN-008 (round 2) not honoured: ${reported} synced, ${reachable} reachable, collisionDetected=${collisionDetected} (${JSON.stringify(onDisk)})`,
       );
     }
   });
@@ -1054,11 +1061,13 @@ describe("5. fast-glob discovery under space/backslash paths", () => {
     }
   });
 
-  it("OBSERVATION: a literal backslash in a path segment yields empty discoverRoles (darwin fast-glob)", async () => {
+  it("WIN-010 FIXED: a literal backslash in a path segment is discovered on darwin (escaped glob pattern)", async () => {
     // On win32 a backslash is a separator (cannot appear inside a segment), so a
-    // literal backslash in a directory name is a POSIX-only construction. This
-    // documents how fast-glob behaves on such an edge path — an observation, not
-    // a claim about real Windows filesystems.
+    // literal backslash in a directory name is a POSIX-only construction. fast-glob
+    // treats `\` as an escape char, so the plain cwd-based glob returned empty.
+    // discoverRoles now escapes backslashes when building the glob pattern (and
+    // restores the real path), so a role under a literal-backslash segment is
+    // discovered — this closes WIN-010.
     const { discoverRoles } = await import("../../src/loader/role-loader.ts");
     const tree = join(tmpRoot, "role\\tree");
     const role = join(tree, "TestRole");
@@ -1066,22 +1075,7 @@ describe("5. fast-glob discovery under space/backslash paths", () => {
     writeFileSync(join(role, "role.yaml"), "name: TestRole\nprompt: hi\n", "utf-8");
     const roles = await discoverRoles(tree);
     const roleIds = [...roles.keys()];
-    // Honest observation record (not flagged as a severity defect): this asserts
-    // the current (empty) behavior so the campaign has an explicit evidence trail.
-    recordDefect("glob-backslash-segment-observation", {
-      cluster: CLUSTER,
-      scenario: `discoverRoles on a tree path containing a literal backslash in a segment (${tree})`,
-      command: "discoverRoles(tree)",
-      expected: "N/A — observation: documented behavior",
-      actual: `discoverRoles returned ${JSON.stringify(roleIds)} (empty) for a path containing a literal backslash segment`,
-      exit_code: null,
-      stdout_tail: "",
-      stderr_tail: "",
-      file_line_refs: ["src/loader/role-loader.ts:53", "src/utils/paths.ts:20-34"],
-    });
-    // Assert the observed behavior stays stable (discovery misses the literal
-    // backslash segment) so the evidence and the test stay in sync.
-    expect(roleIds).toEqual([]);
+    expect(roleIds).toEqual(["TestRole"]);
   });
 });
 

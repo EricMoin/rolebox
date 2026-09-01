@@ -16,7 +16,7 @@ import {
   statSync,
 } from "node:fs";
 import { join } from "node:path";
-import { createDirSymlink } from "../../utils/symlink.ts";
+import { createDirSymlink, removeLinkSafe } from "../../utils/symlink.ts";
 
 export async function sync(target: string): Promise<void> {
   const syncTarget = getSyncTarget(target);
@@ -27,6 +27,15 @@ export async function sync(target: string): Promise<void> {
 
   let synced = 0;
   let skipped = 0;
+  let collisions = 0;
+
+  // WIN-008: case-insensitive target collision guard. On a case-insensitive
+  // filesystem (NTFS, default APFS) two role ids that differ only by case map
+  // to the same target path; without a guard the later entry unlinks and
+  // re-creates the earlier entry's link, silently dropping a locked role while
+  // still reporting it as synced. Track every target path we are about to write
+  // (case-folded) and refuse/skip a colliding entry instead of clobbering it.
+  const claimedTargets = new Map<string, string>();
 
   for (const entry of lock.roles) {
     const { role, registry, version } = entry;
@@ -41,6 +50,23 @@ export async function sync(target: string): Promise<void> {
       continue;
     }
 
+    // WIN-008: before unlinking/creating, detect a case-insensitive collision
+    // with a target already claimed this run. Skip the later entry and count it
+    // as skipped (never synced) so the summary does not over-report, and warn
+    // naming BOTH colliding ids so the drop is never silent.
+    const foldedTarget = targetPath.toLowerCase();
+    const priorRole = claimedTargets.get(foldedTarget);
+    if (priorRole !== undefined) {
+      console.warn(
+        `Warning: role '${role}' collides case-insensitively with '${priorRole}' ` +
+          `at '${targetPath}'; skipping to avoid clobbering the existing link for '${priorRole}'.`,
+      );
+      skipped++;
+      collisions++;
+      continue;
+    }
+    claimedTargets.set(foldedTarget, role);
+
     // lstatSync (not existsSync): existsSync follows symlinks and misses broken ones
     let targetStat;
     try {
@@ -53,7 +79,11 @@ export async function sync(target: string): Promise<void> {
       createDirSymlink(sourcePath, targetPath);
       synced++;
     } else if (targetStat.isSymbolicLink()) {
-      unlinkSync(targetPath);
+      // WIN-012: a Windows directory junction is a reparse-point DIRECTORY that
+      // cannot be removed with unlinkSync (libuv raises EPERM/EISDIR), which
+      // crashed re-sync with an uncaught exception. removeLinkSafe handles the
+      // junction fallback; a non-link path is a no-op.
+      removeLinkSafe(targetPath);
       createDirSymlink(sourcePath, targetPath);
       synced++;
     } else if (targetStat.isDirectory()) {
@@ -94,6 +124,7 @@ export async function sync(target: string): Promise<void> {
 
   const parts: string[] = [`Synced ${synced} roles to ${target}`];
   if (skipped > 0) parts.push(`${skipped} skipped`);
+  if (collisions > 0) parts.push(`${collisions} case-collision(s) skipped`);
   if (cleaned > 0) parts.push(`${cleaned} cleaned`);
   console.log(parts.join(", "));
 

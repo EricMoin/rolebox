@@ -1,11 +1,12 @@
 import { defineCommand } from "citty";
 import * as clack from "@clack/prompts";
-import { findInLock, removeFromLock } from "../config.ts";
+import { findInLock, removeFromLock, loadLock } from "../config.ts";
 import { getRolePath, getSyncTarget } from "../paths.ts";
-import { existsSync, rmSync, lstatSync, unlinkSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, rmSync, lstatSync, readlinkSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { SYNC_TARGET_VALUES } from "../../constants.ts";
 import { assertInteractiveContext, pickInstalledRole } from "../pick.ts";
+import { removeLinkSafe } from "../../utils/symlink.ts";
 import type { PromptApi } from "../pick.ts";
 
 /**
@@ -49,22 +50,55 @@ export async function uninstall(roleId: string): Promise<void> {
   const { registry, version } = entry;
   const rolePath = getRolePath(registry, roleId, version);
 
-  if (existsSync(rolePath)) {
+  // WIN-009: before deleting the source dir, detect whether ANY other lock
+  // entry resolves (via getRolePath) to a path equal to this role's source —
+  // CASE-INSENSITIVELY. On a case-insensitive filesystem (Windows / APFS) two
+  // case-variant role IDs can resolve to the SAME physical directory, so
+  // deleting one would silently destroy the other's data (permanent loss).
+  // When a sibling shares the source, keep the source dir, only drop this
+  // role's lock entry, and warn naming the sibling.
+  let sharedSource = false;
+  let siblingRole = "";
+  const lock = loadLock();
+  for (const other of lock.roles) {
+    if (other.role === entry.role && other.registry === entry.registry) continue;
+    const otherPath = getRolePath(other.registry, other.role, other.version);
+    if (resolve(otherPath).toLowerCase() === resolve(rolePath).toLowerCase()) {
+      sharedSource = true;
+      siblingRole = other.role;
+      break;
+    }
+  }
+
+  if (sharedSource) {
+    console.warn(
+      `Warning: '${roleId}' shares its source directory with '${siblingRole}'. ` +
+        `Skipping source removal to avoid deleting the sibling role's data.`,
+    );
+  } else if (existsSync(rolePath)) {
     rmSync(rolePath, { recursive: true, force: true });
   }
 
   // Clean up sync symlinks across every supported target platform
   // (opencode / pi / dsh) — the role may have been synced to any of them.
+  // Only remove links whose readlink target resolves to THIS role's source;
+  // never blindly unlink every symlink in a sync target (that would destroy
+  // other roles' links). When a sibling shares this source (WIN-009), leave
+  // the shared link untouched so the sibling stays reachable.
   for (const target of SYNC_TARGET_VALUES) {
     try {
       const syncTarget = getSyncTarget(target);
       if (existsSync(syncTarget)) {
         const entries = readdirSync(syncTarget);
-        for (const entry of entries) {
-          const fullPath = join(syncTarget, entry);
+        for (const entryName of entries) {
+          const fullPath = join(syncTarget, entryName);
           try {
             if (lstatSync(fullPath).isSymbolicLink()) {
-              unlinkSync(fullPath);
+              const linkTarget = readlinkSync(fullPath);
+              const pointsAtRole = resolve(linkTarget) === resolve(rolePath);
+              if (pointsAtRole && !sharedSource) {
+                removeLinkSafe(fullPath);
+              }
             }
           } catch {
             console.warn("Warning: Failed to clean up symlink:", fullPath);
