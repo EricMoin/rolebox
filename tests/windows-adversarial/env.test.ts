@@ -517,96 +517,39 @@ describe("windows-adversarial: cluster env (config + environment resolution)", (
         forward: getFor(variants.forward),
       };
 
-      // (a) The override is returned VERBATIM — no quote-stripping or slash /
-      //     separator normalization. This is the documented-behavior observation.
-      if (resolved.trailing !== variants.trailing) {
-        recordAndFail({
-          testId: "s4-verbatim-trailing",
-          scenario: "ROLEBOX_DATA_DIR trailing-backslash not normalized",
-          command: "getDataDir() with trailing-backslash override",
-          expected: `verbatim ${JSON.stringify(variants.trailing)}`,
-          actual: JSON.stringify(resolved.trailing),
-          fileLineRefs: REFS_OVERRIDE_RAW,
-          severity: "low",
-        });
-      }
-      if (resolved.quoted !== variants.quoted) {
-        recordAndFail({
-          testId: "s4-verbatim-quoted",
-          scenario: "ROLEBOX_DATA_DIR quoted value not normalized",
-          command: "getDataDir() with quoted override",
-          expected: `verbatim ${JSON.stringify(variants.quoted)}`,
-          actual: JSON.stringify(resolved.quoted),
-          fileLineRefs: REFS_OVERRIDE_RAW,
-          severity: "low",
-        });
-      }
-      if (resolved.forward !== variants.forward) {
-        recordAndFail({
-          testId: "s4-verbatim-forward",
-          scenario: "ROLEBOX_DATA_DIR forward-slash not normalized",
-          command: "getDataDir() with forward-slash override",
-          expected: `verbatim ${JSON.stringify(variants.forward)}`,
-          actual: JSON.stringify(resolved.forward),
-          fileLineRefs: REFS_OVERRIDE_RAW,
-          severity: "low",
-        });
-      }
-
-      // (b) Win32 semantics: trailing-backslash and forward-slash are the SAME
-      //     usable directory. The quoted value is NOT — it carries literal quotes
-      //     (invalid on Windows → EINVAL), so it resolves to a different dir.
+      // WIN-006 FIXED: the override is NORMALIZED, not returned verbatim —
+      // surrounding quotes are stripped and a trailing path separator removed —
+      // so all three encodings resolve to the same usable directory on Windows
+      // instead of one of them carrying a literal quote/backslash (which EINVALs).
+      // Any residual literal quote, or any encoding resolving to a DIFFERENT
+      // directory than the others, is now a regression, not the defect.
       const trailing = winNormalize(resolved.trailing);
       const forward = winNormalize(resolved.forward);
       const quoted = winNormalize(resolved.quoted);
       const sameTrailingForward = trailing === forward;
       const quotedHasQuote = resolved.quoted.includes('"');
-      const quotedDiffers = quoted !== forward;
+      const quotedResolvesSame = quoted === forward;
+      const allResolveSame = sameTrailingForward && quotedResolvesSame;
 
-      if (!sameTrailingForward) {
+      if (quotedHasQuote || !allResolveSame) {
         recordAndFail({
-          testId: "s4-trailing-vs-forward-diverges",
+          testId: "s4-not-normalized-regression",
           scenario:
-            "ROLEBOX_DATA_DIR trailing-backslash and forward-slash do NOT resolve to the same Windows dir",
+            "quoted/trailing ROLEBOX_DATA_DIR not normalized after the WIN-006 fix (literal quote or divergent dir)",
           command: "winNormalize(getDataDir()) comparison",
-          expected: `both normalize to ${forward}`,
-          actual: `trailing=${trailing} forward=${forward}`,
-          fileLineRefs: REFS_OVERRIDE_RAW,
-          severity: "medium",
-        });
-      }
-      if (quotedHasQuote) {
-        recordAndFail({
-          testId: "s4-quotes-not-stripped-defect",
-          scenario:
-            "quoted ROLEBOX_DATA_DIR retains literal quotes -> invalid/unusable dir on Windows (cmd.exe `set VAR=\"C:\\path\"` quirk)",
-          command: `ROLEBOX_DATA_DIR=${JSON.stringify(variants.quoted)}`,
           expected:
-            "all three encodings resolve to the same usable dir (quotes stripped)",
-          actual:
-            `getDataDir()=${JSON.stringify(resolved.quoted)} (literal quotes retained; invalid path on Windows) vs forward=${forward}`,
-          fileLineRefs: REFS_OVERRIDE_RAW,
-          severity: "medium",
-        });
-      }
-      if (!quotedDiffers && !quotedHasQuote) {
-        // This can't happen while quotes are retained, but guard the contract.
-        recordAndFail({
-          testId: "s4-quoted-should-differ",
-          scenario: "quoted ROLEBOX_DATA_DIR must resolve differently (quotes invalid)",
-          command: "winNormalize(getDataDir()) comparison",
-          expected: "quoted != forward",
-          actual: `quoted=${quoted} forward=${forward}`,
+            "all three encodings resolve to the same usable dir (quotes stripped; separator normalized)",
+          actual: `quotedHasQuote=${quotedHasQuote} trailing=${trailing} forward=${forward} quoted=${quoted}`,
           fileLineRefs: REFS_OVERRIDE_RAW,
           severity: "medium",
         });
       }
 
-      // Invariants: trailing & forward agree (pass); quoted MUST be flagged as a
-      // defect (retained quotes -> not the same usable dir). This is the discover.
+      // The fix's contract: no literal quote survives; trailing-backslash,
+      // quoted, and forward-slash all collapse to one usable directory.
       expect(sameTrailingForward).toBe(true);
-      expect(quotedHasQuote).toBe(false); // throws: defect already recorded above
-      expect(quotedDiffers).toBe(true);
+      expect(quotedHasQuote).toBe(false);
+      expect(quotedResolvesSame).toBe(true);
       bestRm(base);
     });
   });
