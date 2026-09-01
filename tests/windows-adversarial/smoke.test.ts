@@ -52,6 +52,14 @@ describe("windows-adversarial harness", () => {
   afterAll(cleanup);
 
   it("recordDefect appends a JSONL evidence line and never throws", () => {
+    // Harness idempotency: recordDefect appends via appendFileSync, so a re-run
+    // in a persisted workspace accumulates the __smoke__ ledger and would break
+    // the `=== 1` assertion below. Reset the smoke cluster so the evidence sink
+    // starts clean on every run. This is the dedicated smoke-only dir, never the
+    // real campaign ledger, and it is reset AFTER the env-var capture above so
+    // the cluster resolution contract is still exercised.
+    rmSync(join(EVIDENCE_ROOT, SMOKE_CLUSTER), { recursive: true, force: true });
+
     const testId = "smoke-harness-ok";
     const ok = recordDefect(testId, {
       scenario: "harness self-check: evidence sink works",
