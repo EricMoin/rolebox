@@ -569,12 +569,23 @@ source in `src/` was changed by the verification pass itself.
 **Local validation (darwin) — subtask 11:**
 - `bun test tests/windows-adversarial tests/cli tests/utils` → **739 pass / 4 skip / 0 fail** (743 tests), exit 0.
 - `bun run typecheck` (`tsc --noEmit`) → **clean** (exit 0).
+- **Harness idempotency (revision 11):** the scaffold smoke test previously grew red on a re-run
+  in a persisted workspace because `recordDefect` appends via `appendFileSync` and the test asserted
+  `lines.length === 1`. Fixed test-side only (commit `3ab54a8`): the dedicated `__smoke__` cluster
+  evidence dir is reset before the evidence-sink assertion, so the smoke test is hermetic on any host
+  without weakening any defect-asserting suite. `739 pass / 4 skip / 0 fail` is now **reproducible**
+  (7/7 consecutive runs). No `src/` change.
 
 **CI validation (real `windows-latest`) — `Windows Adversarial` workflow:**
 - Run **`33483060862`** → `https://github.com/EricMoin/rolebox/actions/runs/33483060862`, conclusion **success**.
 - `junit-windows.xml` (downloaded `evidence` artifact): **tests = 85, failures = 0, errors = 0, skipped = 0**.
 - **Before vs after:** round-1 `33476863229` → **16** failures; round-2 `33477954903` → **27** failures;
   post-fix `33483060862` → **0** failures.
+- **Harness idempotency re-check (revision 11)** — run **`33484337262`** →
+  `https://github.com/EricMoin/rolebox/actions/runs/33484337262`, conclusion **success**;
+  `junit-windows.xml` **tests = 85, failures = 0, errors = 0, skipped = 0**. The downloaded
+  `__smoke__/smoke-harness-ok.json` evidence file is a **single JSONL line**, confirming the
+  idempotent reset held on the cloud `windows-latest` runner too (final CI round for this fix).
 
 ### Per-defect final status
 
