@@ -1,0 +1,90 @@
+name: Windows Adversarial
+
+# Adversarial Windows campaign — drive the compiled rolebox CLI as a real child
+# process on windows-latest and record defects that appear only on the win32
+# platform branch. This whole suite is OPT-IN: it only runs on the
+# `test/windows-adversarial` branch (pushed by subtask 8) or via manual dispatch.
+#
+# It is intentionally separate from CI so a working-tree ordering/assertion
+# policy never conflicts with the evidence files this campaign writes.
+#
+# ── .gitignore / .rolebox/evidence conflict (documented, NOT fixed) ────────
+# `tests/windows-adversarial/helpers/evidence.ts` writes defect records to
+# `.rolebox/evidence/windows-campaign/<cluster>/<test-id>.json`. The repo
+# `.gitignore` line 4 ignores `.rolebox/` in full, so `.rolebox/evidence/**` is
+# git-ignored BY DESIGN. We MUST NOT un-ignore it: the campaign's premise is
+# that failing/adversarial tests are the deliverable and that our evidence never
+# dirties git status. `actions/upload-artifact` reads the runner working tree,
+# not git, so the gitignore does NOT prevent the artifact upload below. The
+# evidence is shipped entirely via the `evidence` artifact.
+#
+# ── --bail=0 adaptation (documented, intentional) ─────────────────────────
+# The orchestration brief requested `bun test ... --bail=0`. bun rejects it:
+# `bun test --bail=0` errors with "--bail expects a number greater than 0".
+# bun's DEFAULT is already no-bail (every test file runs and every failure is
+# reported), so omitting `--bail` preserves the intended "never stop early"
+# semantics while keeping the command valid. The JUnit reporter still emits all
+# failures so the campaign reads them from the artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/windows-adversarial]
+
+jobs:
+  adversarial:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match the bun version pin used by the main CI workflow
+      # (.github/workflows/ci.yml:31-33 — oven-sh/setup-bun@v2, bun-version:
+      # latest). The orchestrator brief cited ci.yml:25-28 (the OS matrix) but
+      # the authoritative version pin is the setup-bun step.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        # --frozen-lockfile: never rewrite bun.lock, fail loudly if out of sync.
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Build (tsc + TUI bundle + dsh web client)
+        # dist/ is gitignored, so a fresh runner has no dist/cli/main.js. The
+        # harness would otherwise build it lazily on the first runCli() call;
+        # build it explicitly here so the suite starts warm. This mirrors the
+        # publish workflow's full `bun run build`.
+        run: bun run build
+
+      - name: Ensure evidence dir exists
+        # bun's `--reporter-outfile` does NOT create missing parent
+        # directories (verified: it exits nonzero when the parent path is
+        # absent). A fresh runner has no `.rolebox/`, so create the JUnit
+        # report's parent first rather than depending on the smoke test having
+        # already created `.rolebox/evidence` via recordDefect.
+        shell: bash
+        run: mkdir -p .rolebox/evidence
+
+      - name: Run adversarial suite
+        # `continue-on-error: true` is REQUIRED: the whole point of this
+        # campaign is that the suite FAILS (it asserts a Windows-correct CLI).
+        # A failure here must not abort the job before evidence is uploaded.
+        # No `--bail`: bun's default runs all files/reports all failures (the
+        # requested `--bail=0` is rejected by bun; see the header note).
+        continue-on-error: true
+        run: bun test tests/windows-adversarial/ --reporter=junit --reporter-outfile=.rolebox/evidence/junit-windows.xml
+
+      - name: Upload evidence artifact
+        # Upload .rolebox/evidence/** regardless of the test result so the
+        # campaign's defect records and the JUnit report always land. `if:
+        # always()` guards against an earlier step's nonzero exit short-
+        # circuiting this one.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence
+          path: .rolebox/evidence/**
+          if-no-files-found: warn
