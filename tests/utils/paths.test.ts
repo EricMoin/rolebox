@@ -13,6 +13,7 @@ import {
   platformAgentsDir,
   platformAgentFilePath,
   toPosixPath,
+  escapeGlobBackslashes,
 } from "../../src/utils/paths.ts";
 
 const FAKE_HOME = "/Users/fakeuser";
@@ -126,5 +127,23 @@ describe("toPosixPath", () => {
 
   it("converts Windows drive paths", () => {
     expect(toPosixPath("C:\\x\\y")).toBe("C:/x/y");
+  });
+});
+
+describe("escapeGlobBackslashes", () => {
+  it("escapes a literal backslash into a glob character class", () => {
+    expect(escapeGlobBackslashes("role\\tree")).toBe("role[\\\\]tree");
+  });
+
+  it("leaves forward-slash (already-posix) paths unchanged", () => {
+    expect(escapeGlobBackslashes("a/b/c")).toBe("a/b/c");
+  });
+
+  it("leaves non-backslash paths unchanged", () => {
+    expect(escapeGlobBackslashes("plain-dir")).toBe("plain-dir");
+  });
+
+  it("escapes every backslash in a mixed path", () => {
+    expect(escapeGlobBackslashes("C:\\x\\y")).toBe("C:[\\\\]x[\\\\]y");
   });
 });

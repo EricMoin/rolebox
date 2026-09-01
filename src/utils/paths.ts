@@ -33,6 +33,30 @@ export function toNativePath(p: string): string {
   return p.replace(/\//g, sep);
 }
 
+/**
+ * Escape backslashes in a path so fast-glob treats a literal `\` as a literal
+ * path character rather than as a glob escape byte.
+ *
+ * fast-glob (via picomatch) treats `\` as an escape character. On POSIX a
+ * directory segment may legitimately contain a literal `\`, and when such a
+ * path is fed to fast-glob the backslash breaks the match (discoverRoles then
+ * silently returns nothing). To match a literal backslash, the pattern must use
+ * a glob character class: `\` → `[\\]`.
+ *
+ * Forward slashes and non-backslash input pass through unchanged, so this is a
+ * no-op for ordinary (already-posix) patterns. It is meant to be applied when
+ * *building* a glob pattern from a path whose segments may contain a literal
+ * backslash.
+ *
+ * win32 note: on Windows `\` is a path separator, so a single path segment can
+ * never contain a literal backslash. This escaping is therefore a POSIX-only
+ * concern and never alters win32 pattern semantics (there, callers normalize
+ * with `toPosixPath` before building a pattern).
+ */
+export function escapeGlobBackslashes(p: string): string {
+  return p.replace(/\\/g, "[\\\\]");
+}
+
 // ── Function / Skill / Subagent helpers (pure joins) ─────────────
 
 /** `{baseDir}/{name}.md` */
