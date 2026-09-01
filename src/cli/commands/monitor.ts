@@ -83,6 +83,18 @@ export async function monitor(
   const diffRenderer = new DiffRenderer();
   let exiting = false;
 
+  // A piped/redirected stdout cannot host an alternating-screen live dashboard.
+  // Writing terminal control sequences into a pipe corrupts whatever consumes
+  // it (a file, `more`, another program) — the Windows defect WIN-002. Refuse
+  // early with an actionable error instead of scribbling escape bytes into the
+  // pipe and hanging in the refresh loop.
+  if (!process.stdout.isTTY) {
+    console.error(
+      "monitor --watch requires an interactive terminal; use plain `rolebox monitor` or --export in pipes/CI",
+    );
+    process.exit(1);
+  }
+
   // Enter alternate screen buffer to preserve user's terminal history
   process.stdout.write("\x1b[?1049h");
 

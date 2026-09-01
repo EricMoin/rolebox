@@ -97,7 +97,7 @@ export function migrate(
   const graphYaml = serializeGraphDeclaration(decl);
 
   const { start, end } = findCollaborationBlock(text);
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   for (let i = start; i <= end; i += 1) {
     lines[i] = LEGACY_PREFIX + lines[i];
   }
@@ -121,7 +121,7 @@ function findCollaborationBlock(text: string): {
   start: number;
   end: number;
 } {
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => /^collaboration:\s*$/.test(line));
   if (start === -1) {
     // Unreachable when a parsed collaboration block exists, but guard anyway.

@@ -4,6 +4,13 @@ import type {
   MonitorSnapshot,
 } from "../../src/cli/commands/monitor/monitor-reader";
 
+// format.ts colors are now gated behind colorEnabled(), which is OFF under a
+// non-TTY bun test runner (process.stdout.isTTY is undefined). This suite's
+// renderSystemPulse contract asserts that ANSI codes ARE emitted, so force
+// color on for this file only. bun test isolates each file to its own process,
+// so this env set does not leak to sibling test files.
+process.env.FORCE_COLOR = "1";
+
 // ── Helpers ─────────────────────────────────────────────────
 
 /**

@@ -87,7 +87,13 @@ async function searchInFile(
     return [];
   }
 
-  const lines = content.split("\n");
+  // Normalize Windows encodings so matchedLine/context carry no \r or \ufeff:
+  // strip a leading UTF-8 BOM (a CRLF file often begins with \ufeff), then split
+  // on /\r?\n/ so CRLF line endings do not leave a trailing \r on each line.
+  if (content.startsWith("\ufeff")) {
+    content = content.slice(1);
+  }
+  const lines = content.split(/\r?\n/);
   const matches: SearchMatch[] = [];
   const searchQuery = caseSensitive ? query : query.toLowerCase();
 

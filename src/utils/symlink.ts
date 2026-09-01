@@ -91,3 +91,42 @@ export function isSymlink(p: string): boolean {
     throw err;
   }
 }
+
+/**
+ * Remove a symlink / reparse point at `path` in a Windows-safe way.
+ *
+ * On Windows a directory junction is a directory entry (a reparse point) that
+ * CANNOT be removed with `unlinkSync` — libuv raises EPERM (or EISDIR) because
+ * the entry is a directory, not a plain file. This helper lstat's the path
+ * first; if it is a symbolic link / reparse point (Node reports junctions as
+ * symbolic links via lstat) it attempts `unlinkSync`, and on EPERM or EISDIR
+ * falls back to removing the entry with directory-junction semantics
+ * (`rmSync(path, { recursive: false, force: false })`). A path that is not a
+ * link, or that no longer exists (ENOENT), is treated as a no-op. Any other
+ * error is rethrown — never silently swallowed.
+ */
+export function removeLinkSafe(path: string): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+
+  if (!stat.isSymbolicLink()) {
+    return;
+  }
+
+  try {
+    fs.unlinkSync(path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EISDIR") {
+      // A directory junction is removed as a directory entry, not a file.
+      fs.rmSync(path, { recursive: false, force: false });
+    } else {
+      throw err;
+    }
+  }
+}

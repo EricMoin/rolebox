@@ -58,13 +58,42 @@ export function getOpencodeSkillsDir(): string {
 // ── Rolebox Paths ─────────────────────────────────────────────────
 
 /**
+ * Normalize an env-var path override before returning it. A cmd.exe
+ * `set VAR="C:\path\"` value carries literal surrounding quotes (and a trailing
+ * backslash) that would resolve to an invalid path on Windows; also trim any
+ * surrounding whitespace. Steps: strip matched surrounding single/double quotes,
+ * trim whitespace, strip a lone trailing quote, then strip trailing path
+ * separators. If the value collapses to empty, return "" so the caller falls
+ * through to the default resolution instead of returning a useless override.
+ */
+function normalizeEnvDirOverride(raw: string): string {
+  let v = raw.trim();
+  // Strip a matched pair of surrounding single or double quotes.
+  if (
+    (v.startsWith('"') && v.endsWith('"')) ||
+    (v.startsWith("'") && v.endsWith("'"))
+  ) {
+    v = v.slice(1, -1);
+  }
+  // Strip a lone trailing quote (an unbalanced quote is equally unusable).
+  if (v.endsWith('"') || v.endsWith("'")) {
+    v = v.slice(0, -1);
+  }
+  // Strip trailing path separators (both / and \).
+  return v.replace(/[\\/]+$/, "");
+}
+
+/**
  * Returns the rolebox data directory.
  * Precedence: ROLEBOX_DATA_DIR env override, then XDG_DATA_HOME/rolebox (all platforms),
  * then %LOCALAPPDATA%/rolebox on Windows, then ~/.local/share/rolebox on Unix.
  */
 export function getDataDir(): string {
   const override = process.env.ROLEBOX_DATA_DIR;
-  if (override) return override;
+  if (override) {
+    const normalized = normalizeEnvDirOverride(override);
+    if (normalized) return normalized;
+  }
 
   // XDG_DATA_HOME is honored on ALL platforms (including win32) so the data dir
   // can be isolated consistently on Windows too. This sits below the
@@ -97,7 +126,10 @@ export function getDataDir(): string {
  */
 export function getConfigDir(): string {
   const override = process.env.ROLEBOX_CONFIG_DIR;
-  if (override) return override;
+  if (override) {
+    const normalized = normalizeEnvDirOverride(override);
+    if (normalized) return normalized;
+  }
 
   // XDG_CONFIG_HOME is honored on ALL platforms (including win32) so the config
   // dir can be isolated consistently on Windows too. This sits below the
@@ -191,6 +223,18 @@ const WIN_RESERVED_NAMES = new Set<string>([
 ]);
 
 /**
+ * The base name Windows uses to decide if a segment is a reserved device name:
+ * uppercased, trailing dots/spaces stripped (Windows strips them before matching),
+ * then cut at the first dot. "CON.txt", "CON." and "CON. " all reduce to "CON".
+ */
+function winReservedBase(raw: string): string {
+  let s = raw.toUpperCase().replace(/[\s.]+$/, "");
+  const dot = s.indexOf(".");
+  if (dot >= 0) s = s.slice(0, dot);
+  return s.replace(/[\s.]+$/, "");
+}
+
+/**
  * Validate that a single path segment (registry name, roleId, or version) is safe
  * to use verbatim as a directory/file component. Throws an actionable error
  * (naming the offending segment and its value) instead of silently mangling it.
@@ -216,9 +260,19 @@ export function assertSafePathSegment(value: string, label: string): void {
       `${label} '${value}' contains a Windows-invalid character (one of : * ? " < > |); refusing to use it in a filesystem path`,
     );
   }
-  if (WIN_RESERVED_NAMES.has(value.toUpperCase())) {
+  if (WIN_RESERVED_NAMES.has(winReservedBase(value))) {
     throw new Error(
       `${label} '${value}' is a Windows reserved device name; refusing to use it in a filesystem path`,
+    );
+  }
+  // Windows silently strips trailing dots/spaces from a path segment, renaming
+  // "foo." to "foo" and "CON " to "CON" — a collision/mangling vector. Reject any
+  // segment whose Windows-normalized form differs from the raw value, in the same
+  // spirit as a leading dot or an all-empty name.
+  const winNormalized = value.replace(/[\s.]+$/, "");
+  if (winNormalized !== value) {
+    throw new Error(
+      `${label} '${value}' ends with a trailing dot or space that Windows strips, just as it refuses a name that starts with a dot or is empty; refusing to use it in a filesystem path`,
     );
   }
   if (value.trim() === "") {

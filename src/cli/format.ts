@@ -10,22 +10,55 @@ import { homedir } from "node:os";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
-export const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-export const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-export const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
-export const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-export const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
-export const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
-export const magenta = (s: string) => `\x1b[35m${s}\x1b[39m`;
-export const white = (s: string) => `\x1b[37m${s}\x1b[39m`;
+/**
+ * Single color decision point for the whole CLI. Evaluated per call (not
+ * cached at module load) so an env change such as `FORCE_COLOR` set by a test
+ * harness takes effect immediately, and so the decision is made fresh for
+ * each process that imports this module.
+ *
+ * Precedence, highest first:
+ *   1. `NO_COLOR` is set (any value, even `""`) → DISABLED. An explicit
+ *      opt-out wins over everything, including `FORCE_COLOR`.
+ *   2. `FORCE_COLOR` is set (any value) → ENABLED. An explicit opt-in
+ *      overrides TERM and TTY detection (the standard force-color escape).
+ *   3. `TERM` is `'dumb'` or empty → DISABLED (no terminal capability).
+ *   4. `process.stdout` is not a TTY (piped/redirected, e.g. a Windows
+ *      `rolebox ... > file` or `rolebox ... | more`) → DISABLED.
+ *   5. otherwise → ENABLED (a real TTY with a normal TERM).
+ *
+ * The `!isTTY` branch is the exact case a Windows user hits when piping CLI
+ * output to a file or another program: no color leaks into the redirected
+ * bytes. Every color helper below passes its string through unchanged when
+ * this returns false.
+ */
+function colorEnabled(): boolean {
+  // Any NO_COLOR value (even "") is an explicit opt-out — wins over FORCE_COLOR.
+  if (process.env.NO_COLOR !== undefined) return false;
+  // Any FORCE_COLOR value is an explicit opt-in (NO_COLOR already handled above).
+  if (process.env.FORCE_COLOR !== undefined) return true;
+  const term = process.env.TERM;
+  if (term === "dumb" || term === "") return false;
+  // Piped / redirected (non-TTY) stdout gets no ANSI color.
+  if (!process.stdout.isTTY) return false;
+  return true;
+}
+
+export const bold = (s: string) => (colorEnabled() ? `\x1b[1m${s}\x1b[22m` : s);
+export const dim = (s: string) => (colorEnabled() ? `\x1b[2m${s}\x1b[22m` : s);
+export const red = (s: string) => (colorEnabled() ? `\x1b[31m${s}\x1b[39m` : s);
+export const green = (s: string) => (colorEnabled() ? `\x1b[32m${s}\x1b[39m` : s);
+export const yellow = (s: string) => (colorEnabled() ? `\x1b[33m${s}\x1b[39m` : s);
+export const cyan = (s: string) => (colorEnabled() ? `\x1b[36m${s}\x1b[39m` : s);
+export const magenta = (s: string) => (colorEnabled() ? `\x1b[35m${s}\x1b[39m` : s);
+export const white = (s: string) => (colorEnabled() ? `\x1b[37m${s}\x1b[39m` : s);
 
 // ── TUI Color Primitives ───────────────────────────────────────────
 
-export const gray = (s: string) => `\x1b[38;5;244m${s}\x1b[39m`;
-export const soft = (s: string) => `\x1b[38;5;240m${s}\x1b[39m`;
-export const border = (s: string) => `\x1b[38;5;238m${s}\x1b[39m`;
-export const sub = (s: string) => `\x1b[38;5;236m${s}\x1b[39m`;
-export const bright = (s: string) => `\x1b[97m${s}\x1b[39m`;
+export const gray = (s: string) => (colorEnabled() ? `\x1b[38;5;244m${s}\x1b[39m` : s);
+export const soft = (s: string) => (colorEnabled() ? `\x1b[38;5;240m${s}\x1b[39m` : s);
+export const border = (s: string) => (colorEnabled() ? `\x1b[38;5;238m${s}\x1b[39m` : s);
+export const sub = (s: string) => (colorEnabled() ? `\x1b[38;5;236m${s}\x1b[39m` : s);
+export const bright = (s: string) => (colorEnabled() ? `\x1b[97m${s}\x1b[39m` : s);
 
 // ── Status Symbols ───────────────────────────────────────────────
 

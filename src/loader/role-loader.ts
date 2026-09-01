@@ -10,7 +10,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { basename, dirname, resolve as pathResolve } from "node:path";
+import { basename, dirname, resolve as pathResolve, sep } from "node:path";
 import fglob from "fast-glob";
 import yaml from "js-yaml";
 import { resolveEnvVarsDeep, resolveEnvVars } from "../resolver/env-resolver.ts";
@@ -18,6 +18,7 @@ import { resolveModel } from "../resolver/model-resolver.ts";
 import type { RoleConfig, SubAgentConfig, DispatchRoleConfig } from "../types.ts";
 import { RoleMode, ROLE_MODE_VALUES, SUBAGENT_ID_SEPARATOR, INHERITABLE_FIELDS, ROLE_YAML } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
+import { escapeGlobBackslashes, toPosixPath } from "../utils/paths.ts";
 import type { Logger, ILogObj } from "tslog";
 import {
   resolveSubagentEntry,
@@ -57,6 +58,27 @@ export async function discoverRoles(
     });
   } catch {
     return roles;
+  }
+
+  // WIN-010: fast-glob treats `\` as an escape char (and normalizes a literal `\`
+  // to `/` in returned paths). On POSIX a directory segment can legitimately
+  // contain a literal `\`, but such a rolebox dir yields an empty cwd-based glob.
+  // Re-run with the backslashes escaped into a glob character class (`[\\]`) and
+  // restore the real path, so a role under a literal-backslash segment is
+  // discovered. Gated on `sep === "/"` (POSIX): on win32 `\` is a separator, so a
+  // segment can never hold a literal `\` and the cwd-based glob already handles
+  // win32 paths — this branch must not alter that behavior.
+  if (sep === "/" && matches.length === 0 && roleboxDir.includes("\\")) {
+    try {
+      const escapedPattern = `${escapeGlobBackslashes(roleboxDir)}/**/${ROLE_YAML}`;
+      const alt = await fglob(escapedPattern, { absolute: true });
+      const posixDir = toPosixPath(roleboxDir);
+      matches = alt.map((m) =>
+        m.startsWith(posixDir) ? roleboxDir + m.slice(posixDir.length) : m,
+      );
+    } catch {
+      matches = [];
+    }
   }
 
   for (const yamlPath of matches) {
