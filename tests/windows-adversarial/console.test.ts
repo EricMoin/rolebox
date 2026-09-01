@@ -223,7 +223,18 @@ function runShell(
     const chunks: Buffer[] = [];
     let child;
     try {
-      child = spawn(exe, args, { cwd, env, windowsHide: true, shell: false });
+      // windowsVerbatimArguments: pass the shell <string> that already contains
+      // quotes verbatim. Node's default quoting escapes an arg's internal `"` as
+      // `\"`, which cmd.exe does not treat as an escaped quote, so `&& "exe" ...`
+      // becomes `&& \"exe\"` and cmd reports `'... is not recognized'` (the CLI
+      // never launches). Verbatim keeps the quotes cmd/PowerShell expect.
+      child = spawn(exe, args, {
+        cwd,
+        env,
+        windowsHide: true,
+        shell: false,
+        windowsVerbatimArguments: true,
+      });
     } catch (err) {
       resolve({
         code: null,
@@ -282,9 +293,14 @@ function shellEnv(dataDir: string, configDir: string, extra: Record<string, stri
   };
 }
 
-/** Quote a Windows command-line token (double quotes; cmd & powershell agree). */
+/** Quote a Windows command-line token; cmd.exe and PowerShell agree on the
+ *  rules. A literal quote inside a quoted token must be DOUBLED (`""`), never
+ *  backslash-escaped: cmd.exe does not understand `\"`, and Node's default
+ *  arg-quoting injects exactly `\"` into a `<string>` that already contains
+ *  quotes, which is the source of `'... is not recognized'` above. Paths never
+ *  contain quotes, so in practice this degrades to plain `"path"`. */
 function winQuote(s: string): string {
-  return `"${s.replace(/"/g, '\\"')}"`;
+  return `"${s.replace(/"/g, '""')}"`;
 }
 
 // ── Scenario 1: piped (non-TTY) → no ANSI SGR ───────────────────────
@@ -395,7 +411,7 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
     if (process.platform !== "win32") {
       console.log(
         `SKIP scenario-3: cmd.exe / powershell.exe unavailable on ${process.platform} (windows-latest-only). ` +
-          `Reproduces as \`cmd /c bun dist/cli/main.js list\` and \`powershell -Command "bun dist/cli/main.js list"\`.`,
+          `Reproduces as \`cmd /d /s /c "<bun>" "<main.js>" list\` and \`powershell -NoProfile -Command "<bun>" "<main.js>" list\`.`,
       );
       return;
     }
@@ -411,8 +427,15 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
     });
 
     const cmdLine = `${winQuote(process.execPath)} ${winQuote(CLI_PATH)} list`;
-    const cmdRun = await runShell("cmd.exe", ["/c", cmdLine], env, REPO_ROOT, 30_000);
-    const psRun = await runShell("powershell.exe", ["-Command", cmdLine], env, REPO_ROOT, 30_000);
+    // cmd /d /s /c: wrap the whole compound in an outer quote pair. `/s` strips
+    // the FIRST and LAST quote of the <string> and leaves the rest unchanged, so
+    // the (already-quoted) exe + script tokens survive; without the outer wrap a
+    // quoted exe as the first token is eaten by cmd's `/c` fallback. Must be
+    // delivered verbatim (see runShell) or Node's `\"` unbalances the command.
+    const cmdRun = await runShell("cmd.exe", ["/d", "/s", "/c", `"${cmdLine}"`], env, REPO_ROOT, 30_000);
+    // PowerShell has no `/s` strip; `-Command` takes everything after it and
+    // re-joins the tokens, so the same winQuote'd command string works as-is.
+    const psRun = await runShell("powershell.exe", ["-NoProfile", "-Command", cmdLine], env, REPO_ROOT, 30_000);
 
     const baseNorm = normalizeForCompare(baseline.stdout);
     const cmdNorm = normalizeForCompare(cmdRun.stdout);
@@ -448,7 +471,7 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
     if (process.platform !== "win32") {
       console.log(
         `SKIP scenario-4: chcp 936 / cmd.exe unavailable on ${process.platform} (windows-latest-only). ` +
-          `Reproduces as \`cmd /c "chcp 936 >nul && bun dist/cli/main.js info cjk-role"\` and compares UTF-8 bytes.`,
+          `Reproduces as \`cmd /d /s /c "chcp 936 >nul && bun dist/cli/main.js info cjk-role"\` and compares UTF-8 bytes.`,
       );
       return;
     }
@@ -465,7 +488,10 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
 
     for (const c of cases) {
       const cmdLine = `chcp 936 >nul && ${winQuote(process.execPath)} ${winQuote(CLI_PATH)} ${c.cliArgs}`;
-      const r = await runShell("cmd.exe", ["/c", cmdLine], env, REPO_ROOT, 30_000);
+      // cmd /d /s /c <"...">: outer-wrap the compound. `/s` strips the outer
+      // quote pair around the <string> and keeps `chcp 936 >nul && "exe" ...`
+      // intact instead of the exe path being mangled (see runShell's verbatim).
+      const r = await runShell("cmd.exe", ["/d", "/s", "/c", `"${cmdLine}"`], env, REPO_ROOT, 30_000);
 
       // No mojibake: the exact UTF-8 bytes of the CJK description must appear.
       const includesCjk = r.stdoutBuf.includes(expectedCjk);
@@ -815,7 +841,7 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
     if (process.platform !== "win32") {
       console.log(
         `SKIP scenario-10: chcp 437 / cmd.exe unavailable on ${process.platform} (windows-latest-only). ` +
-          `Reproduces as \`cmd /c "chcp 437 >nul && bun dist/cli/main.js list"\` and asserts the ASCII role id survives intact.`,
+          `Reproduces as \`cmd /d /s /c "chcp 437 >nul && bun dist/cli/main.js list"\` and asserts the ASCII role id survives intact.`,
       );
       return;
     }
@@ -824,7 +850,9 @@ describe("Cluster D: console output / ANSI / interactivity", () => {
     const env = shellEnv(sb.dataDir, sb.configDir);
     const expectedAscii = Buffer.from(ROLE_ID, "utf-8");
     const cmdLine = `chcp 437 >nul && ${winQuote(process.execPath)} ${winQuote(CLI_PATH)} list`;
-    const r = await runShell("cmd.exe", ["/c", cmdLine], env, REPO_ROOT, 30_000);
+    // Same corrected seam as scenario-4: `cmd /d /s /c "<compound>"` outer-wrap +
+    // verbatim delivery keeps the quoted exe path from being `\"`-mangled.
+    const r = await runShell("cmd.exe", ["/d", "/s", "/c", `"${cmdLine}"`], env, REPO_ROOT, 30_000);
 
     // Locks the GBK defect (scenario-4) to non-ASCII content only: under a plain
     // US-ASCII codepage a pure-ASCII role id must survive byte-for-byte.
