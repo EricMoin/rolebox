@@ -134,21 +134,77 @@ export interface DshSessionStoreLike {
 // ── Adapter implementation ───────────────────────────────────────────────────
 
 /**
+ * Optional per-session agent-injection seam for {@link DshSessionAdapter.prompt}.
+ *
+ * dsh (DeepSeek Harness) has NO `prompt` on the SessionStore — prompting is
+ * driven by the live agent loop, so rolebox's graph-notify reminders (which
+ * are delivered through `ISessionClient.prompt`, the SAME path opencode/Pi
+ * use) need a host-way in. On dsh that way is the live `Agent` surface
+ * (`ctx.agents` → `AgentRegistry.get(sessionId)` → `Agent.inject`), which this
+ * seam abstracts so the adapter stays SDK-free (the dsh surface is consumed
+ * structurally against the shapes verified in `docs/dsh-plugin-contract.md`
+ * §4.2 — the Agent signature is duck-typed).
+ *
+ * When the plugin provides an injector (wired from an optional `ctx.agents`
+ * probe — the service may be absent in minimal/headless profiles), `prompt()`
+ * routes the reminder into the target session's live agent. Absent → the
+ * adapter keeps its documented no-op (returns `null`), and the graph engine's
+ * F6 notifier logs the degraded reminder instead of crashing. This is
+ * intentionally BEST-EFFORT: the `GraphNotifySource` config is wired on the
+ * dsh path, but a session with no live agent (or a host without `ctx.agents`)
+ * degrades to the same silent-drop marker the engine already records for a
+ * missing emperor session, never a crash.
+ */
+export interface DshPromptInjector {
+  /**
+   * Inject a text reminder into a session's live agent.
+   *
+   * @param sessionId - The target dsh session id (the emperor/orchestrator
+   *   session that drove `graph_run`, per the graph-notify owner-targeting).
+   * @param text      - The `<system-reminder>` body (contains the graph
+   *   marker + agent). Already carries the resolved agent inline.
+   * @param options   - Optional prompt metadata forwarded from
+   *   `ISessionClient.prompt` (`agent`, `noReply`); consumed as advisory.
+   * @returns A message id, or `null` when the session has no live agent / the
+   *   injection is unsupported, so the caller can degrade cleanly.
+   */
+  inject(
+    sessionId: string,
+    text: string,
+    options?: { agent?: string; noReply?: boolean },
+  ): Promise<{ id: string } | null>;
+}
+
+/** Options for constructing a {@link DshSessionAdapter}. */
+export interface DshSessionAdapterOptions {
+  /** Optional logger name override. */
+  loggerName?: string;
+  /**
+   * Optional agent-injection seam (see {@link DshPromptInjector}). When
+   * present, `prompt()` routes graph-notify reminders into the target session's
+   * live agent; absent, `prompt()` keeps its documented no-op.
+   */
+  promptInjector?: DshPromptInjector;
+}
+
+/**
  * ISessionClient adapter for the dsh platform, backed by a structural
  * `SessionStore` (the `ctx.sessions` service).
  */
 export class DshSessionAdapter implements ISessionClient {
   private readonly _log: Logger<ILogObj>;
+  private readonly _promptInjector?: DshPromptInjector;
 
   /**
    * @param store   - The dsh `SessionStore` service (`ctx.sessions`).
-   * @param options - Optional logger name override.
+   * @param options - Optional logger name override + agent-injection seam.
    */
   constructor(
     public readonly store: DshSessionStoreLike,
-    options?: { loggerName?: string },
+    options?: DshSessionAdapterOptions,
   ) {
     this._log = createSubLogger(options?.loggerName ?? "dsh-session");
+    this._promptInjector = options?.promptInjector;
   }
 
   // ── Read methods ─────────────────────────────────────────────────────────
@@ -407,13 +463,23 @@ export class DshSessionAdapter implements ISessionClient {
   }
 
   /**
-   * Prompt a session asynchronously — unsupported. Prompting is driven by
-   * the dsh agent loop (`ctx.agents` / the agent inbox), not the
-   * SessionStore; return null.
+   * Prompt a session asynchronously (fire-and-forget).
+   *
+   * The dsh SessionStore has no `prompt`: prompting is driven by the live
+   * agent loop. When the adapter was constructed with a {@link DshPromptInjector}
+   * (the plugin wires one from the optional `ctx.agents` live-agent registry),
+   * this routes the prompt's text into the target session's agent via
+   * `Agent.inject` — the dsh equivalent of opencode/Pi's `sessionClient.prompt`
+   * used by graph-notify to deliver a `<system-reminder>` to the orchestrator.
+   *
+   * No injector (or an injection that fails / finds no live agent) degrades
+   * cleanly: the reminder is dropped the same way a missing emperor session is
+   * dropped (the graph engine's F6 notifier logs a degraded marker), and the
+   * adapter returns `null` to signal the caller no prompt was enqueued.
    */
   async prompt(
-    _id: string,
-    _options: {
+    id: string,
+    options: {
       parts: Array<{ type: string; text: string }>;
       noReply?: boolean;
       system?: string;
@@ -422,6 +488,28 @@ export class DshSessionAdapter implements ISessionClient {
       fromLoop?: boolean;
     },
   ): Promise<{ id: string } | null> {
+    if (this._promptInjector) {
+      const text = (options.parts ?? [])
+        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .join("");
+      if (text) {
+        try {
+          const result = await this._promptInjector.inject(id, text, {
+            agent: options.agent,
+            noReply: options.noReply,
+          });
+          if (result) {
+            this._log.debug("prompt() injected via dsh agent seam", { id });
+            return result;
+          }
+        } catch (err) {
+          this._log.debug("prompt() injector failed", {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
     this._log.debug("prompt() is unsupported on dsh SessionStore — returning null");
     return null;
   }

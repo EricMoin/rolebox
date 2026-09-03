@@ -1100,6 +1100,22 @@ export default async function (pi: any): Promise<void> {
       },
     };
 
+    // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
+    //
+    // Pi never populates `context.agent` on tool contexts. This shared ref is
+    // the single source of truth for "which rolebox agent is acting", read by
+    // the graph tool's getEffectiveAgent resolver (forwarded into the injected
+    // `<system-reminder>` so the orchestrator resumes as its real role instead
+    // of default_agent) and written by the role switcher. In a spawned subagent
+    // process it is seeded from ROLEBOX_ACTIVE_AGENT so nested dispatch can
+    // reach that subagent's own children. Created BEFORE the service stack so
+    // the graph tool resolver closure can capture it.
+    const seededAgent = process.env.ROLEBOX_ACTIVE_AGENT?.trim() || null;
+    const activeAgent = createActiveAgentRef(seededAgent);
+    if (seededAgent) {
+      log.info("Seeded active agent from environment", { agent: seededAgent });
+    }
+
     const serviceStack = new PiLightweightServiceStack(
       pi,
       resolvedRoles,
@@ -1122,6 +1138,10 @@ export default async function (pi: any): Promise<void> {
       // its sessions with the feed, and maintains the sessionId → nodeId
       // reverse index the liveness relay below resolves through.
       livenessFeed,
+      // Pi never populates `context.agent`, so the graph tools fall back to
+      // this resolver to forward the orchestrator's active role into the
+      // injected `<system-reminder>` (role switcher's ActiveAgentRef).
+      () => activeAgent.get() ?? "",
     );
 
     // ── PiHookPipeline — single handleEvent dispatch (subtask S6) ──────
@@ -1178,19 +1198,6 @@ export default async function (pi: any): Promise<void> {
     // Build real dispatch CanonicalToolDefs and pass them to the service
     // stack instead of stub tools. All other tools (standalone, session,
     // asset) are built as before.
-
-    // ── Active-agent ref (Pi "current agent" bridge) ──────────────────────
-    //
-    // Pi never populates `context.agent` on tool contexts. This shared ref is
-    // the single source of truth for "which rolebox agent is acting", read by
-    // the dispatch tool's direct-child gate and written by the role switcher.
-    // In a spawned subagent process it is seeded from ROLEBOX_ACTIVE_AGENT so
-    // nested dispatch can reach that subagent's own children.
-    const seededAgent = process.env.ROLEBOX_ACTIVE_AGENT?.trim() || null;
-    const activeAgent = createActiveAgentRef(seededAgent);
-    if (seededAgent) {
-      log.info("Seeded active agent from environment", { agent: seededAgent });
-    }
 
     // ── Child-process mode guard (subtask S2) ─────────────────────────────
     //

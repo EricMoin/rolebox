@@ -80,6 +80,10 @@ function createFakeCtx(
   options: {
     webServer?: DshWebServerRouteRegistrar | null;
     systemPrompt?: boolean;
+    /** Optional live-agent registry double (graph-notify injector seam). */
+    agents?: {
+      get(id: string): { id: string; inject(m: unknown): unknown } | undefined;
+    };
   } = {},
 ) {
   const registeredTools: DshDefineToolOptions[] = [];
@@ -158,14 +162,20 @@ function createFakeCtx(
     // mounted directly on the context, mirroring the dsh host — and also
     // resolved by name for the probe's `ctx.get('systemPrompt')` fallback.
     ...(options.systemPrompt ? { systemPrompt } : {}),
+    // Optional live-agent registry (full profile with the dsh-agent bundle
+    // rows). graph-notify probes it to wire the session adapter's
+    // prompt-injector; absent → graphNotify degrades (stats.graphNotifyWired
+    // false) without failing boot.
+    ...(options.agents ? { agents: options.agents } : {}),
     get(name: string): unknown {
       // Optional-service seam: the host web server and (in full profiles) the
-      // system-prompt registry are probed by the plugin; every other name
-      // resolves to undefined (absent).
+      // system-prompt registry and live-agent registry are probed by the
+      // plugin; every other name resolves to undefined (absent).
       if (name === "webServer") return options.webServer ?? undefined;
       if (name === "systemPrompt") {
         return options.systemPrompt ? systemPrompt : undefined;
       }
+      if (name === "agents") return options.agents ?? undefined;
       return undefined;
     },
     on(event: string, listener: (...args: unknown[]) => void) {
@@ -433,6 +443,49 @@ describe("dsh plugin apply()", () => {
     expect(listeners.has("session/event")).toBe(true);
 
     disposer();
+  });
+
+  it("wires graph-notify injection when the live agents service is present, degrades otherwise", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    // Full profile: the ctx carries the live-agent registry (`ctx.agents`),
+    // so the session adapter's prompt() gets the graph-notify injector seam.
+    const injected: Array<{ id: string; text: string }> = [];
+    const agents = {
+      get(id: string) {
+        if (id !== "session-1") return undefined;
+        return {
+          id,
+          inject(m: unknown) {
+            const content = (m as { content?: Array<{ text?: string }> }).content;
+            injected.push({
+              id,
+              text: content?.[0]?.text ?? "",
+            });
+            return undefined;
+          },
+        };
+      },
+    };
+    const { ctx: ctxAgents } = createFakeCtx({ agents });
+    const disposerWith = await apply(
+      ctxAgents,
+      { roleboxDir: tmpDir } as DshPluginConfig,
+    );
+    expect(disposerWith.stats.graphNotifyWired).toBe(true);
+    disposerWith();
+
+    // Headless/minimal profile: no live-agent registry → graph-notify the
+    // graph engine still assembles a graphNotify config, but prompt() is the
+    // documented no-op (the F6 notifier logs the degraded reminder). The
+    // injector is NOT wired, so the boot does not gate on it.
+    const { ctx: ctxNoAgents } = createFakeCtx();
+    const disposerWithout = await apply(
+      ctxNoAgents,
+      { roleboxDir: tmpDir } as DshPluginConfig,
+    );
+    expect(disposerWithout.stats.graphNotifyWired).toBe(false);
+    disposerWithout();
   });
 
   it("registers every assembled tool when enabledNamespaces is absent", async () => {

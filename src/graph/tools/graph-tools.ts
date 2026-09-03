@@ -157,6 +157,17 @@ interface GraphEntry {
    * in {@link GraphToolSet.commit}.
    */
   invokingSessionId?: string;
+  /**
+   * Sticky acting-agent (role id) captured at `graph_create` (or the first
+   * `graph_run` / construction tool call that carried one). Mirrors
+   * `invokingSessionId`: it is threaded into the graph-notify factories so the
+   * injected `<system-reminder>` carries THIS agent, and opencode resumes the
+   * orchestrator session as its real role instead of falling back to
+   * `default_agent`. Absent → the notifier falls back to the config's static
+   * `agent` (if any). See the notifier-resolution contract in
+   * {@link GraphToolSet.commit}.
+   */
+  agent?: string;
 }
 
 /**
@@ -614,6 +625,7 @@ export class GraphToolSet {
   private completionHandler(
     graphId: string,
     invokingSessionId?: string,
+    agent?: string,
   ): ((event: NodeCompletionEvent) => void) | undefined {
     const src = this.deps.graphNotify;
     if (src === undefined) return undefined;
@@ -631,9 +643,13 @@ export class GraphToolSet {
       this.recordNotificationDegraded(graphId, "completion");
       return undefined;
     }
+    // The acting-agent passed at engine construction (the orchestrator's role)
+    // wins over a statically-configured `src.agent`, so a runtime-captured
+    // `context.agent` is forwarded to opencode's prompt body.
+    const notifierAgent = agent || src.agent;
     return createGraphNotifier(src.sessionClient, {
       emperorSessionId,
-      ...(src.agent ? { agent: src.agent } : {}),
+      ...(notifierAgent ? { agent: notifierAgent } : {}),
     });
   }
 
@@ -651,6 +667,7 @@ export class GraphToolSet {
   private terminalHandler(
     graphId: string,
     invokingSessionId?: string,
+    agent?: string,
   ): ((event: GraphTerminalEvent) => void) | undefined {
     const src = this.deps.graphNotify;
     if (src === undefined) return undefined;
@@ -667,9 +684,10 @@ export class GraphToolSet {
       this.recordNotificationDegraded(graphId, "terminal");
       return undefined;
     }
+    const notifierAgent = agent || src.agent;
     return createGraphTerminalNotifier(src.sessionClient, {
       emperorSessionId,
-      ...(src.agent ? { agent: src.agent } : {}),
+      ...(notifierAgent ? { agent: notifierAgent } : {}),
     }) as (event: GraphTerminalEvent) => void;
   }
 
@@ -688,6 +706,7 @@ export class GraphToolSet {
   private stallHandler(
     graphId: string,
     invokingSessionId?: string,
+    agent?: string,
   ): ((event: NodeStallEvent) => void) | undefined {
     const src = this.deps.graphNotify;
     if (src === undefined) return undefined;
@@ -706,9 +725,10 @@ export class GraphToolSet {
       this.recordNotificationDegraded(graphId, "stall");
       return undefined;
     }
+    const notifierAgent = agent || src.agent;
     return createGraphStallNotifier(src.sessionClient, {
       emperorSessionId,
-      ...(src.agent ? { agent: src.agent } : {}),
+      ...(notifierAgent ? { agent: notifierAgent } : {}),
     }) as (event: NodeStallEvent) => void;
   }
 
@@ -760,6 +780,7 @@ export class GraphToolSet {
     declaration: GraphDeclaration,
     graphId: string,
     invokingSessionId?: string,
+    agent?: string,
   ): EngineRuntime {
     const options: CreateEngineOptions = {
       manager: this.deps.manager,
@@ -789,16 +810,16 @@ export class GraphToolSet {
     // Subtask 3: wire the configured graph-notify completion seam (absent →
     // no-op). The emperor session is targeted ONLY for notification; the
     // graphParentContext budget scope (sessionID: graphId) is left unchanged.
-    const completion = this.completionHandler(graphId, invokingSessionId);
+    const completion = this.completionHandler(graphId, invokingSessionId, agent);
     if (completion) {
       options.onNodeCompletion = completion;
     }
-    const terminal = this.terminalHandler(graphId, invokingSessionId);
+    const terminal = this.terminalHandler(graphId, invokingSessionId, agent);
     if (terminal) {
       options.onGraphTerminal = terminal;
     }
     // Subtask 5: wire the configured graph-notify stall seam (absent → no-op).
-    const stall = this.stallHandler(graphId, invokingSessionId);
+    const stall = this.stallHandler(graphId, invokingSessionId, agent);
     if (stall) {
       options.onNodeStall = stall;
     }
@@ -919,6 +940,7 @@ export class GraphToolSet {
     graphId: string,
     candidate: GraphDeclaration,
     invokingSessionId?: string,
+    agent?: string,
   ): void {
     const validation = validateGraphDeclaration(candidate);
     if (!validation.valid) {
@@ -934,7 +956,11 @@ export class GraphToolSet {
     // keeps the emperor-session resolver consistent across mid-flight rebuilds
     // so `completionHandler`/`terminalHandler` never degrade to a no-op.
     const sessionId = prior?.invokingSessionId ?? invokingSessionId;
-    const runtime = this.buildEngine(candidate, graphId, sessionId);
+    // Sticky notifier agent: same sticky discipline — prefer the captured
+    // acting-agent so the injected `<system-reminder>` keeps forwarding the
+    // orchestrator's role across mid-flight rebuilds.
+    const resolvedAgent = prior?.agent ?? agent;
+    const runtime = this.buildEngine(candidate, graphId, sessionId, resolvedAgent);
     if (prior) {
       const priorState = prior.runtime.status();
       const hasProgress = [...priorState.nodes.values()].some(
@@ -966,6 +992,7 @@ export class GraphToolSet {
       declaration: candidate,
       runtime,
       ...(sessionId ? { invokingSessionId: sessionId } : {}),
+      ...(resolvedAgent ? { agent: resolvedAgent } : {}),
     });
   }
 
@@ -982,7 +1009,7 @@ export class GraphToolSet {
 
   // ── graph_create ───────────────────────────────────────────────────────────
 
-  graph_create(args: GraphCreateArgs, invokingSessionId?: string): GraphCreateResult {
+  graph_create(args: GraphCreateArgs, invokingSessionId?: string, agent?: string): GraphCreateResult {
     const { name, budget } = args;
     if (!name || name.trim() === "") {
       throw new Error('graph_create: "name" is required and must be non-empty.');
@@ -1008,7 +1035,7 @@ export class GraphToolSet {
 
     // Capture the invoking session id onto the registry entry so every
     // subsequent construction/run uses it for the graph-notify resolver.
-    this.commit(graphId, declaration, invokingSessionId);
+    this.commit(graphId, declaration, invokingSessionId, agent);
     return {
       graph_id: graphId,
       name: name.trim(),
@@ -1018,7 +1045,7 @@ export class GraphToolSet {
 
   // ── graph_add_node ─────────────────────────────────────────────────────────
 
-  graph_add_node(args: GraphAddNodeArgs, invokingSessionId?: string): GraphAddNodeResult {
+  graph_add_node(args: GraphAddNodeArgs, invokingSessionId?: string, agent?: string): GraphAddNodeResult {
     const entry = this.getEntry(args.graph_id);
     if (entry.declaration.nodes.some((n) => n.id === args.id)) {
       throw new Error(
@@ -1050,13 +1077,13 @@ export class GraphToolSet {
 
     const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
     candidate.nodes.push(node);
-    this.commit(args.graph_id, candidate, invokingSessionId);
+    this.commit(args.graph_id, candidate, invokingSessionId, agent);
     return { node_id: args.id, graph_id: args.graph_id, created: true };
   }
 
   // ── graph_add_edge ─────────────────────────────────────────────────────────
 
-  graph_add_edge(args: GraphAddEdgeArgs, invokingSessionId?: string): GraphAddEdgeResult {
+  graph_add_edge(args: GraphAddEdgeArgs, invokingSessionId?: string, agent?: string): GraphAddEdgeResult {
     const entry = this.getEntry(args.graph_id);
     const type: EdgeType = args.type ?? "always";
 
@@ -1105,14 +1132,14 @@ export class GraphToolSet {
 
     const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
     candidate.edges.push(edge);
-    this.commit(args.graph_id, candidate, invokingSessionId);
+    this.commit(args.graph_id, candidate, invokingSessionId, agent);
 
     return { edge_id: `${args.from}->${args.to}`, from: args.from, to: args.to, type };
   }
 
   // ── graph_add_loop ─────────────────────────────────────────────────────────
 
-  graph_add_loop(args: GraphAddLoopArgs, invokingSessionId?: string): GraphAddLoopResult {
+  graph_add_loop(args: GraphAddLoopArgs, invokingSessionId?: string, agent?: string): GraphAddLoopResult {
     const entry = this.getEntry(args.graph_id);
     if ((entry.declaration.loop_groups ?? []).some((g) => g.id === args.id)) {
       throw new Error(
@@ -1152,7 +1179,7 @@ export class GraphToolSet {
     const groups = [...(candidate.loop_groups ?? [])];
     groups.push(loop);
     candidate.loop_groups = groups;
-    this.commit(args.graph_id, candidate, invokingSessionId);
+    this.commit(args.graph_id, candidate, invokingSessionId, agent);
 
     return {
       loop_id: args.id,
@@ -1167,6 +1194,7 @@ export class GraphToolSet {
   async graph_run(
     args: GraphRunArgs,
     invokingSessionId?: string,
+    agent?: string,
   ): Promise<GraphRunResult> {
     const entry = this.getEntry(args.graph_id);
 
@@ -1203,6 +1231,10 @@ export class GraphToolSet {
     // receives a fresh session id, the stored value is updated below so
     // subsequent mid-flight rebuilds (construction tools) keep working seams.
     const sessionId = entry.invokingSessionId ?? invokingSessionId;
+    // Sticky notifier agent: same sticky discipline — prefer the graph-captured
+    // acting-agent so the injected `<system-reminder>` keeps forwarding the
+    // orchestrator's role across rebuilds/retries.
+    const agentId = entry.agent ?? agent;
 
     // Per-graph in-flight guard (concurrency fix): when the registry entry's
     // runtime is ALREADY executing with running/ready nodes, a concurrent
@@ -1240,6 +1272,7 @@ export class GraphToolSet {
       this.registry.set(args.graph_id, {
         ...entry,
         ...(invokingSessionId ? { invokingSessionId } : {}),
+        ...(agent ? { agent: agentId } : {}),
       });
       return {
         graph_id: args.graph_id,
@@ -1274,6 +1307,7 @@ export class GraphToolSet {
       this.registry.set(args.graph_id, {
         ...entry,
         ...(invokingSessionId ? { invokingSessionId } : {}),
+        ...(agent ? { agent: agentId } : {}),
       });
       return {
         graph_id: args.graph_id,
@@ -1307,9 +1341,9 @@ export class GraphToolSet {
       );
     }
 
-    const completion = this.completionHandler(args.graph_id, sessionId);
-    const terminal = this.terminalHandler(args.graph_id, sessionId);
-    const stall = this.stallHandler(args.graph_id, sessionId);
+    const completion = this.completionHandler(args.graph_id, sessionId, agentId);
+    const terminal = this.terminalHandler(args.graph_id, sessionId, agentId);
+    const stall = this.stallHandler(args.graph_id, sessionId, agentId);
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
@@ -1422,6 +1456,7 @@ export class GraphToolSet {
       ...entry,
       runtime,
       ...(invokingSessionId ? { invokingSessionId } : {}),
+      ...(agent ? { agent: agentId } : {}),
     });
 
     const state = runtime.status();

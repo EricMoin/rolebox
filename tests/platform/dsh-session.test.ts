@@ -3,6 +3,7 @@
 import { describe, it, expect } from "bun:test";
 import { DshSessionAdapter } from "../../src/platform/adapters/dsh/session.ts";
 import type {
+  DshPromptInjector,
   DshSessionEventLike,
   DshSessionLike,
   DshSessionStoreLike,
@@ -322,5 +323,103 @@ describe("DshSessionAdapter", () => {
     expect(await adapter.abort("s1")).toBe(false);
     expect(await adapter.compact("s1")).toBe(false);
     expect(await adapter.children("s1")).toEqual([]);
+  });
+
+  // ── graph-notify prompt-injector seam (DSH graphNotify assembly) ──────────
+  //
+  // The dsh SessionStore has no `prompt`; graph-notify reminders reach the
+  // orchestrator through the optional live-agent injector wired by the plugin
+  // (`ctx.agents` → `Agent.inject`). These tests verify the adapter's
+  // `prompt()` uses that seam and keeps its documented no-op otherwise.
+
+  it("prompt() routes the reminder text through the injector with agent + noReply", async () => {
+    const calls: Array<{
+      id: string;
+      text: string;
+      agent?: string;
+      noReply?: boolean;
+    }> = [];
+    const injector: DshPromptInjector = {
+      async inject(id: string, text: string, options?: { agent?: string; noReply?: boolean }) {
+        calls.push({
+          id,
+          text,
+          agent: options?.agent,
+          noReply: options?.noReply,
+        });
+        return { id };
+      },
+    };
+    const adapter = new DshSessionAdapter(makeStore([makeBaseSession()]), {
+      promptInjector: injector,
+    });
+
+    const result = await adapter.prompt("s1", {
+      parts: [{ type: "text", text: "<system-reminder> node done" }],
+      noReply: true,
+      agent: "emperor--jinyiwei",
+    });
+
+    expect(result).toEqual({ id: "s1" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].id).toBe("s1");
+    expect(calls[0].text).toBe("<system-reminder> node done");
+    expect(calls[0].agent).toBe("emperor--jinyiwei");
+    expect(calls[0].noReply).toBe(true);
+  });
+
+  it("prompt() joins multi-part text before injecting", async () => {
+    let seenText = "";
+    const injector: DshPromptInjector = {
+      async inject(_id: string, text: string) {
+        seenText = text;
+        return { id: "x" };
+      },
+    };
+    const adapter = new DshSessionAdapter(makeStore([makeBaseSession()]), {
+      promptInjector: injector,
+    });
+
+    await adapter.prompt("s1", {
+      parts: [
+        { type: "text", text: "part-one" },
+        { type: "text", text: "part-two" },
+      ],
+    });
+    expect(seenText).toBe("part-onepart-two");
+  });
+
+  it("prompt() degrades to null when the injector finds no result or rejects", async () => {
+    const nullInjector: DshPromptInjector = {
+      async inject() {
+        return null;
+      },
+    };
+    const throwingInjector: DshPromptInjector = {
+      async inject() {
+        throw new Error("no live agent");
+      },
+    };
+
+    const adapter1 = new DshSessionAdapter(makeStore([makeBaseSession()]), {
+      promptInjector: nullInjector,
+    });
+    const adapter2 = new DshSessionAdapter(makeStore([makeBaseSession()]), {
+      promptInjector: throwingInjector,
+    });
+    const adapter3 = new DshSessionAdapter(makeStore([makeBaseSession()]), {
+      promptInjector: nullInjector,
+    });
+
+    expect(
+      await adapter1.prompt("s1", { parts: [{ type: "text", text: "hi" }] }),
+    ).toBeNull();
+    expect(
+      await adapter2.prompt("s1", { parts: [{ type: "text", text: "hi" }] }),
+    ).toBeNull();
+    // Empty text → not injected → null.
+    expect(
+      await adapter3.prompt("s1", { parts: [{ type: "text", text: "" }] }),
+    ).toBeNull();
   });
 });

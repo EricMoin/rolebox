@@ -110,6 +110,16 @@ export interface BuildToolsOptions {
    * (30_000).
    */
   nodeStallGraceMs?: number;
+  /**
+   * Optional platform-provided acting-agent resolver (Pi / DSH). Threaded
+   * through `createGraphTools` into the graph tool execute methods so that when
+   * the platform never populates `context.agent`, the injected
+   * `<system-reminder>` still forwards the orchestrator's role instead of
+   * falling back to `default_agent`. Receives the invoking session id (so a
+   * per-session resolver like DSH's role switcher can resolve the active role).
+   * Absent → `context.agent`-only (opencode, unchanged).
+   */
+  getEffectiveAgent?: (sessionID?: string) => string;
 }
 
 export function buildCanonicalTools(
@@ -201,6 +211,12 @@ export function buildCanonicalTools(
       // the graph_* tools and the HookDeps graphTools query) when the
       // platform assembly layer provided one.
       toolset: opts.graphTools,
+      // Non-opencode platforms (Pi/DSH) never populate `context.agent`, so the
+      // platform resolver supplies the orchestrator's role for the injected
+      // `<system-reminder>` (absent → context.agent-only, opencode unchanged).
+      ...(opts.getEffectiveAgent !== undefined
+        ? { getEffectiveAgent: opts.getEffectiveAgent }
+        : {}),
       // Subtask 6: thread the node-liveness feed + monitor stall thresholds
       // into the graph tools' engine construction (absent → defaults,
       // behavior unchanged).

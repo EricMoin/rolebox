@@ -147,6 +147,15 @@ export class PiLightweightServiceStack implements IHookProvider {
    * engines run without liveness recording (backward compatible).
    */
   private _livenessFeed?: NodeLivenessFeed;
+  /**
+   * Optional platform-provided acting-agent resolver (Pi/DSH parity). On Pi
+   * `context.agent` is never populated, so the graph tools (wired via
+   * buildCanonicalTools → createGraphTools) fall back to this resolver so the
+   * injected `<system-reminder>` still forwards the orchestrator's real role
+   * instead of falling back to `default_agent`. Reads the role switcher's
+   * shared `ActiveAgentRef` (global, session-agnostic on Pi).
+   */
+  private _getEffectiveAgent?: (sessionID?: string) => string;
   /** Pi-compiled tools stored after init() for getHandlers(). */
   private _compiledTools: Record<string, unknown> = {};
 
@@ -163,6 +172,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     stateDir: string = process.cwd(),
     interceptorHooks?: ToolInterceptorHooks,
     livenessFeed?: NodeLivenessFeed,
+    getEffectiveAgent?: (sessionID?: string) => string,
   ) {
     this._pi = pi;
     this._resolvedRoles = resolvedRoles;
@@ -177,6 +187,7 @@ export class PiLightweightServiceStack implements IHookProvider {
     this._stateDir = stateDir;
     this._interceptorHooks = interceptorHooks;
     this._livenessFeed = livenessFeed;
+    this._getEffectiveAgent = getEffectiveAgent;
     // Subtask 2: the graph tools only assemble when a dispatch manager is
     // present (buildCanonicalTools gates the eight graph_* keys on it), so
     // the shared toolset is constructed under the same gate. The graph-notify
@@ -288,6 +299,12 @@ export class PiLightweightServiceStack implements IHookProvider {
       // engine construction (absent → engine behavior unchanged).
       ...(this._livenessFeed !== undefined
         ? { livenessFeed: this._livenessFeed }
+        : {}),
+      // Pi never populates `context.agent`, so the graph tools fall back to
+      // this resolver to forward the orchestrator's role into the injected
+      // `<system-reminder>` (absent → context.agent-only, backward compatible).
+      ...(this._getEffectiveAgent !== undefined
+        ? { getEffectiveAgent: this._getEffectiveAgent }
         : {}),
     });
 

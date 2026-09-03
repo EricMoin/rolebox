@@ -181,6 +181,17 @@ export function createGraphTools(
     nodeStallWarnMs?: number;
     nodeStallGraceMs?: number;
     livenessFeed?: NodeLivenessFeed;
+    /**
+     * Optional platform-provided acting-agent resolver. Mirrors the dispatch
+     * path's `getEffectiveAgent` deps injection (`src/dispatch/tools.ts:70-73`):
+     * on platforms where `context.agent` is never populated (Pi / DSH), the
+     * graph tools fall back to this resolver so the injected `<system-reminder>`
+     * still forwards the orchestrator's real role instead of falling back to
+     * `default_agent`. Receives the invoking session id so a per-session
+     * resolver (e.g. DSH's role switcher) can resolve the active role for that
+     * session. Absent → `context.agent`-only (opencode, unchanged).
+     */
+    getEffectiveAgent?: (sessionID?: string) => string;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -201,11 +212,11 @@ export function createGraphTools(
   });
 
   return {
-    graph_create: createGraphCreateTool(toolset),
-    graph_add_node: createGraphAddNodeTool(toolset),
-    graph_add_edge: createGraphAddEdgeTool(toolset),
-    graph_add_loop: createGraphAddLoopTool(toolset),
-    graph_run: createGraphRunTool(toolset),
+    graph_create: createGraphCreateTool(toolset, opts.getEffectiveAgent),
+    graph_add_node: createGraphAddNodeTool(toolset, opts.getEffectiveAgent),
+    graph_add_edge: createGraphAddEdgeTool(toolset, opts.getEffectiveAgent),
+    graph_add_loop: createGraphAddLoopTool(toolset, opts.getEffectiveAgent),
+    graph_run: createGraphRunTool(toolset, opts.getEffectiveAgent),
     graph_status: createGraphStatusTool(toolset),
     graph_cancel: createGraphCancelTool(toolset),
     graph_approve: createGraphApproveTool(toolset),
@@ -234,9 +245,29 @@ function json(input: unknown): string {
   return JSON.stringify(input, null, 2);
 }
 
+/**
+ * Resolve the effective acting agent for a graph tool call.
+ *
+ * Mirrors the dispatch path's fallback chain (`src/dispatch/tools.ts:70-73`):
+ * `context.agent` wins (opencode populates it natively), else the
+ * platform-provided resolver (Pi / DSH, where `context.agent` is always empty)
+ * supplies the orchestrator's active role, else `""`. This keeps the injected
+ * `<system-reminder>` forwarding the orchestrator's real role instead of
+ * falling back to `default_agent`.
+ */
+function resolveEffectiveAgent(
+  agent: string | undefined,
+  sessionID: string | undefined,
+  resolver?: (sessionID?: string) => string,
+): string {
+  if (agent && agent.length > 0) return agent;
+  return resolver?.(sessionID) ?? "";
+}
+
 /** graph_create — open a graph registry slot. */
 function createGraphCreateTool(
   toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
 ): CanonicalToolDef {
   return defineTool({
     description:
@@ -250,8 +281,18 @@ function createGraphCreateTool(
     async execute(args, context) {
       try {
         // Capture the invoking session id so the graph-notify emperor-session
-        // resolver is wired on the very first engine construction.
-        return json(toolset.graph_create(args, context?.sessionID));
+        // resolver is wired on the very first engine construction. The acting
+        // agent is forwarded so the injected `<system-reminder>` resumes the
+        // orchestrator as its real role (not default_agent). On Pi/DSH
+        // `context.agent` is empty, so the platform-provided resolver supplies
+        // the orchestrator's active role instead.
+        return json(
+          toolset.graph_create(
+            args,
+            context?.sessionID,
+            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
+          ),
+        );
       } catch (err) {
         return `graph_create failed: ${(err as Error).message}`;
       }
@@ -262,6 +303,7 @@ function createGraphCreateTool(
 /** graph_add_node — dynamically add a node to the graph. */
 function createGraphAddNodeTool(
   toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
 ): CanonicalToolDef {
   return defineTool({
     description:
@@ -297,7 +339,13 @@ function createGraphAddNodeTool(
     },
     async execute(args, context) {
       try {
-        return json(toolset.graph_add_node(args, context?.sessionID));
+        return json(
+          toolset.graph_add_node(
+            args,
+            context?.sessionID,
+            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
+          ),
+        );
       } catch (err) {
         return `graph_add_node failed: ${(err as Error).message}`;
       }
@@ -308,6 +356,7 @@ function createGraphAddNodeTool(
 /** graph_add_edge — add a directed edge between two nodes. */
 function createGraphAddEdgeTool(
   toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
 ): CanonicalToolDef {
   return defineTool({
     description:
@@ -348,7 +397,13 @@ function createGraphAddEdgeTool(
     },
     async execute(args, context) {
       try {
-        return json(toolset.graph_add_edge(args, context?.sessionID));
+        return json(
+          toolset.graph_add_edge(
+            args,
+            context?.sessionID,
+            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
+          ),
+        );
       } catch (err) {
         return `graph_add_edge failed: ${(err as Error).message}`;
       }
@@ -359,6 +414,7 @@ function createGraphAddEdgeTool(
 /** graph_add_loop — declare a bounded-cycle loop group. */
 function createGraphAddLoopTool(
   toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
 ): CanonicalToolDef {
   return defineTool({
     description:
@@ -394,7 +450,13 @@ function createGraphAddLoopTool(
     },
     async execute(args, context) {
       try {
-        return json(toolset.graph_add_loop(args, context?.sessionID));
+        return json(
+          toolset.graph_add_loop(
+            args,
+            context?.sessionID,
+            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
+          ),
+        );
       } catch (err) {
         return `graph_add_loop failed: ${(err as Error).message}`;
       }
@@ -405,6 +467,7 @@ function createGraphAddLoopTool(
 /** graph_run — execute (or dry-run validate) a constructed graph. */
 function createGraphRunTool(
   toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
 ): CanonicalToolDef {
   return defineTool({
     description:
@@ -439,8 +502,16 @@ function createGraphRunTool(
       try {
         // Subtask 3: forward the invoking session id (the orchestrator/emperor
         // session running graph_run) so the graph-notify completion seam targets
-        // the correct emperor session at runtime.
-        return json(await toolset.graph_run(args, context?.sessionID));
+        // the correct emperor session at runtime. Also forward the acting agent
+        // so the injected `<system-reminder>` resumes the orchestrator as its
+        // real role. On Pi/DSH `context.agent` is empty, so the platform
+        // resolver supplies the orchestrator's active role instead.
+        const effAgent = resolveEffectiveAgent(
+          context?.agent,
+          context?.sessionID,
+          getEffectiveAgent,
+        );
+        return json(await toolset.graph_run(args, context?.sessionID, effAgent));
       } catch (err) {
         return `graph_run failed: ${(err as Error).message}`;
       }

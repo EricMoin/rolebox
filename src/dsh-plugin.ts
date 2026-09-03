@@ -9,13 +9,18 @@
  *   - `inject`  — the dsh services rolebox's adapters consume: `tools`
  *                 (tool registration, §3.1), `sessions` (session lifecycle,
  *                 §4.1), `subagents` (agent catalog, §4.3). The live-agent
- *                 `agents` service (§4.2) is deliberately NOT injected:
- *                 `DshAgentRegistrar` manages the *catalog* of spawnable
- *                 definitions through `ctx.subagents` and explicitly keeps
- *                 the `ctx.agents` AgentRegistry side out of scope (see
- *                 `src/platform/adapters/dsh/agent-registrar.ts` module
- *                 docstring). Injecting a service we do not consume would
- *                 gate plugin activation on it for no reason.
+ *                 `agents` service (§4.2) is deliberately NOT in the `inject`
+ *                 roster: `DshAgentRegistrar` manages the *catalog* of
+ *                 spawnable definitions through `ctx.subagents` and explicitly
+ *                 keeps the `ctx.agents` AgentRegistry side out of the catalog
+ *                 seam (see `src/platform/adapters/dsh/agent-registrar.ts`
+ *                 module docstring). It is instead probed OPTIONALLY
+ *                 ({@link probeAgentRegistry}) as the graph-notify injection
+ *                 seam — the dsh host's per-session message-injection surface
+ *                 — so graph `<system-reminder>` reminders reach the
+ *                 orchestrator. Injecting it in the roster would gate plugin
+ *                 activation on it; probing it lets minimal/headless profiles
+ *                 boot with graph-notify degraded instead.
  *   - `Config`  — a StandardSchemaV1 config schema (contract §2.4)
  *   - `apply(ctx, config)` — bootstrap + wire the dsh adapters
  *
@@ -62,7 +67,10 @@ import type { DshSubagentDispatchRuntime } from "./platform/adapters/dsh/dispatc
 import { DshToolFactory } from "./platform/adapters/dsh/tool-factory.ts";
 import type { DshDefineToolOptions } from "./platform/adapters/dsh/tool-factory.ts";
 import { DshSessionAdapter } from "./platform/adapters/dsh/session.ts";
-import type { DshSessionStoreLike } from "./platform/adapters/dsh/session.ts";
+import type {
+  DshPromptInjector,
+  DshSessionStoreLike,
+} from "./platform/adapters/dsh/session.ts";
 import { DshHookProvider } from "./platform/adapters/dsh/hook-provider.ts";
 import { DshRoleSwitcher, createActiveRoleRef } from "./platform/adapters/dsh/role-switcher.ts";
 import { DshSystemPromptAdapter } from "./platform/adapters/dsh/system-prompt.ts";
@@ -93,7 +101,8 @@ export const name = "rolebox";
 /**
  * dsh services this plugin waits for (contract §2.2 `inject`).
  * `tools` / `sessions` / `subagents` are the services rolebox's dsh adapters
- * consume; see the module docstring for why `agents` is excluded.
+ * consume; see the module docstring for why the live-agent `agents` service is
+ * probed optionally (graph-notify) rather than injected.
  */
 export const inject: string[] = ["tools", "sessions", "subagents"];
 
@@ -179,6 +188,16 @@ export interface DshPluginContext {
    */
   systemPrompt?: unknown;
   /**
+   * The dsh live-agent registry service (`@deepseek-ai/dsh-agent` `AgentRegistry`,
+   * structural subset — see {@link DshAgentRegistryLike}). Present only in full
+   * profiles where the agent-loop bundle rows are mounted; headless / minimal
+   * profiles have no live agent registry, so the property is absent and graph
+   * notify degrades gracefully (see {@link probeAgentRegistry}). Never
+   * injected via the `inject` roster — an optional service must not gate plugin
+   * activation.
+   */
+  agents?: unknown;
+  /**
    * Resolve a cordis service by name (optional-service seam). The dsh host
    * context resolves any registered service; this plugin probes for
    * `"webServer"` (present only when the web profile is active) and skips
@@ -240,6 +259,16 @@ export interface DshPluginStats {
    * plugin keeps running.
    */
   monitorRouteRegistered: boolean;
+  /**
+   * Whether graph-notify was wired on the dsh path. `true` only when the
+   * optional live-agent registry (`ctx.agents`) was present at boot, so the
+   * session adapter's `prompt()` can route graph `<system-reminder>` reminders
+   * into the target session's agent. When `false` (minimal/headless profiles
+   * with no `ctx.agents`) the graph engine still assembles with a `graphNotify`
+   * config, but `prompt()` degrades to its no-op and the F6 notifier marks the
+   * degraded reminder instead of delivering one.
+   */
+  graphNotifyWired: boolean;
 }
 
 /**
@@ -255,6 +284,126 @@ export interface DshPluginDisposer {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+// ── Structural dsh live-agent surface (contract §4.2, duck-typed) ──────────
+//
+// rolebox's graph-notify reminders are delivered through
+// `ISessionClient.prompt(...)` (the SAME path opencode/Pi use). The dsh
+// SessionStore has no `prompt` — prompting is driven by the live agent loop —
+// so the plugin routes reminders through the live `Agent` surface instead:
+// `ctx.agents.get(sessionId)` → `Agent.inject`. Only the `get` + `inject`
+// members graph-notify needs are declared; the dsh surface is consumed
+// structurally (SDK-free), so a missing / non-conforming `ctx.agents` resolves
+// to "absent" and the plugin degrades cleanly.
+
+/** Minimal structural dsh `Agent` (the live agent backing a session). */
+interface DshAgentLike {
+  readonly id: string;
+  /** Inject a message into the agent's inbox (fires the loop). */
+  inject(message: unknown): unknown | Promise<unknown>;
+}
+
+/** Minimal structural dsh `AgentRegistry` (`ctx.agents`). */
+interface DshAgentRegistryLike {
+  /** Look up the live agent for a session id (§4.2 `get`). */
+  get(id: string): DshAgentLike | undefined;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh live-agent registry
+ * (`ctx.agents`, `@deepseek-ai/dsh-agent`).
+ *
+ * The service is optional: it is mounted ONLY when the `dsh-agent` /
+ * `dsh-agent-loop` bundle rows are present (full profiles). Minimal/headless
+ * profiles have no live agent registry, so this probe returns `undefined` and
+ * the plugin keeps booting with graph-notify degraded to the engine's default
+ * no-op marker (same graceful path as `probeWebServer` / `probeSystemPrompt`).
+ *
+ * Like `probeSystemPrompt`, the property read is NOT trusted as the whole
+ * probe — a service mounted by a SIBLING plugin fiber (the real profile shape)
+ * is invisible to the property-resolver walk — so a throw on `ctx.agents`
+ * falls through to the named-service resolver `ctx.get("agents")`, which reads
+ * the shared reflect store across fibers. Both paths probe `get(id)` to
+ * confirm the service is the agent registry (not some unrelated `agents`
+ * service). The probe is deliberately NOT gated on the `inject` roster: an
+ * optional service must not gate plugin activation.
+ */
+function probeAgentRegistry(
+  ctx: DshPluginContext,
+): DshAgentRegistryLike | undefined {
+  let service: unknown;
+  try {
+    service = ctx.agents;
+  } catch {
+    // Sibling-fiber service (full profile) — the property read throws; fall
+    // through to the cross-fiber named-service resolver below.
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("agents");
+    } catch {
+      return undefined;
+    }
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { get?: unknown }).get === "function"
+  ) {
+    return service as DshAgentRegistryLike;
+  }
+  return undefined;
+}
+
+/**
+ * Build a {@link DshPromptInjector} over an optional dsh agent registry.
+ *
+ * The injector resolves the live `Agent` for a target session and calls
+ * `Agent.inject` with the reminder's text (wrapped in a dsh ContentBlock bag
+ * — the message shape the contract §4.1/§4.2 uses everywhere). A missing
+ * registry, a session with no live agent, or a non-conforming / throwing
+ * `inject` all degrade to `null` (the reminder is dropped the same way a
+ * missing emperor session is) rather than failing the graph engine. The
+ * `Agent.inject` signature is duck-typed (§4.2 lists it but does not live-test
+ * its message shape), so the injector is best-effort and defensive.
+ */
+function buildAgentPromptInjector(
+  registry: DshAgentRegistryLike | undefined,
+): DshPromptInjector | undefined {
+  if (!registry) return undefined;
+  return {
+    async inject(
+      sessionId: string,
+      text: string,
+      _options?: { agent?: string; noReply?: boolean },
+    ): Promise<{ id: string } | null> {
+      let agent: DshAgentLike | undefined;
+      try {
+        agent = registry.get(sessionId);
+      } catch {
+        return null;
+      }
+      if (!agent || typeof agent.inject !== "function") return null;
+      try {
+        // The reminder text already carries the graph marker + the resolved
+        // agent (buildGraphCompletionText embeds `agent: <id>`), so the agent
+        // is delivered inline in the body — the content-block bag is the
+        // minimal dsh message shape. Fire-and-forget: resolve a sync or async
+        // inject uniformly, treat a rejection as a degradation.
+        await Promise.resolve(
+          agent.inject({ content: [{ type: "text", text }] }),
+        );
+        // `Agent.inject` does not guarantee a message id; use the session id
+        // as an advisory NotifyId (satisfies the ISessionClient.prompt shape).
+        return { id: sessionId };
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
 
 /**
  * Resolve the rolebox directories for the dsh platform, applying the
@@ -559,7 +708,23 @@ export async function apply(
   }
 
   // 4. Compile + register tools (dsh session adapter drives the session tools).
-  const sessionAdapter = new DshSessionAdapter(ctx.sessions);
+  //
+  // graph-notify injection seam (subtask: DSH graphNotify assembly). The dsh
+  // SessionStore has NO `prompt` — the opencode/Pi `sessionClient.prompt` way
+  // of delivering graph `<system-reminder>` reminders has no SessionStore
+  // equivalent. dsh's per-session message injection lives on the live `Agent`
+  // surface (`ctx.agents` → `Agent.inject`), which is mounted only in full
+  // profiles. Probe it OPTIONALLY: when the live agent registry is present the
+  // session adapter's `prompt()` routes graph-notify reminders into the target
+  // session's agent (the dsh equivalent of opencode/Pi graph-notify); when it
+  // is absent the adapter keeps its documented no-op and the graph engine's F6
+  // notifier logs the degraded reminder — never a crash, never gating boot.
+  const agentRegistry = probeAgentRegistry(ctx);
+  const promptInjector = buildAgentPromptInjector(agentRegistry);
+  const graphNotifyWired = promptInjector !== undefined;
+  const sessionAdapter = new DshSessionAdapter(ctx.sessions, {
+    ...(promptInjector ? { promptInjector } : {}),
+  });
   const factory = new DshToolFactory();
 
   // ── dsh dispatch path (subtask 8) ────────────────────────────────────────
@@ -585,10 +750,34 @@ export async function apply(
   // every graph node dispatches through the dsh subagent API. stateDir
   // (process.cwd()) persists engine state under `.rolebox/state` — the same
   // layout the opencode path uses.
+  //
+  // `getEffectiveAgent` mirrors the Pi/dispatch deps-injection pattern: dsh
+  // never populates `context.agent` on tool contexts, so the graph tools fall
+  // back to this per-session resolver (the role switcher's ActiveRoleRef) so
+  // the injected `<system-reminder>` forwards the orchestrator's real role
+  // instead of falling back to `default_agent`. When no role is active for the
+  // session it resolves to "" (base agent → resume as default).
+  //
+  // `graphNotify` mirrors the opencode/Pi config (tool-service.ts:91-94 /
+  // pi service-stack.ts:201-204): `sessionClient` is the SAME session client
+  // the platform threads through dispatch/loop (dsh's `sessionAdapter`, whose
+  // `prompt()` now routes through the optional live-agent injector above), and
+  // `emperorSessionId` resolves the orchestrator session from the graph tool's
+  // execution context (`invokingSessionId`). This is what makes DSH graph
+  // orchestration produce `<system-reminder>` (node-completion + graph-terminal
+  // + stall) reminders targeting the calling emperor session, exactly like
+  // opencode/Pi. When `ctx.agents` is absent, `sessionAdapter.prompt()` is the
+  // documented no-op and the engine's F6 notifier degrades per-marker.
   const graphTools = createGraphTools(undefined, {
     dispatch: dshDispatch,
     directory: process.cwd(),
     stateDir: process.cwd(),
+    getEffectiveAgent: (sessionID?: string) =>
+      sessionID ? activeRole.get(sessionID) ?? "" : "",
+    graphNotify: {
+      sessionClient: sessionAdapter,
+      emperorSessionId: (invokingSessionId) => invokingSessionId,
+    },
   });
 
   // Loop mode: the loop coordinator drives worker rounds through the SAME
@@ -782,6 +971,7 @@ export async function apply(
     dispatchMode: "dsh",
     loopWired: true,
     webRouteRegistered,
+    graphNotifyWired,
     monitorRouteRegistered,
   };
   return disposer;

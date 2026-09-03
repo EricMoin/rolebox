@@ -23,6 +23,7 @@
 
 import { describe, it, expect, beforeEach } from "bun:test";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { createGraphTools } from "../../src/graph/tools/index.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
@@ -236,6 +237,31 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
     expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
   });
 
+  it("forwards the acting agent into the injected reminder so the orchestrator role is resumed", async () => {
+    const client = new FakeSessionClient();
+    const dispatch = new FakeDispatchSeam();
+    const ts = createGraphToolSet({
+      dispatch,
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: EMPEROR_SESSION,
+      },
+    });
+
+    const graphId = buildSingleNodeGraph(ts);
+    // The tool factory forwards context.agent as the third arg — the
+    // orchestrator's acting role must flow into the prompt body so opencode
+    // resumes the real role instead of default_agent.
+    await ts.graph_run({ graph_id: graphId }, "invoking-session-7", "emperor--jinyiwei");
+    dispatch.completeLatest();
+    await flush();
+
+    // Both per-node completion and graph-terminal reminders carry the agent.
+    expect(client.prompts).toHaveLength(2);
+    expect(client.prompts[0].agent).toBe("emperor--jinyiwei");
+    expect(client.prompts[1].agent).toBe("emperor--jinyiwei");
+  });
+
   it("uses a prebuilt notifier fn as-is", async () => {
     const client = new FakeSessionClient();
     const dispatch = new FakeDispatchSeam();
@@ -375,5 +401,105 @@ describe("graph_run → graph-notify engine wiring (subtask 3)", () => {
     expect(client.prompts[0].text).toContain("node: A");
     expect(client.prompts[1].id).toBe("emperor-create-session");
     expect(client.prompts[1].text).toContain(GRAPH_COMPLETE_MARKER);
+  });
+});
+
+// ── Graph tool factory — effective agent forwarding (Pi/DSH) ───────────────
+//
+// The opencode path forwards `context.agent` natively. On Pi/DSH the platform
+// never populates `context.agent`, so the graph tools must fall back to the
+// platform-provided `getEffectiveAgent` resolver (the role switcher's
+// ActiveAgentRef / ActiveRoleRef) — otherwise the injected `<system-reminder>`
+// resumes the orchestrator as `default_agent` instead of its real role.
+describe("graph tool factory — effective agent forwarding", () => {
+  /** Drive a single-node graph to completion through the FACTORY tools. */
+  async function runSingleNodeGraph(
+    tools: Record<string, unknown>,
+    ctx: { sessionID?: string; agent?: string },
+  ): Promise<void> {
+    const graphCreate = (tools.graph_create as never as {
+      execute: (a: unknown, c: unknown) => Promise<string>;
+    });
+    const graphAddNode = (tools.graph_add_node as never as {
+      execute: (a: unknown, c: unknown) => Promise<string>;
+    });
+    const graphRun = (tools.graph_run as never as {
+      execute: (a: unknown, c: unknown) => Promise<string>;
+    });
+    await graphCreate.execute({ name: "eff-agent" }, ctx);
+    await graphAddNode.execute(
+      { graph_id: "eff-agent", id: "A", agent: "emperor--jinyiwei--ui", prompt: "do the thing" },
+      ctx,
+    );
+    await graphRun.execute({ graph_id: "eff-agent" }, ctx);
+  }
+
+  it("forwards the platform resolver's role when context.agent is empty (Pi/DSH)", async () => {
+    const client = new FakeSessionClient();
+    const dispatch = new FakeDispatchSeam();
+    const tools = createGraphTools(undefined, {
+      dispatch,
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: EMPEROR_SESSION,
+      },
+      // Pi-style global resolver (the role switcher's ActiveAgentRef).
+      getEffectiveAgent: (sessionID?: string) =>
+        sessionID ? "emperor--jinyiwei" : "",
+    });
+
+    // Pi/DSH tool factories set context.agent to "".
+    await runSingleNodeGraph(tools, { sessionID: "invoking-session-7", agent: "" });
+    dispatch.completeLatest();
+    await flush();
+
+    expect(client.prompts).toHaveLength(2);
+    expect(client.prompts[0].agent).toBe("emperor--jinyiwei");
+    expect(client.prompts[1].agent).toBe("emperor--jinyiwei");
+  });
+
+  it("prefers context.agent over the platform resolver when both are present (opencode parity)", async () => {
+    const client = new FakeSessionClient();
+    const dispatch = new FakeDispatchSeam();
+    const tools = createGraphTools(undefined, {
+      dispatch,
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: EMPEROR_SESSION,
+      },
+      getEffectiveAgent: () => "fallback-role",
+    });
+
+    // opencode populates context.agent natively → it must win over the resolver.
+    await runSingleNodeGraph(tools, { sessionID: "invoking-session-7", agent: "context-role" });
+    dispatch.completeLatest();
+    await flush();
+
+    expect(client.prompts).toHaveLength(2);
+    expect(client.prompts[0].agent).toBe("context-role");
+    expect(client.prompts[1].agent).toBe("context-role");
+  });
+
+  it("forwards no agent when neither context.agent nor the resolver yields one (base-agent session)", async () => {
+    const client = new FakeSessionClient();
+    const dispatch = new FakeDispatchSeam();
+    const tools = createGraphTools(undefined, {
+      dispatch,
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: EMPEROR_SESSION,
+      },
+      // No role active for the session → resolver yields "" (base agent).
+      getEffectiveAgent: () => "",
+    });
+
+    await runSingleNodeGraph(tools, { sessionID: "invoking-session-7", agent: "" });
+    dispatch.completeLatest();
+    await flush();
+
+    // Base-agent session: reminders fire but carry no role override.
+    expect(client.prompts).toHaveLength(2);
+    expect(client.prompts[0].agent).toBeUndefined();
+    expect(client.prompts[1].agent).toBeUndefined();
   });
 });
