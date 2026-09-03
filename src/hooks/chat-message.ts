@@ -93,7 +93,14 @@ export async function handleChatMessage(
   const part = output.parts[textPartIndex] as { type: string; text: string };
   const agentId = input.agent as string | undefined;
 
-  if (agentId && input.sessionID) {
+  // Register the session→agent mapping only on GENUINE user turns. A synthetic
+  // injection (`<system-reminder>` re-entering after a graph/dispatch/loop
+  // notification) resumes with the platform default agent when the notifier
+  // does not forward the role — overwriting here would pollute the registry,
+  // and system.transform later resolves the wrong role from it. `isSyntheticInjection`
+  // (already computed above) is the reuse of the existing non-user-turn
+  // classifier; it covers every dispatch/graph/loop/copilot marker.
+  if (agentId && input.sessionID && !isSyntheticInjection) {
     state.sessionAgentRegistry.set(input.sessionID, agentId);
   }
 

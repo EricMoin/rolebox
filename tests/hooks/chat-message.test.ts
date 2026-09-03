@@ -202,6 +202,26 @@ describe("handleChatMessage — session agent registration", () => {
 
     expect(state.sessionAgentRegistry.has("sess-1")).toBe(false);
   });
+
+  it("does not overwrite session->agent mapping for synthetic (reminder) injections", async () => {
+    const state = makeState();
+    // A genuine user turn already bound this session to a real role.
+    state.sessionAgentRegistry.set("sess-1", "emperor--jinyiwei");
+
+    // A graph-terminal <system-reminder> re-enters; before fix [2] the platform
+    // default agent (no forwarded role) overwrote the registry, so
+    // system.transform later resolved the wrong role.
+    await handleChatMessage(
+      { agent: "default_agent", sessionID: "sess-1" },
+      makeTextOutput(`${GRAPH_COMPLETE_MARKER} graph complete`),
+      state,
+      minimalDeps(),
+    );
+
+    // Registry must retain the genuine role — synthetic injections are dead
+    // turns, not a change of acting role.
+    expect(state.sessionAgentRegistry.get("sess-1")).toBe("emperor--jinyiwei");
+  });
 });
 
 describe("handleChatMessage — auto-activation", () => {
