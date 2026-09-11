@@ -1,0 +1,41 @@
+name: Deprecate
+
+# Manual registry-maintenance workflow.
+#
+# The tag-driven `publish.yml` workflow is the release button. This separate,
+# manually-triggered workflow exists because local npm credentials for this
+# repository are unavailable — every registry write goes through GitHub Actions
+# using the repository NPM_TOKEN secret. It marks a version range as deprecated,
+# so installers see an upgrade notice.
+#
+# Run from the Actions tab (workflow_dispatch) or:
+#   gh workflow run deprecate.yml \
+#     -f range='<semver range>' \
+#     -f message='<message>'
+
+on:
+  workflow_dispatch:
+    inputs:
+      range:
+        description: "npm semver range to deprecate"
+        required: true
+      message:
+        description: "Deprecation message shown to installers"
+        required: true
+        default: "This version is outdated and no longer maintained; please upgrade to the latest release."
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # setup-node writes .npmrc referencing NODE_AUTH_TOKEN so
+          # `npm deprecate` authenticates against the registry.
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Deprecate versions
+        run: npm deprecate "rolebox@${{ inputs.range }}" "${{ inputs.message }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

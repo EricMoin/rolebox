@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.1
+
+### Bug Fixes
+
+- Corrected documentation and inline-comment examples. No functional change.
+
 ## 1.8.0
 
 ### Breaking Changes
