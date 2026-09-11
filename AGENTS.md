@@ -23,6 +23,22 @@ Key scripts (`package.json`):
 
 ---
 
+## ⚠️ Privacy & leakage hygiene — applies to EVERY agent, every turn
+
+Anything you write can become public: git history, commit messages, changelogs and release notes, workflow files, published package contents, and CI logs. Before emitting any output that leaves the session, verify it does not expose:
+
+- **Private vendors / infrastructure** — internal hostnames or service names, provider or account keys, model codenames, or any identifier that is not already public.
+- **Secrets and credentials** — tokens, API keys, passwords, private keys, `.npmrc` / environment values, CI secrets.
+- **Personal / committer-identifying data** — usernames, home-directory paths, email addresses, machine-specific paths.
+
+Rules:
+
+- Use neutral placeholders in examples (`example-provider/model-name`, `/path/to/project`, `user@example.com`). Never paste real values.
+- Do NOT announce, describe, or reference a cleanup or removal of such data in commit messages, changelogs, release notes, or docs — keep them generic.
+- Before publishing, scan the artifact that actually leaves (for example `npm pack` output). Keep any blocklist or scan patterns out of version control.
+- Never print, echo, log, or commit secret values. If a value may have been exposed, flag it for rotation.
+- When in doubt, leave it out.
+
 ## ⚠️ Testing policy — READ FIRST
 
 > **DO NOT run the full test suite.**
