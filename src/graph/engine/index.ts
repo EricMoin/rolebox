@@ -1525,6 +1525,7 @@ export {
   createGraphNotifier,
   createGraphStallNotifier,
   createGraphTerminalNotifier,
+  buildPropagatedBlockedText,
 } from "./graph-notify.ts";
 export type {
   GraphCompletionHandler,

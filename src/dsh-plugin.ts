@@ -98,6 +98,7 @@ import { buildCanonicalTools } from "./platform/tool-assembly.ts";
 import type { PlatformCapabilities } from "./platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "./prompt/builder.ts";
 import { createGraphTools } from "./graph/tools/index.ts";
+import { createGraphToolSet, type GraphToolSet } from "./graph/tools/graph-tools.ts";
 import { LoopCoordinator } from "./loop/coordinator.ts";
 import { LoopStore } from "./loop/loop-store.ts";
 import { createLoopTools } from "./loop/loop-tools.ts";
@@ -449,17 +450,25 @@ function boundNoticeSummary(text: string): string {
  * Build a {@link DshPromptInjector} over an optional dsh agent registry.
  *
  * The injector resolves the live `Agent` for a target session and delivers
- * the reminder as a full rc.6 `UserMessage` (message.d.ts:120-133) through the
- * agent's first available delivery member. Delivery preference is a WAKING
- * member first — `steer` (an idle driver starts a turn; a running driver
- * consumes it at its next step boundary, rc.6 runtime-types.d.ts:116-123),
- * then `followup` (queues an ordinary follow-up turn and wakes the driver,
- * :110-115) — and only then `inject`, which queues model-facing context
- * WITHOUT waking an idle driver (:124-132). A missing registry, a session with
- * no live agent, an agent exposing none of the three members, or a throwing /
- * rejecting delivery all degrade to `null` (the reminder is dropped the same
- * way a missing emperor session is) rather than failing the graph engine. The
- * `Agent` surface is duck-typed, so the injector is best-effort and defensive.
+ * the reminder as a full rc.6 `UserMessage` (message.d.ts:120-133). The
+ * delivery member is chosen from `options.noReply` with the same semantics as
+ * opencode/Pi (`triggerTurn = !noReply`), so dsh does not diverge:
+ *
+ *   - `noReply: true`  → deliver WITHOUT waking an idle driver: the non-waking
+ *     `inject` member only (rc.6 runtime-types.d.ts:124-132; never
+ *     `steer`/`followup`). Absent → `null`.
+ *   - `noReply: false` → deliver with a WAKING member — `steer` (an idle driver
+ *     starts a turn; a running driver consumes it at its next step boundary,
+ *     :116-123), then `followup` (:110-115). Absent → `null` (never silently
+ *     no-wake an explicit wake request).
+ *   - `noReply: undefined` → legacy best-effort: waking members preferred, the
+ *     non-waking `inject` fallback last.
+ *
+ * A missing registry, a session with no live agent, an agent exposing none of
+ * the required members, or a throwing / rejecting delivery all degrade to
+ * `null` (the reminder is dropped the same way a missing emperor session is)
+ * rather than failing the graph engine. The `Agent` surface is duck-typed, so
+ * the injector is best-effort and defensive.
  *
  * The message carries a per-injection unique `id` (a randomUUID string — a
  * branded `MessageId` is satisfied structurally at this duck-typed boundary):
@@ -474,7 +483,7 @@ export function buildAgentPromptInjector(
     async inject(
       sessionId: string,
       text: string,
-      _options?: { agent?: string; noReply?: boolean },
+      options?: { agent?: string; noReply?: boolean },
     ): Promise<{ id: string } | null> {
       let agent: DshAgentLike | undefined;
       try {
@@ -484,18 +493,30 @@ export function buildAgentPromptInjector(
       }
       if (!agent) return null;
 
-      // First available delivery member, waking members preferred (see the
-      // docstring). `.bind(agent)` preserves the method receiver.
+      // Delivery member selection (see the docstring): noReply:true → non-waking
+      // `inject` only; noReply:false → waking `steer`/`followup` only; undefined
+      // → legacy waking-preferred-with-inject-fallback. `.bind(agent)` preserves
+      // the method receiver.
       const deliver:
         | ((message: unknown) => unknown | Promise<unknown>)
         | undefined =
-        typeof agent.steer === "function"
-          ? agent.steer.bind(agent)
-          : typeof agent.followup === "function"
-            ? agent.followup.bind(agent)
-            : typeof agent.inject === "function"
-              ? agent.inject.bind(agent)
-              : undefined;
+        options?.noReply === true
+          ? typeof agent.inject === "function"
+            ? agent.inject.bind(agent)
+            : undefined
+          : options?.noReply === false
+            ? typeof agent.steer === "function"
+              ? agent.steer.bind(agent)
+              : typeof agent.followup === "function"
+                ? agent.followup.bind(agent)
+                : undefined
+            : typeof agent.steer === "function"
+              ? agent.steer.bind(agent)
+              : typeof agent.followup === "function"
+                ? agent.followup.bind(agent)
+                : typeof agent.inject === "function"
+                  ? agent.inject.bind(agent)
+                  : undefined;
       if (!deliver) return null;
 
       // The reminder text already carries the graph marker + the resolved
@@ -1079,6 +1100,13 @@ export async function apply(
   // entry constructs its DispatchManager (createDispatchManager in
   // src/pi-extension.ts / src/index.ts) — the opencode path is untouched;
   // this is additive routing by platform.
+  // Late-bound nested-graph liveness seam. The adapter is constructed before
+  // the graph toolset (the toolset depends on the adapter), so the probe is
+  // closed over a mutable reference assigned once the toolset exists. When
+  // wired, a node whose subagent launched a nested graph is NOT reported
+  // complete until that graph settles, and a nested-graph failure propagates
+  // (escalates the node) instead of being silently dropped.
+  let graphToolSet: GraphToolSet | undefined;
   const dshDispatch = new DshDispatchAdapter({
     subagents: ctx.subagents,
     sessionClient: sessionAdapter,
@@ -1090,6 +1118,11 @@ export async function apply(
     // fails loud with DshParentUnresolvedError instead of forwarding
     // `parent: undefined`.
     parentResolver: (sid) => agentRegistry?.get(sid),
+    graphLiveness: {
+      hasExecuting: (sid) => graphToolSet?.hasExecutingGraphsForSession(sid) ?? false,
+      subscribeTerminal: (cb) =>
+        graphToolSet?.subscribeGraphTerminal(cb) ?? (() => {}),
+    },
     directory: process.cwd(),
   });
 
@@ -1116,16 +1149,31 @@ export async function apply(
   // + stall) reminders targeting the calling emperor session, exactly like
   // opencode/Pi. When `ctx.agents` is absent, `sessionAdapter.prompt()` is the
   // documented no-op and the engine's F6 notifier degrades per-marker.
-  const graphTools = createGraphTools(undefined, {
+  //
+  // The toolset is built explicitly (not via `createGraphTools`'s internal
+  // construction) so the SAME instance backs both the `graph_*` tools and the
+  // adapter's nested-graph liveness probe.
+  graphToolSet = createGraphToolSet({
     dispatch: dshDispatch,
     directory: process.cwd(),
     stateDir: process.cwd(),
-    getEffectiveAgent: (sessionID?: string) =>
-      sessionID ? activeRole.get(sessionID) ?? "" : "",
     graphNotify: {
       sessionClient: sessionAdapter,
       emperorSessionId: (invokingSessionId) => invokingSessionId,
     },
+    // Nested blocked-gate propagation: when a graph at any nesting depth
+    // blocks on a `needs_approval` gate, the toolset walks the invoking
+    // session chain through the dispatch adapter and delivers a [GRAPH BLOCKED]
+    // reminder to the OUTERMOST live session (the user's orchestrator), so the
+    // human can approve there even when the subagent session that invoked the
+    // nested graph has already ended. Single-level graphs resolve to a
+    // length-1 chain and behave exactly as before.
+    resolveSessionChain: (sid) => dshDispatch.resolveSessionChain(sid),
+  });
+  const graphTools = createGraphTools(undefined, {
+    toolset: graphToolSet,
+    getEffectiveAgent: (sessionID?: string) =>
+      sessionID ? activeRole.get(sessionID) ?? "" : "",
   });
 
   // Loop mode: the loop coordinator drives worker rounds through the SAME

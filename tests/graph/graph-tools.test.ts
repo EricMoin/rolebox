@@ -33,7 +33,7 @@ import type { EngineRuntime } from "../../src/graph/engine/index";
 import type { ISessionClient } from "../../src/platform/ports/session-client";
 import { graphEventsPath } from "../../src/graph/engine/graph-events";
 import { GraphEventRecorder } from "../../src/graph/engine/graph-events";
-import { clearParentQueues } from "../../src/dispatch/notification";
+import { clearParentQueues, GRAPH_BLOCKED_MARKER } from "../../src/dispatch/notification";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -851,6 +851,276 @@ describe("hasInflightGraphsForSession", () => {
     const { graph_id } = ts.graph_create({ name: "no-session" });
     ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
     expect(ts.hasInflightGraphsForSession("sess-S")).toBe(false);
+  });
+});
+
+// ── Nested-graph liveness surface ──────────────────────────────────────────
+//
+// Backs the dsh dispatch adapter's nested-graph settlement guard: an outer
+// node whose subagent launched a nested graph must not be reported complete
+// until that graph settles, and a failed nested graph must propagate.
+
+describe("hasExecutingGraphsForSession / subscribeGraphTerminal", () => {
+  /** Controllable dispatch seam: completes nodes async, optionally failing. */
+  class FakeDispatch implements NodeDispatchPort {
+    private subs = new Map<string, TaskTerminatedCallback>();
+    private tasks = new Map<string, DispatchTask>();
+    private seq = 0;
+    constructor(
+      private stayRunning: Set<string> = new Set(),
+      private failNodes: Set<string> = new Set(),
+    ) {}
+
+    executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
+      const id = `task-${node.nodeId}-${++this.seq}`;
+      const task: DispatchTask = {
+        id,
+        sessionId: `sess-${id}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      };
+      this.tasks.set(id, task);
+      if (!this.stayRunning.has(node.nodeId)) {
+        setTimeout(() => {
+          const status = this.failNodes.has(node.nodeId) ? "error" : "completed";
+          task.status = status;
+          if (status === "error") task.error = "boom";
+          this.subs.get(id)?.(id, status);
+        }, 0);
+      }
+      return Promise.resolve(task);
+    }
+
+    onTaskTerminated(
+      taskId: string,
+      cb: TaskTerminatedCallback,
+    ): TaskTerminatedCallback {
+      this.subs.set(taskId, cb);
+      return cb;
+    }
+
+    getTask(taskId: string): DispatchTask | undefined {
+      return this.tasks.get(taskId);
+    }
+  }
+
+  const settle = () => new Promise((r) => setTimeout(r, 25));
+
+  function openSingleNode(
+    name: string,
+    opts?: { stayRunning?: Set<string>; failNodes?: Set<string> },
+  ): { ts: GraphToolSet; graphId: string } {
+    const ts = new GraphToolSet({
+      dispatch: new FakeDispatch(opts?.stayRunning, opts?.failNodes),
+    });
+    const { graph_id } = ts.graph_create({ name });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    return { ts, graphId: graph_id };
+  }
+
+  beforeEach(() => {
+    clearParentQueues();
+  });
+
+  it("hasExecutingGraphsForSession is true while the engine is executing, false once complete", async () => {
+    const { ts, graphId } = openSingleNode("exec-true", {
+      stayRunning: new Set(["A"]),
+    });
+    await ts.graph_run({ graph_id: graphId }, "sess-S");
+    expect(ts.hasExecutingGraphsForSession("sess-S")).toBe(true);
+    expect(ts.hasExecutingGraphsForSession("sess-OTHER")).toBe(false);
+
+    const done = openSingleNode("exec-done");
+    await done.ts.graph_run({ graph_id: done.graphId }, "sess-S");
+    await settle();
+    expect(done.ts.hasExecutingGraphsForSession("sess-S")).toBe(false);
+  });
+
+  it("subscribeGraphTerminal fires a non-failed observation for a clean completion", async () => {
+    const { ts, graphId } = openSingleNode("terminal-ok");
+    const seen: Array<{ graphId: string; sessionId?: string; failed: boolean }> = [];
+    const unsub = ts.subscribeGraphTerminal((info) => seen.push(info));
+
+    await ts.graph_run({ graph_id: graphId }, "sess-S");
+    await settle();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].graphId).toBe(graphId);
+    expect(seen[0].sessionId).toBe("sess-S");
+    expect(seen[0].failed).toBe(false);
+
+    unsub();
+    const again = openSingleNode("terminal-after-unsub");
+    await again.ts.graph_run({ graph_id: again.graphId }, "sess-S");
+    await settle();
+    expect(seen).toHaveLength(1); // no further observations after unsubscribe
+  });
+
+  it("subscribeGraphTerminal marks a graph with an escalated node as failed", async () => {
+    const { ts, graphId } = openSingleNode("terminal-failed", {
+      failNodes: new Set(["A"]),
+    });
+    const seen: Array<{ graphId: string; sessionId?: string; failed: boolean }> = [];
+    ts.subscribeGraphTerminal((info) => seen.push(info));
+
+    await ts.graph_run({ graph_id: graphId }, "sess-S");
+    await settle();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].graphId).toBe(graphId);
+    expect(seen[0].failed).toBe(true);
+  });
+});
+
+// ── Nested blocked-gate approval propagation ──────────────────────────────
+//
+// A `needs_approval` gate inside a NESTED graph must surface its approval
+// request at the OUTERMOST live session so the human can approve there — the
+// subagent session that invoked the nested graph may already be dead. The
+// toolset walks the session chain through the injected resolver (the dsh
+// dispatch adapter's dispatch-parent index) and delivers a `[GRAPH BLOCKED]`
+// reminder to the outermost session with `noReply:false` (wakes it). A
+// single-level graph (no parent) must behave exactly as before.
+
+describe("nested blocked-gate approval propagation", () => {
+  /** Dispatch seam that leaves every node running so a gate can be paused. */
+  class StayingDispatch implements NodeDispatchPort {
+    async executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
+      return {
+        id: `task-${node.nodeId}`,
+        sessionId: `sess-${node.nodeId}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      } as DispatchTask;
+    }
+  }
+
+  class RecordingSessionClient implements ISessionClient {
+    prompts: Array<{ id: string; text: string; noReply?: boolean }> = [];
+    async prompt(
+      id: string,
+      options: { parts: Array<{ type: string; text: string }>; noReply?: boolean },
+    ): Promise<{ id: string } | null> {
+      this.prompts.push({
+        id,
+        text: options.parts.map((p) => p.text).join("\n"),
+        noReply: options.noReply,
+      });
+      return { id };
+    }
+    async list(): Promise<never> { throw new Error("not implemented"); }
+    async get(): Promise<never> { throw new Error("not implemented"); }
+    async messages(): Promise<never> { throw new Error("not implemented"); }
+    async children(): Promise<never> { throw new Error("not implemented"); }
+    async todo(): Promise<never> { throw new Error("not implemented"); }
+    async diff(): Promise<never> { throw new Error("not implemented"); }
+    async fork(): Promise<never> { throw new Error("not implemented"); }
+    async status(): Promise<never> { throw new Error("not implemented"); }
+    async promptSync(): Promise<never> { throw new Error("not implemented"); }
+    async create(): Promise<never> { throw new Error("not implemented"); }
+    async abort(): Promise<never> { throw new Error("not implemented"); }
+  }
+
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+
+  /** Reach the live engine runtime (private access — the in-repo test idiom). */
+  function liveRuntime(
+    ts: GraphToolSet,
+    graphId: string,
+  ): { advance: { onNodeSignalEmitted(n: string, t: string, p: unknown): Promise<void> } } {
+    const entry = (ts as unknown as { getEntry(id: string): { runtime: unknown } })["getEntry"](
+      graphId,
+    );
+    return entry.runtime as unknown as {
+      advance: { onNodeSignalEmitted(n: string, t: string, p: unknown): Promise<void> };
+    };
+  }
+
+  function gateSet(
+    client: ISessionClient,
+    resolveSessionChain?: (sessionId: string) => string[] | undefined,
+  ): { ts: GraphToolSet; graphId: string } {
+    const ts = new GraphToolSet({
+      dispatch: new StayingDispatch(),
+      // Mirror production: the emperor session IS the graph's invoking session.
+      graphNotify: {
+        sessionClient: client,
+        emperorSessionId: (invokingSessionId) => invokingSessionId,
+      },
+      ...(resolveSessionChain ? { resolveSessionChain } : {}),
+    });
+    const { graph_id } = ts.graph_create({ name: "nested-gate" });
+    ts.graph_add_node({ graph_id, id: "GATE", agent: "a", prompt: "Approve?", needs_approval: true });
+    return { ts, graphId: graph_id };
+  }
+
+  it("propagates a nested blocked gate to the outermost session with node + graph_approve call", async () => {
+    const client = new RecordingSessionClient();
+    const { ts, graphId } = gateSet(client, (sid) =>
+      sid === "child-session" ? ["child-session", "outer-session"] : [sid],
+    );
+    const seen: Array<{ isBlocked: boolean; blockedNodeIds: string[] }> = [];
+    ts.subscribeGraphTerminal((info) => seen.push(info));
+
+    await ts.graph_run({ graph_id: graphId }, "child-session");
+    await liveRuntime(ts, graphId).advance.onNodeSignalEmitted("GATE", "need_approval", "review");
+    await settle();
+
+    // The invoking session keeps its own [GRAPH BLOCKED] reminder (unchanged).
+    const toChild = client.prompts.filter((p) => p.id === "child-session");
+    expect(toChild).toHaveLength(1);
+    expect(toChild[0].text).toContain(GRAPH_BLOCKED_MARKER);
+
+    // The propagated reminder targets the OUTERMOST live session and wakes it.
+    const toOuter = client.prompts.filter((p) => p.id === "outer-session");
+    expect(toOuter).toHaveLength(1);
+    expect(toOuter[0].text).toContain(GRAPH_BLOCKED_MARKER);
+    expect(toOuter[0].text).toContain(graphId);
+    expect(toOuter[0].text).toContain("GATE");
+    expect(toOuter[0].text).toContain(
+      `graph_approve(graph_id="${graphId}", node_id="GATE", action="approve")`,
+    );
+    // The parent chain is carried so the human sees WHICH nested invocation.
+    expect(toOuter[0].text).toContain("child-session -> outer-session");
+    expect(toOuter[0].noReply).toBe(false);
+
+    // The observation carries the blocked fact + blocked node ids.
+    expect(seen[seen.length - 1]?.isBlocked).toBe(true);
+    expect(seen[seen.length - 1]?.blockedNodeIds).toEqual(["GATE"]);
+  });
+
+  it("does not propagate when the invoking session is already the outermost (single-level)", async () => {
+    const client = new RecordingSessionClient();
+    const { ts, graphId } = gateSet(client, (sid) => [sid]);
+
+    await ts.graph_run({ graph_id: graphId }, "only-session");
+    await liveRuntime(ts, graphId).advance.onNodeSignalEmitted("GATE", "need_approval", "review");
+    await settle();
+
+    expect(client.prompts.map((p) => p.id)).toEqual(["only-session"]);
+  });
+
+  it("does not propagate when no chain resolver is wired (opencode/Pi unchanged)", async () => {
+    const client = new RecordingSessionClient();
+    const { ts, graphId } = gateSet(client, undefined);
+
+    await ts.graph_run({ graph_id: graphId }, "child-session");
+    await liveRuntime(ts, graphId).advance.onNodeSignalEmitted("GATE", "need_approval", "review");
+    await settle();
+
+    expect(client.prompts.map((p) => p.id)).toEqual(["child-session"]);
   });
 });
 

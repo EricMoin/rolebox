@@ -138,12 +138,17 @@ export interface DshSessionStoreLike {
  * (the dsh surface is consumed structurally against the shapes verified in
  * `docs/dsh-plugin-contract.md` §4.2 — the Agent signature is duck-typed).
  *
- * The plugin's injector prefers a WAKING member — `steer` (rc.6
- * runtime-types.d.ts:116-123: an idle driver starts a turn; a running driver
- * consumes it at its next step boundary), then `followup` (:110-115: queues an
- * ordinary follow-up turn and wakes the driver) — and falls back to `inject`
- * (:124-132), which queues model-facing context WITHOUT waking an idle driver;
- * an idle driver leaves it pending until a follow-up or steering wakes it.
+ * The plugin's injector selects the delivery member from `noReply`, matching
+ * opencode/Pi semantics (`triggerTurn = !noReply`): `noReply: true` uses the
+ * non-waking `inject` member only (:124-132 — queues model-facing context
+ * WITHOUT waking an idle driver); `noReply: false` uses a WAKING member —
+ * `steer` (rc.6 runtime-types.d.ts:116-123: an idle driver starts a turn; a
+ * running driver consumes it at its next step boundary), then `followup`
+ * (:110-115: queues an ordinary follow-up turn and wakes the driver);
+ * `undefined` keeps the legacy best-effort preference (waking preferred,
+ * `inject` fallback). A member the chosen mode requires but the agent does not
+ * expose degrades to `null` rather than silently delivering with the wrong
+ * wake behavior.
  *
  * When the plugin provides an injector (wired from an optional `ctx.agents`
  * probe — the service may be absent in minimal/headless profiles), `prompt()`
@@ -164,10 +169,13 @@ export interface DshPromptInjector {
    * @param text      - The `<system-reminder>` body (contains the graph
    *   marker + agent). Already carries the resolved agent inline.
    * @param options   - Optional prompt metadata forwarded from
-   *   `ISessionClient.prompt` (`agent`, `noReply`); consumed as advisory.
+   *   `ISessionClient.prompt` (`agent`, `noReply`). `noReply` SELECTS the
+   *   delivery member (see the interface docstring): `true` = non-waking
+   *   `inject`, `false` = waking `steer`/`followup`, `undefined` = legacy
+   *   best-effort.
    * @returns A message id (unique per injected message), or `null` when the
-   *   session has no live agent / the injection is unsupported, so the caller
-   *   can degrade cleanly.
+   *   session has no live agent / the required delivery member is absent, so
+   *   the caller can degrade cleanly.
    */
   inject(
     sessionId: string,
@@ -484,10 +492,11 @@ export class DshSessionAdapter implements ISessionClient {
    * (the plugin wires one from the optional `ctx.agents` live-agent registry),
    * this routes the prompt's text into the target session's agent — the dsh
    * equivalent of opencode/Pi's `sessionClient.prompt` used by graph-notify to
-   * deliver a `<system-reminder>` to the orchestrator. The injector prefers a
-   * WAKING delivery member (`steer`, then `followup`) and falls back to
-   * `inject`, which queues model-facing context WITHOUT waking an idle driver
-   * (rc.6 runtime-types.d.ts:124-132).
+   * deliver a `<system-reminder>` to the orchestrator. The injector selects the
+   * delivery member from `options.noReply` (matching opencode/Pi
+   * `triggerTurn = !noReply`): `true` uses the non-waking `inject` member,
+   * `false` uses a waking `steer`/`followup` member, `undefined` keeps the
+   * legacy best-effort preference (rc.6 runtime-types.d.ts:110-132).
    *
    * No injector (or an injection that fails / finds no live agent) degrades
    * cleanly: the reminder is dropped the same way a missing emperor session is

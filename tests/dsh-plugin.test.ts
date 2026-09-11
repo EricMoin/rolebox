@@ -1593,6 +1593,66 @@ describe("buildAgentPromptInjector (rc.6 delivery contract)", () => {
     )!;
     expect(await rejecting.inject("session-1", "hello")).toBeNull();
   });
+
+  it("(f) honors noReply:true by using the non-waking inject member even when steer is available", async () => {
+    const { agent, calls } = makeValidatingAgent("session-1", {
+      steer: true,
+      followup: true,
+      inject: true,
+    });
+    const injector = buildAgentPromptInjector(makeRegistry(agent))!;
+
+    const result = await injector.inject("session-1", "silent", { noReply: true });
+
+    expect(result).not.toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("inject");
+  });
+
+  it("(f2) noReply:true degrades to null when only waking members exist (never wakes silently)", async () => {
+    const { agent, calls } = makeValidatingAgent("session-1", {
+      steer: true,
+      followup: true,
+    });
+    const injector = buildAgentPromptInjector(makeRegistry(agent))!;
+
+    expect(await injector.inject("session-1", "silent", { noReply: true })).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("(g) honors noReply:false by preferring a waking member (steer)", async () => {
+    const { agent, calls } = makeValidatingAgent("session-1", {
+      steer: true,
+      inject: true,
+    });
+    const injector = buildAgentPromptInjector(makeRegistry(agent))!;
+
+    await injector.inject("session-1", "wake", { noReply: false });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("steer");
+  });
+
+  it("(g2) noReply:false falls back to followup when steer is absent", async () => {
+    const { agent, calls } = makeValidatingAgent("session-1", {
+      followup: true,
+      inject: true,
+    });
+    const injector = buildAgentPromptInjector(makeRegistry(agent))!;
+
+    await injector.inject("session-1", "wake", { noReply: false });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("followup");
+  });
+
+  it("(g3) noReply:false degrades to null when no waking member exists (never silently no-wakes)", async () => {
+    const { agent, calls } = makeValidatingAgent("session-1", { inject: true });
+    const injector = buildAgentPromptInjector(makeRegistry(agent))!;
+
+    expect(await injector.inject("session-1", "wake", { noReply: false })).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
 });
 
 // ── event-bridge: previously-dropped dsh session-log vocabulary ────────────

@@ -423,6 +423,249 @@ describe("graph engine dispatch through the dsh subagent seam", () => {
   });
 });
 
+// ── Nested-graph settlement through the dsh dispatch path ───────────────────
+//
+// A dispatched subagent that calls `graph_run` ends its turn immediately
+// (graph_run is non-blocking), so its dsh run resolves `completed` while the
+// nested graph is still executing. The outer node must stay running until the
+// nested graph settles, and a nested-graph failure must propagate (escalate)
+// instead of being reported as a success.
+
+describe("nested graph settlement through the dsh subagent seam", () => {
+  /** Adapter + toolset wired with the (late-bound) nested-graph liveness probe. */
+  function nestedToolset(): { ts: GraphToolSet; adapter: DshDispatchAdapter } {
+    let tsRef: GraphToolSet | undefined;
+    const adapter = new DshDispatchAdapter({
+      subagents: service,
+      directory: tmpDir,
+      parentResolver: () => fakeParent,
+      graphLiveness: {
+        hasExecuting: (sid) => tsRef?.hasExecutingGraphsForSession(sid) ?? false,
+        subscribeTerminal: (cb) =>
+          tsRef?.subscribeGraphTerminal(cb) ?? (() => {}),
+      },
+    });
+    const ts = new GraphToolSet({ dispatch: adapter, directory: tmpDir });
+    tsRef = ts;
+    return { ts, adapter };
+  }
+
+  function nodeStatus(ts: GraphToolSet, graphId: string, nodeId: string): string | undefined {
+    return statusJson<GraphJson>(ts, { graph_id: graphId, format: "json" }).nodes.find(
+      (n) => n.node_id === nodeId,
+    )?.status;
+  }
+
+  /** The dsh run id that is NOT the outer run's (the nested node's run). */
+  function otherRunId(outerRunId: string): string {
+    const id = [...service.runs.keys()].find((r) => r !== outerRunId);
+    if (!id) throw new Error("nested run not started");
+    return id;
+  }
+
+  it("holds the outer node running while the nested graph executes, then escalates it on nested failure", async () => {
+    const { ts } = nestedToolset();
+
+    const inner = ts.graph_create({ name: "inner-graph" });
+    ts.graph_add_node({ graph_id: inner.graph_id, id: "M1", agent: "inner", prompt: "inner" });
+    const outer = ts.graph_create({ name: "outer-graph" });
+    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
+
+    // Both agents yield a controllable run that stays pending.
+    service.seedProvider("outer");
+    service.seedProvider("inner");
+
+    await ts.graph_run({ graph_id: outer.graph_id });
+    await settle();
+    expect(service.runs.size).toBe(1);
+    const outerRunId = [...service.runs.keys()][0];
+
+    // The outer subagent dispatches the nested graph from its own session.
+    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
+    await settle();
+    expect(service.runs.size).toBe(2);
+
+    // The subagent ends its turn `completed` — the nested graph is still
+    // executing, so the outer node must NOT complete.
+    service.completeRun(outerRunId, {
+      stopReason: "completed",
+      output: outputBlock("outer done"),
+    });
+    await settle();
+    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
+
+    // The nested graph fails → the failure propagates to the outer node.
+    service.completeRun(otherRunId(outerRunId), {
+      stopReason: "error",
+      output: outputBlock("inner exploded"),
+    });
+    await settle();
+
+    const json = statusJson<GraphJson>(ts, { graph_id: outer.graph_id, format: "json" });
+    const n1 = json.nodes.find((n) => n.node_id === "N1");
+    expect(n1?.status).toBe("escalate");
+    expect(n1?.error).toContain("nested graph");
+    expect(json.phase).toBe("complete");
+  });
+
+  it("completes the outer node once the nested graph finishes cleanly", async () => {
+    const { ts } = nestedToolset();
+
+    const inner = ts.graph_create({ name: "inner-ok" });
+    ts.graph_add_node({ graph_id: inner.graph_id, id: "M1", agent: "inner", prompt: "inner" });
+    const outer = ts.graph_create({ name: "outer-ok" });
+    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
+
+    service.seedProvider("outer");
+    service.seedProvider("inner");
+
+    await ts.graph_run({ graph_id: outer.graph_id });
+    await settle();
+    const outerRunId = [...service.runs.keys()][0];
+    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
+    await settle();
+
+    service.completeRun(outerRunId, {
+      stopReason: "completed",
+      output: outputBlock("outer done"),
+    });
+    await settle();
+    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
+
+    service.completeRun(otherRunId(outerRunId), {
+      stopReason: "completed",
+      output: outputBlock("inner done"),
+    });
+    await settle();
+
+    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("completed");
+    const withOutput = statusJson<Record<string, unknown>>(ts, {
+      graph_id: outer.graph_id,
+      node_id: "N1",
+      format: "json",
+      include_output: true,
+    });
+    expect(String(withOutput.output ?? "")).toContain("outer done");
+  });
+
+  it("completes a node normally when its agent launches no nested graph (no regression)", async () => {
+    let tsRef: GraphToolSet | undefined;
+    const adapter = new DshDispatchAdapter({
+      subagents: service,
+      directory: tmpDir,
+      parentResolver: () => fakeParent,
+      graphLiveness: {
+        hasExecuting: (sid) => tsRef?.hasExecutingGraphsForSession(sid) ?? false,
+        subscribeTerminal: (cb) =>
+          tsRef?.subscribeGraphTerminal(cb) ?? (() => {}),
+      },
+    });
+    const ts = new GraphToolSet({ dispatch: adapter, directory: tmpDir });
+    tsRef = ts;
+
+    service.seedProvider("plain");
+    service.autoComplete.set("plain", {
+      stopReason: "completed",
+      output: outputBlock("plain done"),
+    });
+
+    const g = ts.graph_create({ name: "plain-graph" });
+    ts.graph_add_node({ graph_id: g.graph_id, id: "N1", agent: "plain", prompt: "plain" });
+    await ts.graph_run({ graph_id: g.graph_id });
+    await settle();
+
+    expect(nodeStatus(ts, g.graph_id, "N1")).toBe("completed");
+  });
+
+  it("resolveSessionChain walks a dispatched child session up to the outermost live session", async () => {
+    const { ts, adapter } = nestedToolset();
+
+    const outer = ts.graph_create({ name: "chain-outer" });
+    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
+    service.seedProvider("outer");
+    service.seedProvider("inner");
+
+    // The user's orchestrator session runs the outer graph.
+    await ts.graph_run({ graph_id: outer.graph_id }, "user-session");
+    await settle();
+    const outerRunId = [...service.runs.keys()][0];
+
+    // The outer subagent (a dispatched child session) runs the inner graph.
+    const inner = ts.graph_create({ name: "chain-inner" });
+    ts.graph_add_node({ graph_id: inner.graph_id, id: "M1", agent: "inner", prompt: "inner" });
+    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
+    await settle();
+
+    // Chain: nested invoker → the real live parent (the orchestrator session).
+    expect(adapter.resolveSessionChain(outerRunId)).toEqual([outerRunId, "user-session"]);
+    // A session with no tracked dispatcher is its own outermost.
+    expect(adapter.resolveSessionChain("user-session")).toEqual(["user-session"]);
+  });
+
+  it("keeps the outer node non-terminal through a nested gate, then escalates it on reject", async () => {
+    const { ts } = nestedToolset();
+
+    const inner = ts.graph_create({ name: "reject-inner" });
+    ts.graph_add_node({
+      graph_id: inner.graph_id,
+      id: "GATE",
+      agent: "inner",
+      prompt: "Approve?",
+      needs_approval: true,
+    });
+    const outer = ts.graph_create({ name: "reject-outer" });
+    ts.graph_add_node({ graph_id: outer.graph_id, id: "N1", agent: "outer", prompt: "outer" });
+
+    service.seedProvider("outer");
+    service.seedProvider("inner");
+
+    // The orchestrator session runs the outer graph; its subagent runs the
+    // nested gate graph from its own (child) session.
+    await ts.graph_run({ graph_id: outer.graph_id }, "user-session");
+    await settle();
+    const outerRunId = [...service.runs.keys()][0];
+    await ts.graph_run({ graph_id: inner.graph_id }, outerRunId, "outer");
+    await settle();
+
+    // The subagent ends its turn → the nested graph still executes, so the
+    // outer node is held running (it must not report a premature success).
+    service.completeRun(outerRunId, {
+      stopReason: "completed",
+      output: outputBlock("outer done"),
+    });
+    await settle();
+    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
+
+    // Drive the nested gate to blocked; the outer node must STAY non-terminal.
+    const entry = (ts as unknown as { getEntry(id: string): { runtime: unknown } })["getEntry"](
+      inner.graph_id,
+    );
+    const runtime = entry.runtime as unknown as {
+      advance: { onNodeSignalEmitted(n: string, t: string, p: unknown): Promise<void> };
+    };
+    await runtime.advance.onNodeSignalEmitted("GATE", "need_approval", "review");
+    await settle();
+    expect(nodeStatus(ts, inner.graph_id, "GATE")).toBe("blocked");
+    expect(nodeStatus(ts, outer.graph_id, "N1")).toBe("running");
+
+    // Reject (no loop group) → the gate escalates, which propagates upward.
+    await ts.graph_approve({
+      graph_id: inner.graph_id,
+      node_id: "GATE",
+      action: "reject",
+      reason: "not good",
+    });
+    await settle();
+    expect(nodeStatus(ts, inner.graph_id, "GATE")).toBe("escalate");
+
+    const json = statusJson<GraphJson>(ts, { graph_id: outer.graph_id, format: "json" });
+    const n1 = json.nodes.find((n) => n.node_id === "N1");
+    expect(n1?.status).toBe("escalate");
+    expect(n1?.error).toContain("nested graph");
+    expect(json.phase).toBe("complete");
+  });
+});
+
 // ── Loop mode through the dsh dispatch path ─────────────────────────────────
 
 describe("loop mode dispatch through the dsh subagent seam", () => {

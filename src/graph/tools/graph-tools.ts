@@ -109,6 +109,7 @@ import {
   createGraphNotifier,
   createGraphStallNotifier,
   createGraphTerminalNotifier,
+  buildPropagatedBlockedText,
   type GraphCompletionHandler,
   type GraphStallHandler,
   type GraphTerminalHandler,
@@ -116,6 +117,7 @@ import {
   type DispatchParentContext,
 } from "../engine/index.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
+import { enqueueNotify } from "../../dispatch/notification.ts";
 import { createSubLogger } from "../../logger.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
 import { serializeGraphDeclaration } from "../serialize.ts";
@@ -278,6 +280,25 @@ export interface GraphToolSetDeps {
    * carried ONLY for notification targeting.
    */
   graphNotify?: GraphNotifySource;
+  /**
+   * Optional session-chain resolver (platform-injected). Given a session id,
+   * returns the ordered chain of sessions from that session UP to the
+   * OUTERMOST live session (`[sessionId, parent, ..., outermost]`), or
+   * `undefined` / a single-element chain when the session has no tracked
+   * dispatcher parent.
+   *
+   * Consumed only by nested blocked-gate propagation: when a graph at any
+   * nesting depth reaches the quiescent-blocked phase, the toolset delivers a
+   * {@link buildPropagatedBlockedText} reminder to `chain.at(-1)` (the user's
+   * orchestrator session) so the human can `graph_approve` there — the
+   * subagent session that invoked the nested graph may already be dead. Absent
+   * (opencode/Pi, or any caller without a parent-session index) → no
+   * propagation: single-level graphs behave exactly as before.
+   *
+   * The dsh plugin wires this from
+   * `DshDispatchAdapter.resolveSessionChain` (its dispatch-parent index).
+   */
+  resolveSessionChain?: (sessionId: string) => string[] | undefined;
 }
 
 // ── Tool parameter shapes (plain objects — subtask 6 wraps with zod) ─────────
@@ -602,12 +623,45 @@ export const UNSUPPORTED_GRAPH_STATUS_FLAGS: ReadonlyArray<{
 
 
 /**
+ * A graph-terminal observation delivered to {@link GraphToolSet.subscribeGraphTerminal}
+ * observers. `sessionId` is the graph's invoking session (the session whose
+ * tool call ran the graph), which lets an observer correlate a nested graph
+ * with the dispatch task that spawned its agent. `failed` is true when the
+ * terminal graph carries at least one escalated or timed-out node.
+ * `isBlocked` is true for the quiescent-blocked (HITL gate) terminal, and
+ * `blockedNodeIds` names the `needs_approval` node(s) awaiting a human decision
+ * (`[]` for a non-blocked terminal). `phase` is the graph phase at emission.
+ */
+export interface GraphTerminalObservation {
+  graphId: string;
+  sessionId?: string;
+  failed: boolean;
+  /** True when the graph is quiescent-blocked on a `needs_approval` gate. */
+  isBlocked: boolean;
+  /** The graph phase at emission time. */
+  phase: string;
+  /** The blocked `needs_approval` node ids (empty for a non-blocked terminal). */
+  blockedNodeIds: string[];
+}
+
+/** Observer callback for {@link GraphToolSet.subscribeGraphTerminal}. */
+export type GraphTerminalObserver = (info: GraphTerminalObservation) => void;
+
+/**
  * The imperative `graph_*` tool set bound to a dispatch manager and a single
  * in-memory graph registry. Construct once per session (or per graph batch);
  * {@link graph_create} opens a registry slot that the other tools mutate.
  */
 export class GraphToolSet {
   private readonly registry = new Map<string, GraphEntry>();
+
+  /**
+   * Graph-terminal observers. Consumed by the dsh dispatch adapter to hold an
+   * outer dispatch open until a graph the dispatched agent launched from its
+   * own session reaches a terminal state (nested-graph propagation). Empty by
+   * default — no observer, no behavior change.
+   */
+  private readonly graphTerminalObservers = new Set<GraphTerminalObserver>();
 
   constructor(private readonly deps: GraphToolSetDeps = {}) {}
 
@@ -820,9 +874,13 @@ export class GraphToolSet {
       options.onNodeCompletion = completion;
     }
     const terminal = this.terminalHandler(graphId, invokingSessionId, agent);
-    if (terminal) {
-      options.onGraphTerminal = terminal;
-    }
+    // Always wire the observed terminal handler so this toolset's terminal
+    // observers (nested-graph settlement) fire for rebuilt engines too, not
+    // just the engine graph_run builds.
+    options.onGraphTerminal = (event: GraphTerminalEvent): void => {
+      this.notifyGraphTerminal(invokingSessionId, event);
+      terminal?.(event);
+    };
     // Subtask 5: wire the configured graph-notify stall seam (absent → no-op).
     const stall = this.stallHandler(graphId, invokingSessionId, agent);
     if (stall) {
@@ -1358,6 +1416,15 @@ export class GraphToolSet {
     const completion = this.completionHandler(args.graph_id, sessionId, agentId);
     const terminal = this.terminalHandler(args.graph_id, sessionId, agentId);
     const stall = this.stallHandler(args.graph_id, sessionId, agentId);
+    // Always wire a terminal handler: besides the graph-notify reminder
+    // (when configured), it feeds this toolset's terminal observers so a
+    // nested graph's settlement can be observed by the dispatch layer. The
+    // observers are notified BEFORE the notifier so a deferred outer dispatch
+    // is settled even when no emperor session is resolvable.
+    const observedTerminal = (event: GraphTerminalEvent): void => {
+      this.notifyGraphTerminal(sessionId, event);
+      terminal?.(event);
+    };
     const runtime = createEngine(entry.declaration, {
       manager: this.deps.manager,
       graphId: args.graph_id,
@@ -1372,7 +1439,7 @@ export class GraphToolSet {
       sweeperIntervalMs: this.deps.sweeperIntervalMs ?? DEFAULT_SWEEPER_INTERVAL_MS,
       ...(this.deps.dispatch ? { dispatch: this.deps.dispatch } : {}),
       ...(completion ? { onNodeCompletion: completion } : {}),
-      ...(terminal ? { onGraphTerminal: terminal } : {}),
+      onGraphTerminal: observedTerminal,
       ...(stall ? { onNodeStall: stall } : {}),
       // Graph monitoring: durable write-side event log when a stateDir is set.
       ...(this.deps.stateDir
@@ -1526,6 +1593,142 @@ export class GraphToolSet {
       }
     }
     return false;
+  }
+
+  /**
+   * Whether the given session owns at least one graph whose engine has NOT
+   * reached a terminal phase — i.e. its phase is still `executing`. Unlike
+   * {@link hasInflightGraphsForSession}, a quiescent-blocked graph (a
+   * `needs_approval` gate awaiting the human) still counts: a dispatched
+   * subagent that launched a nested graph must not be reported terminal while
+   * that graph is unsettled for ANY reason, including a HITL gate.
+   *
+   * Consumed by the dsh dispatch adapter's nested-graph settlement guard so an
+   * outer node stays `running` (and its failure never silently becomes a
+   * success) until the nested graph it launched reaches a terminal state.
+   */
+  hasExecutingGraphsForSession(sessionID: string): boolean {
+    for (const entry of this.registry.values()) {
+      if (entry.invokingSessionId !== sessionID) continue;
+      if (entry.runtime.status().phase === EnginePhase.Executing) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Subscribe to graph-terminal events for every graph this toolset runs.
+   * Returns an unsubscribe function. Used by the dsh dispatch adapter to learn
+   * when a nested graph launched from a dispatched agent's session settles, so
+   * the outer dispatch can be settled from the nested graph's outcome rather
+   * than from the agent's (premature) turn completion.
+   */
+  subscribeGraphTerminal(observer: GraphTerminalObserver): () => void {
+    this.graphTerminalObservers.add(observer);
+    return () => {
+      this.graphTerminalObservers.delete(observer);
+    };
+  }
+
+  /**
+   * Fan a terminal event out to every registered observer. Best-effort: a
+   * throwing observer must never corrupt the engine's terminal transition
+   * (mirrors the `onGraphTerminal` notifier convention). A no-op with no
+   * observers registered.
+   *
+   * For the quiescent-blocked terminal it also propagates the approval request
+   * up the session chain to the outermost live session (see
+   * {@link GraphToolSetDeps.resolveSessionChain}) so a nested `needs_approval`
+   * gate reaches the user's orchestrator session — not just the (possibly
+   * dead) subagent session that invoked the nested graph.
+   */
+  private notifyGraphTerminal(
+    sessionId: string | undefined,
+    event: GraphTerminalEvent,
+  ): void {
+    const blockedNodeIds = event.isBlocked
+      ? this.blockedNodeIdsFor(event.graphId)
+      : [];
+    const info: GraphTerminalObservation = {
+      graphId: event.graphId,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+      failed:
+        event.nodeStatusSummaries.escalate > 0 ||
+        event.nodeStatusSummaries.timeout > 0,
+      isBlocked: event.isBlocked,
+      phase: event.phase,
+      blockedNodeIds,
+    };
+    for (const observer of [...this.graphTerminalObservers]) {
+      try {
+        observer(info);
+      } catch {
+        // A throwing observer must not break the terminal transition.
+      }
+    }
+    if (event.isBlocked && sessionId) {
+      this.propagateBlockedGate(sessionId, event, blockedNodeIds);
+    }
+  }
+
+  /**
+   * Read the ids of the currently `blocked` nodes in a graph's live runtime.
+   * Empty when the graph is unknown (e.g. the terminal fired before the
+   * registry entry was replaced) — never fabricated.
+   */
+  private blockedNodeIdsFor(graphId: string): string[] {
+    const entry = this.registry.get(graphId);
+    if (!entry) return [];
+    const ids: string[] = [];
+    for (const node of entry.runtime.status().nodes.values()) {
+      if (node.status === NodeStatus.Blocked) ids.push(node.nodeId);
+    }
+    return ids;
+  }
+
+  /**
+   * Deliver a blocked-gate reminder to the OUTERMOST live session on the
+   * invoking session's chain. A no-op when no resolver is wired (opencode/Pi),
+   * when the chain has no parent (single-level graph — the graph's own invoking
+   * session already received the terminal reminder), or when no session client
+   * is configured. Delivery is fire-and-forget, serialized per target session
+   * via {@link enqueueNotify}; a failure is logged and never breaks the
+   * terminal transition.
+   */
+  private propagateBlockedGate(
+    invokingSessionId: string,
+    event: GraphTerminalEvent,
+    blockedNodeIds: string[],
+  ): void {
+    const resolve = this.deps.resolveSessionChain;
+    if (!resolve) return;
+    const chain = resolve(invokingSessionId);
+    if (!chain || chain.length <= 1) return;
+    const outermost = chain[chain.length - 1];
+    if (!outermost || outermost === invokingSessionId) return;
+    const src = this.deps.graphNotify;
+    if (src === undefined || typeof src === "function") return;
+    const text = buildPropagatedBlockedText({
+      graphId: event.graphId,
+      phase: event.phase,
+      blockedNodeIds,
+      chain,
+    });
+    void enqueueNotify(outermost, async () => {
+      try {
+        await src.sessionClient.prompt(outermost, {
+          parts: [{ type: "text", text }],
+          noReply: false,
+        });
+        return true;
+      } catch (err) {
+        log.warn(
+          `graph-tools: failed to propagate blocked gate for graph "${event.graphId}" to outermost session "${outermost}": ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return false;
+      }
+    });
   }
 
   // ── Session-level liveness resolution (subtask 6) ──────────────────────────

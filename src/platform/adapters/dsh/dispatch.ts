@@ -107,6 +107,36 @@ export interface DshSubagentDispatchRuntime extends DshSubagentRuntime {
 }
 
 /**
+ * Nested-graph liveness seam. The dsh graph toolset is consumed structurally
+ * (the adapter never imports the graph subsystem) so a run whose agent launched
+ * a nested graph can be settled from THAT graph's outcome instead of the
+ * agent's turn completion.
+ *
+ * A dispatched subagent that calls `graph_run` ends its turn immediately
+ * (graph_run is non-blocking), so the run's `result` resolves `completed`
+ * while the nested graph is still executing. Without this seam the outer node
+ * would report success and the nested graph's eventual failure would be lost.
+ */
+export interface DshNestedGraphLiveness {
+  /**
+   * Whether the session still owns a graph that has not reached a terminal
+   * phase (including a quiescent-blocked HITL gate).
+   */
+  hasExecuting(sessionId: string): boolean;
+  /**
+   * Subscribe to graph-terminal events for the graphs the session's agents
+   * launched. Returns an unsubscribe function.
+   */
+  subscribeTerminal(
+    observer: (info: {
+      graphId: string;
+      sessionId?: string;
+      failed: boolean;
+    }) => void,
+  ): () => void;
+}
+
+/**
  * dsh `SubagentResult` — the terminal outcome a `SubagentRun.result` promise
  * resolves with. The single structural declaration lives in
  * `agent-registrar.ts` (`DshSubagentResult`) so `DshSubagentRun.result` is
@@ -172,6 +202,15 @@ export interface DshDispatchAdapterOptions {
    * probed live-agent registry: `(sid) => registry?.get(sid)`.
    */
   parentResolver?: (sessionId: string) => unknown;
+  /**
+   * Optional nested-graph liveness seam (see {@link DshNestedGraphLiveness}).
+   * When wired, a run that settles `completed` while its session still owns an
+   * executing nested graph is held `running` until that graph reaches a
+   * terminal state; a failed nested graph then settles the task as `error`
+   * (the engine's escalate path) instead of a silent success. Absent → the
+   * pre-existing behavior (settle from `stopReason` alone).
+   */
+  graphLiveness?: DshNestedGraphLiveness;
   /**
    * Optional workspace directory for result sidecars
    * (`{directory}/.rolebox/state/results/`). Defaults to `process.cwd()`.
@@ -254,6 +293,24 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
   private readonly tasks = new Map<string, DshTaskEntry>();
   private readonly log;
   private readonly directory: string;
+  /**
+   * Runs whose `result` settled `completed` while their session still owned an
+   * executing nested graph. Keyed by task id → the run's materialized output
+   * text, settled when the nested graph reaches a terminal state.
+   */
+  private readonly pendingNestedSettle = new Map<string, string>();
+  /** Lazily-created nested-graph terminal subscription (one per adapter). */
+  private nestedUnsub?: () => void;
+  /**
+   * Dispatch-parent index: child session id (a `SubagentRun.id`) → the REAL
+   * live parent session recorded at spawn (`liveParentSessionId`). Lets the
+   * adapter walk a nested graph's invoking session chain up to the outermost
+   * live session (see {@link resolveSessionChain}) so a blocked
+   * `needs_approval` gate can be surfaced to the user's orchestrator session.
+   * Entries are never evicted (the run registry itself is lifetime-long), so a
+   * chain resolved after the child agent's session has ended still resolves.
+   */
+  private readonly childToParent = new Map<string, string>();
 
   constructor(private readonly opts: DshDispatchAdapterOptions) {
     this.log = createSubLogger(opts.loggerName ?? "dsh-dispatch");
@@ -341,6 +398,10 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     const run = await this.opts.subagents.start(agent, request);
 
     const id = run.id;
+    // Record the dispatch-parent edge BEFORE any settlement can fire so the
+    // chain is resolvable even if the run completes immediately (a
+    // `graph_run`-launching subagent ends its turn at once).
+    this.childToParent.set(id, liveParentSessionId);
     const task: DispatchTask = {
       id,
       sessionId: id,
@@ -418,16 +479,24 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     const outputText = blocksToText(result?.output ?? []);
     switch (result?.stopReason) {
       case "completed": {
+        // A subagent that dispatched a nested graph via `graph_run` ends its
+        // turn immediately (graph_run is non-blocking), so `stopReason` is
+        // "completed" while the nested graph is still executing. Hold the task
+        // running until that graph settles; otherwise the outer layer reports
+        // success and the nested graph's failure is lost.
+        if (this.deferUntilNestedGraphsSettle(id, task, outputText)) return;
         task.status = "completed";
         task.completedAt = new Date();
         task.result = this.materialize(id, outputText);
         break;
       }
       case "aborted":
+        this.pendingNestedSettle.delete(id);
         task.status = "cancelled";
         task.completedAt = new Date();
         break;
       case "max-tokens":
+        this.pendingNestedSettle.delete(id);
         task.status = "timeout";
         task.completedAt = new Date();
         task.error = outputText || "dsh subagent exceeded max-tokens";
@@ -435,6 +504,7 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
       case "error":
       case "refusal":
       default: {
+        this.pendingNestedSettle.delete(id);
         task.status = "error";
         task.completedAt = new Date();
         task.error =
@@ -451,10 +521,84 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     this.finishTerminal(id);
   }
 
+  /**
+   * Hold a `completed` run open while its session still owns an executing
+   * nested graph. Returns `true` when settlement was deferred (the caller must
+   * NOT settle the task), `false` when the task can settle normally.
+   *
+   * The nested graph is correlated by the run's session id: in dsh a
+   * `SubagentRun.id` IS a `SessionId`, and the graph tool's invoking-session is
+   * the child agent's session — so `task.sessionId` identifies the graphs the
+   * dispatched agent launched.
+   */
+  private deferUntilNestedGraphsSettle(
+    id: string,
+    task: DispatchTask,
+    outputText: string,
+  ): boolean {
+    const liveness = this.opts.graphLiveness;
+    if (!liveness || !liveness.hasExecuting(task.sessionId)) return false;
+    this.pendingNestedSettle.set(id, outputText);
+    if (!this.nestedUnsub) {
+      this.nestedUnsub = liveness.subscribeTerminal((info) => {
+        this.onNestedGraphTerminal(info);
+      });
+    }
+    this.log.debug(
+      "dsh subagent run completed but its session owns an executing nested graph — deferring settlement",
+      { id, sessionId: task.sessionId },
+    );
+    return true;
+  }
+
+  /**
+   * Settle every deferred task whose session has no executing graph left after
+   * a nested graph reached a terminal state. A failed nested graph (escalated /
+   * timed-out node) settles the task `error` so the engine escalates the node
+   * instead of reporting a fabricated success.
+   */
+  private onNestedGraphTerminal(info: {
+    graphId: string;
+    sessionId?: string;
+    failed: boolean;
+  }): void {
+    if (this.pendingNestedSettle.size === 0) return;
+    const liveness = this.opts.graphLiveness;
+    for (const [id, outputText] of [...this.pendingNestedSettle]) {
+      const entry = this.tasks.get(id);
+      if (!entry || entry.task.status !== "running") {
+        this.pendingNestedSettle.delete(id);
+        continue;
+      }
+      if (!info.sessionId || entry.task.sessionId !== info.sessionId) continue;
+      // Another graph owned by the same session is still executing — keep
+      // waiting for its terminal event.
+      if (liveness?.hasExecuting(entry.task.sessionId)) continue;
+      this.pendingNestedSettle.delete(id);
+      if (info.failed) {
+        entry.task.status = "error";
+        entry.task.completedAt = new Date();
+        entry.task.error = `nested graph "${info.graphId}" failed`;
+      } else {
+        entry.task.status = "completed";
+        entry.task.completedAt = new Date();
+        entry.task.result = this.materialize(id, outputText);
+      }
+      void entry.run.dispose().catch(() => undefined);
+      this.log.debug("dsh nested-graph deferral settled", {
+        id,
+        graphId: info.graphId,
+        status: entry.task.status,
+      });
+      this.finishTerminal(id);
+    }
+  }
+
   /** Settle a run as `error` from a rejected result promise (defensive). */
   private settleError(id: string, err: unknown): void {
     const entry = this.tasks.get(id);
     if (!entry || entry.task.status !== "running") return;
+    this.pendingNestedSettle.delete(id);
     entry.task.status = "error";
     entry.task.completedAt = new Date();
     entry.task.error =
@@ -470,6 +614,7 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
   private forceSettle(id: string, status: "cancelled" | "timeout", reason: string): void {
     const entry = this.tasks.get(id);
     if (!entry || entry.task.status !== "running") return;
+    this.pendingNestedSettle.delete(id);
     entry.task.status = status;
     entry.task.completedAt = new Date();
     entry.task.error = reason;
@@ -575,6 +720,38 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
   /** Look up a dispatched task's current record (status + result ref). */
   getTask(taskId: string): DispatchTask | undefined {
     return this.tasks.get(taskId)?.task;
+  }
+
+  /**
+   * Walk a dispatched child session up to the outermost live session by
+   * following the dispatch-parent index recorded at each
+   * {@link startRun} (`childToParent`).
+   *
+   * In dsh a `SubagentRun.id` IS a `SessionId`; each run records the REAL live
+   * parent session that owned its spawn. Starting from a nested graph's
+   * invoking session (the child session that called `graph_run`), this returns
+   * `[sessionId, parent, ..., outermost]` — the chain a blocked approval must
+   * travel to reach the user's orchestrator session. A session with no tracked
+   * dispatcher is its own outermost (`[sessionId]`), so a single-level graph
+   * (whose invoking session IS the orchestrator) yields a length-1 chain and
+   * the caller skips propagation.
+   *
+   * Cycle-safe: a seen-set stops a malformed parent loop, and the walk is
+   * bounded by the registry size. Consumed (structurally) by the graph
+   * toolset's `resolveSessionChain` seam.
+   */
+  resolveSessionChain(sessionId: string): string[] {
+    const chain = [sessionId];
+    const seen = new Set<string>([sessionId]);
+    let current = sessionId;
+    for (;;) {
+      const parent = this.childToParent.get(current);
+      if (!parent || seen.has(parent)) break;
+      chain.push(parent);
+      seen.add(parent);
+      current = parent;
+    }
+    return chain;
   }
 
   /**

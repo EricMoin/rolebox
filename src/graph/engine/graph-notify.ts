@@ -350,6 +350,58 @@ export function buildGraphTerminalText(event: GraphTerminalEvent): string {
 }
 
 /**
+ * Build the `<system-reminder>` text for a blocked gate that is being
+ * propagated UP the session chain from a nested graph to the outermost live
+ * (orchestrator) session.
+ *
+ * Unlike {@link buildGraphTerminalText} — which targets the graph's own
+ * invoking session — this reminder names the graph, the blocked
+ * `needs_approval` node(s), AND the parent session chain, so the human can see
+ * WHICH nested graph is waiting and then approve it from the top level. It uses
+ * {@link GRAPH_BLOCKED_MARKER} (a member of
+ * {@link DISPATCH_NOTIFICATION_MARKERS}), so the re-entering chat.message hook
+ * still classifies it as a non-user turn.
+ *
+ * @param args.graphId        The blocked (nested) graph.
+ * @param args.phase          The graph's engine phase at emission time.
+ * @param args.blockedNodeIds The `needs_approval` node ids currently blocked.
+ * @param args.chain          Ordered session chain from the graph's invoking
+ *                            session to the outermost live session.
+ */
+export function buildPropagatedBlockedText(args: {
+  graphId: string;
+  phase: string;
+  blockedNodeIds: string[];
+  chain: string[];
+}): string {
+  const { graphId, phase, blockedNodeIds, chain } = args;
+  const approveAction =
+    blockedNodeIds.length > 0
+      ? blockedNodeIds
+          .map(
+            (nodeId) =>
+              `graph_approve(graph_id="${graphId}", node_id="${nodeId}", action="approve")`,
+          )
+          .join("\n")
+      : `graph_approve(graph_id="${graphId}", node_id="<blocked_node_id>", action="approve")`;
+  return buildReminder({
+    marker: GRAPH_BLOCKED_MARKER,
+    fields: [
+      { label: "graph", value: graphId },
+      { label: "phase", value: phase },
+      { label: "blocked", value: blockedNodeIds.join(", ") },
+      { label: "chain", value: chain.join(" -> ") },
+    ],
+    action: [
+      "Nested graph quiescent-blocked — a needs_approval node awaits a human decision. Approve or reject it from THIS session.",
+      `Approve: ${approveAction}`,
+      `Reject: graph_approve(graph_id="${graphId}", node_id="<blocked_node_id>", action="reject") with reason`,
+      `Inspect: graph_status(graph_id="${graphId}", status="blocked", include_output=true)`,
+    ].join("\n"),
+  });
+}
+
+/**
  * Create a graph-terminal notifier wired to the engine's `onGraphTerminal` seam.
  *
  * Follows the same session-client injection + dedupe + failure-logging pattern
