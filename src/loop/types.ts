@@ -1,0 +1,135 @@
+/**
+ * Controls whether a new loop session inherits the parent's conversation
+ * history ("inherit") or starts with a clean slate ("fresh").
+ */
+export type LoopMode = "inherit" | "fresh";
+
+/**
+ * Result of registering a loop with the LoopService.
+ * `ok: true` means registration succeeded and the loop was dispatched.
+ * `ok: false; reason` describes why registration was rejected (e.g. loop
+ * already active for the session, identical task in an ancestor chain, tree
+ * worker budget exhausted).
+ */
+export type RegisterResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Orchestrator phase of a loop execution.
+ *
+ * The state machine flows: activating → dispatching → awaiting_worker → summarizing → dispatching → ...
+ * Terminal phases: complete | cancelled | interrupted | error
+ *
+ * - `activating`: The loop is being initialized (first round setup).
+ * - `dispatching`: The loop is dispatching a round to DispatchManager.
+ * - `awaiting_worker`: Waiting for the dispatched worker task to complete.
+ * - `summarizing`: Generating a summary of the completed round.
+ * - `finalizing`: Wrapping up the loop after all rounds are done.
+ * - `complete`: All iterations finished successfully.
+ * - `cancelled`: The loop was explicitly cancelled by user or agent request.
+ * - `interrupted`: The loop was interrupted (e.g., session timeout).
+ * - `error`: The loop encountered an unrecoverable error.
+ */
+export type LoopPhase =
+  | "activating"
+  | "dispatching"
+  | "awaiting_worker"
+  | "summarizing"
+  | "finalizing"
+  | "complete"
+  | "cancelled"
+  | "interrupted"
+  | "error";
+
+/**
+ * Record of a single completed (or failed/cancelled) loop round.
+ * Persisted in LoopState.rounds for post-hoc session discovery.
+ */
+export interface RoundRecord {
+  /** 1-based round number */
+  round: number;
+  /** Dispatch task ID for this round's worker */
+  workerTaskId: string;
+  /** Session ID of the worker (key for session_read/session_info) */
+  workerSessionId: string;
+  /** Unix timestamp (ms) when the round was dispatched */
+  startedAt: number;
+  /** Unix timestamp (ms) when the round completed (undefined if still running) */
+  completedAt?: number;
+  /** Duration in milliseconds (completedAt - startedAt) */
+  durationMs?: number;
+  /** Terminal status of this round */
+  status: "running" | "completed" | "error" | "cancelled";
+}
+
+/**
+ * Full runtime state for a single loop execution.
+ * Persisted between rounds to enable recovery and monitoring.
+ */
+export interface LoopState {
+  /** Session ID of the origin (first) loop round */
+  originSessionId: string;
+  /** Name of the agent running the loop */
+  agent: string;
+  /** Base prompt sent to the agent each round */
+  basePrompt: string;
+  /**
+   * High-level objective this loop set out to accomplish.
+   * Used by the stall guard to detect convergence — when the summary
+   * declares the objective done, the loop terminates early.
+   */
+  objective?: string;
+  /**
+   * Stable fingerprint of the loop's prompt configuration (base prompt,
+   * objective, agent, mode). When two loop registration attempts share
+   * the same fingerprint, the second is rejected as a near-duplicate.
+   * Computed by the orchestrator (subtask 4).
+   */
+  promptFingerprint?: string;
+  /** Loop mode — inherit conversation history or start fresh each round */
+  mode: LoopMode;
+  /** Total number of rounds requested (may be less if cancelled early) */
+  total: number;
+  /** Current round number (1-based; 1 = first round) */
+  current: number;
+  /**
+   * When this loop is a tree worker dispatched by an orchestrator run,
+   * this identifies the orchestrator's loop. `undefined` for root loops.
+   * Used by the max-tree-worker cap (subtask 3).
+   */
+  parentLoopId?: string;
+  /** Current orchestrator phase */
+  phase: LoopPhase;
+  /** DispatchManager task ID for the active worker round */
+  activeWorkerTaskId?: string;
+  /** Session ID of the active worker round */
+  activeWorkerSessionId?: string;
+  /** Summary text produced after the most recent round */
+  lastSummary?: string;
+  /**
+   * Message ID in the origin session that marks the boundary before the
+   * current summarizing phase. Only messages AFTER this ID are captured
+   * by readOriginSummary. Prevents summary accumulation across rounds.
+   */
+  summaryBoundaryMessageId?: string;
+  /** Whether cancellation has been requested */
+  cancelRequested: boolean;
+  /** Error description when phase is "error" */
+  errorReason?: string;
+  /**
+   * Counter of consecutive rounds where the worker produced no meaningful
+   * progress (no LOOP_PROGRESS_MARKER, empty output, or summary unchanged).
+   * When it reaches CONSECUTIVE_STALE_THRESHOLD, the stall guard terminates
+   * the loop early.
+   */
+  consecutiveStaleRounds?: number;
+  /** Unix timestamp (ms) when the loop started */
+  startedAt: number;
+  /** Unix timestamp (ms) of the most recent state update */
+  updatedAt: number;
+  /** Unix timestamp (ms) when the current round started */
+  roundStartedAt: number;
+  /** History of all dispatched rounds with their worker session IDs */
+  rounds?: RoundRecord[];
+  /** Schema version for forward-compatible persistence */
+  schemaVersion: number;
+}

@@ -1,0 +1,25 @@
+# rolebox as a dsh profile bundle layer (contract: docs/dsh-plugin-contract.md §5.3).
+#
+# `name` points at the package subpath export `./dsh` (dist/dsh-plugin.js),
+# which default-exports the cordis Object plugin `{ name, inject, Config,
+# apply }`. The package root (`main` → dist/index.js) is the opencode plugin
+# and is NOT a cordis plugin, so it must not be referenced here — this row
+# follows the verified "scoped sub-path" name form used by the dsh-base
+# bundle (e.g. `@deepseek-ai/dsh-tool-subagent-control/list-agents`).
+#
+# No web config keys are needed (or accepted): the role-switch UI now
+# surfaces as a dsh.client slot plugin in the web profile, and the `/rolebox`
+# route is served by dsh's own host webserver via its optional `webServer`
+# service seam. All other Config options stay at their dsh defaults
+# (roleboxDir under $DSH_HOME, all namespaces enabled).
+#
+# The row `name` (`rolebox/dsh`) doubles as the package spec dsh-client-modules
+# resolves via require.resolve('<name>/package.json') when scanning for
+# dsh.client packages — package.json must keep the `"./dsh/package.json"`
+# export (→ ./package.json) or the web client is silently skipped from the
+# boot graph. The client bundle envelope id must equal this name too (see
+# scripts/build-dsh-web-client.ts).
+- insert:
+    - id: rolebox
+      name: rolebox/dsh
+      config: {}

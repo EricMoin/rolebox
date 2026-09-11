@@ -1,0 +1,234 @@
+import { describe, it, expect, afterEach, spyOn } from "bun:test";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { acquireStateLock, StaleLockTimeoutMs } from "../../src/dispatch/concurrency/state-lock";
+
+const dirs: string[] = [];
+
+afterEach(() => {
+  for (const d of dirs) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {}
+  }
+  dirs.length = 0;
+});
+
+function makePath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "state-lock-test-"));
+  dirs.push(dir);
+  return join(dir, "state.json");
+}
+
+describe("acquireStateLock", () => {
+  it("acquires lock on first call — ok:true, release unlinks", () => {
+    const path = makePath();
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+    expect(lock.heldByPid).toBeUndefined();
+    expect(existsSync(path + ".lock")).toBe(true);
+
+    // Verify lock file contents
+    const raw = readFileSync(path + ".lock", "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+    expect(typeof parsed.startedAt).toBe("number");
+
+    // Release
+    lock.release();
+    expect(existsSync(path + ".lock")).toBe(false);
+  });
+
+  it("second acquire on same path with live pid returns ok:false", () => {
+    const path = makePath();
+    const lock1 = acquireStateLock(path);
+    expect(lock1.ok).toBe(true);
+
+    const lock2 = acquireStateLock(path);
+    expect(lock2.ok).toBe(false);
+    expect(lock2.heldByPid).toBe(process.pid);
+
+    lock1.release();
+    // lock2.release() should be safe (no-op on non-owned lock)
+  });
+
+  it("stale lock takeover: dead pid lock is reclaimed", () => {
+    const path = makePath();
+
+    // Write a lock file with a dead pid (99999 is unlikely to exist)
+    const lockFile = path + ".lock";
+    writeFileSync(lockFile, JSON.stringify({ pid: 99999, startedAt: Date.now() }), "utf-8");
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+
+    // Verify new lock file has our pid
+    const raw = readFileSync(lockFile, "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+
+    lock.release();
+    expect(existsSync(lockFile)).toBe(false);
+  });
+
+  it("release is idempotent — calling twice does not throw", () => {
+    const path = makePath();
+    const lock = acquireStateLock(path);
+    lock.release();
+    expect(() => lock.release()).not.toThrow();
+  });
+
+  it("release is safe on non-owned lock", () => {
+    const path = makePath();
+    const lock1 = acquireStateLock(path);
+    const lock2 = acquireStateLock(path);
+    expect(lock2.ok).toBe(false);
+    // release on a non-owned lock should not unlink the real lock
+    expect(() => lock2.release()).not.toThrow();
+    expect(existsSync(path + ".lock")).toBe(true);
+    lock1.release();
+  });
+
+  it("corrupt lock file is treated as absent — fresh acquire succeeds", () => {
+    const path = makePath();
+    // Write garbage
+    writeFileSync(path + ".lock", "not-json", "utf-8");
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+
+    // Verify fresh lock file
+    const raw = readFileSync(path + ".lock", "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+
+    lock.release();
+  });
+
+  it("live pid with fresh lock is not reclaimed — ok:false", () => {
+    const path = makePath();
+    // Write lock as current process (alive) with recent timestamp
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+      "utf-8",
+    );
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(false);
+    expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  it("live pid with stale lock (>5min old) is reclaimed", () => {
+    const path = makePath();
+    // Write lock as current process (alive) with startedAt beyond timeout
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now() - StaleLockTimeoutMs - 10_000, lastHeartbeat: Date.now() - StaleLockTimeoutMs - 10_000 }),
+      "utf-8",
+    );
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+
+    // Verify new lock file has our pid
+    const raw = readFileSync(path + ".lock", "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+    expect(typeof parsed.lastHeartbeat).toBe("number");
+
+    lock.release();
+    expect(existsSync(path + ".lock")).toBe(false);
+  });
+
+  it("live pid with lock just under timeout boundary is not reclaimed", () => {
+    const path = makePath();
+    // startedAt just within the timeout window (5s slack)
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: process.pid, startedAt: Date.now() - StaleLockTimeoutMs + 5_000, lastHeartbeat: Date.now() - StaleLockTimeoutMs + 5_000 }),
+      "utf-8",
+    );
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(false);
+    expect(lock.heldByPid).toBe(process.pid);
+  });
+
+  it("truncated lock content (partial JSON) is treated as absent — fresh acquire succeeds", () => {
+    const path = makePath();
+    // Truncated/corrupted JSON — readLockFile returns null — treated as no lock.
+    writeFileSync(path + ".lock", '{"pid": 1234, "sta', "utf-8");
+
+    const lock = acquireStateLock(path);
+    expect(lock.ok).toBe(true);
+
+    const raw = readFileSync(path + ".lock", "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.pid).toBe(process.pid);
+
+    lock.release();
+    expect(existsSync(path + ".lock")).toBe(false);
+  });
+
+  it("non-ESRCH error from process.kill (EPERM simulation) — unverifiable pid falls through to staleness check", () => {
+    const path = makePath();
+    // A recycled/alive pid whose state we cannot verify (EPERM).
+    const recycledPid = 99999;
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: recycledPid, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+      "utf-8",
+    );
+
+    const killSpy = spyOn(process, "kill").mockImplementation(() => {
+      const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    });
+
+    try {
+      // Fresh (not stale) lock — unverifiable pid must NOT be reclaimed on the
+      // dead-pid path; it is held (ok:false) rather than wedging startup.
+      const lock = acquireStateLock(path);
+      expect(lock.ok).toBe(false);
+      expect(lock.heldByPid).toBe(recycledPid);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+
+  it("non-ESRCH error (EPERM) on a genuinely stale lock is reclaimed via staleness check", () => {
+    const path = makePath();
+    // Recycled/alive pid, unverifiable state, but lock age exceeds the timeout.
+    const recycledPid = 99998;
+    writeFileSync(
+      path + ".lock",
+      JSON.stringify({ pid: recycledPid, startedAt: Date.now() - StaleLockTimeoutMs - 10_000, lastHeartbeat: Date.now() - StaleLockTimeoutMs - 10_000 }),
+      "utf-8",
+    );
+
+    const killSpy = spyOn(process, "kill").mockImplementation(() => {
+      const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    });
+
+    try {
+      // Unverifiable pid + stale age → reclaimed through the staleness path,
+      // not the dead-pid path. Startup is never thrown.
+      const lock = acquireStateLock(path);
+      expect(lock.ok).toBe(true);
+
+      const raw = readFileSync(path + ".lock", "utf-8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.pid).toBe(process.pid);
+
+      lock.release();
+      expect(existsSync(path + ".lock")).toBe(false);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+});

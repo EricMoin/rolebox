@@ -1,0 +1,326 @@
+import { defineCommand } from "citty";
+import * as clack from "@clack/prompts";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import yaml from "js-yaml";
+import { loadLock, findInLock } from "../config.ts";
+import { getSyncTarget, getRolePath, getTargetConfigDir } from "../paths.ts";
+import { computeIntegrity } from "../registry-client.ts";
+import { assertInteractiveContext, pickInstalledRole } from "../pick.ts";
+import type { PromptApi } from "../pick.ts";
+import { DEFAULT_FUNCTIONS, RoleMode, ROLE_YAML } from "../../constants.ts";
+import { PLATFORM_REGISTRY } from "../../platform/registry.ts";
+import {
+  bold,
+  dim,
+  green,
+  yellow,
+  red,
+  cyan,
+  SYM_OK,
+  SYM_FAIL,
+  SYM_WARN,
+  SYM_ARROW,
+  printHeader,
+  printField,
+  checkSymlink,
+  listSymlinks,
+  shortenPath,
+} from "../format.ts";
+
+interface RoleYaml {
+  name?: string;
+  description?: string;
+  model?: string;
+  mode?: string;
+  temperature?: number;
+  top_p?: number;
+  variant?: string;
+  skills?: string[];
+  opencode_skills?: string[];
+  functions?: string[];
+  disable_functions?: string[];
+  subagents?: Array<{ name?: string; description?: string }>;
+  prompt?: string;
+  prompt_file?: string;
+}
+
+interface InfoJson {
+  role: string;
+  name?: string;
+  description?: string;
+  version: string;
+  registry: string;
+  installedAt: string;
+  integrity: string;
+  path: string;
+  model?: string;
+  mode?: string;
+  temperature?: number;
+  skills: string[];
+  functions: string[];
+  subagents: Array<{ name: string; description?: string }>;
+  sync: { synced: boolean; symlinkValid: boolean };
+  syncTargets: Array<{ target: string; label: string; present: boolean; synced: boolean; symlinkValid: boolean; linkPath: string }>;
+  integrityCheck?: { passed: boolean; expected: string; actual: string };
+}
+
+export async function info(roleId: string, jsonOutput: boolean, checkIntegrity: boolean): Promise<void> {
+  const entry = findInLock(roleId);
+  if (!entry) {
+    throw new Error(`Role "${roleId}" is not installed. Run \`rolebox list\` to see installed roles.`);
+  }
+
+  const rolePath = getRolePath(entry.registry, entry.role, entry.version);
+  const roleYamlPath = join(rolePath, ROLE_YAML);
+
+  let roleConfig: RoleYaml = {};
+  if (existsSync(roleYamlPath)) {
+    try {
+      roleConfig = yaml.load(readFileSync(roleYamlPath, "utf-8")) as RoleYaml || {};
+    } catch {
+      console.warn("Warning: Failed to load role YAML:", roleYamlPath);
+      roleConfig = {};
+    }
+  }
+
+  // Compute sync status for EVERY registered platform — registry-driven, so a
+  // new harness is reported here automatically.
+  const syncTargets = PLATFORM_REGISTRY.map((platform) => {
+    const linkPath = join(getSyncTarget(platform.id), entry.role);
+    const sym = checkSymlink(linkPath, entry.role);
+    const tSynced = sym.exists && sym.isSymlink;
+    return {
+      target: platform.id,
+      label: platform.label,
+      present: existsSync(getTargetConfigDir(platform.id)),
+      synced: tSynced,
+      symlinkValid: tSynced && sym.targetExists,
+      linkPath,
+    };
+  });
+  // opencode remains the backward-compatible top-level `sync` field.
+  const opencodeSync = syncTargets.find((t) => t.target === "opencode") ?? syncTargets[0];
+  const synced = opencodeSync?.synced ?? false;
+  const symlinkValid = opencodeSync?.symlinkValid ?? false;
+
+  const allSkills = [...(roleConfig.skills || []), ...(roleConfig.opencode_skills || [])];
+  const allFunctions = roleConfig.functions || [...DEFAULT_FUNCTIONS];
+  const subagents = [
+    ...(roleConfig.subagents || []).map((s) => ({ name: s.name || "unnamed", description: s.description })),
+    ...discoverFileSubagents(rolePath),
+  ];
+
+  let integrityResult: { passed: boolean; expected: string; actual: string } | undefined;
+  if (checkIntegrity && existsSync(rolePath)) {
+    const actual = await computeIntegrity(rolePath);
+    integrityResult = {
+      passed: actual === entry.integrity,
+      expected: entry.integrity,
+      actual,
+    };
+  }
+
+  if (jsonOutput) {
+    const output: InfoJson = {
+      role: entry.role,
+      name: roleConfig.name,
+      description: roleConfig.description,
+      version: entry.version,
+      registry: entry.registry,
+      installedAt: entry.installedAt,
+      integrity: entry.integrity,
+      path: rolePath,
+      model: roleConfig.model,
+      mode: roleConfig.mode,
+      temperature: roleConfig.temperature,
+      skills: allSkills,
+      functions: allFunctions,
+      subagents,
+      sync: { synced, symlinkValid },
+      syncTargets: syncTargets.map((t) => ({
+        target: t.target,
+        label: t.label,
+        present: t.present,
+        synced: t.synced,
+        symlinkValid: t.symlinkValid,
+        linkPath: t.linkPath,
+      })),
+      ...(integrityResult ? { integrityCheck: integrityResult } : {}),
+    };
+    console.log(JSON.stringify(output, null, 2));
+    return;
+  }
+
+  // Role header
+  console.log("");
+  console.log(`${bold(entry.role)}`);
+
+  // Basic info
+  printHeader("Details");
+  if (roleConfig.name) printField("Name", roleConfig.name);
+  if (roleConfig.description) printField("Description", roleConfig.description);
+  printField("Version", entry.version);
+  printField("Registry", entry.registry);
+  printField("Installed", entry.installedAt);
+  printField("Integrity", dim(entry.integrity));
+  printField("Path", shortenPath(rolePath));
+
+  // Model config
+  if (roleConfig.model || roleConfig.mode || roleConfig.temperature) {
+    printHeader("Model");
+    if (roleConfig.model) printField("Model", roleConfig.model);
+    printField("Mode", roleConfig.mode || RoleMode.Primary);
+    if (roleConfig.temperature != null) printField("Temperature", String(roleConfig.temperature));
+    if (roleConfig.top_p != null) printField("Top P", String(roleConfig.top_p));
+    if (roleConfig.variant) printField("Variant", roleConfig.variant);
+  }
+
+  // Skills
+  if (allSkills.length > 0) {
+    printHeader(`Skills (${allSkills.length})`);
+    const maxShow = 10;
+    const shown = allSkills.slice(0, maxShow);
+    for (const skill of shown) {
+      console.log(`    ${dim("•")} ${skill}`);
+    }
+    if (allSkills.length > maxShow) {
+      console.log(`    ${dim(`... and ${allSkills.length - maxShow} more`)}`);
+    }
+  }
+
+  // Functions
+  printHeader(`Functions (${allFunctions.length})`);
+  console.log(`    ${allFunctions.join(", ")}`);
+  if (roleConfig.disable_functions && roleConfig.disable_functions.length > 0) {
+    console.log(`    ${dim("disabled:")} ${roleConfig.disable_functions.join(", ")}`);
+  }
+
+  // Subagents
+  if (subagents.length > 0) {
+    printHeader(`Subagents (${subagents.length})`);
+    for (const sub of subagents) {
+      const desc = sub.description ? dim(` — ${sub.description}`) : "";
+      console.log(`    ${dim("•")} ${sub.name}${desc}`);
+    }
+  }
+
+  // Sync status — per target (opencode, pi, dsh)
+  printHeader("Sync");
+  for (const t of syncTargets) {
+    const label = t.label.padEnd(9);
+    if (t.symlinkValid) {
+      console.log(`  ${SYM_OK} ${label} Symlinked to ${dim(shortenPath(t.linkPath))}`);
+    } else if (t.synced) {
+      console.log(`  ${SYM_WARN} ${label} symlink exists but target is ${red("missing")}`);
+    } else {
+      const hint = t.present ? cyan(`rolebox sync ${t.target}`) : dim(`${t.label} not detected`);
+      console.log(`  ${SYM_FAIL} ${label} Not synced ${dim("—")} ${hint}`);
+    }
+  }
+
+  // Integrity check
+  if (integrityResult) {
+    console.log("");
+    if (integrityResult.passed) {
+      console.log(`  ${SYM_OK} Integrity check ${green("passed")}`);
+    } else {
+      console.log(`  ${SYM_FAIL} Integrity check ${red("FAILED")}`);
+      console.log(`    Expected: ${dim(integrityResult.expected)}`);
+      console.log(`    Actual:   ${dim(integrityResult.actual)}`);
+      process.exitCode = 1;
+    }
+  }
+
+  console.log("");
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+function discoverFileSubagents(rolePath: string): Array<{ name: string; description?: string }> {
+  const subagentsDir = join(rolePath, "subagents");
+  if (!existsSync(subagentsDir)) return [];
+
+  const results: Array<{ name: string; description?: string }> = [];
+  try {
+    const entries = readdirSync(subagentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const subRoleYaml = join(subagentsDir, entry.name, ROLE_YAML);
+      if (existsSync(subRoleYaml)) {
+        try {
+          const config = yaml.load(readFileSync(subRoleYaml, "utf-8")) as { name?: string; description?: string } || {};
+          results.push({ name: config.name || entry.name, description: config.description });
+        } catch {
+          console.warn("Warning: Failed to load subagent YAML:", subRoleYaml);
+          results.push({ name: entry.name });
+        }
+      }
+    }
+  } catch {
+    // Best-effort — subagent discovery should not crash info
+  }
+  return results;
+}
+
+
+
+/**
+ * Interactive flow for `rolebox info` without a role: pick an installed role
+ * and return its roleId, or undefined when the user cancels. `prompts` is
+ * injectable for tests.
+ */
+export async function infoInteractive(prompts: PromptApi = clack): Promise<string | undefined> {
+  assertInteractiveContext(
+    "info",
+    "Pass the role explicitly, e.g. `rolebox info software-architect`.",
+  );
+
+  prompts.intro("rolebox info");
+  const picked = await pickInstalledRole("Select a role to inspect:", prompts);
+  if (!picked) {
+    prompts.cancel("Operation cancelled.");
+    return undefined;
+  }
+  prompts.outro("");
+  return picked;
+}
+
+export default defineCommand({
+  meta: {
+    name: "info",
+    description: "Show detailed info for an installed role",
+  },
+  args: {
+    role: {
+      type: "positional",
+      description: "Role ID to inspect. Omit for interactive selection",
+      required: false,
+    },
+    json: {
+      type: "boolean",
+      description: "Output as JSON",
+    },
+    check: {
+      type: "boolean",
+      description: "Verify integrity hash",
+    },
+  },
+  async run({ args }) {
+    // JSON output must stay machine-readable — an interactive picker would
+    // pollute stdout, so require an explicit role in that mode.
+    if (!args.role && args.json) {
+      throw new Error(
+        "`rolebox info --json` requires an explicit role so the JSON output stays machine-readable. Use `rolebox info <role> --json`.",
+      );
+    }
+
+    let roleId: string | undefined = args.role;
+    if (!roleId) {
+      roleId = await infoInteractive();
+      if (!roleId) return;
+    }
+
+    await info(roleId, args.json ?? false, args.check ?? false);
+  },
+});

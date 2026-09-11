@@ -1,0 +1,38 @@
+import type { ResolvedRole, ResolvedFunction } from "../types.ts";
+import type { PluginCoreLike } from "./service.ts";
+import type { EventBus } from "./event-bus.ts";
+import type { PlatformCapabilities } from "../platform/capabilities.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
+
+/**
+ * Context passed to every PluginService's init() method.
+ * Carries everything a service needs to initialize, plus a reference
+ * to the PluginCore itself for inter-service lookups.
+ */
+export interface PluginContext {
+  /** Platform-agnostic session client adapter. */
+  session: ISessionClient;
+  /** All resolved roles. */
+  resolvedRoles: ResolvedRole[];
+  /** Map of roleId → resolved functions (shared with index.ts). */
+  roleFunctionsMap: Map<string, ResolvedFunction[]>;
+  /** The working directory as passed in (un-normalized), used for map keys. */
+  rawDirectory: string;
+  /** The working directory (normalized via realpath), used for file/state paths. */
+  directory: string;
+  /** Reference to the PluginCore for inter-service access. */
+  core: PluginCoreLike;
+  /** The plugin's event bus for inter-service pub/sub. */
+  bus: EventBus;
+  /** Rolebox role directory path (for hot-reload re-discovery). */
+  roleboxDir?: string;
+  /** Global skills directory path (for hot-reload skill sync). */
+  globalSkillsDir?: string;
+  /** OpenCode config directory path (for resolver context). */
+  configDir?: string;
+  /** Builtin functions directory path (for resolver context). */
+  builtinDir?: string;
+  /** Platform capabilities for feature detection and graceful degradation.
+   * When absent, all capabilities are assumed supported (full opencode platform). */
+  capabilities?: PlatformCapabilities;
+}

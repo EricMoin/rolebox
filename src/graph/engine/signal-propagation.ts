@@ -1,0 +1,506 @@
+/**
+ * Graph Execution Engine v2 — Signal Propagation
+ *
+ * Version: 2.0
+ * Date: 2026-07-24
+ *
+ * The two propagation half of the engine's advancement algorithm (steps 4a
+ * and 4b in `engine-advance.ts`), complementing the forward data flow that
+ * runs on `answer`. Whereas `answer` flows *down* along edges to activate
+ * downstream joins, failure signals travel the other two lanes:
+ *
+ * - {@link propagateRevise} — a convergence node emits `revise_needed`; the
+ *   revision feedback is routed *back* along the loop group's
+ *   `on_signal(revise_needed)` back-edges so the offending upstream nodes
+ *   re-enter `ready`, bounded by the loop group's `max_traversals` counter.
+ *   When the cap is reached (or there is no loop group), the revision
+ *   *escalates* instead of looping.
+ *
+ * - {@link propagateEscalate} — a node signals `escalate`; the worst signal
+ *   (escalate > revise_needed > answer, graph-model.md §5.1) travels *forward*
+ *   along outbound edges to the nearest fan-in convergence node. The node's
+ *   effective escalate-retry budget is resolved first — the max of its
+ *   `budget.max_retries` and the `retry.max` of any OUTBOUND or INCOMING edge
+ *   (graph-model.md §5.3): while `retryCount` is below the budget, the node is
+ *   re-marked `ready` for an automatic retry; otherwise the escalation lands
+ *   on the convergence node, whose join re-evaluates and fails → that node
+ *   escalates too, and the walk continues. Single-input (non-convergence)
+ *   nodes are transparent pass-throughs.
+ *
+ * Both functions are **pure state-mutation** steps. They mutate node lifecycle
+ * status and the frontier only — they never dispatch. Dispatch of the
+ * re-marked-ready nodes is done by the caller's existing `_dispatchReadyNodes`
+ * step (which also applies the budget pre-check before each dispatch). This
+ * keeps the propagation logic free of I/O and easy to test in isolation.
+ *
+ * Design references:
+ * - `.rolebox/design/graph-model.md` §4 (bounded-cycle loops), §5.1 (signal
+ *   escalation lattice), §5.3 (retry as an edge property)
+ * - `.rolebox/design/failure-resilience.md` §1.5 (join failure), §1.6 (loop
+ *   traversal exhaustion), §2 (propagation rules), §4 (bounded-cycle exit)
+ * - `.rolebox/design/orchestration-patterns.md` §1.6 (bounded-cycle loop
+ *   groups, revise-driven re-dispatch)
+ */
+
+import { NodeStatus } from "../../constants.ts";
+import type {
+  EdgePayload,
+  EngineState,
+  NodeRuntimeState,
+} from "../../types.engine-v2.ts";
+import type { EdgeDeclaration } from "../../types.graph-v2.ts";
+import { addToFrontier, incrementLoopTraversal, recordConvergenceOutput } from "./engine-state.ts";
+import {
+  canTransitionNode,
+  markDone,
+  markEscalated,
+  markReady,
+} from "./node-lifecycle.ts";
+import {
+  evaluateJoin,
+  joinSatisfied,
+  getUpstreamNodeIds,
+  isReviseBackEdge,
+} from "./join-evaluator.ts";
+import { deriveNodeArtifacts } from "./recorder.ts";
+import { markDirty } from "./engine-persistence.ts";
+
+// ── Report ──────────────────────────────────────────────────────────────────
+
+/**
+ * What a propagation step did, for diagnostics and tests.
+ *
+ * The fields are intentionally separate so a single call can be inspected
+ * precisely: which upstream nodes were re-marked `ready` (revise), which nodes
+ * were escalated (exhaustion / join failure), which node was re-marked `ready`
+ * for an automatic retry (escalate), and where the escalation was absorbed.
+ *
+ * Note on the removed `rootReached` field (former review finding F3/L8): the
+ * interface used to promise "escalation reached the graph root (graph will
+ * terminate with error)", but the promise was never fulfilled. Escalation
+ * propagation is **forward-only** — {@link propagateEscalationForward} walks
+ * outbound edges from the escalating node toward graph *sinks* (nodes with no
+ * outbound edges), and a "graph root" in this codebase is a node with no
+ * *incoming* edges (`engine-state.ts:getRootNodeIds`, `join-evaluator.ts`).
+ * Forward propagation can therefore never reach a graph root: it starts
+ * downstream of the roots and moves further downstream. The only truthful
+ * sink-side observable — "the escalation reached the end of the line and the
+ * graph will terminate with error" — is already reported by {@link escalated}
+ * (the join-failed sink node lands there) plus an empty {@link absorbed};
+ * re-labeling that event "rootReached" would misname sinks as roots. The field
+ * had zero consumers, so it was removed rather than repurposed.
+ */
+export interface SignalPropagationReport {
+  /** Which propagation lane ran: `revise` or `escalate`. */
+  kind: "revise" | "escalate";
+  /** (revise) Upstream nodes re-marked `ready` and added to the frontier. */
+  revisedUpstream: string[];
+  /** Nodes escalated by this propagation (traversal exhaustion / join failure). */
+  escalated: string[];
+  /** The escalating node that was re-marked `ready` for an automatic retry. */
+  retried: string[];
+  /** Escalation absorbed — the convergence node's join is still satisfiable. */
+  absorbed: string[];
+  /** Machine-readable reason for an escalation (e.g. "max_traversals exhausted"). */
+  reason?: string;
+}
+
+// ── Payload → text helpers ──────────────────────────────────────────────────
+
+/** Best-effort short reason string from an `escalate` payload. */
+function extractReason(payload: unknown): string {
+  if (typeof payload === "string") return payload || "escalated";
+  if (payload && typeof payload === "object") {
+    const obj = payload as { reason?: unknown; error?: unknown; message?: unknown };
+    if (typeof obj.reason === "string") return obj.reason;
+    if (typeof obj.error === "string") return obj.error;
+    if (typeof obj.message === "string") return obj.message;
+  }
+  return "escalated";
+}
+
+/** Best-effort human-readable revision feedback from a `revise_needed` payload. */
+function revisionText(payload: unknown): string {
+  if (typeof payload === "string") return payload;
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    for (const key of ["findings", "verdict", "reason", "feedback", "review"]) {
+      const value = obj[key];
+      if (typeof value === "string") return value;
+      if (
+        Array.isArray(value) &&
+        value.every((item) => typeof item === "string")
+      ) {
+        return value.map((item) => `- ${item}`).join("\n");
+      }
+    }
+    return JSON.stringify(payload);
+  }
+  return "";
+}
+
+/** Append revision feedback to a node's re-execution prompt for the given round. */
+function mergeRevisionFeedback(
+  prompt: string,
+  round: number,
+  payload: unknown,
+): string {
+  const text = revisionText(payload);
+  if (!text) return prompt;
+  return `${prompt}\n\n[Revision feedback — round ${round}]:\n${text}`;
+}
+
+// ── Revise propagation ──────────────────────────────────────────────────────
+
+/**
+ * Whether an edge acts as a `revise_needed` back-edge.
+ *
+ * Only `on_signal` edges whose filter names `revise_needed` qualify (design
+ * graph-model.md §5.2, orchestration-patterns.md §1.6). `always` edges are
+ * forward data-flow, not revision back-edges; `on_condition` edges are not
+ * signal-routed and are out of scope for revision re-entry.
+ *
+ * Delegates to the shared {@link isReviseBackEdge} predicate in join-evaluator
+ * so all in-degree logic stays consistent across modules.
+ */
+function activatesOnRevise(edge: EdgeDeclaration): boolean {
+  return isReviseBackEdge(edge);
+}
+
+/**
+ * Back-propagate a `revise_needed` signal from a convergence node into its
+ * loop group.
+ *
+ * 1. No loop group → the revision has nowhere to re-enter; the node escalates
+ *    with reason `no loop group`.
+ * 2. Stuck detection — identical consecutive convergence outputs for
+ *    `>= CONSECUTIVE_STALE_THRESHOLD` traversals → `completed → done` with
+ *    reason `"stuck"`; no traversal consumed.
+ * 3. Loop group present but `incrementLoopTraversal` is rejected
+ *    (`traversalCount >= max_traversals`) → the `revise_needed` back-edge is
+ *    deactivated (graph-model.md §4.2); the node escalates with reason
+ *    `max_traversals exhausted`.
+ * 4. Otherwise the traversal counter is incremented and every upstream target
+ *    reachable via an `on_signal(revise_needed)` back-edge within the loop
+ *    group re-enters `ready` (added to the frontier) with the revision feedback
+ *    merged into its re-execution prompt. The caller's `_dispatchReadyNodes`
+ *    step re-dispatches them (completed → ready is the loop re-entry edge,
+ *    node-lifecycle.ts).
+ *
+ * The escalating node is expected to already be `completed` (the reviewing
+ * pass finished); exhausting the cap flips it to `done`
+ * (`completed → done`).
+ */
+export function propagateRevise(
+  state: EngineState,
+  node: NodeRuntimeState,
+  payload: unknown,
+): SignalPropagationReport {
+  const report: SignalPropagationReport = {
+    kind: "revise",
+    revisedUpstream: [],
+    escalated: [],
+    retried: [],
+    absorbed: [],
+  };
+
+  const groupId = node.loopGroupId;
+  if (!groupId) {
+    escalateNode(state, node, "no loop group");
+    report.reason = "no loop group";
+    report.escalated.push(node.nodeId);
+    return report;
+  }
+
+  // ── stuck early-exit (§4.3) ────────────────────────────────────────────
+  // Check before consuming any traversal: identical consecutive convergence
+  // outputs mean the reviewer cannot make progress.
+  if (recordConvergenceOutput(state, groupId, payload)) {
+    markDone(state, node, "stuck");
+    report.reason = "stuck";
+    report.escalated.push(node.nodeId);
+    return report;
+  }
+
+  if (!incrementLoopTraversal(state, groupId)) {
+    markDone(state, node, "max_traversals exhausted");
+    report.reason = "max_traversals exhausted";
+    report.escalated.push(node.nodeId);
+    return report;
+  }
+
+  // The current traversal round (1-based) for feedback labeling.
+  const round = state.loopGroups.get(groupId)?.traversalCount ?? 1;
+
+  for (const edge of state.graphDeclaration.edges) {
+    if (edge.from !== node.nodeId) continue;
+    if (!activatesOnRevise(edge)) continue;
+
+    const target = state.nodes.get(edge.to);
+    // Only targets inside the same loop group and in a state from which `ready`
+    // is reachable are re-entered (completed / pending / blocked — never a
+    // still-running or terminal node).
+    if (!target || target.loopGroupId !== groupId) continue;
+    if (!canTransitionNode(target.status, NodeStatus.Ready)) continue;
+
+    target.prompt = mergeRevisionFeedback(target.prompt, round, payload);
+    markReady(state, target);
+    target.traversalCount += 1;
+    addToFrontier(state, edge.to);
+    report.revisedUpstream.push(edge.to);
+  }
+
+  return report;
+}
+
+// ── Escalate propagation ────────────────────────────────────────────────────
+
+/**
+ * Effective escalate-retry policy for a node.
+ *
+ * `max` is the node's escalate-retry budget — the maximum of the node's
+ * declared `budget.max_retries`, the `retry.max` of any OUTBOUND edge, and
+ * the `retry.max` of any INCOMING edge. `backoffMs` is the `backoff_ms`
+ * declared on the highest-max retry-bearing edge (the first such edge in
+ * declaration order that declares one).
+ */
+interface EscalateRetryPolicy {
+  /** Effective escalate-retry budget (0 = no automatic retry). */
+  max: number;
+  /** Backoff (ms) declared by the highest-max qualifying retry edge, if any. */
+  backoffMs?: number;
+}
+
+/**
+ * Resolve the node's effective escalate-retry budget.
+ *
+ * Retry is declared as an edge property (graph-model.md §5.3 — the `retry`
+ * block on any edge incident to the node) AND as a per-node budget
+ * (`budget.max_retries`, carried onto the runtime state by `registerNode`).
+ * The effective budget is the max over all three sources:
+ *
+ * - `node.budget.max_retries` — the node's own declared retry allowance,
+ * - `edge.retry.max` on OUTBOUND edges — the legacy edge-driven retry
+ *   (an upstream node is retried when an edge it feeds declares the policy),
+ * - `edge.retry.max` on INCOMING edges — a downstream node is retried when
+ *   the edge feeding it declares the policy.
+ *
+ * A single retryable edge (either direction) is sufficient: the retried node
+ * re-runs and re-emits along all its edges. `backoffMs` — the `backoff_ms` of
+ * the highest-max retry-bearing edge — is returned so the retry gate can
+ * withhold the re-dispatch for that window (graph-model.md §6.3).
+ */
+function resolveEscalateRetryPolicy(
+  state: EngineState,
+  node: NodeRuntimeState,
+): EscalateRetryPolicy {
+  let effectiveMax = node.budget?.max_retries ?? 0;
+  let edgeMax = 0;
+  let backoffMs: number | undefined;
+
+  for (const edge of state.graphDeclaration.edges) {
+    if (edge.from !== node.nodeId && edge.to !== node.nodeId) continue;
+    const retry = edge.retry;
+    if (!retry || retry.max <= 0) continue;
+    if (retry.max > edgeMax) {
+      edgeMax = retry.max;
+      backoffMs = retry.backoff_ms;
+    } else if (retry.max === edgeMax && backoffMs === undefined) {
+      // Same max, later edge — capture its backoff if the earlier one lacked one.
+      backoffMs = retry.backoff_ms;
+    }
+  }
+
+  return { max: Math.max(effectiveMax, edgeMax), backoffMs };
+}
+
+/**
+ * Propagate the worst signal (`escalate`) from an escalating node forward to
+ * the nearest fan-in convergence node(s), per the signal escalation lattice
+ * (graph-model.md §5.1) and retry policy (§5.3).
+ *
+ * 1. **Retry gate:** resolve the node's effective escalate-retry budget — the
+ *    max of its declared `budget.max_retries`, the `retry.max` of any OUTBOUND
+ *    edge, and the `retry.max` of any INCOMING edge (graph-model.md §5.3). If
+ *    the budget allows another attempt (`retryCount < max`), increment
+ *    `retryCount` and re-mark the node `ready` (escalate → ready) so it
+ *    re-runs — no upward propagation this round. The absorbed escalate's
+ *    dual-write recording (`node.signalsObserved["escalate"]` + the graph
+ *    `signalLedger` entry) is cleared at absorption so a deferred drain
+ *    (`AdvanceEngine._drainDeferred` → `_latestTerminating`) cannot replay it
+ *    against the re-dispatched (Running) node and re-escalate the retry. When
+ *    the qualifying retry edge declares `backoff_ms`, the retry is withheld
+ *    until `now + backoff_ms` (`retryBackoffUntil`); backoff/budget for the
+ *    retry dispatch is otherwise handled by the caller's dispatch step
+ *    (graph-model.md §6.3).
+ * 2. **Forward propagation:** otherwise walk the node's outbound edges.
+ *    Single-input (non-convergence) nodes are transparent pass-throughs.
+ *    At the first multi-input fan-in node, record the `escalate` as an upstream
+ *    result and re-evaluate its join:
+ *      - join `failed` → that convergence node escalates too; the walk
+ *        continues from it.
+ *      - join `satisfied` / `waiting` → partial failure absorbed (`any` /
+ *        `quorum` can still proceed); the walk stops on that branch.
+ *    If the escalation reaches a node with no outbound edge (a graph sink),
+ *    it has reached the end of the line — nothing further to abort.
+ *
+ * A still-satisfiable downstream join (absorption) is what keeps a partial
+ * failure from misjudging the graph `complete`: the escalating node and any
+ * join-failed convergence node are terminal, but a pending/running branch that
+ * legitimately continues keeps the engine in `executing` (engine-advance's
+ * `_checkTermination` guard).
+ */
+export function propagateEscalate(
+  state: EngineState,
+  node: NodeRuntimeState,
+  payload: unknown,
+): SignalPropagationReport {
+  const report: SignalPropagationReport = {
+    kind: "escalate",
+    revisedUpstream: [],
+    escalated: [],
+    retried: [],
+    absorbed: [],
+  };
+
+  // 1. Retry gate — re-mark the source node ready for an automatic retry when
+  //    its effective escalate-retry budget (node budget.max_retries, or the
+  //    retry.max of an outbound/incoming edge) still has allowance.
+  const policy = resolveEscalateRetryPolicy(state, node);
+  if (
+    policy.max > 0 &&
+    node.retryCount < policy.max &&
+    canTransitionNode(node.status, NodeStatus.Ready)
+  ) {
+    node.retryCount += 1;
+    node.prompt = `${node.prompt}\n\n[Automatic retry ${node.retryCount}]: previous attempt escalated — ${extractReason(payload)}`;
+    // Backoff: withhold the re-dispatch until now + backoff_ms when the
+    // qualifying retry edge declares one. Written here so no policy info is
+    // lost; the dispatch step consumes it before re-dispatching.
+    if (policy.backoffMs !== undefined) {
+      node.retryBackoffUntil = Date.now() + policy.backoffMs;
+    }
+    // Drain-replay race guard: the escalate that triggered this retry was
+    // already recorded into both ledgers — `node.signalsObserved["escalate"]`
+    // and the graph-level `state.signalLedger` entry (`signalBridge.record` →
+    // `recordSignalToLedger`, or a synthetic `recordSignalToLedger` call from
+    // the race-guard / M7-containment path). If it survived while the node
+    // re-dispatches, a deferred drain (`_drainDeferred` → `_latestTerminating`)
+    // would replay it and re-escalate the re-dispatched (Running) node —
+    // defeating the retry. Clear the absorbed recording (mirrors
+    // `clearSignalLedgerEntry` in node-retry.ts) so `_latestTerminating`
+    // returns null and the drain skips the retried node; the ledger entry is
+    // lazily re-created by `signal-bridge.ts:record` when the node emits again.
+    delete node.signalsObserved["escalate"];
+    state.signalLedger.delete(node.nodeId);
+    markReady(state, node);
+    addToFrontier(state, node.nodeId);
+    report.retried.push(node.nodeId);
+    return report;
+  }
+
+  // 2. Forward propagation toward the nearest fan-in convergence node(s).
+  propagateEscalationForward(state, node, payload, report);
+  return report;
+}
+
+/**
+ * BFS over outbound edges, escalating join-failed convergence nodes and
+ * stopping at absorbed ones. Single-input nodes pass through untouched.
+ */
+function propagateEscalationForward(
+  state: EngineState,
+  start: NodeRuntimeState,
+  payload: unknown,
+  report: SignalPropagationReport,
+): void {
+  const visited = new Set<string>([start.nodeId]);
+  const queue: NodeRuntimeState[] = [start];
+
+  while (queue.length > 0) {
+    const current = queue.shift() as NodeRuntimeState;
+
+    for (const edge of state.graphDeclaration.edges) {
+      if (edge.from !== current.nodeId) continue;
+      const target = state.nodes.get(edge.to);
+      if (!target || visited.has(target.nodeId)) continue;
+      visited.add(target.nodeId);
+
+      // Only multi-input fan-in nodes are escalation targets; single-input
+      // nodes are transparent pass-throughs (kept pending so a partial
+      // failure does not spuriously complete the graph).
+      if (getUpstreamNodeIds(state, target).length <= 1) {
+        queue.push(target);
+        continue;
+      }
+
+      // Convergence node reached: record the escalate, re-evaluate its join.
+      recordEscalate(state, target, current, payload);
+      const verdict = evaluateJoin(state, target);
+      if (verdict.kind === "failed") {
+        if (canTransitionNode(target.status, NodeStatus.Escalate)) {
+          markEscalated(state, target, extractReason(payload));
+          report.escalated.push(target.nodeId);
+          queue.push(target); // its failure may fail the next convergence node
+        }
+      } else {
+        // satisfied / waiting → partial failure absorbed; this branch stops.
+        report.absorbed.push(target.nodeId);
+      }
+    }
+  }
+}
+
+// ── Shared helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Record an upstream `escalate` as an {@link EdgePayload} into a convergence
+ * node's `upstreamResults` and recompute its join satisfaction, so the join
+ * evaluator (and the cascade canceller, which reads `upstreamResults` to
+ * distinguish resolved from cancellable sources) sees the failure.
+ *
+ * The `budgetConsumed` projection mirrors {@link AdvanceEngine._buildEdgePayload}
+ * and `approval-handler.ts` so the escalate path no longer under-reports the
+ * source node's consumption (former review finding M1): tokens = input + output
+ * from `source.tokensConsumed`, cost from the same record, sessions from
+ * `source.sessionsSpawned`.
+ */
+function recordEscalate(
+  state: EngineState,
+  target: NodeRuntimeState,
+  source: NodeRuntimeState,
+  payload: unknown,
+): void {
+  const tc = source.tokensConsumed;
+  const edgePayload: EdgePayload = {
+    fromNode: source.nodeId,
+    fromSignal: "escalate",
+    result: extractReason(payload),
+    // For escalate the node may not have a materialized result — deriveNodeArtifacts
+    // legitimately returns [] in that case; do not hardcode an empty list.
+    artifacts: source.artifacts ?? deriveNodeArtifacts(source),
+    budgetConsumed: {
+      tokens: tc.inputTokens + tc.outputTokens,
+      cost: tc.cost,
+      sessions: source.sessionsSpawned,
+    },
+  };
+  target.upstreamResults.set(source.nodeId, edgePayload);
+  target.joinSatisfied = joinSatisfied(state, target);
+  // The upstreamResults / joinSatisfied mutation above is persistent graph
+  // state — route it through the markDirty choke-point so the advancement
+  // critical section persists the recorded escalate (Y11).
+  markDirty(state);
+}
+
+/**
+ * Escalate a node that has already finished its pass (e.g. a reviewer that
+ * completed its `revise_needed` review, then hit the traversal cap). The
+ * `completed → escalate` transition represents "revision rejected at the cap →
+ * escalate". Guarded so replaying an already-escalated node is a no-op.
+ */
+function escalateNode(state: EngineState, node: NodeRuntimeState, reason: string): void {
+  if (canTransitionNode(node.status, NodeStatus.Escalate)) {
+    markEscalated(state, node, reason);
+  }
+}

@@ -1,0 +1,1378 @@
+/**
+ * dsh (DeepSeek Harness) cordis plugin entry point — `src/dsh-plugin.ts`
+ *
+ * Exports a cordis plugin per the conventions verified in
+ * `docs/dsh-plugin-contract.md` against the dsh 0.1.5-rc.1 source checkout
+ * (`@deepseek-ai/cordis@4.0.2`, `@deepseek-ai/dsh-tools@0.1.5-rc.1`, ...):
+ *
+ *   - `name`    — `'rolebox'`
+ *   - `inject`  — the dsh services rolebox's adapters consume: `tools`
+ *                 (tool registration, §3.1), `sessions` (session lifecycle,
+ *                 §4.1), `subagents` (agent catalog, §4.3). The live-agent
+ *                 `agents` service (§4.2) is deliberately NOT in the `inject`
+ *                 roster: `DshAgentRegistrar` manages the *catalog* of
+ *                 spawnable definitions through `ctx.subagents` and explicitly
+ *                 keeps the `ctx.agents` AgentRegistry side out of the catalog
+ *                 seam (see `src/platform/adapters/dsh/agent-registrar.ts`
+ *                 module docstring). It is instead probed OPTIONALLY
+ *                 ({@link probeAgentRegistry}) as the graph-notify injection
+ *                 seam — the dsh host's per-session message-injection surface
+ *                 — so graph `<system-reminder>` reminders reach the
+ *                 orchestrator. Injecting it in the roster would gate plugin
+ *                 activation on it; probing it lets minimal/headless profiles
+ *                 boot with graph-notify degraded instead.
+ *   - `Config`  — a StandardSchemaV1 config schema (contract §2.4)
+ *   - `apply(ctx, config)` — bootstrap + wire the dsh adapters
+ *
+ * ── Config mechanism (contract §2.4) ──────────────────────────────────────
+ * The contract verified that cordis 4.0.1's `Config` field is typed
+ * `StandardSchemaV1<any, T>` and that schemas implementing the standard
+ * `'~standard'` interface work directly as a plugin Config (defaults applied,
+ * invalid values rejected). The dsh packages use the
+ * `@deepseek-ai/schemastery` fork as their schema DSL; this repo does not
+ * depend on that fork (or any `@deepseek-ai/*` package — the adapters are
+ * deliberately SDK-free, structural). zod v4 — already a rolebox dependency —
+ * implements the same `StandardSchemaV1` interface (`~standard`), which is the
+ * exact mechanism the contract verified. So `Config` below is a zod schema:
+ * identical mechanism, no new dependency. `live:` verified on zod@4.1.8:
+ * `schema['~standard'].validate({})` → `{value:{...defaults}}` and invalid
+ * input → `{issues:[...]}`.
+ *
+ * ── Tool registration ─────────────────────────────────────────────────────
+ * `DshToolFactory.compileAll(buildCanonicalTools(...))` produces objects
+ * structurally matching the verified `ToolDefinition` register input
+ * (`DshToolDefinition` — name/description/parameters/output/execute,
+ * contract §3.2); `ctx.tools.register(def)` consumes them (§3.1). The real
+ * dsh registry stores the definition raw (no `defineTool()` compile step);
+ * the structural contract is identical, so direct registration is safe.
+ *
+ * MUST NOT import `@opencode-ai/plugin` (or any platform SDK).
+ *
+ * @module
+ */
+
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
+import type {
+  RoleboxDirectories,
+  InitializeRuntimeOptions,
+} from "./platform/factory.ts";
+import { DshAgentRegistrar } from "./platform/adapters/dsh/agent-registrar.ts";
+import type {
+  DshProviderRouteProbe,
+  DshSpawnContextProvider,
+  DshSpawnDelegate,
+  DshSubagentProvider,
+} from "./platform/adapters/dsh/agent-registrar.ts";
+import { DshDispatchAdapter } from "./platform/adapters/dsh/dispatch.ts";
+import type { DshSubagentDispatchRuntime } from "./platform/adapters/dsh/dispatch.ts";
+import { DshToolFactory } from "./platform/adapters/dsh/tool-factory.ts";
+import type { DshToolDefinition } from "./platform/adapters/dsh/tool-factory.ts";
+import { DshSessionAdapter } from "./platform/adapters/dsh/session.ts";
+import type {
+  DshPromptInjector,
+  DshSessionStoreLike,
+} from "./platform/adapters/dsh/session.ts";
+import { DshHookProvider } from "./platform/adapters/dsh/hook-provider.ts";
+import { DshRoleSwitcher, createActiveRoleRef } from "./platform/adapters/dsh/role-switcher.ts";
+import { ActiveRoleStore } from "./platform/adapters/dsh/active-role-store.ts";
+import { DshSystemPromptAdapter } from "./platform/adapters/dsh/system-prompt.ts";
+import type { DshSystemPromptRegistry } from "./platform/adapters/dsh/system-prompt.ts";
+import {
+  createDshSkillProviderFactory,
+  ROLEBOX_SKILL_PROVIDER,
+} from "./platform/adapters/dsh/skill-provider.ts";
+import type {
+  DshSkillProvider,
+  DshSkillProviderControl,
+  DshSkillProviderLike,
+} from "./platform/adapters/dsh/skill-provider.ts";
+import {
+  DshRoleSwitchWebRoute,
+  ROLE_SWITCH_ROUTE_PREFIX,
+} from "./platform/adapters/dsh/web-role-switch-route.ts";
+import type { DshWebServerRouteRegistrar } from "./platform/adapters/dsh/web-role-switch-route.ts";
+import { DshRoleboxMonitorWebRoute } from "./platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import { buildCanonicalTools } from "./platform/tool-assembly.ts";
+import type { PlatformCapabilities } from "./platform/capabilities.ts";
+import { buildAvailableFunctionsBlock } from "./prompt/builder.ts";
+import { createGraphTools } from "./graph/tools/index.ts";
+import { LoopCoordinator } from "./loop/coordinator.ts";
+import { LoopStore } from "./loop/loop-store.ts";
+import { createLoopTools } from "./loop/loop-tools.ts";
+import { applyProjectConfig } from "./project-config.ts";
+import { createSubLogger } from "./logger.ts";
+import { roleFunctionsMap } from "./resolver/registry.ts";
+import type { ResolvedRole } from "./types.ts";
+
+// ── Plugin metadata ────────────────────────────────────────────────────────
+
+/** Plugin name — the cordis fiber/logger label (contract §2.2). */
+export const name = "rolebox";
+
+/**
+ * dsh services this plugin waits for (contract §2.2 `inject`).
+ * `tools` / `sessions` / `subagents` are the services rolebox's dsh adapters
+ * consume; see the module docstring for why the live-agent `agents` service is
+ * probed optionally (graph-notify) rather than injected.
+ */
+export const inject: string[] = ["tools", "sessions", "subagents"];
+
+// ── Config (StandardSchemaV1, contract §2.4) ───────────────────────────────
+
+/**
+ * Plugin config schema — a zod v4 schema implementing the StandardSchemaV1
+ * interface cordis 4.0.1 requires for `Config` (see module docstring).
+ *
+ * All options are optional:
+ *   - `roleboxDir`        — override the rolebox directory (default:
+ *                           `{cwd}/rolebox` if present, else `{dsh home}/rolebox`)
+ *   - `skillsDir`         — override the global skills directory (default:
+ *                           `{dsh home}/skills`)
+ *   - `defaultRole`       — role id (directory name) promoted to primary
+ *   - `enabledNamespaces` — allow-list of tool names / name-space prefixes;
+ *                           `"*"` or absent registers every assembled tool
+ *   - `onSpawn`           — programmatic spawn delegate (a host seam, NOT
+ *                           representable in YAML); when supplied, registered
+ *                           providers delegate to it. When omitted, they fall
+ *                           back to the host provider named by
+ *                           `spawnProviderName` (default `"spawn"`); only when
+ *                           that provider is unregistered do they reject with
+ *                           `DshSpawnNotWiredError`
+ *   - `spawnProviderName` — YAML-representable name of the `ctx.subagents`
+ *                           provider rolebox delegates real spawning to when
+ *                           `onSpawn` is absent (default `"spawn"`)
+ *
+ * There is deliberately no web-server config: the role-switch UI now mounts
+ * on dsh's own host webserver via the optional `webServer` service seam (see
+ * {@link probeWebServer}) and the `dsh.client` slot plugin — no bind host or
+ * port belongs on this plugin.
+ */
+export const Config = z.object({
+  roleboxDir: z
+    .string()
+    .optional()
+    .describe("Absolute path to the directory containing role.yaml files"),
+  skillsDir: z
+    .string()
+    .optional()
+    .describe("Absolute path to the global skills directory"),
+  defaultRole: z
+    .string()
+    .optional()
+    .describe("Role id (directory name) to promote to primary"),
+  enabledNamespaces: z
+    .array(z.string())
+    .optional()
+    .describe("Tool name / namespace-prefix allow-list; '*' registers all"),
+  onSpawn: z
+    .custom<DshSpawnDelegate>(
+      (value) => typeof value === "function",
+      "onSpawn must be a function (DshSpawnDelegate)",
+    )
+    .optional()
+    .describe(
+      "Programmatic host seam (not representable in YAML): spawn delegate invoked by registered providers' start(). Omitted → start() delegates to the host provider named by spawnProviderName (default 'spawn'); only when that provider is unregistered does it reject DshSpawnNotWiredError.",
+    ),
+  spawnProviderName: z
+    .string()
+    .optional()
+    .describe(
+      "Name of the ctx.subagents provider rolebox delegates real spawning to when no onSpawn delegate is wired (default 'spawn', as registered by @deepseek-ai/dsh-subagent-spawn-in-process). A value colliding with a rolebox agent id is refused at spawn time.",
+    ),
+});
+
+/** Inferred config type — the object passed to `apply(ctx, config)`. */
+export type DshPluginConfig = z.infer<typeof Config>;
+
+// ── Structural cordis ctx surface ──────────────────────────────────────────
+
+/** The dsh tool registry seam this plugin consumes (contract §3.1). */
+export interface DshToolsRegistry {
+  /**
+   * Register a tool definition. Returns the disposer that removes it.
+   * @param definition - A compiled tool definition (DshToolDefinition).
+   */
+  register(definition: DshToolDefinition): () => void;
+}
+
+/**
+ * Minimal structural surface of the cordis `Context` this plugin consumes.
+ * Mirrors the documented cordis context (§2.5 — property reads resolve
+ * services, `on` subscribes to events) plus the three injected dsh services.
+ * The real dsh host supplies the full Context; tests inject a fake double.
+ */
+export interface DshPluginContext {
+  /** dsh tools service (`ToolRuntime`, contract §3.1). */
+  tools: DshToolsRegistry;
+  /** dsh session service (`SessionStore`, contract §4.1). */
+  sessions: DshSessionStoreLike;
+  /**
+   * dsh subagent service (`SubagentRuntime`, contract §4.3). Typed as the
+   * dispatch superset (adds `start`) because this plugin both syncs agents
+   * into the catalog (via {@link DshAgentRegistrar}) and dispatches graph
+   * nodes / loop rounds through `ctx.subagents.start` (via
+   * {@link DshDispatchAdapter}).
+   */
+  subagents: DshSubagentDispatchRuntime;
+  /**
+   * The dsh system-prompt registry service (`@deepseek-ai/dsh-system-prompt`,
+   * structural subset — see {@link DshSystemPromptRegistry}). Present only in
+   * full profiles; headless profiles have no model-facing prompt assembly, so
+   * the property is absent and the plugin degrades gracefully (see
+   * {@link probeSystemPrompt}). Never injected via the `inject` roster — an
+   * optional service must not gate plugin activation.
+   */
+  systemPrompt?: unknown;
+  /**
+   * The dsh live-agent registry service (`@deepseek-ai/dsh-agent` `AgentRegistry`,
+   * structural subset — see {@link DshAgentRegistryLike}). Present only in full
+   * profiles where the agent-loop bundle rows are mounted; headless / minimal
+   * profiles have no live agent registry, so the property is absent and graph
+   * notify degrades gracefully (see {@link probeAgentRegistry}). Never
+   * injected via the `inject` roster — an optional service must not gate plugin
+   * activation.
+   */
+  agents?: unknown;
+  /**
+   * The dsh llm service (`@deepseek-ai/dsh-llm` `LlmRuntime`, structural subset
+   * — see {@link DshLlmRuntimeLike}). Always mounted in a full profile; probed
+   * optionally by {@link probeLlmRoutes} so the agent registrar can degrade a
+   * split model whose provider route has no registered adapter to a model-only
+   * override instead of failing the spawn with `NO_ADAPTER`. Never injected via
+   * the `inject` roster — an optional service must not gate plugin activation.
+   */
+  llm?: unknown;
+  /**
+   * The dsh skill-registry service (`@deepseek-ai/dsh-skill` `ctx.skills`,
+   * structural subset — see {@link DshSkillRegistryLike}). Present whenever the
+   * profile mounts the `dsh-skill` registry row that resolves model- and
+   * user-facing skills; headless / minimal profiles without it have the
+   * property absent and rolebox's lazy skill provider is simply not registered
+   * (see {@link probeSkillRegistry}). Never injected via the `inject` roster —
+   * an optional service must not gate plugin activation.
+   */
+  skills?: unknown;
+  /**
+   * Resolve a cordis service by name (optional-service seam). The dsh host
+   * context resolves any registered service; this plugin probes for
+   * `"webServer"` (present only when the web profile is active) and skips
+   * gracefully when it is absent — headless profiles have no web server.
+   */
+  get(name: string): unknown;
+  /** Subscribe to a cordis/dsh event (contract §2.5). */
+  on(event: string, listener: (...args: unknown[]) => void): (() => void) | void;
+  /** Emit a cordis/dsh event. */
+  emit(event: string, ...args: unknown[]): void;
+}
+
+// ── Disposer / stats ───────────────────────────────────────────────────────
+
+/** Bootstrap + wiring statistics exposed on the returned disposer. */
+export interface DshPluginStats {
+  /** Roles discovered on disk. */
+  discovered: number;
+  /** Roles successfully resolved. */
+  resolved: number;
+  /** Roles that failed resolution. */
+  skipped: number;
+  /** Tools registered into `ctx.tools` (after the namespace filter). */
+  registeredTools: number;
+  /** Agents registered into `ctx.subagents` (roles + subagents). */
+  registeredAgents: number;
+  /** The resolved roles (post `defaultRole` promotion). */
+  resolvedRoles: ResolvedRole[];
+  /**
+   * Dispatch mode — always `"dsh"` on this platform. The graph engine and
+   * loop mode dispatch subagent sessions through the dsh subagent seam
+   * (`ctx.subagents.start` / the dsh session service) instead of the opencode
+   * SDK client (see {@link DshDispatchAdapter}).
+   */
+  dispatchMode: "dsh";
+  /**
+   * Whether the loop coordinator was wired to the dsh dispatch adapter.
+   * `false` would indicate a wiring failure (apply still degrades to
+   * graph-only orchestration).
+   */
+  loopWired: boolean;
+  /**
+   * Whether the `/rolebox` role-switch routes were registered on dsh's host
+   * web server. `true` only when the optional `webServer` service was present
+   * on the ctx (the web profile) AND registration succeeded; headless
+   * profiles have no web server, so this stays `false` and the plugin keeps
+   * running. The role-switch surface shares ONE `/rolebox` prefix
+   * registration with the monitor surface (see `monitorRouteRegistered`) —
+   * the real host webserver rejects duplicate prefix routes.
+   */
+  webRouteRegistered: boolean;
+  /**
+   * Whether the `/rolebox` monitor routes (`/status`, `/metrics`) were
+   * registered on dsh's host web server. Mirrors `webRouteRegistered` — the
+   * role-switch and monitor surfaces are composed into a single `/rolebox`
+   * prefix registration, so both flags are set from the same registration
+   * outcome. `true` only when the optional `webServer` service was present
+   * AND registration succeeded; headless profiles stay `false` and the
+   * plugin keeps running.
+   */
+  monitorRouteRegistered: boolean;
+  /**
+   * Whether graph-notify was wired on the dsh path. `true` only when the
+   * optional live-agent registry (`ctx.agents`) was present at boot, so the
+   * session adapter's `prompt()` can route graph `<system-reminder>` reminders
+   * into the target session's agent. When `false` (minimal/headless profiles
+   * with no `ctx.agents`) the graph engine still assembles with a `graphNotify`
+   * config, but `prompt()` degrades to its no-op and the F6 notifier marks the
+   * degraded reminder instead of delivering one.
+   */
+  graphNotifyWired: boolean;
+}
+
+/**
+ * The fiber disposer returned by `apply()` (cordis convention, contract §8
+ * appendix: "return () => {...}; // fiber disposer"). Also carries the
+ * `stats` from this boot so callers/tests can observe the bootstrap outcome.
+ */
+export interface DshPluginDisposer {
+  /** Clean up tool registrations, hook listeners, and agent registrations. */
+  (): void;
+  /** Bootstrap + wiring statistics for this apply() run. */
+  stats: DshPluginStats;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+// ── Structural dsh live-agent surface (contract §4.2, duck-typed) ──────────
+//
+// rolebox's graph-notify reminders are delivered through
+// `ISessionClient.prompt(...)` (the SAME path opencode/Pi use). The dsh
+// SessionStore has no `prompt` — prompting is driven by the live agent loop —
+// so the plugin routes reminders through the live `Agent` surface instead:
+// `ctx.agents.get(sessionId)` → the agent's delivery members. rc.6 exposes
+// three (runtime-types.d.ts): `steer` (:123 — an idle driver starts a turn; a
+// running driver consumes it at its next step boundary), `followup` (:115 —
+// queues an ordinary follow-up turn and wakes the driver), and `inject`
+// (:132 — queues model-facing context WITHOUT waking an idle driver). Only the
+// members graph-notify needs are declared; the dsh surface is consumed
+// structurally (SDK-free), so a missing / non-conforming `ctx.agents` resolves
+// to "absent" and the plugin degrades cleanly.
+
+/** Minimal structural dsh `Agent` (the live agent backing a session). */
+interface DshAgentLike {
+  readonly id: string;
+  /** Wake the driver with steering (idle starts a turn). rc.6 runtime-types.d.ts:123. */
+  steer?(message: unknown): unknown | Promise<unknown>;
+  /** Queue a follow-up turn and wake the driver. rc.6 runtime-types.d.ts:115. */
+  followup?(message: unknown): unknown | Promise<unknown>;
+  /** Queue context WITHOUT waking an idle driver. rc.6 runtime-types.d.ts:132. */
+  inject?(message: unknown): unknown | Promise<unknown>;
+}
+
+/** Minimal structural dsh `AgentRegistry` (`ctx.agents`). */
+interface DshAgentRegistryLike {
+  /** Look up the live agent for a session id (§4.2 `get`). */
+  get(id: string): DshAgentLike | undefined;
+}
+
+/** Minimal structural dsh `LlmRuntime` (`ctx.llm`, `@deepseek-ai/dsh-llm`). */
+interface DshLlmRuntimeLike {
+  /**
+   * Registered provider routes. `LlmProviderInfo.id` is the "Provider route key
+   * used by `GenerateOptions.provider`"
+   * (`dsh-llm/lib/types/types.d.ts:131-138`; `listProviders()` at
+   * `index.d.ts:234`). Only `id` is read.
+   */
+  listProviders(): ReadonlyArray<{ id: string }>;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh live-agent registry
+ * (`ctx.agents`, `@deepseek-ai/dsh-agent`).
+ *
+ * The service is optional: it is mounted ONLY when the `dsh-agent` /
+ * `dsh-agent-loop` bundle rows are present (full profiles). Minimal/headless
+ * profiles have no live agent registry, so this probe returns `undefined` and
+ * the plugin keeps booting with graph-notify degraded to the engine's default
+ * no-op marker (same graceful path as `probeWebServer` / `probeSystemPrompt`).
+ *
+ * Like `probeSystemPrompt`, the property read is NOT trusted as the whole
+ * probe — a service mounted by a SIBLING plugin fiber (the real profile shape)
+ * is invisible to the property-resolver walk — so a throw on `ctx.agents`
+ * falls through to the named-service resolver `ctx.get("agents")`, which reads
+ * the shared reflect store across fibers. Both paths probe `get(id)` to
+ * confirm the service is the agent registry (not some unrelated `agents`
+ * service). The probe is deliberately NOT gated on the `inject` roster: an
+ * optional service must not gate plugin activation.
+ */
+function probeAgentRegistry(
+  ctx: DshPluginContext,
+): DshAgentRegistryLike | undefined {
+  let service: unknown;
+  try {
+    service = ctx.agents;
+  } catch {
+    // Sibling-fiber service (full profile) — the property read throws; fall
+    // through to the cross-fiber named-service resolver below.
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("agents");
+    } catch {
+      return undefined;
+    }
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { get?: unknown }).get === "function"
+  ) {
+    return service as DshAgentRegistryLike;
+  }
+  return undefined;
+}
+
+/**
+ * Bound a `notice` source summary to the rc.6 `CONTEXT_SUMMARY_MAX_CHARS`
+ * (120): the first line trimmed, ellipsized when longer
+ * (`len <= 120 ? s : s.slice(0, 119) + "…"`). Mirrors `boundContextSummary`
+ * (`@deepseek-ai/dsh-llm/lib/types/message.js:15-19`) without importing
+ * dsh-llm — the adapter stays SDK-free.
+ */
+function boundNoticeSummary(text: string): string {
+  const firstLine = (text.split(/\r?\n/, 1)[0] ?? "").trim();
+  const summary = firstLine || text.trim();
+  return summary.length <= 120 ? summary : `${summary.slice(0, 119)}…`;
+}
+
+/**
+ * Build a {@link DshPromptInjector} over an optional dsh agent registry.
+ *
+ * The injector resolves the live `Agent` for a target session and delivers
+ * the reminder as a full rc.6 `UserMessage` (message.d.ts:120-133) through the
+ * agent's first available delivery member. Delivery preference is a WAKING
+ * member first — `steer` (an idle driver starts a turn; a running driver
+ * consumes it at its next step boundary, rc.6 runtime-types.d.ts:116-123),
+ * then `followup` (queues an ordinary follow-up turn and wakes the driver,
+ * :110-115) — and only then `inject`, which queues model-facing context
+ * WITHOUT waking an idle driver (:124-132). A missing registry, a session with
+ * no live agent, an agent exposing none of the three members, or a throwing /
+ * rejecting delivery all degrade to `null` (the reminder is dropped the same
+ * way a missing emperor session is) rather than failing the graph engine. The
+ * `Agent` surface is duck-typed, so the injector is best-effort and defensive.
+ *
+ * The message carries a per-injection unique `id` (a randomUUID string — a
+ * branded `MessageId` is satisfied structurally at this duck-typed boundary):
+ * the host inbox dedupes on `message.id`, so a shared or absent id would
+ * silently drop the second of two consecutive reminders.
+ */
+export function buildAgentPromptInjector(
+  registry: DshAgentRegistryLike | undefined,
+): DshPromptInjector | undefined {
+  if (!registry) return undefined;
+  return {
+    async inject(
+      sessionId: string,
+      text: string,
+      _options?: { agent?: string; noReply?: boolean },
+    ): Promise<{ id: string } | null> {
+      let agent: DshAgentLike | undefined;
+      try {
+        agent = registry.get(sessionId);
+      } catch {
+        return null;
+      }
+      if (!agent) return null;
+
+      // First available delivery member, waking members preferred (see the
+      // docstring). `.bind(agent)` preserves the method receiver.
+      const deliver:
+        | ((message: unknown) => unknown | Promise<unknown>)
+        | undefined =
+        typeof agent.steer === "function"
+          ? agent.steer.bind(agent)
+          : typeof agent.followup === "function"
+            ? agent.followup.bind(agent)
+            : typeof agent.inject === "function"
+              ? agent.inject.bind(agent)
+              : undefined;
+      if (!deliver) return null;
+
+      // The reminder text already carries the graph marker + the resolved
+      // agent (buildGraphCompletionText embeds `agent: <id>`), so the agent is
+      // delivered inline in the body. A full rc.6 UserMessage needs id / role
+      // / content / source (message.d.ts:120-133); the plugin `notice` source
+      // (message.d.ts:98-101, 81-84) carries a bounded summary.
+      const id = randomUUID();
+      const message = {
+        id,
+        role: "user" as const,
+        content: [{ type: "text" as const, text }],
+        source: {
+          kind: "plugin" as const,
+          plugin: "rolebox",
+          form: "notice" as const,
+          summary: boundNoticeSummary(text),
+        },
+      };
+      try {
+        // Fire-and-forget: resolve a sync or async delivery uniformly, treat
+        // a rejection as a degradation.
+        await Promise.resolve(deliver(message));
+        return { id };
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+
+/**
+ * Resolve the rolebox directories for the dsh platform, applying the
+ * `roleboxDir` / `skillsDir` config overrides on top of `dshPlatformPaths()`
+ * (which resolves `$DSH_HOME` or `~/.dsh` — contract §5.1).
+ */
+function resolveDirs(config: DshPluginConfig): RoleboxDirectories {
+  const dirs = resolveRoleboxDirectories({
+    platformId: "dsh",
+    workingDir: process.cwd(),
+  });
+  return {
+    ...dirs,
+    roleboxDir: config.roleboxDir ?? dirs.roleboxDir,
+    globalSkillsDir: config.skillsDir ?? dirs.globalSkillsDir,
+  };
+}
+
+/**
+ * Namespace filter for tool registration.
+ *
+ * `enabledNamespaces` is a dsh-specific config option: when set and
+ * non-empty, only tools whose key matches one of the entries are registered.
+ * An entry matches either exactly (the full tool key, e.g. `signal`) or as a
+ * namespace prefix (the key's segment before the first `_`, e.g. `hashline`
+ * matches `hashline_read` / `hashline_edit`). The wildcard `"*"` disables the
+ * filter — as does an absent/empty option (register everything).
+ */
+function isNamespaceEnabled(
+  key: string,
+  enabled: string[] | undefined,
+): boolean {
+  if (!enabled || enabled.length === 0) return true;
+  if (enabled.includes("*")) return true;
+  const prefix = key.split("_")[0] ?? key;
+  return enabled.some((ns) => ns === key || ns === prefix);
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh host web server service.
+ *
+ * The dsh host registers its webserver as a named service
+ * (`ctx.get("webServer")`, `@deepseek-ai/dsh-host-webserver`) ONLY when the
+ * web profile is active; headless profiles have no web server, so this probe
+ * returns `undefined` and the plugin skips `/rolebox` route registration
+ * gracefully. The service is consumed by duck typing (the structural
+ * `register(route)` surface — see {@link DshWebServerRouteRegistrar}), so a
+ * missing `get`, a throw on an unknown name, or a non-conforming value all
+ * resolve to "absent" rather than failing the boot.
+ */
+function probeWebServer(
+  ctx: DshPluginContext,
+): DshWebServerRouteRegistrar | undefined {
+  let service: unknown;
+  try {
+    service = typeof ctx.get === "function" ? ctx.get("webServer") : undefined;
+  } catch {
+    return undefined;
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { register?: unknown }).register === "function"
+  ) {
+    return service as DshWebServerRouteRegistrar;
+  }
+  return undefined;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh system-prompt registry
+ * service (`@deepseek-ai/dsh-system-prompt`).
+ *
+ * The service may surface either as a direct `ctx.systemPrompt` property
+ * (the host injects the registry onto the context) or through the
+ * named-service resolver `ctx.get("systemPrompt")` — both are probed,
+ * mirroring {@link probeWebServer}. Full profiles mount the registry (the
+ * `system-prompt` bundle row); headless profiles have no model-facing prompt
+ * assembly, so this probe returns `undefined` and the plugin skips the
+ * rolebox prompt contributions gracefully.
+ *
+ * The property read is deliberately NOT trusted as the whole probe: a
+ * service mounted by a SIBLING plugin fiber (the real profile shape — the
+ * bundle loader mounts every row via `ctx.plugin()`, so the registry lives
+ * in another plugin's fiber) is invisible to the property-resolver walk,
+ * which only climbs ANCESTOR fibers and THROWS on an unknown name. A throw
+ * from `ctx.systemPrompt` therefore falls through to the named-service
+ * resolver, which reads the shared reflect store across fibers. The service
+ * is consumed by duck typing (the structural `section(entry)` /
+ * `context(entry)` surface — see {@link DshSystemPromptRegistry}), so a
+ * missing `get`, a throw on an unknown name, or a non-conforming value all
+ * resolve to "absent" rather than failing the boot. The probe is
+ * deliberately NOT gated on the `inject` roster: an optional service must
+ * not gate plugin activation.
+ */
+function probeSystemPrompt(
+  ctx: DshPluginContext,
+): DshSystemPromptRegistry | undefined {
+  let service: unknown;
+  try {
+    service = ctx.systemPrompt;
+  } catch {
+    // Sibling-fiber service (full profile) — the property read throws;
+    // fall through to the cross-fiber named-service resolver below.
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("systemPrompt");
+    } catch {
+      return undefined;
+    }
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { section?: unknown }).section === "function" &&
+    typeof (service as { context?: unknown }).context === "function"
+  ) {
+    return service as DshSystemPromptRegistry;
+  }
+  return undefined;
+}
+
+/**
+ * Structural dsh skill-registry service (`@deepseek-ai/dsh-skill`
+ * `ctx.skills`), SDK-free. Only the `registerProvider` seam is consumed; the
+ * candidate/definition surface is owned by the skill-provider module
+ * (`DshSkillProviderLike`). Matches the verified rc.6 signature
+ * (`dsh-skill/lib/types/index.d.ts:249`):
+ * `registerProvider(create: (control) => SkillProvider): () => void`.
+ */
+interface DshSkillRegistryLike {
+  /**
+   * Register a LAZY skill provider. `create` is invoked once with the
+   * registration control and must return a provider; the returned disposer
+   * unregisters it.
+   */
+  registerProvider(
+    create: (control: DshSkillProviderControl) => DshSkillProviderLike,
+  ): () => void;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh skill-registry service
+ * (`@deepseek-ai/dsh-skill` `ctx.skills`).
+ *
+ * The service may surface either as a direct `ctx.skills` property (the host
+ * injects the registry onto the context) or through the named-service resolver
+ * `ctx.get("skills")` — both are probed, mirroring {@link probeSystemPrompt}.
+ * Full profiles mount the `dsh-skill` registry row; headless / minimal
+ * profiles have no model-facing skill registry, so this probe returns
+ * `undefined` (the same no-op marker as {@link probeAgentRegistry}) and the
+ * plugin keeps booting with rolebox's skill provider absent.
+ *
+ * The property read is deliberately NOT trusted as the whole probe: a service
+ * mounted by a SIBLING plugin fiber (the real profile shape) is invisible to
+ * the property-resolver walk, which only climbs ANCESTOR fibers and THROWS on
+ * an unknown name. A throw from `ctx.skills` therefore falls through to the
+ * named-service resolver, which reads the shared reflect store across fibers.
+ * The service is consumed by duck typing (a callable `registerProvider` — see
+ * {@link DshSkillRegistryLike}), so a missing `get`, a throw on an unknown
+ * name, or a non-conforming value all resolve to "absent" rather than failing
+ * the boot. The probe is deliberately NOT gated on the `inject` roster: an
+ * optional service must not gate plugin activation.
+ */
+function probeSkillRegistry(
+  ctx: DshPluginContext,
+): DshSkillRegistryLike | undefined {
+  let service: unknown;
+  try {
+    service = ctx.skills;
+  } catch {
+    // Sibling-fiber service (full profile) — the property read throws;
+    // fall through to the cross-fiber named-service resolver below.
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("skills");
+    } catch {
+      return undefined;
+    }
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { registerProvider?: unknown }).registerProvider === "function"
+  ) {
+    return service as DshSkillRegistryLike;
+  }
+  return undefined;
+}
+
+/**
+ * Structurally probe the cordis ctx for the dsh llm service
+ * (`ctx.llm`, `@deepseek-ai/dsh-llm`).
+ *
+ * The llm service is the adapter registry that answers "does a provider route
+ * have a registered adapter?" (`listProviders()`), which is exactly the check
+ * that prevents a split rolebox model from routing a spawn through an
+ * unregistered provider and failing with `NO_ADAPTER`. It is always mounted in
+ * a full dsh profile, but it is NOT in the `inject` roster (an optional probe
+ * must not gate plugin activation), so this resolves it structurally: try the
+ * direct `ctx.llm` property first, and — because a service mounted by a SIBLING
+ * plugin fiber throws on the property-resolver walk (mirroring
+ * {@link probeSystemPrompt}) — fall through to the named-service resolver
+ * `ctx.get("llm")`. The value is consumed by duck typing (the structural
+ * `listProviders()` surface — see {@link DshLlmRuntimeLike}), so a missing
+ * `get`, a throw, or a non-conforming value all resolve to "absent" and the
+ * registrar keeps its pre-safety behavior (emit the split unchanged).
+ */
+function probeLlmRoutes(
+  ctx: DshPluginContext,
+): DshLlmRuntimeLike | undefined {
+  let service: unknown;
+  try {
+    service = ctx.llm;
+  } catch {
+    // Sibling-fiber service (full profile) — the property read throws;
+    // fall through to the cross-fiber named-service resolver below.
+    service = undefined;
+  }
+  if (service === undefined && typeof ctx.get === "function") {
+    try {
+      service = ctx.get("llm");
+    } catch {
+      return undefined;
+    }
+  }
+  if (
+    service !== undefined &&
+    service !== null &&
+    typeof (service as { listProviders?: unknown }).listProviders === "function"
+  ) {
+    return service as DshLlmRuntimeLike;
+  }
+  return undefined;
+}
+
+/**
+ * Capabilities declared for the dsh platform. Values reflect what the dsh
+ * adapters actually support (session fork/create/status via the SessionStore
+ * adapter; event streaming via the event bus; in-session active-role
+ * switching via the DshRoleSwitcher + the `/rolebox` host routes). Currently
+ * advisory — `buildCanonicalTools` documents that capabilities are "not
+ * consulted in Phase 1 tool assembly" — but kept honest for future
+ * consumers.
+ */
+const dshCapabilities: PlatformCapabilities = {
+  platformId: "dsh",
+  hasBackgroundTasks: false,
+  hasSessionFork: true,
+  hasSessionCreate: true,
+  hasSessionAbort: false,
+  hasAgentFileSync: false,
+  hasMultiStepTools: true,
+  hasEventStream: true,
+  hasSessionStatus: true,
+  hasRoleSwitch: true,
+};
+
+// ── apply ───────────────────────────────────────────────────────────────────
+
+/**
+ * Cordis plugin `apply(ctx, config)` — boots rolebox on the dsh platform.
+ *
+ * Flow (mirroring `src/index.ts`):
+ *   1. Resolve directories via the dsh platform paths (config overrides win).
+ *   2. `initializeRoleboxRuntime()` with a `DshAgentRegistrar` bound to
+ *      `ctx.subagents` — discovers roles, resolves them, syncs agents into
+ *      the dsh subagent catalog.
+ *   3. Apply `defaultRole` project-config promotion when configured.
+ *   3a. Wire the dsh role switcher (per-session active-role state + the
+ *       `session/created` restore listener) and — OPTIONALLY — register the
+ *       composed `/rolebox` prefix route (role-switch surface + monitor
+ *       `/status`, `/metrics` surfaces) on dsh's host web server via the
+ *       `webServer` service seam (present only in the web profile). The two
+ *       surfaces share ONE prefix registration — the real host webserver
+ *       rejects duplicate `(kind, path)` pairs. A registration failure logs
+ *       a warning and degrades — the plugin keeps running without the web
+ *       surface.
+ *   3b. OPTIONALLY register the session-level system-prompt contributions
+ *       (`rolebox:role` section + `rolebox:context` context entry) when the
+ *       `systemPrompt` service is present on the ctx (full profiles only);
+ *       headless profiles warn-degrade and the plugin keeps running.
+ *   4. Compile canonical tools via `DshToolFactory` from
+ *      `buildCanonicalTools(...)` (with the dsh session adapter as the
+ *      session client) and register them into `ctx.tools`, filtered by
+ *      `enabledNamespaces`.
+ *   5. Mount hooks via `DshHookProvider` (rolebox hook kinds onto the dsh
+ *      `tools/*` / `session/event` extension points).
+ *   6. Log discovered/resolved/skipped counts mirroring `src/index.ts`.
+ *
+ * @param ctx    - The cordis context (structural; the injected dsh services).
+ * @param config - Validated plugin config. cordis validates through
+ *                 `Config['~standard']` and passes the defaults-applied
+ *                 output; direct callers may pass a partial object — every
+ *                 option is optional, so the partial path is safe too.
+ * @returns A fiber disposer that also carries `stats`.
+ */
+export async function apply(
+  ctx: DshPluginContext,
+  config: DshPluginConfig = {} as DshPluginConfig,
+): Promise<DshPluginDisposer> {
+  const log = createSubLogger("dsh-plugin");
+
+  // 1. Resolve directories (dsh platform paths + config overrides).
+  const dirs = resolveDirs(config);
+  log.info("dsh plugin starting", {
+    roleboxDir: dirs.roleboxDir,
+    globalSkillsDir: dirs.globalSkillsDir,
+    configDir: dirs.configDir,
+  });
+
+  // 2. Discover + resolve roles; sync agents into ctx.subagents.
+  //
+  // The per-session active-role holder is created FIRST and shared by BOTH
+  // the registrar (which reads it at spawn time to apply the active role's
+  // system prompt / model to spawned agents) and the role switcher (which
+  // writes it on switch/clear and restores it on session/created). Sharing
+  // one instance is what makes a web-UI role switch reach the spawned agent.
+  //
+  // durability: the holder is backed by the concrete `ActiveRoleStore`
+  // sidecar. State home MUST be the workspace (`process.cwd()`), NOT
+  // `dirs.configDir` (the dsh home, ~/.dsh): the sidecar lives beside the
+  // other workspace state under `.rolebox/state`, so a role switch persists
+  // with the project — the same convention the graph engine / dispatch stores
+  // follow. The store hydrates the holder synchronously at construction
+  // (`activerole-<workspaceHash>.json`) and every switch writes back
+  // best-effort.
+  const activeRoleStore = new ActiveRoleStore(process.cwd());
+  const activeRole = createActiveRoleRef(activeRoleStore);
+  // Spawn-time context injection: rolebox's `system-transform` hook (which
+  // injects the role's dynamic context — available functions, memory — into
+  // the agent prompt) has no dsh extension point and is a documented no-op
+  // (hook-provider.ts:178). Its counterpart here materializes the ACTIVE
+  // role's context block at spawn time — the available-functions block first
+  // (mirroring src/hooks/system-transform.ts:77-85) — so a spawned agent's
+  // effective prompt carries the rolebox context alongside the role prompt.
+  const contextProvider: DshSpawnContextProvider = (sessionId) => {
+    const activeId = activeRole.get(sessionId);
+    if (!activeId) return undefined;
+    const functions = roleFunctionsMap.get(activeId);
+    if (!functions || functions.length === 0) return undefined;
+    const block = buildAvailableFunctionsBlock(functions);
+    return block ? [{ type: "text", text: block }] : undefined;
+  };
+  // Provider-route safety path: probe the mounted dsh llm service and hand the
+  // registrar a live route list, so a split definition model whose provider has
+  // no registered adapter degrades to a model-only override (one warning)
+  // instead of failing the spawn with NO_ADAPTER. The closure reads
+  // `listProviders()` at SPAWN time, so adapters registered after plugin boot
+  // are seen. Absent `ctx.llm` → no probe → the split is emitted unchanged.
+  const llm = probeLlmRoutes(ctx);
+  const providerRoutes: DshProviderRouteProbe | undefined = llm
+    ? () => llm.listProviders().map((entry) => entry.id)
+    : undefined;
+  const registrar = new DshAgentRegistrar({
+    subagents: ctx.subagents,
+    activeRole,
+    contextProvider,
+    providerRoutes,
+    // Host-supplied spawn seam : when the host passes `onSpawn`, registered
+    // providers delegate real spawning to it. Absent → the registrar warns once
+    // at construction and every `ctx.subagents.start()` delegates to the host
+    // provider named by `spawnProviderName` (default "spawn", registered by
+    // @deepseek-ai/dsh-subagent-spawn-in-process); only when that provider is
+    // unregistered does `start()` reject DshSpawnNotWiredError.
+    onSpawn: config.onSpawn,
+    spawnProviderName: config.spawnProviderName,
+  });
+  const runtimeOptions: InitializeRuntimeOptions = {
+    directories: dirs,
+    roleFunctionsMap,
+    registrar,
+  };
+  const { resolvedRoles, discovered, resolved, skipped } =
+    await initializeRoleboxRuntime(runtimeOptions);
+
+  // 3. Apply the defaultRole promotion when configured.
+  if (config.defaultRole) {
+    applyProjectConfig(resolvedRoles, { defaultRole: config.defaultRole });
+  }
+
+  // 3a. Wire the dsh role switcher (per-session active-role state + the
+  // `session/created` restore listener). The switcher is always constructed —
+  // it backs the `/rolebox` host routes and `hasRoleSwitch`. The web surface
+  // itself is OPTIONAL: the dsh host webserver service (`ctx.get('webServer')`)
+  // exists only when the web profile is active, so the `/rolebox` prefix
+  // route is registered only when the service is present; headless profiles
+  // skip with a debug log and the plugin keeps running.
+  // `activeRole` is the SAME store-backed holder created above, so a switch
+  // through the switcher (web UI or host route) persists to the workspace
+  // sidecar and is read back by the registrar / prompt adapter.
+  //
+  // Skill-catalog refresh seam (subtask 7). The lazy skill provider registered
+  // below retains its registration `control`; `refreshSkillCatalog` is the
+  // single hook that invalidates the dsh `ctx.skills` catalog when the set of
+  // candidate roles changes. It is wired to BOTH drivers:
+  //   (a) an active-role change — the switcher calls `onActiveRoleChanged`
+  //       once per applied switch/clear/restore below; and
+  //   (b) a role RE-RESOLUTION — a re-`apply` (HMR) re-resolves roles and
+  //       registers a FRESH provider from the new role set, while the previous
+  //       registration is disposed (its control's abort signal fires), so the
+  //       stale provider's `invalidate()` is a no-op and the new provider
+  //       already advertises the re-resolved roles.
+  // It is a no-op until the provider is registered, and a no-op again after
+  // disposal (the provider guards on `control.signal.aborted`).
+  let skillProvider: DshSkillProvider | undefined;
+  const refreshSkillCatalog = (): void => {
+    skillProvider?.invalidate();
+  };
+  const roleSwitcher = new DshRoleSwitcher({
+    registrar,
+    store: ctx.sessions,
+    ctx,
+    activeRole,
+    onActiveRoleChanged: () => refreshSkillCatalog(),
+  });
+
+  // Optional host webServer seam — probe ONCE here. The composed `/rolebox`
+  // prefix route (role-switch surface + monitor surface) is registered below,
+  // after the loop wiring that the monitor surface depends on (its live-loop
+  // census). The real dsh host webserver rejects a duplicate `(kind, path)`
+  // registration (`webserver: duplicate prefix route "/rolebox"` — see
+  // `@deepseek-ai/dsh-host-webserver` lib/index.js:54-55), so both surfaces
+  // MUST share a single prefix registration; a failure logs a warning and
+  // degrades — the plugin keeps running without the web surface.
+  const routeDisposers: Array<() => void> = [];
+  const webServer = probeWebServer(ctx);
+  let webRouteRegistered = false;
+  let monitorRouteRegistered = false;
+
+  // Optional systemPrompt service seam — register the rolebox session-level
+  // system-prompt contributions (`rolebox:role` section + `rolebox:context`
+  // context entry) when the dsh host provides the registry, so the
+  // model-facing prompt carries the ACTIVE role's system prompt and its
+  // available-functions block. The service exists only in full profiles (the
+  // `@deepseek-ai/dsh-system-prompt` bundle); headless profiles have no
+  // model-facing prompt assembly, so the probe returns absent and the plugin
+  // keeps booting without the prompt seam — identical degradation to the
+  // webServer seam above. The adapter's registry disposers are collected
+  // into the fiber disposer below via `promptDisposers`.
+  const promptDisposers: Array<() => void> = [];
+  const systemPromptRegistry = probeSystemPrompt(ctx);
+  if (systemPromptRegistry) {
+    try {
+      const promptAdapter = new DshSystemPromptAdapter({
+        registrar,
+        activeRole,
+        roleFunctionsMap,
+        directory: dirs.roleboxDir,
+      });
+      promptAdapter.register(systemPromptRegistry);
+      promptDisposers.push(() => promptAdapter.dispose());
+      log.info("Rolebox system-prompt contributions registered", {
+        section: "rolebox:role",
+        context: "rolebox:context",
+      });
+    } catch (err) {
+      log.warn("System-prompt registration failed — degrading", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    log.warn("No systemPrompt service on ctx — role prompt injection disabled");
+  }
+
+  // Optional skills service seam — register rolebox's LAZY skill provider on
+  // dsh's global `ctx.skills` registry so every skill name in the role prompt's
+  // `<available_skills>` block is resolvable by the `skill` tool under dsh.
+  // The registry's plugin seam is `registerProvider(create)` — a FACTORY — fed
+  // the `(control) => SkillProvider` factory built from the resolved roles (the
+  // candidate pool, narrowed by the provider to the active ∪ default roles),
+  // the shared `activeRole` ActiveRoleRef holder (the active set, read at list
+  // time), and the promoted default role. The service exists only when the
+  // profile mounts the `dsh-skill` registry row; headless / minimal profiles
+  // have no skill registry, so the probe returns absent and the plugin keeps
+  // booting without it — identical degradation to the systemPrompt seam above.
+  // The registration disposer is collected into the fiber disposer below via
+  // `skillDisposers`.
+  const skillDisposers: Array<() => void> = [];
+  const skillRegistry = probeSkillRegistry(ctx);
+  if (skillRegistry) {
+    try {
+      const skillProviderFactory = createDshSkillProviderFactory({
+        roles: resolvedRoles,
+        activeRole,
+        ...(config.defaultRole ? { defaultRoleId: config.defaultRole } : {}),
+      });
+      // Capture the provider instance the registry's factory creates so the
+      // `refreshSkillCatalog` seam wired above can invalidate its catalogs on
+      // a role change. The registry invokes `create(control)` synchronously,
+      // so `skillProvider` is assigned before `registerProvider` returns.
+      const captureProvider = (
+        control: DshSkillProviderControl,
+      ): DshSkillProviderLike => {
+        const provider = skillProviderFactory(control);
+        skillProvider = provider;
+        return provider;
+      };
+      const dispose = skillRegistry.registerProvider(captureProvider);
+      skillDisposers.push(dispose);
+      log.info("Rolebox skill provider registered", {
+        provider: ROLEBOX_SKILL_PROVIDER,
+        candidateRoles: resolvedRoles.length,
+      });
+    } catch (err) {
+      log.warn("Skill-provider registration failed — degrading", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    log.debug("No skills service on ctx — rolebox skill provider disabled");
+  }
+
+  // 4. Compile + register tools (dsh session adapter drives the session tools).
+  //
+  // graph-notify injection seam (subtask: DSH graphNotify assembly). The dsh
+  // SessionStore has NO `prompt` — the opencode/Pi `sessionClient.prompt` way
+  // of delivering graph `<system-reminder>` reminders has no SessionStore
+  // equivalent. dsh's per-session message delivery lives on the live `Agent`
+  // surface (`ctx.agents`), which is mounted only in full profiles. Probe it
+  // OPTIONALLY: when the live agent registry is present the session adapter's
+  // `prompt()` delivers graph-notify reminders into the target session's agent
+  // (the dsh equivalent of opencode/Pi graph-notify), preferring a WAKING
+  // member (`steer`, then `followup`; rc.6 runtime-types.d.ts:115-123) and
+  // falling back to `inject` (:124-132), which queues model-facing context
+  // WITHOUT waking an idle driver; when the registry is absent the adapter
+  // keeps its documented no-op and the graph engine's F6 notifier logs the
+  // degraded reminder — never a crash, never gating boot.
+  const agentRegistry = probeAgentRegistry(ctx);
+  const promptInjector = buildAgentPromptInjector(agentRegistry);
+  const graphNotifyWired = promptInjector !== undefined;
+  const sessionAdapter = new DshSessionAdapter(ctx.sessions, {
+    ...(promptInjector ? { promptInjector } : {}),
+  });
+  const factory = new DshToolFactory();
+
+  // ── dsh dispatch path (subtask 8) ────────────────────────────────────────
+  //
+  // The dsh platform's "dispatch manager": routes graph node dispatch AND
+  // loop worker rounds through the dsh services instead of the opencode SDK
+  // client — `ctx.subagents.start` for spawning (per-role agent mapping via
+  // the providers {@link DshAgentRegistrar} registered above), `ctx.sessions`
+  // + the run's `result` promise for collecting results, `run.dispose()` for
+  // cancellation, and stopReason→DispatchTaskStatus translation so failures
+  // map to the engine's escalate semantics. This mirrors how the opencode
+  // entry constructs its DispatchManager (createDispatchManager in
+  // src/pi-extension.ts / src/index.ts) — the opencode path is untouched;
+  // this is additive routing by platform.
+  const dshDispatch = new DshDispatchAdapter({
+    subagents: ctx.subagents,
+    sessionClient: sessionAdapter,
+    // dsh REQUIRES a live parent `Agent` on every SubagentStartRequest
+    // (`dsh-subagent/lib/types/types.d.ts:101`) and the in-process driver
+    // dereferences it while composing the child. Resolve it from the probed
+    // live-agent registry (`ctx.agents`); when the registry is absent
+    // (headless/minimal profile) or the session has no live agent, the adapter
+    // fails loud with DshParentUnresolvedError instead of forwarding
+    // `parent: undefined`.
+    parentResolver: (sid) => agentRegistry?.get(sid),
+    directory: process.cwd(),
+  });
+
+  // Graph engine v2 tools bound to the dsh dispatch seam. Engines construct
+  // with `{ dispatch: dshDispatch }` (no DispatchManager on the dsh path), so
+  // every graph node dispatches through the dsh subagent API. stateDir
+  // (process.cwd()) persists engine state under `.rolebox/state` — the same
+  // layout the opencode path uses.
+  //
+  // `getEffectiveAgent` mirrors the Pi/dispatch deps-injection pattern: dsh
+  // never populates `context.agent` on tool contexts, so the graph tools fall
+  // back to this per-session resolver (the role switcher's ActiveRoleRef) so
+  // the injected `<system-reminder>` forwards the orchestrator's real role
+  // instead of falling back to `default_agent`. When no role is active for the
+  // session it resolves to "" (base agent → resume as default).
+  //
+  // `graphNotify` mirrors the opencode/Pi config (tool-service.ts:91-94 /
+  // pi service-stack.ts:201-204): `sessionClient` is the SAME session client
+  // the platform threads through dispatch/loop (dsh's `sessionAdapter`, whose
+  // `prompt()` now routes through the optional live-agent injector above), and
+  // `emperorSessionId` resolves the orchestrator session from the graph tool's
+  // execution context (`invokingSessionId`). This is what makes DSH graph
+  // orchestration produce `<system-reminder>` (node-completion + graph-terminal
+  // + stall) reminders targeting the calling emperor session, exactly like
+  // opencode/Pi. When `ctx.agents` is absent, `sessionAdapter.prompt()` is the
+  // documented no-op and the engine's F6 notifier degrades per-marker.
+  const graphTools = createGraphTools(undefined, {
+    dispatch: dshDispatch,
+    directory: process.cwd(),
+    stateDir: process.cwd(),
+    getEffectiveAgent: (sessionID?: string) =>
+      sessionID ? activeRole.get(sessionID) ?? "" : "",
+    graphNotify: {
+      sessionClient: sessionAdapter,
+      emperorSessionId: (invokingSessionId) => invokingSessionId,
+    },
+  });
+
+  // Loop mode: the loop coordinator drives worker rounds through the SAME
+  // dsh dispatch adapter (dispatchRound/getRoundResult/cancelRound map to
+  // subagents.start / run.result / run.dispose), with a LoopStore under the
+  // dsh config dir for restart recovery.
+  //
+  // OUT-OF-SCOPE OUTLIER (pre-existing): unlike the active-role store above
+  // (and the graph/dispatch stores, all rooted at `process.cwd()`), this
+  // LoopStore is still rooted at `dirs.configDir` (the dsh home, ~/.dsh). It
+  // is deliberately left unchanged here to keep the wiring scoped; a
+  // follow-up should align it with the workspace state home.
+  const loopStore = new LoopStore(dirs.configDir);
+  const loopCoordinator = new LoopCoordinator(dshDispatch, {
+    delayMs: 2000,
+    persist: (loops) => {
+      void loopStore.save(loops);
+    },
+  });
+  const loopTools = createLoopTools(loopCoordinator, sessionAdapter);
+
+  // Optional host webServer seam — register the composed `/rolebox` prefix
+  // route on dsh's own web server. The role-switch surface (`/roles*`) and
+  // the monitor surface (`/status`, `/metrics`) are composed into a SINGLE
+  // registration — the real host webserver rejects a second `prefix /rolebox`
+  // `register()` (`webserver: duplicate prefix route "/rolebox"`,
+  // `@deepseek-ai/dsh-host-webserver` lib/index.js:54-55) — with the monitor
+  // route owning `/status` + `/metrics` and delegating the `/roles*`
+  // sub-paths to the role-switch handler via its `delegate` option. A
+  // registration failure logs a warning and degrades (the plugin keeps
+  // running without the web surface); the route disposer is collected into
+  // the fiber disposer below.
+  if (webServer) {
+    try {
+      const roleSwitchRoute = new DshRoleSwitchWebRoute(
+        roleSwitcher,
+        ctx.sessions,
+      );
+      const monitorRoute = new DshRoleboxMonitorWebRoute(
+        roleSwitcher,
+        ctx.sessions,
+        loopCoordinator,
+        process.cwd(),
+        {
+          delegate: (req, res) => roleSwitchRoute.handle(req, res),
+        },
+      );
+      const dispose = monitorRoute.register(webServer);
+      routeDisposers.push(dispose);
+      webRouteRegistered = true;
+      monitorRouteRegistered = true;
+      log.info("Rolebox routes registered on host web server", {
+        prefix: ROLE_SWITCH_ROUTE_PREFIX,
+        surfaces: "role-switch + monitor",
+      });
+    } catch (err) {
+      log.warn("Rolebox route registration failed — degrading", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    log.debug(
+      "No host web server service on ctx — skipping /rolebox route registration",
+    );
+  }
+
+  const tools = {
+    ...buildCanonicalTools({
+      resolvedRoles,
+      directory: process.cwd(),
+      sessionClient: sessionAdapter,
+      capabilities: dshCapabilities,
+    }),
+    ...graphTools,
+    ...loopTools,
+  };
+  const compiled = factory.compileAll(tools);
+
+  const toolDisposers: Array<() => void> = [];
+  let registeredTools = 0;
+  for (const [key, def] of Object.entries(compiled)) {
+    if (!isNamespaceEnabled(key, config.enabledNamespaces)) continue;
+    // compileAll() is typed `Record<string, unknown>` (the IToolFactory port
+    // contract); the compiled objects are structurally DshToolDefinition.
+    const dispose = ctx.tools.register(def as DshToolDefinition);
+    toolDisposers.push(dispose);
+    registeredTools++;
+  }
+
+  // 5. Mount hooks (rolebox hook kinds onto dsh extension points).
+  const hookProvider = new DshHookProvider(ctx, {});
+
+  // 5a. Loop-state recovery (mirrors the opencode/pi entry): reconcile
+  // persisted loops against the dsh dispatch registry and re-subscribe
+  // termination listeners so interrupted loops resume after a restart.
+  // Best-effort — a failed load/reconcile degrades to a fresh coordinator
+  // (loopWired stays true; only the persisted loops are lost).
+  try {
+    const loadedLoops = loopStore.load();
+    if (loadedLoops && loadedLoops.size > 0) {
+      const reconciled = await loopStore.reconcile(loadedLoops, async (taskId) => {
+        const status = await dshDispatch.getTaskStatus(taskId);
+        return { status: status ?? "unknown", exists: status !== undefined };
+      });
+      for (const [id, state] of reconciled) {
+        loopCoordinator.restoreState(state);
+      }
+      await loopCoordinator.reSubscribeListeners();
+      log.info("Loop state recovered", { restored: reconciled.size });
+    }
+  } catch (err) {
+    log.warn("loop state recovery degraded — starting fresh", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // 6. Log counts mirroring src/index.ts.
+  const registeredAgents = (await registrar.list()).length;
+  log.info("Plugin initialized", {
+    discovered,
+    resolved,
+    skipped,
+    registeredTools,
+    registeredAgents,
+  });
+  if (discovered === 0) {
+    log.info("No roles found in rolebox directory");
+  }
+
+  // Fiber disposer (cordis convention) + stats for callers/tests.
+  const disposer = (() => {
+    // Host route + prompt-seam teardown FIRST: unmount the /rolebox routes
+    // (fire-and-forget — the disposers are no-ops when the route was never
+    // registered), release the system-prompt registry contributions (also
+    // no-ops when the seam was never wired), and release the switcher's ctx
+    // listeners (its `session/created` restore subscription) before any
+    // other cleanup.
+    for (const dispose of routeDisposers) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("role-switch route disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    for (const dispose of promptDisposers) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("system-prompt disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    for (const dispose of skillDisposers) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("skill-provider disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    roleSwitcher.dispose();
+    // durability: final synchronous write of the active-role sidecar. The
+    // holder's per-switch write is async/best-effort and the `session/flush`
+    // checkpoint may never fire on an abrupt shutdown, so mirror the loop-store
+    // sync save below to guarantee the last selection is on disk. Skipped when
+    // the map is empty — there is nothing to persist, and writing an empty
+    // sidecar would create (or clobber) a file for a workspace that never
+    // selected a role. Best-effort: a failed write is logged and never blocks
+    // fiber unload.
+    try {
+      const activeRoles = activeRole.snapshot();
+      if (activeRoles.size > 0) {
+        activeRoleStore.saveSync(activeRoles);
+      }
+    } catch (err) {
+      log.debug("active-role state save failed during dispose", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    hookProvider.dispose();
+    // Loop teardown: persist the live loop states, then stop the coordinator
+    // (clears its sweeper interval + worker termination listeners).
+    try {
+      loopStore.saveSync(loopCoordinator.getAllLoopStates() ?? new Map());
+    } catch (err) {
+      log.debug("loop state save failed during dispose", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    loopCoordinator.dispose();
+    loopStore.dispose();
+    for (const dispose of toolDisposers) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("tool disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    // Best-effort agent-catalog cleanup (dsh providers are removed via the
+    // registrar's unregister → disposer chain). Fire-and-forget: fiber
+    // unload is synchronous in cordis.
+    registrar
+      .list()
+      .then((ids) => (ids.length > 0 ? registrar.unregister(ids) : undefined))
+      .catch((err) => {
+        log.debug("agent unregister failed during dispose", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }) as DshPluginDisposer;
+  disposer.stats = {
+    discovered,
+    resolved,
+    skipped,
+    registeredTools,
+    registeredAgents,
+    resolvedRoles,
+    dispatchMode: "dsh",
+    loopWired: true,
+    webRouteRegistered,
+    graphNotifyWired,
+    monitorRouteRegistered,
+  };
+  return disposer;
+}
+
+// ── Default export (object plugin shape) ───────────────────────────────────
+
+/**
+ * Default export — the object plugin shape (`{ apply(ctx, config) }`,
+ * contract §2.2 `Plugin.Object`), which is what the cordis loader consumes
+ * from a package's default export. The named exports above (`name`,
+ * `inject`, `Config`, `apply`) are also provided for direct import.
+ */
+export default {
+  name,
+  inject,
+  Config,
+  apply,
+};
+
+// Type-only re-exports kept out of the plugin metadata: the dsh adapters'
+// structural provider type, for consumers wiring a spawn delegate.
+export type { DshSubagentProvider };

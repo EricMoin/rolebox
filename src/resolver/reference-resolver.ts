@@ -1,0 +1,238 @@
+import { resolve as pathResolve, relative, dirname, basename, extname } from "node:path";
+import fg from "fast-glob";
+import yaml from "js-yaml";
+import type { ReferenceEntry, ResolvedReference } from "../types.ts";
+import type { ReferenceScope } from "../constants.ts";
+import { createSubLogger, formatError } from "../logger.ts";
+import { readTextFile, fileExists } from "../utils/fs.ts";
+import { toPosixPath } from "../utils/paths.ts";
+
+const log = createSubLogger("reference-resolver");
+
+/**
+ * Module-level cache for frontmatter description extraction.
+ * Keyed by absolute filePath so different baseDir invocations naturally
+ * use separate cache entries (different absolute paths → no collision).
+ */
+const descriptionCache = new Map<string, Promise<string | undefined>>();
+
+/**
+ * Derive a human-readable name from a reference file path.
+ * "theory/core-principles.md" → "theory/core-principles"
+ */
+function deriveNameFromPath(relPath: string): string {
+  // Normalize to forward slashes first so the extension strip and the
+  // "references/" prefix regex behave identically on every platform (a
+  // Windows-style backslash path would otherwise skip both). The derived name
+  // is an identifier, so forward-slash separators are the correct contract.
+  const posixPath = toPosixPath(relPath);
+  const ext = extname(posixPath);
+  const withoutExt = ext ? posixPath.slice(0, -ext.length) : posixPath;
+  // Strip leading "references/" prefix if present
+  return withoutExt.replace(/^references\//, "");
+}
+
+/**
+ * Generate a fallback description from a filename.
+ * "core-principles" → "Core Principles"
+ */
+function deriveDescriptionFromName(name: string): string {
+  const filename = basename(name);
+  return filename
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Extract description from a markdown file's YAML frontmatter.
+ * Returns undefined if no frontmatter or no description field.
+ * Results are cached in the module-level descriptionCache keyed by absolute
+ * filePath, so files read during discoverReferences are not re-read by
+ * resolveExplicitReferences within the same resolveAllReferences chain.
+ */
+async function extractFrontmatterDescription(
+  filePath: string,
+): Promise<string | undefined> {
+  // Check cache first
+  const cached = descriptionCache.get(filePath);
+  if (cached !== undefined) return cached;
+
+  // Cache miss — extract and store the promise so concurrent calls deduplicate
+  const promise = extractFrontmatterDescriptionInner(filePath);
+  if (descriptionCache.size >= 500) {
+    descriptionCache.clear();
+  }
+  descriptionCache.set(filePath, promise);
+  return promise;
+}
+
+/**
+ * Inner implementation: reads the file and parses YAML frontmatter.
+ */
+async function extractFrontmatterDescriptionInner(
+  filePath: string,
+): Promise<string | undefined> {
+  try {
+    const content = await readTextFile(filePath);
+    const trimmed = content.trimStart();
+
+    if (!trimmed.startsWith("---")) return undefined;
+
+    const endIdx = trimmed.indexOf("\n---", 3);
+    if (endIdx === -1) return undefined;
+
+    const yamlStr = trimmed.slice(4, endIdx);
+    const parsed = yaml.load(yamlStr);
+
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const meta = parsed as Record<string, unknown>;
+      if (typeof meta.description === "string") {
+        return meta.description;
+      }
+    }
+  } catch (err) {
+    // File unreadable or invalid frontmatter — skip
+    log.debug("Failed to read file", { path: filePath, error: formatError(err) });
+  }
+  return undefined;
+}
+
+/**
+ * Auto-discover all .md files in a `references/` directory.
+ * Returns resolved references with descriptions from frontmatter or auto-generated.
+ */
+export async function discoverReferences(
+  baseDir: string,
+  scope: ReferenceScope,
+): Promise<ResolvedReference[]> {
+  const refsDir = pathResolve(baseDir, "references");
+  let matches: string[];
+
+  try {
+    matches = await fg("**/*.md", {
+      cwd: refsDir,
+      absolute: true,
+      onlyFiles: true,
+    });
+  } catch {
+    return [];
+  }
+
+  // Batch-read all discovered files with Promise.all using the cache
+  const resolved = await Promise.all(
+    matches.map(async (filePath) => {
+      const relativePath = toPosixPath(relative(baseDir, filePath));
+      const name = deriveNameFromPath(relativePath);
+      const frontmatterDesc = await extractFrontmatterDescription(filePath);
+      const description = frontmatterDesc ?? deriveDescriptionFromName(name);
+      return {
+        name,
+        filePath: toPosixPath(filePath),
+        description,
+        scope,
+        relativePath,
+      };
+    }),
+  );
+
+  // Sort for deterministic output
+  resolved.sort((a, b) => a.name.localeCompare(b.name));
+  return resolved;
+}
+
+/**
+ * Resolve explicit reference declarations from role.yaml or SKILL.md frontmatter.
+ * Merges with auto-discovered references, with explicit entries taking priority
+ * for description overrides.
+ */
+export async function resolveExplicitReferences(
+  declarations: Record<string, string | ReferenceEntry>,
+  baseDir: string,
+  scope: ReferenceScope,
+): Promise<ResolvedReference[]> {
+  const resolved: ResolvedReference[] = [];
+
+  for (const [key, value] of Object.entries(declarations)) {
+    const entry: ReferenceEntry =
+      typeof value === "string" ? { path: value } : value;
+
+    const filePath = pathResolve(baseDir, entry.path);
+
+    try {
+      if (!(await fileExists(filePath))) {
+        log.info(`Skipping reference "${key}": file not found at "${entry.path}"`);
+        continue;
+      }
+    } catch (err) {
+      log.debug("Failed to check file existence", { path: filePath, error: formatError(err) });
+      continue;
+    }
+
+    const relativePath = toPosixPath(relative(baseDir, filePath));
+    const name = key;
+    let description: string;
+
+    if (entry.description) {
+      description = entry.description;
+    } else {
+      const frontmatterDesc = await extractFrontmatterDescription(filePath);
+      description = frontmatterDesc ?? deriveDescriptionFromName(name);
+    }
+
+    resolved.push({
+      name,
+      filePath: toPosixPath(filePath),
+      description,
+      scope,
+      relativePath,
+    });
+  }
+
+  return resolved;
+}
+
+/**
+ * Resolve all references for a given directory:
+ * 1. Auto-discover references/ directory
+ * 2. Apply explicit declarations as overrides (for descriptions)
+ * 3. Merge with explicit-only entries (files outside references/)
+ *
+ * Deduplication: explicit entries override auto-discovered ones by filePath.
+ */
+export async function resolveAllReferences(
+  baseDir: string,
+  scope: ReferenceScope,
+  explicitDeclarations?: Record<string, string | ReferenceEntry>,
+): Promise<ResolvedReference[]> {
+  const discovered = await discoverReferences(baseDir, scope);
+
+  if (!explicitDeclarations || Object.keys(explicitDeclarations).length === 0) {
+    return discovered;
+  }
+
+  const explicit = await resolveExplicitReferences(
+    explicitDeclarations,
+    baseDir,
+    scope,
+  );
+
+  // Build a map keyed by absolute filePath for deduplication
+  const byPath = new Map<string, ResolvedReference>();
+
+  // Key the map on the forward-slash-normalized filePath so discovered refs
+  // (fast-glob → forward slashes) and explicit refs (path.resolve → native
+  // separators) collapse to the same key on Windows. Without this, the same
+  // file would appear twice and the dedup would silently fail.
+  for (const ref of discovered) {
+    byPath.set(toPosixPath(ref.filePath), ref);
+  }
+
+  // Explicit entries override discovered ones (for description enrichment)
+  for (const ref of explicit) {
+    byPath.set(toPosixPath(ref.filePath), ref);
+  }
+
+  const merged = Array.from(byPath.values());
+  merged.sort((a, b) => a.name.localeCompare(b.name));
+  return merged;
+}

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img"
+  aria-label="rolebox logo">
+  <title>rolebox</title>
+  <!-- Flat dark surface; visible as a tile on light backgrounds, subtle on dark -->
+  <rect width="512" height="512" rx="112" ry="112" fill="#0D1117" />
+  <!-- Isometric flat-shaded cube = "box". Three flat tones, no gradient.
+       Top = sky-400 (light), front-left = sky-500 (brand), front-right = sky-600 (shadow).
+       R (role) sits on the front of the box => "role in a box" = rolebox. -->
+  <g id="box">
+    <polygon points="256,76 412,166 256,256 100,166" fill="#38BDF8" />
+    <polygon points="100,166 256,256 256,436 100,346" fill="#0EA5E9" />
+    <polygon points="412,166 412,346 256,436 256,256" fill="#0284C7" />
+  </g>
+  <!-- R logomark: white, centered on the front of the box -->
+  <text x="256" y="252"
+    text-anchor="middle"
+    dominant-baseline="central"
+    font-family="'Space Grotesk', 'SpaceGrotesk', 'Space Grotesk Bold', system-ui, sans-serif"
+    font-weight="700"
+    font-size="200"
+    fill="#FFFFFF">R</text>
+</svg>

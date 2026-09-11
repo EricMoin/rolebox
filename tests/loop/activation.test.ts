@@ -1,0 +1,320 @@
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { OpencodeClient } from "@opencode-ai/sdk";
+import {
+  createPluginHooks,
+  userMessagedSessions,
+  activeLoopManager,
+  pendingCorrections,
+  loopManagerMap,
+} from "../../src/core/composition";
+import { LOOP_PROGRESS_MARKER, STOP_LOOP_SIGNAL, LOOP_FUNCTION_NAME } from "../../src/loop/constants";
+import { functionRuntime } from "../../src/function/runtime-state";
+import { functionSessionState } from "../../src/function/session-state";
+import { hookState } from "../../src/hooks/state";
+import { parseFunctionActivation as _realParseFn } from "../../src/function/parser";
+import { OpencodeSessionAdapter } from "../../src/platform/adapters/opencode/session";
+// Snapshot the real parser implementation at module load time for mock restore
+const realParseFunctionActivation = _realParseFn;
+
+function createMockClient(): OpencodeClient {
+  return {
+    session: {
+      create: mock(() =>
+        Promise.resolve({ data: { id: "test-child" }, error: undefined }),
+      ),
+      prompt: mock(() =>
+        Promise.resolve({
+          data: { parts: [{ type: "text", text: "ok" }] },
+          error: undefined,
+        }),
+      ),
+      promptAsync: mock(() =>
+        Promise.resolve({ data: undefined, error: undefined }),
+      ),
+      messages: mock(() =>
+        Promise.resolve({ data: [], error: undefined }),
+      ),
+      status: mock(() =>
+        Promise.resolve({ data: {}, error: undefined }),
+      ),
+      abort: mock(() =>
+        Promise.resolve({ data: undefined, error: undefined }),
+      ),
+      get: mock(() =>
+        Promise.resolve({ data: { id: "test" }, error: undefined }),
+      ),
+      delete: mock(() =>
+        Promise.resolve({ data: undefined, error: undefined }),
+      ),
+    },
+  } as unknown as OpencodeClient;
+}
+
+describe("loop activation", () => {
+  let hooks: Awaited<ReturnType<typeof createPluginHooks>>;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "rolebox-loop-test-"));
+    pendingCorrections.clear();
+    userMessagedSessions.clear();
+    const client = createMockClient();
+    hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+  });
+
+  afterEach(() => {
+    loopManagerMap.clear();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("registers a loop when |loop:3| is parsed", async () => {
+    const output = {
+      parts: [{ type: "text" as const, text: "|loop:3| do the thing" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_001" },
+      output,
+    );
+
+    expect(activeLoopManager?.isLoopSession("ses_001")).toBe(true);
+  });
+
+  it("registers a loop with fresh mode when |loop:5,fresh| is parsed", async () => {
+    const output = {
+      parts: [
+        { type: "text" as const, text: "|loop iterations=5 mode=fresh| work" },
+      ],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_002" },
+      output,
+    );
+
+    expect(activeLoopManager?.isLoopSession("ses_002")).toBe(true);
+  });
+
+  it("rejects |loop| on a session that already has an active loop (same-origin exclusivity)", async () => {
+    const output1 = {
+      parts: [{ type: "text" as const, text: "|loop:2| first loop" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_003" },
+      output1,
+    );
+
+    const output2 = {
+      parts: [
+        { type: "text" as const, text: "|loop:3| nested attempt" },
+      ],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_003" },
+      output2,
+    );
+
+    const correction = pendingCorrections.get("ses_003");
+    expect(correction).toContain("loop already active for this session");
+  });
+
+  it("adds an invalid-loop-params correction for |loop:0|", async () => {
+    const output = {
+      parts: [{ type: "text" as const, text: "|loop:0| do work" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_004" },
+      output,
+    );
+
+    const correction = pendingCorrections.get("ses_004");
+    expect(correction).toContain("Invalid loop params");
+    expect(activeLoopManager?.isLoopSession("ses_004")).toBe(false);
+  });
+
+  it("clamps to hard cap when |loop:999| exceeds limit", async () => {
+    const output = {
+      parts: [
+        { type: "text" as const, text: "|loop:999| super loop" },
+      ],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_005" },
+      output,
+    );
+
+    expect(activeLoopManager?.isLoopSession("ses_005")).toBe(true);
+    const correction = pendingCorrections.get("ses_005");
+    expect(correction).toContain("clamped");
+  });
+
+  it("does NOT cancel when user message arrives during round 1 (loop still on origin)", async () => {
+    const output1 = {
+      parts: [{ type: "text" as const, text: "|loop:5| keep going" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_006" },
+      output1,
+    );
+
+    expect(activeLoopManager?.isLoopSession("ses_006")).toBe(true);
+    // Self-start microtask may have already advanced past activating phase
+    const phase1 = activeLoopManager!.getLoopState("ses_006")!.phase;
+    expect(["activating", "dispatching", "awaiting_worker"]).toContain(phase1);
+
+    const output2 = {
+      parts: [{ type: "text" as const, text: "another message" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_006" },
+      output2,
+    );
+
+    expect(activeLoopManager!.getLoopState("ses_006")!.cancelRequested).toBe(false);
+    // Loop should still be non-terminal after user message during round 1
+    const phase2 = activeLoopManager!.getLoopState("ses_006")!.phase;
+    expect(["activating", "dispatching", "awaiting_worker"]).toContain(phase2);
+  });
+
+  it("cancels loop when user message arrives after loop advanced off origin (round 2+)", async () => {
+    const output1 = {
+      parts: [{ type: "text" as const, text: "|loop:5| keep going" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_006b" },
+      output1,
+    );
+
+    expect(activeLoopManager?.isLoopSession("ses_006b")).toBe(true);
+
+    // Manually advance phase to simulate loop having dispatched a worker round
+    const loop = activeLoopManager!.getLoopState("ses_006b")!;
+    loop.phase = "awaiting_worker";
+
+    const output2 = {
+      parts: [{ type: "text" as const, text: STOP_LOOP_SIGNAL }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_006b" },
+      output2,
+    );
+
+    expect(activeLoopManager!.getLoopState("ses_006b")!.cancelRequested).toBe(true);
+    expect(userMessagedSessions.has("ses_006b")).toBe(true);
+  });
+
+  it("does NOT add userMessagedSessions for LOOP_PROGRESS_MARKER messages", async () => {
+    const output = {
+      parts: [
+        {
+          type: "text" as const,
+          text: `${LOOP_PROGRESS_MARKER} round 1/3 done]`,
+        },
+      ],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_007" },
+      output,
+    );
+
+    expect(userMessagedSessions.has("ses_007")).toBe(false);
+  });
+
+  it("does NOT reset continuation counters for LOOP_PROGRESS_MARKER messages", async () => {
+    functionRuntime.init("ses_008", "test-fn", 1);
+    const st = functionRuntime.get("ses_008", "test-fn")!;
+    st.continuationCount = 7;
+
+    const output = {
+      parts: [
+        {
+          type: "text" as const,
+          text: `${LOOP_PROGRESS_MARKER} round 2/5 done]`,
+        },
+      ],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_008" },
+      output,
+    );
+
+    const updated = functionRuntime.get("ses_008", "test-fn");
+    expect(updated?.continuationCount).toBe(7);
+  });
+
+  it("does NOT trigger auto-continue misclassification via LOOP_PROGRESS_MARKER", async () => {
+    const output = {
+      parts: [
+        {
+          type: "text" as const,
+          text: `${LOOP_PROGRESS_MARKER} loop complete]`,
+        },
+      ],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_009" },
+      output,
+    );
+
+    expect(userMessagedSessions.has("ses_009")).toBe(false);
+  });
+
+  it("injects correction when activeLoopManager is undefined", async () => {
+    const originalManager = hookState.activeLoopManager;
+    hookState.activeLoopManager = undefined as any;
+
+    const output = {
+      parts: [{ type: "text" as const, text: "|loop:3| do thing" }],
+    };
+    await hooks["chat.message"](
+      { agent: "test-agent", sessionID: "ses_010" },
+      output,
+    );
+
+    const correction = pendingCorrections.get("ses_010");
+    expect(correction).toContain("Loop manager is not available");
+    expect(activeLoopManager?.isLoopSession("ses_010")).toBe(false);
+
+    hookState.activeLoopManager = originalManager;
+  });
+
+  it("injects correction when |loop| is parsed but no matching loopCall exists", async () => {
+    // Mock parser so "loop" appears in parsedFunctions but NOT in calls
+    mock.module("../../src/function/parser", () => ({
+      parseFunctionActivation: (text: string) => {
+        // Only intercept our test text; delegate everything else to real impl
+        if (text === "|loop| do thing") {
+          return {
+            functions: [LOOP_FUNCTION_NAME],
+            calls: [],
+            cleanedText: "do thing",
+          };
+        }
+        return realParseFunctionActivation(text);
+      },
+    }));
+
+    try {
+      // Pre-activate loop so isActive returns true
+      functionSessionState.activate("ses_012", [LOOP_FUNCTION_NAME], []);
+
+      const output = {
+        parts: [{ type: "text" as const, text: "|loop| do thing" }],
+      };
+      await hooks["chat.message"](
+        { agent: "test-agent", sessionID: "ses_012" },
+        output,
+      );
+
+      const correction = pendingCorrections.get("ses_012");
+      expect(correction).toContain("Loop call not found");
+      expect(activeLoopManager?.isLoopSession("ses_012")).toBe(false);
+    } finally {
+      // Restore real parser implementation so other test files aren't affected
+      mock.module("../../src/function/parser", () => ({
+        parseFunctionActivation: realParseFunctionActivation,
+      }));
+    }
+  });
+});

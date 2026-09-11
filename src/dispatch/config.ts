@@ -1,0 +1,232 @@
+/**
+ * Centralized configuration constants for the dispatch subsystem.
+ * This is the single source of truth — all other files import from here.
+ */
+
+// ── Timing constants ────────────────────────────────────────────────
+
+/** Task TTL (30 min): how long completed/failed task records live before cleanup.
+ *  LIVE — read by manager.ts:758,1126 */
+export const TASK_TTL_MS = 1_800_000;
+
+/** Minimum runtime (5 s): a task must exist at least this long before it can be reaped.
+ *  LIVE — read by manager.ts:898 */
+export const MIN_RUNTIME_MS = 5_000;
+
+/** Sync timeout (10 min): max wall-clock time for synchronous executeSync prompts.
+ *  LIVE — imported by manager.ts:10 */
+export const SYNC_TIMEOUT_MS = 600_000;
+
+/** Background default stale timeout (15 min): per-task default when no explicit timeout_ms is set.
+ *  More aggressive than the old global staleTimeoutMs (45 min) to prevent background tasks from
+ *  holding resources too long.
+ *  LIVE — imported by manager.ts:10 */
+export const BACKGROUND_STALE_TIMEOUT_MS = 900_000;
+
+/** Minimum consecutive idle polls before marking a task as stable / complete.
+ *  LIVE — referenced by completion-detector.ts:53 (doc comment) */
+export const MIN_STABILITY_POLLS = 2;
+
+/** Per-task reconcile watchdog interval (15 s): max event silence before a one-shot reconcile.
+ *  LIVE — imported by manager.ts:10, watchdog.test.ts:4 */
+export const WATCHDOG_INTERVAL_MS = 15_000;
+
+/** Global sweep interval (30 s): safety-net pass over all running tasks for missed events / crash recovery.
+ *  LIVE — imported by manager.ts:10, watchdog.test.ts:5 */
+export const GLOBAL_SWEEP_INTERVAL_MS = 30_000;
+
+/** Idle debounce (1.5 s): wait after a validated session.idle before confirming completion, to absorb between-step idles.
+ *  LIVE — imported by manager.ts:10, watchdog.test.ts:6 */
+export const IDLE_DEBOUNCE_MS = 1_500;
+
+/** Max consecutive SDK fetch failures before escalating a running task to error.
+ *  Prevents silent death: if evaluateAndComplete cannot fetch session state,
+ *  the task transitions to error instead of cycling through the watchdog forever. */
+export const MAX_CONSECUTIVE_FETCH_FAILURES = 3;
+
+/** Default total session.create attempts (1 initial + N-1 retries) for transient
+ *  transport failures. Only THROWN errors are retried; a null return (server
+ *  rejection via r.error) is never retried.
+ *  LIVE — consumed by task-launcher.ts startBackgroundTask */
+export const DEFAULT_CREATE_RETRY_ATTEMPTS = 3;
+
+/** Default backoff (ms) between session.create retry attempts.
+ *  LIVE — consumed by task-launcher.ts startBackgroundTask */
+export const DEFAULT_CREATE_RETRY_BACKOFF_MS = 250;
+
+/** Default prompt timeout (ms) for synchronous dispatch.
+ *  LIVE — consumed by manager.ts (Task 12) */
+export const DEFAULT_SYNC_PROMPT_TIMEOUT_MS = 600_000;
+
+/** Timeout (ms) for materializing a sub-agent result fetch — default: 10 s */
+export const MATERIALIZE_TIMEOUT_MS = 10_000;
+
+/** Result retention (ms): how long sidecar result files are kept after task cleanup — default: 1 h */
+export const RESULT_RETENTION_MS = 3_600_000;
+
+/** Outbox sweeper initial retry delay (ms) — default: 3 s */
+export const OUTBOX_FIRST_RETRY_MS = 3_000;
+
+/** Outbox sweeper max retry delay (ms) — default: 60 s */
+export const OUTBOX_MAX_RETRY_MS = 60_000;
+
+/** Outbox sweeper polling interval (ms) — default: 5 s */
+export const OUTBOX_SWEEP_INTERVAL_MS = 5_000;
+
+/** Metrics persist interval (ms) — how often to flush metrics to disk — default: 5 s */
+export const METRICS_PERSIST_INTERVAL_MS = 5_000;
+
+/** Default max NDJSON metrics event log file size (100 KB). */
+export const DEFAULT_METRICS_EVENT_LOG_MAX_BYTES = 102_400;
+
+/** Default budget sampling interval (30 s): how often to sample token/cost from sessions. */
+export const DEFAULT_BUDGET_SAMPLE_INTERVAL_MS = 30_000;
+
+// ── Streaming progress constants ────────────────────────────────────
+
+/** Default TTL for progress events (5 min): how long events live before cleanup.
+ *  LIVE — consumed by ProgressStore.cleanupExpired */
+export const DEFAULT_PROGRESS_TTL_MS = 300_000;
+
+/** Max progress events retained per task — default: 1 000.
+ *  LIVE — consumed by ProgressStore.addProgressEvent */
+export const MAX_PROGRESS_EVENTS_PER_TASK = 1_000;
+
+// ── Checkpoint constants ────────────────────────────────────────────
+
+/** Default TTL for checkpoint data (24 h): how long checkpoints live before cleanup.
+ *  LIVE — consumed by CheckpointStore.cleanupExpired */
+export const DEFAULT_CHECKPOINT_TTL_MS = 86_400_000;
+
+// ── Configuration interface ─────────────────────────────────────────
+
+/**
+ * Configurable limits and intervals for the dispatch manager.
+ *
+ * New fields are marked optional (`?:`) to preserve backward compatibility
+ * with existing call sites that construct partial configs.
+ */
+export interface DispatchManagerConfig {
+  /** Maximum cumulative input tokens across all dispatched sessions in a request (undefined = unlimited). */
+  maxInputTokensPerRequest?: number;
+  /** Maximum cumulative output tokens across all dispatched sessions in a request (undefined = unlimited). */
+  maxOutputTokensPerRequest?: number;
+  /** Maximum cumulative cost (USD) across all dispatched sessions in a request (undefined = unlimited). */
+  maxCostPerRequest?: number;
+  /** Maximum input tokens for a single dispatched session (undefined = unlimited). */
+  maxInputTokensPerSession?: number;
+  /** Maximum cost for a single dispatched session (undefined = unlimited). */
+  maxCostPerSession?: number;
+  /** How often (ms) to sample token/cost from sessions (default: 30000). */
+  budgetSampleIntervalMs?: number;
+  /** Time-to-live (ms) for completed task records before cleanup — default: 30 minutes */
+  taskTtlMs: number;
+  /** Minimum wall-clock time (ms) before a task can be reaped — default: 5000 */
+  minRuntimeMs: number;
+  /** Per-task default stale timeout (ms) for background tasks — default: 900000 (15 min) */
+  backgroundStaleTimeoutMs?: number;
+  /** Watchdog reconcile interval (ms) — default: 15000 (15 s) */
+  watchdogIntervalMs?: number;
+  /** Global sweep interval (ms) — default: 30000 (30 s) */
+  globalSweepIntervalMs?: number;
+  /** Idle debounce delay (ms) — default: 1500 (1.5 s) */
+  idleDebounceMs?: number;
+
+  /** @deprecated Use syncPromptTimeoutMs instead.
+   *  Timeout (ms) for synchronous executeSync prompts — default: 600000 (10 min). */
+  syncTimeoutMs?: number;
+  /** Timeout (ms) for the sub-agent prompt to complete in sync mode — default: 600000 (10 min) */
+  syncPromptTimeoutMs?: number;
+
+  /** Total session.create attempts for transient (thrown) failures — default: 3.
+   *  A null return (server rejection) is never retried. Set to 1 to disable retries. */
+  createRetryAttempts?: number;
+  /** Backoff (ms) between session.create retry attempts — default: 250. */
+  createRetryBackoffMs?: number;
+
+  /** Timeout (ms) for materializing a sub-agent result fetch — default: 10000 */
+  materializeTimeoutMs?: number;
+  /** How long (ms) sidecar result files are kept after task cleanup — default: 3600000 */
+  resultRetentionMs?: number;
+  /** Outbox sweeper initial retry delay (ms) — default: 3000 */
+  outboxFirstRetryMs?: number;
+  /** Outbox sweeper max retry delay (ms) — default: 60000 */
+  outboxMaxRetryMs?: number;
+  /** Outbox sweeper polling interval (ms) — default: 5000 */
+  outboxSweepIntervalMs?: number;
+}
+
+// ── Default configuration ───────────────────────────────────────────
+
+export const DEFAULT_CONFIG: DispatchManagerConfig = {
+  taskTtlMs: TASK_TTL_MS,
+  minRuntimeMs: MIN_RUNTIME_MS,
+  backgroundStaleTimeoutMs: BACKGROUND_STALE_TIMEOUT_MS,
+  watchdogIntervalMs: WATCHDOG_INTERVAL_MS,
+  globalSweepIntervalMs: GLOBAL_SWEEP_INTERVAL_MS,
+  idleDebounceMs: IDLE_DEBOUNCE_MS,
+  syncTimeoutMs: SYNC_TIMEOUT_MS,
+  syncPromptTimeoutMs: DEFAULT_SYNC_PROMPT_TIMEOUT_MS,
+
+  createRetryAttempts: DEFAULT_CREATE_RETRY_ATTEMPTS,
+  createRetryBackoffMs: DEFAULT_CREATE_RETRY_BACKOFF_MS,
+
+  materializeTimeoutMs: MATERIALIZE_TIMEOUT_MS,
+  resultRetentionMs: RESULT_RETENTION_MS,
+  outboxFirstRetryMs: OUTBOX_FIRST_RETRY_MS,
+  outboxMaxRetryMs: OUTBOX_MAX_RETRY_MS,
+  outboxSweepIntervalMs: OUTBOX_SWEEP_INTERVAL_MS,
+  budgetSampleIntervalMs: DEFAULT_BUDGET_SAMPLE_INTERVAL_MS,
+};
+
+// ── Environment variable resolution ─────────────────────────────────
+
+/**
+ * Reads dispatch configuration from environment variables.
+ * Only returns keys that are explicitly set and parse to positive numbers.
+ * NaN, ≤0, and empty-string values are silently ignored.
+ */
+export function resolveEnvConfig(): Partial<DispatchManagerConfig> {
+  const result: Partial<DispatchManagerConfig> = {};
+
+  const intEnv = (key: string): number | undefined => {
+    const raw = process.env[key];
+    if (raw === undefined || raw === "") return undefined;
+    const n = Number(raw);
+    if (Number.isNaN(n) || n <= 0) return undefined;
+    return n;
+  };
+
+  const bs = intEnv("ROLEBOX_DISPATCH_BG_STALE_MS");
+  if (bs !== undefined) result.backgroundStaleTimeoutMs = bs;
+
+  const mt = intEnv("ROLEBOX_DISPATCH_MATERIALIZE_TIMEOUT_MS");
+  if (mt !== undefined) result.materializeTimeoutMs = mt;
+
+  const rr = intEnv("ROLEBOX_DISPATCH_RESULT_RETENTION_MS");
+  if (rr !== undefined) result.resultRetentionMs = rr;
+
+  return result;
+}
+
+// ── Config merging ──────────────────────────────────────────────────
+
+/**
+ * Merge dispatch configuration with precedence: env > roleConfig > base.
+ *
+ * @param base       Base configuration (e.g. DEFAULT_CONFIG)
+ * @param roleCfg    Optional role-level overrides (from role.yaml `dispatch:` block)
+ * @param envCfg     Optional environment-level overrides (from resolveEnvConfig())
+ * @returns          Merged DispatchManagerConfig
+ */
+export function mergeConfig(
+  base: DispatchManagerConfig,
+  roleCfg?: Partial<DispatchManagerConfig>,
+  envCfg?: Partial<DispatchManagerConfig>,
+): DispatchManagerConfig {
+  return {
+    ...base,
+    ...roleCfg,
+    ...envCfg,
+  };
+}
