@@ -46,6 +46,9 @@ function reactDouble() {
       () => {},
     ],
     useEffect: () => {},
+    // The dock holds one ref (focus restoration after a collapsing switch),
+    // so this double must expose the same surface the component imports.
+    useRef: (initial: unknown) => ({ current: initial }),
     createElement: (type: unknown, props: unknown, ...children: unknown[]) => ({
       type,
       props,

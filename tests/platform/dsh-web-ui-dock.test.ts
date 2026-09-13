@@ -217,9 +217,32 @@ function keyDown(input: VNode, key: string): void {
 // ── Module mocks (must precede the dock import) ────────────────────────────
 
 const FRAGMENT = Symbol.for("react.fragment");
-const jsx = (type: unknown, props: Record<string, unknown>): VNode => ({ type, props });
 
-mock.module("react", () => ({ useState, useEffect, createElement: jsx, Fragment: FRAGMENT }));
+/** Nodes the component asked to focus, in order (the R5 focus-restoration spy). */
+const focusCalls: unknown[] = [];
+
+/**
+ * `useRef` — a per-slot mutable cell. It shares the `states` slot array with
+ * `useState` (both consume a `hookIndex` slot), so hook order stays stable.
+ */
+function useRef<T>(initial: T): { current: T } {
+  const rs = renderState!;
+  const slot = hookIndex++;
+  if (rs.states.length <= slot) rs.states.push({ current: initial });
+  return rs.states[slot] as { current: T };
+}
+
+const jsx = (type: unknown, props: Record<string, unknown>): VNode => {
+  // Stand in for React's ref attachment so focus restoration is observable
+  // without a real DOM.
+  const ref = props?.ref as { current: unknown } | undefined;
+  if (ref !== undefined && ref !== null && typeof ref === "object") {
+    ref.current = { focus: () => focusCalls.push(type) };
+  }
+  return { type, props };
+};
+
+mock.module("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 mock.module("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 
@@ -241,6 +264,8 @@ interface FetchConfig {
   active: string | null;
   switchOk: boolean;
   clearOk: boolean;
+  /** When false, `GET /rolebox/roles` answers 500 so the load-failure path is reachable. */
+  rolesOk: boolean;
   /** When true, the next POST /roles/switch hangs until `releaseSwitch` resolves it. */
   gateSwitch: boolean;
 }
@@ -262,6 +287,9 @@ globalThis.fetch = ((input: unknown, init?: RequestInit) => {
   const method = (init?.method ?? "GET").toUpperCase();
   calls.push({ url, method, body: typeof init?.body === "string" ? init.body : null });
   if (url === dock.ROLES_ENDPOINT) {
+    if (!cfg.rolesOk) {
+      return Promise.resolve(fakeResponse(500, { ok: false, error: "server exploded" }));
+    }
     return Promise.resolve(fakeResponse(200, cfg.roles));
   }
   if (url.startsWith(dock.ACTIVE_ENDPOINT + "?")) {
@@ -323,6 +351,7 @@ const ROLES = [
 
 function mountDock(sessionId = "sess-1"): void {
   calls.length = 0;
+  focusCalls.length = 0;
   releaseSwitch = null;
   mount(dock.RoleSwitchDock as unknown as (props: unknown) => unknown, { sessionId });
 }
@@ -357,32 +386,64 @@ function statusSeat(): VNode {
   return byClass("rolebox-dock-status")[0]!;
 }
 
+/** The header's value seat — the active role's display name (never its id). */
+function valueSeat(): VNode {
+  return byClass("rolebox-dock-value")[0]!;
+}
+
+/** The header's Active/Base chip (absent while the dock is still hydrating). */
+function chipSeat(): VNode | undefined {
+  return byClass("rolebox-dock-chip")[0];
+}
+
+/**
+ * Disclosure openness. The region is ALWAYS MOUNTED (so closing can animate
+ * and closed content leaves the a11y tree via `visibility`), so openness is
+ * read from `data-open` rather than inferred from list presence.
+ */
+function disclosureOpen(): boolean {
+  return byClass("rolebox-dock-disclosure")[0]!.props["data-open"] === "true";
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe("RoleSwitchDock", () => {
   beforeEach(() => {
-    cfg = { roles: ROLES, active: null, switchOk: true, clearOk: true, gateSwitch: false };
+    cfg = { roles: ROLES, active: null, switchOk: true, clearOk: true, rolesOk: true, gateSwitch: false };
   });
 
   describe("collapsed posture", () => {
-    it("starts collapsed and hydrates the active role into the header seat", async () => {
+    it("starts collapsed and hydrates the active role into the header value seat", async () => {
       cfg.active = "engineer";
       mountDock();
       await settle();
 
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
+      expect(disclosureOpen()).toBe(false);
       expect(headerButton().props["aria-expanded"]).toBe(false);
-      expect(textOf(statusSeat())).toContain("Active role: engineer");
-      expect(statusSeat().props.title).toBe("Active role: engineer");
-      // The current-role dot in the header marks a non-base session at a glance.
-      expect(byClass("rolebox-dock-current")).toHaveLength(1);
+      // The header VALUE seat names the role: a display name, never the id the
+      // picker does not show.
+      expect(textOf(valueSeat())).toBe("Engineer");
+      expect(valueSeat().props.title).toBe("Engineer");
+      // The chip spells the state out, so it survives total loss of hue.
+      expect(textOf(chipSeat()!)).toBe("Active");
+      // Reserved mark seat: the non-colour row channel carrying the check glyph.
+      expect(byClass("rolebox-dock-mark-active")).toHaveLength(1);
+      // The shipped 6px dot is gone entirely.
+      expect(byClass("rolebox-dock-current")).toHaveLength(0);
+      // The live region is ALWAYS mounted so it can announce later; at rest it
+      // is empty and therefore silent.
+      expect(byClass("rolebox-dock-status")).toHaveLength(1);
+      expect(textOf(statusSeat())).toBe("");
     });
 
-    it("shows no current dot when the session runs the base agent", async () => {
+    it("reports the base agent without a dot when the session runs no role", async () => {
       mountDock();
       await settle();
-      expect(textOf(statusSeat())).toBe("Ready");
+      expect(textOf(valueSeat())).toBe("Base agent");
+      expect(textOf(chipSeat()!)).toBe("Base");
+      expect(byClass("rolebox-dock-mark-active")).toHaveLength(0);
       expect(byClass("rolebox-dock-current")).toHaveLength(0);
+      expect(textOf(statusSeat())).toBe("");
     });
 
     it("expands with one click and marks the active role with aria-current", async () => {
@@ -391,7 +452,7 @@ describe("RoleSwitchDock", () => {
       await settle();
       expand();
 
-      expect(byClass("rolebox-dock-list")).toHaveLength(1);
+      expect(disclosureOpen()).toBe(true);
       expect(headerButton().props["aria-expanded"]).toBe(true);
       expect(roleRows()).toHaveLength(ROLES.length);
       const current = roleRows().filter((row) => row.props["aria-current"] === "true");
@@ -411,8 +472,8 @@ describe("RoleSwitchDock", () => {
       await settle();
 
       expect(headerButton().props["aria-expanded"]).toBe(false);
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
-      expect(textOf(statusSeat())).toContain("Active role: architect");
+      expect(disclosureOpen()).toBe(false);
+      expect(textOf(valueSeat())).toBe("Software Architect");
       const activeCalls = calls.filter((call) => call.url.startsWith(dock.ACTIVE_ENDPOINT));
       expect(activeCalls.at(-1)!.url).toContain("sess-2");
 
@@ -504,7 +565,7 @@ describe("RoleSwitchDock", () => {
 
       changeInput(filterInput(), "eng");
       click(headerButton());
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
+      expect(disclosureOpen()).toBe(false);
       click(headerButton());
       expect(filterInput().props.value).toBe("eng");
       expect(rows()).toHaveLength(1);
@@ -550,8 +611,16 @@ describe("RoleSwitchDock", () => {
       click(rows().find((row) => textOf(row).includes("Engineer"))!);
       await settle();
 
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
-      expect(textOf(statusSeat())).toContain("Role engineer is active");
+      expect(disclosureOpen()).toBe(false);
+      // The collapse IS the confirmation: no text banner. The value seat and
+      // the chip carry the new state.
+      expect(textOf(valueSeat())).toBe("Engineer");
+      expect(textOf(chipSeat()!)).toBe("Active");
+      // No visible banner — but the change is still announced (SC 4.1.3).
+      expect(textOf(statusSeat())).toContain("is now the active role");
+      expect(String(statusSeat().props.className)).toContain(
+        "rolebox-dock-status-sr",
+      );
       const posted = calls.find((call) => call.method === "POST");
       expect(posted!.body).toBe(JSON.stringify({ role: "engineer", session: "sess-1" }));
 
@@ -573,15 +642,17 @@ describe("RoleSwitchDock", () => {
       expect(byClass("rolebox-dock-list")).toHaveLength(1);
       expect(textOf(statusSeat())).toContain("Switch failed");
       const retry = rows().find((row) => textOf(row).includes("Retry"))!;
-      expect(textOf(retry)).toContain("Switch to engineer");
+      // The retry names the DISPLAY NAME, never the id the picker never shows.
+      expect(textOf(retry)).toContain("Switch to Engineer");
       expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
 
       cfg.switchOk = true;
       click(retry);
       await settle();
 
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
-      expect(textOf(statusSeat())).toContain("Role engineer is active");
+      expect(disclosureOpen()).toBe(false);
+      expect(textOf(valueSeat())).toBe("Engineer");
+      expect(textOf(chipSeat()!)).toBe("Active");
       expect(calls.filter((call) => call.method === "POST")).toHaveLength(2);
     });
 
@@ -594,8 +665,9 @@ describe("RoleSwitchDock", () => {
       click(rows().find((row) => textOf(row).includes("Return to base agent"))!);
       await settle();
 
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
-      expect(textOf(statusSeat())).toContain("Base agent active");
+      expect(disclosureOpen()).toBe(false);
+      expect(textOf(valueSeat())).toBe("Base agent");
+      expect(textOf(chipSeat()!)).toBe("Base");
       expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
 
       expand();
@@ -609,6 +681,8 @@ describe("RoleSwitchDock", () => {
       expand();
 
       click(rows().find((row) => textOf(row).includes("Engineer"))!);
+      // The progress message names the DISPLAY NAME, never the id.
+      expect(textOf(statusSeat())).toContain("Switching to Engineer…");
       expect(rows().every((row) => row.props.disabled === true)).toBe(true);
       expect(headerButton().props.disabled).toBeUndefined();
 
@@ -618,7 +692,7 @@ describe("RoleSwitchDock", () => {
 
       releaseSwitch!(fakeResponse(200, { ok: true, session: "sess-1", role: "engineer" }));
       await settle();
-      expect(byClass("rolebox-dock-list")).toHaveLength(0);
+      expect(disclosureOpen()).toBe(false);
     });
   });
 
@@ -644,6 +718,196 @@ describe("RoleSwitchDock", () => {
       ]);
       const leaks = allVars.filter((token) => !token.startsWith("--dsw-") && !frameVars.has(token));
       expect(leaks).toEqual([]);
+
+      // Every rolebox token CONSUMPTION must carry a comma + fallback, so the
+      // bare var() scan above can never become a loophole for minting a private
+      // token namespace. Definitions are plain declarations and are not scanned.
+      const bareRoleboxVars = [...cssText.matchAll(/var\((--rolebox-[a-z0-9-]+)\)/g)].map((m) => m[1]!);
+      expect(bareRoleboxVars).toEqual([]);
+      expect(cssText).not.toContain(".rolebox-dock-current");
+    });
+  });
+
+  describe("disclosure accessibility", () => {
+    it("pairs aria-expanded with aria-controls on the always-mounted region", async () => {
+      cfg.active = "engineer";
+      mountDock();
+      await settle();
+
+      expect(headerButton().props["aria-controls"]).toBe(dock.DOCK_DISCLOSURE_ID);
+      expect(byClass("rolebox-dock-disclosure")[0]!.props.id).toBe(dock.DOCK_DISCLOSURE_ID);
+      expect(byClass("rolebox-dock-disclosure")).toHaveLength(1);
+
+      const label = String(headerButton().props["aria-label"]);
+      expect(label).toContain("Engineer");
+      expect(label).toContain("is active");
+      expect(label).toContain("Expand role list");
+
+      expand();
+      expect(String(headerButton().props["aria-label"])).toContain("Collapse role list");
+    });
+
+    it("keeps transient status text out of the toggle's own content", async () => {
+      cfg.switchOk = false;
+      mountDock();
+      await settle();
+      expand();
+      click(rows().find((row) => textOf(row).includes("Engineer"))!);
+      await settle();
+
+      // The live region is a SIBLING of the toggle inside the header row, so a
+      // status message can never rewrite the control's accessible name.
+      expect(textOf(statusSeat())).toContain("Switch failed");
+      expect(textOf(headerButton())).not.toContain("Switch failed");
+    });
+  });
+
+  describe("focus restoration", () => {
+    it("returns focus to the toggle after a successful switch", async () => {
+      mountDock();
+      await settle();
+      expand();
+      expect(focusCalls).toHaveLength(0);
+
+      click(rows().find((row) => textOf(row).includes("Engineer"))!);
+      await settle();
+
+      // The activated row is hidden by the collapse, so focus must be handed
+      // back to the toggle or it falls to <body> and the next keystroke is lost.
+      expect(focusCalls.length).toBeGreaterThan(0);
+    });
+
+    it("returns focus to the toggle after clearing back to the base agent", async () => {
+      cfg.active = "engineer";
+      mountDock();
+      await settle();
+      expand();
+      focusCalls.length = 0;
+
+      click(rows().find((row) => textOf(row).includes("Return to base agent"))!);
+      await settle();
+
+      expect(focusCalls.length).toBeGreaterThan(0);
+      expect(textOf(statusSeat())).toContain("Returned to the base agent");
+    });
+  });
+
+  describe("live count", () => {
+    it("reports the library size and the narrowed size while filtering", async () => {
+      mountDock();
+      await settle();
+      expand();
+
+      expect(textOf(byClass("rolebox-dock-count")[0]!)).toBe(String(ROLES.length));
+      // The count is real feedback, so it is a live region rather than a
+      // decoration a screen reader never learns about.
+      expect(byClass("rolebox-dock-count")[0]!.props.role).toBe("status");
+      changeInput(filterInput(), "engineer");
+      expect(textOf(byClass("rolebox-dock-count")[0]!)).toBe("1 of " + ROLES.length);
+    });
+  });
+
+  describe("load failure recovery", () => {
+    it("offers a Reload action that recovers the list", async () => {
+      cfg.rolesOk = false;
+      mountDock();
+      await settle();
+      expand();
+
+      expect(textOf(byClass("rolebox-dock-empty")[0]!)).toContain("Couldn't load roles");
+      const reload = byClass("rolebox-dock-empty-action")[0]!;
+      expect(reload).toBeDefined();
+      expect(textOf(reload)).toBe("Reload");
+
+      cfg.rolesOk = true;
+      click(reload);
+      await settle();
+
+      expect(calls.filter((call) => call.url === dock.ROLES_ENDPOINT).length).toBeGreaterThanOrEqual(2);
+      expect(roleRows()).toHaveLength(ROLES.length);
+    });
+
+    it("keeps an anchor on screen while the retry is in flight", async () => {
+      cfg.rolesOk = false;
+      mountDock();
+      await settle();
+      expand();
+      expect(textOf(byClass("rolebox-dock-empty")[0]!)).toContain("Couldn't load roles");
+
+      cfg.rolesOk = true;
+      click(byClass("rolebox-dock-empty-action")[0]!);
+
+      // The region the user clicked from must not blank out mid-retry, and the
+      // placeholder is deliberately NOT a live region (the header seat already
+      // announces the load, so a second one would double-announce).
+      const placeholder = byClass("rolebox-dock-empty")[0]!;
+      expect(textOf(placeholder)).toContain("Loading roles…");
+      expect(placeholder.props.role).toBeUndefined();
+
+      await settle();
+      expect(roleRows()).toHaveLength(ROLES.length);
+    });
+  });
+
+  describe("disclosure motion", () => {
+    it("animates open/close, rotates the chevron, and honours reduced motion", () => {
+      const cssText = css.dockCss;
+
+      // Spatial continuity: the list extends downward out from under the header
+      // by animating a grid track rather than teleporting into place.
+      expect(cssText).toContain("grid-template-rows");
+      expect(cssText).toContain('.rolebox-dock-disclosure[data-open="false"]');
+      // The chevron states which way the control will move the surface.
+      expect(cssText).toContain('.rolebox-dock-chevron[data-open="true"]');
+      expect(cssText).toContain("rotate(180deg)");
+      // Exits run faster than entrances so the UI is never held back.
+      expect(cssText).toContain("--rolebox-dur-exit");
+      // Every motion has a reduced-motion fallback.
+      expect(cssText).toContain("@media (prefers-reduced-motion: reduce)");
+      // Focus is deliberately instantaneous on both the header and the rows.
+      expect(cssText).toContain(".rolebox-dock-header:focus-visible");
+      expect(cssText).toContain(".rolebox-dock-row:focus-visible");
+
+      // The chevron must not run AGAINST the disclosure it is paired with: the
+      // closed state carries the exit duration, the open state the enter one.
+      const chevronClosed =
+        /\.rolebox-dock-chevron\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(chevronClosed).toContain("--rolebox-dur-exit");
+      const chevronOpen =
+        /\.rolebox-dock-chevron\[data-open="true"\]\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(chevronOpen).toContain("--rolebox-dur-base");
+
+      // The sr-only seat must actually BE sr-only, not merely named so.
+      const srBlock =
+        /\.rolebox-dock-status-sr\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(srBlock).toContain("position: absolute");
+      expect(srBlock).toContain("clip-path: inset(50%)");
+
+      // ONE easing curve, the host's. An earlier invented pair made the opening
+      // cover half its distance in the first fifth of its duration (which reads
+      // as a stutter) and the closing hesitate through its first half.
+      expect(cssText.match(/--rolebox-ease[a-z-]*:/g)).toEqual(["--rolebox-ease:"]);
+
+      // Height and opacity must share a duration so the content finishes
+      // appearing exactly when the box finishes revealing it. They used to
+      // disagree (200ms of height against 130ms of opacity on open, and 160ms
+      // against 90ms on close, so the content vanished half way through a close).
+      const openBlock =
+        /\.rolebox-dock-disclosure\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(openBlock).toContain("grid-template-rows var(--rolebox-dur-base");
+      expect(openBlock).toContain("opacity var(--rolebox-dur-base");
+      const closedBlock =
+        /\.rolebox-dock-disclosure\[data-open="false"\]\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(closedBlock).toContain("grid-template-rows var(--rolebox-dur-exit");
+      expect(closedBlock).toContain("opacity var(--rolebox-dur-exit");
+
+      // The collapsed subtree must skip its OWN layout: a 0fr grid track clips
+      // and visibility: hidden skips paint, but neither skips layout, so the
+      // invisible list was laid out on every pass. Guarded by @supports so a
+      // browser without allow-discrete keeps the close animation.
+      expect(cssText).toContain("@supports (transition-behavior: allow-discrete)");
+      expect(cssText).toContain("content-visibility: hidden");
+      expect(cssText).toContain("transition-behavior: normal, allow-discrete");
     });
   });
 });

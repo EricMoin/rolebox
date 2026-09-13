@@ -1150,6 +1150,42 @@ shell owns the open state.
   `GET /rolebox/metrics` same-origin (relative paths on the dsh web server)
   and renders the engine-graph / loop / metrics readings with
   loading/error/empty states.
+- **Attention-first posture** — the body leads with a derived verdict band
+  ("N need attention" / "All clear") before it lists any evidence, because the
+  page is opened under time pressure. Every raw backend phase renders beside a
+  normalised state word (`Running`/`Blocked`/`Stopped`/`Complete`/`Failed`/
+  `Idle`/`Unknown`) so neither the engine phase vocabulary
+  (`idle | executing | complete`) nor the eight-state loop machine has to be
+  memorised. `cancelled`/`interrupted` are `Stopped`, deliberately not
+  `Failed` — the run stopped, it did not break.
+- **Honest verdicts** — the band claims `All clear` only when every phase was
+  actually classified. A phase the classifier cannot read is named in the band
+  (`N state unrecognized`) rather than silently dropped, because a monitoring
+  surface that under-reports is worse than one that over-reports.
+- **Terminal graphs keep their own verdict** — `nodeStatusCounts` is a snapshot
+  of node statuses that OUTLIVE the run (a cancelled or timed-out node stays in
+  the map for the life of the session, and a graph can legitimately complete
+  with one present). No node count may therefore raise the verdict once
+  `phase === "complete"` — **except `blocked`**, which the engine
+  deliberately leaves for the human when a graph is cancelled, and which
+  therefore still raises the verdict on a terminal graph. Without that
+  carve-out a finished graph would pin a permanent red band beside its own green
+  `Complete` chip, and alarm fatigue is the one failure mode a monitoring
+  surface cannot afford; with too broad a rule the panel would instead hide a
+  pending approval gate behind the same green chip. On a LIVE graph the same
+  node statuses do raise the band: `escalate` (a NodeStatus the host's own
+  renderer paints as an error — a node waiting on a human) reports as
+  `Blocked`, and a failed, timed-out or cancelled node reports as `Failed`.
+- **Reference data is demoted, not hidden** — metric groups cap at
+  `GROUP_ROW_LIMIT` rows behind an accessible "Show all N" disclosure, and the
+  first load shows a content-shaped skeleton in place of the former bare text
+  line while a refresh keeps the existing data on screen.
+- **Dock focus restoration** — a successful switch or clear collapses the
+  disclosure out from under the row the user just activated, which would drop
+  keyboard focus to `<body>`. The dock therefore holds exactly one ref, on the
+  header toggle, and returns focus to it after a successful mutation. That is
+  the module's only DOM interaction, and it is deliberate: every other rule
+  (no measurement, no scroll listeners, no other DOM reads) still holds.
 
 ### 4.5 Session-level system-prompt registration (`rolebox:role` / `rolebox:context`)
 

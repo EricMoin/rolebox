@@ -5,61 +5,76 @@
  * The dock is a list/session-scoped full-width row above the composer card
  * (declared by `@deepseek-ai/dsh-client-ui-conversation` as
  * `{ kind: 'list', scope: 'session', owner: InputZone }`). This component is
- * registered into that slot by the client plugin entry (`client.ts`) and
- * renders a dsh-styled one-tap role picker:
+ * registered into that slot by the client plugin entry (`client.ts`).
  *
- *   - a 36px toggle header (lead glyph + "Role" title + status seat, plus a
- *     current-role dot) that collapses/expands the role list — the dock
- *     starts COLLAPSED on mount and on every session change so it never
- *     blocks the composer, and the status seat still reports the hydrated
- *     active role while collapsed (the dot gives the same state at a
- *     glance). The styles come from the sibling `role-switch-dock.css.ts`
- *     module (itself a faithful replica of the shipped QueueDock/TodoPanel
- *     rules — see that module's docstring for the citation map);
- *   - a collapsible role list (`GET /rolebox/roles`, same-origin relative
- *     path — the dsh web server serves the rolebox API under `/rolebox/*`),
- *     one 36px row per role; a row click posts
- *     `POST /rolebox/roles/switch` with `{ role, session: sessionId }` (the
- *     session id arrives through the entry's inject factory, `client.ts`);
- *   - a filter row between the header and the list (shown while expanded
- *     and while roles exist) that narrows the list client-side by name and
- *     description as the user types, with a clear affordance and an
- *     explicit no-match row. The query survives collapse/expand (it stays
- *     visible in the field — no hidden state) and resets on session change;
+ * The dock answers a STATUS question — "which role is running?" — so the
+ * redesign makes the VALUE the title. The shipped static label ("Role") is
+ * gone; the header renders the active role's display NAME. A label the user
+ * already knows (the strip is 8px above a composer, glyph-marked, and the only
+ * such strip) is replaced by the one fact the user does not have.
+ *
+ *   - a 40px toggle header — lead glyph, the active role NAME, an
+ *     `Active`/`Base` chip, a chevron — plus a sibling status seat outside
+ *     the button. The dock starts COLLAPSED on mount and on every session
+ *     change so it never blocks the composer;
+ *   - the active role is carried by FIVE redundant channels and never by a
+ *     coloured side border (a banned anti-slop tell): the spelled-out chip in
+ *     the header (which survives total loss of hue perception), a reserved
+ *     20px trailing mark seat on every row holding a check glyph, an inherited
+ *     font-weight step (400 -> 500) on the active row, the host active-nav
+ *     fill, and `aria-current`. The shipped 6px dot is gone;
+ *   - the status seat is a SIBLING of the toggle button, not a descendant:
+ *     a live region nested inside an interactive control rewrites the
+ *     control's accessible name on every status change. It is rendered
+ *     UNCONDITIONALLY so the region stays mounted (mounting a live region
+ *     together with its text is unreliable across screen readers), and it is
+ *     empty and silent at rest — the value seat and the chip carry the steady
+ *     state. A successful mutation writes a confirmation into it visually
+ *     hidden, so a collapse is still announced;
+ *   - the disclosure is ALWAYS MOUNTED and animated via
+ *     `grid-template-rows: 0fr -> 1fr` plus `visibility`, so closing can
+ *     animate and closed content is neither focusable nor exposed to the
+ *     accessibility tree. The button carries `aria-expanded` and
+ *     `aria-controls`;
+ *   - a filter row (shown while roles exist) narrows the list client-side by
+ *     name and description as the user types, with a clear affordance, a live
+ *     `n of N` count, and an explicit no-match row. The query survives
+ *     collapse/expand and resets on session change;
  *   - on mount (and on every `sessionId` change) the session's persisted
- *     active role is hydrated from `GET /rolebox/roles/active?session=…`,
- *     so the `aria-current` highlight and the status seat reflect the role
- *     that survived a reload / session switch;
- *   - a successful switch or clear collapses the dock again — the
- *     always-visible status seat carries the confirmation and the dock
- *     returns to its 36px posture; a FAILED mutation keeps the list open
- *     so the Retry row stays reachable;
+ *     active role is hydrated from `GET /rolebox/roles/active?session=…`. A
+ *     tri-state (`loading` | `ready` | `unknown`) prevents the dock from
+ *     claiming "Base agent" before the probe has answered;
+ *   - a successful switch or clear collapses the dock — the collapse IS the
+ *     confirmation (no toast, no checkmark flash, no colour pulse) — and a
+ *     FAILED mutation keeps the list open so the Retry row stays reachable;
  *   - a clear-to-base row (visible only while a role is active) issues
- *     `DELETE /rolebox/roles/active?session=…`, returning the session to
- *     the base agent; on success the `aria-current` highlight and the
- *     status seat reset, and a failed clear keeps the previous active role;
- *   - a failed switch or clear preserves the previous active state, shows
- *     the server error on the status seat, and offers a Retry row that
- *     re-runs the failed mutation;
- *   - the header's status seat reports load/switch/clear outcomes and
- *     errors (live region, `role="status"`).
+ *     `DELETE /rolebox/roles/active?session=…`;
+ *   - a failed LOAD is recoverable: the empty state offers a Reload action
+ *     that preserves the open list and the typed query.
  *
  * The slot contract (dsh-client-ui-slots' `SlotCore.register` +
  * `PropsRuntime` / `InjectFace` / `PropsLocale`) is consumed STRUCTURALLY:
- * `@deepseek-ai/dsh-client-ui-slots` is not installed yet (subtask 3 adds the
- * devDeps), so `RoleSwitchDockProps` duck-types the composed four-share
- * intersection against the observed `.d.ts` shapes — see the module docstring
- * of `client.ts` for the citation map. The only external module this file
- * imports is `react`, whose type surface is currently supplied by the
- * temporary `react.stub.d.ts` in this directory.
+ * `@deepseek-ai/dsh-client-ui-slots` is not installed yet, so
+ * `RoleSwitchDockProps` duck-types the composed four-share intersection
+ * against the observed `.d.ts` shapes — see the module docstring of
+ * `client.ts` for the citation map. The only external module this file
+ * imports is `react`, whose type surface is supplied by the temporary
+ * `react.stub.d.ts` in this directory — which declares `useState`,
+ * `useEffect`, `useRef`, `createElement` and `Fragment`. No hook beyond
+ * those five may be used.
  *
  * This module is BROWSER code: it must not import node builtins, and it uses
- * the browser `fetch` global with relative (same-origin) paths.
+ * the browser `fetch` global with relative (same-origin) paths. It touches
+ * the DOM in exactly ONE place, by design: a single `useRef` on the header
+ * toggle, used to restore focus after a successful switch/clear. Collapsing
+ * the disclosure hides the row the user just activated, so without that call
+ * focus falls to `<body>` and the keyboard user's next keystroke goes nowhere.
+ * No scroll listeners, no measurement, no other DOM reads.
  *
  * @module
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { dockClass } from "./role-switch-dock.css.ts";
 
 /**
@@ -105,25 +120,16 @@ export interface RoleSwitchErrorBody {
 /**
  * Composed props of the dock entry — a duck-type of the slot framework's
  * `PropsRuntime<'conversation.input.dock'> & InjectFace<...> & PropsLocale<'conversation'>`
- * intersection (dsh-client-ui-slots `lib/types/index.d.ts:358`), restricted
- * to the two seats this component consumes:
+ * intersection, restricted to the two seats this component consumes:
  *
  *   - `sessionId` — the framework-resolved session id, delivered through the
  *     entry's inject factory (`client.ts` passes `inject: (sessionId) =>
- *     ({ sessionId })`, per the InjectParams of a `scope: 'session'` slot,
- *     dsh-client-ui-slots `lib/types/index.d.ts:367`).
- *   - `t` — the locale seat promised by declaring `locale: 'conversation'`
- *     (dsh-client-ui-slots `lib/types/index.d.ts:67-70`). Declared (optional)
- *     so the component satisfies the four-share composition, but the dock
- *     renders hardcoded English text: the 'conversation' dictionary keys are
- *     not known at this layer, and unknown keys must not be routed through
- *     `t`.
- *
- * Members the real composed props carry that this component does not consume
- * (the session/global standard kit — `useSession`, `useProjection`,
- * `useSessions`, `useWorkspaces` — and the `InputZone` owner share `session` /
- * `input`) are simply not declared: a component with a narrower prop type
- * accepts the broader framework-supplied props structurally.
+ *     ({ sessionId })`, per the InjectParams of a `scope: 'session'` slot).
+ *   - `t` — the locale seat promised by declaring `locale: 'conversation'`.
+ *     Declared (optional) so the component satisfies the four-share
+ *     composition, but the dock renders hardcoded English text: the
+ *     'conversation' dictionary keys are not known at this layer, and unknown
+ *     keys must not be routed through `t`.
  */
 export interface RoleSwitchDockProps {
   /** Framework-resolved session id, delivered via the entry's inject factory. */
@@ -145,6 +151,13 @@ export const CLEAR_ENDPOINT = "/rolebox/roles/active";
 export const SWITCH_ENDPOINT = "/rolebox/roles/switch";
 
 /**
+ * The id wiring the header's `aria-controls` to the animated disclosure
+ * region. Exported so the tests can assert the pair without duplicating the
+ * literal.
+ */
+export const DOCK_DISCLOSURE_ID = "rolebox-dock-disclosure";
+
+/**
  * `ROLE_DATALIST_ID` (`"rolebox-role-list"`) — retained as an exported
  * contract constant. The pre-restyle dock fed a `<datalist>` with this id
  * into the role-id input; the picker restyle dropped the input/datalist
@@ -157,7 +170,25 @@ export const ROLE_DATALIST_ID = "rolebox-role-list";
 interface DockStatus {
   text: string;
   error: boolean;
+  /**
+   * Render the seat visually hidden. A successful switch confirms itself
+   * visually by collapsing and by re-mounting the value seat — but a screen
+   * reader gets nothing from a collapse, so the confirmation is announced
+   * through the seat instead (WCAG 2.1 AA SC 4.1.3). No visible banner.
+   */
+  srOnly?: boolean;
 }
+
+/**
+ * Hydration state of the dock's data.
+ *
+ *   - `loading` — the roles/active probes are in flight; the value seat reads
+ *     "Loading…" and no chip is shown, so the dock never claims "Base agent"
+ *     before the active-role probe has answered.
+ *   - `ready` — both probes settled; the value seat and the chip are truthful.
+ *   - `unknown` — the roles probe failed; the empty state offers Reload.
+ */
+type DockRoleState = "loading" | "ready" | "unknown";
 
 /** Render an error/status message as a string (browser-safe, no node builtins). */
 function toMessage(err: unknown): string {
@@ -183,10 +214,10 @@ function isActiveBody(value: unknown): value is RoleSwitchActiveBody {
 /**
  * Normalized result of a rolebox mutation (`POST /rolebox/roles/switch` or
  * `DELETE /rolebox/roles/active`). Non-2xx responses carry the stable error
- * shape `{ ok: false, error: string }` (see `web-role-switch-route.ts`);
- * 2xx mutations carry `{ ok: true, session, role }` — `role` is `null` for
- * a clear. Malformed bodies fall back to a status-derived error so the
- * caller always has a displayable message.
+ * shape `{ ok: false, error: string }`; 2xx mutations carry
+ * `{ ok: true, session, role }` — `role` is `null` for a clear. Malformed
+ * bodies fall back to a status-derived error so the caller always has a
+ * displayable message.
  */
 interface RoleboxMutation {
   ok: boolean;
@@ -212,11 +243,10 @@ async function readMutation(res: Response): Promise<RoleboxMutation> {
 }
 
 /**
- * Lead glyph — a 14×14 "role" mark (person silhouette) stroked with
+ * Lead glyph — a 14x14 "role" mark (person silhouette) stroked with
  * `currentColor`, following the shipped glyph convention of the dsh dock
- * strips (14×14 artboard, `fill: none`, `aria-hidden` — cf. TodoPanel's
- * `CompletedGlyph`, client.js:6116). Inline local SVG: the dsh primitives
- * icon set is deliberately not imported.
+ * strips (14x14 artboard, `fill: none`, `aria-hidden`). Inline local SVG:
+ * the dsh primitives icon set is deliberately not imported.
  */
 function RoleGlyph() {
   return (
@@ -239,7 +269,7 @@ function RoleGlyph() {
 }
 
 /**
- * Filter lead glyph — a 14×14 magnifier marking the search field, following
+ * Filter lead glyph — a 14x14 magnifier marking the search field, following
  * the same stroke convention as {@link RoleGlyph} (inline local SVG,
  * `fill: none`, `aria-hidden`).
  */
@@ -264,7 +294,7 @@ function SearchGlyph() {
 }
 
 /**
- * Filter clear glyph — a 12×12 cross centered in the 24×24 clear-button hit
+ * Filter clear glyph — a 12x12 cross centered in the 24x24 clear-button hit
  * area (see `.rolebox-dock-filter-clear`), same stroke convention.
  */
 function ClearGlyph() {
@@ -287,36 +317,107 @@ function ClearGlyph() {
 }
 
 /**
- * The dock component: a dsh-styled picker (toggle header + role list).
+ * Disclosure chevron — a 14x14 caret that rotates 180 degrees when the list
+ * is open. It communicates WHICH DIRECTION the control will move the surface,
+ * so it is paired with the same 200ms/160ms curve as the disclosure itself.
+ */
+function ChevronGlyph() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m3.5 5.75 3.5 3.5 3.5-3.5"
+        stroke="currentColor"
+        strokeWidth={1.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Active-row mark — a 14x14 check. It lives in the reserved 20px trailing
+ * seat that EVERY row carries, so switching the active role never reflows a
+ * row. This is the non-colour channel that survives total loss of hue
+ * perception, and it replaces the shipped 6px dot.
+ */
+function CheckGlyph() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="m3.25 7.5 2.75 2.75 4.75-6"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Alert glyph — a 14x14 circled exclamation marking the error seat. State is
+ * never carried by colour alone, so every error surface pairs its tint with
+ * this glyph and the message text.
+ */
+function AlertGlyph() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx="7" cy="7" r="5.4" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M7 4.3v3.7"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <circle cx="7" cy="10.1" r=".75" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * The dock component: a dsh-styled picker (header + animated disclosure).
  *
  * Behavior:
  *   - starts collapsed (and re-collapses on every `sessionId` change, and
- *     after a successful switch/clear): the header's status seat plus the
- *     current-role dot report the active role while the list is hidden, and
- *     one header click expands it;
+ *     after a successful switch/clear). The header's VALUE seat reports the
+ *     active role's display name while the list is hidden, and one header
+ *     click expands it;
  *   - on mount (and on every `sessionId` change), fetches the switchable
  *     roles from `GET /rolebox/roles` and the session's persisted active
- *     role from `GET /rolebox/roles/active?session=…` — both best-effort:
- *     a failed roles fetch leaves an empty list and the status seat reports
- *     the error; a failed active probe just leaves the seat unhighlighted
- *     (see {@link RoleSwitchActiveBody});
+ *     role from `GET /rolebox/roles/active?session=…` — the active probe is
+ *     best-effort (a failure just leaves the seat showing the base agent);
  *   - the expanded list is preceded by a filter row: a keystroke filter
- *     narrows the rows by name and description (case-insensitive
- *     substring), the clear button (visible only while a query is typed)
- *     restores the full list, and an explicit no-match row reports an
- *     empty result set;
- *   - the header toggles the list; a row click posts
- *     `{ role, session: sessionId }` to `POST /rolebox/roles/switch` (the
- *     framework-resolved session id from the inject face), then reflects
- *     the outcome on the status seat — on success the seat names the role
- *     as active for the current session and the dock collapses, on failure
- *     the previous active role is preserved, the list stays open, the
- *     server error is shown, and a Retry row re-runs the failed switch;
+ *     narrows the rows by name and description (case-insensitive substring),
+ *     the clear button (visible only while a query is typed) restores the
+ *     full list, and an explicit no-match row reports an empty result set;
+ *   - a row click posts `{ role, session: sessionId }` to
+ *     `POST /rolebox/roles/switch`, then collapses on success (the collapse
+ *     is the confirmation). On failure the previous active role is preserved,
+ *     the list stays open, the server error is shown, and a Retry row re-runs
+ *     the failed switch;
  *   - the clear-to-base row (visible only while a role is active) issues
- *     `DELETE /rolebox/roles/active?session=…`, resetting the
- *     `aria-current` highlight and the status seat to the base agent on
- *     success (and collapsing the dock); a failed clear keeps the previous
- *     active role and shows the server error with a Retry row;
+ *     `DELETE /rolebox/roles/active?session=…`, collapsing on success; a
+ *     failed clear keeps the previous active role and shows the error with a
+ *     Retry row;
  *   - rows and the clear/retry controls are disabled while a mutation is
  *     in flight (the filter stays usable — filtering is not a mutation).
  *
@@ -326,16 +427,16 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
   const [roles, setRoles] = useState<RoleSwitchRoleDto[]>([]);
   const [busy, setBusy] = useState(false);
   /**
-   * Collapsed by default: the dock is a quiet 36px tool strip above the
-   * composer, not a view. Every session change re-collapses it (see the
-   * load effect) and a successful switch/clear collapses it again.
+   * Collapsed by default: the dock is a quiet tool strip above the
+   * composer, not a view. Every session change re-collapses it and a
+   * successful switch/clear collapses it again.
    */
   const [collapsed, setCollapsed] = useState(true);
   /**
    * The keystroke filter over the role list (name + description,
    * case-insensitive). Transient chrome state: it survives collapse/expand
-   * (the field stays visible and self-explanatory — no hidden state) but is
-   * reset by a session change.
+   * (the field stays visible and self-explanatory — no hidden state) and is
+   * preserved across a Reload, but is reset by a session change.
    */
   const [query, setQuery] = useState("");
   const [activeRole, setActiveRole] = useState<string | null>(null);
@@ -350,24 +451,40 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
     text: "Loading roles…",
     error: false,
   });
+  /**
+   * Bumped by `reload()`. It is a dependency of the LOAD effect only, so a
+   * retry re-fetches without re-running the session reset — which is what
+   * lets Reload preserve the open list and the typed query.
+   */
+  const [loadToken, setLoadToken] = useState(0);
+  /** Hydration tri-state; see {@link DockRoleState}. */
+  const [roleState, setRoleState] = useState<DockRoleState>("loading");
+  /**
+   * The header toggle. Used only to restore focus after a successful
+   * switch/clear collapses the disclosure out from under the activated row.
+   */
+  const headerRef = useRef<{ focus?: () => void } | null>(null);
 
-  // Load the role list and the session's persisted active role. The effect
-  // re-runs on every `sessionId` change so a session switch re-fetches both
-  // (the dock is session-scoped — each session carries its own active role
-  // server-side). `cancelled` guards against a state update after unmount or
-  // after a superseding run (the fetches resolve asynchronously).
+  // Session-scoped reset. Deliberately does NOT depend on `loadToken`: a
+  // session switch must never render stale state, but a Reload must not throw
+  // away the user's filter or the open list.
   useEffect(() => {
-    let cancelled = false;
-
-    // Drop the previous session's rows/seat before re-fetching: a session
-    // switch must never render stale state. The dock also returns to its
-    // collapsed posture and drops the transient filter — a fresh session
-    // starts from the full list, not a stale narrowed one.
     setRoles([]);
     setActiveRole(null);
     setFailedAction(null);
     setCollapsed(true);
     setQuery("");
+    setRoleState("loading");
+    setStatus({ text: "Loading roles…", error: false });
+  }, [sessionId]);
+
+  // Load the role list and the session's persisted active role. Re-runs on a
+  // session change and on an explicit reload. `cancelled` guards against a
+  // state update after unmount or after a superseding run (the fetches
+  // resolve asynchronously).
+  useEffect(() => {
+    let cancelled = false;
+    setRoleState("loading");
     setStatus({ text: "Loading roles…", error: false });
 
     async function loadDockState(): Promise<void> {
@@ -395,18 +512,15 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       if (cancelled) return;
       setRoles(list);
       setActiveRole(active);
-      setStatus(
-        active !== null
-          ? { text: "Active role: " + active, error: false }
-          : {
-              text: list.length > 0 ? "Ready" : "No switchable roles",
-              error: false,
-            },
-      );
+      setRoleState("ready");
+      // The value seat and the chip carry the steady state; the seat stays
+      // empty until there is something to report (progress or a failure).
+      setStatus({ text: "", error: false });
     }
 
     loadDockState().catch((err: unknown) => {
       if (cancelled) return;
+      setRoleState("unknown");
       setStatus({
         text: "Failed to load roles: " + toMessage(err),
         error: true,
@@ -416,7 +530,12 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, loadToken]);
+
+  /** Re-fetch the role list and the active role without losing the filter. */
+  function reload(): void {
+    setLoadToken((n) => n + 1);
+  }
 
   /**
    * Switch to a role. The session id for the POST body is the
@@ -427,8 +546,9 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
    */
   async function switchRole(role: string): Promise<void> {
     if (busy) return;
+    const switchedName = roles.find((item) => item.id === role)?.name ?? role;
     setBusy(true);
-    setStatus({ text: "Switching to " + role + "…", error: false });
+    setStatus({ text: "Switching to " + switchedName + "…", error: false });
     try {
       const res = await fetch(SWITCH_ENDPOINT, {
         method: "POST",
@@ -446,14 +566,20 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       }
       setFailedAction(null);
       setActiveRole(result.role);
+      // The picker closes on success and the collapse IS the visible
+      // confirmation: the value seat re-mounts with the new name, the chip
+      // flips to Active, and the dock returns to its rest posture instead of
+      // blocking the composer. No toast, no checkmark flash, no colour pulse —
+      // but the seat still announces the change for assistive technology.
       setStatus({
-        text: "Role " + result.role + " is active for this session",
+        text: switchedName + " is now the active role",
         error: false,
+        srOnly: true,
       });
-      // The picker closes on success: the always-visible status seat (and
-      // the header's current-role dot) carries the confirmation, and the
-      // dock returns to its 36px posture instead of blocking the composer.
       setCollapsed(true);
+      // The row this was clicked from is about to be hidden, which would drop
+      // focus to <body>; return it to the toggle the user came from.
+      headerRef.current?.focus?.();
     } catch (err) {
       setFailedAction({ kind: "switch", role });
       setStatus({
@@ -469,7 +595,7 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
    * Clear the active role back to the base agent
    * (`DELETE /rolebox/roles/active?session=…` — the session param is sent
    * the same way the active-role probe passes it). Success resets the
-   * `aria-current` highlight and the status seat; failure preserves the
+   * `aria-current` highlight and the value seat; failure preserves the
    * previous active role and leaves `failedAction` set for the Retry row.
    */
   async function clearRole(): Promise<void> {
@@ -492,8 +618,13 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
       }
       setFailedAction(null);
       setActiveRole(null);
-      setStatus({ text: "Base agent active for this session", error: false });
+      setStatus({
+        text: "Returned to the base agent",
+        error: false,
+        srOnly: true,
+      });
       setCollapsed(true);
+      headerRef.current?.focus?.();
     } catch (err) {
       setFailedAction({ kind: "clear" });
       setStatus({
@@ -529,36 +660,103 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
             role.description.toLowerCase().includes(needle),
         );
 
+  // Recognition over recall: the header names the DISPLAY NAME of the active
+  // role. The shipped design named the role *id*, which the picker never
+  // displays — so the header named a string the user could not find anywhere
+  // in the list. Falls back to the id only if the role is not in the list.
+  const activeName =
+    activeRole === null
+      ? null
+      : (roles.find((role) => role.id === activeRole)?.name ?? activeRole);
+  const valueLabel =
+    roleState === "loading"
+      ? "Loading…"
+      : roleState === "unknown"
+        ? "Unknown"
+        : (activeName ?? "Base agent");
+  const chipKind: "active" | "base" | null =
+    roleState === "ready" ? (activeRole === null ? "base" : "active") : null;
+  const spokenValue = chipKind === "base" ? "base agent" : valueLabel;
+  const headerLabel =
+    "Role picker: " +
+    spokenValue +
+    (chipKind === "active" ? " is active" : "") +
+    (collapsed ? ". Expand role list." : ". Collapse role list.");
+
+  const countText =
+    needle === ""
+      ? String(roles.length)
+      : visibleRoles.length + " of " + roles.length;
+
+  const open = !collapsed;
+
   return (
     <div className="rolebox-dock" data-rolebox-dock>
       <div className={dockClass.panel}>
-        <button
-          type="button"
-          className={dockClass.header}
-          aria-expanded={!collapsed}
-          onClick={() => setCollapsed((value) => !value)}
-        >
-          <span className={dockClass.lead} aria-hidden="true">
-            <RoleGlyph />
-          </span>
-          <span className={dockClass.title}>Role</span>
+        <div className={dockClass.headerRow}>
+          <button
+            ref={headerRef}
+            type="button"
+            className={dockClass.header}
+            aria-expanded={open}
+            aria-controls={DOCK_DISCLOSURE_ID}
+            aria-label={headerLabel}
+            onClick={() => setCollapsed((value) => !value)}
+          >
+            <span className={dockClass.lead} aria-hidden="true">
+              <RoleGlyph />
+            </span>
+            <span
+              key={roleState + ":" + (activeRole ?? "none")}
+              className={dockClass.value}
+              title={valueLabel}
+            >
+              {valueLabel}
+            </span>
+            {chipKind !== null && (
+              <span
+                className={
+                  chipKind === "active"
+                    ? dockClass.chip + " " + dockClass.chipActive
+                    : dockClass.chip + " " + dockClass.chipBase
+                }
+                aria-hidden="true"
+              >
+                {chipKind === "active" ? "Active" : "Base"}
+              </span>
+            )}
+            <span
+              className={dockClass.chevron}
+              data-open={String(open)}
+              aria-hidden="true"
+            >
+              <ChevronGlyph />
+            </span>
+          </button>
           <span
             role="status"
             title={status.text}
             className={
-              status.error
+              (status.error
                 ? dockClass.status + " " + dockClass.statusError
-                : dockClass.status
+                : dockClass.status) +
+              (status.srOnly === true ? " " + dockClass.statusSr : "")
             }
           >
+            {status.error && (
+              <span className={dockClass.statusGlyph} aria-hidden="true">
+                <AlertGlyph />
+              </span>
+            )}
             {status.text}
           </span>
-          {activeRole !== null && (
-            <span className={dockClass.current} aria-hidden="true" />
-          )}
-        </button>
-        {!collapsed && (
-          <>
+        </div>
+        <div
+          className={dockClass.disclosure}
+          id={DOCK_DISCLOSURE_ID}
+          data-open={String(open)}
+        >
+          <div className={dockClass.disclosureInner}>
             {roles.length > 0 && (
               <div className={dockClass.filter}>
                 <span className={dockClass.filterLead} aria-hidden="true">
@@ -579,6 +777,9 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                     if (event.key === "Escape" && query !== "") setQuery("");
                   }}
                 />
+                <span className={dockClass.count} role="status">
+                  {countText}
+                </span>
                 {query !== "" && (
                   <button
                     type="button"
@@ -591,18 +792,23 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                 )}
               </div>
             )}
-            <div className={dockClass.list}>
+            <div
+              className={dockClass.list}
+              role="group"
+              aria-label="Switchable roles"
+            >
               {visibleRoles.map((role) => {
                 const meta = [role.description, role.model, role.mode]
                   .filter((part): part is string => Boolean(part))
                   .join(" · ");
+                const isActive = role.id === activeRole;
                 return (
                   <button
                     key={role.id}
                     type="button"
                     className={dockClass.row}
                     disabled={busy}
-                    aria-current={role.id === activeRole ? "true" : undefined}
+                    aria-current={isActive ? "true" : undefined}
                     onClick={() => {
                       void switchRole(role.id);
                     }}
@@ -615,9 +821,16 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                         {meta}
                       </span>
                     )}
-                    {role.id === activeRole && (
-                      <span className={dockClass.current} aria-hidden="true" />
-                    )}
+                    <span
+                      className={
+                        isActive
+                          ? dockClass.mark + " " + dockClass.markActive
+                          : dockClass.mark
+                      }
+                      aria-hidden="true"
+                    >
+                      {isActive && <CheckGlyph />}
+                    </span>
                   </button>
                 );
               })}
@@ -626,6 +839,43 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                   No roles match “{query.trim()}”
                 </div>
               )}
+              {roles.length === 0 && needle === "" && roleState === "loading" && (
+                // Not a live region: the header seat already announces the load.
+                <div className={dockClass.empty}>
+                  <span className={dockClass.emptyBody}>Loading roles…</span>
+                </div>
+              )}
+              {roles.length === 0 &&
+                needle === "" &&
+                roleState !== "loading" &&
+                (roleState === "unknown" ? (
+                  <div className={dockClass.empty}>
+                    <span className={dockClass.emptyTitle}>
+                      Couldn&apos;t load roles
+                    </span>
+                    <span className={dockClass.emptyBody}>{status.text}</span>
+                    <button
+                      type="button"
+                      className={dockClass.emptyAction}
+                      onClick={reload}
+                    >
+                      Reload
+                    </button>
+                  </div>
+                ) : (
+                  <div className={dockClass.empty}>
+                    <span className={dockClass.emptyBody}>
+                      No switchable roles in this project.
+                    </span>
+                    <button
+                      type="button"
+                      className={dockClass.emptyAction}
+                      onClick={reload}
+                    >
+                      Reload
+                    </button>
+                  </div>
+                ))}
               {failedAction !== null && (
                 <button
                   type="button"
@@ -637,7 +887,9 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                   <span className={dockClass.meta}>
                     {failedAction.kind === "clear"
                       ? "Return to base agent"
-                      : "Switch to " + failedAction.role}
+                      : "Switch to " +
+                        (roles.find((item) => item.id === failedAction.role)
+                          ?.name ?? failedAction.role)}
                   </span>
                 </button>
               )}
@@ -657,8 +909,8 @@ export function RoleSwitchDock({ sessionId }: RoleSwitchDockProps) {
                 </button>
               )}
             </div>
-          </>
-        )}
+          </div>
+        </div>
       </div>
     </div>
   );

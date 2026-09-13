@@ -36,6 +36,8 @@ declare module "react" {
     effect: () => void | (() => void),
     deps?: readonly unknown[],
   ): void;
+  /** `useRef` — a mutable ref slot (structural copy of @types/react's signature). */
+  export function useRef<T>(initial: T): { current: T };
   /** `createElement` — element factory (structural copy). */
   export function createElement(
     type: unknown,

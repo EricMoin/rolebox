@@ -201,7 +201,15 @@ function click(node: VNode): void {
 const FRAGMENT = Symbol.for("react.fragment");
 const jsx = (type: unknown, props: Record<string, unknown>): VNode => ({ type, props });
 
-mock.module("react", () => ({ useState, useEffect, createElement: jsx, Fragment: FRAGMENT }));
+/** `useRef` — a per-slot mutable cell (shares the `useState` slot array). */
+function useRef<T>(initial: T): { current: T } {
+  const rs = renderState!;
+  const slot = hookIndex++;
+  if (rs.states.length <= slot) rs.states.push({ current: initial });
+  return rs.states[slot] as { current: T };
+}
+
+mock.module("react", () => ({ useState, useEffect, useRef, createElement: jsx, Fragment: FRAGMENT }));
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 mock.module("react/jsx-dev-runtime", () => ({ jsx, jsxs: jsx, jsxDEV: jsx, Fragment: FRAGMENT }));
 
@@ -332,6 +340,18 @@ function statusSeat(): VNode {
 
 function stateSeat(): VNode {
   return byClass("rolebox-monitor-state")[0]!;
+}
+
+/**
+ * The glyph component the attention band chose. The harness stores function
+ * components as vnodes without invoking them (there is no real DOM), so the
+ * component IDENTITY is what is observable here — which is exactly what the
+ * assertion needs: which of the three glyphs the band selected.
+ */
+function bandGlyph(): string {
+  const glyph = byClass("rolebox-monitor-attention-glyph")[0]!;
+  const child = childNodes(glyph)[0] as VNode;
+  return (child.type as { name?: string }).name ?? "";
 }
 
 /** Text of the `dd` value of the kv row whose `dt` label is `name`. */
@@ -606,6 +626,347 @@ describe("RoleboxMonitorPanel", () => {
       const allVars = [...cssText.matchAll(/var\((--[a-z0-9-]+)\)/g)].map((match) => match[1]!);
       const leaks = allVars.filter((token) => !token.startsWith("--dsw-"));
       expect(leaks).toEqual([]);
+
+      // Every rolebox token CONSUMPTION must carry a comma + fallback, so the
+      // bare var() scan above can never become a loophole for a private
+      // namespace. Definitions are plain declarations and are not scanned.
+      const bareRoleboxVars = [...cssText.matchAll(/var\((--rolebox-[a-z0-9-]+)\)/g)].map((m) => m[1]!);
+      expect(bareRoleboxVars).toEqual([]);
+
+      // The neutral chips must be distinguishable in KIND, not just in alpha —
+      // the word is the primary channel, but a 1px 4%-alpha hairline is not one.
+      const stoppedBlock =
+        /\.rolebox-monitor-chip-stopped\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(stoppedBlock).toContain("--rolebox-border-strong");
+      const idleBlock =
+        /\.rolebox-monitor-chip-idle\s*\{([^}]*)\}/s.exec(cssText)?.[1] ?? "";
+      expect(idleBlock).toContain("rolebox-surface-hover");
+
+      // Both rolebox surfaces move on ONE curve — the host's (--ds-ease-in-out).
+      expect(cssText.match(/--rolebox-ease[a-z-]*:/g)).toEqual(["--rolebox-ease:"]);
+    });
+  });
+
+  describe("run-state vocabulary", () => {
+    it("classifies the real engine (idle | executing | complete), loop and node vocabularies", () => {
+      // The loop state machine, verbatim (src/loop/types.ts).
+      expect(panel.classifyRunPhase("activating")).toBe("running");
+      expect(panel.classifyRunPhase("dispatching")).toBe("running");
+      expect(panel.classifyRunPhase("awaiting_worker")).toBe("running");
+      expect(panel.classifyRunPhase("summarizing")).toBe("running");
+      expect(panel.classifyRunPhase("finalizing")).toBe("running");
+      expect(panel.classifyRunPhase("complete")).toBe("complete");
+      expect(panel.classifyRunPhase("error")).toBe("failed");
+      // A cancelled run stopped, but it did not break — calling it Failed
+      // would be a lie.
+      expect(panel.classifyRunPhase("cancelled")).toBe("stopped");
+      expect(panel.classifyRunPhase("interrupted")).toBe("stopped");
+      // Engine vocabulary.
+      expect(panel.classifyRunPhase("executing")).toBe("running");
+      // The engine's resting phase is a real state, not an unreadable one.
+      expect(panel.classifyRunPhase("idle")).toBe("idle");
+      expect(panel.classifyRunPhase("blocked")).toBe("blocked");
+      expect(panel.classifyRunPhase("failed")).toBe("failed");
+      // Never guess: an unrecognised or absent phase is neutrally unknown.
+      expect(panel.classifyRunPhase("weird_thing")).toBe("unknown");
+      expect(panel.classifyRunPhase(undefined)).toBe("unknown");
+    });
+
+    it("derives the attention verdict from the payload alone", () => {
+      const healthy = panel.deriveAttention(STATUS_BODY.engineGraphs, STATUS_BODY.loops);
+      expect(healthy.needsAttention).toBe(false);
+      expect(healthy.running).toBe(2);
+      expect(healthy.failed).toEqual([]);
+
+      const broken = panel.deriveAttention(
+        [{ ...STATUS_BODY.engineGraphs[0]!, phase: "failed" }],
+        STATUS_BODY.loops,
+      );
+      expect(broken.needsAttention).toBe(true);
+      expect(broken.failed).toEqual(["graph-1"]);
+    });
+
+    it("treats an escalated node as blocked until the graph completes", () => {
+      // idle + an escalated node: a node is waiting on a human, which the
+      // host's own renderer paints as an error.
+      const awaiting = panel.deriveAttention(
+        [
+          {
+            ...STATUS_BODY.engineGraphs[0]!,
+            phase: "idle",
+            nodeStatusCounts: { escalate: 1 },
+          },
+        ],
+        [],
+      );
+      expect(awaiting.needsAttention).toBe(true);
+      expect(awaiting.blocked).toEqual(["graph-1"]);
+
+      // A historical escalation on a finished graph must not alarm forever.
+      const finished = panel.deriveAttention(
+        [
+          {
+            ...STATUS_BODY.engineGraphs[0]!,
+            phase: "complete",
+            nodeStatusCounts: { escalate: 1 },
+          },
+        ],
+        [],
+      );
+      expect(finished.needsAttention).toBe(false);
+    });
+
+    it("keeps a terminal graph's verdict despite its historical stopped nodes", () => {
+      // nodeStatusCounts is a snapshot that OUTLIVES the run, so a finished
+      // graph must never pin a permanent red band beside its own green chip.
+      expect(
+        panel.deriveAttention(
+          [
+            {
+              ...STATUS_BODY.engineGraphs[0]!,
+              phase: "complete",
+              nodeStatusCounts: { timeout: 1, done: 3 },
+            },
+          ],
+          [],
+        ).needsAttention,
+      ).toBe(false);
+      expect(
+        panel.deriveAttention(
+          [
+            {
+              ...STATUS_BODY.engineGraphs[0]!,
+              phase: "complete",
+              nodeStatusCounts: { cancelled: 1, done: 2 },
+            },
+          ],
+          [],
+        ).needsAttention,
+      ).toBe(false);
+      // The carve-out: a HITL gate survives cancellation — the engine leaves the
+      // blocked node for the human while forcing the phase to complete — so it
+      // must still raise the verdict on a terminal graph.
+      expect(
+        panel.deriveAttention(
+          [
+            {
+              ...STATUS_BODY.engineGraphs[0]!,
+              phase: "complete",
+              nodeStatusCounts: { blocked: 1 },
+            },
+          ],
+          [],
+        ),
+      ).toMatchObject({ needsAttention: true, blocked: ["graph-1"] });
+
+      // On a LIVE graph the same node statuses do raise the verdict.
+      expect(
+        panel.deriveAttention(
+          [
+            {
+              ...STATUS_BODY.engineGraphs[0]!,
+              phase: "executing",
+              nodeStatusCounts: { timeout: 1, running: 1 },
+            },
+          ],
+          [],
+        ).needsAttention,
+      ).toBe(true);
+    });
+
+    it("names unreadable phases instead of claiming all clear", () => {
+      const murky = panel.deriveAttention(
+        [{ ...STATUS_BODY.engineGraphs[0]!, phase: "quantum_superposition" }],
+        [],
+      );
+      expect(murky.needsAttention).toBe(false);
+      expect(murky.unknown).toEqual(["graph-1"]);
+      // The band must NOT assert "All clear" over data it could not read.
+      expect(panel.describeAttention(murky)).toContain("Unrecognized: graph-1");
+    });
+
+    it("carries the admission into the band and the live region", async () => {
+      cfg.status = {
+        ...STATUS_BODY,
+        engineGraphs: [
+          { ...STATUS_BODY.engineGraphs[0]!, phase: "quantum_superposition" },
+        ],
+      };
+      mountPanel();
+      await settle();
+
+      const band = byClass("rolebox-monitor-attention")[0]!;
+      expect(textOf(band)).toContain("state unrecognized");
+      expect(band.props.className).toContain("rolebox-monitor-attention-calm");
+      // A check mark must never sit over an admission: the neutral question
+      // glyph is what this state renders.
+      expect(bandGlyph()).toBe("QuestionGlyph");
+      // The live region must not disagree with the band about the same snapshot.
+      expect(textOf(statusSeat())).toContain("state unrecognized");
+    });
+
+    it("surfaces a failed node on a graph whose own phase still reads running", () => {
+      const verdict = panel.deriveAttention(
+        [
+          {
+            ...STATUS_BODY.engineGraphs[0]!,
+            phase: "executing",
+            nodeStatusCounts: { running: 1, failed: 2 },
+          },
+        ],
+        [],
+      );
+      expect(verdict.needsAttention).toBe(true);
+      expect(verdict.failed).toEqual(["graph-1"]);
+    });
+
+    it("does not raise attention for a cancelled run", () => {
+      const verdict = panel.deriveAttention([], [
+        { ...STATUS_BODY.loops[0]!, phase: "cancelled" },
+      ]);
+      expect(verdict.needsAttention).toBe(false);
+    });
+  });
+
+  describe("attention band", () => {
+    it("leads with an all-clear verdict for a healthy snapshot", async () => {
+      mountPanel();
+      await settle();
+
+      const band = byClass("rolebox-monitor-attention")[0]!;
+      expect(band.props.className).toContain("rolebox-monitor-attention-calm");
+      expect(textOf(band)).toContain("All clear");
+      // "All clear" is the only state allowed a check mark.
+      expect(bandGlyph()).toBe("CheckGlyph");
+      // The band is the first child of the body — verdict before evidence.
+      expect(childNodes(byClass("rolebox-monitor-body")[0]!)[0]).toBe(band);
+    });
+
+    it("raises an alert band and names what needs attention", async () => {
+      cfg.status = {
+        ...STATUS_BODY,
+        engineGraphs: [{ ...STATUS_BODY.engineGraphs[0]!, phase: "failed" }],
+      };
+      mountPanel();
+      await settle();
+
+      const band = byClass("rolebox-monitor-attention")[0]!;
+      expect(band.props.className).toContain("rolebox-monitor-attention-alert");
+      expect(textOf(band)).toContain("1 need attention");
+      expect(textOf(band)).toContain("Failed: graph-1");
+      expect(bandGlyph()).toBe("AlertGlyph");
+      // The live-region seat announces the verdict too.
+      expect(textOf(statusSeat())).toContain("1 need attention");
+    });
+  });
+
+  describe("state chips", () => {
+    it("pairs every raw phase with a normalised state word", async () => {
+      mountPanel();
+      await settle();
+
+      const bodyText = textOf(byClass("rolebox-monitor-body")[0]!);
+      // The raw backend phase is never replaced by the word.
+      expect(bodyText).toContain("executing");
+      expect(bodyText).toContain("awaiting_worker");
+      // Both the graph and the loop are running.
+      expect(byClass("rolebox-monitor-chip-running")).toHaveLength(2);
+      expect(byClass("rolebox-monitor-chip-complete")).toHaveLength(0);
+    });
+
+    it("moves the chip to its terminal state after a refresh", async () => {
+      mountPanel();
+      await settle();
+
+      cfg.status = {
+        ...STATUS_BODY,
+        engineGraphs: [{ ...STATUS_BODY.engineGraphs[0]!, phase: "complete" }],
+      };
+      click(refreshButton());
+      await settle();
+
+      expect(byClass("rolebox-monitor-chip-complete")).toHaveLength(1);
+      expect(byClass("rolebox-monitor-chip-running")).toHaveLength(1);
+      const bodyText = textOf(byClass("rolebox-monitor-body")[0]!);
+      expect(bodyText).toContain("complete");
+    });
+  });
+
+  describe("section counts", () => {
+    it("states how much each section holds", async () => {
+      mountPanel();
+      await settle();
+
+      const counts = byClass("rolebox-monitor-section-count");
+      expect(counts).toHaveLength(4);
+      expect(textOf(counts[0]!)).toBe("1"); // engine graphs
+      expect(textOf(counts[1]!)).toBe("1"); // loops
+      expect(textOf(counts[3]!)).toBe("2"); // sessions
+    });
+  });
+
+  describe("metric overflow", () => {
+    it("caps a group and exposes the rest through an accessible disclosure", async () => {
+      const counters: Record<string, { value: number }> = {};
+      for (let i = 0; i < 10; i++) counters["c" + i] = { value: i };
+      cfg.status = { engineGraphs: STATUS_BODY.engineGraphs };
+      cfg.metrics = { counters, gauges: {}, histograms: {} };
+      mountPanel();
+      await settle();
+
+      const toggle = byClass("rolebox-monitor-more")[0]!;
+      expect(toggle).toBeDefined();
+      expect(toggle.props["aria-expanded"]).toBe(false);
+      expect(textOf(toggle)).toBe("Show all 10");
+      expect(toggle.props["aria-controls"]).toBe("rolebox-monitor-counters");
+      // The 9th row is behind the disclosure.
+      expect(textOf(byClass("rolebox-monitor-body")[0]!)).not.toContain("c9");
+
+      click(toggle);
+      // Re-query: the click re-rendered the tree, so the old vnode is stale.
+      const toggled = byClass("rolebox-monitor-more")[0]!;
+      expect(toggled.props["aria-expanded"]).toBe(true);
+      expect(textOf(toggled)).toBe("Show fewer");
+      expect(textOf(byClass("rolebox-monitor-body")[0]!)).toContain("c9");
+    });
+
+    it("renders no disclosure when a group fits the cap", async () => {
+      mountPanel();
+      await settle();
+      expect(byClass("rolebox-monitor-more")).toHaveLength(0);
+    });
+  });
+
+  describe("loading and refresh posture", () => {
+    it("substitutes a content-shaped skeleton for the first load only", async () => {
+      cfg.gate = true;
+      mountPanel();
+
+      expect(byClass("rolebox-monitor-skeleton")).toHaveLength(1);
+      expect(byClass("rolebox-monitor-spinner")).toHaveLength(1);
+      // The skeleton mirrors the real layout: an attention band plus cards.
+      expect(byClass("rolebox-monitor-skeleton-card")).toHaveLength(3);
+
+      releaseGate();
+      await settle();
+      expect(byClass("rolebox-monitor-skeleton")).toHaveLength(0);
+    });
+
+    it("names a refresh as a refresh rather than a first load", async () => {
+      mountPanel();
+      await settle();
+      expect(textOf(statusSeat())).toContain("Updated at");
+
+      cfg.gate = true;
+      click(refreshButton());
+      // With data already on screen the seat says what is happening, and the
+      // body is never replaced by the skeleton.
+      expect(textOf(statusSeat())).toBe("Refreshing…");
+      expect(byClass("rolebox-monitor-skeleton")).toHaveLength(0);
+      expect(byClass("rolebox-monitor-body")).toHaveLength(1);
+
+      releaseGate();
+      await settle();
     });
   });
 });
