@@ -1482,6 +1482,49 @@ live: dsh --profile testp --dump-default-config
 live: → "# == @dsh-contract-test/test-bundle" with the bundle's insert rows composed
 ```
 
+### 5.4.1 rolebox plugin config options
+
+Every option is optional — the rolebox plugin activates with the dsh-home
+defaults alone (`roleboxDir` / `skillsDir` resolved on top of
+`dshPlatformPaths()`, see §5.1):
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `roleboxDir` | `string` | `{dsh home}/rolebox` | Directory containing `role.yaml` files |
+| `skillsDir` | `string` | `{dsh home}/skills` | Global skills directory |
+| `defaultRole` | `string` | — | Role id (directory name) promoted to primary mode |
+| `enabledNamespaces` | `string[]` | all | Tool allow-list: exact tool names or namespace prefixes (e.g. `hashline`, `graph`); `"*"` or absent registers every assembled tool |
+
+Set them by patching the rolebox row's `config` from the profile's own
+`cordis.patch.yml` (applied after every bundle layer, §5.4):
+
+```yaml
+# ~/.dsh/profiles/<name>/cordis.patch.yml
+- id: rolebox
+  config:
+    roleboxDir: /absolute/path/to/roles
+    enabledNamespaces: ["asset", "graph", "hashline", "loop", "memory", "reference", "session", "signal"]
+```
+
+Because an `id`-targeted patch replaces the row's config wholesale (§5.3), keys
+the bundle layer declared are lost unless re-declared in the same patch. A fully
+configured example ships at `examples/dsh/cordis.patch.yml`.
+
+### 5.4.2 Global `web_search` / `web_fetch` collision (verified at boot)
+
+The dsh base profile already registers a **global** `web_search` / `web_fetch`
+tool (via `@deepseek-ai/dsh-tool-web`). dsh's tool registry rejects duplicate
+global tool names, so registering rolebox's own `web_search` / `web_fetch` /
+`web_read` on top fails boot with:
+
+```text
+tool "web_search" is already registered
+```
+
+**Mitigation:** exclude the colliding `web` namespace from rolebox's
+`enabledNamespaces` in the profile patch and let dsh's own web tools serve — or
+choose an allow-list that avoids the overlap (see §5.4.1 for the option itself).
+
 ### 5.5 `dsh plugin add` reconcile behavior
 
 `dsh plugin` is a **thin pnpm forwarder** (`apps/cli/src/plugin.ts`):

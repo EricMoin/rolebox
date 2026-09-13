@@ -569,6 +569,131 @@ against the current tree on 2026-08-24.
 
 ---
 
+## 4. Authored surface — the public graph toolset
+
+§1–§3 describe the engine internals. This section describes the surface an
+agent or role actually drives to author a workflow: the toolset registered in
+`src/graph/tools/index.ts` (implementations in `src/graph/tools/graph-tools.ts`).
+
+### 4.1 The toolset
+
+| Tool | Purpose |
+|------|---------|
+| `graph_create` | Open a graph registry slot; returns the `graph_id` every later call needs |
+| `graph_add_node` | Register one worker node |
+| `graph_add_edge` | Add a directed edge (data flow + signal routing) |
+| `graph_add_loop` | Declare a bounded cycle over existing nodes |
+| `graph_run` | Dispatch ready roots (non-blocking), or validate structure with `dry_run` |
+| `graph_status` | Query node / loop / graph state |
+| `graph_cancel` | Cancel the whole graph, one node, or one loop group (`cascade` propagates downstream) |
+| `graph_approve` | Resolve a `needs_approval` gate (`approve` / `reject`) |
+
+### 4.2 Nodes
+
+Nodes are **role-agnostic `{agent, prompt}` tuples**. `graph_add_node` takes
+`graph_id`, `id`, `agent`, `prompt`, plus optional `completion_condition`
+(a named condition that auto-completes the node), `needs_approval`, `join`
+(fan-in strategy: `all` / `any` / `quorum`), and `budget`
+(`max_input_tokens` / `max_output_tokens` / `max_cost_usd` / `timeout_ms`).
+Structural validation is **atomic** — an invalid node is rejected without
+mutating the graph. `timeout_ms: 0` is the documented per-node opt-out sentinel
+that disables the staleness watchdog; only negative values are rejected.
+
+### 4.3 Edges
+
+Edges are directed and carry both data flow and signal routing. `type` is one of:
+
+- `always` — activate the target when the source completes;
+- `on_signal` — activate on a specific signal type (requires `signal_filter`,
+  e.g. `["revise_needed"]`);
+- `on_condition` — activate when a named condition evaluates true (requires
+  `condition`).
+
+Optional per-edge controls: `retry` (auto-retry on escalate, with `backoff_ms`)
+and the `data_passthrough_include` / `data_passthrough_exclude` /
+`data_passthrough_max_chars` triple that bounds what crosses the edge.
+
+### 4.4 Loop groups
+
+`graph_add_loop(graph_id, id, nodes, max_traversals, mode?)` declares a set of
+existing nodes as a **bounded cycle** with a hard `max_traversals` cap (the only
+required numeric field; `>= 1`). Rounds re-dispatch within the **same engine
+state** (`mode: "inherit"`); per-round session isolation is **not supported** —
+`mode: "fresh"` returns an explicit error naming the alternative path (a
+separate graph per round).
+
+The authored API has **no loop-level termination/timeout parameter**. Early exit
+is engine behavior, not configuration: a loop member that signals `answer` exits
+the loop on the **`converged`** path (only the forward `answer` data flow runs,
+and no traversal is consumed), while a loop that repeatedly emits the same
+convergence output escalates with reason **`stuck`** after
+`CONSECUTIVE_STALE_THRESHOLD` (= 2) identical traversals. For a time bound, use
+the per-node `budget.timeout_ms` (§4.2). See §2.6 / `loop-group-executor.ts`
+for the full outcome table.
+
+### 4.5 Approval gates
+
+A node with `needs_approval: true` pauses the graph at that node and the engine
+emits `[GRAPH BLOCKED]`. The gate is resolved with
+`graph_approve(graph_id, node_id, action)`:
+
+- `action: "approve"` — the node completes (`blocked → completed`) and its
+  forward `answer` data flow resumes the graph automatically;
+- `action: "reject"` — the node re-enters with the supplied reason when it
+  belongs to a loop group, otherwise it escalates.
+
+Both directions are idempotent — a decision on an already-resolved node is a
+no-op.
+
+### 4.6 Observability
+
+`graph_status` takes `graph_id` / `node_id` / `loop_id` targets and reports
+with no target at all (listing every graph). Useful switches: `format`
+(`summary` | `tree` | `json`), `scope` (`session` | `persisted` | `all`),
+`include_output` (materialized node results), `include_history` + `round`,
+`include_progress` / `include_budget` / `include_loops` / `include_metrics`,
+`pending_approvals` ("awaiting human" view), `stream` + `since`, and the
+`max_chars` / `offset` / `tail` pagination triple.
+
+Persisted state lives in `.rolebox/state/engine-{slug}.json` per graph, alongside
+the append-only `.rolebox/state/graph-events-*.ndjson` event log (see §2.6 for
+the persistence model).
+
+### 4.7 Usage protocol (non-blocking)
+
+`graph_run` is **non-blocking** — it dispatches ready root nodes and returns
+immediately with `phase`, `active_nodes`, and `pending_nodes`. End your turn
+after `graph_run`; the engine emits a `[GRAPH COMPLETE]` system-reminder when
+all nodes finish (or `[GRAPH BLOCKED]` when a node awaits approval). On the next
+turn, read results once via `graph_status(graph_id, include_output=true)`.
+Polling `graph_status` is a fallback only.
+
+```text
+1. graph_create(name="review-workflow")                 → { graph_id: "review-workflow", ... }
+2. graph_add_node(graph_id="review-workflow", id="writer",
+     agent="emperor--jinyiwei--ui", prompt="Build the component")
+3. graph_add_node(graph_id="review-workflow", id="reviewer",
+     agent="emperor--jinyiwei--test", prompt="Review the result")
+4. graph_add_edge(graph_id="review-workflow",
+     from="writer", to="reviewer", type="always")
+5. graph_run(graph_id="review-workflow")                → non-blocking; end your turn
+6. [GRAPH COMPLETE] system-reminder arrives
+7. graph_status(graph_id="review-workflow", include_output=true)   → read results once
+```
+
+Loop groups and approval gates compose on top of the same node/edge model:
+
+```text
+graph_add_loop(graph_id="review-workflow", id="revise",
+  nodes=["writer", "reviewer"], max_traversals=3)
+graph_add_node(graph_id="review-workflow", id="finalize",
+  agent="emperor--jinyiwei--docs", prompt="Finalize", needs_approval=true)
+graph_run(graph_id="review-workflow")                          → [GRAPH BLOCKED] at "finalize"
+graph_approve(graph_id="review-workflow", node_id="finalize", action="approve")
+```
+
+---
+
 ## Appendix — verification notes
 
 - Line ranges in the task brief that were verified as **exact** (still valid

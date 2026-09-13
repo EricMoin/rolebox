@@ -102,7 +102,7 @@ model: openrouter-anthropic/anthropic/claude-opus-4.8
 At load time the value is run through the model resolver
 (`src/resolver/model-resolver.ts`): a value already present in the harness's
 model catalog passes through, a configured
-[`model_aliases`](../README.md#model-alias-configuration) entry maps to its
+[`model_aliases`](model-aliases.md) entry maps to its
 canonical target (single hop), and anything unrecognized passes through
 unchanged with a log hint. Bare names therefore work only through that
 alias/passthrough path — prefer the explicit `provider/model-id` form.
