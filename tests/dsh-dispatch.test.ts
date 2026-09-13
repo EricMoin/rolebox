@@ -44,6 +44,7 @@ import type {
 } from "../src/platform/adapters/dsh/agent-registrar.ts";
 import { DshAgentRegistrar } from "../src/platform/adapters/dsh/agent-registrar.ts";
 import type { AgentDefinition } from "../src/platform/types.ts";
+import { sessionSignalLedger } from "../src/signal/session-signal-ledger.ts";
 
 // ── Mocked dsh subagent service ─────────────────────────────────────────────
 
@@ -1118,6 +1119,92 @@ describe("dsh 0.1.5-rc.1 continuable-creation contract (prepareContinuable)", ()
   function registrarFor(def: AgentDefinition): DshSubagentProvider {
     return new DshAgentRegistrar({ subagents: service }).buildProvider(def);
   }
+});
+
+// ── Terminating-signal parity on the dsh settlement path ────────────────────
+//
+// The completion evaluator records the sub-agent's terminating signal on the
+// task (`task.terminatingSignal`, completion-evaluator.ts) so the engine's
+// `mapDispatchStatusToSignal` (engine-recovery.ts) can preserve a real
+// `revise_needed` / `escalate` instead of hardcoding `answer`. The dsh
+// adapter settles its own tasks, so it must make the same assignment —
+// otherwise every completed dsh node falls through to the inferred-answer
+// branch and logs "no terminatingSignal recorded for completed task".
+
+describe("terminating-signal parity on dsh completion settlement", () => {
+  // `sessionSignalLedger` is a process-wide singleton; reset it around every
+  // case so one case's recorded signal cannot leak into another.
+  beforeEach(() => {
+    sessionSignalLedger.resetAll();
+  });
+
+  afterEach(() => {
+    sessionSignalLedger.resetAll();
+  });
+
+  it("settles a completed run with the synthetic answer signal when no signal was recorded", async () => {
+    service.seedProvider("silent-run");
+    const { workerTaskId } = await dispatch.dispatchRound({
+      originSessionId: "origin-signal",
+      agent: "silent-run",
+      prompt: "round",
+    });
+
+    // Settle the run explicitly so the assertion never races a timer.
+    service.completeRun(workerTaskId, {
+      stopReason: "completed",
+      output: outputBlock("finished clean"),
+    });
+    await settle();
+
+    const task = dispatch.getTask(workerTaskId);
+    expect(task?.status).toBe("completed");
+    expect(task?.terminatingSignal?.type).toBe("answer");
+    expect(task?.terminatingSignal?.payload).toEqual({ __inferred: true });
+  });
+
+  it("carries the ledger's terminating signal from the sub-agent session onto the settled task", async () => {
+    service.seedProvider("revise-run");
+    const { workerTaskId, workerSessionId } = await dispatch.dispatchRound({
+      originSessionId: "origin-signal",
+      agent: "revise-run",
+      prompt: "round",
+    });
+
+    // The sub-agent's own `signal()` call lands in the ledger keyed by its
+    // session — in dsh a `SubagentRun.id` IS a `SessionId`.
+    sessionSignalLedger.record(workerSessionId, "revise_needed", {
+      reason: "rework the draft",
+    });
+    service.completeRun(workerTaskId, {
+      stopReason: "completed",
+      output: outputBlock("done"),
+    });
+    await settle();
+
+    const task = dispatch.getTask(workerTaskId);
+    expect(task?.status).toBe("completed");
+    expect(task?.terminatingSignal?.type).toBe("revise_needed");
+    expect(task?.terminatingSignal?.payload).toEqual({ reason: "rework the draft" });
+  });
+
+  it("leaves the error path untouched (it maps independently of the signal)", async () => {
+    service.seedProvider("error-run");
+    const { workerTaskId } = await dispatch.dispatchRound({
+      originSessionId: "origin-signal",
+      agent: "error-run",
+      prompt: "round",
+    });
+    service.completeRun(workerTaskId, {
+      stopReason: "error",
+      output: outputBlock("boom"),
+    });
+    await settle();
+
+    const task = dispatch.getTask(workerTaskId);
+    expect(task?.status).toBe("error");
+    expect(task?.terminatingSignal).toBeUndefined();
+  });
 });
 
 // ── Import hygiene ──────────────────────────────────────────────────────────

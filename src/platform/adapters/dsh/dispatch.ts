@@ -86,6 +86,8 @@ import type {
   DshSubagentStartRequest,
 } from "./agent-registrar.ts";
 import { extractResultBlock, writeResultSidecar } from "../../../dispatch/completion/result-extractor.ts";
+import { sessionSignalLedger } from "../../../signal/session-signal-ledger.ts";
+import { SYNTHETIC_ANSWER_SIGNAL } from "../../../signal/signal-constants.ts";
 import { createSubLogger } from "../../../logger.ts";
 
 // Re-exported for existing consumers/tests that import the run-result shape
@@ -488,6 +490,7 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
         task.status = "completed";
         task.completedAt = new Date();
         task.result = this.materialize(id, outputText);
+        this.recordTerminatingSignal(task);
         break;
       }
       case "aborted":
@@ -519,6 +522,35 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
     // Best-effort run cleanup (the dsh abort surface) after settlement.
     void entry.run.dispose().catch(() => undefined);
     this.finishTerminal(id);
+  }
+
+  /**
+   * Record the run's terminating signal on the task before it settles, with
+   * parity to the completion evaluator (`completion-evaluator.ts` sets
+   * `task.terminatingSignal` on the in-process / opencode / pi paths). The dsh
+   * adapter settles its own tasks, so without this the engine's
+   * `mapDispatchStatusToSignal` (`engine-recovery.ts`) finds the field unset
+   * and the ledger empty for EVERY completed dsh node — logging
+   * "no terminatingSignal recorded for completed task" and inferring the
+   * `answer` it could have read directly.
+   *
+   * Infallible by construction: settlement is fire-and-forget and must never
+   * reject (see {@link wireRunSettlement}), so a throwing ledger falls back to
+   * the same synthetic answer the completion evaluator uses.
+   */
+  private recordTerminatingSignal(task: DispatchTask): void {
+    let signal: { type: string; payload: unknown } | null = null;
+    try {
+      signal = sessionSignalLedger.getTerminating(task.sessionId);
+    } catch (err) {
+      // Defensive: a broken ledger must not break settlement — degrade to the
+      // synthetic answer below rather than propagating out of a settle path.
+      this.log.debug("dsh terminating-signal ledger lookup failed", {
+        id: task.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    task.terminatingSignal = signal ?? SYNTHETIC_ANSWER_SIGNAL;
   }
 
   /**
@@ -583,6 +615,7 @@ export class DshDispatchAdapter implements NodeDispatchPort, IDispatchAdapter {
         entry.task.status = "completed";
         entry.task.completedAt = new Date();
         entry.task.result = this.materialize(id, outputText);
+        this.recordTerminatingSignal(entry.task);
       }
       void entry.run.dispose().catch(() => undefined);
       this.log.debug("dsh nested-graph deferral settled", {
