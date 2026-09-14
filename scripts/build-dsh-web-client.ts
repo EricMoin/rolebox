@@ -47,14 +47,16 @@ console.log("build:dsh-web-client — bundle success")
 //
 // Observed verbatim in @deepseek-ai/dsh-client-ui-commands/lib/client.js:1-3
 // (id = the loader entry name; the entry the loader graph rows by). The
-// envelope id MUST equal the loader entry's `name` for rolebox's
-// `rolebox/dsh` row: dsh-client-modules' browser half keys the module table
-// by the boot-graph row id (the entry name) and rejects a bundle whose
-// factory registered under a different id (`lib/client.js:84`:
-// "bundle <url> loaded without registering \"<id>\" via __ModuleLoader__.load").
-// dsh's own roster rows use plain package names, so id == package name for
-// them; rolebox's cordis plugin lives at the `./dsh` sub-path export, hence
-// the `rolebox/dsh` entry name — and the envelope id must match it. The
+// envelope id MUST equal rolebox's boot-graph row id: dsh-client-modules
+// derives that id from the nearest owning package manifest's `name` because
+// the bundle patch names the host half with the path-like
+// `../dist/dsh-plugin.js` (dsh/cordis.patch.yml) — package-subpath names
+// such as `rolebox/dsh` are not scanned as client packages at all. The
+// browser half keys the module table by that row id and rejects a bundle
+// whose factory registered under a different one:
+// "bundle <url> loaded without registering \"<id>\" via __ModuleLoader__.load".
+// rolebox's package name is `rolebox`, so id == package name, exactly like
+// dsh's own roster rows. The
 // preamble (`var module` / `var exports` / the Symbol.toStringTag Module
 // marker) and the trailing `return module.exports` mirror those bundles —
 // the loader takes the factory's return value as the module's exports, so
@@ -63,7 +65,7 @@ const bundlePath = resolve(projectRoot, "dist/dsh-web-client.js")
 const bundled = await Bun.file(bundlePath).text()
 const wrapped = [
   `window.__ModuleLoader__.load({`,
-  `\tid: "rolebox/dsh",`,
+  `\tid: "rolebox",`,
   `\tfactory: (require) => {`,
   `\t\tvar module = { exports: {} };`,
   `\t\tvar exports = module.exports;`,

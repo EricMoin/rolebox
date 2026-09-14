@@ -1,25 +1,29 @@
 # rolebox as a dsh profile bundle layer (contract: docs/dsh-plugin-contract.md §5.3).
 #
-# `name` points at the package subpath export `./dsh` (dist/dsh-plugin.js),
-# which default-exports the cordis Object plugin `{ name, inject, Config,
-# apply }`. The package root (`main` → dist/index.js) is the opencode plugin
-# and is NOT a cordis plugin, so it must not be referenced here — this row
-# follows the verified "scoped sub-path" name form used by the dsh-base
-# bundle (e.g. `@deepseek-ai/dsh-tool-subagent-control/list-agents`).
+# `name` points at the cordis host half (dist/dsh-plugin.js), which
+# default-exports the Object plugin `{ name, inject, Config, apply }`. The
+# package root (`main` → dist/index.js) is the opencode plugin and is NOT a
+# cordis plugin, so it must not be referenced here.
 #
-# No web config keys are needed (or accepted): the role-switch UI now
-# surfaces as a dsh.client slot plugin in the web profile, and the `/rolebox`
-# route is served by dsh's own host webserver via its optional `webServer`
-# service seam. All other Config options stay at their dsh defaults
-# (roleboxDir under $DSH_HOME, all namespaces enabled).
+# The specifier is PACKAGE-RELATIVE because a bundle-patch row resolves against
+# the patch file's own directory (<pkg>/dsh/), so `../dist/dsh-plugin.js`
+# lands on <pkg>/dist/dsh-plugin.js wherever the package is installed.
 #
-# The row `name` (`rolebox/dsh`) doubles as the package spec dsh-client-modules
-# resolves via require.resolve('<name>/package.json') when scanning for
-# dsh.client packages — package.json must keep the `"./dsh/package.json"`
-# export (→ ./package.json) or the web client is silently skipped from the
-# boot graph. The client bundle envelope id must equal this name too (see
-# scripts/build-dsh-web-client.ts).
+# dsh-client-modules only scans loader rows whose specifier is a package root
+# (bare name) or path-like (relative / absolute / file:): a package SUBPATH
+# such as `rolebox/dsh` fails `exactPackageSpecifier` and is cached as a
+# permanent "not a client package" verdict, so the web client never reaches
+# the boot graph. The path-like form makes the scan derive the browser module
+# id from this package's manifest (`name: "rolebox"`), so package.json must
+# keep its `"./client"` export and the client bundle envelope id must be
+# `rolebox` (scripts/build-dsh-web-client.ts).
+#
+# No web config keys are needed (or accepted): the role-switch UI surfaces as
+# a dsh.client slot plugin in the web profile, and the `/rolebox` route is
+# served by dsh's own host webserver via its optional `webServer` service
+# seam. All other Config options stay at their dsh defaults (roleboxDir under
+# $DSH_HOME, all namespaces enabled).
 - insert:
     - id: rolebox
-      name: rolebox/dsh
+      name: ../dist/dsh-plugin.js
       config: {}

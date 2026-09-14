@@ -29,9 +29,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { load } from "js-yaml";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { shortHash } from "../src/utils/state-paths.ts";
@@ -456,14 +455,15 @@ describe("dsh plugin shape", () => {
 // ── Packaging: the dsh-client-modules resolution seam ──────────────────────
 //
 // dsh-client-modules (node half) discovers dsh.client packages by resolving
-// `require.resolve('<loader entry name>/package.json')` from the host context
-// and parsing the manifest for `dsh.client` + `exports["./client"]`
-// (lib/index.js:138-139, 238-264). rolebox's loader row is named
-// `rolebox/dsh` (the cordis plugin lives at the `./dsh` sub-path export), so
-// the exports map MUST expose `"./dsh/package.json"` or the entry is cached
-// as a permanent negative verdict and the web client never reaches the boot
-// graph. The browser half additionally requires the bundle envelope id to
-// equal the graph row id (lib/client.js:84).
+// the loader entry's NAME and parsing the owning manifest for `dsh.client` +
+// `exports["./client"]` (packages/client/modules/src/index.ts). Only a
+// package-root specifier (bare name) or a path-like specifier is eligible
+// (`exactPackageSpecifier`); a package SUBPATH such as `rolebox/dsh` is
+// cached as a permanent negative verdict and the web client never reaches the
+// boot graph. The shipped bundle patch therefore names the cordis host half
+// with the package-relative `../dist/dsh-plugin.js`, and the nearest owning
+// manifest supplies the browser module id `rolebox`. The browser half
+// additionally requires the bundle envelope id to equal that graph row id.
 
 describe("dsh packaging — dsh-client-modules resolution seam", () => {
   const pkgRoot = resolve(import.meta.dir, "..");
@@ -491,30 +491,43 @@ describe("dsh packaging — dsh-client-modules resolution seam", () => {
     expect(existsSync(resolve(pkgRoot, rel!))).toBe(true);
   });
 
-  it("resolves require.resolve('rolebox/dsh/package.json') (the entry-name seam)", () => {
-    // Mirror dsh-client-modules resolvePkgJson in the profile layout: the
-    // host's createRequire is anchored at the profile/config tree, and the
-    // profile installs rolebox as a `link:` dependency (pnpm link: → this
-    // repo). Resolving the bare package spec 'rolebox/dsh/package.json' then
-    // walks node_modules, follows the link, and consults THIS package.json's
-    // exports map — which must expose './dsh/package.json'.
-    const sandbox = mkdtempSync(join(tmpdir(), "rolebox-dsh-seam-"));
-    try {
-      const nm = join(sandbox, "node_modules");
-      mkdirSync(nm, { recursive: true });
-      symlinkSync(pkgRoot, join(nm, "rolebox"), "dir");
-      const req = createRequire(join(sandbox, "host.js"));
-      const resolved = req.resolve("rolebox/dsh/package.json");
-      expect(resolved).toBe(resolve(pkgRoot, "package.json"));
-    } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+  it("names the cordis host half with a package-relative loader specifier", () => {
+    // Mirror dsh-client-modules' locatePkgJson: a bundle-patch row resolves
+    // against the patch file's own directory, the specifier must be
+    // path-like (a subpath such as `rolebox/dsh` is not scanned), and the
+    // nearest owning manifest above the resolved host half supplies the
+    // browser module id.
+    const patchPath = resolve(pkgRoot, "dsh/cordis.patch.yml");
+    const doc = load(readFileSync(patchPath, "utf8")) as Array<{
+      insert?: Array<{ id?: string; name?: string }>;
+    }>;
+    const row = doc[0]?.insert?.[0];
+    expect(row?.id).toBe("rolebox");
+    expect(row?.name).toBe("../dist/dsh-plugin.js");
+
+    const hostPath = resolve(dirname(patchPath), row!.name!);
+    expect(hostPath).toBe(resolve(pkgRoot, "dist/dsh-plugin.js"));
+    expect(existsSync(hostPath)).toBe(true);
+
+    let dir = dirname(hostPath);
+    let owningName: string | undefined;
+    while (owningName === undefined) {
+      const candidate = join(dir, "package.json");
+      if (existsSync(candidate)) {
+        owningName = (JSON.parse(readFileSync(candidate, "utf8")) as { name?: string }).name;
+        break;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
     }
+    expect(owningName).toBe("rolebox");
   });
 
-  it("builds the client bundle envelope with the graph-row id 'rolebox/dsh'", () => {
+  it("builds the client bundle envelope with the graph-row id 'rolebox'", () => {
     const bundle = readFileSync(resolve(pkgRoot, "dist/dsh-web-client.js"), "utf8");
     expect(bundle.startsWith("window.__ModuleLoader__.load({")).toBe(true);
-    expect(bundle).toContain('id: "rolebox/dsh"');
+    expect(bundle).toContain('id: "rolebox"');
   });
 });
 
@@ -1712,7 +1725,7 @@ describe("dsh bundle patch files", () => {
     expect(entries.length).toBeGreaterThanOrEqual(1);
     const first = entries[0] as { insert?: Array<{ id?: string; name?: string }> };
     expect(first.insert?.[0]?.id).toBe("rolebox");
-    expect(first.insert?.[0]?.name).toBe("rolebox/dsh");
+    expect(first.insert?.[0]?.name).toBe("../dist/dsh-plugin.js");
   });
 
   it("the configured example (examples/dsh/cordis.patch.yml) parses as a YAML entry list", () => {
@@ -1723,7 +1736,7 @@ describe("dsh bundle patch files", () => {
     const insert = (entries[0] as { insert?: Array<{ id?: string; name?: string; config?: unknown }> })
       .insert?.[0];
     expect(insert?.id).toBe("rolebox");
-    expect(insert?.name).toBe("rolebox/dsh");
+    expect(insert?.name).toBe("./node_modules/rolebox/dist/dsh-plugin.js");
     // Every Config option from the README table is representable.
     const config = insert?.config as Record<string, unknown> | undefined;
     expect(typeof config?.roleboxDir).toBe("string");

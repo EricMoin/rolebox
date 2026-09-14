@@ -48,7 +48,7 @@ jobs:
         # `dist/` is gitignored, so the dsh-client-modules seam tests
         # (tests/dsh-plugin.test.ts:356-391) fail on a fresh runner unless the
         # bundle is built here: they assert dist/dsh-web-client.js exists and
-        # that its envelope id is "rolebox/dsh". Run before the test steps.
+        # that its envelope id is "rolebox". Run before the test steps.
         run: bun run build:dsh-web-client
 
       - name: Run tests (isolated core suite)

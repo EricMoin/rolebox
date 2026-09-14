@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **dsh web UI dropped from the boot graph** — The bundle patch named the cordis host half with the package subpath `rolebox/dsh`. dsh-client-modules only scans loader rows whose specifier is a package root or a path-like module (`exactPackageSpecifier` / `locatePkgJson`), so the row was cached as a permanent "not a client package" verdict and the role dock plus monitor panel never reached `window.__DSH_BOOT__`. The shipped patch now uses the package-relative `../dist/dsh-plugin.js` (resolved against the patch file's own directory), which makes the scan derive the browser module id `rolebox` from the package manifest; the client bundle envelope id changes from `rolebox/dsh` to `rolebox` to match that row.
+
 ## 1.8.1
 
 ### Bug Fixes

@@ -926,26 +926,27 @@ resolves the `./client` export, and records `inject` / `immediately`
 ```
 
 **Resolution precondition (the missing link this integration tripped on).** Before
-parsing `dsh.client`, the registry resolves the package by the loader entry's
-**name** (`fiber.entry.options.name`) through
-`require.resolve('<name>/package.json')` from the host context
-(`createRequire(ctx.baseUrl)`, `source:packages/client/modules/src/index.ts`);
-an unresolvable name is cached as a permanent "not a client package" verdict
-(`resolveMeta`, `source:packages/client/modules/src/index.ts`) and the entry
-silently never reaches the boot graph. dsh's own roster rows use plain package
-names (`@deepseek-ai/dsh-client-ui-goal`), so `<name>/package.json` resolves
-naturally. rolebox's cordis plugin lives at the scoped sub-path export `./dsh`,
-making its entry name `rolebox/dsh` — which is NOT a resolvable package spec on
-its own. The packaging must therefore export `"./dsh/package.json"` →
-`"./package.json"` (package.json), so
-`require.resolve('rolebox/dsh/package.json')` lands on the root manifest carrying
-the `dsh.client` declaration. And the browser half requires the bundle envelope
-id to EQUAL the boot-graph row id (the entry name): `arrive()` rejects a bundle
-that loads without registering its row id. The client bundle is therefore
-wrapped with `id: "rolebox/dsh"` (scripts/build-dsh-web-client.ts) to match the
-row — dsh's own bundles satisfy this trivially because their row name IS their
-package name. Both sides of this contract are pinned by `tests/dsh-plugin.test.ts`
-("dsh packaging exposes the dsh-client-modules resolution seam").
+parsing `dsh.client`, the registry resolves the loader entry's **name**
+(`fiber.entry.options.name`, `resolveSource` in
+`source:packages/client/modules/src/index.ts`). Only a package-root specifier
+(a bare name such as `@deepseek-ai/dsh-client-ui-goal`) or a path-like
+specifier (relative, absolute, or `file:`) is eligible:
+`exactPackageSpecifier` returns `undefined` for a package SUBPATH such as
+`rolebox/dsh`, and `locatePkgJson` then returns early, caching a permanent
+"not a client package" verdict — the entry silently never reaches the boot
+graph. dsh's own roster rows are package roots, so they resolve naturally.
+rolebox's cordis host half lives at the `./dsh` sub-path export, so the shipped
+bundle patch names it with a PACKAGE-RELATIVE path instead:
+`../dist/dsh-plugin.js`, resolved against the patch file's own directory
+(`dsh/cordis.patch.yml` → `<pkg>/dsh/`). The scan then walks to the nearest
+owning manifest and derives the browser module id from its `name` field —
+`rolebox`. Both halves of the contract follow from that id: the package must
+export `"./client"` (package.json), and the browser half requires the bundle
+envelope id to EQUAL the boot-graph row id, so the built bundle is wrapped with
+`id: "rolebox"` (scripts/build-dsh-web-client.ts) — dsh's own bundles satisfy
+this trivially because their row name IS their package name. Both sides are
+pinned by `tests/dsh-plugin.test.ts` ("dsh packaging exposes the
+dsh-client-modules resolution seam").
 
 #### 4.4.3 Slot registry + `ctx.slots.inject` pattern
 
@@ -1014,7 +1015,7 @@ memoized in `loadCache`) — so require cycles throw and load order needs no
 external sequencing (`source:packages/client/modules/README.md`). rolebox's build
 (`scripts/build-dsh-web-client.ts`) bundles `web-ui/client.ts` with Bun
 (`format: "cjs"`, `react` / `react/jsx-runtime` / `@deepseek-ai/*` external) and
-wraps the output in this exact envelope with `id: "rolebox/dsh"`.
+wraps the output in this exact envelope with `id: "rolebox"`.
 
 #### 4.4.6 Monitoring endpoints: `GET /rolebox/status` / `GET /rolebox/metrics`
 
