@@ -75,19 +75,23 @@ jobs:
         run: bun test tests/tui/
 
       - name: Order-independence regression guard (forward)
-        # REGRESSION GUARD — do NOT delete or merge as redundant. These two files
-        # historically failed together depending on execution order, caused by
-        # bun's cross-file `mock.module` leakage: a mock registered by one file
-        # shadowed the real module for a later file. Under `--isolate` each test
-        # file gets its own module registry, so the pair must pass in either
-        # order. Running it both ways is the structural proof the leakage is gone
-        # and guards against reintroducing shared-registry pollution.
-        run: bun test --isolate tests/graph/graph-store.test.ts tests/cli/registry-client.test.ts
+        # REGRESSION GUARD — do NOT delete or merge as redundant. This pair is a
+        # mocker/real-consumer pair for one module: install.test.ts registers an
+        # unimplemented `src/cli/registry-client` mock via `mock.module`, while
+        # registry-client.test.ts imports that module for real and exercises
+        # fetch/download/integrity against temp-dir fixtures. In a shared module
+        # registry a mock registered by one file shadows the real module for a
+        # later file — the leakage class tests/cli/commands/install-realtime.test.ts
+        # documents (it defends itself with `?real` specifiers). Under `--isolate`
+        # each test file gets its own module registry, so the pair must pass in
+        # either order. Running it both ways is the structural proof the leakage
+        # is gone and guards against reintroducing shared-registry pollution.
+        run: bun test --isolate tests/cli/commands/install.test.ts tests/cli/registry-client.test.ts
 
       - name: Order-independence regression guard (reverse)
         # Same pair with arguments reversed — both directions must pass. Keep
         # this step next to the forward step above.
-        run: bun test --isolate tests/cli/registry-client.test.ts tests/graph/graph-store.test.ts
+        run: bun test --isolate tests/cli/registry-client.test.ts tests/cli/commands/install.test.ts
 
       - name: Randomized-order core suite (full-suite order-independence fuzz)
         # Run the ENTIRE core suite under a random test order to catch any order-
