@@ -1,10 +1,24 @@
 # Changelog
 
-## Unreleased
+## 1.9.0
+
+### Features
+
+- **Redesign the role dock and monitor in the dsh web UI** — The role dock now leads with the active role's display name and an explicit Active/Base state instead of an unlabelled dot, and the monitor panel opens with an attention verdict plus a plain-language state word beside every phase, so a failed graph no longer looks identical to a healthy one. Collapsed content no longer lays out, animations follow the host's single easing curve, and a graph with a pending approval gate is still reported as live for the human.
 
 ### Bug Fixes
 
 - **dsh web UI dropped from the boot graph** — The bundle patch named the cordis host half with the package subpath `rolebox/dsh`. dsh-client-modules only scans loader rows whose specifier is a package root or a path-like module (`exactPackageSpecifier` / `locatePkgJson`), so the row was cached as a permanent "not a client package" verdict and the role dock plus monitor panel never reached `window.__DSH_BOOT__`. The shipped patch now uses the package-relative `../dist/dsh-plugin.js` (resolved against the patch file's own directory), which makes the scan derive the browser module id `rolebox` from the package manifest; the client bundle envelope id changes from `rolebox/dsh` to `rolebox` to match that row.
+
+- **Record the terminating signal on settle on dsh** — The dsh adapter now reads the completion ledger when it settles a task, so completed nodes record their terminating signal and recovery no longer logs a missing `terminatingSignal`; a broken ledger falls back to the synthetic answer instead of breaking the fire-and-forget settle path.
+
+- **Handle nested graph gates and failures on dsh** — A node whose agent launches a nested graph via the non-blocking `graph_run` is now held running until that graph terminates, a nested failure propagates as an escalation, and a nested approval gate walks the session parent chain to reach the outermost live session together with the exact `graph_approve` call. Silent reminders now honor `noReply` with the same waking/silent split as opencode and Pi.
+
+### Documentation
+
+- **Refocus the README and move detail to docs** — The README now leads with what rolebox is and how to install it, and the graph-engine internals, dsh route contracts, and model-alias resolution move into `docs/`. A `graph_add_loop` termination example that described a non-existent parameter was replaced with the real `max_traversals` cap behavior.
+
+- **Add output privacy and leakage hygiene guidance to AGENTS.md** — Contributor guidance now requires checking everything that leaves the session — git history, changelogs, release notes, workflow files, package contents, and CI logs — for private infrastructure, secrets, and personal data.
 
 ## 1.8.1
 

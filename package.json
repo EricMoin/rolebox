@@ -1,6 +1,6 @@
 {
   "name": "rolebox",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "Agent plugin — define custom AI agent roles with per-role prompts, models, skills, and permissions",
   "engines": {
     "opencode": "^1.0.0"
@@ -42,7 +42,6 @@
     "dsh",
     "examples",
     "functions",
-    "tui",
     "scripts/patch-opentui-native-entry.mjs"
   ],
   "scripts": {
