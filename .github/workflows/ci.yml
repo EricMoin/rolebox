@@ -41,6 +41,14 @@ jobs:
       - name: Type check (full project)
         run: bun run typecheck
 
+      - name: Build package library (tsc emit)
+        # `dist/` is gitignored, so the dsh-client-modules seam tests
+        # (tests/dsh-plugin.test.ts:494-525) fail on a fresh runner unless the
+        # library is emitted here: they assert dist/dsh-plugin.js exists, and
+        # build:dsh-web-client below copies the ./client entry declarations this
+        # emit produces. Run before the build/test steps.
+        run: bunx tsc
+
       - name: Build TUI module (bundle + declarations)
         run: bun run build:tui
 
