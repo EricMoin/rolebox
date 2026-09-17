@@ -21,6 +21,13 @@
  *   - POST   /rolebox/roles/switch with malformed JSON → 400
  *   - POST   /rolebox/roles/switch with an oversized body → 413
  *   - DELETE /rolebox/roles/active   — clears the active role
+ *   - POST   /rolebox/reload         — in-process reload via the optional
+ *     callback: 200 `{ ok:true, discovered, resolved, skipped }`; 409 when
+ *     disabled (`{ disabled:true }`) or busy/failed; 404 with no callback
+ *     wired; 500 when the callback throws; 405 on the wrong method
+ *   - monitor-route composition: a POST to `/rolebox/reload` through the
+ *     single `/rolebox` registration reaches the reload handler, not the
+ *     monitor status handler
  *   - session resolution: explicit session wins → most recent store session
  *     → `"default"`
  *   - unknown sub-routes → 404 `{ ok:false }`; known path + wrong method
@@ -31,6 +38,9 @@
 
 import { describe, it, expect } from "bun:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RoleMode } from "../../src/constants.ts";
 import { DshRoleSwitcher } from "../../src/platform/adapters/dsh/role-switcher.ts";
 import {
@@ -41,6 +51,8 @@ import type {
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
 } from "../../src/platform/adapters/dsh/web-role-switch-route.ts";
+import { DshRoleboxMonitorWebRoute } from "../../src/platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import type { DshRoleboxReloadResult } from "../../src/platform/adapters/dsh/rolebox-reload.ts";
 import { DshAgentRegistrar } from "../../src/platform/adapters/dsh/agent-registrar.ts";
 import type {
   DshSubagentProvider,
@@ -53,6 +65,7 @@ import type {
   DshSessionStoreLike,
 } from "../../src/platform/adapters/dsh/session.ts";
 import type { AgentDefinition } from "../../src/platform/types.ts";
+import type { LoopCoordinator } from "../../src/loop/coordinator.ts";
 
 // ── Fakes (platform-test convention) ────────────────────────────────────────
 
@@ -163,6 +176,13 @@ function createFakeWebServer() {
   return { webServer, registered };
 }
 
+/** Fake LoopCoordinator — the monitor route only needs getAllLoopStates(). */
+function makeLoopCoordinator(): LoopCoordinator {
+  return {
+    getAllLoopStates: () => new Map(),
+  } as unknown as LoopCoordinator;
+}
+
 // ── Mock req/res (no node:http server is created) ───────────────────────────
 
 /** Minimal IncomingMessage double: url/method + data/end/error listeners. */
@@ -245,7 +265,10 @@ function json<T = any>(result: { text: string }): T {
  * Full fixture: primary roles `alpha`/`beta` + a subagent-mode `gamma` in the
  * catalog, a session `s1` in the store, and a real switcher + route adapter.
  */
-async function createFixture(options?: { maxBodyBytes?: number }) {
+async function createFixture(options?: {
+  maxBodyBytes?: number;
+  reload?: () => Promise<DshRoleboxReloadResult>;
+}) {
   const { ctx } = createFakeCtx();
   const registrar = new DshAgentRegistrar({ subagents: createFakeSubagents() });
   await registrar.register([
@@ -428,6 +451,156 @@ describe("DshRoleSwitchWebRoute routes", () => {
     expect(res.status).toBe(200);
     expect(json(res)).toEqual({ ok: true, session: "s1", role: null });
     expect(fixture.switcher.getActive("s1")).toBeNull();
+  });
+});
+
+// ── POST /rolebox/reload ────────────────────────────────────────────────────
+
+describe("DshRoleSwitchWebRoute POST /rolebox/reload", () => {
+  it("invokes the wired reload callback and returns the counts", async () => {
+    let calls = 0;
+    const fixture = await createFixture({
+      reload: async () => {
+        calls++;
+        return { success: true, discovered: 3, resolved: 2, skipped: 1 };
+      },
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["Content-Type"]).toContain("application/json");
+    expect(json(res)).toEqual({ ok: true, discovered: 3, resolved: 2, skipped: 1 });
+    expect(calls).toBe(1);
+  });
+
+  it("returns 409 with disabled:true when the reloader is kill-switched", async () => {
+    const fixture = await createFixture({
+      reload: async () => ({ success: false, disabled: true }),
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(409);
+    expect(json(res)).toEqual({
+      ok: false,
+      disabled: true,
+      error: "Role reload is disabled",
+    });
+  });
+
+  it("returns 409 with the error when a reload is already in progress", async () => {
+    const fixture = await createFixture({
+      reload: async () => ({ success: false, error: "reload already in progress" }),
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(409);
+    expect(json(res)).toEqual({ ok: false, error: "reload already in progress" });
+  });
+
+  it("returns 409 with a stable error when a failed reload carries no message", async () => {
+    const fixture = await createFixture({
+      reload: async () => ({ success: false }),
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(409);
+    expect(json(res)).toEqual({ ok: false, error: "Role reload failed" });
+  });
+
+  it("returns 404 when no reload callback is wired", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(404);
+    expect(json(res)).toEqual({ ok: false, error: "Not found" });
+  });
+
+  it("returns 500 when the reload callback throws", async () => {
+    const fixture = await createFixture({
+      reload: async () => {
+        throw new Error("reload exploded");
+      },
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(500);
+    expect(json(res)).toEqual({ ok: false, error: "Internal server error" });
+  });
+
+  it("returns 405 for the wrong method on the known /reload path", async () => {
+    let calls = 0;
+    const fixture = await createFixture({
+      reload: async () => {
+        calls++;
+        return { success: true };
+      },
+    });
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const handler = registered[0].handler;
+
+    const res = await invoke(handler, "GET", "/rolebox/reload");
+
+    expect(res.status).toBe(405);
+    expect(json(res)).toEqual({ ok: false, error: "Method not allowed" });
+    expect(calls).toBe(0);
+  });
+
+  it("rides the monitor route's single /rolebox registration into the reload handler", async () => {
+    let calls = 0;
+    const fixture = await createFixture({
+      reload: async () => {
+        calls++;
+        return { success: true, discovered: 2, resolved: 2, skipped: 0 };
+      },
+    });
+    // Compose exactly like the plugin: the monitor route owns the ONLY
+    // `/rolebox` registration and delegates every non-monitor sub-path
+    // (including `/reload`) to the role-switch handler.
+    const monitorRoute = new DshRoleboxMonitorWebRoute(
+      fixture.switcher,
+      fixture.store,
+      makeLoopCoordinator(),
+      mkdtempSync(join(tmpdir(), "dsh-role-switch-route-")),
+      { delegate: (req, res) => fixture.route.handle(req, res) },
+    );
+    const { webServer, registered } = createFakeWebServer();
+    monitorRoute.register(webServer);
+
+    // One registration only — the host rejects a duplicate `/rolebox` prefix.
+    expect(registered).toHaveLength(1);
+    expect(registered[0].path).toBe("/rolebox");
+
+    const res = await invoke(registered[0].handler, "POST", "/rolebox/reload");
+
+    expect(res.status).toBe(200);
+    // The reload body — not the monitor `/status` composed body.
+    expect(json(res)).toEqual({ ok: true, discovered: 2, resolved: 2, skipped: 0 });
+    expect(calls).toBe(1);
   });
 });
 

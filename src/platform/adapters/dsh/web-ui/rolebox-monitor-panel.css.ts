@@ -141,6 +141,42 @@ export const monitorCss = `
   opacity: 0.45;
 }
 
+/*
+ * The manual role-reload control. Same control geometry as Refresh, but a
+ * filled surface so the two actions are distinguishable at a glance: Refresh
+ * re-reads, Reload roles asks the server to re-resolve roles from disk.
+ */
+.rolebox-monitor-reload {
+  box-sizing: border-box;
+  flex: none;
+  align-items: center;
+  gap: var(--rolebox-space-2, 8px);
+  height: 36px;
+  padding: 0 var(--rolebox-space-3, 12px);
+  border: 1px solid var(--rolebox-border-strong, rgba(0, 0, 0, 0.12));
+  border-radius: var(--rolebox-radius-control, 8px);
+  background: var(--rolebox-surface, rgb(245, 246, 247));
+  color: var(--rolebox-ink, rgb(15, 17, 21));
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  transition: background-color var(--rolebox-dur-fast, 130ms) var(--rolebox-ease, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.rolebox-monitor-reload:hover {
+  background: var(--rolebox-surface-hover, rgba(38, 49, 72, 0.06));
+}
+
+.rolebox-monitor-reload:focus-visible {
+  outline: 2px solid var(--rolebox-focus-ring, rgb(65, 118, 230));
+  outline-offset: -2px;
+}
+
+.rolebox-monitor-reload:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 @keyframes rolebox-monitor-spin {
   0% {
     opacity: 0;
@@ -604,6 +640,7 @@ export const monitorCss = `
   }
   .rolebox-monitor-chip,
   .rolebox-monitor-refresh,
+  .rolebox-monitor-reload,
   .rolebox-monitor-retry,
   .rolebox-monitor-more {
     transition: none;
@@ -617,6 +654,7 @@ export const monitorClass = {
   header: "rolebox-monitor-header",
   title: "rolebox-monitor-title",
   refresh: "rolebox-monitor-refresh",
+  reload: "rolebox-monitor-reload",
   spinner: "rolebox-monitor-spinner",
   status: "rolebox-monitor-status",
   statusError: "rolebox-monitor-status-error",

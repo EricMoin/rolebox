@@ -15,6 +15,9 @@
  *   - the manual Refresh control re-fetches both endpoints (with the panel
  *     `aria-busy` and the control disabled while in flight) and updates the
  *     readings;
+ *   - the manual role-reload control POSTs `/rolebox/reload` exactly once
+ *     per click, re-fetches the role state on success, reports success and
+ *     failure on the status seat, and never schedules a timer (no polling);
  *   - the loading / error / empty states: a pending initial fetch shows the
  *     loading state, a failed fetch shows an `role="alert"` error state with
  *     a Retry control that re-runs the load, an empty snapshot shows the
@@ -227,6 +230,10 @@ interface FetchConfig {
   metricsOk: boolean;
   /** When true, both fetches hang until `releaseGate` resolves them. */
   gate: boolean;
+  /** `POST /rolebox/reload` response body (the success shape by default). */
+  reload: unknown;
+  /** When false, the reload POST answers 409 with `reload` as the error body. */
+  reloadOk: boolean;
 }
 
 let cfg: FetchConfig;
@@ -250,6 +257,13 @@ globalThis.fetch = ((input: unknown, init?: RequestInit) => {
   const url = String(input);
   const method = (init?.method ?? "GET").toUpperCase();
   calls.push(method + " " + url);
+  if (url === panel.RELOAD_ENDPOINT) {
+    // MANUAL ONLY: the POST is issued from the button's click, never a timer.
+    if (method !== "POST") {
+      return Promise.resolve(fakeResponse(405, { ok: false, error: "Method not allowed" }));
+    }
+    return Promise.resolve(fakeResponse(cfg.reloadOk ? 200 : 409, cfg.reload));
+  }
   if (cfg.gate) {
     return new Promise<Response>((resolve) => {
       pendingGates.push(() =>
@@ -338,6 +352,10 @@ function statusSeat(): VNode {
   return byClass("rolebox-monitor-status")[0]!;
 }
 
+function reloadButton(): VNode {
+  return byClass("rolebox-monitor-reload")[0]!;
+}
+
 function stateSeat(): VNode {
   return byClass("rolebox-monitor-state")[0]!;
 }
@@ -369,7 +387,15 @@ function kvValue(name: string): string {
 
 describe("RoleboxMonitorPanel", () => {
   beforeEach(() => {
-    cfg = { status: STATUS_BODY, metrics: METRICS_BODY, statusOk: true, metricsOk: true, gate: false };
+    cfg = {
+      status: STATUS_BODY,
+      metrics: METRICS_BODY,
+      statusOk: true,
+      metricsOk: true,
+      gate: false,
+      reload: { ok: true, discovered: 3, resolved: 2, skipped: 1 },
+      reloadOk: true,
+    };
   });
 
   describe("API contract", () => {
@@ -486,6 +512,124 @@ describe("RoleboxMonitorPanel", () => {
       // The live-region status seat announces the refresh outcome.
       expect(textOf(statusSeat())).toContain("Updated at");
       expect(statusSeat().props.title).toContain("Updated at");
+    });
+  });
+
+  describe("manual role reload", () => {
+    it("declares the same-origin reload endpoint", () => {
+      expect(panel.RELOAD_ENDPOINT).toBe("/rolebox/reload");
+    });
+
+    it("renders the Reload roles control in the header beside Refresh", async () => {
+      mountPanel();
+      await settle();
+
+      const reload = reloadButton();
+      expect(reload.props.type).toBe("button");
+      expect(textOf(reload)).toContain("Reload roles");
+      const header = childNodes(byClass("rolebox-monitor-header")[0]!);
+      expect(header).toContain(refreshButton());
+      expect(header).toContain(reload);
+    });
+
+    it("POSTs /rolebox/reload exactly once per click, then re-fetches the role state", async () => {
+      mountPanel();
+      await settle();
+      expect(calls).toEqual(["GET /rolebox/status", "GET /rolebox/metrics"]);
+
+      click(reloadButton());
+      // In flight: the panel is busy and both controls are gated.
+      expect(root().props["aria-busy"]).toBe(true);
+      expect(reloadButton().props.disabled).toBe(true);
+      expect(refreshButton().props.disabled).toBe(true);
+      await settle();
+
+      expect(calls).toEqual([
+        "GET /rolebox/status",
+        "GET /rolebox/metrics",
+        "POST /rolebox/reload",
+        "GET /rolebox/status",
+        "GET /rolebox/metrics",
+      ]);
+      expect(root().props["aria-busy"]).toBe(false);
+
+      // The button is the only trigger: one click, one POST.
+      click(reloadButton());
+      await settle();
+      expect(calls.filter((call) => call === "POST /rolebox/reload")).toHaveLength(2);
+    });
+
+    it("surfaces the reload success on the status seat", async () => {
+      cfg.reload = { ok: true, discovered: 3, resolved: 2, skipped: 1 };
+      mountPanel();
+      await settle();
+
+      click(reloadButton());
+      expect(textOf(statusSeat())).toBe("Reloading roles…");
+      await settle();
+
+      // The confirmation survives the role-state re-fetch it triggered.
+      expect(textOf(statusSeat())).toContain("Reloaded roles");
+      expect(textOf(statusSeat())).toContain("3 discovered");
+      expect(textOf(statusSeat())).toContain("2 resolved");
+      expect(textOf(statusSeat())).toContain("1 skipped");
+      expect(statusSeat().props.className).not.toContain("rolebox-monitor-status-error");
+      expect(byClass("rolebox-monitor-body")).toHaveLength(1);
+    });
+
+    it("surfaces a failed reload on the status seat and keeps the readings", async () => {
+      cfg.reloadOk = false;
+      cfg.reload = { ok: false, error: "reload already in progress" };
+      mountPanel();
+      await settle();
+
+      click(reloadButton());
+      await settle();
+
+      expect(statusSeat().props.title).toContain("Role reload failed");
+      expect(statusSeat().props.title).toContain("reload already in progress");
+      expect(statusSeat().props.className).toContain("rolebox-monitor-status-error");
+      // A failed reload changed nothing: the readings stay and no follow-up
+      // fetch is issued.
+      expect(textOf(byClass("rolebox-monitor-body")[0]!)).toContain("graph-1");
+      expect(calls).toEqual([
+        "GET /rolebox/status",
+        "GET /rolebox/metrics",
+        "POST /rolebox/reload",
+      ]);
+    });
+
+    it("never schedules a timer — only a click issues the next request", async () => {
+      // Polling would have to schedule setInterval/setTimeout; the panel must
+      // schedule neither, and the call log must stay frozen between clicks.
+      const scheduled: string[] = [];
+      const realSetInterval = globalThis.setInterval;
+      const realSetTimeout = globalThis.setTimeout;
+      globalThis.setInterval = ((...args: unknown[]) => {
+        scheduled.push("setInterval");
+        return (realSetInterval as (...a: unknown[]) => unknown)(...args);
+      }) as unknown as typeof globalThis.setInterval;
+      globalThis.setTimeout = ((...args: unknown[]) => {
+        scheduled.push("setTimeout");
+        return (realSetTimeout as (...a: unknown[]) => unknown)(...args);
+      }) as unknown as typeof globalThis.setTimeout;
+      try {
+        mountPanel();
+        await settle();
+        click(reloadButton());
+        await settle();
+
+        const afterReload = calls.length;
+        expect(scheduled).toEqual([]);
+        // Wait out a would-be polling tick with a REAL timer: the panel still
+        // fetches nothing on its own.
+        await new Promise((resolve) => realSetTimeout(resolve, 25));
+        expect(calls).toHaveLength(afterReload);
+        expect(scheduled).toEqual([]);
+      } finally {
+        globalThis.setInterval = realSetInterval;
+        globalThis.setTimeout = realSetTimeout;
+      }
     });
   });
 
@@ -610,6 +754,7 @@ describe("RoleboxMonitorPanel", () => {
         "rolebox-monitor-panel",
         "rolebox-monitor-header",
         "rolebox-monitor-refresh",
+        "rolebox-monitor-reload",
         "rolebox-monitor-status",
         "rolebox-monitor-state",
         "rolebox-monitor-retry",

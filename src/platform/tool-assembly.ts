@@ -122,6 +122,39 @@ export interface BuildToolsOptions {
   getEffectiveAgent?: (sessionID?: string) => string;
 }
 
+/**
+ * The four role-snapshot tool keys — the tools whose behavior is bound to the
+ * resolved-role snapshot (`resolvedRoles`). Kept as a membership record so
+ * the dsh plugin can both skip them in its boot registration loop
+ * (`key in ROLE_SNAPSHOT_TOOL_KEYS`) and rebuild them as one disposable
+ * generation on an in-process role reload.
+ */
+export const ROLE_SNAPSHOT_TOOL_KEYS = {
+  asset_search: true,
+  asset_inspect: true,
+  asset_validate: true,
+  reference_search: true,
+} as const satisfies Record<string, true>;
+
+/**
+ * Build exactly the four role-snapshot tools from a resolved-role snapshot.
+ *
+ * Separate from {@link buildCanonicalTools} so the dsh plugin's reload seam can
+ * rebuild this generation alone (dispose-then-re-register) without recompiling
+ * the rest of the canonical tool set. The boot path calls this with the same
+ * argument, so the assembled map is unchanged.
+ */
+export function buildRoleSnapshotTools(
+  resolvedRoles: ResolvedRole[],
+): Record<string, CanonicalToolDef> {
+  return {
+    asset_search: createAssetSearchTool(resolvedRoles),
+    asset_inspect: createAssetInspectTool(resolvedRoles),
+    asset_validate: createAssetValidateTool(resolvedRoles),
+    reference_search: createReferenceSearchTool(resolvedRoles),
+  };
+}
+
 export function buildCanonicalTools(
   opts: BuildToolsOptions,
 ): Record<string, CanonicalToolDef> {
@@ -143,10 +176,7 @@ export function buildCanonicalTools(
   tools.signal = createSignalTool();
   tools.interactive_terminal = createInteractiveTerminalTool();
 
-  tools.asset_search = createAssetSearchTool(opts.resolvedRoles);
-  tools.asset_inspect = createAssetInspectTool(opts.resolvedRoles);
-  tools.asset_validate = createAssetValidateTool(opts.resolvedRoles);
-  tools.reference_search = createReferenceSearchTool(opts.resolvedRoles);
+  Object.assign(tools, buildRoleSnapshotTools(opts.resolvedRoles));
 
   // 2. Session tools (if sessionClient provided)
   if (opts.sessionClient) {

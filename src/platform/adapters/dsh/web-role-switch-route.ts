@@ -30,6 +30,15 @@
  *                                        {@link DshRoleSwitcher.activate}.
  *   - `DELETE /rolebox/roles/active`   — clear the active role for the
  *                                        session.
+ *   - `POST   /rolebox/reload`         — in-process, NON-DESTRUCTIVE role
+ *                                        reload (re-discovery + re-resolution);
+ *                                        delegates to the optional
+ *                                        {@link DshRoleSwitchRouteOptions.reload}
+ *                                        callback. `200` with
+ *                                        `{ ok, discovered, resolved, skipped }`
+ *                                        on success, `409` when the reloader is
+ *                                        disabled/busy/failed, `404` when no
+ *                                        callback is wired.
  *
  * The `session` key is optional everywhere: an explicit session (body or
  * `?session=` query) wins; otherwise the most recently active session in the
@@ -39,10 +48,13 @@
  * Error contract — identical to the loopback server: every non-2xx response
  * is JSON with the stable shape `{ "ok": false, "error": string }`. Status
  * codes: `400` (malformed JSON, missing `role`, unknown or non-primary
- * role), `404` (unknown route), `405` (known path, wrong method), `413`
- * (request body over the cap), `500` (unexpected failure). 2xx responses are
+ * role), `404` (unknown route, or `/reload` with no callback wired), `405`
+ * (known path, wrong method), `409` (reload disabled/busy/failed — the
+ * disabled body additionally carries `"disabled": true`), `413` (request
+ * body over the cap), `500` (unexpected failure). 2xx responses are
  * resource-shaped: the roles list is a bare array, `active` is
- * `{ session, role }`, mutations are `{ ok: true, session, role }`.
+ * `{ session, role }`, mutations are `{ ok: true, session, role }`, and
+ * `/reload` is `{ ok: true, discovered, resolved, skipped }`.
  *
  * Operational notes:
  *   - Request bodies are capped (default 64 KiB) — oversized bodies are
@@ -60,6 +72,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createSubLogger, formatError } from "../../../logger.ts";
 import type { AgentDefinition } from "../../types.ts";
 import type { DshRoleSwitcher } from "./role-switcher.ts";
+import type { DshRoleboxReloadResult } from "./rolebox-reload.ts";
 import type { DshSessionLike, DshSessionStoreLike } from "./session.ts";
 
 /**
@@ -99,6 +112,15 @@ export interface DshRoleSwitchRouteOptions {
   maxBodyBytes?: number;
   /** Optional sub-logger name override (default `"dsh-role-switch-route"`). */
   loggerName?: string;
+  /**
+   * Optional `POST /rolebox/reload` callback — the in-process,
+   * non-destructive role reloader (`DshRoleboxReloader.reload` in
+   * `rolebox-reload.ts`, the dsh substitute for the opencode-only
+   * HotReloadService). When omitted, the sub-path is not served and the
+   * route answers `404`, so the route never exposes a reload the plugin did
+   * not explicitly wire.
+   */
+  reload?: () => Promise<DshRoleboxReloadResult>;
 }
 
 /**
@@ -134,6 +156,7 @@ export class DshRoleSwitchWebRoute {
   private readonly switcher: DshRoleSwitcher;
   private readonly store: DshSessionStoreLike;
   private readonly maxBodyBytes: number;
+  private readonly reload: (() => Promise<DshRoleboxReloadResult>) | undefined;
   private readonly _log;
 
   /**
@@ -150,6 +173,7 @@ export class DshRoleSwitchWebRoute {
     this.switcher = switcher;
     this.store = store;
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    this.reload = options.reload;
     this._log = createSubLogger(options.loggerName ?? "dsh-role-switch-route");
   }
 
@@ -198,6 +222,9 @@ export class DshRoleSwitchWebRoute {
       }
       if (method === "DELETE" && sub === "/roles/active") {
         return this.serveClear(res, session);
+      }
+      if (method === "POST" && sub === "/reload") {
+        return this.serveReload(res);
       }
 
       if (KNOWN_SUB_PATHS.has(sub)) {
@@ -274,6 +301,53 @@ export class DshRoleSwitchWebRoute {
     return sendJson(res, 200, { ok: true, session, role: null });
   }
 
+  /**
+   * `POST /rolebox/reload` — in-process, NON-DESTRUCTIVE role reload through
+   * the optional {@link DshRoleSwitchRouteOptions.reload} callback.
+   *
+   * Contract: `200 { ok: true, discovered, resolved, skipped }` on success;
+   * `409 { ok: false, disabled: true, error }` when the reloader is
+   * kill-switched; `409 { ok: false, error }` when the reload is busy or
+   * failed; `404` when no callback is wired. A callback that throws is
+   * caught HERE (the `handle` try/catch cannot see a rejection adopted by a
+   * `return <promise>` branch) and answered `500`.
+   */
+  private async serveReload(res: ServerResponse): Promise<void> {
+    if (!this.reload) {
+      return sendJson(res, 404, errorBody("Not found"));
+    }
+
+    let result: DshRoleboxReloadResult;
+    try {
+      result = await this.reload();
+    } catch (err) {
+      this._log.error("Role reload callback failed", {
+        error: formatError(err),
+      });
+      return sendJson(res, 500, errorBody("Internal server error"));
+    }
+    if (result.disabled) {
+      return sendJson(res, 409, {
+        ok: false,
+        disabled: true,
+        error: result.error ?? "Role reload is disabled",
+      });
+    }
+    if (!result.success) {
+      return sendJson(res, 409, errorBody(result.error ?? "Role reload failed"));
+    }
+
+    const discovered = result.discovered ?? 0;
+    const resolved = result.resolved ?? 0;
+    const skipped = result.skipped ?? 0;
+    this._log.info("Role reloaded via web route", {
+      discovered,
+      resolved,
+      skipped,
+    });
+    return sendJson(res, 200, { ok: true, discovered, resolved, skipped });
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   /**
@@ -321,7 +395,12 @@ export class DshRoleSwitchWebRoute {
 // ── Routing constants ────────────────────────────────────────────────────────
 
 /** Sub-paths that exist under the `/rolebox` prefix (for `405` vs `404`). */
-const KNOWN_SUB_PATHS = new Set(["/roles", "/roles/active", "/roles/switch"]);
+const KNOWN_SUB_PATHS = new Set([
+  "/roles",
+  "/roles/active",
+  "/roles/switch",
+  "/reload",
+]);
 
 // ── Serialization helpers ────────────────────────────────────────────────────
 

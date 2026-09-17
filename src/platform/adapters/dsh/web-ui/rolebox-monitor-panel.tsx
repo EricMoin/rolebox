@@ -33,6 +33,11 @@
  *     in flight the panel is `aria-busy` and the control is disabled; the
  *     header status seat (`role="status"`, the live region) reports
  *     load/refresh outcomes and errors;
+ *   - a manual "Reload roles" control POSTs `POST /rolebox/reload` (the
+ *     in-process, non-destructive role reload) and then re-fetches the role
+ *     state through the Refresh path; it is the reload's ONLY entry point (no
+ *     CLI/TUI surface) and it NEVER polls — the request is issued from the
+ *     click alone, and the status seat reports the outcome or the failure;
  *   - a failed initial load renders an explicit error state (`role="alert"`)
  *     with the server message and a Retry control; an empty snapshot (no
  *     graphs, no loops, no metrics, zero sessions) renders an explicit
@@ -75,6 +80,14 @@ export const STATUS_ENDPOINT = "/rolebox/status";
 
 /** `GET /rolebox/metrics` — `metrics.snapshot()` (counters/gauges/histograms). */
 export const METRICS_ENDPOINT = "/rolebox/metrics";
+
+/**
+ * `POST /rolebox/reload` — in-process, non-destructive role reload
+ * (same-origin). The monitor panel is the ONLY entry point to it (locked
+ * decision: no CLI/TUI surface), it is triggered MANUALLY (no polling), and a
+ * successful reload is followed by a role-state re-fetch.
+ */
+export const RELOAD_ENDPOINT = "/rolebox/reload";
 
 // ── Structural DTOs (mirror the backend / monitor-reader shapes) ───────────
 
@@ -753,6 +766,8 @@ function renderSessionsBlock(sessions: MonitorSessionsDto) {
  * engine-graph / loop / metrics / sessions readings, and surfaces
  * loading / error / empty states with a live-region status seat
  * (`role="status"`) and an `aria-busy` panel while a fetch is in flight.
+ * The header also carries the manual role-reload control
+ * (`POST /rolebox/reload`), the reload's only entry point; it never polls.
  *
  * @param props - composed settings-page props (see {@link RoleboxMonitorPanelProps}).
  */
@@ -778,6 +793,19 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
    * written so the state comparison sees a change.
    */
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
+  /**
+   * Manual role-reload trigger (`POST /rolebox/reload`). MANUAL ONLY: the
+   * request is issued from the button's click handler and never from a timer
+   * or an interval — this panel does not poll.
+   */
+  const [reloading, setReloading] = useState(false);
+  /**
+   * Confirmation of the last successful role reload, held until the
+   * follow-up role-state fetch lands. The fetch owns the status seat's steady
+   * text, so without this hand-off the reload's confirmation would be
+   * overwritten by the refresh the reload itself triggered.
+   */
+  const [reloadNotice, setReloadNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -785,6 +813,13 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
     // for content that has never rendered, and the seat names which one is
     // happening.
     const isInitialLoad = statusBody === null && metricsBody === null;
+    // Consume a pending role-reload confirmation: the fetch that follows a
+    // successful reload is what reports it, so the seat shows the reload
+    // outcome instead of a bare "Updated at" timestamp. Clearing it here (and
+    // not on the success branch) keeps a stale confirmation from resurfacing
+    // if this follow-up fetch itself fails.
+    const reloadNoticeText = reloadNotice;
+    setReloadNotice(null);
     setLoading(true);
     setStatus({
       text: isInitialLoad ? "Loading monitoring data…" : "Refreshing…",
@@ -820,16 +855,17 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
         );
         setStatus({
           text:
-            "Updated at " +
-            new Date().toLocaleTimeString() +
-            (verdict.needsAttention
-              ? " — " +
-                (verdict.failed.length + verdict.blocked.length) +
-                " need attention"
-              : "") +
-            (verdict.unknown.length > 0
-              ? " — " + verdict.unknown.length + " state unrecognized"
-              : ""),
+            reloadNoticeText ??
+            ("Updated at " +
+              new Date().toLocaleTimeString() +
+              (verdict.needsAttention
+                ? " — " +
+                  (verdict.failed.length + verdict.blocked.length) +
+                  " need attention"
+                : "") +
+              (verdict.unknown.length > 0
+                ? " — " + verdict.unknown.length + " state unrecognized"
+                : "")),
           error: false,
         });
       } catch (err) {
@@ -887,6 +923,58 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
   };
 
   const refresh = (): void => setRefreshToken((count) => count + 1);
+
+  /**
+   * Reload roles: POST the in-process reload route, then re-fetch the role
+   * state. MANUAL ONLY — this runs from the button's click handler and nothing
+   * else; no timer and no interval is ever scheduled.
+   *
+   * This is NOT the dock's client-side `reload()`
+   * (`role-switch-dock.tsx`), which merely re-reads the role list over GET.
+   * This control is a different concern: it asks the server to re-discover and
+   * re-resolve roles from disk and refresh every consumer of the previous role
+   * state. The two are deliberately not merged.
+   *
+   * A failed reload leaves the previously rendered role state untouched (the
+   * server preserved its state too), so the failure is reported on the status
+   * seat without a follow-up fetch.
+   */
+  const reloadRoles = async (): Promise<void> => {
+    if (reloading) return;
+    setReloading(true);
+    setStatus({ text: "Reloading roles…", error: false });
+    try {
+      const res = await fetch(RELOAD_ENDPOINT, { method: "POST" });
+      const body = (await res.json().catch(() => null)) as unknown;
+      if (!res.ok) {
+        // The route's stable error shape is { ok: false, error, disabled? };
+        // a bodyless failure degrades to the HTTP status.
+        const message =
+          isRecord(body) && typeof body.error === "string"
+            ? body.error
+            : "HTTP " + res.status;
+        setStatus({ text: "Role reload failed: " + message, error: true });
+        return;
+      }
+      const record = isRecord(body) ? body : {};
+      setReloadNotice(
+        "Reloaded roles — " +
+          (asNumber(record.discovered) ?? 0) +
+          " discovered, " +
+          (asNumber(record.resolved) ?? 0) +
+          " resolved, " +
+          (asNumber(record.skipped) ?? 0) +
+          " skipped",
+      );
+      // Re-fetch the role state through the same path the Refresh control
+      // uses; the notice rides that fetch so the seat reports the outcome.
+      setRefreshToken((count) => count + 1);
+    } catch (err) {
+      setStatus({ text: "Role reload failed: " + toMessage(err), error: true });
+    } finally {
+      setReloading(false);
+    }
+  };
 
   // Body posture: a full loading state only while nothing has rendered yet
   // (a refresh with data keeps the data visible); the error state only when
@@ -1130,20 +1218,35 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
   }
 
   return (
-    <div className="rolebox-monitor" data-rolebox-monitor aria-busy={loading}>
+    <div
+      className="rolebox-monitor"
+      data-rolebox-monitor
+      aria-busy={loading || reloading}
+    >
       <div className={monitorClass.panel}>
         <header className={monitorClass.header}>
           <h1 className={monitorClass.title}>Monitoring</h1>
           <button
             type="button"
             className={monitorClass.refresh}
-            disabled={loading}
+            disabled={loading || reloading}
             onClick={refresh}
           >
             {loading && (
               <span className={monitorClass.spinner} aria-hidden="true" />
             )}
             Refresh
+          </button>
+          <button
+            type="button"
+            className={monitorClass.reload}
+            disabled={loading || reloading}
+            onClick={() => void reloadRoles()}
+          >
+            {reloading && (
+              <span className={monitorClass.spinner} aria-hidden="true" />
+            )}
+            Reload roles
           </button>
           <span
             role="status"

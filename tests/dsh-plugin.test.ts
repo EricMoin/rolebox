@@ -21,6 +21,10 @@
  *     `rolebox:context` context entry register on the service double, and
  *     the section provider serves the ACTIVE role's prompt after a switch;
  *     headless profiles (no service) degrade with unchanged stats
+ *   - the in-process reload seam: `POST /rolebox/reload` re-resolves roles in
+ *     place, and the route, skill-provider, and system-prompt consumers observe
+ *     the new role set; the configured defaultRole is re-applied to the
+ *     reloaded set
  *   - the disposer cleans up registrations/listeners
  *   - the plugin source stays free of @opencode-ai / @deepseek-ai imports
  *
@@ -70,6 +74,10 @@ import type {
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
 } from "../src/platform/adapters/dsh/web-role-switch-route.ts";
+import type {
+  DshSkillProviderControl,
+  DshSkillProviderLike,
+} from "../src/platform/adapters/dsh/skill-provider.ts";
 
 // ── Validating fake live-agent registry ────────────────────────────────────
 //
@@ -182,6 +190,8 @@ function createFakeCtx(
     agents?: FakeAgentRegistry;
     /** Optional dsh llm runtime double (`ctx.llm` provider-route probe seam). */
     llm?: { listProviders(): ReadonlyArray<{ id: string }> };
+    /** Optional dsh skill-registry double (lazy skill-provider seam). */
+    skills?: boolean;
   } = {},
 ) {
   const registeredTools: DshToolDefinition[] = [];
@@ -207,6 +217,31 @@ function createFakeCtx(
       return () => {
         promptDisposed.push({ kind: "context", name: entry.name });
       };
+    },
+  };
+
+  // Recording dsh skill-registry double (`ctx.skills`, the `dsh-skill`
+  // registry row). `registerProvider(create)` invokes the factory once with
+  // the rc.6 `{ signal, invalidate }` control, records the created provider,
+  // and counts invalidations so the reload test can assert the live catalog
+  // was refreshed.
+  let skillInvalidations = 0;
+  const skillRegistrations: Array<{
+    provider: DshSkillProviderLike;
+    control: DshSkillProviderControl;
+  }> = [];
+  const skills = {
+    registerProvider(
+      create: (control: DshSkillProviderControl) => DshSkillProviderLike,
+    ): () => void {
+      const control: DshSkillProviderControl = {
+        signal: new AbortController().signal,
+        invalidate: () => {
+          skillInvalidations++;
+        },
+      };
+      skillRegistrations.push({ provider: create(control), control });
+      return () => {};
     },
   };
 
@@ -279,16 +314,22 @@ function createFakeCtx(
     // profile where the llm service is mounted; absent → the registrar emits a
     // split provider unchanged (pre-safety behavior).
     ...(options.llm ? { llm: options.llm } : {}),
+    // Optional skill registry (full profile with the `dsh-skill` bundle row):
+    // rolebox registers its lazy skill provider against it. Absent → the
+    // plugin's graceful degrade.
+    ...(options.skills ? { skills } : {}),
     get(name: string): unknown {
       // Optional-service seam: the host web server and (in full profiles) the
-      // system-prompt registry, live-agent registry, and llm runtime are probed
-      // by the plugin; every other name resolves to undefined (absent).
+      // system-prompt registry, live-agent registry, llm runtime, and skill
+      // registry are probed by the plugin; every other name resolves to
+      // undefined (absent).
       if (name === "webServer") return options.webServer ?? undefined;
       if (name === "systemPrompt") {
         return options.systemPrompt ? systemPrompt : undefined;
       }
       if (name === "agents") return options.agents ?? undefined;
       if (name === "llm") return options.llm ?? undefined;
+      if (name === "skills") return options.skills ? skills : undefined;
       return undefined;
     },
     on(event: string, listener: (...args: unknown[]) => void) {
@@ -308,7 +349,18 @@ function createFakeCtx(
     },
   };
 
-  return { ctx, tools, providers, listeners, systemPrompt, sections, contexts, started };
+  return {
+    ctx,
+    tools,
+    providers,
+    listeners,
+    systemPrompt,
+    sections,
+    contexts,
+    started,
+    skillRegistrations,
+    skillInvalidationCount: () => skillInvalidations,
+  };
 }
 
 // ── Mock req/res for driving the registered /rolebox route handler ──────────
@@ -404,6 +456,45 @@ const SIMPLE_ROLE = [
   "description: A minimal role for the dsh plugin test",
   "prompt: You are a test role.",
 ].join("\n");
+
+/** A role (plus its skill) that appears on disk only after boot. */
+const RELOADED_ROLE = [
+  "name: Reloaded Role",
+  "description: A role added after boot",
+  "prompt: You are a reloaded role.",
+  "skills:",
+  "  - reload-skill",
+].join("\n");
+
+/** A skill-less role that appears on disk only after boot (defaultRole case). */
+const NEWCOMER_ROLE = [
+  "name: Newcomer Role",
+  "description: A role added after boot",
+  "prompt: You are a newcomer role.",
+].join("\n");
+
+/** Write `{tmpDir}/{roleId}/skills/{skillName}/SKILL.md`. */
+function writeRoleSkill(roleId: string, skillName: string): void {
+  const skillDir = join(tmpDir, roleId, "skills", skillName);
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(
+    join(skillDir, "SKILL.md"),
+    [
+      "---",
+      `name: ${skillName}`,
+      `description: The ${skillName} asset.`,
+      "---",
+      `# ${skillName}`,
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+}
+
+/** Extract the role ids from a `GET /rolebox/roles` response body. */
+function roleIds(res: { text: string }): string[] {
+  return (JSON.parse(res.text) as Array<{ id: string }>).map((role) => role.id);
+}
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-dsh-plugin-"));
@@ -1024,6 +1115,158 @@ describe("dsh plugin apply()", () => {
 
     disposer();
     expect(registered).toHaveLength(0);
+  });
+
+  it("POST /rolebox/reload refreshes the route, skill, and prompt consumers", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    // Host web server registrar — captures the composed /rolebox route so the
+    // test drives the reload + role-switch surface exactly as the monitor
+    // panel does.
+    const registered: DshWebRouteLike[] = [];
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        registered.push(route);
+        return () => {
+          const i = registered.indexOf(route);
+          if (i >= 0) registered.splice(i, 1);
+        };
+      },
+    };
+
+    // The switch persists through the workspace-rooted active-role store;
+    // isolate process.cwd() so the sidecar lands in tmpDir.
+    const cwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      const { ctx, sections, skillRegistrations, skillInvalidationCount } =
+        createFakeCtx({
+          webServer: fakeWebServer,
+          systemPrompt: true,
+          skills: true,
+        });
+
+      const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+      const route = registered[0];
+      expect(route).toBeDefined();
+
+      // Boot state: one switchable role, the skill provider registered, and no
+      // catalog invalidation yet.
+      expect(
+        roleIds(await invoke(route.handler, "GET", "/rolebox/roles")),
+      ).toEqual(["tester"]);
+      expect(skillRegistrations).toHaveLength(1);
+      const provider = skillRegistrations[0].provider;
+      expect((await provider.list({})).map((candidate) => candidate.name)).toEqual([]);
+      expect(skillInvalidationCount()).toBe(0);
+
+      // Activate the boot role so its skills become candidates (the provider
+      // advertises the active ∪ default roles).
+      const switched = await invoke(
+        route.handler,
+        "POST",
+        "/rolebox/roles/switch",
+        JSON.stringify({ role: "tester", session: "s1" }),
+      );
+      expect(switched.status).toBe(200);
+
+      // NON-DESTRUCTIVE on-disk change: a new primary role + its skill.
+      writeRoleYaml("reloader", RELOADED_ROLE);
+      writeRoleSkill("reloader", "reload-skill");
+
+      const invalidationsBefore = skillInvalidationCount();
+
+      // The reload route succeeds and reports the re-discovered set.
+      const reload = await invoke(route.handler, "POST", "/rolebox/reload");
+      expect(reload.status).toBe(200);
+      expect(JSON.parse(reload.text)).toEqual({
+        ok: true,
+        discovered: 2,
+        resolved: 2,
+        skipped: 0,
+      });
+
+      // The live skill catalog was invalidated exactly once for the reload.
+      expect(skillInvalidationCount()).toBe(invalidationsBefore + 1);
+
+      // Route consumer: the re-synced registrar advertises the new role.
+      expect(
+        roleIds(await invoke(route.handler, "GET", "/rolebox/roles")),
+      ).toEqual(["reloader", "tester"]);
+
+      // Prompt consumer: switching to the new role makes the rolebox:role
+      // section serve its freshly resolved prompt (through the registrar the
+      // reloader re-synced).
+      const switchToNew = await invoke(
+        route.handler,
+        "POST",
+        "/rolebox/roles/switch",
+        JSON.stringify({ role: "reloader", session: "s1" }),
+      );
+      expect(switchToNew.status).toBe(200);
+      // The resolved prompt carries the role's <available_skills> block after
+      // its own text, so assert the prompt prefix.
+      expect(
+        sections[0].text({ agent: { id: "s1" }, sessionID: "s1" }),
+      ).toStartWith("You are a reloaded role.");
+
+      // Skill consumer: the provider re-reads the SAME captured roles array on
+      // every list(), so the new role's skill is advertised after the reload.
+      expect(
+        (await provider.list({})).map((candidate) => candidate.name),
+      ).toContain("reload-skill");
+
+      disposer();
+      expect(registered).toHaveLength(0);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  it("re-applies the configured defaultRole to the reloaded role set in place", async () => {
+    writeRoleYaml("tester", SIMPLE_ROLE);
+
+    const registered: DshWebRouteLike[] = [];
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        registered.push(route);
+        return () => {
+          const i = registered.indexOf(route);
+          if (i >= 0) registered.splice(i, 1);
+        };
+      },
+    };
+
+    const cwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      const { ctx } = createFakeCtx({ webServer: fakeWebServer });
+      const disposer = await apply(ctx, {
+        roleboxDir: tmpDir,
+        defaultRole: "tester",
+      } as DshPluginConfig);
+
+      // Boot promotion: the configured role is the designated primary.
+      expect(disposer.stats.resolvedRoles.map((role) => role.id)).toEqual(["tester"]);
+      expect(disposer.stats.resolvedRoles[0].config.mode).toBe("primary");
+
+      // A new role arrives on disk; the reload must re-apply the promotion to
+      // the re-resolved set (tester stays primary, the newcomer is demoted).
+      writeRoleYaml("newcomer", NEWCOMER_ROLE);
+      const reload = await invoke(registered[0].handler, "POST", "/rolebox/reload");
+      expect(reload.status).toBe(200);
+
+      // disposer.stats.resolvedRoles is the SAME container the reloader mutated
+      // in place — a rebuilt array would leave this stale.
+      const modes = Object.fromEntries(
+        disposer.stats.resolvedRoles.map((role) => [role.id, role.config.mode]),
+      );
+      expect(modes).toEqual({ tester: "primary", newcomer: "all" });
+
+      disposer();
+    } finally {
+      process.chdir(cwd);
+    }
   });
 
   it("skips route registration when ctx.get('webServer') is absent", async () => {

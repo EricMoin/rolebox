@@ -94,7 +94,12 @@ import {
 } from "./platform/adapters/dsh/web-role-switch-route.ts";
 import type { DshWebServerRouteRegistrar } from "./platform/adapters/dsh/web-role-switch-route.ts";
 import { DshRoleboxMonitorWebRoute } from "./platform/adapters/dsh/web-rolebox-monitor-route.ts";
-import { buildCanonicalTools } from "./platform/tool-assembly.ts";
+import { DshRoleboxReloader } from "./platform/adapters/dsh/rolebox-reload.ts";
+import {
+  buildCanonicalTools,
+  buildRoleSnapshotTools,
+  ROLE_SNAPSHOT_TOOL_KEYS,
+} from "./platform/tool-assembly.ts";
 import type { PlatformCapabilities } from "./platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "./prompt/builder.ts";
 import { createGraphTools } from "./graph/tools/index.ts";
@@ -339,6 +344,19 @@ export interface DshPluginDisposer {
   (): void;
   /** Bootstrap + wiring statistics for this apply() run. */
   stats: DshPluginStats;
+  /**
+   * In-process role-reload seam: replace the four role-snapshot tools
+   * (`asset_search` / `asset_inspect` / `asset_validate` / `reference_search`)
+   * with a fresh generation built from `roles`. Disposes the previously
+   * registered generation FIRST — the host registry frees each global tool
+   * name synchronously, so re-registering the same names cannot collide —
+   * then compiles and registers the new snapshot, honoring the
+   * `enabledNamespaces` filter. Safe to call repeatedly; the fiber disposer
+   * releases the last retained generation.
+   * @param roles - the re-resolved roles the new snapshot binds to.
+   * @returns the number of tools registered for this generation.
+   */
+  registerRoleSnapshotTools(roles: ResolvedRole[]): number;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -827,9 +845,13 @@ const dshCapabilities: PlatformCapabilities = {
  *       `/status`, `/metrics` surfaces) on dsh's host web server via the
  *       `webServer` service seam (present only in the web profile). The two
  *       surfaces share ONE prefix registration — the real host webserver
- *       rejects duplicate `(kind, path)` pairs. A registration failure logs
- *       a warning and degrades — the plugin keeps running without the web
- *       surface.
+ *       rejects duplicate `(kind, path)` pairs. The composed route also
+ *       carries the in-process `POST /rolebox/reload` surface
+ *       (`DshRoleboxReloader`), which re-discovers + re-resolves roles and
+ *       refreshes the role-snapshot tools and the skill catalog IN PLACE —
+ *       exposed only where this route is (the DSH web monitor panel). A
+ *       registration failure logs a warning and degrades — the plugin keeps
+ *       running without the web surface.
  *   3b. OPTIONALLY register the session-level system-prompt contributions
  *       (`rolebox:role` section + `rolebox:context` context entry) when the
  *       `systemPrompt` service is present on the ctx (full profiles only);
@@ -1195,6 +1217,38 @@ export async function apply(
   });
   const loopTools = createLoopTools(loopCoordinator, sessionAdapter);
 
+  // Role-snapshot registration seam (in-process role reload). The four tools
+  // whose behavior is bound to the resolved-role snapshot are registered as
+  // ONE disposable generation: a reload disposes the previous generation and
+  // registers a fresh one from the re-resolved roles. Disposal MUST precede
+  // registration — the host registry keys global tools by name and rejects a
+  // duplicate (packages/core/tools/src/index.ts ToolRuntime.register →
+  // packages/core/scope/src/store.ts NamedEntries.insert, which throws when
+  // the name is already present); the disposer returned by register() runs
+  // that insert's undo SYNCHRONOUSLY, so each name is free before the new
+  // definition is registered.
+  const roleSnapshotDisposers: Array<() => void> = [];
+  const registerRoleSnapshotTools = (roles: ResolvedRole[]): number => {
+    for (const dispose of roleSnapshotDisposers.splice(0)) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("role-snapshot tool disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const compiled = factory.compileAll(buildRoleSnapshotTools(roles));
+    let registered = 0;
+    for (const [key, def] of Object.entries(compiled)) {
+      if (!isNamespaceEnabled(key, config.enabledNamespaces)) continue;
+      const dispose = ctx.tools.register(def as DshToolDefinition);
+      roleSnapshotDisposers.push(dispose);
+      registered++;
+    }
+    return registered;
+  };
+
   // Optional host webServer seam — register the composed `/rolebox` prefix
   // route on dsh's own web server. The role-switch surface (`/roles*`) and
   // the monitor surface (`/status`, `/metrics`) are composed into a SINGLE
@@ -1208,9 +1262,40 @@ export async function apply(
   // the fiber disposer below.
   if (webServer) {
     try {
+      // In-process, NON-DESTRUCTIVE role-reload seam. Built from the SAME
+      // instances the boot path created:
+      //   - `dirs` — the directories the runtime was booted from;
+      //   - `resolvedRoles` — the mutable array `initializeRoleboxRuntime`
+      //     returned, i.e. the exact reference the skill-provider factory
+      //     captured (`roles: resolvedRoles`) and the boot role-snapshot
+      //     generation reads;
+      //   - `roleFunctionsMap` — the shared map the system-prompt adapter
+      //     reads at render time;
+      //   - `registrar` — the EXISTING DshAgentRegistrar (its `sync` is
+      //     diff/idempotent, so re-syncing unchanged agents is a no-op).
+      // The reloader mutates those containers IN PLACE, so every captured
+      // consumer observes the re-resolved roles without re-registration.
+      //
+      // `refreshSkills` is `refreshSkillCatalog` (invalidate the LIVE
+      // provider registration) and that is sufficient: DshSkillProvider
+      // resolves `deps.roles` at `list()` time and that dependency IS the
+      // array refilled by the reloader, so a fresh factory + re-register would
+      // only churn the registration and orphan the captured `skillProvider`.
+      // The reloader itself re-applies the project default role on the new
+      // set.
+      const roleboxReloader = new DshRoleboxReloader({
+        directories: dirs,
+        resolvedRoles,
+        roleFunctionsMap,
+        registrar,
+        refreshRoleSnapshotTools: registerRoleSnapshotTools,
+        refreshSkills: refreshSkillCatalog,
+        ...(config.defaultRole ? { defaultRole: config.defaultRole } : {}),
+      });
       const roleSwitchRoute = new DshRoleSwitchWebRoute(
         roleSwitcher,
         ctx.sessions,
+        { reload: () => roleboxReloader.reload() },
       );
       const monitorRoute = new DshRoleboxMonitorWebRoute(
         roleSwitcher,
@@ -1255,6 +1340,10 @@ export async function apply(
   const toolDisposers: Array<() => void> = [];
   let registeredTools = 0;
   for (const [key, def] of Object.entries(compiled)) {
+    // The role-snapshot tools are registered as their own disposition-managed
+    // generation below — never here, or the host's duplicate-name rejection
+    // would throw on boot.
+    if (key in ROLE_SNAPSHOT_TOOL_KEYS) continue;
     if (!isNamespaceEnabled(key, config.enabledNamespaces)) continue;
     // compileAll() is typed `Record<string, unknown>` (the IToolFactory port
     // contract); the compiled objects are structurally DshToolDefinition.
@@ -1262,6 +1351,9 @@ export async function apply(
     toolDisposers.push(dispose);
     registeredTools++;
   }
+  // Initial generation: the same four tools, registered through the reload
+  // seam so a later re-registration replaces them cleanly.
+  registeredTools += registerRoleSnapshotTools(resolvedRoles);
 
   // 5. Mount hooks (rolebox hook kinds onto dsh extension points).
   const hookProvider = new DshHookProvider(ctx, {});
@@ -1378,6 +1470,17 @@ export async function apply(
         });
       }
     }
+    // The retained role-snapshot generation (the reload seam spawns a new
+    // one per call, so release whichever generation is current).
+    for (const dispose of roleSnapshotDisposers) {
+      try {
+        dispose();
+      } catch (err) {
+        log.debug("role-snapshot tool disposer failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     // Best-effort agent-catalog cleanup (dsh providers are removed via the
     // registrar's unregister → disposer chain). Fire-and-forget: fiber
     // unload is synchronous in cordis.
@@ -1403,6 +1506,7 @@ export async function apply(
     graphNotifyWired,
     monitorRouteRegistered,
   };
+  disposer.registerRoleSnapshotTools = registerRoleSnapshotTools;
   return disposer;
 }
 
