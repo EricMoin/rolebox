@@ -5,6 +5,7 @@ import { createPluginHooks } from "../core/composition.ts";
 import { OpencodeSessionAdapter } from "../platform/adapters/opencode/session.ts";
 export { loopManagerMap, activeLoopManager } from "../core/composition.js";
 import { roleFunctionsMap } from "../resolver/registry.ts";
+export { roleFunctionsMap } from "../resolver/registry.ts";
 import { loadProjectConfig, applyProjectConfig } from "../project-config.ts";
 import { PLUGIN_ID } from "../constants.ts";
 import { createSubLogger, getLogFilePath, configureLogDirectory } from "../logger.ts";
