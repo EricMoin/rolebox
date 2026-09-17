@@ -1,7 +1,7 @@
 /**
  * Pi synthetic session.status event wiring tests (subtask S4, updated for S6).
  *
- * Verifies the status-event wiring exported from `src/pi-extension.ts`
+ * Verifies the status-event wiring exported from `src/entries/pi.ts`
  * (`wirePiSessionStatusEvents`):
  *   1. pi.on("agent_start") → canonical session.status event with
  *      properties.status "busy" and the sessionID resolved through the
@@ -25,8 +25,8 @@
 import { describe, expect, it } from "bun:test";
 import { PiProcessSessionAdapter } from "../src/platform/adapters/pi/process-session.ts";
 import { PiEventBridge } from "../src/platform/adapters/pi/event-bridge.ts";
-import { wirePiSessionStatusEvents } from "../src/pi-extension.ts";
-import type { PiStatusWireResult } from "../src/pi-extension.ts";
+import { wirePiSessionStatusEvents } from "../src/entries/pi.ts";
+import type { PiStatusWireResult } from "../src/entries/pi.ts";
 import type { CanonicalEvent } from "../src/platform/types.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ import { discoverRoles } from "../src/loader/role-loader";
 import { resolveSkills } from "../src/resolver/skill-resolver";
 import { buildAgentPrompt } from "../src/prompt/builder";
 import { toPosixPath } from "../src/utils/paths";
-import RoleboxModule from "../src/index";
+import RoleboxModule from "../src/entries/opencode.ts";
 const RoleboxPlugin = RoleboxModule.server;
 
 const examplesDir = path.join(import.meta.dir, "..", "examples");

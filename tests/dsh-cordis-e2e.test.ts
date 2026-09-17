@@ -44,8 +44,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import roleboxPlugin from "../src/dsh-plugin.ts";
-import type { DshPluginDisposer } from "../src/dsh-plugin.ts";
+import roleboxPlugin from "../src/entries/dsh.ts";
+import type { DshPluginDisposer } from "../src/entries/dsh.ts";
 import type { DshToolDefinition } from "../src/platform/adapters/dsh/tool-factory.ts";
 import {
   DshAgentRegistrar,

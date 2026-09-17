@@ -44,7 +44,9 @@ jobs:
       - name: Build package library (tsc emit)
         # `dist/` is gitignored, so the dsh-client-modules seam tests
         # (tests/dsh-plugin.test.ts:494-525) fail on a fresh runner unless the
-        # library is emitted here: they assert dist/dsh-plugin.js exists, and
+        # library is emitted here: they assert dist/entries/dsh.js exists (the
+        # canonical entry; dist/dsh-plugin.js is only a generated re-export stub
+        # written by build:entry-aliases, never by this emit), and
         # build:dsh-web-client below copies the ./client entry declarations this
         # emit produces. Run before the build/test steps.
         run: bunx tsc

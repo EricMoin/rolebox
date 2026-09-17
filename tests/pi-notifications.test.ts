@@ -2,7 +2,7 @@
  * Pi NotificationManager wiring tests (subtask S3).
  *
  * Verifies the Pi-side notification wiring exported from
- * `src/pi-extension.ts`:
+ * `src/entries/pi.ts`:
  *   1. `wirePiNotifications()` parses role `notifications:` configs and
  *      global config from ROLEBOX_NOTIFICATIONS_CONFIG /
  *      ROLEBOX_NOTIFICATIONS_ENABLED (mirroring notification-service.ts).
@@ -31,8 +31,8 @@ import {
   getPiNotificationManager,
   extractSessionId,
   extractEventAgent,
-} from "../src/pi-extension.ts";
-import type { PiNotificationWireResult } from "../src/pi-extension.ts";
+} from "../src/entries/pi.ts";
+import type { PiNotificationWireResult } from "../src/entries/pi.ts";
 import { PiEventBridge } from "../src/platform/adapters/pi/event-bridge.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { ResolvedRole } from "../src/types.ts";

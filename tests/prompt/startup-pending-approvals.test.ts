@@ -1,7 +1,7 @@
 /**
  * Startup pending-approvals reminder (subtask 4).
  *
- * Verifies the startup aggregation path wired in `src/pi-extension.ts`:
+ * Verifies the startup aggregation path wired in `src/entries/pi.ts`:
  * - `collectStartupPendingApprovals(stateDir)` enumerates every `blocked`
  *   `needs_approval` gate recovered from the persisted store;
  * - `buildPendingApprovalsReminder(pending)` produces EXACTLY one
@@ -29,7 +29,7 @@ import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts"
 import {
   collectStartupPendingApprovals,
   buildPendingApprovalsReminder,
-} from "../../src/pi-extension.ts";
+} from "../../src/entries/pi.ts";
 import {
   DISPATCH_NOTIFICATION_MARKERS,
   PENDING_APPROVALS_MARKER,

@@ -1,13 +1,13 @@
 # rolebox as a dsh profile bundle layer (contract: docs/dsh-plugin-contract.md §5.3).
 #
-# `name` points at the cordis host half (dist/dsh-plugin.js), which
+# `name` points at the cordis host half (dist/entries/dsh.js), which
 # default-exports the Object plugin `{ name, inject, Config, apply }`. The
 # package root (`main` → dist/index.js) is the opencode plugin and is NOT a
 # cordis plugin, so it must not be referenced here.
 #
 # The specifier is PACKAGE-RELATIVE because a bundle-patch row resolves against
-# the patch file's own directory (<pkg>/dsh/), so `../dist/dsh-plugin.js`
-# lands on <pkg>/dist/dsh-plugin.js wherever the package is installed.
+# the patch file's own directory (<pkg>/dsh/), so `../dist/entries/dsh.js`
+# lands on <pkg>/dist/entries/dsh.js wherever the package is installed.
 #
 # dsh-client-modules only scans loader rows whose specifier is a package root
 # (bare name) or path-like (relative / absolute / file:): a package SUBPATH
@@ -25,5 +25,5 @@
 # $DSH_HOME, all namespaces enabled).
 - insert:
     - id: rolebox
-      name: ../dist/dsh-plugin.js
+      name: ../dist/entries/dsh.js
       config: {}

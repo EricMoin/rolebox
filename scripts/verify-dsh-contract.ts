@@ -1,7 +1,7 @@
 /**
  * verify-dsh-contract — READ-ONLY drift detector for rolebox's structural dsh
  * mirrors (`Dsh*` interfaces in `src/platform/adapters/dsh/**` and the plugin
- * metadata in `src/dsh-plugin.ts`).
+ * metadata in `src/entries/dsh.ts`).
  *
  * rolebox consumes the DeepSeek Harness (dsh) across a structural boundary: it
  * never imports `@deepseek-ai/*` at runtime, so a dsh rename or removal of a
@@ -334,7 +334,7 @@ const MIRROR = {
   skillProvider: "src/platform/adapters/dsh/skill-provider.ts",
   agentRegistrar: "src/platform/adapters/dsh/agent-registrar.ts",
   session: "src/platform/adapters/dsh/session.ts",
-  plugin: "src/dsh-plugin.ts",
+  plugin: "src/entries/dsh.ts",
 } as const
 
 // dsh-checkout relative paths (source root = $DSH_SOURCE_DIR).

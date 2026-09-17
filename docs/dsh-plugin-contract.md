@@ -568,7 +568,7 @@ but must not extend the harness's event vocabulary. The boundary is:
   own `SessionEventMap`
   (`source:packages/core/session/src/known-event-types.ts`). This is
   enforced mechanically by `tests/platform/dsh-no-custom-session-events.test.ts`,
-  which scans `src/platform/adapters/dsh/**` and `src/dsh-plugin.ts`; it resolves
+  which scans `src/platform/adapters/dsh/**` and `src/entries/dsh.ts`; it resolves
   inline literals, named string constants, and non-interpolated template
   literals, and fails on any non-catalog or statically unresolvable type. The
   guard is pinned to the installed `@deepseek-ai/dsh-session` catalog, so an
@@ -585,7 +585,7 @@ at `.rolebox/state/activerole-<dirHash>.json`
 `{ version, sessions: [{ sessionId, roleId, updatedAt }] }`), never in the
 session log. The store is constructed from the workspace directory
 (`process.cwd()`) and injected into the shared `ActiveRoleRef` at
-`src/dsh-plugin.ts`; the holder hydrates synchronously from the sidecar
+`src/entries/dsh.ts`; the holder hydrates synchronously from the sidecar
 at construction, writes back best-effort on every switch, and is pruned on load
 by TTL + a session cap. The switcher's `session/created` restore uses the
 precedence **sidecar entry → read-only legacy-event adoption → fork
@@ -674,7 +674,7 @@ dsh has no registered llm adapter for would turn a working spawn into a hard
 `NO_ADAPTER` dispatch failure (`source:packages/llm/llm/src/index.ts`; see
 [dsh provider notes](dsh-provider-notes.md) §2/§4). When the plugin can resolve
 the `ctx.llm` service, it probes `listProviders()` (the
-`probeLlmRoutes`/`providerRoutes` seam in `src/dsh-plugin.ts`) and hands the
+`probeLlmRoutes`/`providerRoutes` seam in `src/entries/dsh.ts`) and hands the
 registrar a spawn-time route probe. If the split provider is absent from that
 list, the registrar logs ONE warning and **degrades to a model-only override** —
 leaving the base provider intact so the spawn inherits the runtime default route
@@ -718,7 +718,7 @@ deployed dsh profile therefore has at least `spawn` and `fork` in
 agent ids and **delegates real spawning to one of these host providers by name**:
 `DshAgentRegistrar.buildProvider().start()` forwards the resolved request to the
 provider named by its `spawnProviderName` option (default `"spawn"`, wired from
-config in `src/dsh-plugin.ts`), refusing recursion when that name
+config in `src/entries/dsh.ts`), refusing recursion when that name
 collides with a rolebox agent id
 (`src/platform/adapters/dsh/agent-registrar.ts`).
 
@@ -896,7 +896,7 @@ structurally (duck typing — never imports `@deepseek-ai/*`,
 `{ kind: 'prefix', path: '/rolebox', handler }` route
 (`web-role-switch-route.ts`). The service is optional: `apply()` probes
 `ctx.get("webServer")` and skips route registration when absent (headless
-profiles) (`src/dsh-plugin.ts`).
+profiles) (`src/entries/dsh.ts`).
 
 #### 4.4.2 `dsh.client` roster contract (node half)
 
@@ -937,7 +937,7 @@ specifier (relative, absolute, or `file:`) is eligible:
 graph. dsh's own roster rows are package roots, so they resolve naturally.
 rolebox's cordis host half lives at the `./dsh` sub-path export, so the shipped
 bundle patch names it with a PACKAGE-RELATIVE path instead:
-`../dist/dsh-plugin.js`, resolved against the patch file's own directory
+`../dist/entries/dsh.js`, resolved against the patch file's own directory
 (`dsh/cordis.patch.yml` → `<pkg>/dsh/`). The scan then walks to the nearest
 owning manifest and derives the browser module id from its `name` field —
 `rolebox`. Both halves of the contract follow from that id: the package must
@@ -1198,7 +1198,7 @@ full profile by the `system-prompt` bundle row). Its `SystemPrompt` service is a
 `context()`, and `renderPrompt()`. rolebox's session-level
 role injection registers two contributions into it via `DshSystemPromptAdapter`
 (`src/platform/adapters/dsh/system-prompt.ts`, wired by
-`src/dsh-plugin.ts`):
+`src/entries/dsh.ts`):
 
 - **Section `rolebox:role` — `order: 50`** — renders the ACTIVE role's full
   `systemPrompt` for the current session (`resolveActiveRolePrompt`). The
@@ -1222,7 +1222,7 @@ role prompt follows): the context entry (order 0) renders AHEAD of the role
 section (order 50).
 
 **Graceful degradation** — the `systemPrompt` service is OPTIONAL. `apply()`
-probes it structurally (`probeSystemPrompt`, `src/dsh-plugin.ts` —
+probes it structurally (`probeSystemPrompt`, `src/entries/dsh.ts` —
 `ctx.systemPrompt` property or `ctx.get("systemPrompt")`, both duck-typed)
 and registers the contributions only when the service is present. Full
 profiles mount it; headless profiles have no model-facing prompt assembly, so
@@ -1250,7 +1250,7 @@ verified `0.1.5-rc.1` source surface that the provider
   default export IS `SkillRegistry`
   (`source:packages/skill/skill/src/index.ts`). The row is optional: a
   profile that does not mount it has no `ctx.skills`, and rolebox's provider is
-  simply not registered (`src/dsh-plugin.ts`).
+  simply not registered (`src/entries/dsh.ts`).
 - The plugin seam is a FACTORY, not a value
   (`source:packages/skill/skill/src/index.ts`):
 
@@ -1265,8 +1265,8 @@ verified `0.1.5-rc.1` source surface that the provider
   unregisters the provider and invalidates catalog caches
   (`source:packages/skill/skill/src/index.ts`).
 - rolebox consumes only this seam, structurally (no `@deepseek-ai/*` import):
-  `DshSkillRegistryLike` (`src/dsh-plugin.ts`), probed at
-  `src/dsh-plugin.ts`, invoked at `src/dsh-plugin.ts` with the
+  `DshSkillRegistryLike` (`src/entries/dsh.ts`), probed at
+  `src/entries/dsh.ts`, invoked at `src/entries/dsh.ts` with the
   factory from `createDshSkillProviderFactory` (`skill-provider.ts`).
   The registration control is held so a role switch can call `invalidate()`
   (`skill-provider.ts`).
@@ -1400,11 +1400,11 @@ a duplicate name OUTRIGHT, and rank decides duplicates only WITHIN one layer
   preset's layer and a read from that scope sees it
   (`source:packages/skill/skill/src/index.ts`). Only an agent preset's
   standing composition mints such a context; rolebox registers once from the
-  plugin's global context (`src/dsh-plugin.ts`). The limitation is
+  plugin's global context (`src/entries/dsh.ts`). The limitation is
   structural, not a rolebox gap.
 - Graceful degradation: an absent `ctx.skills` is a no-op, never a boot gate
-  (`src/dsh-plugin.ts`); the service is deliberately not in the
-  `inject` roster (`src/dsh-plugin.ts`).
+  (`src/entries/dsh.ts`); the service is deliberately not in the
+  `inject` roster (`src/entries/dsh.ts`).
 
 ---
 
@@ -1653,7 +1653,7 @@ real packages. Conformance of the structural mirrors is checked by
   `"spawn"`, registered by `@deepseek-ai/dsh-subagent-spawn-in-process`), with a
   recursion guard against an agent-id collision
   (`src/platform/adapters/dsh/agent-registrar.ts`; config wiring
-  `src/dsh-plugin.ts`). Covered by unit tests against a fake registry
+  `src/entries/dsh.ts`). Covered by unit tests against a fake registry
   double and by the cordis e2e harness (`tests/dsh-cordis-e2e.test.ts`,
   `tests/platform/agent-registrar.test.ts`). **Still unverified:** a live
   end-to-end boot against the deployed dsh profile (`~/.dsh/profiles/...`) that

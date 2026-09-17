@@ -4,7 +4,7 @@ import path from "node:path";
 import { tmpdir as osTmpdir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap, pendingCorrections } from "../src/core/composition";
-import { roleFunctionsMap } from "../src/index";
+import { roleFunctionsMap } from "../src/entries/opencode.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../src/types";
 import { RoleMode } from "../src/constants";
 import type { DispatchManagerConfig } from "../src/dispatch/config.ts";

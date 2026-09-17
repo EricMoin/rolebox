@@ -1,7 +1,7 @@
 /**
  * Pi extension — skill path registration (S1 wiring) tests.
  *
- * Verifies the wiring added to src/pi-extension.ts after
+ * Verifies the wiring added to src/entries/pi.ts after
  * initializeRoleboxRuntime():
  *   - every resolved skill of every resolved role — role-local AND global
  *     scope — is registered via `registrar.registerSkillPath(agentId,
@@ -13,7 +13,7 @@
  *     returns `{ skillPaths }` containing those directories.
  *
  * The test runs the REAL extension entry point (default export of
- * src/pi-extension.ts) against a hermetic fixture:
+ * src/entries/pi.ts) against a hermetic fixture:
  *   - `process.chdir()` → a temp workspace containing `rolebox/` with
  *     role.yaml fixtures that reference role-local and global skills;
  *   - `PI_CODING_AGENT_DIR` → a temp dir so configDir / globalSkillsDir
@@ -33,7 +33,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import initExtension from "../src/pi-extension.ts";
+import initExtension from "../src/entries/pi.ts";
 
 // ── Fixture role definitions ────────────────────────────────────────────────
 //

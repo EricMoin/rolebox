@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 /**
- * dsh-plugin tests — the cordis plugin entry point (`src/dsh-plugin.ts`)
+ * dsh-plugin tests — the cordis plugin entry point (`src/entries/dsh.ts`)
  * booted on a minimal fake cordis ctx against a temp rolebox directory.
  *
  * Verifies:
@@ -40,13 +40,13 @@ import { tmpdir } from "node:os";
 import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
 import { DshEventBridge, mapDshEventType } from "../src/platform/adapters/dsh/event-bridge.ts";
-import { apply, name, inject, Config, buildAgentPromptInjector } from "../src/dsh-plugin.ts";
+import { apply, name, inject, Config, buildAgentPromptInjector } from "../src/entries/dsh.ts";
 import type {
   DshPluginContext,
   DshPluginDisposer,
   DshPluginStats,
   DshPluginConfig,
-} from "../src/dsh-plugin.ts";
+} from "../src/entries/dsh.ts";
 import {
   DshToolFactory,
   DSH_TOOL_PRESENTATION,
@@ -552,7 +552,7 @@ describe("dsh plugin shape", () => {
 // (`exactPackageSpecifier`); a package SUBPATH such as `rolebox/dsh` is
 // cached as a permanent negative verdict and the web client never reaches the
 // boot graph. The shipped bundle patch therefore names the cordis host half
-// with the package-relative `../dist/dsh-plugin.js`, and the nearest owning
+// with the package-relative `../dist/entries/dsh.js`, and the nearest owning
 // manifest supplies the browser module id `rolebox`. The browser half
 // additionally requires the bundle envelope id to equal that graph row id.
 
@@ -594,10 +594,10 @@ describe("dsh packaging — dsh-client-modules resolution seam", () => {
     }>;
     const row = doc[0]?.insert?.[0];
     expect(row?.id).toBe("rolebox");
-    expect(row?.name).toBe("../dist/dsh-plugin.js");
+    expect(row?.name).toBe("../dist/entries/dsh.js");
 
     const hostPath = resolve(dirname(patchPath), row!.name!);
-    expect(hostPath).toBe(resolve(pkgRoot, "dist/dsh-plugin.js"));
+    expect(hostPath).toBe(resolve(pkgRoot, "dist/entries/dsh.js"));
     expect(existsSync(hostPath)).toBe(true);
 
     let dir = dirname(hostPath);
@@ -1968,7 +1968,7 @@ describe("dsh bundle patch files", () => {
     expect(entries.length).toBeGreaterThanOrEqual(1);
     const first = entries[0] as { insert?: Array<{ id?: string; name?: string }> };
     expect(first.insert?.[0]?.id).toBe("rolebox");
-    expect(first.insert?.[0]?.name).toBe("../dist/dsh-plugin.js");
+    expect(first.insert?.[0]?.name).toBe("../dist/entries/dsh.js");
   });
 
   it("the configured example (examples/dsh/cordis.patch.yml) parses as a YAML entry list", () => {
@@ -1979,7 +1979,7 @@ describe("dsh bundle patch files", () => {
     const insert = (entries[0] as { insert?: Array<{ id?: string; name?: string; config?: unknown }> })
       .insert?.[0];
     expect(insert?.id).toBe("rolebox");
-    expect(insert?.name).toBe("./node_modules/rolebox/dist/dsh-plugin.js");
+    expect(insert?.name).toBe("./node_modules/rolebox/dist/entries/dsh.js");
     // Every Config option from the README table is representable.
     const config = insert?.config as Record<string, unknown> | undefined;
     expect(typeof config?.roleboxDir).toBe("string");
@@ -1992,7 +1992,7 @@ describe("dsh bundle patch files", () => {
 // ── Import hygiene ─────────────────────────────────────────────────────────
 
 describe("dsh-plugin import hygiene", () => {
-  const FILE = resolve(import.meta.dir, "../src/dsh-plugin.ts");
+  const FILE = resolve(import.meta.dir, "../src/entries/dsh.ts");
 
   function extractImportSpecifiers(source: string): string[] {
     const importRe =

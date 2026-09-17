@@ -18,7 +18,7 @@
       # package root or a path-like specifier (never the `rolebox/dsh`
       # subpath) so dsh-client-modules scans it and derives the browser
       # module id `rolebox` from the package manifest.
-      name: ./node_modules/rolebox/dist/dsh-plugin.js
+      name: ./node_modules/rolebox/dist/entries/dsh.js
       config:
         # Override the rolebox directory (default: {dsh home}/rolebox).
         roleboxDir: /absolute/path/to/roles
@@ -42,7 +42,7 @@
 # browser module id from the nearest owning package.json. Here that manifest
 # is `node_modules/rolebox/package.json` (name "rolebox"), so the bundle
 # envelope id is `rolebox` (scripts/build-dsh-web-client.ts). The shipped
-# bundle layer uses `../dist/dsh-plugin.js` because its patch file sits at
+# bundle layer uses `../dist/entries/dsh.js` because its patch file sits at
 # `<pkg>/dsh/cordis.patch.yml`; a profile patch resolves against the profile
 # directory instead.
 #

@@ -50,7 +50,7 @@ console.log("build:dsh-web-client — bundle success")
 // envelope id MUST equal rolebox's boot-graph row id: dsh-client-modules
 // derives that id from the nearest owning package manifest's `name` because
 // the bundle patch names the host half with the path-like
-// `../dist/dsh-plugin.js` (dsh/cordis.patch.yml) — package-subpath names
+// `../dist/entries/dsh.js` (dsh/cordis.patch.yml) — package-subpath names
 // such as `rolebox/dsh` are not scanned as client packages at all. The
 // browser half keys the module table by that row id and rejects a bundle
 // whose factory registered under a different one:

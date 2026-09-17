@@ -2,7 +2,7 @@
 
 /**
  * dsh plugin-level skill-registration integration test —
- * `src/dsh-plugin.ts` booted on a fake cordis ctx whose `skills` service is a
+ * `src/entries/dsh.ts` booted on a fake cordis ctx whose `skills` service is a
  * duck-typed double, against a real temp-dir role fixture.
  *
  * This is the end-to-end proof of the skill-surface defect fix at the WIRING
@@ -49,11 +49,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { apply } from "../../src/dsh-plugin.ts";
+import { apply } from "../../src/entries/dsh.ts";
 import type {
   DshPluginConfig,
   DshPluginContext,
-} from "../../src/dsh-plugin.ts";
+} from "../../src/entries/dsh.ts";
 import { shortHash } from "../../src/utils/state-paths.ts";
 import type { DshToolDefinition } from "../../src/platform/adapters/dsh/tool-factory.ts";
 import type {

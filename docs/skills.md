@@ -64,9 +64,9 @@ native discovery mechanism:
 
 | Platform | Mechanism | Where |
 |---|---|---|
-| opencode | Symlink sync into the global skills dir (`~/.config/opencode/skills/`), discovered by oh-my-openagent | `syncSkillSymlinks` (`src/sync/skill-symlinks.ts`), invoked from `src/index.ts` |
-| Pi | `registrar.registerSkillPath(agentId, dirname(skill.filePath))`, reported through `resources_discover` | `src/pi-extension.ts` |
-| dsh | A lazy `ctx.skills` `SkillProvider` registered on dsh's skill registry | `src/platform/adapters/dsh/skill-provider.ts`; registered at `src/dsh-plugin.ts` |
+| opencode | Symlink sync into the global skills dir (`~/.config/opencode/skills/`), discovered by oh-my-openagent | `syncSkillSymlinks` (`src/sync/skill-symlinks.ts`), invoked from `src/entries/opencode.ts` |
+| Pi | `registrar.registerSkillPath(agentId, dirname(skill.filePath))`, reported through `resources_discover` | `src/entries/pi.ts` |
+| dsh | A lazy `ctx.skills` `SkillProvider` registered on dsh's skill registry | `src/platform/adapters/dsh/skill-provider.ts`; registered at `src/entries/dsh.ts` |
 
 *From `src/sync/skill-symlinks.ts` — `syncSkillSymlinks` and its oh-my-openagent discovery contract:*
 
@@ -82,7 +82,7 @@ native discovery mechanism:
 export function syncSkillSymlinks(resolvedRoles: ResolvedRole[], globalSkillsDir: string): void {
 ```
 
-*From `src/pi-extension.ts` — `registerAgentSkillPaths` calling `registrar.registerSkillPath`:*
+*From `src/entries/pi.ts` — `registerAgentSkillPaths` calling `registrar.registerSkillPath`:*
 
 ```ts
     const registerAgentSkillPaths = (
@@ -161,7 +161,7 @@ files a registration into the layer of its CALLING context's scope, and only a
 context scoped to the dsh agent object (an agent preset's standing composition)
 lands in that agent's layer where a read from that scope would see it
 (`lib/types/index.d.ts`). rolebox registers once from the plugin's
-global context (`src/dsh-plugin.ts`), so its provider serves the workspace
+global context (`src/entries/dsh.ts`), so its provider serves the workspace
 layer. Closing the gap would require registering from a context scoped to the
 dsh agent object — a capability only an agent preset's standing composition
 provides.

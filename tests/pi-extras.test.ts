@@ -14,7 +14,7 @@
  * Mirrors the opencode-side wiring at src/core/services/tool-service.ts:91-106,
  * restricted to the five Pi-eligible tools (LSP + asset_hot_reload are
  * opencode-only and intentionally not forwarded). load_role_skill is the
- * Pi-only skill loader (src/pi-extension.ts:952-953; opencode has its own
+ * Pi-only skill loader (src/entries/pi.ts:952-953; opencode has its own
  * native skill tool).
  */
 

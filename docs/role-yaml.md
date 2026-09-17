@@ -135,7 +135,7 @@ How the split is consumed per platform:
   (`src/platform/adapters/opencode/agent-registrar.ts`).
 - **pi** splits on the first slash and resolves the pair against pi's model
   registry (`src/platform/adapters/pi/role-switcher.ts`,
-  `src/pi-extension.ts`).
+  `src/entries/pi.ts`).
 - **dsh** splits on the first slash into `agentOptions.provider` +
   `agentOptions.model` at spawn
   (`src/platform/adapters/dsh/agent-registrar.ts`; see the

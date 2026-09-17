@@ -53,64 +53,64 @@
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
+import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import type {
   RoleboxDirectories,
   InitializeRuntimeOptions,
-} from "./platform/factory.ts";
-import { DshAgentRegistrar } from "./platform/adapters/dsh/agent-registrar.ts";
+} from "../platform/factory.ts";
+import { DshAgentRegistrar } from "../platform/adapters/dsh/agent-registrar.ts";
 import type {
   DshProviderRouteProbe,
   DshSpawnContextProvider,
   DshSpawnDelegate,
   DshSubagentProvider,
-} from "./platform/adapters/dsh/agent-registrar.ts";
-import { DshDispatchAdapter } from "./platform/adapters/dsh/dispatch.ts";
-import type { DshSubagentDispatchRuntime } from "./platform/adapters/dsh/dispatch.ts";
-import { DshToolFactory } from "./platform/adapters/dsh/tool-factory.ts";
-import type { DshToolDefinition } from "./platform/adapters/dsh/tool-factory.ts";
-import { DshSessionAdapter } from "./platform/adapters/dsh/session.ts";
+} from "../platform/adapters/dsh/agent-registrar.ts";
+import { DshDispatchAdapter } from "../platform/adapters/dsh/dispatch.ts";
+import type { DshSubagentDispatchRuntime } from "../platform/adapters/dsh/dispatch.ts";
+import { DshToolFactory } from "../platform/adapters/dsh/tool-factory.ts";
+import type { DshToolDefinition } from "../platform/adapters/dsh/tool-factory.ts";
+import { DshSessionAdapter } from "../platform/adapters/dsh/session.ts";
 import type {
   DshPromptInjector,
   DshSessionStoreLike,
-} from "./platform/adapters/dsh/session.ts";
-import { DshHookProvider } from "./platform/adapters/dsh/hook-provider.ts";
-import { DshRoleSwitcher, createActiveRoleRef } from "./platform/adapters/dsh/role-switcher.ts";
-import { ActiveRoleStore } from "./platform/adapters/dsh/active-role-store.ts";
-import { DshSystemPromptAdapter } from "./platform/adapters/dsh/system-prompt.ts";
-import type { DshSystemPromptRegistry } from "./platform/adapters/dsh/system-prompt.ts";
+} from "../platform/adapters/dsh/session.ts";
+import { DshHookProvider } from "../platform/adapters/dsh/hook-provider.ts";
+import { DshRoleSwitcher, createActiveRoleRef } from "../platform/adapters/dsh/role-switcher.ts";
+import { ActiveRoleStore } from "../platform/adapters/dsh/active-role-store.ts";
+import { DshSystemPromptAdapter } from "../platform/adapters/dsh/system-prompt.ts";
+import type { DshSystemPromptRegistry } from "../platform/adapters/dsh/system-prompt.ts";
 import {
   createDshSkillProviderFactory,
   ROLEBOX_SKILL_PROVIDER,
-} from "./platform/adapters/dsh/skill-provider.ts";
+} from "../platform/adapters/dsh/skill-provider.ts";
 import type {
   DshSkillProvider,
   DshSkillProviderControl,
   DshSkillProviderLike,
-} from "./platform/adapters/dsh/skill-provider.ts";
+} from "../platform/adapters/dsh/skill-provider.ts";
 import {
   DshRoleSwitchWebRoute,
   ROLE_SWITCH_ROUTE_PREFIX,
-} from "./platform/adapters/dsh/web-role-switch-route.ts";
-import type { DshWebServerRouteRegistrar } from "./platform/adapters/dsh/web-role-switch-route.ts";
-import { DshRoleboxMonitorWebRoute } from "./platform/adapters/dsh/web-rolebox-monitor-route.ts";
-import { DshRoleboxReloader } from "./platform/adapters/dsh/rolebox-reload.ts";
+} from "../platform/adapters/dsh/web-role-switch-route.ts";
+import type { DshWebServerRouteRegistrar } from "../platform/adapters/dsh/web-role-switch-route.ts";
+import { DshRoleboxMonitorWebRoute } from "../platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import { DshRoleboxReloader } from "../platform/adapters/dsh/rolebox-reload.ts";
 import {
   buildCanonicalTools,
   buildRoleSnapshotTools,
   ROLE_SNAPSHOT_TOOL_KEYS,
-} from "./platform/tool-assembly.ts";
-import type { PlatformCapabilities } from "./platform/capabilities.ts";
-import { buildAvailableFunctionsBlock } from "./prompt/builder.ts";
-import { createGraphTools } from "./graph/tools/index.ts";
-import { createGraphToolSet, type GraphToolSet } from "./graph/tools/graph-tools.ts";
-import { LoopCoordinator } from "./loop/coordinator.ts";
-import { LoopStore } from "./loop/loop-store.ts";
-import { createLoopTools } from "./loop/loop-tools.ts";
-import { applyProjectConfig } from "./project-config.ts";
-import { createSubLogger } from "./logger.ts";
-import { roleFunctionsMap } from "./resolver/registry.ts";
-import type { ResolvedRole } from "./types.ts";
+} from "../platform/tool-assembly.ts";
+import type { PlatformCapabilities } from "../platform/capabilities.ts";
+import { buildAvailableFunctionsBlock } from "../prompt/builder.ts";
+import { createGraphTools } from "../graph/tools/index.ts";
+import { createGraphToolSet, type GraphToolSet } from "../graph/tools/graph-tools.ts";
+import { LoopCoordinator } from "../loop/coordinator.ts";
+import { LoopStore } from "../loop/loop-store.ts";
+import { createLoopTools } from "../loop/loop-tools.ts";
+import { applyProjectConfig } from "../project-config.ts";
+import { createSubLogger } from "../logger.ts";
+import { roleFunctionsMap } from "../resolver/registry.ts";
+import type { ResolvedRole } from "../types.ts";
 
 // ── Plugin metadata ────────────────────────────────────────────────────────
 

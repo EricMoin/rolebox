@@ -30,7 +30,7 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { PiProcessSessionAdapter, buildSpawnArgs } from "../src/platform/adapters/pi/process-session.ts";
 import { detectCompletion } from "../src/dispatch/completion/completion-detector.ts";
-import { PI_SUBAGENT_TOOLS } from "../src/pi-extension.ts";
+import { PI_SUBAGENT_TOOLS } from "../src/entries/pi.ts";
 import type {
   SessionMessageSnapshot,
   TaskEventState,

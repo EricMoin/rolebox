@@ -3,7 +3,7 @@
 /**
  * Role-snapshot tool registration seam — src/platform/tool-assembly.ts
  * (ROLE_SNAPSHOT_TOOL_KEYS / buildRoleSnapshotTools) plus the
- * registerRoleSnapshotTools handle on the apply() disposer (src/dsh-plugin.ts).
+ * registerRoleSnapshotTools handle on the apply() disposer (src/entries/dsh.ts).
  *
  * Verifies:
  *   - buildRoleSnapshotTools advertises exactly the four role-snapshot keys
@@ -31,8 +31,8 @@ import {
   ROLE_SNAPSHOT_TOOL_KEYS,
   buildRoleSnapshotTools,
 } from "../../src/platform/tool-assembly.ts";
-import { apply } from "../../src/dsh-plugin.ts";
-import type { DshPluginConfig, DshPluginContext } from "../../src/dsh-plugin.ts";
+import { apply } from "../../src/entries/dsh.ts";
+import type { DshPluginConfig, DshPluginContext } from "../../src/entries/dsh.ts";
 import type {
   DshToolDefinition,
   DshToolRunContext,

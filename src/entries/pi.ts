@@ -16,83 +16,83 @@
 import { dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
-import { PiLightweightServiceStack } from "./platform/adapters/pi/service-stack.ts";
-import { PiEventBridge } from "./platform/adapters/pi/event-bridge.ts";
-import { PiAgentRegistrar } from "./platform/adapters/pi/agent-registrar.ts";
-import { createPiHookPipeline } from "./platform/adapters/pi/hook-pipeline.ts";
+import { PiLightweightServiceStack } from "../platform/adapters/pi/service-stack.ts";
+import { PiEventBridge } from "../platform/adapters/pi/event-bridge.ts";
+import { PiAgentRegistrar } from "../platform/adapters/pi/agent-registrar.ts";
+import { createPiHookPipeline } from "../platform/adapters/pi/hook-pipeline.ts";
 import {
   extractPiSessionId,
   runPiSystemTransform,
-} from "./platform/adapters/pi/system-transform.ts";
-import { wirePiChatActivation } from "./platform/adapters/pi/chat-activation.ts";
+} from "../platform/adapters/pi/system-transform.ts";
+import { wirePiChatActivation } from "../platform/adapters/pi/chat-activation.ts";
 import {
   isPiChildProcess,
   resolveChildDispatchStoreDir,
-} from "./platform/adapters/pi/child-mode.ts";
-import { wireRoleSwitcher } from "./platform/adapters/pi/role-switcher.ts";
-import { createActiveAgentRef } from "./platform/adapters/pi/active-agent.ts";
-import type { ToolInterceptorHooks } from "./platform/adapters/pi/tool-interceptor.ts";
-import type { CanonicalEventType } from "./platform/types.ts";
-import { piCapabilities } from "./platform/capabilities.ts";
-import { createSubLogger, formatError } from "./logger.ts";
+} from "../platform/adapters/pi/child-mode.ts";
+import { wireRoleSwitcher } from "../platform/adapters/pi/role-switcher.ts";
+import { createActiveAgentRef } from "../platform/adapters/pi/active-agent.ts";
+import type { ToolInterceptorHooks } from "../platform/adapters/pi/tool-interceptor.ts";
+import type { CanonicalEventType } from "../platform/types.ts";
+import { piCapabilities } from "../platform/capabilities.ts";
+import { createSubLogger, formatError } from "../logger.ts";
 import type {
   ResolvedFunction,
   ResolvedRole,
   ResolvedSkill,
   ResolvedSubAgent,
-} from "./types.ts";
-import { NotificationManager } from "./notifications/manager.ts";
-import type { NotificationConfig } from "./notifications/types.ts";
+} from "../types.ts";
+import { NotificationManager } from "../notifications/manager.ts";
+import type { NotificationConfig } from "../notifications/types.ts";
 import {
   DEFAULT_NOTIFICATION_CONFIG,
   parseNotificationConfig,
   resolveEnvVarsInConfig,
-} from "./notifications/config.ts";
-import type { ISessionClient } from "./platform/ports/session-client.ts";
-import { PiProcessSessionAdapter } from "./platform/adapters/pi/process-session.ts";
-import { PiNotificationSessionClient } from "./platform/adapters/pi/notification-session.ts";
-import { DispatchAdapter } from "./loop/dispatch-adapter.ts";
-import { LoopCoordinator } from "./loop/coordinator.ts";
-import { LoopStore } from "./loop/loop-store.ts";
-import { createDispatchTools } from "./dispatch/tools.ts";
-import { createLoopTools } from "./loop/loop-tools.ts";
-import { createTaskTools } from "./dispatch/query/task-tools.ts";
-import { createMemoryUpdateTool } from "./memory/tools.ts";
-import { createFunctionGraphTool } from "./function/function-graph.ts";
-import { createSkillComposeTool } from "./asset/skill-compose.ts";
-import { createLoadRoleSkillTool } from "./asset/skill-tool.ts";
-import { createContextAssembleTool } from "./dispatch/query/context-assemble.ts";
+} from "../notifications/config.ts";
+import type { ISessionClient } from "../platform/ports/session-client.ts";
+import { PiProcessSessionAdapter } from "../platform/adapters/pi/process-session.ts";
+import { PiNotificationSessionClient } from "../platform/adapters/pi/notification-session.ts";
+import { DispatchAdapter } from "../loop/dispatch-adapter.ts";
+import { LoopCoordinator } from "../loop/coordinator.ts";
+import { LoopStore } from "../loop/loop-store.ts";
+import { createDispatchTools } from "../dispatch/tools.ts";
+import { createLoopTools } from "../loop/loop-tools.ts";
+import { createTaskTools } from "../dispatch/query/task-tools.ts";
+import { createMemoryUpdateTool } from "../memory/tools.ts";
+import { createFunctionGraphTool } from "../function/function-graph.ts";
+import { createSkillComposeTool } from "../asset/skill-compose.ts";
+import { createLoadRoleSkillTool } from "../asset/skill-tool.ts";
+import { createContextAssembleTool } from "../dispatch/query/context-assemble.ts";
 import {
   createDispatchManager,
   buildSubagentLineage,
-} from "./dispatch/factory.ts";
+} from "../dispatch/factory.ts";
 import {
   loadNotifyDedup,
   persistNotifyDedupSync,
-} from "./platform/adapters/pi/sidecar-persister.ts";
+} from "../platform/adapters/pi/sidecar-persister.ts";
 import {
   seedSentFinalNotifies,
   getSentFinalNotifies,
   enqueueNotify,
   PENDING_APPROVALS_MARKER,
-} from "./dispatch/notification.ts";
-import { buildReminder } from "./prompt/reminder.ts";
-import { scanPersistedStates } from "./graph/tools/persisted-state.ts";
-import { listPendingApprovals } from "./graph/tools/status-queries.ts";
-import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
-import { recoverInterruptedGraphs } from "./graph/engine/engine-startup.ts";
+} from "../dispatch/notification.ts";
+import { buildReminder } from "../prompt/reminder.ts";
+import { scanPersistedStates } from "../graph/tools/persisted-state.ts";
+import { listPendingApprovals } from "../graph/tools/status-queries.ts";
+import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
+import { recoverInterruptedGraphs } from "../graph/engine/engine-startup.ts";
 import {
   GraphEventRecorder,
   createGraphNotifier,
   createGraphTerminalNotifier,
   type GraphTerminalEvent,
   type NodeLivenessFeed,
-} from "./graph/engine/index.ts";
+} from "../graph/engine/index.ts";
 import {
   createAllLspTools,
   LspClientManager,
   LspDocumentManager,
-} from "./lsp/index.ts";
+} from "../lsp/index.ts";
 
 // ── Shared state maps ─────────────────────────────────────────────────────
 

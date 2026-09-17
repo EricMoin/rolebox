@@ -21,7 +21,7 @@
  * ## What it scans
  *
  * Every `.ts`/`.tsx` file under `src/platform/adapters/dsh/` plus
- * `src/dsh-plugin.ts`. For each session-like `.append(type, …)` call site it
+ * `src/entries/dsh.ts`. For each session-like `.append(type, …)` call site it
  * resolves the `type` argument — a string literal, a same-file (or cross-file,
  * within the scan set) string constant, or a template literal without
  * interpolation — and asserts membership in `KNOWN_SESSION_EVENT_TYPES`
@@ -48,7 +48,7 @@ const REPO_ROOT = resolve(import.meta.dir, "../..");
 const SCAN_DIRS = [join(REPO_ROOT, "src/platform/adapters/dsh")];
 
 /** Individual files scanned in addition to {@link SCAN_DIRS}. */
-const SCAN_FILES = [join(REPO_ROOT, "src/dsh-plugin.ts")];
+const SCAN_FILES = [join(REPO_ROOT, "src/entries/dsh.ts")];
 
 /** A detected `.append(type, …)` call whose `type` is not catalog-declared. */
 interface Violation {
@@ -350,7 +350,7 @@ describe("dsh session-event write boundary", () => {
     const files = scannedFiles();
     expect(files.length).toBeGreaterThan(0);
     expect(files.some((f) => f.endsWith(join("adapters", "dsh", "session.ts")))).toBe(true);
-    expect(files.some((f) => f.endsWith("dsh-plugin.ts"))).toBe(true);
+    expect(files.some((f) => f.endsWith("dsh.ts"))).toBe(true);
   });
 
   it("no rolebox source appends a non-catalog session event type", () => {

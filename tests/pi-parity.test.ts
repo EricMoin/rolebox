@@ -4,7 +4,7 @@
  * Asserts that the shared opencode tool surface — the tools ToolService
  * registers on the opencode platform (src/core/services/tool-service.ts:56-107)
  * — is a SUBSET of the tools PiLightweightServiceStack registers on Pi
- * (src/pi-extension.ts:912-967), and that parity is currently EXACT: every
+ * (src/entries/pi.ts:912-967), and that parity is currently EXACT: every
  * shared tool is registered on Pi, and Pi registers nothing outside the
  * documented surface.
  *
@@ -17,15 +17,15 @@
  * Documented opencode-only tool (NOT part of the shared surface):
  *   - asset_hot_reload — HotReloadService is a PluginCore service; Pi runs
  *     PiLightweightServiceStack instead and deliberately omits it
- *     (src/pi-extension.ts:917-918)
+ *     (src/entries/pi.ts:917-918)
  *
  * Documented Pi-only tool (NOT part of the shared surface):
  *   - load_role_skill — skill-loading tool registered only on Pi via
- *     pi-extension.ts extraTools (src/pi-extension.ts:952-953); opencode has
+ *     pi-extension.ts extraTools (src/entries/pi.ts:952-953); opencode has
  *     its own native skill tool and never registers it
  *     (src/asset/skill-tool.ts:156-159)
  *
- * The Pi side is wired EXACTLY as src/pi-extension.ts wires it (same
+ * The Pi side is wired EXACTLY as src/entries/pi.ts wires it (same
  * factories, same overrides, same dispatchManager gate), so the assertions
  * pin the real platform wiring, not a synthetic setup.
  */
@@ -184,7 +184,7 @@ function makeSessionClient(): ISessionClient {
   } as unknown as ISessionClient;
 }
 
-// ── Pi wiring mirror (src/pi-extension.ts:912-967) ───────────────────────────
+// ── Pi wiring mirror (src/entries/pi.ts:912-967) ───────────────────────────
 
 let clientManager: LspClientManager;
 let docManager: LspDocumentManager;
@@ -273,7 +273,7 @@ async function initPiStack(): Promise<{ registeredNames: string[]; count: number
 
 describe("Pi ↔ opencode tool-surface parity (S11)", () => {
   beforeAll(() => {
-    // Constructed exactly as src/pi-extension.ts:925-926 does — the two
+    // Constructed exactly as src/entries/pi.ts:925-926 does — the two
     // platform-agnostic LSP managers; LspService is not involved.
     clientManager = new LspClientManager(process.cwd());
     docManager = new LspDocumentManager();

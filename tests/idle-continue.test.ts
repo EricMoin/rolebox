@@ -5,7 +5,7 @@ import { tmpdir as osTmpdir } from "node:os";
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { createPluginHooks, managerMap } from "../src/core/composition";
 import { buildNotificationText, isDispatchNotification } from "../src/dispatch/notification";
-import { roleFunctionsMap } from "../src/index";
+import { roleFunctionsMap } from "../src/entries/opencode.ts";
 import { functionSessionState } from "../src/function/session-state";
 import { functionRuntime } from "../src/function/runtime-state";
 import type { ResolvedRole, ResolvedFunction } from "../src/types";

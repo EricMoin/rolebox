@@ -2,7 +2,7 @@
  * Pi service stack — LSP tool registration via the extraTools channel
  * (Subtask S10).
  *
- * Verifies the src/pi-extension.ts LSP wiring end-to-end through
+ * Verifies the src/entries/pi.ts LSP wiring end-to-end through
  * PiLightweightServiceStack:
  *   1. init() registers the full lsp_* surface (createAllLspTools) via the
  *      extraTools channel — the representative names (lsp_diagnostics,
@@ -16,7 +16,7 @@
  *      shutdown handler runs — disposes without throwing.
  *
  * The two managers are constructed directly (LspClientManager(process.cwd())
- * / LspDocumentManager), exactly as src/pi-extension.ts does; LspService is
+ * / LspDocumentManager), exactly as src/entries/pi.ts does; LspService is
  * deliberately not involved (it requires a PluginCore Pi cannot run).
  */
 
@@ -88,7 +88,7 @@ describe("Pi LSP tools via the extraTools channel (S10)", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "pi-lsp-test-"));
-    // Constructed exactly as src/pi-extension.ts does (S10): the two
+    // Constructed exactly as src/entries/pi.ts does (S10): the two
     // platform-agnostic managers directly — no LspService involved.
     clientManager = new LspClientManager(process.cwd());
     docManager = new LspDocumentManager();

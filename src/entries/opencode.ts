@@ -1,14 +1,14 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
-import { OpencodeAgentRegistrar } from "./platform/adapters/opencode/agent-registrar.ts";
-import { syncSkillSymlinks } from "./sync/skill-symlinks.ts";
-import { createPluginHooks } from "./core/composition.ts";
-import { OpencodeSessionAdapter } from "./platform/adapters/opencode/session.ts";
-export { loopManagerMap, activeLoopManager } from "./core/composition.js";
-import { roleFunctionsMap } from "./resolver/registry.ts";
-import { loadProjectConfig, applyProjectConfig } from "./project-config.ts";
-import { PLUGIN_ID } from "./constants.ts";
-import { createSubLogger, getLogFilePath, configureLogDirectory } from "./logger.ts";
-import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "./platform/factory.ts";
+import { OpencodeAgentRegistrar } from "../platform/adapters/opencode/agent-registrar.ts";
+import { syncSkillSymlinks } from "../sync/skill-symlinks.ts";
+import { createPluginHooks } from "../core/composition.ts";
+import { OpencodeSessionAdapter } from "../platform/adapters/opencode/session.ts";
+export { loopManagerMap, activeLoopManager } from "../core/composition.js";
+import { roleFunctionsMap } from "../resolver/registry.ts";
+import { loadProjectConfig, applyProjectConfig } from "../project-config.ts";
+import { PLUGIN_ID } from "../constants.ts";
+import { createSubLogger, getLogFilePath, configureLogDirectory } from "../logger.ts";
+import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 
 const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
   configureLogDirectory(ctx.directory);

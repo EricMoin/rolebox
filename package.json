@@ -9,25 +9,25 @@
   "bin": {
     "rolebox": "./dist/cli/main.js"
   },
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/entries/opencode.js",
+  "types": "dist/entries/opencode.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "import": "./dist/entries/opencode.js",
+      "types": "./dist/entries/opencode.d.ts",
+      "default": "./dist/entries/opencode.js"
     },
     "./tui": {
       "import": "./dist/tui.js",
       "types": "./dist/tui.d.ts"
     },
     "./pi": {
-      "import": "./dist/pi-extension.js",
-      "types": "./dist/pi-extension.d.ts"
+      "import": "./dist/entries/pi.js",
+      "types": "./dist/entries/pi.d.ts"
     },
     "./dsh": {
-      "import": "./dist/dsh-plugin.js",
-      "types": "./dist/dsh-plugin.d.ts"
+      "import": "./dist/entries/dsh.js",
+      "types": "./dist/entries/dsh.d.ts"
     },
     "./dsh/cordis.patch.yml": "./dsh/cordis.patch.yml",
     "./dsh/package.json": "./package.json",
@@ -45,10 +45,11 @@
     "scripts/patch-opentui-native-entry.mjs"
   ],
   "scripts": {
-    "build": "tsc && bun run build:tui && bun run build:dsh-web-client",
+    "build": "tsc && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client",
+    "build:entry-aliases": "bun run scripts/build-entry-aliases.ts",
     "build:tui": "bun run scripts/build-tui.ts",
     "build:dsh-web-client": "NODE_ENV=production bun run scripts/build-dsh-web-client.ts",
-    "prepublishOnly": "tsc",
+    "prepublishOnly": "tsc && bun run build:entry-aliases",
     "typecheck": "tsc --noEmit",
     "test": "bun run test:core && bun run test:tui",
     "test:core": "bun test --isolate --path-ignore-patterns=tests/tui",
@@ -78,7 +79,7 @@
     "tui"
   ],
   "pi": {
-    "extensions": ["./dist/pi-extension.js"]
+    "extensions": ["./dist/entries/pi.js"]
   },
   "dsh": {
     "bundle": {
