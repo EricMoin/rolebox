@@ -13,7 +13,8 @@ Key scripts (`package.json`):
 
 | Script | Command |
 | --- | --- |
-| `build` | `tsc && bun run build:tui && bun run build:dsh-web-client` |
+| `build` | `tsc && bun run build:entry-aliases && bun run build:tui && bun run build:dsh-web-client` |
+| `build:entry-aliases` | `bun run scripts/build-entry-aliases.ts` |
 | `build:tui` | `bun run scripts/build-tui.ts` |
 | `build:dsh-web-client` | `NODE_ENV=production bun run scripts/build-dsh-web-client.ts` |
 | `typecheck` | `tsc --noEmit` |
