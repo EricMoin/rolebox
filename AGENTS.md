@@ -114,7 +114,7 @@ New tests mirror the `src/` module path under `tests/`. Root-level `tests/*.test
 | `src/sync/**` | `tests/agent-registry.test.ts` |
 | `src/terminal/**` | `tests/interactive-terminal.test.ts` |
 | `src/logger.ts` | `tests/logger.test.ts` |
-| `src/index.ts`, `src/pi-extension.ts`, `src/dsh-plugin.ts` | `tests/index.test.ts`, `tests/pi-*.test.ts`, `tests/dsh-*.test.ts`, `tests/e2e.test.ts` |
+| `src/entries/opencode.ts`, `src/entries/pi.ts`, `src/entries/dsh.ts` | `tests/index.test.ts`, `tests/pi-*.test.ts`, `tests/dsh-*.test.ts`, `tests/e2e.test.ts` |
 
 Support directories (helpers, not modules): `tests/helpers/`, `tests/integration/`, `tests/monitor/`.
 

@@ -2,7 +2,7 @@
 #
 # `name` points at the cordis host half (dist/entries/dsh.js), which
 # default-exports the Object plugin `{ name, inject, Config, apply }`. The
-# package root (`main` → dist/index.js) is the opencode plugin and is NOT a
+# package root (`main` → dist/entries/opencode.js) is the opencode plugin and is NOT a
 # cordis plugin, so it must not be referenced here.
 #
 # The specifier is PACKAGE-RELATIVE because a bundle-patch row resolves against

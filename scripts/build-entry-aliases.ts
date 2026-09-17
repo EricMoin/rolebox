@@ -1,5 +1,13 @@
-import { existsSync } from "node:fs"
+import { existsSync, unlinkSync } from "node:fs"
 import { resolve } from "node:path"
+
+// Builds the legacy published entry aliases (dist/index.js, dist/pi-extension.js,
+// dist/dsh-plugin.js) as re-export stubs over the canonical dist/entries modules.
+//
+// The purge below exists because tsc never cleans its outDir: a tree built from
+// the OLD flat layout still carries dist/<alias>.d.ts and its sourcemaps, and
+// package.json's "files": ["dist"] would publish those broken legacy
+// declarations beside the stubs. They are removed, never rewritten.
 
 // Project root = scripts/.. (this script lives in scripts/)
 const projectRoot = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd()
@@ -22,6 +30,22 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+// tsc emits a legacy declaration only while the flat src/<alias>.ts exists, and
+// nothing removes it once that source is gone. Unlink exactly the declaration
+// and sourcemap siblings — never the ".js" stub written below, and nothing under
+// dist/entries/ — so a rebuilt tree cannot publish a stale .d.ts. The existsSync
+// guard keeps a missing file a silent no-op, so the run stays idempotent.
+const purged: string[] = []
+for (const { alias } of legacyAliases) {
+  for (const suffix of [".d.ts", ".d.ts.map", ".js.map"]) {
+    const stale = resolve(projectRoot, "dist", `${alias}${suffix}`)
+    if (existsSync(stale)) {
+      unlinkSync(stale)
+      purged.push(`dist/${alias}${suffix}`)
+    }
+  }
+}
+
 for (const { alias, entry } of legacyAliases) {
   // The alias must be a re-export stub, NOT a byte copy: the relative
   // specifiers emitted inside dist/entries/<entry>.js are one level deeper
@@ -41,6 +65,9 @@ for (const { alias, entry } of legacyAliases) {
   await Bun.write(resolve(projectRoot, "dist", `${alias}.js`), stub)
 }
 
+if (purged.length > 0) {
+  console.log(`build:entry-aliases — purged ${purged.length} stale legacy declaration artifacts: ${purged.join(", ")}`)
+}
 console.log(
   `build:entry-aliases — wrote ${legacyAliases.length} legacy aliases: ${legacyAliases.map(({ alias }) => `dist/${alias}.js`).join(", ")}`,
 )
