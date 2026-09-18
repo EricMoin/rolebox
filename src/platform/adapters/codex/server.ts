@@ -11,18 +11,29 @@
  *
  * Framing: output carries one JSON object per line, newline-terminated. The
  * loop tolerates chunk boundaries (a line split across two data events is
- * reassembled), CRLF line endings, and blank lines (skipped as framing noise,
- * not a parse error). A trailing line that was never newline-terminated is
- * NOT treated as a message: it was never a complete frame.
+ * reassembled, and Buffer chunks are decoded with a streaming UTF-8 decoder so
+ * a multi-byte character split across two chunks survives), CRLF line endings,
+ * and blank lines (skipped as framing noise, not a parse error). A trailing
+ * line that was never newline-terminated is NOT treated as a message: it was
+ * never a complete frame, and a trailing incomplete UTF-8 sequence inside it
+ * stays undecoded for the same reason.
  *
- * Ordering: messages are handled strictly one at a time, awaited sequentially.
- * A slow tool call therefore delays the next message, but responses stay in
+ * Ordering: REQUESTS are handled strictly one at a time, awaited sequentially.
+ * A slow tool call therefore delays the next request, but responses stay in
  * request order and the canonical tools' shared state (terminals, hashline
  * edits, memory writes) never runs two calls concurrently by accident.
+ * NOTIFICATIONS are the deliberate exception: a message without an id is
+ * handled immediately on arrival and never queues behind the in-flight
+ * request, so notifications/cancelled can abort the call it names while that
+ * call is still running. The server owns one AbortController per in-flight
+ * request id and hands its signal to the tool context. A cancelled call is not
+ * special on the wire: it still gets a normal response carrying whatever the
+ * tool body returns or throws.
  *
  * @module
  */
 
+import { StringDecoder } from "node:string_decoder";
 import {
   JsonRpcErrorCode,
   JSONRPC_VERSION,
@@ -58,12 +69,15 @@ export interface CodexMcpServerOptions {
   /**
    * Build the canonical tool context for one call. Called once per
    * tools/call, before the tool runs; if it throws, the call is answered with
-   * an isError tool result rather than crashing the loop.
+   * an isError tool result rather than crashing the loop. The second argument
+   * is the signal of the AbortController the server owns for this request id —
+   * notifications/cancelled aborts it (an existing one-parameter factory stays
+   * valid, it just cannot observe cancellation).
    */
-  contextFactory?: (info: {
-    name: string;
-    args: Record<string, unknown>;
-  }) => CanonicalToolContext | Promise<CanonicalToolContext>;
+  contextFactory?: (
+    info: { name: string; args: Record<string, unknown> },
+    signal: AbortSignal,
+  ) => CanonicalToolContext | Promise<CanonicalToolContext>;
 }
 
 /** Plain-object guard used for params and arguments. */
@@ -72,8 +86,18 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+/**
+ * Whether a raw line is a well-formed notification (a message without an id).
+ * An unparsable line is NOT one: it produces an error response, so it stays in
+ * the ordered request chain.
+ */
+function isNotificationLine(line: string): boolean {
+  const parsed = parseMessageLine(line);
+  return parsed.ok && parsed.value.kind === "notification";
+}
+
 /** Fallback context when no contextFactory was supplied. */
-function createDefaultContext(): CanonicalToolContext {
+function createDefaultContext(signal: AbortSignal): CanonicalToolContext {
   const directory = process.cwd();
   return {
     sessionID: "",
@@ -81,7 +105,7 @@ function createDefaultContext(): CanonicalToolContext {
     agent: "",
     directory,
     worktree: directory,
-    abort: new AbortController().signal,
+    abort: signal,
     metadata() {
       // No per-call metadata seam on stdio MCP — documented no-op.
     },
@@ -107,7 +131,11 @@ export class CodexMcpServer {
   #instructions: string | undefined;
   #contextFactory: CodexMcpServerOptions["contextFactory"];
   #clientInfo: Record<string, unknown> | undefined;
-  /** Sequential handler chain — see the module docstring on ordering. */
+  /** AbortController of each request currently inside a tool call, by id. */
+  #inflight = new Map<JsonRpcId, AbortController>();
+  /** Set once the output stream has failed; later writes are skipped. */
+  #outputBroken = false;
+  /** Sequential request chain — notifications bypass it (module docstring). */
   #chain: Promise<void> = Promise.resolve();
   #servePromise: Promise<void> | undefined;
 
@@ -119,7 +147,22 @@ export class CodexMcpServer {
       ((message: string): void => {
         process.stderr.write("[rolebox-mcp] " + message + "\n");
       });
-    this.#factory = new CodexMcpToolFactory(opts.tools);
+
+    // An EPIPE arrives asynchronously: without this listener it would become an
+    // uncaught exception, and every later write would throw again.
+    const outputEvents = this.#output as {
+      on?: (event: "error", listener: (err: unknown) => void) => unknown;
+    };
+    if (typeof outputEvents.on === "function") {
+      outputEvents.on("error", (err: unknown) => {
+        this.#outputBroken = true;
+        this.#report("output stream error: " + formatError(err).message);
+      });
+    }
+
+    // Compile once: the factory records the definitions for call() and returns
+    // the descriptors in the same pass.
+    this.#factory = new CodexMcpToolFactory();
     this.#descriptors = Object.values(this.#factory.compileAll(opts.tools));
     this.#serverName = opts.serverName ?? DEFAULT_MCP_SERVER_NAME;
     this.#serverVersion = opts.serverVersion;
@@ -137,9 +180,10 @@ export class CodexMcpServer {
   }
 
   /**
-   * Handle one newline-framed line. Blank lines are ignored; every error path
-   * is converted into a protocol response (or an isError tool result) — this
-   * method never rejects.
+   * Handle one newline-framed line. Blank lines are ignored; a notification is
+   * never answered and is handled out of band (see the module docstring on
+   * ordering); every error path is converted into a protocol response (or an
+   * isError tool result) — this method never rejects.
    */
   async handleLine(line: string): Promise<void> {
     if (line.trim().length === 0) return;
@@ -152,9 +196,7 @@ export class CodexMcpServer {
 
     const message = parsed.value;
     if (message.kind === "notification") {
-      // Any message without an id is never answered. notifications/initialized
-      // and notifications/cancelled are the ones Codex sends; both are no-ops
-      // here (cancellation of an in-flight call is not wired on this transport).
+      this.#handleNotification(message.method, message.params);
       return;
     }
 
@@ -174,6 +216,10 @@ export class CodexMcpServer {
 
   async #run(): Promise<void> {
     const input = this.#input;
+    // One decoder for the whole run: a multi-byte character split across two
+    // chunks must be held until its remaining bytes arrive rather than decoded
+    // in isolation as U+FFFD.
+    const decoder = new StringDecoder("utf8");
     let buffer = "";
 
     await new Promise<void>((resolve) => {
@@ -185,7 +231,7 @@ export class CodexMcpServer {
       };
 
       input.on("data", (chunk: Buffer | string) => {
-        buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+        buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
         let index = buffer.indexOf("\n");
         while (index !== -1) {
           const line = buffer.slice(0, index);
@@ -201,9 +247,11 @@ export class CodexMcpServer {
         finish();
       });
 
-      // An input that already ended before serve() was called never emits
-      // "end" again — resolve immediately rather than hanging.
+      // An input that already ended or was already destroyed before serve()
+      // was called never emits "end"/"close" again — resolve immediately
+      // rather than hanging.
       if ((input as { readableEnded?: boolean }).readableEnded === true) finish();
+      if ((input as { destroyed?: boolean }).destroyed === true) finish();
     });
 
     await this.#chain;
@@ -212,6 +260,16 @@ export class CodexMcpServer {
   }
 
   #enqueue(line: string): void {
+    if (isNotificationLine(line)) {
+      // Out of band: a notification must never wait behind the in-flight
+      // request, or a cancel could only be seen after the call it cancels had
+      // finished (see the module docstring on ordering).
+      void this.handleLine(line).catch((err: unknown) => {
+        this.#report("unhandled notification error: " + formatError(err).message);
+      });
+      return;
+    }
+
     this.#chain = this.#chain
       .then(() => this.handleLine(line))
       .catch((err: unknown) => {
@@ -280,25 +338,62 @@ export class CodexMcpServer {
     // self-corrects); only a malformed tools/call envelope is a protocol error.
     const args = record?.arguments ?? {};
 
-    let context: CanonicalToolContext;
-    if (this.#contextFactory) {
-      try {
-        context = await this.#contextFactory({ name, args: asRecord(args) ?? {} });
-      } catch (err) {
-        const message = formatError(err).message;
-        this.#report('context factory failed for tool "' + name + '": ' + message);
-        this.#writeResult(id, {
-          content: [{ type: "text", text: 'tool "' + name + '" could not run: ' + message }],
-          isError: true,
-        });
-        return;
+    // One controller per in-flight request: #handleNotification looks the id
+    // up here and aborts the signal the tool context carries.
+    const controller = new AbortController();
+    this.#inflight.set(id, controller);
+    try {
+      let context: CanonicalToolContext;
+      if (this.#contextFactory) {
+        try {
+          context = await this.#contextFactory(
+            { name, args: asRecord(args) ?? {} },
+            controller.signal,
+          );
+        } catch (err) {
+          const message = formatError(err).message;
+          this.#report('context factory failed for tool "' + name + '": ' + message);
+          this.#writeResult(id, {
+            content: [{ type: "text", text: 'tool "' + name + '" could not run: ' + message }],
+            isError: true,
+          });
+          return;
+        }
+      } else {
+        context = createDefaultContext(controller.signal);
       }
-    } else {
-      context = createDefaultContext();
-    }
 
-    const result: McpToolCallResult = await this.#factory.call(name, args, context);
-    this.#writeResult(id, result);
+      const result: McpToolCallResult = await this.#factory.call(name, args, context);
+      this.#writeResult(id, result);
+    } finally {
+      this.#inflight.delete(id);
+    }
+  }
+
+  /**
+   * Handle a notification immediately — never queued behind a request (see the
+   * module docstring on ordering). notifications/cancelled aborts the request
+   * it names while that request is still running; every other notification,
+   * including notifications/initialized, is a documented no-op.
+   */
+  #handleNotification(method: string, params: unknown): void {
+    if (method !== "notifications/cancelled") return;
+
+    const record = asRecord(params);
+    const requestId = record?.requestId;
+    if (typeof requestId !== "string" && typeof requestId !== "number") return;
+
+    const controller = this.#inflight.get(requestId);
+    if (!controller) return;
+
+    const requestedReason = record?.reason;
+    controller.abort(
+      new Error(
+        typeof requestedReason === "string" && requestedReason.length > 0
+          ? requestedReason
+          : "cancelled by client",
+      ),
+    );
   }
 
   #writeResult(id: JsonRpcId, result: unknown): void {
@@ -310,9 +405,14 @@ export class CodexMcpServer {
   }
 
   #write(message: JsonRpcMessage): void {
+    // Once the output has failed — synchronously below, or asynchronously via
+    // the error listener — later writes are skipped instead of throwing once
+    // per message.
+    if (this.#outputBroken) return;
     try {
       this.#output.write(serializeMessage(message));
     } catch (err) {
+      this.#outputBroken = true;
       this.#report("failed to write response: " + formatError(err).message);
     }
   }

@@ -10,12 +10,15 @@
  * Tool surface (deliberately NOT expanded here): the canonical intersection set
  * that buildCanonicalTools() assembles for a harness with no session client and
  * no dispatch backend, plus load_role_skill. There are no session_* tools (the
- * stdio transport exposes no rolebox session client), no dispatch_/loop_/task_
- * tools (orchestration on non-opencode harnesses is graph-only), and no stubs
- * standing in for either.
+ * stdio transport exposes no rolebox session client) and no dispatch_/loop_/
+ * task_/graph_* tools — orchestration needs a dispatch backend, which this
+ * entry does not construct, so buildCanonicalTools() registers no graph_* tools
+ * either. No stubs stand in for any of them.
  *
- * Run directly with `node dist/entries/codex.js` (or `bun src/entries/codex.ts`);
- * importing the module has no side effects.
+ * Run directly with `node dist/entries/codex.js` (or `bun src/entries/codex.ts`).
+ * Importing the module does NOT start the server or read stdin; the module-level
+ * logger does open its log file and install its signal handlers on first
+ * evaluation.
  *
  * @module
  */
@@ -30,6 +33,7 @@ import {
   createCodexMcpServer,
   type CodexMcpServer,
 } from "../platform/adapters/codex/server.ts";
+import { installProtocolStdoutGuard } from "../platform/adapters/codex/stdout-guard.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
 import { buildCanonicalTools } from "../platform/tool-assembly.ts";
 import type { CanonicalToolContext } from "../platform/types.ts";
@@ -82,8 +86,14 @@ function resolvePackageVersion(): string {
  * Boot the role runtime and build the MCP server WITHOUT serving it. The
  * returned server is ready for serve() (the entry point) or handleLine()
  * (embedded/tests).
+ *
+ * `output` defaults to process.stdout. The stdio entry passes the protocol
+ * writer captured by installProtocolStdoutGuard() instead, because a library
+ * logging to process.stdout would otherwise corrupt the protocol stream.
  */
-export async function startCodexMcpServer(): Promise<CodexMcpServer> {
+export async function startCodexMcpServer(
+  options: { output?: NodeJS.WritableStream } = {},
+): Promise<CodexMcpServer> {
   const workingDir = process.cwd();
   configureLogDirectory(workingDir);
 
@@ -104,19 +114,20 @@ export async function startCodexMcpServer(): Promise<CodexMcpServer> {
   });
 
   // The context factory closes over the server so it can read the clientInfo
-  // recorded by the initialize handshake. Each call gets a fresh
-  // AbortController (nothing aborts it yet — cancellation notifications are
-  // not wired on this transport) and a unique messageID.
+  // recorded by the initialize handshake. `signal` is the per-request signal
+  // the server aborts when notifications/cancelled names that request, and
+  // messageID is unique per call.
   let server: CodexMcpServer | undefined;
   const contextFactory = (
     _info: { name: string; args: Record<string, unknown> },
+    signal: AbortSignal,
   ): CanonicalToolContext => ({
     sessionID: resolveCodexSessionId(server?.clientInfo),
     messageID: randomUUID(),
     agent: "",
     directory: workingDir,
     worktree: workingDir,
-    abort: new AbortController().signal,
+    abort: signal,
     metadata() {
       // stdio MCP has no per-call metadata seam — documented no-op.
     },
@@ -128,6 +139,7 @@ export async function startCodexMcpServer(): Promise<CodexMcpServer> {
   server = createCodexMcpServer({
     tools,
     serverVersion: resolvePackageVersion(),
+    output: options.output,
     contextFactory,
     onError(message: string): void {
       log.warn(message);
@@ -149,7 +161,13 @@ export async function startCodexMcpServer(): Promise<CodexMcpServer> {
 
 /** Boot the server and serve it until stdin ends. */
 export async function main(): Promise<void> {
-  const server = await startCodexMcpServer();
+  // Install before booting anything that might log: fd 1 is the protocol
+  // channel on this transport, so stdout is diverted to stderr and the server
+  // gets the captured writer for its own responses. That writer also carries
+  // asynchronous stdout failures (EPIPE), so the server stops writing instead
+  // of crashing. Never restored — the process serves until stdin closes.
+  const guard = installProtocolStdoutGuard();
+  const server = await startCodexMcpServer({ output: guard.stream });
   await server.serve();
 }
 

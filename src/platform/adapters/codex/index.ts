@@ -8,8 +8,10 @@ export {
   DEFAULT_MCP_SERVER_NAME,
 } from "./server.ts";
 export type { CodexMcpServerOptions } from "./server.ts";
+export { installProtocolStdoutGuard } from "./stdout-guard.ts";
+export type { ProtocolStdoutGuard } from "./stdout-guard.ts";
 export { CodexMcpToolFactory } from "./tool-factory.ts";
-export type { McpToolDescriptor, McpToolCallResult } from "./tool-factory.ts";
+export type { McpContentBlock, McpToolDescriptor, McpToolCallResult } from "./tool-factory.ts";
 export {
   MCP_PROTOCOL_VERSIONS,
   MCP_LATEST_PROTOCOL_VERSION,
