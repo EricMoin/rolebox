@@ -41,6 +41,14 @@ jobs:
       - name: Type check (full project)
         run: bun run typecheck
 
+      - name: Type check tests (tests/graph + tests/utils)
+        # tsconfig.json only includes src/, so tests/** was never part of any
+        # tsc program and could drift from the production signatures it
+        # exercises. This step closes that gap for tests/graph and tests/utils
+        # (stage 1; the include list widens to the rest of tests/** later).
+        # src/tui is deliberately not covered — see tsconfig.tests.json for why.
+        run: bun run typecheck:tests
+
       - name: Build package library (tsc emit)
         # `dist/` is gitignored, so the dsh-client-modules seam tests
         # (tests/dsh-plugin.test.ts:494-525) fail on a fresh runner unless the

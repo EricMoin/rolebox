@@ -51,6 +51,7 @@
     "build:dsh-web-client": "NODE_ENV=production bun run scripts/build-dsh-web-client.ts",
     "prepublishOnly": "tsc && bun run build:entry-aliases",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json",
     "test": "bun run test:core && bun run test:tui",
     "test:core": "bun test --isolate --path-ignore-patterns=tests/tui",
     "test:tui": "bun test tests/tui/",

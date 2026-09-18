@@ -1,0 +1,24 @@
+// Type-check gate for the test suite — tests/graph + tests/utils.
+//
+// tsconfig.json includes only ["src"] (excluding src/tui), so tests/** never
+// takes part in any tsc program: `bun run typecheck` stays green while the
+// tests drift away from the production contracts they exercise (Bun is
+// transpile-only, so type errors never surface in `bun test` either).
+//
+// This config extends the repository compiler options (NodeNext + strict) and
+// adds the covered test directories on top of src: tests/graph (the graph
+// engine suite) and tests/utils (shared helper tests such as error-text). It is
+// a staged tightening: this is the next step, and the include list widens to
+// the rest of tests/** once each directory is clean.
+//
+// `src/tui` stays excluded. Its 127 TS2322 diagnostics are the documented
+// @opentui `fg`-not-on-SpanProps false positives that scripts/build-tui.ts:33-42
+// already accepts; adding it here would only reproduce a known-bad gate.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src", "tests/graph/**/*.ts", "tests/utils/**/*.ts"],
+  "exclude": ["src/tui"]
+}
