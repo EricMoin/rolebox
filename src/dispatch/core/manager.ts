@@ -285,10 +285,29 @@ export class DispatchManager {
   async dispose(): Promise<void> {
     this.orchestrator.dispose();
     this.progressStore.stopSweeper();
+    this.progressStore.dispose();
     const budgetDispose = (this.budgetTracker as unknown as { dispose?: () => void }).dispose;
     if (budgetDispose) budgetDispose.call(this.budgetTracker);
     this.cleanupCompletedSyncSessions();
-    await this.flushPersist();
+    // The release tail is unconditional: a throwing flush must not leave the
+    // watchdog timers running or the state lock held for its stale window.
+    try {
+      await this.flushPersist();
+    } finally {
+      this.watchdog.dispose();
+      this.store.unlock();
+    }
+  }
+
+  /**
+   * True while the periodic pipelines that keep a manager live are armed:
+   * the outbox sweeper, the config-aware budget sampler (see
+   * CompletionOrchestrator.isRunning) and the progress sweeper. A manager
+   * whose timers were stopped (flushPersistSync, dispose) reports false so
+   * health() can surface the zombie instead of reporting healthy.
+   */
+  isOperational(): boolean {
+    return this.orchestrator.isRunning() && this.progressStore.isSweeping();
   }
 
   /** Sweep completedSyncSessions entries older than 1 hour (COMPLETED_SYNC_TTL_MS). */

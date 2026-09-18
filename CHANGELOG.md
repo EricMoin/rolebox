@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **Dispatch teardown always releases its resources** — `DispatchManager.dispose()` now runs its release tail in a `finally`, so a throwing state flush can no longer leave the watchdog timers running or the state lock held. Pending debounced progress writes are flushed and their timers cleared on teardown, so no write can fire after a manager is disposed.
+
+- **Dispatch health is config-aware** — a stopped budget sampler now reads as a stopped pipeline only when a budget limit is actually configured, so a manager with no configured limits no longer reports unhealthy merely because its sampler was never armed, and a manager with configured limits no longer reports healthy while its sampler is dead.
+
+- **Process-fatal events are recorded without changing host behaviour** — a new observation-only reporter flushes rolebox state and writes one structured log entry on `uncaughtException` / `unhandledRejection`. It never exits, re-throws, or alters the host's exit code, installs and removes exactly its own process listeners, and reports at most one event per process.
+
 ## 1.9.0
 
 ### Features

@@ -47,6 +47,7 @@ import { RoleMode } from "../src/constants.ts";
 import type { DispatchManager } from "../src/dispatch/core/manager.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { LoopCoordinator } from "../src/loop/coordinator.ts";
+import { hookState } from "../src/hooks/state.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -246,6 +247,59 @@ describe("ToolService — opencode graphTools path", () => {
       expect(core.getService<HookService>("hook-service")).toBeDefined();
     } finally {
       await core.dispose();
+    }
+  });
+
+  it("restarting dispatch-service rebinds ToolService and LoopService to the fresh manager", async () => {
+    const client = makeMockClient();
+    const core = new PluginCore();
+    core.registerService(new HotReloadService());
+    const dispatchSvc = new DispatchService();
+    core.registerService(dispatchSvc);
+    core.registerService(new LoopService());
+    core.registerService(new LspService());
+    core.registerService(new NotificationService());
+    core.registerService(new SessionService());
+    core.registerService(new RecoveryService());
+    core.registerService(new ExtensionService());
+    core.registerService(new ToolService());
+    core.registerService(new HookService());
+    core.registerService(new HealthMonitorService());
+
+    await core.init({
+      session: new OpencodeSessionAdapter(client),
+      resolvedRoles: [makePrimaryRole()],
+      roleFunctionsMap: new Map<string, ResolvedFunction[]>(),
+      roleGraphMap: new Map(),
+      rawDirectory: tmpDir,
+      directory: tmpDir,
+      core,
+      bus: core.getBus(),
+    });
+
+    try {
+      const toolService = core.getService<ToolService>("tool-service")!;
+      const loopService = core.getService<LoopService>("loop-service")!;
+      const m1 = dispatchSvc.getDispatchManager();
+      const toolset1 = toolService.getGraphToolSet();
+      const loopManager1 = loopService.getLoopManager();
+
+      await core.restartService("dispatch-service");
+
+      // Fresh manager with re-armed periodic timers
+      const m2 = dispatchSvc.getDispatchManager();
+      expect(m2).not.toBe(m1);
+      expect(m2.isOperational()).toBe(true);
+      // Cascade: dependents re-inited against the fresh manager
+      expect(toolService.getGraphToolSet()).not.toBe(toolset1);
+      expect(loopService.getLoopManager()).not.toBe(loopManager1);
+      expect(dispatchSvc.health().status).toBe("healthy");
+    } finally {
+      await core.dispose();
+      hookState.managerMap.delete(tmpDir);
+      hookState.loopManagerMap.delete(tmpDir);
+      hookState.loopStoreMap.delete(tmpDir);
+      hookState.activeLoopManager = undefined;
     }
   });
 });

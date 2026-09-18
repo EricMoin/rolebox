@@ -660,4 +660,28 @@ describe("TaskStateStore", () => {
       expect(parsed.outbox).toBeUndefined();
     });
   });
+
+  describe("state lock release", () => {
+    it("unlock() releases the lock so a new store in the same directory can acquire it", () => {
+      const dir = mkdtempSync(join(tmpdir(), "task-store-lock-"));
+      dirs.push(dir);
+      currentDataDir = dir;
+
+      const storeA = new TaskStateStore(dir);
+      expect(storeA.tryLock()).toBe(true);
+      expect(storeA.readOnly).toBe(false);
+
+      const lockPath = stateFilePath(dir) + ".lock";
+      expect(existsSync(lockPath)).toBe(true);
+
+      storeA.unlock();
+      expect(existsSync(lockPath)).toBe(false);
+
+      // Same PID + fresh lock would otherwise be refused for StaleLockTimeoutMs
+      const storeB = new TaskStateStore(dir);
+      expect(storeB.tryLock()).toBe(true);
+      expect(storeB.readOnly).toBe(false);
+      storeB.unlock();
+    });
+  });
 });

@@ -13,6 +13,9 @@
  * with stub ISessionClient.create implementations.
  */
 import { describe, it, expect, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { DispatchManager } from "../../src/dispatch/core/manager";
 import { createMockClient, parentContext } from "./helpers";
 import { SessionCreateRejectedError } from "../../src/platform/types";
@@ -37,12 +40,23 @@ function makeSession(id: string): SessionInfo {
 }
 
 const managed: DispatchManager[] = [];
+const managerTempDirs: string[] = [];
+// DispatchManager defaults its store directory to process.cwd(), so a tracked
+// manager gets a fresh temp store directory instead — otherwise it writes
+// dispatch-<repoHash>.json and its .lock into the repository's own
+// .rolebox/state during a test run.
 function track(m: DispatchManager): DispatchManager {
+  const dir = mkdtempSync(join(tmpdir(), "session-create-retry-isolation-"));
+  managerTempDirs.push(dir);
+  m.setStoreDirectory(dir);
   managed.push(m);
   return m;
 }
 afterEach(async () => {
   await Promise.all(managed.splice(0).map((m) => m.dispose()));
+  for (const dir of managerTempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 describe("session.create bounded retry — transient (thrown) vs rejection (null)", () => {

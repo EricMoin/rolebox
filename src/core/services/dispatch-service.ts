@@ -62,6 +62,8 @@ export class DispatchService implements PluginService, ToolContributor {
   private resolvedSubagents = new Map<string, { parentFullId: string }>();
   private subagentModelKey = new Map<string, string>();
   private recoverFailed = false;
+  /** managerMap key published by the last init() — used to evict this core's manager on dispose(). */
+  private managerMapKey?: string;
 
   /** Optional session client override. When set, used in place of ctx.session. */
   private readonly sessionClient: ISessionClient | undefined;
@@ -102,6 +104,7 @@ export class DispatchService implements PluginService, ToolContributor {
     // 2. Reuse or create DispatchManager (was lines 155-167 in plugin-hooks.ts)
     // Use rawDirectory for map keys to match test expectations and legacy behavior
     const mapDir = ctx.rawDirectory;
+    this.managerMapKey = mapDir;
     const storeDir = ctx.directory;
     let dispatchManager = hookState.managerMap.get(mapDir);
     if (!dispatchManager) {
@@ -117,13 +120,16 @@ export class DispatchService implements PluginService, ToolContributor {
       dispatchManager = result.manager;
       hookState.managerMap.set(mapDir, dispatchManager);
 
-      // Graceful degradation: recover() failure → log error + use empty state
+      // Graceful degradation: recover() failure → log error + use empty state.
+      // Assign (do not latch): a fresh manager whose recover() succeeded clears a
+      // previous failure. A reused manager keeps its own verdict, because this
+      // branch is skipped on the cache-hit path above.
       if (result.recoverError) {
-        this.recoverFailed = true;
         log.error("DispatchManager.recover() failed, continuing with empty state", {
           error: result.recoverError.message,
         });
       }
+      this.recoverFailed = result.recoverError !== undefined;
     }
 
     this.dispatchManager = dispatchManager;
@@ -150,6 +156,26 @@ export class DispatchService implements PluginService, ToolContributor {
       log.warn("dispatch flush during dispose failed", {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+    // Evict the cached manager so the next init() rebuilds a fresh one with all
+    // periodic timers re-armed. Identity-guarded: an older core must never evict
+    // a newer manager another PluginCore published for the same rawDirectory.
+    const key = this.managerMapKey;
+    if (key && hookState.managerMap.get(key) === this.dispatchManager) {
+      hookState.managerMap.delete(key);
+    }
+  }
+
+  /**
+   * Synchronous crash-safe flush for process exit/SIGINT/SIGTERM. No-op before
+   * init or when degraded.
+   */
+  flushPersistSync(): void {
+    if (this.degraded || !this.dispatchManager) return;
+    try {
+      this.dispatchManager.flushPersistSync();
+    } catch (err) {
+      log.warn("dispatch flush on exit failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -222,6 +248,9 @@ export class DispatchService implements PluginService, ToolContributor {
     }
     if (this.recoverFailed) {
       return { status: "degraded", detail: "DispatchManager.recover() failed — running with empty state" };
+    }
+    if (!this.dispatchManager.isOperational()) {
+      return { status: "unhealthy", detail: "DispatchManager present but periodic pipeline stopped (sweeper not running)" };
     }
     return { status: "healthy" };
   }

@@ -17,6 +17,7 @@ import { ExtensionService } from "./services/extension-service.ts";
 import { ToolService } from "./services/tool-service.ts";
 import { HookService } from "./services/hook-service.ts";
 import { HealthMonitorService } from "./services/health-monitor-service.ts";
+import { ProcessFatalReporter } from "./process-fatal-reporter.ts";
 
 const log = createSubLogger("plugin-hooks");
 
@@ -112,21 +113,27 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
 
   await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
-  // Register sync shutdown handlers (async disposal is fire-and-forget)
+  // Register sync shutdown handlers (async disposal is fire-and-forget). The
+  // flush is hoisted out of the guard so the observation-only fatal reporter
+  // below reuses exactly the same synchronous path.
+  const flushAllSync = () => {
+    for (const [d, mgr] of hookState.loopManagerMap) {
+      try { hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates()); } catch (err) { log.warn("flushAllSync saveSync failed for directory", d, err); }
+      mgr.dispose();
+    }
+    core.getService<DispatchService>("dispatch-service")?.flushPersistSync();
+    if (directory) { functionRuntime.flushSync(); sessionSignalLedger.flushSync(); }
+    void core.dispose(); // fire-and-forget for async service disposal
+  };
   if (!hookState.shutdownRegistered) {
     hookState.shutdownRegistered = true;
-    const flushAllSync = () => {
-      for (const [d, mgr] of hookState.loopManagerMap) {
-        try { hookState.loopStoreMap.get(d)?.saveSync(mgr.getAllLoopStates()); } catch (err) { log.warn("flushAllSync saveSync failed for directory", d, err); }
-        mgr.dispose();
-      }
-      core.getService<DispatchService>("dispatch-service")?.getDispatchManager().flushPersistSync();
-      if (directory) { functionRuntime.flushSync(); sessionSignalLedger.flushSync(); }
-      void core.dispose(); // fire-and-forget for async service disposal
-    };
     process.on("exit", () => flushAllSync());
     process.on("SIGINT", () => { flushAllSync(); process.exit(130); });
     process.on("SIGTERM", () => { flushAllSync(); process.exit(143); });
+    // Observation-only crash reporter: flush + one log entry on
+    // uncaughtException/unhandledRejection. It never exits, re-throws or
+    // changes the host's exit semantics — installed once per process.
+    new ProcessFatalReporter({ flush: flushAllSync }).install();
   }
 
   const loopService = core.getService<LoopService>("loop-service");

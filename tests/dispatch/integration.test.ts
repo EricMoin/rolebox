@@ -1,8 +1,12 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { detectCompletion } from "../../src/dispatch/completion/completion-detector";
 import type { SessionMessageSnapshot, TaskEventState } from "../../src/dispatch/types";
 import { TASK_TTL_MS } from "../../src/dispatch/config";
 import { clearSentFinalNotifies, clearParentQueues, hasFinalNotifyBeenSent } from "../../src/dispatch/notification";
+import { DispatchManager } from "../../src/dispatch/core/manager";
 
 afterEach(() => {
   clearSentFinalNotifies();
@@ -10,6 +14,29 @@ afterEach(() => {
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+// DispatchManager defaults its store directory to process.cwd(), so a manager
+// built without an explicit directory writes dispatch-<repoHash>.json and its
+// .lock into the repository's own .rolebox/state during a test run. Every
+// manager in this file gets a fresh temp store directory instead, removed
+// after each test.
+const managerTempDirs: string[] = [];
+
+function makeManager(
+  ...args: ConstructorParameters<typeof DispatchManager>
+): DispatchManager {
+  const manager = new DispatchManager(...args);
+  const dir = mkdtempSync(join(tmpdir(), "dispatch-integration-isolation-"));
+  managerTempDirs.push(dir);
+  manager.setStoreDirectory(dir);
+  return manager;
+}
+
+afterEach(() => {
+  for (const dir of managerTempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ── BUG-2: Completion detection uses session-status-first approach ────────
 
@@ -89,7 +116,6 @@ describe("BUG-6: TTL=30 min", () => {
 
 describe("integration: event-driven completion flow", () => {
   it("launch → event sequence (busy→message.updated→idle) → debounce → complete → notify", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -105,7 +131,7 @@ describe("integration: event-driven completion flow", () => {
         Promise.resolve({ type: "idle" }),
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       staleTimeoutMs: 500,
       maxConcurrent: 5,
       taskTtlMs: 100,
@@ -144,11 +170,10 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("session error event transitions task to error", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       staleTimeoutMs: 500,
       maxConcurrent: 5,
       taskTtlMs: 100,
@@ -166,11 +191,10 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("session deleted event transitions task to error", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient();
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       staleTimeoutMs: 500,
       maxConcurrent: 5,
       taskTtlMs: 100,
@@ -188,7 +212,6 @@ describe("integration: event-driven completion flow", () => {
   });
 
   it("a stale idle status with an in-flight tool cancels the idle debounce (task not completed)", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -204,7 +227,7 @@ describe("integration: event-driven completion flow", () => {
         Promise.resolve({ type: "idle" }),
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 5,
       taskTtlMs: 100,
     });
@@ -239,7 +262,6 @@ describe("integration: event-driven completion flow", () => {
 
 describe("integration: getResult truncation + spill", () => {
   it("getResult returns full text even when large", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const longText = "x".repeat(50000);
@@ -254,7 +276,7 @@ describe("integration: getResult truncation + spill", () => {
             { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: longText }] },
           ]),
     });
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 2,
       taskTtlMs: 100,
     });
@@ -277,7 +299,6 @@ describe("integration: getResult truncation + spill", () => {
   });
 
   it("getResult extracts fenced result block", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -290,7 +311,7 @@ describe("integration: getResult truncation + spill", () => {
             { info: { role: "assistant", id: "a1" }, parts: [{ type: "text", text: "preamble\n```result\nfenced content here\n```\nsuffix" }] },
           ]),
     });
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 2,
       taskTtlMs: 100,
     });
@@ -315,7 +336,6 @@ describe("integration: getResult truncation + spill", () => {
 
 describe("integration: FINAL notification idempotency", () => {
   it("completing last task sends FINAL notification with noReply:false", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let finalNotifyCount = 0;
@@ -332,7 +352,7 @@ describe("integration: FINAL notification idempotency", () => {
         return Promise.resolve({ id: "prompt-1" });
       },
     });
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 5,
       taskTtlMs: 100,
     });
@@ -371,7 +391,6 @@ describe("integration: FINAL notification idempotency", () => {
 
 describe("integration: session-gone handling", () => {
   it("handleSessionError transitions task to error and notifies parent", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let notifyCalls = 0;
@@ -383,7 +402,7 @@ describe("integration: session-gone handling", () => {
         return Promise.resolve({ id: "prompt-1" });
       },
     });
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 5,
       taskTtlMs: 100,
     });
@@ -408,7 +427,6 @@ describe("integration: session-gone handling", () => {
 
 describe("integration: no-hang on never-resolving messages", () => {
   it("materialization times out quickly, no hang, getResult responds promptly", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -419,7 +437,7 @@ describe("integration: no-hang on never-resolving messages", () => {
       sessionMessages: () => new Promise(() => {}),
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       materializeTimeoutMs: 100,
       maxConcurrent: 2,
       taskTtlMs: 5000,
@@ -451,7 +469,6 @@ describe("integration: no-hang on never-resolving messages", () => {
 
 describe("integration: notify-after-materialize ordering", () => {
   it("session.messages is called before promptAsync during completion flow", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const callOrder: string[] = [];
@@ -479,7 +496,7 @@ describe("integration: notify-after-materialize ordering", () => {
         Promise.resolve({ type: "idle" }),
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 5,
       taskTtlMs: 100,
       minRuntimeMs: 0,
@@ -522,7 +539,6 @@ describe("integration: notify-after-materialize ordering", () => {
 
 describe("integration: reap survival", () => {
   it("getResult returns ok after cleanupTask, reading from persistent sidecar", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     const client = createMockClient({
@@ -539,7 +555,7 @@ describe("integration: reap survival", () => {
           ]),
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 2,
       taskTtlMs: 100,
       resultRetentionMs: 60000,
@@ -572,7 +588,6 @@ describe("integration: reap survival", () => {
 
 describe("integration: backward-compat lazy fetch", () => {
   it("first getResult triggers messages fetch, second uses cache only", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let messagesCallCount = 0;
@@ -592,7 +607,7 @@ describe("integration: backward-compat lazy fetch", () => {
       },
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 2,
       taskTtlMs: 100,
     });
@@ -624,7 +639,6 @@ describe("integration: backward-compat lazy fetch", () => {
 
 describe("integration: concurrent evaluateAndComplete no-op", () => {
   it("calling evaluateAndComplete on already-completed task is a no-op", async () => {
-    const { DispatchManager } = await import("../../src/dispatch/core/manager");
     const { createMockClient, parentContext } = await import("./helpers");
 
     let messagesCallCount = 0;
@@ -647,7 +661,7 @@ describe("integration: concurrent evaluateAndComplete no-op", () => {
       },
     });
 
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       maxConcurrent: 2,
       taskTtlMs: 100,
     });
@@ -679,7 +693,6 @@ describe("integration: outbox resend", () => {
   it(
     "failed final notify populates outbox, sweeper retries successfully",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
 
       let notifyAttemptCount = 0;
@@ -709,7 +722,7 @@ describe("integration: outbox resend", () => {
             ]),
       });
 
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         maxConcurrent: 2,
         taskTtlMs: 100,
       });
@@ -743,7 +756,6 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
   it(
     "materializeAndNotify with remainingTasks > 0 does not call addToOutbox",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
 
       let promptAsyncCallCount = 0;
@@ -770,7 +782,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
             ]),
       });
 
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         maxConcurrent: 2,
         taskTtlMs: 100,
       });
@@ -812,7 +824,6 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
   it(
     "intermediate notification not in outbox — sweeper does not resend",
     async () => {
-      const { DispatchManager } = await import("../../src/dispatch/core/manager");
       const { createMockClient, parentContext } = await import("./helpers");
       const { clearSentFinalNotifies } = await import("../../src/dispatch/notification");
 
@@ -834,7 +845,7 @@ describe("integration: intermediate notification does NOT enter outbox", () => {
             ]),
       });
 
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         maxConcurrent: 4,
         taskTtlMs: 100,
       });

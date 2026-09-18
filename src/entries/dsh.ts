@@ -102,6 +102,7 @@ import {
 } from "../platform/tool-assembly.ts";
 import type { PlatformCapabilities } from "../platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "../prompt/builder.ts";
+import { ProcessFatalReporter } from "../core/process-fatal-reporter.ts";
 import { createGraphTools } from "../graph/tools/index.ts";
 import { createGraphToolSet, type GraphToolSet } from "../graph/tools/graph-tools.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
@@ -1395,8 +1396,37 @@ export async function apply(
     log.info("No roles found in rolebox directory");
   }
 
+  // Observation-only crash reporter: on uncaughtException / unhandledRejection
+  // it synchronously flushes the dsh path's rolebox state (the same saves the
+  // disposer below performs) and writes ONE structured log entry. It never
+  // calls process.exit, never re-throws and never touches stdout; the latch in
+  // the handler makes a second event a no-op. The disposer removes exactly the
+  // listeners installed here.
+  const fatalReporter = new ProcessFatalReporter({
+    flush: () => {
+      try {
+        const activeRoles = activeRole.snapshot();
+        if (activeRoles.size > 0) {
+          activeRoleStore.saveSync(activeRoles);
+        }
+      } catch {
+        // Best-effort — the fatal path never blocks on a failed sidecar write.
+      }
+      try {
+        loopStore.saveSync(loopCoordinator.getAllLoopStates() ?? new Map());
+      } catch {
+        // Best-effort — same policy as the disposer below.
+      }
+      loopCoordinator.dispose();
+    },
+  });
+  const uninstallFatalReporter = fatalReporter.install();
+
   // Fiber disposer (cordis convention) + stats for callers/tests.
   const disposer = (() => {
+    // The crash reporter goes first: teardown failures must not be observed as
+    // process-fatal events, and no handler may run after the listeners are gone.
+    uninstallFatalReporter();
     // Host route + prompt-seam teardown FIRST: unmount the /rolebox routes
     // (fire-and-forget — the disposers are no-ops when the route was never
     // registered), release the system-prompt registry contributions (also

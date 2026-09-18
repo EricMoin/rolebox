@@ -144,6 +144,37 @@ export class CompletionOrchestrator implements OrchestratorBridge {
     }
   }
 
+  /**
+   * True while the periodic pipelines that keep the manager operational are
+   * armed: the outbox sweeper, plus the budget sampler whenever a budget limit
+   * is configured (startBudgetSampler legitimately returns no timer when no
+   * limit is set — that absence must not read as a stopped pipeline).
+   * The persist timer is deliberately excluded: it is undefined whenever state
+   * is clean.
+   */
+  isRunning(): boolean {
+    return (
+      this.d._sweeperTimerInternal !== undefined &&
+      (!this.hasBudgetLimits() || this.isBudgetSamplerArmed())
+    );
+  }
+
+  /** True while the budget sampler timer is armed. */
+  isBudgetSamplerArmed(): boolean {
+    return this.d._budgetSamplerTimer !== undefined;
+  }
+
+  /** True when any of the five budget limits is configured (mirrors startBudgetSampler's gate). */
+  hasBudgetLimits(): boolean {
+    return (
+      this.d.config.maxInputTokensPerRequest !== undefined ||
+      this.d.config.maxOutputTokensPerRequest !== undefined ||
+      this.d.config.maxCostPerRequest !== undefined ||
+      this.d.config.maxInputTokensPerSession !== undefined ||
+      this.d.config.maxCostPerSession !== undefined
+    );
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────
 
   cleanupTask(taskId: string): void {

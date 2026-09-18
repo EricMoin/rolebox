@@ -118,7 +118,25 @@ export class InMemoryProgressStore implements ProgressStore {
     }
   }
 
+  /** True while the periodic cleanup sweeper timer is armed. */
+  isSweeping(): boolean {
+    return this._sweeperTimer !== undefined;
+  }
+
   // ── Test accessors ───────────────────────────────────────────────
+
+  /**
+   * Teardown: flush every pending debounced write through flushSync(), then
+   * cancel any remaining debounce handle. After this returns no debounced
+   * write can fire — the store is inert until a new event is added.
+   */
+  dispose(): void {
+    this.flushSync();
+    for (const timer of this.debounceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.debounceTimers.clear();
+  }
 
   /** Exposed for testing: force-flush all pending debounced writes synchronously. */
   flushSync(): void {

@@ -2,7 +2,7 @@ import { describe, it, expect, mock, afterEach, beforeEach } from "bun:test";
 import { DispatchManager } from "../../src/dispatch/core/manager";
 import type { DispatchTask } from "../../src/dispatch/types";
 import { TaskStateStore } from "../../src/dispatch/persistence/task-store.ts";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { clearParentQueues, clearSentFinalNotifies } from "../../src/dispatch/notification";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -17,6 +17,38 @@ const fastConfig = {
   taskTtlMs: 100,
 };
 
+// ── cwd-store isolation ──────────────────────────────────────────
+//
+// DispatchManager defaults its store directory to process.cwd(), so a manager
+// built without an explicit directory writes dispatch-<repoHash>.json and its
+// .lock into the repository's own .rolebox/state during a test run. Every
+// manager in this file gets a fresh temp store directory instead, removed
+// after each test.
+const managerTempDirs: string[] = [];
+const managerDirs = new WeakMap<DispatchManager, string>();
+
+function makeManager(
+  ...args: ConstructorParameters<typeof DispatchManager>
+): DispatchManager {
+  const manager = new DispatchManager(...args);
+  const dir = mkdtempSync(join(tmpdir(), "dispatch-manager-isolation-"));
+  managerTempDirs.push(dir);
+  manager.setStoreDirectory(dir);
+  managerDirs.set(manager, dir);
+  return manager;
+}
+
+/** The isolated store directory makeManager() assigned to a manager. */
+function storeDirFor(manager: DispatchManager): string {
+  return managerDirs.get(manager)!;
+}
+
+afterEach(() => {
+  for (const dir of managerTempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── tests ────────────────────────────────────────────────────────
 
 describe("DispatchManager", () => {
@@ -28,7 +60,7 @@ describe("DispatchManager", () => {
 
   it("launch() creates a task and registers with global poller when run_in_background is true", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       {
@@ -60,7 +92,7 @@ describe("DispatchManager", () => {
         throw new Error("create failed");
       },
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       {
@@ -87,7 +119,7 @@ describe("DispatchManager", () => {
           ],
         }),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const result = await manager.executeSync(
       {
@@ -108,7 +140,7 @@ describe("DispatchManager", () => {
       sessionPrompt: () =>
         Promise.resolve(null),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const result = await manager.executeSync(
       {
@@ -129,7 +161,7 @@ describe("DispatchManager", () => {
       sessionPrompt: () => new Promise<never>(() => {}), // never resolves
       sessionAbort: () => Promise.resolve(true),
     });
-    const manager = new DispatchManager(client, { ...fastConfig, syncPromptTimeoutMs: 20 });
+    const manager = makeManager(client, { ...fastConfig, syncPromptTimeoutMs: 20 });
 
     await expect(
       manager.executeSync(
@@ -145,7 +177,7 @@ describe("DispatchManager", () => {
     const client = createMockClient({
       sessionCreate: () => new Promise<never>(() => {}), // never resolves
     });
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       ...fastConfig,
       materializeTimeoutMs: 20,
       syncPromptTimeoutMs: 5000,
@@ -171,7 +203,7 @@ describe("DispatchManager", () => {
       const client = createMockClient({
         sessionPrompt: () => deferred,
       });
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
 
@@ -200,7 +232,7 @@ describe("DispatchManager", () => {
 
     it("T16: executeSync cleans up task from this.tasks on completion", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const taskCountBefore = mgr.tasks.size;
@@ -218,7 +250,7 @@ describe("DispatchManager", () => {
       if (!process.env.ROLEBOX_METRICS) return;
 
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
 
       const completedBefore = metrics.counter("dispatch_completed_total", { mode: "sync" }).peek();
       const histBefore = metrics.histogram("task_duration_ms", { mode: "sync" }).peek();
@@ -242,7 +274,7 @@ describe("DispatchManager", () => {
       const client = createMockClient({
         sessionPrompt: () => Promise.reject(new Error("prompt failed")),
       });
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
 
       const errorBefore = metrics.counter("dispatch_error_total", { mode: "sync" }).peek();
 
@@ -263,7 +295,7 @@ describe("DispatchManager", () => {
       const client = createMockClient({
         sessionPrompt: () => Promise.reject(new Error("prompt failed")),
       });
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
 
@@ -289,7 +321,7 @@ describe("DispatchManager", () => {
         sessionPrompt: () => new Promise<never>(() => {}),
         sessionAbort: () => Promise.resolve(true),
       });
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         ...fastConfig,
         syncPromptTimeoutMs: 200,
       });
@@ -341,7 +373,7 @@ describe("DispatchManager", () => {
         sessionPrompt: () => new Promise<never>(() => {}),
         sessionAbort: () => Promise.resolve(true),
       });
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         ...fastConfig,
         syncPromptTimeoutMs: 600_000,
       });
@@ -367,7 +399,7 @@ describe("DispatchManager", () => {
         sessionPrompt: () => new Promise<never>(() => {}),
         sessionAbort: () => Promise.resolve(true),
       });
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         ...fastConfig,
         syncPromptTimeoutMs: 20,
       });
@@ -405,7 +437,7 @@ describe("DispatchManager", () => {
       tasks.set(syncTask.id, syncTask);
       await store.save(tasks);
 
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       manager.setStoreDirectory(tempDir);
 
       await manager.recover();
@@ -427,7 +459,7 @@ describe("DispatchManager", () => {
 
     it("normal sync completion leaves no lingering entry in this.tasks or _syncControllers", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const tasksBefore = mgr.tasks.size;
@@ -450,7 +482,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() aborts session and updates status to cancelled", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       {
@@ -471,7 +503,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() returns false for unknown task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const result = await manager.cancelTask("nonexistent-task");
     expect(result).toBe(false);
@@ -479,7 +511,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() returns false for completed task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "work", run_in_background: true },
@@ -497,7 +529,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() returns false for errored task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "work", run_in_background: true },
@@ -515,7 +547,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() returns false for cancelled task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "work", run_in_background: true },
@@ -533,7 +565,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() returns false for timed out task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "work", run_in_background: true },
@@ -551,7 +583,7 @@ describe("DispatchManager", () => {
 
   it("cancelTask() returns false when notification is in-flight", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "work", run_in_background: true },
@@ -578,7 +610,7 @@ describe("DispatchManager", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "work", run_in_background: true },
@@ -604,7 +636,7 @@ describe("DispatchManager", () => {
 
   it("getResult() extracts text from assistant messages", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       {
@@ -634,7 +666,7 @@ describe("DispatchManager", () => {
 
   it("getResult() returns not_found kind for unknown task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const result = await manager.getResult("unknown");
     expect(result.kind).toBe("not_found");
@@ -644,7 +676,7 @@ describe("DispatchManager", () => {
 
   it("getResult() returns fetch_error kind when task.result has fetchError", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       {
@@ -695,7 +727,7 @@ describe("DispatchManager", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
@@ -715,7 +747,7 @@ describe("DispatchManager", () => {
 
   it("getResult() on non-continued task returns all assistant text (regression)", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
@@ -740,7 +772,7 @@ describe("DispatchManager", () => {
 
   it("getResult() returns totalChars equal to full text length", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -764,7 +796,7 @@ describe("DispatchManager", () => {
 
   it("getResult() returns resultText from fenced block when ```result fence is present", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -790,7 +822,7 @@ describe("DispatchManager", () => {
 
   it("getResult() returns resultText equal to raw text when no fence is present", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -816,7 +848,7 @@ describe("DispatchManager", () => {
 
   it("getResult() non-ok kinds (not_found/expired/fetch_error) have zero totalChars and empty resultText", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const notFound = await manager.getResult("nonexistent");
     expect(notFound.kind).toBe("not_found");
@@ -838,7 +870,7 @@ describe("DispatchManager", () => {
 
     // fetch_error
     const clientErr = createMockClient();
-    const mgr2 = new DispatchManager(clientErr);
+    const mgr2 = makeManager(clientErr);
     const t2 = await mgr2.launch(
       { subagent: "helper", prompt: "fail", run_in_background: false },
       parentContext(),
@@ -863,7 +895,7 @@ describe("DispatchManager", () => {
 
   it("cache-first: getResult reads from task.result sidecar, never calls network", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -898,7 +930,7 @@ describe("DispatchManager", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -923,7 +955,7 @@ describe("DispatchManager", () => {
 
   it("fetch-error: task.result with fetchError returns fetch_error kind", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "fail", run_in_background: false },
       parentContext(),
@@ -946,7 +978,7 @@ describe("DispatchManager", () => {
 
   it("sidecar-survival: missing task with orphaned sidecar file returns ok", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "analyze", run_in_background: false },
       parentContext(),
@@ -956,9 +988,9 @@ describe("DispatchManager", () => {
     // Clean up the task from memory
     manager.cleanupTask(taskId);
 
-    // Write an orphaned sidecar file
-    const sidecarPath = resultSidecarPath(taskId, process.cwd());
-    writeResultSidecar(taskId, "survivor output", process.cwd());
+    // Write an orphaned sidecar file into the manager's own store directory
+    const sidecarPath = resultSidecarPath(taskId, storeDirFor(manager));
+    writeResultSidecar(taskId, "survivor output", storeDirFor(manager));
 
     const result = await manager.getResult(taskId);
     expect(result.kind).toBe("ok");
@@ -968,7 +1000,7 @@ describe("DispatchManager", () => {
 
   it("expired: cleanedUpTasks entry returns expired kind", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const task = await manager.launch(
       { subagent: "helper", prompt: "p", run_in_background: false },
       parentContext(),
@@ -982,7 +1014,7 @@ describe("DispatchManager", () => {
 
   it("not-found: unknown task id returns not_found kind", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const result = await manager.getResult("never-existed");
     expect(result.kind).toBe("not_found");
@@ -993,14 +1025,14 @@ describe("DispatchManager", () => {
 
   it("getTask() returns undefined for unknown task", () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     expect(manager.getTask("nonexistent")).toBeUndefined();
   });
 
   it("getTask() returns the correct task by id", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       {
@@ -1021,7 +1053,7 @@ describe("DispatchManager", () => {
 
   it("getTasksByParent() returns only tasks for the given parent session", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const ctx1 = { sessionID: "parent-1", agent: "a", directory: "/tmp" };
     const ctx2 = { sessionID: "parent-2", agent: "b", directory: "/tmp" };
@@ -1054,7 +1086,7 @@ describe("DispatchManager", () => {
 
   it("getTasksByParent() index sync: cleanup 1 of 3 tasks, returns 2 with no stale entries", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const ctx = { sessionID: "parent-cleanup", agent: "a", directory: "/tmp" };
 
@@ -1096,7 +1128,7 @@ describe("DispatchManager", () => {
 
   it("getTasksByParent() index consistency: multiple parents each have correct subsets", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const ctxA = { sessionID: "parent-A", agent: "a", directory: "/tmp" };
     const ctxB = { sessionID: "parent-B", agent: "b", directory: "/tmp" };
@@ -1154,7 +1186,7 @@ describe("DispatchManager", () => {
 
   it("cleanupTask() removes task from store", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: false },
@@ -1168,7 +1200,7 @@ describe("DispatchManager", () => {
 
   it("cleanupTask → getResult() returns expired kind for cleaned-up task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: false },
@@ -1187,7 +1219,7 @@ describe("DispatchManager", () => {
 
   it("cleanupTask FIFO trim at 501 entries keeps size 500 and evicts oldest", () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const taskIds: string[] = [];
@@ -1210,7 +1242,7 @@ describe("DispatchManager", () => {
     const client = createMockClient({
       sessionMessages: () => Promise.reject(new Error("network failure")),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: false },
@@ -1230,7 +1262,7 @@ describe("DispatchManager", () => {
 
   it("handleSessionIdle defers when elapsed < minRuntimeMs", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: false },
@@ -1254,7 +1286,7 @@ describe("DispatchManager", () => {
 
   it("handleSessionIdle starts debounce then completes on trigger when elapsed >= minRuntimeMs and assistant output exists", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: false },
@@ -1297,7 +1329,7 @@ describe("DispatchManager", () => {
 
   it("does not grow unbounded (LRU eviction at 500 entries, oldest timestamp evicted)", () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const mgr = manager as any;
     const taskIds: string[] = [];
@@ -1327,7 +1359,7 @@ describe("DispatchManager", () => {
   describe("inflight counter", () => {
     it("tracks remaining tasks per parent, decrements on completion", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const ctx = parentContext();
       const mgr = manager as any;
 
@@ -1361,7 +1393,7 @@ describe("DispatchManager", () => {
 
     it("handles multiple parents independently", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const ctx1 = { sessionID: "parent-A", agent: "a", directory: "/tmp" };
@@ -1393,7 +1425,7 @@ describe("DispatchManager", () => {
 
     it("decrements on task error", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const ctx = parentContext();
       const mgr = manager as any;
 
@@ -1409,7 +1441,7 @@ describe("DispatchManager", () => {
 
     it("decrements on task timeout", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const ctx = parentContext();
       const mgr = manager as any;
 
@@ -1425,7 +1457,7 @@ describe("DispatchManager", () => {
 
     it("decrements on cancel", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const ctx = parentContext();
       const mgr = manager as any;
 
@@ -1441,7 +1473,7 @@ describe("DispatchManager", () => {
 
     it("does not double-decrement on double-completion", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const ctx = parentContext();
       const mgr = manager as any;
 
@@ -1463,7 +1495,7 @@ describe("DispatchManager", () => {
       const client = createMockClient({
         sessionPromptAsync: () => Promise.reject(new Error("promptAsync failed")),
       });
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const ctx = parentContext();
       const mgr = manager as any;
 
@@ -1478,7 +1510,7 @@ describe("DispatchManager", () => {
 
     it("getInflightCount returns 0 for unknown parent", () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
 
       expect(manager.getInflightCount("nonexistent-parent")).toBe(0);
     });
@@ -1489,7 +1521,7 @@ describe("DispatchManager", () => {
   describe("double-completion guard", () => {
     it("handleTaskCompleted twice keeps task completed and is idempotent", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
         parentContext(),
@@ -1506,7 +1538,7 @@ describe("DispatchManager", () => {
 
     it("handleTaskCompleted on error-status task is no-op", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
         parentContext(),
@@ -1525,7 +1557,7 @@ describe("DispatchManager", () => {
 
     it("handleTaskError on completed-status task is no-op", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
         parentContext(),
@@ -1542,7 +1574,7 @@ describe("DispatchManager", () => {
 
     it("handleTaskTimeout on cancelled-status task is no-op", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
         parentContext(),
@@ -1573,7 +1605,7 @@ describe("DispatchManager", () => {
       const sessionMessagesMock = mock(() => deferred);
       client.messages = sessionMessagesMock;
 
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
 
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
@@ -1604,7 +1636,7 @@ describe("DispatchManager", () => {
 
     it("second handleSessionIdle for same task is a no-op while already debouncing", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
 
       const task = await manager.launch(
         { subagent: "h", prompt: "p", run_in_background: true },
@@ -1647,7 +1679,7 @@ describe("DispatchManager", () => {
     it("gauge returns to baseline after handleTaskCompleted", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
@@ -1665,7 +1697,7 @@ describe("DispatchManager", () => {
     it("gauge returns to baseline after handleTaskError", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
@@ -1683,7 +1715,7 @@ describe("DispatchManager", () => {
     it("gauge returns to baseline after handleTaskTimeout", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
@@ -1701,7 +1733,7 @@ describe("DispatchManager", () => {
     it("gauge returns to baseline after cancelTask", async () => {
       if (!process.env.ROLEBOX_METRICS) return;
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
@@ -1721,7 +1753,7 @@ describe("DispatchManager", () => {
       const client = createMockClient({
         sessionPromptAsync: () => Promise.reject(new Error("promptAsync failed")),
       });
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const g = metrics.gauge("inflight_tasks");
       const baseline = g.peek();
 
@@ -1762,7 +1794,7 @@ describe("reopenForContinuation", () => {
       },
       sessionMessages: () => Promise.resolve(msgResult),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const t1 = await manager.launch(
@@ -1817,7 +1849,7 @@ describe("reopenForContinuation", () => {
 
   it("throws when session_id points to non-existent task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     await expect(
       manager.reopenForContinuation(
@@ -1830,7 +1862,7 @@ describe("reopenForContinuation", () => {
 
   it("throws when session_id points to cleaned-up task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const t1 = await manager.launch(
@@ -1851,7 +1883,7 @@ describe("reopenForContinuation", () => {
 
   it("throws when session_id subagent mismatches", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const t1 = await manager.launch(
@@ -1873,7 +1905,7 @@ describe("reopenForContinuation", () => {
     const client = createMockClient({
       sessionMessages: () => Promise.resolve([]),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const t1 = await manager.launch(
@@ -1897,7 +1929,7 @@ describe("reopenForContinuation", () => {
     const client = createMockClient({
       sessionMessages: () => Promise.resolve([]),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const t1 = await manager.launch(
@@ -1932,7 +1964,7 @@ describe("recover()", () => {
 
   it("recover() with no persisted state is a no-op", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     await manager.recover();
 
@@ -1961,7 +1993,7 @@ describe("recover()", () => {
     await store.save(tasks);
 
     // Create manager simulating restart
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
 
     await manager.recover();
@@ -1999,7 +2031,7 @@ describe("recover()", () => {
     tasks.set(runningTask.id, runningTask);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
 
     await manager.recover();
@@ -2036,7 +2068,7 @@ describe("recover()", () => {
     tasks.set(runningTask.id, runningTask);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
 
     await manager.recover();
@@ -2070,7 +2102,7 @@ describe("recover()", () => {
     tasks.set(pendingTask.id, pendingTask);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
 
     await manager.recover();
@@ -2127,7 +2159,7 @@ describe("recover()", () => {
     tasks.set(otherParentTask.id, otherParentTask);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
 
     await manager.recover();
@@ -2184,7 +2216,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2217,7 +2249,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2258,7 +2290,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2295,7 +2327,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2363,7 +2395,7 @@ describe("recover()", () => {
     }
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2408,7 +2440,7 @@ describe("recover()", () => {
     tasks.set(task.id, task);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2456,7 +2488,7 @@ describe("recover()", () => {
     tasks.set(task.id, task);
     await store.save(tasks);
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2511,7 +2543,7 @@ describe("recover()", () => {
 
     (client.messages as any).mock.calls.length = 0;
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     await manager.recover();
 
@@ -2557,7 +2589,7 @@ describe("recover()", () => {
     tasks.set(task.id, task);
     await store.save(tasks, new Set(["bg_outbox"]));
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     const mgr = manager as any;
     await manager.recover();
@@ -2579,7 +2611,7 @@ describe("debounced persistence", () => {
 
   it("multiple consecutive persistState calls within debounce window → only 1 actual save", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const saveSpy = mock(() => Promise.resolve());
@@ -2601,7 +2633,7 @@ describe("debounced persistence", () => {
 
   it("flushPersist() immediately writes all pending data without waiting for debounce", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const saveSpy = mock(() => Promise.resolve());
@@ -2626,7 +2658,7 @@ describe("debounced persistence", () => {
 
   it("flushPersist() is idempotent — calling twice only saves once", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const saveSpy = mock(() => Promise.resolve());
@@ -2644,7 +2676,7 @@ describe("debounced persistence", () => {
 
   it("concurrent persistState and flushPersist do not race", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const saveSpy = mock(() => Promise.resolve());
@@ -2671,7 +2703,7 @@ describe("flushPersistSync", () => {
 
   it("T5-1: flushPersistSync writes current state and clears _dirty", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     // Make a state change that schedules a persist
@@ -2692,7 +2724,7 @@ describe("flushPersistSync", () => {
   it("T5-2: terminal state IS NOT immediately durable (no sync flush in leaveRunning)", async () => {
     const client = createMockClient();
     const dir = mkdtempSync(join(tmpdir(), "dispatch-flush-test-"));
-    const manager = new DispatchManager(client, { ...fastConfig, taskTtlMs: 5000 });
+    const manager = makeManager(client, { ...fastConfig, taskTtlMs: 5000 });
     manager.setStoreDirectory(dir);
     const mgr = manager as any;
 
@@ -2729,11 +2761,150 @@ describe("flushPersistSync", () => {
 
   it("T5-3: flushPersistSync is idempotent", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     // Call before any state — no crash
     expect(() => manager.flushPersistSync()).not.toThrow();
     expect(() => manager.flushPersistSync()).not.toThrow();
+  });
+});
+
+// ── dispose: restart-safety teardown ─────────────────────────────
+
+describe("dispose", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  it("stops the watchdog, releases the state lock, and is idempotent", async () => {
+    const client = createMockClient();
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-dispose-test-"));
+    const manager = makeManager(client, fastConfig);
+    manager.setStoreDirectory(dir);
+
+    try {
+      await manager.recover();
+
+      // recover() acquires the state lock — exactly one lock file under state/
+      const stateDir = join(dir, ".rolebox", "state");
+      const lockFiles = readdirSync(stateDir).filter((f) => /^dispatch-.*\.json\.lock$/.test(f));
+      expect(lockFiles).toHaveLength(1);
+      const lockPath = join(stateDir, lockFiles[0]);
+
+      await manager.dispose();
+
+      // Watchdog timers stopped, lock released
+      expect((manager as any).watchdog.disposed).toBe(true);
+      expect(existsSync(lockPath)).toBe(false);
+
+      // A second dispose() is a safe no-op
+      await expect(manager.dispose()).resolves.toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("releases the watchdog and the state lock even when the flush throws", async () => {
+    const client = createMockClient();
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-dispose-throw-"));
+    const manager = makeManager(client, fastConfig);
+    manager.setStoreDirectory(dir);
+
+    try {
+      await manager.recover();
+
+      // recover() acquires the state lock — exactly one lock file under state/
+      const stateDir = join(dir, ".rolebox", "state");
+      const lockFiles = readdirSync(stateDir).filter((f) => /^dispatch-.*\.json\.lock$/.test(f));
+      expect(lockFiles).toHaveLength(1);
+      const lockPath = join(stateDir, lockFiles[0]);
+
+      // A throwing flush must not skip the release tail
+      (manager as any).metricsPersister.persist = async () => {
+        throw new Error("persist failed");
+      };
+
+      await expect(manager.dispose()).rejects.toThrow("persist failed");
+      expect((manager as any).watchdog.disposed).toBe(true);
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("isOperational() tracks the periodic pipeline", async () => {
+    const client = createMockClient();
+    const manager = makeManager(client, fastConfig);
+
+    // Both sweeper timers are armed at construction
+    expect(manager.isOperational()).toBe(true);
+
+    // flushPersistSync stops the outbox sweeper (and the watchdog)
+    manager.flushPersistSync();
+    expect(manager.isOperational()).toBe(false);
+
+    await manager.dispose();
+    expect(manager.isOperational()).toBe(false);
+  });
+
+  it("isOperational() requires the budget sampler once a budget limit is configured", async () => {
+    const client = createMockClient();
+    const manager = makeManager(client, { ...fastConfig, maxCostPerRequest: 1 });
+
+    try {
+      // A configured limit arms the sampler — the pipeline is live.
+      expect(manager.isOperational()).toBe(true);
+
+      // Disarm ONLY the budget sampler; the outbox sweeper stays armed, so a
+      // config-blind predicate would keep reporting operational.
+      const deps = (manager as any).orchestrator.d;
+      clearInterval(deps._budgetSamplerTimer);
+      deps._budgetSamplerTimer = undefined;
+
+      expect(manager.isOperational()).toBe(false);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("isOperational() stays true with no budget limits configured (no false unhealthy)", async () => {
+    const client = createMockClient();
+    const manager = makeManager(client, fastConfig);
+
+    try {
+      // startBudgetSampler legitimately returns no timer when no limit is set.
+      expect((manager as any).orchestrator.d._budgetSamplerTimer).toBeUndefined();
+      expect(manager.isOperational()).toBe(true);
+    } finally {
+      await manager.dispose();
+    }
+  });
+
+  it("flushes a pending progress write and clears its debounce timer on dispose", async () => {
+    const client = createMockClient();
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-dispose-progress-"));
+    const manager = makeManager(client, fastConfig);
+    manager.setStoreDirectory(dir);
+
+    try {
+      const progressStore = manager.getProgressStore();
+      progressStore.addProgressEvent("task_progress_dispose", {
+        task_id: "task_progress_dispose",
+        stage: "write",
+        message: "pending write",
+        timestamp: new Date().toISOString(),
+      });
+      expect((progressStore as any).debounceTimers.size).toBe(1);
+
+      await manager.dispose();
+
+      // Pending event flushed to disk, and no debounce handle can fire later.
+      const filePath = join(dir, ".rolebox", "state", "progress", "task_progress_dispose.json");
+      expect(existsSync(filePath)).toBe(true);
+      expect((progressStore as any).debounceTimers.size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2746,7 +2917,7 @@ describe("Task 17: LRU cleanedUpTasks", () => {
 
   it("T17-1: getResult returns expired for LRU entries, not_found for evicted and unknown", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     // Clean up 100 tasks — all should stay in LRU (under 500 cap)
@@ -2783,7 +2954,7 @@ describe("Task 17: leaveRunning debounced persist", () => {
 
   it("T17-2: leaveRunning does NOT invoke store.saveSync (no sync flush on hot path)", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const saveSyncSpy = mock(() => {});
@@ -2807,7 +2978,7 @@ describe("Task 17: degraded mode", () => {
 
   it("T17-3: degraded mode — store.save() is no-op when _readOnly is set", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     // Force the store into read-only degraded mode
@@ -2829,7 +3000,7 @@ describe("Task 17: degraded mode", () => {
 
   it("T17-4: recover() sets _readOnly when store.tryLock() fails", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const origTryLock = mgr.store.tryLock.bind(mgr.store);
@@ -2871,7 +3042,7 @@ describe("T8: Notification outbox", () => {
     }) as typeof setInterval;
 
     try {
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const sweepCb = capturedCallbacks[capturedCallbacks.length - 1];
       expect(sweepCb).toBeDefined();
@@ -2909,7 +3080,7 @@ describe("T8: Notification outbox", () => {
     }) as typeof setInterval;
 
     try {
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const sweepCb = capturedCallbacks[capturedCallbacks.length - 1];
       expect(sweepCb).toBeDefined();
@@ -2971,7 +3142,7 @@ describe("T8: Notification outbox", () => {
     }) as typeof setInterval;
 
     try {
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
       const sweepCb = capturedCallbacks[capturedCallbacks.length - 1];
       expect(sweepCb).toBeDefined();
@@ -3033,7 +3204,7 @@ describe("T8: Notification outbox", () => {
     tasks.set(task.id, task);
     await store.save(tasks, new Set(["bg_test"]));
 
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     manager.setStoreDirectory(tempDir);
     const mgr = manager as any;
     await manager.recover();
@@ -3045,7 +3216,7 @@ describe("T8: Notification outbox", () => {
 
   it("sweeper timer is cleared on flushPersistSync", () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     expect(mgr.sweeperTimer).toBeDefined();
@@ -3065,7 +3236,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("T13-1: false-positive guard — message count grows between re-confirmations, task stays running", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
     const watchdog = mgr.watchdog;
 
@@ -3125,7 +3296,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("T13-2: true completion — message count stable across both debounce elapses", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
     const watchdog = mgr.watchdog;
 
@@ -3171,7 +3342,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("T13-3: session gone — verifyExistence returns missing, task errored + notified", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const task = await manager.launch(
@@ -3210,7 +3381,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("T13-4: session uncertain — verifyExistence returns exists, task stays running", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const task = await manager.launch(
@@ -3251,7 +3422,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     clearSentFinalNotifies();
     clearParentQueues();
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const task = await manager.launch(
@@ -3300,7 +3471,7 @@ describe("Task 13: completion stability re-confirmation", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "do work", run_in_background: false },
@@ -3320,7 +3491,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("materializeResult() returns fetchError ref when task is not found", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
     const mgr = manager as any;
 
     const ref = await mgr.materializeResult("nonexistent");
@@ -3337,7 +3508,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       sessionMessages: () =>
         Promise.reject(new Error("session expired")),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "fail", run_in_background: false },
@@ -3360,7 +3531,7 @@ describe("Task 13: completion stability re-confirmation", () => {
         // never resolves — simulates a hanging SDK call
       }),
     });
-    const manager = new DispatchManager(client, {
+    const manager = makeManager(client, {
       ...fastConfig,
       materializeTimeoutMs: 100,
     });
@@ -3397,7 +3568,7 @@ describe("Task 13: completion stability re-confirmation", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client);
+    const manager = makeManager(client);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "do work", run_in_background: false },
@@ -3425,7 +3596,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     const client = createMockClient({
       sessionMessages: () => deferred,
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: true },
@@ -3469,7 +3640,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     const client = createMockClient({
       sessionMessages: () => deferred,
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: true },
@@ -3508,7 +3679,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("materializeAndNotify is no-op for non-completed task status", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: true },
@@ -3523,7 +3694,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("materializeAndNotify is no-op for nonexistent task", async () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     // Should not throw
@@ -3537,7 +3708,7 @@ describe("Task 13: completion stability re-confirmation", () => {
     const client = createMockClient({
       sessionMessages: () => deferred,
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "h", prompt: "p", run_in_background: true },
@@ -3589,7 +3760,7 @@ describe("Task 13: completion stability re-confirmation", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
 
     const task = await manager.launch(
       { subagent: "helper", prompt: "do work", run_in_background: false },
@@ -3604,8 +3775,8 @@ describe("Task 13: completion stability re-confirmation", () => {
     const ref = await mgr.materializeResult(task.id);
     taskRef.result = ref;
 
-    // Verify sidecar exists on disk
-    const sidecarPath = resultSidecarPath(task.id, process.cwd());
+    // Verify sidecar exists on disk (in the manager's own store directory)
+    const sidecarPath = resultSidecarPath(task.id, storeDirFor(manager));
     const raw = readFileSync(sidecarPath, "utf-8");
     expect(raw).toContain("final answer");
 
@@ -3625,7 +3796,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
   it("T11-2: cleanup deferred while taskId is in notifyOutbox", () => {
     const client = createMockClient();
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     // Put a task into tasks map
@@ -3679,7 +3850,7 @@ describe("Task 13: completion stability re-confirmation", () => {
             },
           ]),
     });
-    const manager = new DispatchManager(client, fastConfig);
+    const manager = makeManager(client, fastConfig);
     const mgr = manager as any;
 
     const task = await manager.launch(
@@ -3719,7 +3890,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       const client = createMockClient({
         sessionMessages: () => Promise.reject(new TimeoutError(20, "test")),
       });
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         ...fastConfig,
         materializeTimeoutMs: 20,
       });
@@ -3746,7 +3917,7 @@ describe("Task 13: completion stability re-confirmation", () => {
       const client = createMockClient({
         sessionMessages: () => Promise.reject(new TimeoutError(20, "test")),
       });
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         ...fastConfig,
         materializeTimeoutMs: 20,
       });
@@ -3787,7 +3958,7 @@ describe("Task 13: completion stability re-confirmation", () => {
           return Promise.resolve([]);
         },
       });
-      const manager = new DispatchManager(client, {
+      const manager = makeManager(client, {
         ...fastConfig,
         materializeTimeoutMs: 20,
       });
@@ -3824,7 +3995,7 @@ describe("Task 13: completion stability re-confirmation", () => {
   describe("task-terminated listeners", () => {
     it("register then complete fires callback with correct (taskId, status)", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3843,7 +4014,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("fire-once: after notify, listeners set is cleared", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3868,7 +4039,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("removeTaskTerminatedListener prevents callback from firing", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3887,7 +4058,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("task error fires listener with error status", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3906,7 +4077,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("task timeout fires listener with timeout status", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3925,7 +4096,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("cancel fires listener with cancelled status", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3943,7 +4114,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("notifyTerminated with no listeners is a no-op", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3958,7 +4129,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("listen-after-terminate: already-completed task fires callback once (async)", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -3991,7 +4162,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("listen-after-terminate: error task fires callback once (async)", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -4016,7 +4187,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("listen-after-terminate: cancelled task fires callback once (async)", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(
@@ -4038,7 +4209,7 @@ describe("Task 13: completion stability re-confirmation", () => {
 
     it("listen-after-terminate: timeout task fires callback once (async)", async () => {
       const client = createMockClient();
-      const manager = new DispatchManager(client, fastConfig);
+      const manager = makeManager(client, fastConfig);
       const mgr = manager as any;
 
       const task = await manager.launch(

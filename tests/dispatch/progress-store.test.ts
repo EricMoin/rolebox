@@ -325,6 +325,30 @@ describe("InMemoryProgressStore", () => {
     });
   });
 
+  describe("dispose", () => {
+    it("flushes pending debounced writes and leaves no debounce handle behind", () => {
+      const dir = mkdtempSync(join(tmpdir(), "progress-dispose-test-"));
+      dirs.push(dir);
+      const store = new InMemoryProgressStore(dir);
+
+      store.addProgressEvent("task_dispose", makeEvent("task_dispose", "write", "pending write"));
+      expect((store as any).debounceTimers.size).toBe(1);
+
+      store.dispose();
+
+      // The pending event was written synchronously…
+      const filePath = join(dir, ".rolebox", "state", "progress", "task_dispose.json");
+      expect(existsSync(filePath)).toBe(true);
+      const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as ProgressEvent[];
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0].stage).toBe("write");
+
+      // …and no debounce timer survives teardown.
+      expect((store as any).debounceTimers.size).toBe(0);
+      expect(() => store.dispose()).not.toThrow();
+    });
+  });
+
   describe("sweeper lifecycle", () => {
     it("startSweeper / stopSweeper do not throw", () => {
       const store = makeStore();

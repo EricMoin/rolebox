@@ -156,6 +156,7 @@ function createStatefulDispatchMocks(): StatefulDispatchMocks {
     getConfig: mock(() => ({})),
     dispose: mock(async () => {}),
     flushPersistSync: mock(() => {}),
+    isOperational: mock(() => true),
   };
 
   const client = {
