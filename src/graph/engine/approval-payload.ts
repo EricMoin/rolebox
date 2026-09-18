@@ -20,7 +20,7 @@
  * Design reference: `.rolebox/design/orchestration-patterns.md` §1.4.
  */
 
-import { NodeStatus } from "../../constants.ts";
+import { NodeStatus, type EnginePhase } from "../../constants.ts";
 import type {
   EdgePayload,
   EngineState,
@@ -48,8 +48,13 @@ export interface ApprovalPayload {
   // Graph context
   /** Graph name from the declaration. */
   graph_name: string;
-  /** Current engine phase (idle / executing / complete). */
-  phase: string;
+  /**
+   * Current engine phase (idle / executing / complete) — the closed
+   * {@link EnginePhase} union, not a widened `string` (B18): the value is
+   * `state.phase` verbatim, so the payload type states exactly what the
+   * engine can emit.
+   */
+  phase: EnginePhase;
   /** Count of nodes currently `completed` in the graph. */
   total_nodes_completed: number;
   /** Cumulative graph budget cost (USD). */
@@ -68,14 +73,23 @@ export interface ApprovalUpstreamResult {
   from_node_id: string;
   /** The agent that produced this result. */
   from_agent: string;
-  /** The signal that carried it (only `answer` edges reach a fan-in gate). */
-  from_signal: string;
+  /**
+   * The signal that carried it (only `answer` edges reach a fan-in gate).
+   * Typed off {@link EdgePayload.fromSignal} rather than restated as a bare
+   * `string` so a future narrowing of the edge payload propagates here
+   * instead of silently drifting (B18).
+   */
+  from_signal: EdgePayload["fromSignal"];
   /** First {@link SUMMARY_LIMIT} chars of the result text. */
   summary: string;
   /** Artifact file paths produced by the source node. */
   artifacts: string[];
-  /** Budget consumed by the source node in producing this result. */
-  budget_consumed: { tokens: number; cost: number; sessions: number };
+  /**
+   * Budget consumed by the source node in producing this result. Reuses the
+   * {@link EdgePayload.budgetConsumed} shape rather than restating it (B18) —
+   * one definition, so the two can never drift.
+   */
+  budget_consumed: EdgePayload["budgetConsumed"];
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

@@ -14,9 +14,11 @@
  *   a newline in one write call) so a reader never observes a half-written
  *   line from this writer.
  * - **Total.** A recorder never throws. Any write failure (missing/uncreatable
- *   directory, filesystem error, corrupt path) is swallowed and the engine
+ *   directory, filesystem error, corrupt path) is contained and the engine
  *   proceeds — this is observability, never a control path. `JSON.stringify`
- *   on a JSON-safe record cannot throw.
+ *   on a JSON-safe record cannot throw. Containment is NOT silence (Y22): the
+ *   failure is counted and logged (first failure, then every Nth repeat) so a
+ *   permanently degraded audit log is distinguishable from an idle one.
  * - **No-op-safe.** With no `stateDir` configured no recorder is constructed,
  *   so there is no file activity and the engine behaves exactly as before.
  *
@@ -38,8 +40,11 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { EnginePhase } from "../../constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type { GraphBudgetState } from "../../types.engine-v2.ts";
 import type { NodeCompletionEvent } from "./engine-advance.ts";
+import { logWarn } from "./log-warn.ts";
+import { asRecord } from "./signal-payload.ts";
 
 // ── Event vocabulary ────────────────────────────────────────────────────────
 
@@ -55,12 +60,49 @@ import type { NodeCompletionEvent } from "./engine-advance.ts";
  *   session, so a notification was suppressed (F6 degradation marker, written
  *   by the toolset's handler resolver).
  */
-export type GraphEventType =
-  | "node_dispatched"
-  | "node_completed"
-  | "phase_change"
-  | "budget_update"
-  | "notification_degraded";
+export const GRAPH_EVENT_TYPES = [
+  "node_dispatched",
+  "node_completed",
+  "phase_change",
+  "budget_update",
+  "notification_degraded",
+] as const;
+
+/** The union of {@link GRAPH_EVENT_TYPES}. */
+export type GraphEventType = (typeof GRAPH_EVENT_TYPES)[number];
+
+/**
+ * String-typed view of the event vocabulary for shape validation (Y21).
+ * `ReadonlySet<string>` accepts an arbitrary parsed string without an
+ * assertion, while the predicate below is sound because the set only ever
+ * contains `GraphEventType` members.
+ */
+const GRAPH_EVENT_TYPE_NAMES: ReadonlySet<string> = new Set(GRAPH_EVENT_TYPES);
+
+/** Whether a parsed JSON value names a member of the event vocabulary. */
+function isGraphEventType(v: unknown): v is GraphEventType {
+  return typeof v === "string" && GRAPH_EVENT_TYPE_NAMES.has(v);
+}
+
+/**
+ * Shape predicate for one parsed NDJSON line (Y21).
+ *
+ * The previous read side asserted `JSON.parse(line) as GraphEventRecord` and
+ * only checked `graphId`, so `{"graphId":"g-1"}` was pushed as a "record"
+ * whose non-optional `event` / `ts` were `undefined` at runtime. This
+ * predicate validates the three fields the type promises: `ts` (number),
+ * `graphId` (string) and `event` (the closed vocabulary). A line that fails
+ * it is treated exactly like unparseable JSON — a corrupt line, skipped.
+ */
+function isGraphEventRecord(v: unknown): v is GraphEventRecord {
+  const r = asRecord(v);
+  if (!r) return false;
+  return (
+    typeof r.ts === "number" &&
+    typeof r.graphId === "string" &&
+    isGraphEventType(r.event)
+  );
+}
 
 /**
  * One JSON line in the event log. Optional fields (`?`) are omitted from the
@@ -144,13 +186,18 @@ export function readGraphEventLog(
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
+    let parsed: unknown;
     try {
-      const record = JSON.parse(trimmed) as GraphEventRecord;
-      if (record && typeof record === "object" && record.graphId === graphId) {
-        records.push(record);
-      }
+      parsed = JSON.parse(trimmed);
     } catch {
-      // Corrupt line — skip honestly, never throw.
+      continue; // unparseable line — skip honestly, never throw
+    }
+    // Y21: shape-validated (ts + vocabulary + graphId) before it can enter the
+    // typed result; a shape-invalid line is a corrupt line, dropped like any
+    // other. The per-graph filter stays defensive even though the path is
+    // already graph-scoped.
+    if (isGraphEventRecord(parsed) && parsed.graphId === graphId) {
+      records.push(parsed);
     }
   }
   return records;
@@ -170,6 +217,12 @@ export function readGraphEventLog(
  */
 export class GraphEventRecorder {
   private readonly directory: string;
+  /**
+   * Consecutive failed appends (Y22). Non-zero means the audit log is
+   * DEGRADED — events are being dropped. Reset by the next successful write;
+   * the count throttles the degradation log line.
+   */
+  private writeFailures = 0;
 
   constructor(directory?: string) {
     this.directory = directory ?? process.cwd();
@@ -177,6 +230,16 @@ export class GraphEventRecorder {
     // (see EngineRuntimeImpl in index.ts). The recorder no longer registers
     // module-level singletons — those were removed to eliminate mutable global
     // state and the risk of stale function references in deserialized states.
+  }
+
+  /** Consecutive failed event-log appends since the last successful write (Y22). */
+  get consecutiveWriteFailures(): number {
+    return this.writeFailures;
+  }
+
+  /** Whether the audit log is currently degraded (≥1 consecutive write failure). */
+  get writeDegraded(): boolean {
+    return this.writeFailures > 0;
   }
 
   // ── Event emitters (all total — never throw) ──────────────────────────────
@@ -245,11 +308,16 @@ export class GraphEventRecorder {
   /**
    * Record that a graph notification seam degraded: the emperor session could
    * not be resolved, so a graph-notify reminder was suppressed (F6). `kind`
-   * names the suppressed seam (`completion` / `terminal`) and rides in the
-   * record's generic `status` slot. Optional-additive — only written when a
-   * stateDir / recorder exists; absent stateDir → warning log only.
+   * names the suppressed seam (`completion` / `terminal` / `stall`, Y32) and
+   * rides in the record's generic `status` string slot. The stall kind is
+   * accepted here rather than asserted into a two-value union at the toolset
+   * call site. Optional-additive — only written when a stateDir / recorder
+   * exists; absent stateDir → warning log only.
    */
-  notificationDegraded(graphId: string, kind: "completion" | "terminal"): void {
+  notificationDegraded(
+    graphId: string,
+    kind: "completion" | "terminal" | "stall",
+  ): void {
     this._append({
       ts: Date.now(),
       graphId,
@@ -263,17 +331,29 @@ export class GraphEventRecorder {
   /**
    * Append one event line. Creates `.rolebox/state/` on demand and appends a
    * single complete line (`JSON.stringify(record) + "\n"`). Never throws: every
-   * failure path (mkdir, append) is swallowed so a disk problem degrades to a
+   * failure path (mkdir, append) is contained so a disk problem degrades to a
    * dropped log line, not a broken engine. JSON-safe records mean stringify
    * cannot throw.
+   *
+   * Y22: containment is observable. A failure increments the consecutive
+   * counter and logs the first failure (then every 20th) with the underlying
+   * error, so a full disk / permission error produces a visible degradation
+   * marker instead of an audit log that is silently empty forever.
    */
   private _append(record: GraphEventRecord): void {
     try {
       const path = graphEventsPath(this.directory, record.graphId);
       mkdirSync(join(path, ".."), { recursive: true });
       appendFileSync(path, `${JSON.stringify(record)}\n`, "utf-8");
-    } catch {
-      // Observability only — a failed write must never break graph advancement.
+      this.writeFailures = 0;
+    } catch (err) {
+      this.writeFailures += 1;
+      if (this.writeFailures === 1 || this.writeFailures % 20 === 0) {
+        logWarn(
+          `graph-events: append failed for graph "${record.graphId}" (${this.writeFailures} consecutive) — audit log degraded: ${errorText(err)}`,
+        );
+      }
     }
   }
 }
+

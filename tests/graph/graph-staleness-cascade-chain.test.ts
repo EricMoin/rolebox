@@ -584,11 +584,12 @@ describe("graph staleness → cascade → deadlock → retry chain (①→②→
       const ctx: TerminationContext = {
         terminalComplete: false,
         terminalBlocked: false,
+        terminalEpoch: 0,
       };
       checkGraphTermination(state, undefined, ctx, undefined, () => true);
 
       expect(state.nodes.get("down")!.status).toBe(NodeStatus.Escalate);
-      expect(state.phase).toBe(EnginePhase.Complete);
+      expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
       // NodeStatus string values are lowercase: "timeout", not "Timeout".
       expect(state.nodes.get("down")!.errorReason).toBe(
         "graph deadlock: no active upstream can satisfy pending node(s) " +

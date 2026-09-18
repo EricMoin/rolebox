@@ -160,7 +160,7 @@ function buildEngine(
     signalBridge: bridge,
     dispatch: new FakeDispatch(),
     ...(opts.conditionResolver ? { conditionResolver: opts.conditionResolver } : {}),
-    ...(opts.noSeam ? {} : { onGraphTerminal: (e) => events.push(e) }),
+    ...(opts.noSeam ? {} : { onGraphTerminal: (e) => { events.push(e); } }),
   });
   return { state, engine, events };
 }
@@ -505,9 +505,10 @@ describe("quiesce-before-drain (M5): completion is gated on an empty pendingComp
     const ctx: TerminationContext = {
       terminalComplete: false,
       terminalBlocked: false,
+      terminalEpoch: 0,
     };
     const events: GraphTerminalEvent[] = [];
-    const onTerminal = (e: GraphTerminalEvent) => events.push(e);
+    const onTerminal = (e: GraphTerminalEvent) => { events.push(e); };
 
     // Pre-drain: the standard completion path must NOT fire (queue non-empty).
     checkGraphTermination(state, onTerminal, ctx);
@@ -662,5 +663,105 @@ describe("onGraphTerminal safety", () => {
     expect(state.nodes.get("G")!.status).toBe(NodeStatus.Blocked);
     expect(state.phase).toBe(EnginePhase.Executing); // blocked — no phase transition
     expect(state.advancingLock).toBe(false);
+  });
+
+  it("an async-rejecting consumer is contained and logged (C5 / Y2)", async () => {
+    const state = createEngineState(singleNode("A", "a1"), "g-1");
+    provision(state);
+    const bridge = new SignalBridge();
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      const engine = new AdvanceEngine({
+        state,
+        signalBridge: bridge,
+        dispatch: new FakeDispatch(),
+        // The seam accepts a promise-returning notifier (C5); its rejection
+        // must be contained by the engine, never surface as an unhandled
+        // rejection at the fire-and-forget advancement path.
+        onGraphTerminal: async () => {
+          throw new Error("async notifier exploded");
+        },
+      });
+
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "answer", "x");
+      // Let the rejected promise settle so the containment handler runs.
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+      expect(state.phase).toBe(EnginePhase.Complete);
+      expect(state.advancingLock).toBe(false);
+      expect(
+        warnings.some(
+          (w) =>
+            w.includes("notifier rejected") &&
+            w.includes("async notifier exploded"),
+        ),
+      ).toBe(true);
+    } finally {
+      console.warn = original;
+    }
+  });
+});
+
+// ── Terminal epoch (Y26) ────────────────────────────────────────────────────
+//
+// `GraphTerminalEvent.terminalEpoch` is the engine-owned episode counter that
+// lets a notification consumer (graph-notify) tell a genuine re-completion
+// after a retry/re-open apart from an idempotent replay. The counter starts at
+// 0 (nothing claimed yet), advances on every successful claim, and advances
+// again on every re-open (retryNode / resetTerminalDedupe). These cases pin the
+// production event shape the consumer reads.
+
+describe("terminal epoch (Y26)", () => {
+  it("stamps the first claim as epoch 1 and starts a NEW epoch on a retry re-open", async () => {
+    const events: GraphTerminalEvent[] = [];
+    const { engine } = buildEngine(singleNode("A"), events);
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("A", "answer", "run-1");
+    expect(events).toHaveLength(1);
+    // 0 = never claimed; the first successful claim advances to 1.
+    expect(events[0].terminalEpoch).toBe(1);
+
+    // Retry re-opens the phase: the one-shot guards are cleared AND the epoch
+    // advances, so the next claim is a new episode.
+    await engine.retryNode("A");
+    await engine.onNodeSignalEmitted("A", "answer", "run-2");
+
+    expect(events).toHaveLength(2);
+    // Exactly two increments between the events: the re-open bump plus the
+    // claim that emitted the second event +2 (a re-open that forgot to bump
+    // would leave these adjacent and the second notification would collide
+    // with the first in a notifier's graphId::type::epoch dedupe key).
+    expect(events[1].terminalEpoch).toBe(events[0].terminalEpoch + 2);
+  });
+
+  it("advances once per claim across a blocked and a later complete terminal event", async () => {
+    const decl: GraphDeclaration = {
+      version: 2,
+      name: "gate-only",
+      nodes: [{ id: "G", agent: "g1", prompt: "pG", needs_approval: true }],
+      edges: [],
+    };
+    const events: GraphTerminalEvent[] = [];
+    const { engine } = buildEngine(decl, events);
+
+    // Quiescent-blocked claim.
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("G", "need_approval", "please review");
+    expect(events).toHaveLength(1);
+    expect(events[0].isBlocked).toBe(true);
+    expect(events[0].terminalEpoch).toBe(1);
+
+    // Approval resume → completion claim.
+    await engine.approveNode("G", "approved");
+    expect(events).toHaveLength(2);
+    expect(events[1].isBlocked).toBe(false);
+    expect(events[1].terminalEpoch).toBe(events[0].terminalEpoch + 1);
   });
 });

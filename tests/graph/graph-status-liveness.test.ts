@@ -22,10 +22,10 @@ import {
   createGraphToolSet,
   GraphToolSet,
   type GraphStatusArgs,
-} from "../../src/graph/tools/graph-tools";
-import { createGraphTools } from "../../src/graph/tools/index";
-import { NodeStatus } from "../../src/constants";
-import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2";
+} from "../../src/graph/tools/graph-tools.ts";
+import { createGraphTools } from "../../src/graph/tools/index.ts";
+import { NodeStatus } from "../../src/constants.ts";
+import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
 
 // Fixed, clearly-in-the-past timestamp so `Date.now() - lastActivityAt` is a
 // stable non-negative value regardless of when the suite runs.

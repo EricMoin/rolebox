@@ -19,6 +19,7 @@ import {
   isLoopExhausted,
   buildSignalContract,
   injectSignalContracts,
+  fingerprintPayload,
 } from "../../src/graph/engine/engine-state.ts";
 
 // ── Fixture builders ──────────────────────────────────────────────────────
@@ -531,5 +532,31 @@ describe("injectSignalContracts", () => {
     // Contract is appended
     const contractIdx = reviewer.prompt.indexOf("\n<signal_contract>");
     expect(contractIdx).toBeGreaterThan(0);
+  });
+});
+
+// ── fingerprintPayload totality (B3) ────────────────────────────────────────
+
+describe("fingerprintPayload", () => {
+  it("returns a string for values JSON cannot serialize (function, symbol)", () => {
+    // Pre-fix: canonicalize declared `string` but answered `undefined` here.
+    expect(typeof fingerprintPayload(() => {})).toBe("string");
+    expect(typeof fingerprintPayload(Symbol("s"))).toBe("string");
+  });
+
+  it("does not throw for BigInt, and fingerprints it stably", () => {
+    // Pre-fix: JSON.stringify(10n) threw a TypeError out of the fingerprint
+    // (JSON cannot represent BigInt). The fallback is BigInt's own decimal
+    // text — no "n" suffix, which is literal syntax, not the string form.
+    expect(fingerprintPayload(10n)).toBe("10");
+    expect(fingerprintPayload(10n)).toBe(fingerprintPayload(10n));
+  });
+
+  it("keeps object canonicalization order-insensitive", () => {
+    expect(fingerprintPayload({ b: 1, a: 2 })).toBe(fingerprintPayload({ a: 2, b: 1 }));
+  });
+
+  it("still trims string payloads", () => {
+    expect(fingerprintPayload("  same  ")).toBe("same");
   });
 });

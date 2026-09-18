@@ -17,10 +17,10 @@
  */
 
 import { describe, it, expect, mock, afterEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/core/manager";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import type { DispatchTask } from "../../src/dispatch/types";
-import { createMockClient, makeTask, parentContext } from "./helpers";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
+import { createMockClient, makeTask, parentContext } from "./helpers.ts";
 import {
   clearParentQueues,
   clearSentFinalNotifies,
@@ -28,18 +28,18 @@ import {
   DISPATCH_ALL_COMPLETE_MARKER,
   GRAPH_COMPLETION_MARKER,
   GRAPH_COMPLETE_MARKER,
-} from "../../src/dispatch/notification";
-import { graphParentContext } from "../../src/graph/engine/dispatch-bridge";
+} from "../../src/dispatch/notification.ts";
+import { graphParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
 import {
   createGraphNotifier,
   createGraphTerminalNotifier,
-} from "../../src/graph/engine/graph-notify";
+} from "../../src/graph/engine/graph-notify.ts";
 import type {
   NodeCompletionEvent,
   GraphTerminalEvent,
-} from "../../src/graph/engine/engine-advance";
-import { NodeStatus } from "../../src/constants";
-import { metrics } from "../../src/dispatch/persistence/metrics";
+} from "../../src/graph/engine/engine-advance.ts";
+import { NodeStatus } from "../../src/constants.ts";
+import { metrics } from "../../src/dispatch/persistence/metrics.ts";
 
 const fastConfig = {
   staleTimeoutMs: 500,
@@ -73,11 +73,23 @@ function makeCompletionEvent(
   };
 }
 
+/**
+ * Terminal-event fixture for the dispatch-layer suppression assertions.
+ *
+ * `terminalEpoch` is the engine-owned Y26 epoch carried by
+ * `GraphTerminalEvent` (src/graph/engine/engine-termination.ts): `0` is the
+ * value an engine instance has before it claims its first terminal event, and
+ * the counter advances on every claim and every re-open. These tests only
+ * assert delivery suppression (which is epoch-independent), so the
+ * never-yet-claimed value is used as the default; an override can still stamp
+ * a later epoch.
+ */
 function makeTerminalEvent(
   overrides: Partial<GraphTerminalEvent> = {},
 ): GraphTerminalEvent {
   return {
     graphId: "g-1",
+    terminalEpoch: 0,
     phase: "complete",
     nodeStatusSummaries: {
       completed: 1,

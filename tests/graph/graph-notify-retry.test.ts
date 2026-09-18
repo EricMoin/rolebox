@@ -156,6 +156,7 @@ function makeEvent(overrides: Partial<NodeCompletionEvent> = {}): NodeCompletion
 function makeTerminalEvent(overrides: Partial<GraphTerminalEvent> = {}): GraphTerminalEvent {
   return {
     graphId: "g-term-retry",
+    terminalEpoch: 0,
     phase: overrides.isBlocked ? "executing" : "complete",
     nodeStatusSummaries: {
       completed: 1,

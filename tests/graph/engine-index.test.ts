@@ -217,6 +217,19 @@ class GatedDispatch implements NodeDispatchPort {
   }
 }
 
+/**
+ * Dispatch seam with the optional cancel surface, so a `cancel()` report's
+ * `cancelCalls` can be asserted (C7).
+ */
+class CancellableDispatch extends FakeDispatch {
+  cancelled: string[] = [];
+
+  cancelTask(taskId: string): Promise<boolean> {
+    this.cancelled.push(taskId);
+    return Promise.resolve(true);
+  }
+}
+
 function makeTask(nodeId: string): DispatchTask {
   return {
     id: `task-${nodeId}`,
@@ -385,7 +398,7 @@ describe("engine.run()", () => {
     await engine.run();
 
     const node = engine.status().nodes.get("A")!;
-    expect([NodeStatus.Timeout, NodeStatus.Escalate]).toContain(node.status);
+    expect<NodeStatus[]>([NodeStatus.Timeout, NodeStatus.Escalate]).toContain(node.status);
     expect(node.status).not.toBe(NodeStatus.Running);
     expect(node.dispatchTaskId).toBeUndefined();
     expect(node.errorReason).toMatch(/dispatch failed/);
@@ -411,7 +424,7 @@ describe("engine.run()", () => {
 
     const r1 = engine.status().nodes.get("R1")!;
     const r2 = engine.status().nodes.get("R2")!;
-    expect([NodeStatus.Timeout, NodeStatus.Escalate]).toContain(r1.status);
+    expect<NodeStatus[]>([NodeStatus.Timeout, NodeStatus.Escalate]).toContain(r1.status);
     expect(r1.dispatchTaskId).toBeUndefined();
     expect(r2.status).toBe(NodeStatus.Running);
     expect(r2.dispatchTaskId).toBeDefined();
@@ -577,12 +590,50 @@ describe("engine.status()", () => {
       status: NodeStatus.Completed,
       startedAt: 1,
     });
+    // Y24: a round entry's `nodeIds` array is itself a mutable leaf.
+    rounds[0].nodeIds.push("GHOST");
 
     const s2 = engine.status();
     expect(s2.signalLedger.get("A")!.history).toHaveLength(histLen);
     expect(s2.loopGroups.get("lg")!.rounds).toHaveLength(roundsLen);
     expect(s2.signalLedger.get("A")!.history).not.toBe(s1.signalLedger.get("A")!.history);
     expect(s2.loopGroups.get("lg")!.rounds).not.toBe(s1.loopGroups.get("lg")!.rounds);
+    // Y24: the tampered `nodeIds` must not have reached the live round record.
+    expect(s2.loopGroups.get("lg")!.rounds![0].nodeIds).not.toContain("GHOST");
+  });
+
+  it("clones upstreamResults payload leaves so snapshot mutation cannot reach the live node (Y24)", async () => {
+    const fake = new FiringDispatch();
+    const engine = createEngine(linearGraph(), { dispatch: fake });
+    // Drive A → B → C to completion so B accumulates A's EdgePayload.
+    await engine.run();
+    await settle();
+    await settle();
+    await settle();
+
+    const snap = engine.status();
+    const a = snap.nodes.get("A")!;
+    const liveA = engine.status().nodes.get("A")!;
+    const payload = snap.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(payload).toBeDefined();
+
+    // Mutate every mutable leaf the snapshot exposes: the payload object, its
+    // artifacts array, its budget object, and the node-level counters.
+    payload.result = "tampered";
+    payload.artifacts.push("tampered");
+    payload.budgetConsumed.tokens = 999_999;
+    a.tokensConsumed.inputTokens = 999_999;
+
+    const live = engine.status();
+    const livePayload = live.nodes.get("B")!.upstreamResults.get("A")!;
+    expect(livePayload.result).not.toBe("tampered");
+    expect(livePayload.artifacts).not.toContain("tampered");
+    expect(livePayload.budgetConsumed.tokens).not.toBe(999_999);
+    expect(live.nodes.get("A")!.tokensConsumed.inputTokens).toBe(
+      liveA.tokensConsumed.inputTokens,
+    );
+    expect(livePayload).not.toBe(payload);
+    expect(livePayload.artifacts).not.toBe(payload.artifacts);
   });
 
   it("deep-clones graphDeclaration (in-place node/edge mutation does not affect the live engine) [Y4]", async () => {
@@ -621,7 +672,16 @@ describe("Phase-3 stubs", () => {
     const engine = createEngine(singleNodeGraph());
     engine.provision();
     await expect(engine.recover()).resolves.toBeUndefined();
-    await expect(engine.cancel()).resolves.toBeUndefined();
+    // C7: cancel() resolves the authoritative teardown report. The provisioned
+    // root is `ready` (never dispatched — run() was not called), so it is
+    // retired and reported; with no cancel surface on the stub-friendly path
+    // there is nothing to hand to `cancelTask`.
+    await expect(engine.cancel()).resolves.toEqual({
+      target: ["A"],
+      cancelled: ["A"],
+      skipped: [],
+      cancelCalls: [],
+    });
   });
 });
 
@@ -649,7 +709,7 @@ describe("engine.cancel()", () => {
     let terminalFires = 0;
     const engine = createEngine(linearGraph(), {
       dispatch: fake,
-      onNodeCompletion: (e) => completions.push(e),
+      onNodeCompletion: (e) => { completions.push(e); },
       onGraphTerminal: () => {
         terminalFires += 1;
       },
@@ -669,6 +729,36 @@ describe("engine.cancel()", () => {
     // The graph-terminal seam fired exactly once — checkTermination drove the
     // quiescent graph to complete through the standard terminal path.
     expect(terminalFires).toBe(1);
+  });
+
+  it("returns the authoritative CancelScopeReport (C7)", async () => {
+    const fake = new CancellableDispatch();
+    const engine = createEngine(linearGraph(), { dispatch: fake });
+    await engine.run(); // A running with a dispatch task, B/C pending
+
+    const report = await engine.cancel();
+
+    expect([...report.target].sort()).toEqual(["A", "B", "C"]);
+    expect([...report.cancelled].sort()).toEqual(["A", "B", "C"]);
+    expect(report.skipped).toEqual([]);
+    // A carried a live dispatch task: exactly one hand-off to the cancel seam.
+    expect(report.cancelCalls).toEqual(["task-A"]);
+    expect(fake.cancelled).toEqual(["task-A"]);
+  });
+
+  it("reports already-terminal nodes as skipped on a second cancel (C7)", async () => {
+    const engine = createEngine(singleNodeGraph(), { dispatch: new FakeDispatch() });
+    await engine.run();
+
+    const first = await engine.cancel();
+    expect(first.cancelled).toEqual(["A"]);
+    expect(first.skipped).toEqual([]);
+
+    // Nothing left to retire: the node is terminal, so the second teardown
+    // reports it as skipped instead of pretending to cancel it.
+    const second = await engine.cancel();
+    expect(second.cancelled).toEqual([]);
+    expect(second.skipped).toEqual(["A"]);
   });
 
   it("recover() is a no-op without a persistence store (clean first run)", async () => {
@@ -692,7 +782,7 @@ describe("engine.dispose()", () => {
     const completions: NodeCompletionEvent[] = [];
     const engine = createEngine(singleNodeGraph(), {
       dispatch: fake,
-      onNodeCompletion: (e) => completions.push(e),
+      onNodeCompletion: (e) => { completions.push(e); },
     });
     await engine.run(); // A dispatched → exactly one onTaskTerminated subscription
 
@@ -737,7 +827,7 @@ describe("engine.dispose()", () => {
     const completions: NodeCompletionEvent[] = [];
     const engine = createEngine(singleNodeGraph(), {
       dispatch: fake,
-      onNodeCompletion: (e) => completions.push(e),
+      onNodeCompletion: (e) => { completions.push(e); },
     });
     await engine.run(); // A dispatched → one onTaskTerminated subscription
     expect(fake.subs.size).toBe(1);
@@ -1021,3 +1111,136 @@ describe("adoptPrior HITL dispatch termination (F1 bridge)", () => {
     expect(snap.phase).toBe(EnginePhase.Executing);
   });
 });
+// ── C6: control-path reports ────────────────────────────────────────────────
+
+describe("C6: approve / reject / partial-approve reports", () => {
+  /** Drive a fresh runtime to the point where the gate P is `blocked`. */
+  async function blockedGate(): Promise<{ engine: EngineRuntime; fake: AdoptHITLDispatch }> {
+    const fake = new AdoptHITLDispatch();
+    // Prior run dispatches P; the rebuilt runtime adopts the still-live task
+    // and re-subscribes it (the realistic toolset flow).
+    const priorEngine = createEngine(gateGraph(), { dispatch: fake });
+    await priorEngine.run();
+    const prior = priorEngine.status();
+    const engine = createEngine(gateGraph(), { dispatch: fake });
+    await engine.adoptPrior(prior);
+    await engine.run();
+    priorEngine.dispose();
+
+    // A HITL status (need_approval) pauses the gate.
+    fake.fire("task-P", "need_approval");
+    await settle();
+    expect(engine.status().nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    return { engine, fake };
+  }
+
+  it("approveNode answers {applied:true}, then {applied:false} for the idempotent replay", async () => {
+    const { engine } = await blockedGate();
+
+    expect(await engine.approveNode("P", "looks good")).toEqual({ applied: true });
+    expect(engine.status().nodes.get("P")!.status).toBe(NodeStatus.Completed);
+
+    // Replay against an already-resolved node: no mutation, and the caller
+    // can tell (previously the void return forced a before/after status diff).
+    expect(await engine.approveNode("P", "looks good")).toEqual({ applied: false });
+  });
+
+  it("rejectNode answers the lane it took, then already_resolved with the live status", async () => {
+    const { engine } = await blockedGate();
+
+    expect(await engine.rejectNode("P", "not good enough")).toEqual({ kind: "escalate" });
+    expect(engine.status().nodes.get("P")!.status).toBe(NodeStatus.Escalate);
+
+    expect(await engine.rejectNode("P", "not good enough")).toEqual({
+      kind: "already_resolved",
+      actualStatus: NodeStatus.Escalate,
+    });
+  });
+
+  it("partialApprove answers the prune report", async () => {
+    const { engine } = await blockedGate();
+
+    // The gate has no upstreams, so the verdict approves/rejects nothing and
+    // the prune cancels nothing — but the report is the engine's own decision,
+    // not a post-hoc status diff.
+    expect(await engine.partialApprove("P", [], [])).toEqual({
+      cancelled: [],
+      surviving: [],
+    });
+  });
+
+  it("unknown node ids still reject with the documented error (C6 error contract)", async () => {
+    const { engine } = await blockedGate();
+
+    await expect(engine.approveNode("GHOST", "x")).rejects.toThrow(/Unknown node id/);
+    await expect(engine.rejectNode("GHOST", "x")).rejects.toThrow(/Unknown node id/);
+    await expect(engine.partialApprove("GHOST", [], [])).rejects.toThrow(/Unknown node id/);
+  });
+});
+
+// ── C3: total error text on the fire-and-forget stale-timeout chain (W3-A) ──
+//
+// `onStaleNodeTimeout` drives the escalate advance fire-and-forget and then, in
+// a `finally`, re-runs the termination check unconditionally (Y11). Both log
+// handlers used `String(err)`; `String(Object.create(null))` itself throws, so
+// a non-stringifiable throw inside the `finally` callback escaped it and turned
+// the voided `.catch().finally()` chain into an UNHANDLED REJECTION — inside a
+// handler whose whole job was to log. `errorText` is total, so the failure is
+// contained as a log line.
+//
+// Revert-would-fail: with `String(err)` the `finally` callback throws, the
+// voided chain rejects, and the `unhandledRejection` listener below records it
+// (or the runtime reports it), failing the `rejections` assertion.
+
+describe("onStaleNodeTimeout — total error text (C3)", () => {
+  it("logs a non-stringifiable termination-check throw instead of raising an unhandled rejection", async () => {
+    const fake = new FakeDispatch();
+    const engine = createEngine(singleNodeGraph(), { dispatch: fake });
+    await engine.run(); // A dispatched and left running (tasks never complete)
+
+    const internals = engine as unknown as {
+      advance: { checkTermination: () => void };
+      onStaleNodeTimeout: (nodeId: string, reason: string) => void;
+    };
+    const realCheckTermination = internals.advance.checkTermination;
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      internals.advance.checkTermination = () => {
+        throw Object.create(null);
+      };
+      internals.onStaleNodeTimeout("A", "stale");
+      // Two macrotask turns: settle the catch + finally chain, then give the
+      // runtime the chance to report any rejection that chain produced.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+    } finally {
+      internals.advance.checkTermination = realCheckTermination;
+      console.warn = originalWarn;
+      process.off("unhandledRejection", onUnhandled);
+      engine.dispose();
+    }
+
+    // The failure became a log line naming the unprintable value instead of a
+    // second throw from inside the catch handler...
+    expect(
+      warnings.some(
+        (w) =>
+          w.includes("termination re-check after stale-node timeout failed") &&
+          w.includes("<unprintable thrown value>"),
+      ),
+    ).toBe(true);
+    // ...and the voided chain surfaced no unhandled rejection.
+    expect(rejections).toEqual([]);
+  });
+});
+

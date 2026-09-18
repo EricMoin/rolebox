@@ -15,7 +15,13 @@
  *    notification that was already delivered).
  *
  * A terminal event fires only when BOTH layers are unclaimed; a fire claims
- * both and marks the state dirty so the claim persists. Because only the
+ * both and marks the state dirty so the claim persists. Each successful claim
+ * advances the per-instance terminal EPOCH ({@link TerminationContext
+ * .terminalEpoch}), which is stamped on the emitted {@link GraphTerminalEvent};
+ * the re-open paths (`retryNode` / `resetTerminalDedupe`) bump it again, so a
+ * notification consumer can tell a genuine re-completion after a retry apart
+ * from an idempotent replay of the same terminal event (Y26).
+ * Because only the
  * per-instance context is reset on re-open (retry / extend), this module also
  * reconciles the persisted layer: a graph that demonstrably has
  * scheduler-active (`running` / `ready`) nodes while a terminal flag is
@@ -29,10 +35,13 @@
  */
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import { canTransitionPhase, transitionPhase } from "./engine-state.ts";
 import { markEscalated } from "./node-lifecycle.ts";
 import { markDirty } from "./engine-persistence.ts";
+import { isThenable } from "./thenable.ts";
+import { logWarn } from "./log-warn.ts";
 
 /**
  * Base reason applied to every pending node when a runtime graph deadlock is
@@ -112,6 +121,21 @@ function buildDeadlockReason(
 }
 
 /**
+ * The terminal-notification seam (contract C5).
+ *
+ * A consumer may be synchronous or async: real notifiers
+ * (`graph-notify.ts::createGraphTerminalNotifier`) return `Promise<boolean>`.
+ * Typing the seam as `=> void` forced the engine to re-discover the promise
+ * with a runtime duck-type assertion; `void | Promise<unknown>` states the
+ * contract the consumers actually implement. The engine never awaits the
+ * result — a returned promise is observed only to contain its rejection (see
+ * `fireGraphTerminal`).
+ */
+export type GraphTerminalNotifier = (
+  event: GraphTerminalEvent,
+) => void | Promise<unknown>;
+
+/**
  * A graph-terminal event emitted via the optional onGraphTerminal callback
  * seam. The engine stays role-agnostic — it packages only the immutable facts;
  * notification / delivery is the consumer's concern and never lives in the
@@ -125,6 +149,18 @@ function buildDeadlockReason(
 export interface GraphTerminalEvent {
   /** Owning graph id. */
   graphId: string;
+  /**
+   * Terminal-notification epoch (Y26), owned by the engine.
+   *
+   * `0` until this engine instance claims its first terminal event; the counter
+   * is incremented on every successful claim ({@link fireGraphTerminal}) and on
+   * every re-open (`AdvanceEngine.retryNode` / `resetTerminalDedupe`), then
+   * stamped on the event. A notification consumer MUST fold it into its dedupe
+   * key: same graphId + terminal type + epoch is an idempotent replay, while a
+   * new epoch is a genuine terminal transition (e.g. the second legitimate
+   * `[GRAPH COMPLETE]` after a retry) that must not be dropped.
+   */
+  terminalEpoch: number;
   /** The graph's engine phase at emission time. */
   phase: string;
   /** Counts of nodes in each terminal / notable status at emission time. */
@@ -163,6 +199,19 @@ export interface GraphTerminalEvent {
 export interface TerminationContext {
   terminalComplete: boolean;
   terminalBlocked: boolean;
+  /**
+   * Terminal-notification epoch (Y26). Incremented on every successful claim in
+   * {@link fireGraphTerminal} and on every re-open — `AdvanceEngine.retryNode`
+   * and `AdvanceEngine.resetTerminalDedupe` both bump it while clearing the two
+   * one-shot flags — and stamped on the emitted {@link GraphTerminalEvent}.
+   *
+   * Because a re-open clears `terminalComplete` / `terminalBlocked` and the
+   * persisted `EngineState.terminalNotified`, the next terminal transition is a
+   * NEW epoch. A notifier instance reused across the re-open keys its dedupe on
+   * the epoch, so the retried chain's legitimate terminal notification is not
+   * mistaken for a replay of the pre-retry one.
+   */
+  terminalEpoch: number;
 }
 
 /**
@@ -204,7 +253,7 @@ export interface TerminationContext {
  */
 export function checkGraphTermination(
   state: EngineState,
-  onGraphTerminal: ((event: GraphTerminalEvent) => void) | undefined,
+  onGraphTerminal: GraphTerminalNotifier | undefined,
   ctx: TerminationContext,
   onSyntheticEscalate?: (nodeId: string, reason: string) => void,
   isPendingDeadEnded?: (nodeId: string) => boolean,
@@ -255,7 +304,17 @@ export function checkGraphTermination(
         hasPending = true;
         pendingNodeIds.push(node.nodeId);
         break;
-      default: break;
+      default: {
+        // Y4 compile-time exhaustiveness: every `NodeStatus` member is listed
+        // above, so this assignment only type-checks while that stays true. A
+        // status added to the vocabulary without a tally branch becomes a
+        // compile error here instead of silently falling through (which could
+        // make the termination checker call a graph with active nodes
+        // complete). The value is `never` — nothing to handle at runtime.
+        const _never: never = node.status;
+        void _never;
+        break;
+      }
     }
   }
 
@@ -388,19 +447,23 @@ export function checkGraphTermination(
  *
  * Exact-once is enforced at TWO layers (M10 / F15): the per-instance
  * {@link TerminationContext} AND the persisted `state.terminalNotified`
- * flag. A fire requires BOTH layers unclaimed; on fire both are claimed and
- * the state is marked dirty so the cross-restart claim survives a rebuild /
- * restart. `state.terminalNotified` may be `undefined` (graphs that never
- * reached a terminal phase, or pre-M10 persisted files) — treated as
+ * flag. A fire requires BOTH layers unclaimed; on fire both are claimed, the
+ * per-instance terminal epoch advances (Y26 — the claimed value is stamped on
+ * the event), and the state is marked dirty so the cross-restart claim survives
+ * a rebuild / restart. `state.terminalNotified` may be `undefined` (graphs
+ * that never reached a terminal phase, or pre-M10 persisted files) — treated as
  * unclaimed.
  *
- * A throwing consumer must not corrupt the advancing critical section
- * (mirrors _notifyCompletion conventions). A no-op when no callback is
- * registered.
+ * Consumer failures must not corrupt the advancing critical section (mirrors
+ * _notifyCompletion conventions): a synchronous throw is caught and logged,
+ * and a returned promise (the seam is {@link GraphTerminalNotifier}, so async
+ * notifiers are legal) has its rejection logged — never surfaced as an
+ * unhandled rejection at the fire-and-forget advancement paths. A no-op when
+ * no callback is registered.
  */
 function fireGraphTerminal(
   state: EngineState,
-  onGraphTerminal: ((event: GraphTerminalEvent) => void) | undefined,
+  onGraphTerminal: GraphTerminalNotifier | undefined,
   counts: {
     completed: number;
     done: number;
@@ -429,12 +492,19 @@ function fireGraphTerminal(
     ctx.terminalComplete = true;
     notified.complete = true;
   }
+  // Y26: this claim opens the next terminal epoch. The counter advances before
+  // the event is built, so every emitted event carries the epoch of ITS claim —
+  // a replay never re-claims (the guards above return first), and a re-open
+  // (retryNode / resetTerminalDedupe) bumps the counter again so the next
+  // genuine terminal transition lands in a new epoch.
+  ctx.terminalEpoch += 1;
   state.terminalNotified = notified;
   // The cross-restart claim is a critical mutation — persist it with the
   // rest of the terminal transition via the engine's dirty flag.
   markDirty(state);
   const event: GraphTerminalEvent = {
     graphId: state.graphId,
+    terminalEpoch: ctx.terminalEpoch,
     phase: state.phase,
     nodeStatusSummaries: {
       completed: counts.completed,
@@ -448,38 +518,24 @@ function fireGraphTerminal(
     isBlocked,
   };
   try {
-    const ret = cb(event) as unknown;
-    // Subtask 2: the seam is typed `() => void`, but real terminal notifiers
-    // (graph-notify.ts createGraphTerminalNotifier) return a promise — an
-    // async throw / rejection would otherwise surface as an unhandled
-    // rejection at the fire-and-forget advancement paths. Contain sync throws
-    // (catch below) AND async rejections (catch on the thenable).
-    if (
-      ret !== null &&
-      ret !== undefined &&
-      typeof (ret as PromiseLike<unknown>).then === "function"
-    ) {
-      void (ret as PromiseLike<unknown>).then(undefined, (e: unknown) => {
+    const ret = cb(event);
+    // Subtask 2 / C5: the seam may return a promise (`graph-notify`'s
+    // terminal notifier does) — an async throw / rejection would otherwise
+    // surface as an unhandled rejection at the fire-and-forget advancement
+    // paths. C4's `isThenable` predicate replaces the old
+    // `as PromiseLike<unknown>` duck-type assertion; the rejection is handled
+    // HERE (logged) and never re-thrown, so the fire stays contained.
+    if (isThenable(ret)) {
+      void Promise.resolve(ret).catch((e: unknown) => {
         logWarn(
-          `graph-terminal: notifier rejected for graph "${state.graphId}": ${errorString(e)}`,
+          `graph-terminal: notifier rejected for graph "${state.graphId}": ${errorText(e)}`,
         );
       });
     }
   } catch (err) {
     // Never let a notifier failure break graph advancement.
     logWarn(
-      `graph-terminal: notifier threw for graph "${state.graphId}": ${errorString(err)}`,
+      `graph-terminal: notifier threw for graph "${state.graphId}": ${errorText(err)}`,
     );
   }
-}
-
-/** Minimal, dependency-free warning logger (no sub-logger import cycle). */
-function logWarn(message: string): void {
-  // eslint-disable-next-line no-console
-  console.warn(message);
-}
-
-/** Best-effort error message from an unknown throw value. */
-function errorString(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

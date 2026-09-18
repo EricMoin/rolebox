@@ -50,6 +50,9 @@ import {
   type NodeDispatchPort,
   type GraphTerminalEvent,
 } from "../../src/graph/engine/engine-advance.ts";
+import { createGraphTerminalNotifier } from "../../src/graph/engine/graph-notify.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import { GRAPH_COMPLETE_MARKER } from "../../src/dispatch/notification.ts";
 
 // ── Fake dispatch seam (injectable into AdvanceEngine) ──────────────────────
 
@@ -80,6 +83,41 @@ class FakeDispatch implements NodeDispatchPort {
       priority: 0,
     });
   }
+}
+
+/**
+ * Minimal recording {@link ISessionClient} (prompt only — the notifier's sole
+ * dependency). Mirrors the fake used by the graph-notify suites.
+ */
+class FakeSessionClient implements ISessionClient {
+  prompts: Array<{ id: string; text: string; noReply?: boolean }> = [];
+
+  async prompt(
+    id: string,
+    options: {
+      parts: Array<{ type: string; text: string }>;
+      noReply?: boolean;
+    },
+  ): Promise<{ id: string } | null> {
+    this.prompts.push({
+      id,
+      text: options.parts.map((p) => p.text).join("\n"),
+      noReply: options.noReply,
+    });
+    return { id };
+  }
+
+  async list(): Promise<never> { throw new Error("not implemented"); }
+  async get(): Promise<never> { throw new Error("not implemented"); }
+  async messages(): Promise<never> { throw new Error("not implemented"); }
+  async children(): Promise<never> { throw new Error("not implemented"); }
+  async todo(): Promise<never> { throw new Error("not implemented"); }
+  async diff(): Promise<never> { throw new Error("not implemented"); }
+  async fork(): Promise<never> { throw new Error("not implemented"); }
+  async status(): Promise<never> { throw new Error("not implemented"); }
+  async promptSync(): Promise<never> { throw new Error("not implemented"); }
+  async create(): Promise<never> { throw new Error("not implemented"); }
+  async abort(): Promise<never> { throw new Error("not implemented"); }
 }
 
 /** Let async microtask-queued work (deferred completions) settle. */
@@ -509,7 +547,7 @@ describe("terminal notification on retry reopen (defect B)", () => {
 
       // Exactly 2 COMPLETEs total: the original + the new one.
       expect(completeCount(events)).toBe(2);
-      expect(state.phase).toBe(EnginePhase.Complete);
+      expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
       expect(events[1].event.nodeStatusSummaries.completed).toBe(2);
     });
 
@@ -543,7 +581,7 @@ describe("terminal notification on retry reopen (defect B)", () => {
 
       // COMPLETE fires exactly once more.
       expect(completeCount(events)).toBe(2);
-      expect(state.phase).toBe(EnginePhase.Complete);
+      expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
       // The second event counts all 3 nodes as completed.
       expect(events[1].event.nodeStatusSummaries.completed).toBe(3);
     });
@@ -584,7 +622,7 @@ describe("terminal notification on retry reopen (defect B)", () => {
       await settle();
 
       expect(completeCount(events)).toBe(3);
-      expect(state.phase).toBe(EnginePhase.Complete);
+      expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     });
   });
 
@@ -673,6 +711,129 @@ describe("terminal notification on retry reopen (defect B)", () => {
       expect(state.phase).toBe(EnginePhase.Executing);
       // Timestamps confirm ordering: the single event preceded retryNode.
       expect(events[0].at).toBeLessThanOrEqual(Date.now());
+    });
+  });
+
+  // ── Test (d): Y26 terminal epoch — engine → notifier, production path ──────
+  //
+  // V1 §6.1 measured the defect end-to-end: `GraphTerminalEvent` carried no
+  // epoch, so `createGraphTerminalNotifier` keyed its dedupe on
+  // `graphId::type` alone and silently dropped the second legitimate
+  // [GRAPH COMPLETE] after a retry/re-open (prompts sent: 1).
+  //
+  // These cases drive the REAL engine terminal seam into the REAL notifier: the
+  // engine stamps every claimed terminal event with its own epoch
+  // (`GraphTerminalEvent.terminalEpoch`) and bumps the counter on every re-open
+  // (retryNode / resetTerminalDedupe), so the notifier's
+  // `graphId::type::epoch` key differs across the re-open and the second
+  // completion is delivered.
+  //
+  // Revert-would-fail: without the engine-side epoch the two terminal events
+  // share one dedupe key and the second `client.prompts` count stays 1.
+
+  describe("(d) Y26 terminal epoch reaches the notifier (production path)", () => {
+    it("delivers the second [GRAPH COMPLETE] after a retry re-opens and re-completes the graph", async () => {
+      const client = new FakeSessionClient();
+      const notifier = createGraphTerminalNotifier(client, {
+        emperorSessionId: "emperor-y26",
+      });
+      const state = createEngineState(singleNode("A"), "g-y26");
+      provision(state);
+      const events: GraphTerminalEvent[] = [];
+      const sends: Promise<unknown>[] = [];
+      const engine = new AdvanceEngine({
+        state,
+        signalBridge: new SignalBridge(),
+        dispatch: new FakeDispatch(),
+        // The production wiring under test: engine terminal seam → notifier.
+        onGraphTerminal: (event) => {
+          events.push(event);
+          const sent = notifier(event);
+          if (sent) sends.push(Promise.resolve(sent));
+        },
+      });
+
+      // First completion → terminal epoch claimed → [GRAPH COMPLETE] #1.
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "answer", "run-1");
+      await Promise.all(sends);
+
+      expect(state.phase).toBe(EnginePhase.Complete);
+      expect(events).toHaveLength(1);
+      expect(client.prompts).toHaveLength(1);
+      expect(client.prompts[0]?.text).toContain(GRAPH_COMPLETE_MARKER);
+      const firstEpoch = events[0]?.terminalEpoch;
+
+      // Retry: the re-open clears the two-layer claim AND advances the epoch.
+      await engine.retryNode("A");
+      await settle();
+      expect(state.phase).toBe(EnginePhase.Executing);
+      expect(state.nodes.get("A")?.status).toBe(NodeStatus.Running);
+
+      await engine.onNodeSignalEmitted("A", "answer", "run-2");
+      await Promise.all(sends);
+
+      // The second claimed event is a NEW epoch, so the notifier must NOT drop
+      // it as a replay of the first (pre-Y26: prompts stayed at 1).
+      expect(events).toHaveLength(2);
+      expect(events[1]?.terminalEpoch).not.toBe(firstEpoch);
+      expect(client.prompts).toHaveLength(2);
+      expect(client.prompts[1]?.text).toContain(GRAPH_COMPLETE_MARKER);
+      // A terminal reminder must wake the orchestrator (noReply: false).
+      expect(client.prompts[1]?.noReply).toBe(false);
+
+      // An idempotent replay of the SAME epoch is still deduped.
+      await notifier(events[1]);
+      expect(client.prompts).toHaveLength(2);
+    });
+
+    it("advances the epoch on a non-retry re-open (resetTerminalDedupe) too", async () => {
+      const client = new FakeSessionClient();
+      const notifier = createGraphTerminalNotifier(client, {
+        emperorSessionId: "emperor-y26-extend",
+      });
+      const state = createEngineState(singleNode("A"), "g-y26-extend");
+      provision(state);
+      const events: GraphTerminalEvent[] = [];
+      const sends: Promise<unknown>[] = [];
+      const engine = new AdvanceEngine({
+        state,
+        signalBridge: new SignalBridge(),
+        dispatch: new FakeDispatch(),
+        onGraphTerminal: (event) => {
+          events.push(event);
+          const sent = notifier(event);
+          if (sent) sends.push(Promise.resolve(sent));
+        },
+      });
+
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "answer", "run-1");
+      await Promise.all(sends);
+      expect(client.prompts).toHaveLength(1);
+
+      // Extend-after-complete: re-open the phase and reset the dedupe guards
+      // exactly as `graph_add_node` + `graph_run` do for a reused engine.
+      addRootNode(state, "B", "b1");
+      state.phase = EnginePhase.Executing;
+      engine.resetTerminalDedupe();
+
+      await engine.dispatchReady();
+      await settle();
+      expect(state.nodes.get("B")?.status).toBe(NodeStatus.Running);
+      expect(client.prompts).toHaveLength(1); // no premature COMPLETE
+
+      await engine.onNodeSignalEmitted("B", "answer", "run-2");
+      await Promise.all(sends);
+
+      expect(events).toHaveLength(2);
+      // Exactly two increments between the events: `resetTerminalDedupe` opened
+      // the new epoch on the re-open, and the claim that emitted event #2
+      // advanced it again. Without the re-open bump the events would be
+      // adjacent and the notifier would drop #2 as a same-epoch replay.
+      expect(events[1].terminalEpoch).toBe(events[0].terminalEpoch + 2);
+      expect(client.prompts).toHaveLength(2);
+      expect(client.prompts[1]?.text).toContain(GRAPH_COMPLETE_MARKER);
     });
   });
 });

@@ -35,7 +35,10 @@ import {
 import {
   executeLoopStep,
 } from "../../src/graph/engine/loop-group-executor.ts";
-import { deriveNodeEvidence } from "../../src/graph/engine/recorder.ts";
+import {
+  deriveNodeEvidence,
+  recordCheckpointForNode,
+} from "../../src/graph/engine/recorder.ts";
 
 // ── Controllable fake dispatch port (mirrors signal-history.test.ts) ────────
 class FakeDispatch implements NodeDispatchPort {
@@ -318,5 +321,55 @@ describe("severity ordering (L1 / 01-F4)", () => {
       escalate: { reason: "boom", evidence: ["tests/e.test.ts"] },
     });
     expect(deriveNodeEvidence(node)).toEqual(["tests/e.test.ts"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (b2) Y9 — checkpointHistory is authoritative, checkpoints is its derived view
+// ═══════════════════════════════════════════════════════════════════════════
+describe("checkpoint history / latest-snapshot consistency (Y9)", () => {
+  it("derives checkpoints from the history tail and never aliases the record", () => {
+    const { state } = buildEngine(chainGraph());
+    const node = state.nodes.get("A")!;
+    // Drive the recorder directly past the 50-entry history cap.
+    for (let i = 0; i < 60; i++) {
+      recordCheckpointForNode(
+        state,
+        node,
+        NodeStatus.Running,
+        NodeStatus.Running,
+        1_000 + i,
+      );
+    }
+    const history = state.checkpointHistory!["A"]!;
+    expect(history).toHaveLength(50); // bounded ring, newest retained
+    expect(history[history.length - 1]!.at).toBe(1_059);
+    // The single-snapshot view equals the history tail...
+    expect(state.checkpoints!["A"]).toEqual(history[history.length - 1]!);
+    // ...but is a defensive copy, not the same record object.
+    expect(state.checkpoints!["A"]).not.toBe(history[history.length - 1]!);
+  });
+
+  it("keeps the two fields consistent when only a legacy checkpoints entry exists", () => {
+    const { state } = buildEngine(chainGraph());
+    const node = state.nodes.get("A")!;
+    // Legacy file shape: a latest snapshot but no append-only history.
+    state.checkpointHistory = undefined;
+    state.checkpoints = {
+      A: { nodeId: "A", status: NodeStatus.Ready, at: 5 },
+    };
+
+    recordCheckpointForNode(state, node, NodeStatus.Ready, NodeStatus.Running, 10);
+
+    // The authoritative history starts at the new transition; the derived view
+    // is its tail — the two can never disagree.
+    expect(state.checkpointHistory!["A"]).toEqual([
+      { nodeId: "A", status: NodeStatus.Running, at: 10 },
+    ]);
+    expect(state.checkpoints!["A"]).toEqual({
+      nodeId: "A",
+      status: NodeStatus.Running,
+      at: 10,
+    });
   });
 });

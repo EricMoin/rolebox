@@ -40,6 +40,7 @@ import {
 import {
   GraphEventRecorder,
   graphEventsPath,
+  readGraphEventLog,
   type GraphEventRecord,
 } from "../../src/graph/engine/graph-events.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
@@ -276,5 +277,90 @@ describe("GraphEventRecorder — total (never throws)", () => {
     );
     // Different graph → different file fragment.
     expect(graphEventsPath("/ws", "other-graph")).not.toBe(p1);
+  });
+});
+
+// ── Y21: read-side shape validation (no `as GraphEventRecord` any more) ──────
+
+describe("readGraphEventLog — shape validation (Y21)", () => {
+  it("skips shape-invalid lines instead of returning them as typed records", () => {
+    const dir = makeWorkspace();
+    const graphId = "g-shape";
+    const path = graphEventsPath(dir, graphId);
+    mkdirSync(join(dir, ".rolebox", "state"), { recursive: true });
+    const valid: GraphEventRecord = {
+      ts: 5,
+      graphId,
+      event: "phase_change",
+      status: "executing",
+    };
+    writeFileSync(
+      path,
+      [
+        JSON.stringify({ graphId }), // missing ts + event
+        JSON.stringify({ ts: 1, graphId }), // missing event
+        JSON.stringify({ ts: "1", graphId, event: "phase_change" }), // ts not a number
+        JSON.stringify({ ts: 2, graphId, event: "bogus_event" }), // out of vocabulary
+        JSON.stringify({ ts: 3, graphId: "other", event: "phase_change" }), // other graph
+        "{ not json", // unparseable
+        JSON.stringify(valid),
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    // Only the well-formed, in-vocabulary, graph-matching line survives — the
+    // old implementation pushed every parseable object with a matching graphId,
+    // typed as a record whose required `event`/`ts` were undefined.
+    expect(readGraphEventLog(dir, graphId)).toEqual([valid]);
+  });
+});
+
+// ── Y22: a degraded audit log is observable (not a silent swallow) ──────────
+
+describe("GraphEventRecorder — degraded audit log is observable (Y22)", () => {
+  it("counts consecutive write failures and logs the first one", () => {
+    const dir = makeWorkspace();
+    const statePath = join(dir, ".rolebox", "state");
+    mkdirSync(join(dir, ".rolebox"), { recursive: true });
+    writeFileSync(statePath, "I am a file, not a directory", "utf-8");
+
+    const recorder = new GraphEventRecorder(dir);
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      recorder.nodeDispatched("g-x", "A", "a1", 1);
+      recorder.nodeDispatched("g-x", "A", "a1", 2);
+      expect(recorder.consecutiveWriteFailures).toBe(2);
+      expect(recorder.writeDegraded).toBe(true);
+      expect(
+        warnings.some(
+          (w) => w.includes("audit log degraded") && w.includes("consecutive"),
+        ),
+      ).toBe(true);
+    } finally {
+      console.warn = original;
+    }
+  });
+
+  it("resets the failure counter after a successful append", () => {
+    const dir = makeWorkspace();
+    const recorder = new GraphEventRecorder(dir);
+    recorder.nodeDispatched("g-ok", "A", "a1", 1);
+    expect(recorder.consecutiveWriteFailures).toBe(0);
+    expect(recorder.writeDegraded).toBe(false);
+  });
+
+  it("accepts the stall degradation kind (Y32: no assertion at the toolset boundary)", () => {
+    const dir = makeWorkspace();
+    const recorder = new GraphEventRecorder(dir);
+    recorder.notificationDegraded("g-stall", "stall");
+    const lines = readEvents(dir, "g-stall");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.event).toBe("notification_degraded");
+    expect(lines[0]!.status).toBe("stall");
   });
 });

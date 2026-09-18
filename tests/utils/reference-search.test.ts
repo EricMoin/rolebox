@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import type { ResolvedRole } from "../../src/types.core";
-import type { ResolvedReference } from "../../src/types.core";
-import { createReferenceSearchTool } from "../../src/utils/reference-search";
+import type { ResolvedRole } from "../../src/types.core.ts";
+import type { ResolvedReference } from "../../src/types.core.ts";
+import { createReferenceSearchTool } from "../../src/utils/reference-search.ts";
 
 let tmpDir: string;
 

@@ -739,7 +739,7 @@ describe("loop-group executor — always-cycle root discovery and bounded traver
       state,
       signalBridge: bridge,
       dispatch: new FakeDispatch(),
-      onNodeCompletion: (e) => events.push(e),
+      onNodeCompletion: (e) => { events.push(e); },
     });
 
     // Drive the always cycle to the cap, mirroring the retirement test above.
@@ -1116,5 +1116,109 @@ describe("loop-group member escalate — retry budget honored (escalate-retry-by
     expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done); // cascade-cancelled
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(0); // unchanged
     expect(aDispatches()).toBe(3); // no dispatch past the budget
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y16 / Y17 — the loop lane's propagation terminal is reportable
+//
+// propagateRevise's stuck / max_traversals exits retire the reviewer
+// `completed → done` (Y17) — a terminal lifecycle transition with no signal of
+// its own. `LoopStepReport` therefore carries `{ escalated, reason }` plus the
+// underlying `propagation` report, so engine-advance can replay it through
+// `_notifyPropagatedEscalations(report, fallbackPayload)` exactly like the
+// non-loop lane (Y16).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("loop-group executor — propagation terminal report (Y16/Y17)", () => {
+  it("an exhaustion exit reports escalated + reason + propagation, and the node lands in done (not escalate)", () => {
+    const { state } = buildEngine(reviewLoopGraph(1));
+    const review = state.nodes.get("review")!;
+    const impl = state.nodes.get("impl")!;
+    impl.status = NodeStatus.Completed;
+    review.status = NodeStatus.Completed;
+    state.loopGroups.get("lg")!.traversalCount = 1;
+
+    const report = executeLoopStep(state, review, "revise_needed", {
+      findings: ["still broken"],
+    });
+
+    expect(report.outcome).toBe("max_traversals_exhausted");
+    expect(report.escalated).toEqual(["review"]);
+    expect(report.reason).toBe("max_traversals exhausted");
+    expect(report.propagation?.reason).toBe("max_traversals exhausted");
+    // Y17: the exhaustion exit is a completed → done retirement — the report's
+    // `escalated` list names the retired node, NOT an escalate status.
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("review")!.status).not.toBe(NodeStatus.Escalate);
+
+    // The exact shape `_notifyPropagatedEscalations(report, fallback)` consumes:
+    // `report.reason ?? fallback` is the notification payload, and every
+    // `report.escalated` id passes its terminal-status guard.
+    const notifiedPayload = report.reason ?? { findings: ["still broken"] };
+    expect(notifiedPayload).toBe("max_traversals exhausted");
+    for (const id of report.escalated) {
+      const node = state.nodes.get(id)!;
+      expect<NodeStatus[]>([NodeStatus.Escalate, NodeStatus.Done]).toContain(node.status);
+    }
+  });
+
+  it("an answer downgraded for unresolved findings carries the same terminal report", () => {
+    const { state } = buildEngine(reviewLoopGraph(1));
+    const review = state.nodes.get("review")!;
+    const impl = state.nodes.get("impl")!;
+    impl.status = NodeStatus.Completed;
+    review.status = NodeStatus.Completed;
+    state.loopGroups.get("lg")!.traversalCount = 1;
+
+    const report = executeLoopStep(state, review, "answer", {
+      findings: ["still broken"],
+    });
+
+    expect(report.outcome).toBe("max_traversals_exhausted");
+    expect(report.escalated).toEqual(["review"]);
+    expect(report.reason).toBe("max_traversals exhausted");
+    expect(report.downgradeReason).toContain("unresolved items");
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
+  });
+
+  it("a stuck exit reports reason 'stuck' with the same consumable shape", () => {
+    const { state } = buildEngine(reviewLoopGraph(5));
+    const review = state.nodes.get("review")!;
+    review.status = NodeStatus.Completed;
+
+    // First identical finding: a normal revision — no terminal transition, so
+    // no propagation-level reason.
+    const first = executeLoopStep(state, review, "revise_needed", { findings: ["same"] });
+    expect(first.outcome).toBe("revising");
+    expect(first.reason).toBeUndefined();
+    expect(first.propagation).toBeDefined();
+
+    // Second identical finding: the stuck exit retires the reviewer done.
+    const second = executeLoopStep(state, review, "revise_needed", { findings: ["same"] });
+    expect(second.outcome).toBe("stuck");
+    expect(second.escalated).toEqual(["review"]);
+    expect(second.reason).toBe("stuck");
+    expect(second.propagation?.reason).toBe("stuck");
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("review")!.errorReason).toBe("stuck");
+  });
+
+  it("the escalate lane exposes its propagation report so the seam can fall back to the signal payload", () => {
+    const { state } = buildEngine(convergeLoopGraph());
+    const a = state.nodes.get("A")!;
+    a.status = NodeStatus.Escalate;
+    state.nodes.get("B")!.status = NodeStatus.Running;
+    state.nodes.get("C")!.status = NodeStatus.Pending;
+
+    const report = executeLoopStep(state, a, "escalate", { reason: "boom" });
+
+    expect(report.outcome).toBe("escalating");
+    expect(report.escalated).toContain("C");
+    expect(report.propagation).toBeDefined();
+    // The escalate lane carries no propagation-level reason: the completion
+    // seam falls back to the original signal payload.
+    expect(report.reason).toBeUndefined();
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
   });
 });

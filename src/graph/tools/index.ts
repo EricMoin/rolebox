@@ -29,6 +29,7 @@
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
 import {
@@ -38,11 +39,7 @@ import {
   type GraphNotifySource,
 } from "./graph-tools.ts";
 import { createGraphApproveTool } from "./approve-tools.ts";
-import {
-  JOIN_STRATEGY_VALUES,
-  NODE_STATUS_VALUES,
-  type NodeStatus,
-} from "../../constants.ts";
+import { NODE_STATUS_VALUES, type NodeStatus } from "../../constants.ts";
 
 // ── Reusable zod schema fragments ────────────────────────────────────────────
 
@@ -74,26 +71,39 @@ const nodeBudgetSchema = z
   })
   .optional();
 
-/** Join/fan-in config — structured form (matches `JoinConfig`, divergence 1). */
+/**
+ * Join/fan-in config — the discriminated form of `JoinConfig` (contract C1,
+ * divergence 1). A discriminated union rather than an object with an optional
+ * `quorum`: `{ strategy: "quorum" }` without a count is rejected here instead
+ * of silently degrading to a count of 1 downstream.
+ */
 const joinSchema = z
-  .object({
-    strategy: z.enum(JOIN_STRATEGY_VALUES),
-    // quorum:N is a required-answer COUNT: it must be a positive integer. A
-    // 0/negative quorum would let a fan-in join be satisfied with ZERO
-    // upstream answers (`answerCount >= n` with n <= 0, join-evaluator.ts:245)
-    // — a DAG-order violation where a convergence node dispatches at graph
-    // start ignoring its declared upstreams. A fractional quorum is meaningless.
-    quorum: z.number().int().positive().optional(),
-  })
+  .discriminatedUnion("strategy", [
+    z.object({ strategy: z.literal("all") }),
+    z.object({ strategy: z.literal("any") }),
+    z.object({
+      strategy: z.literal("quorum"),
+      // quorum:N is a required-answer COUNT: it must be a positive integer. A
+      // 0/negative quorum would let a fan-in join be satisfied with ZERO
+      // upstream answers (`answerCount >= n` with n <= 0, join-evaluator.ts:245)
+      // — a DAG-order violation where a convergence node dispatches at graph
+      // start ignoring its declared upstreams. A fractional quorum is meaningless.
+      quorum: z.number().int().positive(),
+    }),
+  ])
   .optional();
 
 /** Edge retry policy — bare number coerced to `{ max }` (divergence 3). */
 const retrySchema = z
   .union([
-    z.number(),
+    // Retry counts are integer thresholds at runtime — a fractional or
+    // negative count is meaningless (a negative one silently reads as "no
+    // retry"), so both branches enforce the same shape as `max_retries` below
+    // (B25).
+    z.number().int().nonnegative(),
     z.object({
-      max: z.number(),
-      backoff_ms: z.number().optional(),
+      max: z.number().int().nonnegative(),
+      backoff_ms: z.number().int().nonnegative().optional(),
     }),
   ])
   .optional();
@@ -248,7 +258,9 @@ function createGraphCreateTool(
       "by all subsequent graph_add_node / graph_add_edge / graph_add_loop / " +
       "graph_run / graph_status / graph_cancel calls.",
     args: {
-      name: z.string().min(1).describe("Human-readable graph name for logging."),
+      // `.trim().min(1)` rejects a whitespace-only name at the schema boundary
+      // instead of relying on the tool layer's trim (B25).
+      name: z.string().trim().min(1).describe("Human-readable graph name for logging."),
       budget: graphBudgetSchema.describe("Graph-level resource limits."),
     },
     async execute(args, context) {
@@ -267,7 +279,7 @@ function createGraphCreateTool(
           ),
         );
       } catch (err) {
-        return `graph_create failed: ${(err as Error).message}`;
+        return `graph_create failed: ${errorText(err)}`;
       }
     },
   });
@@ -285,9 +297,15 @@ function createGraphAddNodeTool(
       "rejected without mutating the graph.",
     args: {
       graph_id: z.string().describe("Graph to add the node to."),
-      id: z.string().describe("Unique node identifier within this graph."),
-      agent: z.string().describe("Agent identifier to dispatch (e.g. a subagent full id)."),
-      prompt: z.string().describe("The prompt this agent executes."),
+      id: z.string().min(1).describe("Unique node identifier within this graph."),
+      agent: z
+        .string()
+        .trim()
+        .min(1)
+        .describe("Agent identifier to dispatch (e.g. a subagent full id)."),
+      // An empty prompt is never a legitimate dispatch (B25): the engine would
+      // happily launch the node with an empty instruction.
+      prompt: z.string().min(1).describe("The prompt this agent executes."),
       completion_condition: z
         .string()
         .optional()
@@ -320,7 +338,7 @@ function createGraphAddNodeTool(
           ),
         );
       } catch (err) {
-        return `graph_add_node failed: ${(err as Error).message}`;
+        return `graph_add_node failed: ${errorText(err)}`;
       }
     },
   });
@@ -378,7 +396,7 @@ function createGraphAddEdgeTool(
           ),
         );
       } catch (err) {
-        return `graph_add_edge failed: ${(err as Error).message}`;
+        return `graph_add_edge failed: ${errorText(err)}`;
       }
     },
   });
@@ -430,7 +448,7 @@ function createGraphAddLoopTool(
           ),
         );
       } catch (err) {
-        return `graph_add_loop failed: ${(err as Error).message}`;
+        return `graph_add_loop failed: ${errorText(err)}`;
       }
     },
   });
@@ -485,7 +503,7 @@ function createGraphRunTool(
         );
         return json(await toolset.graph_run(args, context?.sessionID, effAgent));
       } catch (err) {
-        return `graph_run failed: ${(err as Error).message}`;
+        return `graph_run failed: ${errorText(err)}`;
       }
     },
   });
@@ -703,7 +721,7 @@ function createGraphStatusTool(
       try {
         return toolset.graph_status(args);
       } catch (err) {
-        return `graph_status failed: ${(err as Error).message}`;
+        return `graph_status failed: ${errorText(err)}`;
       }
     },
   });
@@ -747,7 +765,7 @@ function createGraphCancelTool(
       try {
         return json(await toolset.graph_cancel(args));
       } catch (err) {
-        return `graph_cancel failed: ${(err as Error).message}`;
+        return `graph_cancel failed: ${errorText(err)}`;
       }
     },
   });

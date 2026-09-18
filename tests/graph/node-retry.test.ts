@@ -222,6 +222,20 @@ describe("resetNodeForRetry (pure state mutation)", () => {
     expect(() => resetNodeForRetry(state, "NOPE")).toThrow(/Unknown node id/);
   });
 
+  it("clears the automatic-retry backoff deadline (Y10)", () => {
+    const { state } = buildAdvance(linearAB());
+    const A = state.nodes.get("A")!;
+    // A ready node sitting in an unexpired escalate-retry backoff window.
+    A.retryBackoffUntil = Date.now() + 60_000;
+
+    resetNodeForRetry(state, "A");
+
+    // The withheld-until stamp must go with the rest of the per-run artifacts;
+    // leaving it behind suppresses the re-dispatch the caller asked for.
+    expect(A.retryBackoffUntil).toBeUndefined();
+    expect(A.status).toBe(NodeStatus.Ready);
+  });
+
   it("drops the graph-level signal ledger entry for the target and every reset downstream node", () => {
     const { state } = buildAdvance(linearABC());
     const B = state.nodes.get("B")!;

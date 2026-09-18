@@ -26,8 +26,14 @@
  * | Condition | Trigger | Outcome |
  * |---|---|---|
  * | **converged** | Convergence node signals `answer` | Loop exits naturally — only forward edges run (engine's `answer` data flow); the stale tracker is reset and no traversal is consumed. |
- * | **max_traversals exhausted** | A `revise_needed` arrives when the loop group's `max_traversals` hard cap is reached | `completed → escalate` with the structured payload `{ reason: "max_traversals exhausted", unresolved, traversals }` (§1.6). |
- * | **stuck** | Consecutive convergence outputs are identical for `>= CONSECUTIVE_STALE_THRESHOLD` (= 2) traversals | `completed → escalate` with reason `"stuck"` before any further traversal is consumed (§4.3). |
+ * | **max_traversals exhausted** | A `revise_needed` arrives when the loop group's `max_traversals` hard cap is reached | `completed → done` with the structured payload `{ reason: "max_traversals exhausted", unresolved, traversals }` (§1.6). |
+ * | **stuck** | Consecutive convergence outputs are identical for `>= CONSECUTIVE_STALE_THRESHOLD` (= 2) traversals | `completed → done` with reason `"stuck"` before any further traversal is consumed (§4.3). |
+ *
+ * Both exhaustion exits retire the node to terminal `done` — **not**
+ * `escalate`; `signal-propagation.ts` is the single enforcement point. A
+ * {@link LoopStepReport.escalated} entry therefore means "retired by this
+ * step", not "the node's status is escalate"; read the node's actual status
+ * when the distinction matters (Y17).
  *
  * Otherwise (`revise_needed` with traversals remaining) the executor delegates
  * to {@link propagateRevise}, which now owns stuck detection and hard-cap
@@ -56,7 +62,12 @@ import type { SignalType } from "./signal-bridge.ts";
 import type { SignalPropagationReport } from "./signal-propagation.ts";
 import { propagateEscalate, propagateRevise } from "./signal-propagation.ts";
 import { cancelPendingUpstreams, type CancelDispatchPort } from "./cascade-canceller.ts";
-import { evaluateJoin } from "./join-evaluator.ts";
+import { evaluateJoin, isReviseBackEdge } from "./join-evaluator.ts";
+import {
+  asRecord,
+  hasUnresolvedPayload,
+  isInferred,
+} from "./signal-payload.ts";
 import { recordLoopRound } from "./recorder.ts";
 import {
   fingerprintPayload,
@@ -74,9 +85,10 @@ import {
  * - `revising` — a `revise_needed` with traversals remaining; the back-edge
  *   re-entered the offending upstream nodes (one traversal consumed).
  * - `stuck` — consecutive identical convergence outputs crossed
- *   `CONSECUTIVE_STALE_THRESHOLD`; the node escalated with reason `"stuck"`.
+ *   `CONSECUTIVE_STALE_THRESHOLD`; the node was retired `completed → done` with
+ *   reason `"stuck"`.
  * - `max_traversals_exhausted` — a `revise_needed` arrived at the hard cap; the
- *   node escalated with the structured exhaustion payload.
+ *   node was retired `completed → done` with the structured exhaustion payload.
  * - `escalating` — the node signalled `escalate`; the worst signal propagated
  *   forward and failed convergence nodes had their pending upstreams cancelled.
  * - `ignored` — the node was not a loop-group member; the defensive non-member
@@ -91,7 +103,13 @@ export type LoopOutcome =
   | "escalating"
   | "ignored";
 
-/** The structured escalation payload mandated by failure-resilience.md §1.6 / §4.3. */
+/**
+ * The structured escalation payload mandated by failure-resilience.md §1.6 / §4.3.
+ *
+ * Reported for the `stuck` / `max_traversals_exhausted` exits even though the
+ * node lands in terminal `done` (not `escalate`) — the payload describes the
+ * exit, not the node's resulting status (Y17).
+ */
 export interface LoopEscalatePayload {
   /** The machine-readable exit reason: `"max_traversals exhausted"` or `"stuck"`. */
   reason: "max_traversals exhausted" | "stuck";
@@ -118,8 +136,23 @@ export interface LoopStepReport {
   traversals: number;
   /** Upstream nodes re-marked `ready` and added to the frontier (revise). */
   revisedUpstream: string[];
-  /** Nodes escalated by this step (exhaustion / stuck / join failure). */
+  /**
+   * Nodes this step retired terminally, whatever status they landed in: a
+   * join-failure escalation (`escalate`) or a `stuck` /
+   * `max_traversals_exhausted` retirement (`completed → done`). The field name
+   * is unchanged for API compatibility — read the node's actual status when the
+   * distinction matters (Y17).
+   */
   escalated: string[];
+  /**
+   * Machine-readable reason of the propagation that ran, mirroring
+   * `SignalPropagationReport.reason` (`"no loop group"` /
+   * `"max_traversals exhausted"` / `"stuck"` / the escalate payload's reason).
+   * Present exactly when {@link propagation} is, so
+   * `engine-advance._notifyPropagatedEscalations` can consume this report's
+   * `{ escalated, reason }` shape directly (Y16).
+   */
+  reason?: string;
   /** The escalating node that was re-marked `ready` for an automatic retry. */
   retried: string[];
   /** Pending upstream nodes retired to `cancelled → done` (cascade). */
@@ -131,7 +164,10 @@ export interface LoopStepReport {
    * step delegated to one of the propagation primitives.
    */
   propagation?: SignalPropagationReport;
-  /** Structured escalation payload for `stuck` / `max_traversals_exhausted`. */
+  /**
+   * Structured escalation payload for `stuck` / `max_traversals_exhausted`.
+   * The node lands in terminal `done` for both (Y17).
+   */
   escalatePayload?: LoopEscalatePayload;
   /** Human-readable reason when `answer` was downgraded to `revise_needed` semantics. */
   downgradeReason?: string;
@@ -151,10 +187,13 @@ export { fingerprintPayload, recordConvergenceOutput, resetConvergenceTracker };
  * escalation report never loses the reviewer's message.
  */
 export function extractUnresolved(payload: unknown): unknown[] {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const obj = payload as Record<string, unknown>;
+  // Shared narrowing (C2 / Y18): the former inline "non-null, non-array
+  // object" test plus `as Record<string, unknown>` assertion is gone.
+  const obj = asRecord(payload);
+  if (obj) {
     for (const key of ["unresolved", "items", "findings"]) {
-      if (Array.isArray(obj[key])) return obj[key];
+      const value = obj[key];
+      if (Array.isArray(value)) return value;
     }
     const verdict = obj["verdict"];
     if (typeof verdict === "string") return [verdict];
@@ -165,29 +204,10 @@ export function extractUnresolved(payload: unknown): unknown[] {
   return [];
 }
 
-/**
- * Defensive check: does a signal payload represent unresolved work?
- *
- * Mirrors {@link extractUnresolved} but is intentionally narrower — it only
- * returns `true` when the payload is a non-null, non-array object whose
- * structure carries a clear unresolved signal. Strings, arrays, and objects
- * without unresolved markers are treated as resolved (backward-compatible).
- *
- * A payload is "unresolved" when it has:
- * - A non-empty array at `unresolved`, `findings`, or `items`, OR
- * - A `verdict` field whose string value is `"veto"` or `"revise"`.
- */
-function hasUnresolvedPayload(payload: unknown): boolean {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const obj = payload as Record<string, unknown>;
-    for (const key of ["unresolved", "items", "findings"]) {
-      if (Array.isArray(obj[key]) && (obj[key] as unknown[]).length > 0) return true;
-    }
-    const verdict = obj["verdict"];
-    if (typeof verdict === "string" && ["veto", "revise"].includes(verdict)) return true;
-  }
-  return false;
-}
+// The "does this payload carry unresolved work" predicate is the shared
+// `hasUnresolvedPayload` from `signal-payload.ts` (C2 / Y18), which is also a
+// type predicate — the private boolean copy and the follow-up
+// `payload as Record<string, unknown>` assertion are both gone.
 
 // ── Convergence-node identification ─────────────────────────────────────────
 
@@ -201,13 +221,9 @@ function hasUnresolvedPayload(payload: unknown): boolean {
  * convergence tracker.
  */
 function hasReviseBackEdge(state: EngineState, node: NodeRuntimeState): boolean {
-  for (const edge of state.graphDeclaration.edges) {
-    if (edge.from !== node.nodeId) continue;
-    if (edge.type === "on_signal" && (edge.signal_filter ?? []).includes("revise_needed")) {
-      return true;
-    }
-  }
-  return false;
+  return state.graphDeclaration.edges.some(
+    (edge) => edge.from === node.nodeId && isReviseBackEdge(edge),
+  );
 }
 
 // ── Core step ───────────────────────────────────────────────────────────────
@@ -237,9 +253,10 @@ function initReport(group: LoopGroupRuntimeState): LoopStepReport {
  *    canceller no longer needs. Forward data flow is left to the caller
  *    (engine-advance's `answer` branch); nothing here consumes a traversal.
  * 2. **revise_needed** — first check the stuck condition. If identical output
- *    repeats for `>= CONSECUTIVE_STALE_THRESHOLD` traversals, escalate with
- *    reason `"stuck"` *without* consuming another traversal. Otherwise check
- *    the hard cap: if `isLoopExhausted`, escalate with the structured
+ *    repeats for `>= CONSECUTIVE_STALE_THRESHOLD` traversals, retire the node
+ *    `completed → done` with reason `"stuck"` *without* consuming another
+ *    traversal. Otherwise check the hard cap: if `isLoopExhausted`, retire it
+ *    `completed → done` with the structured
  *    `{ reason: "max_traversals exhausted", unresolved, traversals }` payload.
  *    With traversals remaining, delegate to {@link propagateRevise} for the
  *    traversal increment + back-edge re-entry.
@@ -304,6 +321,7 @@ export function executeLoopStep(
       report.propagation = prop;
       report.revisedUpstream = prop.revisedUpstream;
       report.escalated = [...prop.escalated];
+      report.reason = prop.reason;
       report.outcome = prop.escalated.length > 0 ? "escalating" : "revising";
       report.downgradeReason = `dangling loop group "${groupId}" — fell back to non-loop revise propagation`;
       return report;
@@ -314,6 +332,7 @@ export function executeLoopStep(
       report.propagation = prop;
       report.retried = prop.retried;
       report.escalated = [...prop.escalated];
+      report.reason = prop.reason;
       report.outcome = "escalating";
       report.downgradeReason = `dangling loop group "${groupId}" — fell back to non-loop escalate propagation`;
       return report;
@@ -362,11 +381,7 @@ export function executeLoopStep(
     // trivial — relying on it to incidentally return false is fragile. An
     // explicit guard makes the intent durable even if hasUnresolvedPayload
     // broadens its criteria in the future.
-    const isInferred =
-      payload &&
-      typeof payload === "object" &&
-      !Array.isArray(payload) &&
-      (payload as Record<string, unknown>).__inferred === true;
+    const inferredAnswer = isInferred(payload);
 
     // ── defensive payload validation ─────────────────────────────────────────
     //
@@ -375,10 +390,11 @@ export function executeLoopStep(
     // downgraded to revise_needed semantics to prevent false convergence.
     // Stuck detection and hard-cap enforcement are delegated entirely to
     // propagateRevise (single enforcement point).
-    // Skipped for synthetic answers (isInferred guard above).
-    if (!isInferred && hasUnresolvedPayload(payload)) {
-      const verdictObj = payload as Record<string, unknown>;
-      const verdict = verdictObj["verdict"];
+    // Skipped for synthetic answers (inferredAnswer guard above).
+    if (!inferredAnswer && hasUnresolvedPayload(payload)) {
+      // The shared predicate narrows to the record it tested, so the former
+      // `payload as Record<string, unknown>` assertion is gone (Y18).
+      const verdict = payload["verdict"];
       report.downgradeReason = `answer payload contained unresolved items${
         typeof verdict === "string" ? `: verdict=${verdict}` : ""
       }`;
@@ -386,6 +402,7 @@ export function executeLoopStep(
       // ── bounded-cycle continuation: delegate to the revise propagator ────
       const prop = propagateRevise(state, node, payload);
       report.propagation = prop;
+      report.reason = prop.reason;
       report.revisedUpstream = prop.revisedUpstream;
       report.escalated = prop.escalated;
       report.traversals = group.traversalCount;
@@ -435,6 +452,7 @@ export function executeLoopStep(
     // propagateRevise (single enforcement point).
     const prop = propagateRevise(state, node, payload);
     report.propagation = prop;
+    report.reason = prop.reason;
     report.revisedUpstream = prop.revisedUpstream;
     report.escalated = prop.escalated;
     report.traversals = group.traversalCount;
@@ -468,6 +486,7 @@ export function executeLoopStep(
   // ── escalate: worst-signal forward propagation + cascade cancellation ────
   const prop = propagateEscalate(state, node, payload);
   report.propagation = prop;
+  report.reason = prop.reason;
   report.retried = prop.retried;
   report.escalated = [...prop.escalated];
   // Every convergence node whose join just failed no longer needs its

@@ -37,10 +37,15 @@
  *   3. `recover()` per-graph try/catch → a throwing graph is captured and the
  *      remaining graphs still recover.
  *
- * Idempotency: this sweep is safe to call repeatedly. `recover()` never
- * re-dispatches — it only re-attaches to already-dispatched tasks (or times
- * out vanished ones), so re-running the sweep after a successful pass finds
- * every graph already `complete` and skips it.
+ * Idempotency: this sweep is safe to call repeatedly, but it must not be run
+ * CONCURRENTLY — two overlapping sweeps would recover the same graph twice.
+ * `recover()` reconciles every persisted `running` node against the dispatch
+ * system: a still-live task is re-attached (never re-dispatched), a vanished
+ * task is timed out, and a task that finished during the restart window has
+ * its terminating signal re-emitted. It then rebuilds the frontier from the
+ * `ready` nodes and DISPATCHES them — so "never re-dispatches" holds only for
+ * nodes that are already running. A second sweep after a successful pass
+ * finds every graph already `complete` and skips it (the phase is persisted).
  *
  * Design references:
  * - `.rolebox/design/engine-state-machine.md` §5 (resilience / crash recovery),
@@ -57,7 +62,9 @@ import { join } from "node:path";
 
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import { EnginePhase } from "../../constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import { loadEngineStateFromJson } from "./engine-persistence.ts";
+import { logWarn } from "./log-warn.ts";
 import type {
   NodeCompletionEvent,
   GraphTerminalEvent,
@@ -126,7 +133,9 @@ export interface RecoverInterruptedGraphsOptions {
    * reminders (the pre-fix gap). Defaults to absent → each resumed engine
    * keeps its default no-op seam, so behavior is identical to older versions.
    */
-  onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  onNodeCompletion?: (
+    event: NodeCompletionEvent,
+  ) => void | Promise<unknown>;
 
   /**
    * Optional graph-terminal notification seam (graph monitoring) forwarded to
@@ -135,7 +144,9 @@ export interface RecoverInterruptedGraphsOptions {
    * state while the plugin was down. Defaults to absent → no-op (unchanged
    * behavior).
    */
-  onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  onGraphTerminal?: (
+    event: GraphTerminalEvent,
+  ) => void | Promise<unknown>;
 
   /**
    * Optional write-side durable event log (graph monitoring) forwarded to
@@ -205,8 +216,8 @@ export async function recoverInterruptedGraphs(
       const raw = readFileSync(filePath, "utf-8");
       loaded = loadEngineStateFromJson(raw, filePath);
     } catch (err) {
-      logWarn(`engine-startup: read failed for ${label}: ${messageOf(err)}`);
-      failed.push(`${label} (read error: ${messageOf(err)})`);
+      logWarn(`engine-startup: read failed for ${label}: ${errorText(err)}`);
+      failed.push(`${label} (read error: ${errorText(err)})`);
       continue;
     }
     if (!loaded) {
@@ -238,10 +249,10 @@ export async function recoverInterruptedGraphs(
       recovered += 1;
     } catch (err) {
       logWarn(
-        `engine-startup: recovery failed for graph ${loaded.graphId}: ${messageOf(err)}`,
+        `engine-startup: recovery failed for graph ${loaded.graphId}: ${errorText(err)}`,
       );
       failed.push(
-        `${label} (graph ${loaded.graphId}: ${messageOf(err)})`,
+        `${label} (graph ${loaded.graphId}: ${errorText(err)})`,
       );
     }
   }
@@ -249,14 +260,3 @@ export async function recoverInterruptedGraphs(
   return { scanned, recovered, failed };
 }
 
-/** Coerce an unknown thrown value to a short, safe error string. */
-function messageOf(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
-
-/** Minimal, dependency-free warning logger (no createSubLogger import cycle). */
-function logWarn(message: string): void {
-  // eslint-disable-next-line no-console
-  console.warn(message);
-}

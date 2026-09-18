@@ -65,6 +65,21 @@ export function addGraphTemplateValue(name: string): void {
   GRAPH_TEMPLATE_VALUES.add(name);
 }
 
+/**
+ * Whether a value is a currently-registered graph-template name: one of the
+ * built-in {@link GraphTemplate} values or a name registered through
+ * {@link addGraphTemplateValue}.
+ *
+ * The registry is the runtime vocabulary, so this predicate is the honest
+ * narrowing for untrusted input (a parsed YAML `template:` field): it accepts
+ * exactly the strings the process would resolve through
+ * `expandTemplate`. A type predicate rather than a cast keeps the trust
+ * boundary explicit at the parser.
+ */
+export function isGraphTemplate(value: unknown): value is GraphTemplate {
+  return typeof value === "string" && GRAPH_TEMPLATE_VALUES.has(value);
+}
+
 // ── Graph Sentinel ─────────────────────────────────────────────────────
 
 /** Reserved node name for the parent/orchestrator in a graph. */

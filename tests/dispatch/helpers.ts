@@ -1,6 +1,6 @@
 import { mock } from "bun:test";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import type { DispatchTask } from "../../src/dispatch/types";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 
 /**
  * Creates a DispatchTask with sensible defaults for testing.
@@ -14,12 +14,17 @@ export function makeTask(
     id: "bg_test123",
     sessionId: "ses_abc",
     parentSessionId: "ses_parent",
+    // Required DispatchTask fields the helper used to omit: `depth` (0 =
+    // direct dispatch) and `priority` (0 = normal). Both were `undefined` at
+    // runtime while the return type claimed `number`.
+    depth: 0,
     status: "pending" as const,
     agent: "test-agent",
     prompt: "do something",
     description: "test task",
     startedAt: new Date(),
     progress: { lastUpdate: new Date(), toolCalls: 0 },
+    priority: 0,
     ...overrides,
   };
 }
@@ -33,7 +38,7 @@ export function createMockClient(overrides?: {
   /** Override for synchronous prompt (waits for response) */
   sessionPrompt?: () => unknown;
   /** Override for fire-and-forget prompt (notification injection) */
-  sessionPromptAsync?: () => unknown;
+  sessionPromptAsync?: (call: unknown) => unknown;
   sessionPromptSync?: () => unknown;
   sessionMessages?: () => unknown;
   sessionStatus?: () => unknown;

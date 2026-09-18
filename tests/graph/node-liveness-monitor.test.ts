@@ -414,12 +414,12 @@ describe("NodeStalenessWatcher — enriched timeout reasons (S1)", () => {
 
     expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
     expect(node.status).toBe(NodeStatus.Timeout);
-    expect(node.errorReason).toBe(
+    const expectedReason =
       "node ran past its staleness timeout (30000ms); " +
-        "last heartbeat 20s ago, heartbeat source=session, stall status=stalling",
-    );
+      "last heartbeat 20s ago, heartbeat source=session, stall status=stalling";
+    expect(node.errorReason).toBe(expectedReason);
     // The same enriched reason is reported through the onTimeout callback.
-    expect(reasons).toEqual([node.errorReason]);
+    expect(reasons).toEqual([expectedReason]);
   });
 
   it("folds the probe result into the timeout reason when it reports the task dead", () => {

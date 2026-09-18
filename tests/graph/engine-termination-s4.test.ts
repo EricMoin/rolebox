@@ -74,7 +74,7 @@ function unrootedCycleGraph(): GraphDeclaration {
 
 /** Fresh per-instance dedupe context. */
 function freshCtx(): TerminationContext {
-  return { terminalComplete: false, terminalBlocked: false };
+  return { terminalComplete: false, terminalBlocked: false, terminalEpoch: 0 };
 }
 
 /** Recording onGraphTerminal spy. */
@@ -115,7 +115,7 @@ describe("M1 onSyntheticEscalate (deadlock guard)", () => {
     // The guard still quiesces the graph exactly as before.
     expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
     expect(state.nodes.get("b")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
   });
 
   it("does not invoke the callback for non-pending nodes (only the deadlocked ones)", () => {
@@ -159,7 +159,7 @@ describe("M1 onSyntheticEscalate (deadlock guard)", () => {
 
     expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
     expect(state.nodes.get("b")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
   });
 
   it("a throwing observer does not break the deadlock quiescence", () => {
@@ -180,7 +180,7 @@ describe("M1 onSyntheticEscalate (deadlock guard)", () => {
 
     expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
     expect(state.nodes.get("b")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
   });
 });
 
@@ -203,7 +203,7 @@ describe("M10 terminalNotified two-layer dedupe", () => {
     expect(events).toHaveLength(0);
     expect(ctx.terminalComplete).toBe(false);
     expect(state.terminalNotified).toEqual({ complete: true, blocked: false });
-    expect(state.phase).toBe(EnginePhase.Complete); // advancement is unaffected
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete); // advancement is unaffected
   });
 
   it("does NOT fire BLOCKED when state.terminalNotified.blocked is preset", () => {
@@ -373,7 +373,7 @@ describe("S3 enriched deadlock reason (upstream causal chain)", () => {
     );
 
     expect(state.nodes.get("B")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     const reason = state.nodes.get("B")!.errorReason!;
     // Base text preserved — existing consumers keep matching.
     expect(reason).toContain("graph deadlock");
@@ -416,7 +416,7 @@ describe("S3 enriched deadlock reason (upstream causal chain)", () => {
     checkGraphTermination(state, undefined, freshCtx());
 
     expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     const reason = state.nodes.get("a")!.errorReason!;
     expect(reason).toContain("graph deadlock");
     expect(reason).toContain("b/c cancelled");

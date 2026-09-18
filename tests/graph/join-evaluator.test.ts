@@ -9,6 +9,8 @@ import {
   collectUpstreamResults,
   getUpstreamNodeIds,
   getJoinStrategy,
+  resolveJoinStrategy,
+  readQuorum,
 } from "../../src/graph/engine/join-evaluator.ts";
 
 // ── Fixture builders ──────────────────────────────────────────────────────
@@ -34,13 +36,18 @@ function diamondGraph(): GraphDeclaration {
 }
 
 /** A diamond sink declared with a specific join strategy. */
-function diamondWithJoin(strategy: "all" | "any" | "quorum", quorum?: number): GraphDeclaration {
+function diamondWithJoin(strategy: "all" | "any" | "quorum", quorum = 1): GraphDeclaration {
   const g = diamondGraph();
   const sink = g.nodes.find((n) => n.id === "sink")!;
+  // Written as explicit per-branch literals so the helper is assignable to the
+  // JoinConfig discriminated union (C1): a `{ strategy: "all" | "any" }` value
+  // is not assignable to the union of its two object branches.
   sink.join =
     strategy === "quorum"
       ? { strategy: "quorum", quorum }
-      : { strategy };
+      : strategy === "any"
+        ? { strategy: "any" }
+        : { strategy: "all" };
   return g;
 }
 
@@ -106,6 +113,29 @@ describe("getJoinStrategy", () => {
     const state = createEngineState(decl, "g-1");
     provision(state);
     expect(getJoinStrategy(state, state.nodes.get("sink")!)).toEqual({ quorum: 2 });
+  });
+});
+
+// ── readQuorum — the single reader of the resolved count (C1) ──────────────
+
+describe("readQuorum", () => {
+  it("returns the count carried by { quorum: N }", () => {
+    expect(readQuorum({ quorum: 3 })).toBe(3);
+  });
+
+  it("returns undefined for the count-less strategies", () => {
+    expect(readQuorum("all")).toBeUndefined();
+    expect(readQuorum("any")).toBeUndefined();
+  });
+
+  it("resolves declared joins into exactly the three runtime members", () => {
+    expect(resolveJoinStrategy(undefined)).toBe("all");
+    expect(resolveJoinStrategy({ strategy: "all" })).toBe("all");
+    expect(resolveJoinStrategy({ strategy: "any" })).toBe("any");
+    expect(resolveJoinStrategy({ strategy: "quorum", quorum: 2 })).toEqual({ quorum: 2 });
+    // A bare "quorum" string is not a representable ResolvedJoinStrategy; the
+    // resolver never produces it.
+    expect(readQuorum(resolveJoinStrategy({ strategy: "quorum", quorum: 1 }))).toBe(1);
   });
 });
 

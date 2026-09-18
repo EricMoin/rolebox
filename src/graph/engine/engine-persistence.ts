@@ -24,7 +24,9 @@
  *   disposed runtime's state is stale relative to the successor runtime, so
  *   flushing it would overwrite newer state (review 05-F1/F3, M14/ML1).
  * - `load(graphId)` — read + validate; returns `null` for a missing file (only
- *   ENOENT) or a schema-version mismatch (clean start / migration point),
+ *   ENOENT), a schema-version mismatch, a file whose nodes fail the R2
+ *   node-level field gate, or an out-of-vocabulary enum (clean start /
+ *   migration point),
  *   mirroring `TaskStateStore.load()` (`src/dispatch/persistence/task-store.ts:125`).
  *   Any other read failure is rethrown — an unreadable state file is an
  *   explicit error, never a silent clean start (review 05-F6, L22).
@@ -49,23 +51,19 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import {
-  ENGINE_PHASE_VALUES,
-  JOIN_STRATEGY_VALUES,
-  NODE_STATUS_VALUES,
-} from "../../constants.ts";
-import type { EnginePhase, NodeStatus } from "../../constants.ts";
-import type { GraphDeclaration } from "../../types.graph-v2.ts";
+import { ENGINE_PHASE_VALUES, NODE_STATUS_VALUES } from "../../constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type {
   CheckpointRecord,
   EdgePayload,
   EngineState,
   GraphBudgetState,
   LoopGroupRuntimeState,
-  NodeLivenessState,
   NodeRuntimeState,
+  ResolvedJoinStrategy,
   SignalLedgerEntry,
 } from "../../types.engine-v2.ts";
+import { logWarn } from "./log-warn.ts";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -152,91 +150,107 @@ export function shouldPersistNonCritical(state: EngineState): boolean {
 // ── Serialization DTO types ─────────────────────────────────────────────────
 
 /**
- * Flat, JSON-safe projection of {@link NodeRuntimeState}: the only structural
- * field (`upstreamResults: Map`) is flattened to a plain `Record`. Every other
- * field is already JSON-primitive (nested records/objects) and passes through.
+ * Runtime fields whose representation is NOT directly JSON-safe and therefore
+ * needs an explicit projection in the DTO. Today the only one is
+ * `upstreamResults` (`Map` → plain `Record`).
  */
-export interface NodeRuntimeStateDTO {
-  nodeId: string;
-  agent: string;
-  prompt: string;
-  needsApproval: boolean;
-  status: string;
-  dispatchTaskId?: string;
-  dispatchSessionId?: string;
-  result?: {
-    sidecarPath: string;
-    totalChars: number;
-    hadFence: boolean;
-    fetchError?: string;
-    materializedAt: number;
-  };
-  // OPTIONAL-ADDITIVE (subtask 2): stashed materialized-result text snapshot —
-  // JSON-primitive string, absent → undefined. Mirrors the liveness/artifacts
-  // pattern (files authored before the field existed lack it).
-  resultText?: string;
-  signalsObserved: Record<string, unknown>;
-  sessionsSpawned: number;
-  tokensConsumed: { inputTokens: number; outputTokens: number; cost: number };
-  upstreamResults: Record<string, EdgePayload>;
-  joinStrategy: string | { quorum: number };
-  joinSatisfied: boolean;
-  loopGroupId?: string;
-  traversalCount: number;
-  startedAt: number;
-  completedAt?: number;
-  retryCount: number;
-  // OPTIONAL-ADDITIVE (escalate-retry backoff): epoch-ms deadline until which
-  // a re-marked-ready retry node's dispatch is withheld. JSON-primitive
-  // number, absent → undefined. Mirrors the resultText/liveness pattern —
-  // files authored before the field existed lack it; the `...rest` spread
-  // carries it both ways and the explicit serialize/deserialize lines pin the
-  // contract.
-  retryBackoffUntil?: number;
-  errorReason?: string;
-  // OPTIONAL-ADDITIVE (subtask 1): JSON-primitive, absent → undefined.
-  artifacts?: string[];
-  evidence?: string[];
-  // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): heartbeat / stall
-  // carrier — JSON-primitive throughout, absent → undefined. Mirrors the
-  // artifacts/evidence pattern (files authored before the field lack it).
-  liveness?: NodeLivenessState;
-}
+type NodeRuntimeStateProjectedKeys = "upstreamResults";
 
-/** Top-level on-disk schema (versioned). `Map` fields are plain `Record`s. */
-export interface EnginePersistenceFile {
+/**
+ * Flat, JSON-safe projection of {@link NodeRuntimeState}.
+ *
+ * R2 (trust boundary): the DTO is DERIVED from the runtime type (mapped type)
+ * instead of hand-mirrored. A field added to / removed from
+ * {@link NodeRuntimeState} now flows into the DTO automatically, so it cannot
+ * silently drift out of the persistence contract: `serializeNodeDTO`'s
+ * `satisfies` check and the key-coverage assertions below fail to compile
+ * instead. `upstreamResults` is the only field whose runtime representation
+ * (`Map`) needs flattening; every other field is already JSON-primitive and
+ * passes through unchanged.
+ */
+export type NodeRuntimeStateDTO = Omit<
+  NodeRuntimeState,
+  NodeRuntimeStateProjectedKeys
+> & {
+  upstreamResults: Record<string, EdgePayload>;
+};
+
+/** Compile-time helper: asserts a derived key set is exactly empty. */
+type AssertNoExcessKeys<T extends never> = T;
+
+// R2 type-level completeness assertion. Both `Exclude`s resolve to `never`
+// while the mapped DTO is faithful:
+// - the first proves the DTO omits NO runtime field (every key of
+//   `NodeRuntimeState` is a key of the DTO);
+// - the second proves the DTO invents no field the runtime type lacks.
+// Adding a field to `NodeRuntimeState` and excluding it from the DTO without
+// re-declaring it here makes these assignments fail to compile.
+type _NodeDtoCoverage = AssertNoExcessKeys<
+  Exclude<keyof NodeRuntimeState, keyof NodeRuntimeStateDTO>
+>;
+type _NodeDtoNoExtras = AssertNoExcessKeys<
+  Exclude<keyof NodeRuntimeStateDTO, keyof NodeRuntimeState>
+>;
+
+/**
+ * `EngineState` keys that are NOT part of the JSON-safe container file:
+ * runtime-only dirty flags, the two non-serializable event sinks, and the
+ * three `Map` collections that are re-declared below in their flat JSON form.
+ *
+ * `advancingLock` / `pendingCompletions` are deliberately NOT in this list:
+ * they remain in the file (crash diagnostics / legacy read-compat) but are
+ * reset to their initial values on hydration — see `deserializeEngineState`.
+ */
+type EngineStateNonSerializedKeys =
+  | "nodes"
+  | "loopGroups"
+  | "signalLedger"
+  | "isDirty"
+  | "isNonCriticalDirty"
+  | "phaseEventSink"
+  | "budgetEventSink";
+
+/**
+ * Top-level on-disk schema (versioned). `Map` fields are plain `Record`s.
+ *
+ * R2: like the node DTO, this is DERIVED from {@link EngineState} — the
+ * `Omit` removes only the runtime-only / re-shaped keys above, so a new
+ * persisted field on `EngineState` cannot be forgotten here.
+ */
+export type EnginePersistenceFile = {
   version: typeof ENGINE_PERSISTENCE_VERSION;
-  graphId: string;
-  phase: EnginePhase;
-  graphDeclaration: GraphDeclaration;
-  nodes: Record<string, NodeRuntimeStateDTO>;
-  /**
-   * LEGACY READ-COMPAT — the dead `EngineState.edges` map was removed (D3),
-   * so new files never carry this key. It is retained here (optional) so
-   * files authored before the removal — which DO carry a top-level `edges`
-   * object — still pass the required-shape gate and hydrate cleanly. The key
-   * is tolerated and ignored: it is never written and never hydrated back
-   * onto a live state.
-   */
-  edges?: Record<string, EdgePayload>;
-  loopGroups: Record<string, LoopGroupRuntimeState>;
-  frontier: string[];
-  budget: GraphBudgetState;
-  signalLedger: Record<string, SignalLedgerEntry>;
-  startedAt: number;
-  updatedAt: number;
-  advancingLock: boolean;
-  pendingCompletions: string[];
-  // OPTIONAL-ADDITIVE (subtask 1): absent in files authored before this field.
-  checkpoints?: Record<string, CheckpointRecord>;
-  // OPTIONAL-ADDITIVE (subtask 7): append-only per-node checkpoint history.
-  // Absent in files authored before this field — deserialize defaults to absent.
-  checkpointHistory?: Record<string, CheckpointRecord[]>;
-  // OPTIONAL-ADDITIVE (monitor M10): cross-restart termination-notification
-  // dedup flags. Absent in files authored before this field — deserialize
-  // leaves it undefined (no fabricated default object).
-  terminalNotified?: { complete: boolean; blocked: boolean };
-}
+} & Omit<EngineState, EngineStateNonSerializedKeys> & {
+    nodes: Record<string, NodeRuntimeStateDTO>;
+    /**
+     * LEGACY READ-COMPAT — the dead `EngineState.edges` map was removed (D3),
+     * so new files never carry this key. It is retained here (optional) so
+     * files authored before the removal — which DO carry a top-level `edges`
+     * object — still pass the required-shape gate and hydrate cleanly. The key
+     * is tolerated and ignored: it is never written and never hydrated back
+     * onto a live state.
+     */
+    edges?: Record<string, EdgePayload>;
+    loopGroups: Record<string, LoopGroupRuntimeState>;
+    signalLedger: Record<string, SignalLedgerEntry>;
+  };
+
+// R2 type-level completeness assertion for the container: every
+// PERSISTED `EngineState` key is covered by the file DTO. The runtime-only
+// keys (dirty flags, event sinks) are legitimately absent from the file, so
+// they are excluded from the check — every other runtime field must be
+// reachable through the `Omit` + re-declarations. Fails to compile if a
+// persisted runtime field is dropped from both.
+type EngineStateRuntimeOnlyKeys =
+  | "isDirty"
+  | "isNonCriticalDirty"
+  | "phaseEventSink"
+  | "budgetEventSink";
+type _FileDtoCoverage = AssertNoExcessKeys<
+  Exclude<
+    Exclude<keyof EngineState, EngineStateRuntimeOnlyKeys>,
+    keyof EnginePersistenceFile
+  >
+>;
 
 // ── Clone helpers (defensive deep-enough copies) ───────────────────────────
 
@@ -297,40 +311,68 @@ export function cloneCheckpointHistory(
 
 // ── Serialize / Deserialize (pure, exportable for tests) ────────────────────
 
+/**
+ * Project one live {@link NodeRuntimeState} into its JSON-safe DTO.
+ *
+ * R2: field-by-field instead of a `...rest` spread. The trailing `satisfies`
+ * makes the DTO's `satisfies`-checked field set the authority: adding a field
+ * to {@link NodeRuntimeState} and forgetting it here is a compile error rather
+ * than a silent `JSON.stringify` drop / reshape. `budget` is carried
+ * explicitly (it used to ride the untyped spread while being absent from the
+ * hand-mirrored DTO declaration) so the per-node declared ceilings survive a
+ * recovery round trip *by contract*, not by accident.
+ */
+export function serializeNodeDTO(n: NodeRuntimeState): NodeRuntimeStateDTO {
+  const upstreamResults: Record<string, EdgePayload> = {};
+  for (const [fromId, payload] of n.upstreamResults) {
+    upstreamResults[fromId] = cloneEdgePayload(payload);
+  }
+  return {
+    nodeId: n.nodeId,
+    agent: n.agent,
+    prompt: n.prompt,
+    needsApproval: n.needsApproval,
+    status: n.status,
+    dispatchTaskId: n.dispatchTaskId,
+    dispatchSessionId: n.dispatchSessionId,
+    result: n.result ? { ...n.result } : undefined,
+    // OPTIONAL-ADDITIVE (subtask 2): stashed result-text snapshot, a plain
+    // JSON-primitive string. Absent → undefined (no fabrication).
+    resultText: n.resultText,
+    signalsObserved: { ...n.signalsObserved },
+    sessionsSpawned: n.sessionsSpawned,
+    tokensConsumed: { ...n.tokensConsumed },
+    upstreamResults,
+    joinStrategy: n.joinStrategy,
+    joinSatisfied: n.joinSatisfied,
+    loopGroupId: n.loopGroupId,
+    traversalCount: n.traversalCount,
+    startedAt: n.startedAt,
+    completedAt: n.completedAt,
+    retryCount: n.retryCount,
+    // OPTIONAL-ADDITIVE (escalate-retry backoff): epoch-ms deadline until
+    // which a re-marked-ready retry node's dispatch is withheld. Carried so a
+    // restart never re-dispatches early. Absent → undefined.
+    retryBackoffUntil: n.retryBackoffUntil,
+    errorReason: n.errorReason,
+    // OPTIONAL-ADDITIVE (subtask 1): JSON-primitive arrays, cloned so the DTO
+    // never aliases the live state's arrays. Absent → undefined.
+    artifacts: n.artifacts ? [...n.artifacts] : undefined,
+    evidence: n.evidence ? [...n.evidence] : undefined,
+    // NodeRuntimeState.budget — declared per-node ceilings (the staleness
+    // watcher reads `budget.timeout_ms` off a recovered node).
+    budget: n.budget ? { ...n.budget } : undefined,
+    // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): cloned liveness
+    // carrier — JSON-primitive throughout. Absent → undefined.
+    liveness: n.liveness ? { ...n.liveness } : undefined,
+  } satisfies NodeRuntimeStateDTO;
+}
+
 /** Flatten a live {@link EngineState} into the versioned, JSON-safe DTO. */
 export function serializeEngineState(state: EngineState): EnginePersistenceFile {
   const nodes: Record<string, NodeRuntimeStateDTO> = {};
   for (const [id, n] of state.nodes) {
-    const { upstreamResults, ...rest } = n;
-    const ur: Record<string, EdgePayload> = {};
-    for (const [fromId, payload] of upstreamResults) {
-      ur[fromId] = cloneEdgePayload(payload);
-    }
-    nodes[id] = {
-      ...rest,
-      signalsObserved: { ...n.signalsObserved },
-      tokensConsumed: { ...n.tokensConsumed },
-      result: n.result ? { ...n.result } : undefined,
-      artifacts: n.artifacts ? [...n.artifacts] : undefined,
-      evidence: n.evidence ? [...n.evidence] : undefined,
-      // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): clone the
-      // liveness carrier so the DTO never aliases the live state's object.
-      // Absent → undefined (files authored before the field existed).
-      liveness: n.liveness ? { ...n.liveness } : undefined,
-      // OPTIONAL-ADDITIVE (subtask 2): the stashed result-text snapshot is a
-      // plain JSON-primitive string, carried by `...rest` above; the explicit
-      // line documents the persistence contract — recovered/adopted nodes keep
-      // their stashed text. Absent → undefined (no fabrication).
-      resultText: n.resultText,
-      // OPTIONAL-ADDITIVE (escalate-retry backoff): the epoch-ms deadline
-      // until which a re-marked-ready retry node's dispatch is withheld. Plain
-      // JSON-primitive number carried by `...rest` above; the explicit line
-      // documents the persistence contract — recovered/adopted nodes keep
-      // their backoff deadline so a restart never re-dispatches early. Absent
-      // → undefined (no fabrication).
-      retryBackoffUntil: n.retryBackoffUntil,
-      upstreamResults: ur,
-    };
+    nodes[id] = serializeNodeDTO(n);
   }
 
   // D3: the dead `state.edges` map is gone — the persisted file deliberately
@@ -385,17 +427,50 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
   assertValidEnums(file);
   const nodes = new Map<string, NodeRuntimeState>();
   for (const [id, dto] of Object.entries(file.nodes)) {
+    // R2 defensive gate (same rule as the never-throw loader's
+    // `hasRequiredShape`, which maps the violation to `null` instead): this
+    // function's contract returns a state, so a node missing a required field
+    // THROWS rather than hydrating a partial node whose `tokensConsumed` /
+    // `signalsObserved` would silently become `{}`.
+    if (!hasRequiredNodeShape(dto)) {
+      throw new Error(
+        `engine-persist: node "${id}" is missing a required field (need agent / prompt / needsApproval / signalsObserved / upstreamResults / tokensConsumed with numeric inputTokens+outputTokens+cost)`,
+      );
+    }
     const upstreamResults = new Map<string, EdgePayload>();
     for (const [fromId, payload] of Object.entries(dto.upstreamResults ?? {})) {
       upstreamResults.set(fromId, cloneEdgePayload(payload));
     }
     const { upstreamResults: _ur, ...rest } = dto;
-    nodes.set(id, {
+    // C1 consumer side: normalize the persisted join strategy into the runtime
+    // vocabulary. A legacy bare "quorum" (persisted by builds that admitted
+    // `JOIN_STRATEGY_VALUES` wholesale) carries no count, so it is normalized
+    // to { quorum: 1 } — the historical runtime default — WITH a warning.
+    // Anything else out of vocabulary was already rejected by assertValidEnums
+    // (load → null); this function's contract returns a state, so it throws.
+    const rawJoinStrategy: unknown = rest.joinStrategy;
+    const joinStrategy = normalizeJoinStrategy(rawJoinStrategy);
+    if (joinStrategy === undefined) {
+      throw new Error(
+        `engine-persist: node "${id}" joinStrategy is not valid (expected "all", "any", or a { quorum: positive-int } object)`,
+      );
+    }
+    if (rawJoinStrategy === LEGACY_BARE_QUORUM_JOIN_STRATEGY) {
+      logWarn(
+        `engine-persist: node "${id}" carried the legacy bare "quorum" joinStrategy — normalizing to { quorum: 1 } (the old value carried no count)`,
+      );
+    }
+    // R2: no assertion closes this object literal. `tokensConsumed` is a
+    // straight clone of the DTO field (the derived DTO types it as the runtime
+    // `UsageRecord`, so the old `as NodeRuntimeState["tokensConsumed"]` cast
+    // that legalized a missing/partial value is gone), and the required-shape
+    // gate above proved the field is a `{ inputTokens, outputTokens, cost }`
+    // object of numbers before hydration.
+    const node: NodeRuntimeState = {
       ...rest,
-      signalsObserved: { ...(rest.signalsObserved ?? {}) },
-      tokensConsumed: {
-        ...(rest.tokensConsumed as NodeRuntimeState["tokensConsumed"]),
-      },
+      joinStrategy,
+      signalsObserved: { ...rest.signalsObserved },
+      tokensConsumed: { ...rest.tokensConsumed },
       result: rest.result ? { ...rest.result } : undefined,
       // OPTIONAL-ADDITIVE (node-anomaly-detection subtask 1): carry the
       // liveness carrier back as a fresh object (no shared reference with the
@@ -412,7 +487,8 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
       // immediately (no backoff was ever declared for them).
       retryBackoffUntil: rest.retryBackoffUntil,
       upstreamResults,
-    } as NodeRuntimeState);
+    };
+    nodes.set(id, node);
   }
 
   // D3: a legacy `file.edges` extra key (present in files authored before the
@@ -429,7 +505,11 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     signalLedger.set(id, cloneSignalLedgerEntry(e));
   }
 
-  return {
+  // R2: the container is assembled as an explicitly typed object literal (no
+  // `as EngineState`). Excess-property / missing-field checking now runs at
+  // the hydration boundary, so a field the DTO forgot to hydrate is a compile
+  // error instead of a silently `undefined` runtime member.
+  const state: EngineState = {
     phase: file.phase,
     graphId: file.graphId,
     graphDeclaration: file.graphDeclaration,
@@ -440,8 +520,15 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     signalLedger,
     startedAt: file.startedAt,
     updatedAt: file.updatedAt,
-    advancingLock: file.advancingLock,
-    pendingCompletions: [...file.pendingCompletions],
+    // R2(c): `advancingLock` / `pendingCompletions` are persisted for crash
+    // diagnostics + legacy read-compat, but they describe a critical section of
+    // the process that WROTE the file. This process has no section running and
+    // no in-memory deferred queue, so hydrating them would resurrect a lock
+    // nobody holds / completions nobody can replay (the same reset
+    // `clearStaleCriticalSection` applies post-hydrate, now enforced at the
+    // trust boundary itself).
+    advancingLock: false,
+    pendingCompletions: [],
     checkpoints: cloneCheckpoints(file.checkpoints),
     // OPTIONAL-ADDITIVE (subtask 7): absent in files authored before this field.
     // Deserialization tolerates the absence and leaves it undefined (no fabrication).
@@ -455,7 +542,8 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     // starts clean.
     isDirty: false,
     isNonCriticalDirty: false,
-  } as EngineState;
+  };
+  return state;
 }
 
 // ── Path helpers ────────────────────────────────────────────────────────────
@@ -613,7 +701,15 @@ export class EnginePersistence {
    * - the file carries an out-of-vocabulary enum value — `node.status` /
    *   `node.joinStrategy` / `file.phase` not in their runtime vocabularies
    *   (R2: a corrupt-but-shape-valid file must not hydrate and crash later in
-   *   `canTransitionNode`).
+   *   `canTransitionNode`);
+   * - a node entry fails the R2 node-level field gate (`agent` / `prompt` /
+   *   `needsApproval` / `signalsObserved` / `upstreamResults` /
+   *   `tokensConsumed` with its three numeric counters) — a previously
+   *   "barely loadable" stub node now yields a clean start.
+   *
+   * A legacy bare `joinStrategy: "quorum"` (no count) is NOT corrupt: it is
+   * normalized to `{ quorum: 1 }` with a `logWarn` (contract C1) — see
+   * `normalizeJoinStrategy`.
    *
    * Non-ENOENT READ failures are NOT clean starts (review 05-F6 / L22): an
    * unreadable-but-present state file (EACCES, EISDIR, ...) is rethrown so the
@@ -688,7 +784,7 @@ export class EnginePersistence {
     } catch (err) {
       // write-through must never break the engine: degrade gracefully in memory,
       // but report the failure so callers can gate clearDirty / retry (M5).
-      logWarn(`engine-persist: save failed for graph "${state.graphId}": ${String(err)}`);
+      logWarn(`engine-persist: save failed for graph "${state.graphId}": ${errorText(err)}`);
       return false;
     }
   }
@@ -750,30 +846,83 @@ export function loadEngineStateFromJson(
 /**
  * Structural presence gate for the required fields of a v2 engine-state file.
  *
- * Beyond the collection/array fields, this also gates `graphDeclaration` (an
- * object — a missing declaration would otherwise let deserializeEngineState
- * return a state whose `graphDeclaration` is `undefined`, and
- * `hydrateEngineState`'s `clearUndeclaredLoopGroupIds` would throw a TypeError
- * OUTSIDE the load try/catch, breaking the "never throws / permanently
- * recoverable" contract — review 05-F2 / M15) and the scalar lifecycle fields
- * `startedAt` / `updatedAt` (numbers) / `advancingLock` (boolean) — `undefined`
- * timestamps would propagate into staleness math as `NaN` comparisons that
- * never fire, silently disabling node timeout detection.
+ * **Top level** — beyond the collection/array fields, this also gates
+ * `graphDeclaration` (an object — a missing declaration would otherwise let
+ * deserializeEngineState return a state whose `graphDeclaration` is
+ * `undefined`, and `hydrateEngineState`'s `clearUndeclaredLoopGroupIds` would
+ * throw a TypeError OUTSIDE the load try/catch, breaking the "never throws /
+ * permanently recoverable" contract — review 05-F2 / M15) and the scalar
+ * lifecycle fields `startedAt` / `updatedAt` (numbers) / `advancingLock`
+ * (boolean) — `undefined` timestamps would propagate into staleness math as
+ * `NaN` comparisons that never fire, silently disabling node timeout
+ * detection.
+ *
+ * **Node level (R2)** — every node entry must carry the fields hydration and
+ * the runtime depend on: `agent` / `prompt` (strings), `needsApproval`
+ * (boolean), `signalsObserved` / `upstreamResults` (objects) and
+ * `tokensConsumed` (an object with the three NUMERIC counters). A node missing
+ * any of them is CORRUPT (clean start, `null`) instead of a "shape-valid"
+ * node hydrated by the old `as NodeRuntimeState["tokensConsumed"]` cast: that
+ * cast let `{ ...undefined }` turn the required `tokensConsumed` into `{}`,
+ * after which `inputTokens + outputTokens` was `NaN` → `null` through a JSON
+ * round trip → the three `>=` ceiling comparisons in budget-bridge.ts were all
+ * false and a declared `max_total_*` graph silently lost its budget gate.
+ *
+ * Behaviour change (node report §compat): files that previously "barely
+ * loaded" — a node missing these fields — now load as a clean start.
  */
 function hasRequiredShape(file: Partial<EnginePersistenceFile>): boolean {
-  return (
-    isPlainObject(file.graphDeclaration) &&
-    isPlainObject(file.nodes) &&
+  if (
+    !isPlainObject(file.graphDeclaration) ||
+    !isPlainObject(file.nodes) ||
     // D3: `file.edges` is NOT required — new files never carry it (the dead
     // field was removed). A legacy `edges` extra key is tolerated and ignored.
-    isPlainObject(file.loopGroups) &&
-    isPlainObject(file.signalLedger) &&
-    Array.isArray(file.frontier) &&
-    Array.isArray(file.pendingCompletions) &&
-    isPlainObject(file.budget) &&
-    typeof file.startedAt === "number" &&
-    typeof file.updatedAt === "number" &&
-    typeof file.advancingLock === "boolean"
+    !isPlainObject(file.loopGroups) ||
+    !isPlainObject(file.signalLedger) ||
+    !Array.isArray(file.frontier) ||
+    !Array.isArray(file.pendingCompletions) ||
+    !isPlainObject(file.budget) ||
+    typeof file.startedAt !== "number" ||
+    typeof file.updatedAt !== "number" ||
+    typeof file.advancingLock !== "boolean"
+  ) {
+    return false;
+  }
+  // R2 node-level gate — the top-level container check alone let a
+  // `{ status, joinStrategy }` stub pass all three gates and hydrate.
+  for (const node of Object.values(file.nodes)) {
+    if (!hasRequiredNodeShape(node)) return false;
+  }
+  return true;
+}
+
+/**
+ * Node-level presence/type gate for one persisted node DTO (R2).
+ *
+ * Mirrors the required (non-optional) fields of {@link NodeRuntimeState} whose
+ * absence would silently produce a type-legal but semantically broken node:
+ * `agent` / `prompt` / `needsApproval` (the node's identity + pausing flag),
+ * `signalsObserved` / `upstreamResults` (spread-iterated during hydration)
+ * and the `tokensConsumed` counters (the budget gate reads them). Optional
+ * additive fields are deliberately NOT required here.
+ */
+function hasRequiredNodeShape(node: unknown): boolean {
+  if (!isPlainObject(node)) return false;
+  if (
+    typeof node.agent !== "string" ||
+    typeof node.prompt !== "string" ||
+    typeof node.needsApproval !== "boolean" ||
+    !isPlainObject(node.signalsObserved) ||
+    !isPlainObject(node.upstreamResults)
+  ) {
+    return false;
+  }
+  const tokens = node.tokensConsumed;
+  if (!isPlainObject(tokens)) return false;
+  return (
+    typeof tokens.inputTokens === "number" &&
+    typeof tokens.outputTokens === "number" &&
+    typeof tokens.cost === "number"
   );
 }
 
@@ -782,25 +931,57 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-// ── Enum vocabulary validation (R2) ─────────────────────────────────────────
+// ── Join-strategy vocabulary + enum validation (R2 / C1) ────────────────────
 
 /**
- * Whether a persisted `joinStrategy` value is a member of the runtime
- * vocabulary: one of {@link JOIN_STRATEGY_VALUES} (`"all"` / `"any"` /
- * `"quorum"`) or a `{ quorum: number }` object whose quorum is a positive
- * integer. Mirrors {@link ResolvedJoinStrategy} in join-evaluator.ts — the
- * object form is what `resolveJoinStrategy` produces for a `quorum:N` config,
- * and `evaluateJoin` reads only `.quorum` off the object at runtime.
+ * Legacy bare `"quorum"` marker (contract C1).
+ *
+ * `JOIN_STRATEGY_VALUES` contains `"quorum"` as a *declaration* vocabulary
+ * member, and older persistence builds accepted every member of it — so files
+ * on disk may carry the bare string, which carries NO count. It is not
+ * runtime-valid (`ResolvedJoinStrategy` has no bare `"quorum"` member): the
+ * two consumption points disagreed on it (`evaluateJoin` fell through to the
+ * `all` branch, `shouldCancel` to `any`), so it must never reach the runtime
+ * again — it is normalized here instead.
+ */
+const LEGACY_BARE_QUORUM_JOIN_STRATEGY = "quorum";
+
+/**
+ * Normalize a persisted `joinStrategy` into the runtime vocabulary.
+ *
+ * - `"all"` / `"any"` → unchanged;
+ * - a legacy bare `"quorum"` → `{ quorum: 1 }` (the historical runtime
+ *   default — validator-v2's old `?? 1`); the caller logs the downgrade;
+ * - `{ quorum: positive-int }` → unchanged;
+ * - anything else (an unknown string, a non-positive / fractional / non-number
+ *   quorum, `null`, an array, …) → `undefined` = out of vocabulary = corrupt.
+ *
+ * Deliberately does NOT consult `JOIN_STRATEGY_VALUES`: that set is the
+ * *declaration* vocabulary and still contains `"quorum"`, which must not be
+ * admitted at the persistence trust boundary.
+ */
+function normalizeJoinStrategy(v: unknown): ResolvedJoinStrategy | undefined {
+  if (v === "all" || v === "any") return v;
+  if (v === LEGACY_BARE_QUORUM_JOIN_STRATEGY) return { quorum: 1 };
+  if (isPlainObject(v)) {
+    // `isPlainObject` narrows to Record<string, unknown> — no assertion needed
+    // (the previous implementation cast this same read).
+    const q = v.quorum;
+    if (typeof q === "number" && Number.isInteger(q) && q > 0) {
+      return { quorum: q };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a persisted `joinStrategy` value can be normalized into the runtime
+ * vocabulary. A legacy bare `"quorum"` counts as valid — it is normalized to
+ * `{ quorum: 1 }` on hydration (with a warning), never rejected as corrupt;
+ * every other out-of-vocabulary value is corrupt.
  */
 function isValidJoinStrategy(v: unknown): boolean {
-  if (typeof v === "string") {
-    return (JOIN_STRATEGY_VALUES as readonly string[]).includes(v);
-  }
-  if (isPlainObject(v) && "quorum" in v) {
-    const q = (v as { quorum: unknown }).quorum;
-    return typeof q === "number" && Number.isInteger(q) && q > 0;
-  }
-  return false;
+  return normalizeJoinStrategy(v) !== undefined;
 }
 
 /**
@@ -812,8 +993,8 @@ function isValidJoinStrategy(v: unknown): boolean {
  * (node-lifecycle.ts — `VALID_NODE_TRANSITIONS[from]` on `undefined`). This
  * gate rejects out-of-vocabulary values up front:
  * - every node `status` ∈ {@link NODE_STATUS_VALUES};
- * - every node `joinStrategy` ∈ {@link JOIN_STRATEGY_VALUES} or a
- *   `{ quorum: number }` object with a positive integer quorum;
+ * - every node `joinStrategy` ∈ `"all" | "any"` / a `{ quorum: positive-int }`
+ *   object / the normalizable legacy bare `"quorum"`;
  * - `file.phase` ∈ {@link ENGINE_PHASE_VALUES}.
  *
  * Throws a descriptive Error on the first violation, so
@@ -823,27 +1004,23 @@ function isValidJoinStrategy(v: unknown): boolean {
  * start) — see `loadEngineStateFromJson`.
  */
 function assertValidEnums(file: Partial<EnginePersistenceFile>): void {
-  if (!ENGINE_PHASE_VALUES.includes(file.phase as EnginePhase)) {
+  const phase = file.phase;
+  if (phase === undefined || !ENGINE_PHASE_VALUES.includes(phase)) {
     throw new Error(
       `engine-persist: phase "${String(file.phase)}" is not a valid EnginePhase`,
     );
   }
   for (const [id, node] of Object.entries(file.nodes ?? {})) {
-    if (!NODE_STATUS_VALUES.includes(node.status as NodeStatus)) {
+    if (!NODE_STATUS_VALUES.includes(node.status)) {
       throw new Error(
         `engine-persist: node "${id}" status "${String(node.status)}" is not a valid NodeStatus`,
       );
     }
     if (!isValidJoinStrategy(node.joinStrategy)) {
       throw new Error(
-        `engine-persist: node "${id}" joinStrategy is not valid (expected one of ${JOIN_STRATEGY_VALUES.join("/")} or a { quorum: positive-int } object)`,
+        `engine-persist: node "${id}" joinStrategy "${String(node.joinStrategy)}" is not valid (expected "all", "any", or a { quorum: positive-int } object)`,
       );
     }
   }
 }
 
-/** Minimal, dependency-free warning logger (no createSubLogger import cycle). */
-function logWarn(message: string): void {
-  // eslint-disable-next-line no-console
-  console.warn(message);
-}

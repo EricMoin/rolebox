@@ -27,10 +27,10 @@ import { describe, it, expect } from "bun:test";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createGraphToolSet, GraphToolSet } from "../../src/graph/tools/graph-tools";
-import { importGraphFromFile } from "../../src/graph/parser-v2";
-import { serializeGraphDeclaration } from "../../src/graph/serialize";
-import type { GraphDeclaration } from "../../src/types.graph-v2";
+import { createGraphToolSet, GraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { importGraphFromFile, parseGraph } from "../../src/graph/parser-v2.ts";
+import { serializeGraphDeclaration } from "../../src/graph/serialize.ts";
+import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -150,6 +150,36 @@ describe("serializeGraphDeclaration", () => {
     expect(yaml.trimStart().startsWith("graph:")).toBe(true);
     expect(yaml).toContain("version: 2");
     expect(yaml).toContain("agent-a");
+  });
+
+  it("preserves declaration metadata across serialize → parse (Y6)", () => {
+    // `template`, `max_iterations`, and `loop_groups[].mode` are documented as
+    // round-trip metadata, but the parser used to drop all three — every
+    // serialize → parse lost them. They are now mapped, so this pins the
+    // lossless round trip.
+    const d: GraphDeclaration = {
+      version: 2,
+      name: "metadata",
+      template: "review-loop",
+      max_iterations: 4,
+      nodes: [
+        { id: "a", agent: "agent-a", prompt: "p" },
+        { id: "b", agent: "agent-b", prompt: "p" },
+      ],
+      edges: [
+        { from: "a", to: "b", type: "always" },
+        { from: "b", to: "a", type: "on_signal", signal_filter: ["revise_needed"] },
+      ],
+      loop_groups: [
+        { id: "lg", nodes: ["a", "b"], max_traversals: 3, mode: "inherit" },
+      ],
+    };
+    const parsed = parseGraph(serializeGraphDeclaration(d));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.graph.template).toBe("review-loop");
+    expect(parsed.graph.max_iterations).toBe(4);
+    expect(parsed.graph.loop_groups?.[0].mode).toBe("inherit");
   });
 });
 

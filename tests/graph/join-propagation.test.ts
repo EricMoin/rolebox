@@ -21,7 +21,7 @@
 import { describe, it, expect } from "bun:test";
 import { JoinStrategy } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
-import type { EdgePayload } from "../../src/types.engine-v2.ts";
+import type { EdgePayload, ResolvedJoinStrategy } from "../../src/types.engine-v2.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import { collectUpstreamResults } from "../../src/graph/engine/join-evaluator.ts";
 
@@ -50,12 +50,19 @@ function diamondGraph(): GraphDeclaration {
 /** A diamond sink declared with a specific join strategy. */
 function diamondWithJoin(
   strategy: "all" | "any" | "quorum",
-  quorum?: number,
+  quorum = 1,
 ): GraphDeclaration {
   const g = diamondGraph();
   const sink = g.nodes.find((n) => n.id === "sink")!;
+  // Explicit per-branch literals keep the helper assignable to the JoinConfig
+  // discriminated union (C1): `{ strategy: "all" | "any" }` is not assignable
+  // to the union of its two object branches.
   sink.join =
-    strategy === "quorum" ? { strategy: "quorum", quorum } : { strategy };
+    strategy === "quorum"
+      ? { strategy: "quorum", quorum }
+      : strategy === "any"
+        ? { strategy: "any" }
+        : { strategy: "all" };
   return g;
 }
 
@@ -101,17 +108,29 @@ describe("registerNode propagates the declared join into the runtime field", () 
     expect(state.nodes.get("sink")!.joinStrategy).toEqual({ quorum: 2 });
   });
 
-  it("propagates join:{ strategy: 'quorum' } (no quorum) with a default quorum of 1", () => {
-    const state = provisionedState(diamondWithJoin("quorum"));
+  it("keeps the defensive default of 1 for an untyped legacy declaration with no count", () => {
+    const decl = diamondGraph();
+    const sink = decl.nodes.find((n) => n.id === "sink")!;
+    // The declared JoinConfig union (C1) cannot express a count-less quorum,
+    // and validator-v2 rule 9 rejects it at the declaration boundary; the only
+    // way it reaches the resolver is from OUTSIDE the type system (hand-written
+    // JS, pre-normalization persisted state). JSON.parse is that boundary, and
+    // the resolver still degrades a missing count to the documented default of
+    // 1 instead of answering `undefined`.
+    sink.join = JSON.parse('{"strategy":"quorum"}');
+    const state = provisionedState(decl);
     expect(state.nodes.get("sink")!.joinStrategy).toEqual({ quorum: 1 });
   });
 
   it("every non-root node gets a propagated strategy (no hardcoded 'all')", () => {
     const state = provisionedState(diamondWithJoin("any"));
     const runtime = state.nodes.get("sink")!.joinStrategy;
-    const declared = diamondWithJoin("any").nodes.find((n) => n.id === "sink")!.join;
-    // Runtime field and declaration agree for the same node.
-    expect(runtime).toBe(declared!.strategy);
+    const declared = diamondWithJoin("any").nodes.find((n) => n.id === "sink")!.join!;
+    // Runtime field and declaration agree for the same node (C1 maps a declared
+    // `{ strategy: "quorum", quorum: N }` onto the runtime `{ quorum: N }` form).
+    const declaredStrategy: ResolvedJoinStrategy =
+      declared.strategy === "quorum" ? { quorum: declared.quorum } : declared.strategy;
+    expect(runtime).toBe(declaredStrategy);
     expect(runtime).not.toBe(JoinStrategy.All);
   });
 });

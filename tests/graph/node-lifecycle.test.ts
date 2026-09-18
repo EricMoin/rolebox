@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { NodeStatus } from "../../src/constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
+import { createEngineState } from "../../src/graph/engine/engine-state.ts";
 import {
   canTransitionNode,
   transitionNode,
@@ -15,9 +16,14 @@ import {
   markNodeBlocked,
 } from "../../src/graph/engine/node-lifecycle.ts";
 
-// Sentinel for tests that exercise transition legality without an engine state.
-// recordCheckpointForNode is a no-op when state is falsy.
-const NO_STATE = undefined as unknown as EngineState;
+// Real (graph-less) engine state for tests that exercise transition legality
+// without a provisioned graph. `recordCheckpointForNode` requires a live state
+// (B12: its former "falsy state is a no-op" guard was removed as unreachable),
+// so the old `undefined` sentinel no longer works.
+const NO_STATE: EngineState = createEngineState(
+  { version: 2, name: "lifecycle", nodes: [], edges: [] },
+  "g-lifecycle",
+);
 
 // ── Fixture builder ──────────────────────────────────────────────────────
 

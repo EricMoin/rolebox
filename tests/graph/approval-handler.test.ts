@@ -24,6 +24,9 @@ import {
   pruneDownstreamSubgraph,
   reenterRejectedUpstreams,
   resetRejectedUpstreams,
+  approvalPayloadProblem,
+  approvalResultText,
+  normalizeApprovalPayload,
 } from "../../src/graph/engine/approval-handler.ts";
 import type { CancelDispatchPort } from "../../src/graph/engine/cascade-canceller.ts";
 
@@ -109,7 +112,7 @@ function buildEngine(
     dispatch: fake,
     // Recording completion seam — existing assertions never read it, so the
     // always-on recorder is behavior-neutral for the pre-existing tests.
-    onNodeCompletion: (e) => events.push(e),
+    onNodeCompletion: (e) => { events.push(e); },
   });
   return { state, engine, fake, events };
 }
@@ -309,8 +312,12 @@ describe("reject (engine path)", () => {
     const p = rig.state.nodes.get("P")!;
     p.status = NodeStatus.Escalate;
     const report = rejectBlockedNode(rig.state, p, "x");
-    expect(report.kind).toBe("already_resolved");
-    expect(report.actualStatus).toBe(NodeStatus.Escalate);
+    // B16: the report is a discriminated union — `actualStatus` exists only on
+    // the already_resolved branch.
+    expect(report).toEqual({
+      kind: "already_resolved",
+      actualStatus: NodeStatus.Escalate,
+    });
     expect(p.status).toBe(NodeStatus.Escalate);
   });
 
@@ -665,4 +672,236 @@ describe("partialApprove (engine path)", () => {
         .partial_approve.reason,
     ).toBe("v1");
   });
+// ── R6: approval payload trust boundary ─────────────────────────────────────
+
+describe("R6: approval payload normalization", () => {
+  it("rejects a non-JSON payload before any state change (node stays blocked)", async () => {
+    const rig = buildEngine(gateGraph());
+    await pauseAtGate(rig);
+    const p = rig.state.nodes.get("P")!;
+    expect(p.status).toBe(NodeStatus.Blocked);
+
+    await expect(rig.engine.approveNode("P", () => "nope")).rejects.toThrow(TypeError);
+
+    // Old behaviour: `markCompleted` ran first and only then did
+    // JSON.stringify(fn) answer `undefined` — the node ended `completed` with
+    // an EdgePayload.result that was not a string, so the downstream join
+    // could never activate (a hung graph with no rollback). New behaviour: the
+    // payload is rejected before the state machine runs, so nothing moved.
+    expect(p.status).toBe(NodeStatus.Blocked);
+    expect(p.signalsObserved["answer"]).toBeUndefined();
+    expect(rig.state.nodes.get("D")!.status).toBe(NodeStatus.Pending);
+
+    // A valid payload afterwards still resolves the gate normally.
+    await rig.engine.approveNode("P", "fine");
+    expect(p.status).toBe(NodeStatus.Completed);
+  });
+
+  it("rejects bigint, symbol and circular payloads without mutating state", async () => {
+    const cases: Array<[string, () => unknown]> = [
+      ["bigint", () => BigInt(7)],
+      ["symbol", () => Symbol("s")],
+      [
+        "circular reference",
+        () => {
+          const cyclic: Record<string, unknown> = {};
+          cyclic["self"] = cyclic;
+          return cyclic;
+        },
+      ],
+    ];
+    for (const [label, make] of cases) {
+      const rig = buildEngine(gateGraph());
+      await pauseAtGate(rig);
+      const p = rig.state.nodes.get("P")!;
+      await expect(rig.engine.approveNode("P", make())).rejects.toThrow(TypeError);
+      expect(`${label}: ${p.status}`).toBe(`${label}: ${NodeStatus.Blocked}`);
+      expect(p.signalsObserved["answer"]).toBeUndefined();
+    }
+  });
+
+  it("records a JSON-safe answer for an accepted object payload and forwards JSON text", async () => {
+    const rig = buildEngine(gateGraph());
+    await pauseAtGate(rig);
+    const payload = { approved: true, note: "lgtm", nested: [1, 2] };
+
+    await rig.engine.approveNode("P", payload);
+
+    const p = rig.state.nodes.get("P")!;
+    expect(p.status).toBe(NodeStatus.Completed);
+    // The recorded answer is a JSON-safe copy — deep-equal, never the caller's
+    // object identity (so a caller mutating its payload cannot rewrite state).
+    expect(p.signalsObserved["answer"]).toEqual(payload);
+    expect(p.signalsObserved["answer"]).not.toBe(payload);
+    // The downstream edge carries JSON text, never `undefined`.
+    const forwarded = rig.state.nodes.get("D")!.upstreamResults.get("P")!;
+    expect(forwarded.result).toBe(JSON.stringify(payload));
+  });
+});
+
+describe("R6: normalizeApprovalPayload / approvalResultText / approvalPayloadProblem", () => {
+  it("projects non-JSON values to JSON-safe ones without throwing", () => {
+    expect(normalizeApprovalPayload(BigInt(7))).toBe("7");
+    expect(normalizeApprovalPayload({ n: BigInt(7) })).toEqual({ n: "7" });
+    expect(normalizeApprovalPayload(undefined)).toBeNull();
+    expect(normalizeApprovalPayload({ a: undefined, b: 1 })).toEqual({ b: 1 });
+    expect(normalizeApprovalPayload([undefined, () => {}])).toEqual([null, null]);
+    expect(normalizeApprovalPayload(Number.NaN)).toBeNull();
+    const cyclic: Record<string, unknown> = { name: "x" };
+    cyclic["self"] = cyclic;
+    expect(normalizeApprovalPayload(cyclic)).toEqual({ name: "x", self: "[Circular]" });
+    // A DAG (a shared reference with no cycle) is duplicated, not reported as
+    // circular — exactly what JSON.stringify does.
+    const shared = { v: 1 };
+    expect(normalizeApprovalPayload({ a: shared, b: shared })).toEqual({
+      a: { v: 1 },
+      b: { v: 1 },
+    });
+    // `toJSON` is honoured the way JSON.stringify honours it.
+    expect(normalizeApprovalPayload(new Date("2020-01-02T03:04:05.000Z"))).toBe(
+      "2020-01-02T03:04:05.000Z",
+    );
+  });
+
+  it("answers a string for every input — never undefined, never a throw", () => {
+    expect(approvalResultText("verbatim")).toBe("verbatim");
+    expect(approvalResultText(undefined)).toBe("");
+    expect(approvalResultText(null)).toBe("");
+    expect(approvalResultText({ a: 1 })).toBe('{"a":1}');
+    expect(approvalResultText(BigInt(9))).toBe('"9"');
+    expect(approvalResultText(() => {})).toContain("=>");
+    const cyclic: Record<string, unknown> = {};
+    cyclic["self"] = cyclic;
+    expect(approvalResultText(cyclic)).toBe('{"self":"[Circular]"}');
+    // A getter that throws is contained: the payload reads as unreadable
+    // instead of escaping the normalizer mid-approval.
+    const hostile = {
+      get boom(): never {
+        throw new Error("nope");
+      },
+    };
+    expect(normalizeApprovalPayload(hostile)).toBe("[Unreadable]");
+    expect(() => approvalResultText(hostile)).not.toThrow();
+  });
+
+  it("names the offending member for a rejected payload", () => {
+    expect(approvalPayloadProblem("ok")).toBeUndefined();
+    expect(approvalPayloadProblem({ a: [1, BigInt(2)] })).toContain("$.a[1]");
+    expect(approvalPayloadProblem(() => {})).toContain("function");
+    expect(approvalPayloadProblem(Symbol("x"))).toContain("symbol");
+    const cyclic: Record<string, unknown> = {};
+    cyclic["self"] = cyclic;
+    expect(approvalPayloadProblem(cyclic)).toContain("circular");
+  });
+});
+
+// ── R3: quorum join strategy in the partial-approval prune lane ─────────────
+
+describe("R3: quorum join strategy drives shouldCancel through readQuorum", () => {
+  /** S1 + S2 feed both the gate P and a quorum join Q. */
+  function quorumGraph(quorum: number): GraphDeclaration {
+    return {
+      version: 2,
+      name: "quorum-prune",
+      nodes: [
+        { id: "S1", agent: "a1", prompt: "s1" },
+        { id: "S2", agent: "a2", prompt: "s2" },
+        { id: "Q", agent: "a3", prompt: "q", join: { strategy: "quorum", quorum } },
+        { id: "P", agent: "a4", prompt: "decide", needs_approval: true },
+        { id: "D", agent: "a5", prompt: "d" },
+      ],
+      edges: [
+        { from: "S1", to: "P", type: "always" },
+        { from: "S2", to: "P", type: "always" },
+        { from: "S1", to: "Q", type: "always" },
+        { from: "S2", to: "Q", type: "always" },
+        { from: "P", to: "D", type: "always" },
+      ],
+    };
+  }
+
+  it("cancels a quorum:2 node when only one approved feeder survives", () => {
+    const rig = buildEngine(quorumGraph(2));
+    const report = pruneDownstreamSubgraph(rig.state, ["S2"], "P");
+    expect(report.cancelled).toEqual(["Q"]);
+    expect(report.surviving).toEqual([]);
+  });
+
+  it("keeps a quorum:1 node that still has one approved feeder", () => {
+    const rig = buildEngine(quorumGraph(1));
+    const report = pruneDownstreamSubgraph(rig.state, ["S2"], "P");
+    expect(report.cancelled).toEqual([]);
+    expect(report.surviving).toEqual(["Q"]);
+  });
+});
+
+// ── C6: the engine's control paths answer their reports directly (W3-A) ─────
+//
+// Old behavior: `AdvanceEngine.approveNode / rejectNode / partialApprove`
+// resolved `void`, so the runtime had to derive the report by diffing status
+// snapshots around the awaited call (approve / reject) or by re-running
+// `pruneDownstreamSubgraph` on a snapshot (partialApprove) — a SECOND decision
+// procedure over a window in which another critical section could run.
+// New behavior: each method resolves the report produced by the primitive that
+// performed the mutation (`approveReport` / `rejectBlockedNode` /
+// `pruneDownstreamSubgraph`), so `EngineRuntime` is a pure pass-through and
+// there is exactly one decision procedure.
+//
+// Revert-would-fail: with the old `Promise<void>` signatures these assertions
+// receive `undefined` (no `applied`, no `kind`, no `cancelled`) and fail.
+
+describe("C6: engine control paths answer their reports", () => {
+  it("approveNode resolves {applied:true}, then {applied:false} for the idempotent replay", async () => {
+    const rig = buildEngine(gateGraph());
+    await pauseAtGate(rig);
+
+    expect(await rig.engine.approveNode("P", "looks good")).toEqual({ applied: true });
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Completed);
+
+    // Replay against an already-resolved node: the primitive answers null, and
+    // the engine projects that into the report instead of resolving void.
+    expect(await rig.engine.approveNode("P", "looks good")).toEqual({ applied: false });
+  });
+
+  it("rejectNode resolves the lane report, then already_resolved with the live status", async () => {
+    const rig = buildEngine(gateGraph());
+    await pauseAtGate(rig);
+
+    expect(await rig.engine.rejectNode("P", "not good enough")).toEqual({ kind: "escalate" });
+    expect(await rig.engine.rejectNode("P", "not good enough")).toEqual({
+      kind: "already_resolved",
+      actualStatus: NodeStatus.Escalate,
+    });
+  });
+
+  it("partialApprove resolves the prune report of the verdict it applied", async () => {
+    const rig = buildEngine(partialGraph());
+    // Drive S1, S2 to completion → P and X dispatched; P pauses for approval.
+    await rig.engine.dispatchReady();
+    await rig.engine.onNodeSignalEmitted("S1", "answer", "r1");
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2");
+    await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+
+    // Rejecting S2 prunes its transitive dependents (X, then Y through the
+    // all-join) and keeps Z (an `any` join satisfied by the approved S1). The
+    // report is the engine's own prune result, not a snapshot re-run.
+    const report = await rig.engine.partialApprove("P", ["S1"], ["S2"], "fix branch 2");
+    expect([...report.cancelled].sort()).toEqual(["X", "Y"]);
+    expect(report.surviving).toEqual(["Z"]);
+    expect(rig.state.nodes.get("X")!.status).toBe(NodeStatus.Done);
+  });
+
+  it("partialApprove resolves the empty report for a non-blocked gate (no-op verdict)", async () => {
+    const rig = buildEngine(gateGraph());
+    await pauseAtGate(rig);
+    await rig.engine.approveNode("P", "ok"); // P → completed, no longer a gate
+
+    expect(await rig.engine.partialApprove("P", [], [])).toEqual({
+      cancelled: [],
+      surviving: [],
+    });
+  });
+});
+
 });

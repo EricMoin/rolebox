@@ -1,5 +1,5 @@
 import { describe, test, expect, jest, mock, beforeEach, afterEach } from "bun:test";
-import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../src/utils/timeout";
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "../../src/utils/timeout.ts";
 import type { Logger } from "tslog";
 
 // ── Mock Logger ──────────────────────────────────────────────────────

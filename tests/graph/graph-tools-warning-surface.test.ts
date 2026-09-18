@@ -30,7 +30,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { createGraphToolSet } from "../../src/graph/tools/graph-tools";
+import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 
 // ── (a) 2-node always-cycle A<->B with NO loop group ───────────────────────
 

@@ -19,21 +19,21 @@ import {
   GraphToolSet,
   type GraphToolSetDeps,
   log as graphToolsLog,
-} from "../../src/graph/tools/graph-tools";
-import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools";
-import type { EngineState } from "../../src/types.engine-v2";
-import type { NodeRuntimeState } from "../../src/types.engine-v2";
-import type { DispatchTask } from "../../src/dispatch/types";
+} from "../../src/graph/tools/graph-tools.ts";
+import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools.ts";
+import type { EngineState } from "../../src/types.engine-v2.ts";
+import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type {
   DispatchParentContext,
   TaskTerminatedCallback,
-} from "../../src/graph/engine/dispatch-bridge";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
-import type { EngineRuntime } from "../../src/graph/engine/index";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import { graphEventsPath } from "../../src/graph/engine/graph-events";
-import { GraphEventRecorder } from "../../src/graph/engine/graph-events";
-import { clearParentQueues, GRAPH_BLOCKED_MARKER } from "../../src/dispatch/notification";
+} from "../../src/graph/engine/dispatch-bridge.ts";
+import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
+import type { EngineRuntime } from "../../src/graph/engine/index.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import { graphEventsPath } from "../../src/graph/engine/graph-events.ts";
+import { GraphEventRecorder } from "../../src/graph/engine/graph-events.ts";
+import { clearParentQueues, GRAPH_BLOCKED_MARKER } from "../../src/dispatch/notification.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 

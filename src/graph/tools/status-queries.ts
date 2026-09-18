@@ -54,6 +54,7 @@
 
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
+import { getSignal } from "../engine/signal-payload.ts";
 
 /**
  * The `graph_status` filter surface. Every field is optional — a filter is
@@ -72,6 +73,26 @@ export interface StatusQuery {
   to_date?: string;
 }
 
+/**
+ * Ledger key of the non-signal approval context stash. The engine writes it via
+ * `recordSignalToLedger` (engine-advance.ts, `buildApprovalPayload`) as a
+ * *context stash*, not one of the signal types — so it is deliberately not part
+ * of the engine's `SIGNAL_KEY` vocabulary, but the read still goes through the
+ * shared `getSignal` narrowing seam (Y8).
+ */
+const APPROVAL_PAYLOAD_KEY = "approval_payload";
+
+/**
+ * A `signalsObserved` ledger entry that is present. The shared `getSignal`
+ * seam (contract C2) takes a type predicate, and a stored `undefined` is
+ * indistinguishable from an absent key — so this is exactly the "recorded at
+ * all" test the ad-hoc `signalsObserved?.[key]` reads used to spell out (Y8),
+ * now shared by every tools-layer ledger read.
+ */
+export function isRecordedSignal(value: unknown): value is unknown {
+  return value !== undefined;
+}
+
 /** Parse an ISO-8601 string to epoch ms, or throw on an invalid value. */
 export function toEpochMs(iso: string): number {
   const ms = new Date(iso).getTime();
@@ -85,19 +106,46 @@ export function toEpochMs(iso: string): number {
  * Case-insensitive substring match on nodeId / prompt / agent.
  * A trimmed empty query matches nothing — never the whole set.
  */
+function queryPredicate(query: string): (n: NodeRuntimeState) => boolean {
+  const needle = query.trim().toLowerCase();
+  if (needle === "") return () => false;
+  const hay = (s: string | undefined) => s?.toLowerCase() ?? "";
+  return (n) =>
+    hay(n.nodeId).includes(needle) ||
+    hay(n.prompt).includes(needle) ||
+    hay(n.agent).includes(needle);
+}
+
+/**
+ * Date-window predicate. `from_date` / `to_date` are ISO strings; either may
+ * be omitted. A node matches only when it has the data to answer the bound (see
+ * the module header for the honest semantics). The bounds are parsed EAGERLY,
+ * so an invalid ISO string throws when the predicate is built — matching the
+ * exported {@link filterByDateWindow} contract even for an empty node set.
+ */
+function dateWindowPredicate(
+  from_date?: string,
+  to_date?: string,
+): (n: NodeRuntimeState) => boolean {
+  const from = from_date !== undefined ? toEpochMs(from_date) : undefined;
+  const to = to_date !== undefined ? toEpochMs(to_date) : undefined;
+  return (n) => {
+    if (from !== undefined && n.startedAt < from) return false;
+    if (to !== undefined) {
+      // A node with no completion timestamp cannot satisfy an upper bound.
+      if (n.completedAt === undefined) return false;
+      if (n.completedAt > to) return false;
+    }
+    return true;
+  };
+}
+
+/** Case-insensitive substring match on nodeId / prompt / agent. */
 export function filterByQuery(
   nodes: ReadonlyMap<string, NodeRuntimeState>,
   query: string,
 ): NodeRuntimeState[] {
-  const needle = query.trim().toLowerCase();
-  if (needle === "") return [];
-  const hay = (s: string | undefined) => s?.toLowerCase() ?? "";
-  return [...nodes.values()].filter(
-    (n) =>
-      hay(n.nodeId).includes(needle) ||
-      hay(n.prompt).includes(needle) ||
-      hay(n.agent).includes(needle),
-  );
+  return [...nodes.values()].filter(queryPredicate(query));
 }
 
 /** Exact {@link NodeStatus} match. */
@@ -127,69 +175,41 @@ export function filterByDateWindow(
   from_date?: string,
   to_date?: string,
 ): NodeRuntimeState[] {
-  const from = from_date !== undefined ? toEpochMs(from_date) : undefined;
-  const to = to_date !== undefined ? toEpochMs(to_date) : undefined;
-  return [...nodes.values()].filter((n) => {
-    if (from !== undefined && n.startedAt < from) return false;
-    if (to !== undefined) {
-      // A node with no completion timestamp cannot satisfy an upper bound.
-      if (n.completedAt === undefined) return false;
-      if (n.completedAt > to) return false;
-    }
-    return true;
-  });
+  return [...nodes.values()].filter(dateWindowPredicate(from_date, to_date));
 }
 
 /**
  * Apply every supplied filter to the node set (AND-combined). Returns an
  * honest subset of the input — an empty array when nothing matches, never
  * fabricated rows. When no filter field is present, returns all nodes.
+ *
+ * Each active predicate is evaluated exactly once per node and the working set
+ * is narrowed in place; the cheapest predicate (the substring query) is
+ * composed first so `every` short-circuits on it. The old implementation
+ * recomputed every enabled filter over the FULL node set, built an id `Set`
+ * per filter, and intersected — semantically identical, needlessly quadratic.
  */
 export function filterNodes(
   nodes: ReadonlyMap<string, NodeRuntimeState>,
   query: StatusQuery,
 ): NodeRuntimeState[] {
-  const hasQuery = query.query !== undefined;
-  const hasStatus = query.status !== undefined;
-  const hasAgent = query.agent !== undefined;
-  const hasDate = query.from_date !== undefined || query.to_date !== undefined;
-  if (!hasQuery && !hasStatus && !hasAgent && !hasDate) {
-    return [...nodes.values()];
+  const predicates: Array<(n: NodeRuntimeState) => boolean> = [];
+  if (query.query !== undefined) {
+    predicates.push(queryPredicate(query.query));
   }
-
-  // Base set: the cheapest single filter first, then narrow with the rest.
-  let result: NodeRuntimeState[];
-  if (hasQuery) {
-    result = filterByQuery(nodes, query.query!);
-  } else if (hasStatus) {
-    result = filterByStatus(nodes, query.status!);
-  } else if (hasAgent) {
-    result = filterByAgent(nodes, query.agent!);
-  } else {
-    result = [...nodes.values()];
+  if (query.status !== undefined) {
+    const status = query.status;
+    predicates.push((n) => n.status === status);
   }
-
-  // Narrow the working set after the base filter for remaining predicates.
-  if (hasQuery) {
-    const wanted = new Set(filterByQuery(nodes, query.query!).map((n) => n.nodeId));
-    result = result.filter((n) => wanted.has(n.nodeId));
+  if (query.agent !== undefined) {
+    const target = query.agent.trim();
+    predicates.push((n) => n.agent === target);
   }
-  if (hasStatus) {
-    const wanted = new Set(filterByStatus(nodes, query.status!).map((n) => n.nodeId));
-    result = result.filter((n) => wanted.has(n.nodeId));
+  if (query.from_date !== undefined || query.to_date !== undefined) {
+    predicates.push(dateWindowPredicate(query.from_date, query.to_date));
   }
-  if (hasAgent) {
-    const wanted = new Set(filterByAgent(nodes, query.agent!).map((n) => n.nodeId));
-    result = result.filter((n) => wanted.has(n.nodeId));
-  }
-  if (hasDate) {
-    const wanted = new Set(
-      filterByDateWindow(nodes, query.from_date, query.to_date).map((n) => n.nodeId),
-    );
-    result = result.filter((n) => wanted.has(n.nodeId));
-  }
-
-  return result;
+  if (predicates.length === 0) return [...nodes.values()];
+  return [...nodes.values()].filter((n) => predicates.every((p) => p(n)));
 }
 
 // ── View flags (subtask 3 — additive, do not rewrite the filters above) ─────
@@ -310,10 +330,25 @@ function blockedSinceMs(payload: unknown, node: NodeRuntimeState): number | unde
   return node.startedAt;
 }
 
-/** Serialize a stashed approval_payload to a truncated one-line summary. */
+/**
+ * Serialize a stashed approval_payload to a truncated one-line summary.
+ *
+ * `JSON.stringify` throws on a cyclic value and on a BigInt, and answers
+ * `undefined` for a function / symbol — the tool boundary narrows the payload
+ * with `z.json()` (approve-tools.ts, B26), but a programmatic stash can still
+ * carry an unserializable value. A throw is contained here and surfaced as an
+ * explicit marker rather than escaping the read-only status query.
+ */
 function summarizePayload(payload: unknown, limit: number): string | undefined {
   if (payload === undefined || payload === null) return undefined;
-  const text = typeof payload === "string" ? payload : JSON.stringify(payload);
+  let text: string | undefined;
+  try {
+    text = typeof payload === "string" ? payload : JSON.stringify(payload);
+  } catch {
+    return "[unserializable payload]";
+  }
+  // A function / symbol payload has no JSON form — treated as "no summary",
+  // matching the pre-existing honest-absence behavior.
   if (text === undefined) return undefined;
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
@@ -346,7 +381,10 @@ export function listPendingApprovals(
     for (const node of state.nodes.values()) {
       if (node.status !== NodeStatus.Blocked) continue;
       if (!node.needsApproval) continue;
-      const payload = node.signalsObserved?.["approval_payload"];
+      // Shared ledger read (contract C2 / Y8): a missing / malformed ledger
+      // answers `undefined` instead of tripping the old optional chain, and the
+      // key is a named constant rather than a loose literal.
+      const payload = getSignal(node, APPROVAL_PAYLOAD_KEY, isRecordedSignal);
       out.push({
         graphId: state.graphId,
         nodeId: node.nodeId,

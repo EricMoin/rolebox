@@ -25,6 +25,7 @@ import {
   buildGraphCompletionText,
   buildGraphTerminalText,
   createGraphTerminalNotifier,
+  GRAPH_NOTIFY_DEDUPE_LIMIT,
   log as graphNotifyLog,
 } from "../../src/graph/engine/graph-notify.ts";
 import {
@@ -225,11 +226,20 @@ describe("createGraphNotifier", () => {
 
 // ── Graph-Terminal Notifier Fixtures ─────────────────────────────────────────
 
+/**
+ * Overrides for {@link makeTerminalEvent}. `terminalEpoch` is the Y26 epoch the
+ * engine stamps on a terminal event (`GraphTerminalEvent.terminalEpoch`);
+ * overriding it here lets the notifier's epoch handling be exercised directly,
+ * and the default `0` covers the legacy "no epoch claimed yet" shape.
+ */
+type TerminalEventOverrides = Partial<GraphTerminalEvent>;
+
 function makeTerminalEvent(
-  overrides: Partial<GraphTerminalEvent> = {},
+  overrides: TerminalEventOverrides = {},
 ): GraphTerminalEvent {
   return {
     graphId: "g-42",
+    terminalEpoch: 0,
     phase: overrides.isBlocked ? "executing" : "complete",
     nodeStatusSummaries: {
       completed: 3,
@@ -452,6 +462,35 @@ describe("createGraphTerminalNotifier", () => {
     expect(client2.prompts).toHaveLength(1);
   });
 
+  it("re-notifies when the terminal epoch advances (Y26)", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, {
+      emperorSessionId: EMPEROR_SESSION,
+    });
+
+    // Epoch 0 (no field yet / first terminal phase): the reminder fires once.
+    expect(await handler(makeTerminalEvent())).toBe(true);
+    // A replay of the SAME epoch is deduped.
+    expect(await handler(makeTerminalEvent())).toBe(false);
+    // A retry / re-open starts a NEW epoch: the second legitimate
+    // [GRAPH COMPLETE] must not be dropped as a replay of the first.
+    expect(await handler(makeTerminalEvent({ terminalEpoch: 1 }))).toBe(true);
+    expect(await handler(makeTerminalEvent({ terminalEpoch: 1 }))).toBe(false);
+    expect(client.prompts).toHaveLength(2);
+  });
+
+  it("keeps the terminal dedupe key distinct per terminal type within an epoch (Y26)", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphTerminalNotifier(client, {
+      emperorSessionId: EMPEROR_SESSION,
+    });
+
+    expect(await handler(makeTerminalEvent({ isBlocked: true, phase: "executing", terminalEpoch: 3 }))).toBe(true);
+    expect(await handler(makeTerminalEvent({ isBlocked: false, phase: "complete", terminalEpoch: 3 }))).toBe(true);
+    expect(await handler(makeTerminalEvent({ isBlocked: true, phase: "executing", terminalEpoch: 3 }))).toBe(false);
+    expect(client.prompts).toHaveLength(2);
+  });
+
   it("injection failure does not throw (returns false on prompt error)", async () => {
     class ThrowingSessionClient extends FakeSessionClient {
       override async prompt(
@@ -471,5 +510,30 @@ describe("createGraphTerminalNotifier", () => {
     // Must resolve and return false, not throw.
     const ok = await handler(makeTerminalEvent());
     expect(ok).toBe(false);
+  });
+});
+
+// ── Bounded dedupe epoch (Y26) ───────────────────────────────────────────────
+
+describe("dedupe epoch is bounded (Y26)", () => {
+  it("evicts the oldest key past the limit instead of growing without bound", async () => {
+    const client = new FakeSessionClient();
+    const handler = createGraphNotifier(client, {
+      emperorSessionId: EMPEROR_SESSION,
+      maxAttempts: 1, // no retry backoff — the loop below is synchronous work
+    });
+
+    for (let i = 0; i < GRAPH_NOTIFY_DEDUPE_LIMIT; i += 1) {
+      await handler(makeEvent({ startedAt: i }));
+    }
+    // The oldest key (startedAt 0) is still claimed at exactly the limit.
+    expect(await handler(makeEvent({ startedAt: 0 }))).toBe(false);
+
+    // One more distinct key crosses the bound and evicts the oldest.
+    await handler(makeEvent({ startedAt: GRAPH_NOTIFY_DEDUPE_LIMIT }));
+
+    // The evicted key is claimable again — bounded eviction, not unbounded
+    // growth (the trade-off is documented on GRAPH_NOTIFY_DEDUPE_LIMIT).
+    expect(await handler(makeEvent({ startedAt: 0 }))).toBe(true);
   });
 });

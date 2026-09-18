@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
-import { parseGraph } from "../../src/graph/parser-v2";
+import { parseGraph } from "../../src/graph/parser-v2.ts";
 import {
   validateGraphDeclaration,
   hasCycle as hasCycleV2,
-} from "../../src/graph/validator-v2";
-import type { GraphDocument } from "../../src/graph/parser-v2";
-import type { EdgeDeclaration } from "../../src/types.graph-v2";
+} from "../../src/graph/validator-v2.ts";
+import type { GraphDocument } from "../../src/graph/parser-v2.ts";
+import type { EdgeDeclaration } from "../../src/types.graph-v2.ts";
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -277,6 +277,162 @@ describe("parseGraph — deserialization", () => {
   it("reports a missing top-level graph block", () => {
     const result = parseGraph({ something: true });
     expect(result.ok).toBe(false);
+  });
+
+  // ── join mapping is explicit, never silently dropped (Y6) ────────────────
+
+  it("reports an unknown join strategy instead of dropping the field", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        nodes: [{ id: "a", agent: "ag", prompt: "p", join: "sometimes" }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(
+      result.errors.some(
+        (e) => e.includes("node[0]") && e.includes('unknown join strategy "sometimes"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects the bare string form \`join: quorum\` (no count)", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        nodes: [{ id: "a", agent: "ag", prompt: "p", join: "quorum" }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.includes("requires its count in the string form"))).toBe(true);
+  });
+
+  it("rejects the object form \`{ strategy: quorum }\` with no count", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        nodes: [{ id: "a", agent: "ag", prompt: "p", join: { strategy: "quorum" } }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.includes('requires a numeric "quorum" count'))).toBe(true);
+  });
+
+  it("maps the object form \`{ strategy: quorum, quorum: 2 }\`", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        nodes: [{ id: "a", agent: "ag", prompt: "p", join: { strategy: "quorum", quorum: 2 } }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.graph.nodes[0].join).toEqual({ strategy: "quorum", quorum: 2 });
+  });
+
+  it("lets an explicit \`quorum\` key override a combined \`quorum:N\` strategy string", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        nodes: [{ id: "a", agent: "ag", prompt: "p", join: { strategy: "quorum:3", quorum: 2 } }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.graph.nodes[0].join).toEqual({ strategy: "quorum", quorum: 2 });
+  });
+
+  // ── declaration metadata is mapped instead of dropped (Y6) ───────────────
+
+  it("maps \`template\` and \`max_iterations\` declaration metadata", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        name: "meta",
+        template: "review-loop",
+        max_iterations: 7,
+        nodes: [{ id: "a", agent: "ag", prompt: "p" }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.graph.template).toBe("review-loop");
+    expect(result.graph.max_iterations).toBe(7);
+  });
+
+  it("reports an unknown template value", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        template: "not-a-topology",
+        nodes: [{ id: "a", agent: "ag", prompt: "p" }],
+        edges: [],
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors.some((e) => e.includes('unknown value "not-a-topology"'))).toBe(true);
+  });
+
+  it("maps loop_groups[].mode and rejects an unknown mode", () => {
+    const group = (mode: unknown) => ({
+      version: 2,
+      nodes: [{ id: "a", agent: "ag", prompt: "p" }],
+      edges: [],
+      loop_groups: [{ id: "lg", nodes: ["a"], max_traversals: 3, mode }],
+    });
+
+    const inherit = parseGraph({ graph: group("inherit") });
+    expect(inherit.ok).toBe(true);
+    if (!inherit.ok) return;
+    expect(inherit.graph.loop_groups?.[0].mode).toBe("inherit");
+
+    const fresh = parseGraph({ graph: group("fresh") });
+    expect(fresh.ok).toBe(true);
+    if (!fresh.ok) return;
+    expect(fresh.graph.loop_groups?.[0].mode).toBe("fresh");
+
+    const bad = parseGraph({ graph: group("sometimes") });
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.errors.some((e) => e.includes('has unknown "mode"'))).toBe(true);
+  });
+
+  // ── budgets are keyed by the spec, not by whatever the input carried (Y7) ─
+
+  it("maps known budget fields and ignores unknown keys", () => {
+    const result = parseGraph({
+      graph: {
+        version: 2,
+        name: "budgets",
+        nodes: [
+          {
+            id: "a",
+            agent: "ag",
+            prompt: "p",
+            budget: { max_input_tokens: "120", max_cost_usd: 0.5, bogus_field: 7 },
+          },
+        ],
+        edges: [],
+        budget: { max_total_output_tokens: 42, max_total_sessions: 3 },
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.graph.nodes[0].budget).toEqual({
+      max_input_tokens: 120,
+      max_cost_usd: 0.5,
+    });
+    expect(result.graph.budget).toEqual({ max_total_output_tokens: 42 });
   });
 });
 

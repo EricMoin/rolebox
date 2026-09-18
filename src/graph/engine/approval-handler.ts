@@ -45,11 +45,13 @@ import {
   getJoinStrategy,
   getUpstreamNodeIds,
   joinSatisfied,
+  readQuorum,
 } from "./join-evaluator.ts";
 import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
 import type { CancelDispatchPort } from "./cascade-canceller.ts";
 import { retireCancelledNode } from "./cancellation.ts";
 import { recordSignalToLedger } from "./signal-bridge.ts";
+import { asRecord } from "./signal-payload.ts";
 import {
   deriveNodeArtifacts,
   recordNodeArtifactsAndEvidence,
@@ -57,17 +59,55 @@ import {
 
 // ── Report shapes ───────────────────────────────────────────────────────────
 
-/** Result of {@link rejectBlockedNode}. */
-export interface RejectReport {
-  /** Which lane the rejection took. */
-  kind: "escalate" | "revise" | "already_resolved";
+/**
+ * Result of {@link approveBlockedNode}, and of the public `EngineRuntime
+ * .approveNode` (contract C6): the caller learns whether its approval actually
+ * took effect instead of having to diff two `status()` snapshots around the
+ * call.
+ */
+export interface ApproveReport {
   /**
-   * When `kind === "already_resolved"`, the actual node status at the time of
-   * the no-op reject (e.g. Completed, Escalate, Done). Absent for genuine
-   * rejection lanes.
+   * `true` when the node was actually `blocked` and the approval transitioned
+   * it to `completed` — the `answer` signal was recorded and the forward data
+   * flow runs. `false` for an idempotent no-op: a replayed approve against an
+   * already-resolved node, or an approve against a node that was never
+   * `blocked`. A no-op approval performs no graph mutation.
    */
-  actualStatus?: NodeStatus;
+  applied: boolean;
 }
+
+/**
+ * Project the {@link approveBlockedNode} primitive's return value into the
+ * public {@link ApproveReport}. The primitive answers the downstream
+ * {@link EdgePayload} (`null` = the node was not `blocked`); the report only
+ * needs the fact that the approval was applied.
+ */
+export function approveReport(edgePayload: EdgePayload | null): ApproveReport {
+  return { applied: edgePayload !== null };
+}
+
+/**
+ * Result of {@link rejectBlockedNode}, and of the public `EngineRuntime
+ * .rejectNode` (contract C6).
+ *
+ * A discriminated union (B16): `actualStatus` exists only on the
+ * `already_resolved` branch, so a caller that needs it must first narrow on
+ * `kind`. The previous optional-field form made "the reject was a no-op
+ * because the node was already resolved" and "a genuine rejection lane"
+ * structurally indistinguishable — and a consumer reading `actualStatus`
+ * without checking `kind` got `undefined` for every real rejection.
+ */
+export type RejectReport =
+  | { kind: "escalate" }
+  | { kind: "revise" }
+  | {
+      kind: "already_resolved";
+      /**
+       * The actual node status at the time of the no-op reject (e.g.
+       * Completed, Escalate, Done).
+       */
+      actualStatus: NodeStatus;
+    };
 
 /** Result of {@link pruneDownstreamSubgraph}. */
 export interface PruneReport {
@@ -81,6 +121,224 @@ export interface PruneReport {
 export interface ReentryReport {
   /** Rejected upstream nodes re-marked `ready` and added to the frontier. */
   reEntered: string[];
+}
+
+// ── Approval payload normalization (R6) ─────────────────────────────────────
+
+/** Deepest nesting {@link normalizeApprovalPayload} walks before truncating. */
+const MAX_PAYLOAD_DEPTH = 64;
+
+/** Placeholder a cyclic payload reference normalizes to. */
+const CIRCULAR_PAYLOAD_MARKER = "[Circular]";
+
+/** Placeholder for a payload nested deeper than {@link MAX_PAYLOAD_DEPTH}. */
+const MAX_DEPTH_PAYLOAD_MARKER = "[MaxDepth]";
+
+/** Placeholder for a payload whose own property access throws. */
+const UNREADABLE_PAYLOAD_MARKER = "[Unreadable]";
+
+/**
+ * JSON-safe value produced by {@link normalizeApprovalPayload}: exactly the
+ * subset of `unknown` that survives `JSON.stringify` + `JSON.parse` without
+ * loss or a throw.
+ */
+export type ApprovalJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | ApprovalJsonValue[]
+  | { [key: string]: ApprovalJsonValue };
+
+/**
+ * Normalize one value, answering `undefined` for the members JSON drops
+ * (undefined / function / symbol on an object member) — the caller decides
+ * whether to drop or null-placehold them.
+ */
+function normalizeApprovalValue(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>,
+): ApprovalJsonValue | undefined {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      // JSON has no NaN / ±Infinity — they serialize to null.
+      return Number.isFinite(value) ? value : null;
+    case "bigint":
+      // Explicitly handled (R6c): a raw BigInt makes JSON.stringify throw.
+      return value.toString();
+    case "undefined":
+    case "function":
+    case "symbol":
+      // JSON.stringify drops these as object members and renders null in
+      // arrays; the caller applies whichever is right for the position.
+      return undefined;
+    case "object":
+      break;
+    default:
+      return undefined;
+  }
+  if (value === null) return null;
+  const obj: object = value;
+  if (seen.has(obj)) return CIRCULAR_PAYLOAD_MARKER;
+  if (depth >= MAX_PAYLOAD_DEPTH) return MAX_DEPTH_PAYLOAD_MARKER;
+  seen.add(obj);
+
+  let normalized: ApprovalJsonValue;
+  try {
+    if (Array.isArray(obj)) {
+      normalized = obj.map((item) => {
+        const itemValue = normalizeApprovalValue(item, depth + 1, seen);
+        return itemValue === undefined ? null : itemValue;
+      });
+    } else {
+      const record = asRecord(obj);
+      const toJson = record?.["toJSON"];
+      if (record !== undefined && typeof toJson === "function") {
+        // Honour `toJSON` the way JSON.stringify does (Date, URL, ...).
+        const jsonValue = normalizeApprovalValue(toJson.call(obj), depth + 1, seen);
+        normalized = jsonValue === undefined ? null : jsonValue;
+      } else {
+        const members: Record<string, ApprovalJsonValue> = {};
+        for (const [key, item] of Object.entries(record ?? {})) {
+          const memberValue = normalizeApprovalValue(item, depth + 1, seen);
+          if (memberValue !== undefined) members[key] = memberValue;
+        }
+        normalized = members;
+      }
+    }
+  } catch {
+    // A getter / Proxy / `toJSON` that throws must not escape this function:
+    // "never throws" is its contract (R6c), and its caller may be mid-way
+    // through preparing an approval.
+    normalized = UNREADABLE_PAYLOAD_MARKER;
+  }
+
+  // Delete after the walk so a value shared by two branches is duplicated
+  // (exactly what JSON.stringify does) instead of being reported as circular.
+  seen.delete(obj);
+  return normalized;
+}
+
+/**
+ * Why `value` is not acceptable as an approval payload, or `undefined` when it
+ * is (R6a).
+ *
+ * The public approval entry points accept `unknown`, so this is the trust
+ * boundary: a payload that JSON cannot represent — a `bigint` (`JSON.stringify`
+ * throws), a function or symbol (silently dropped), a circular reference
+ * (throws), or an object member whose read throws — is reported so the caller
+ * can reject it BEFORE the state machine runs, instead of half-completing the
+ * node. `undefined` is legal (it means "no payload"; the caller falls back to
+ * the node's recorded approval summary), and `NaN` / `±Infinity` stay legal
+ * because JSON renders them as `null` without throwing — the historical
+ * behaviour.
+ *
+ * Never throws: a payload whose own property access throws is reported as
+ * unacceptable rather than propagating the getter's error.
+ */
+export function approvalPayloadProblem(value: unknown): string | undefined {
+  try {
+    return jsonPayloadProblem(value, new WeakSet<object>(), "$");
+  } catch {
+    return "reading the payload threw (a getter or proxy rejected inspection)";
+  }
+}
+
+/** Recursive worker behind {@link approvalPayloadProblem}. */
+function jsonPayloadProblem(
+  value: unknown,
+  seen: WeakSet<object>,
+  path: string,
+): string | undefined {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+    case "number":
+    case "undefined":
+      return undefined;
+    case "bigint":
+      return `a bigint at ${path} (JSON.stringify would throw)`;
+    case "function":
+      return `a function at ${path} (JSON.stringify drops it)`;
+    case "symbol":
+      return `a symbol at ${path} (JSON.stringify drops it)`;
+    case "object":
+      break;
+    default:
+      return `an unsupported ${typeof value} at ${path}`;
+  }
+  if (value === null) return undefined;
+  const obj: object = value;
+  if (seen.has(obj)) return `a circular reference at ${path}`;
+  seen.add(obj);
+
+  let problem: string | undefined;
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length && problem === undefined; i += 1) {
+      problem = jsonPayloadProblem(obj[i], seen, `${path}[${i}]`);
+    }
+  } else {
+    for (const [key, item] of Object.entries(asRecord(obj) ?? {})) {
+      problem = jsonPayloadProblem(item, seen, `${path}.${key}`);
+      if (problem !== undefined) break;
+    }
+  }
+
+  // Delete after the walk so a value shared by two branches is inspected in
+  // both (JSON.stringify duplicates it) instead of being reported as circular.
+  seen.delete(obj);
+  return problem;
+}
+
+/**
+ * Normalize an approval payload into a JSON-safe value, WITHOUT throwing — the
+ * explicit handling R6(c) asks for.
+ *
+ * The public approval entry points accept `unknown` (the tool layer parses a
+ * JSON argument, but the exported `EngineRuntime` API takes any value), and
+ * every later consumer — the per-node `signalsObserved` ledger, the
+ * `signalLedger` history, the durable `JSON.stringify` in the persistence
+ * layer — assumes JSON data. Rather than reject or throw, this projects the
+ * value: `bigint` becomes its decimal string (a raw BigInt makes
+ * `JSON.stringify` throw), `undefined` / function / symbol become `null` at
+ * the top level and in arrays and are dropped as object members (JSON
+ * semantics), a cyclic reference becomes `"[Circular]"`, nesting past
+ * {@link MAX_PAYLOAD_DEPTH} becomes `"[MaxDepth]"`, and a payload whose own
+ * property read throws becomes `"[Unreadable]"`.
+ *
+ * The result is therefore safe to record and to persist, and never throws — so
+ * it cannot leave the approval half-applied (R6b).
+ */
+export function normalizeApprovalPayload(value: unknown): ApprovalJsonValue {
+  const normalized = normalizeApprovalValue(value, 0, new WeakSet<object>());
+  if (normalized !== undefined) return normalized;
+  // Top-level undefined / function / symbol: JSON.stringify would answer
+  // `undefined` (a type lie for the string-typed `EdgePayload.result`), so
+  // answer a stable representation instead.
+  return value === undefined ? null : String(value);
+}
+
+/**
+ * The downstream {@link EdgePayload.result} text for an approval output.
+ *
+ * Total and non-throwing (R6c). A string is returned verbatim — the historical
+ * contract, so an approval note is never JSON-quoted. `null` / `undefined`
+ * answer `""` (the historical empty marker). Anything else is normalized first
+ * (see {@link normalizeApprovalPayload}) and then serialized, so a function /
+ * symbol / BigInt / cyclic payload can no longer answer `undefined` (the
+ * declared-`string` lie that left a node `completed` with a downstream
+ * activation that could never run) and can no longer throw between the state
+ * mutation and the edge emission.
+ */
+export function approvalResultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  const text = JSON.stringify(normalizeApprovalPayload(value));
+  return text === undefined ? "" : text;
 }
 
 // ── Feedback merging ────────────────────────────────────────────────────────
@@ -108,6 +366,21 @@ export function mergeRejectionFeedback(prompt: string, reason?: string): string 
  *   terminal-success and lets downstream `on_signal(answer)` / `always` edges
  *   activate via the caller's forward-data-flow step.
  *
+ * R6 error/state contract:
+ *
+ * - The caller-supplied payload must be a JSON value. A `bigint`, function,
+ *   symbol, circular reference, or an object whose property read throws is
+ *   rejected with a `TypeError` BEFORE anything mutates
+ *   ({@link approvalPayloadProblem}) — the node keeps its `blocked` status and
+ *   no `answer` is recorded. Previously such a payload left the node
+ *   `completed` with `EdgePayload.result === undefined`, so the downstream
+ *   join could never activate.
+ * - An accepted payload is normalized to a JSON-safe value before it is
+ *   recorded ({@link normalizeApprovalPayload}), and the downstream `result`
+ *   text is built before the node's lifecycle changes — a failure while
+ *   preparing the edge payload can therefore never leave the node
+ *   `completed` with its downstream activation missing.
+ *
  * @returns The downstream {@link EdgePayload}, or `null` when the node was not
  *   actually `blocked` (a no-op guard — approve is idempotent).
  */
@@ -121,6 +394,24 @@ export function approveBlockedNode(
   // Derive the answer output from the caller payload, else the agent-rendered
   // `need_approval` summary, else a plain accept marker.
   const raw = node.signalsObserved["need_approval"];
+  // R6(a): the caller-supplied payload is the trust boundary — reject a
+  // non-JSON value BEFORE the state machine runs, so an unacceptable payload
+  // leaves the node exactly as it was (previously the node was marked
+  // `completed` and the downstream activation silently never happened). The
+  // node's own recorded `need_approval` summary is engine data, not caller
+  // input, so it is normalized rather than rejected — a malformed recorded
+  // summary must not make a node permanently unapprovable.
+  if (payload !== undefined) {
+    const problem = approvalPayloadProblem(payload);
+    if (problem !== undefined) {
+      throw new TypeError(
+        `approveBlockedNode: the approval payload for node "${node.nodeId}" is not a JSON value — ` +
+          `${problem}. The approval was NOT applied. Pass a JSON-serializable payload ` +
+          `(string, number, boolean, null, array, or plain object).`,
+      );
+    }
+  }
+
   const answerOutput =
     payload !== undefined
       ? payload
@@ -128,10 +419,24 @@ export function approveBlockedNode(
         ? raw
         : "approved";
 
+  // R6(a): normalize the payload ONCE, before anything mutates. The public
+  // entry points accept `unknown` (a published-package surface — narrowing the
+  // parameter would break existing direct callers and the tool layer), so the
+  // explicit normalization here is the trust boundary: every later consumer
+  // (the per-node ledger, the `signalLedger` history, the durable
+  // `JSON.stringify`) can safely serialize the recorded value.
+  const normalizedOutput = normalizeApprovalPayload(answerOutput);
+  // R6(b): build the downstream `result` text BEFORE `markCompleted`. The
+  // normalizer is total so this cannot throw today, but the ordering IS the
+  // contract: a serialization failure must leave the node untouched instead of
+  // `completed` with its forward data flow never emitted (which strands every
+  // downstream join forever).
+  const resultText = approvalResultText(answerOutput);
+
   // Record the synthetic `answer` signal through the shared ledger write path
   // (observability only — no listener firing, which would re-enter the
   // advancement critical section). The caller drives the forward answer flow.
-  recordSignalToLedger(state, node.nodeId, "answer", answerOutput, "approval");
+  recordSignalToLedger(state, node.nodeId, "answer", normalizedOutput, "approval");
   // Ensure the node's genuinely produced artifacts are recorded before the
   // EdgePayload is built, so the downstream node's upstreamResults carry them
   // (same data-flow gap as _buildEdgePayload — subtask C-RECORD).
@@ -142,9 +447,7 @@ export function approveBlockedNode(
   return {
     fromNode: node.nodeId,
     fromSignal: "answer",
-    result: typeof answerOutput === "string"
-      ? answerOutput
-      : JSON.stringify(answerOutput ?? ""),
+    result: resultText,
     artifacts: node.artifacts ?? deriveNodeArtifacts(node),
     budgetConsumed: {
       tokens: tc.inputTokens + tc.outputTokens,
@@ -306,10 +609,15 @@ function shouldCancel(
 ): boolean {
   if (upstreamTotal === 0) return false;
   if (approvedCount === 0) return true;
+  // Contract C1: the quorum count is read through the shared
+  // {@link readQuorum} accessor — the SAME accessor `evaluateJoin` uses — so
+  // the join-evaluation and cancellation lanes can never interpret a strategy
+  // differently (R3: a bare `"quorum"` string used to resolve to `all` here
+  // and `false`/"any" in `shouldCancel`, i.e. two opposite semantics for one
+  // value). `undefined` means the strategy carries no quorum count.
+  const quorum = readQuorum(strategy);
+  if (quorum !== undefined) return approvedCount < quorum;
   if (strategy === JoinStrategy.All) return true;
-  if (typeof strategy === "object" && "quorum" in strategy) {
-    return approvedCount < strategy.quorum;
-  }
   // "any" — at least one approved source survives.
   return false;
 }

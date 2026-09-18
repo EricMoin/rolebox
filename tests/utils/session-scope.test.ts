@@ -9,7 +9,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildSessionScope } from "../../src/utils/session-scope";
+import { buildSessionScope } from "../../src/utils/session-scope.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 

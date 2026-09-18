@@ -24,19 +24,20 @@
 
 import { JoinStrategy } from "../../constants.ts";
 import type { EdgeDeclaration, JoinConfig } from "../../types.graph-v2.ts";
-import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
+import type {
+  EngineState,
+  NodeRuntimeState,
+  ResolvedJoinStrategy,
+} from "../../types.engine-v2.ts";
 import type { EdgePayload } from "../../types.engine-v2.ts";
 import { markDirty } from "./engine-persistence.ts";
 
-// ── Join strategy resolution ────────────────────────────────────────────────
+// The runtime join-strategy type lives beside the field it types in
+// types.engine-v2.ts (C1). It is re-exported here so existing importers of
+// this module keep resolving `ResolvedJoinStrategy` from the evaluator.
+export type { ResolvedJoinStrategy };
 
-/**
- * Resolved join strategy, shared by both the per-node runtime field
- * (`NodeRuntimeState.joinStrategy`) and join evaluation.
- *
- * `'all'` | `{ quorum: number }` — see {@link resolveJoinStrategy}.
- */
-export type ResolvedJoinStrategy = JoinStrategy | { quorum: number };
+// ── Join strategy resolution ────────────────────────────────────────────────
 
 /**
  * Pure resolver that projects a node's declared {@link JoinConfig} into the
@@ -62,14 +63,34 @@ export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
     return JoinStrategy.Any;
   }
   // quorum:N — the quorum count lives on the JoinConfig, not the strategy string.
-  // Defensive clamp: validation now rejects quorum < 1 up front (zod +
-  // validator-v2 rule 9), but a non-zod caller or hydrated persisted state
-  // could still carry a non-positive quorum, which would make `evaluateJoin`
-  // treat the join as satisfied with ZERO upstream answers (a DAG-order
-  // violation). Clamp to the documented default of 1 so a broken declaration
-  // degrades to "any"-like semantics instead of an early dispatch.
-  const quorum = join.quorum ?? 1;
+  // The declared discriminated union (C1) guarantees the count is present on
+  // this branch; the widening below covers inputs the compiler cannot see
+  // (hand-written JS callers, pre-normalization persisted state), where a
+  // missing count still degrades to the documented default of 1. The
+  // DECLARATION side may not lean on that default: validator-v2 rule 9
+  // rejects `{ strategy: "quorum" }` without a count and parser-v2 refuses to
+  // build one.
+  //
+  // Defensive clamp: a non-positive quorum would make `evaluateJoin` treat the
+  // join as satisfied with ZERO upstream answers (a DAG-order violation).
+  // Clamp to 1 so a broken input degrades to "any"-like semantics instead of
+  // an early dispatch.
+  const declaredQuorum: number | undefined = join.quorum;
+  const quorum = declaredQuorum ?? 1;
   return { quorum: quorum >= 1 ? quorum : 1 };
+}
+
+/**
+ * The required answer count of a resolved join strategy, or `undefined` for
+ * the strategies that carry no count (`"all"` / `"any"`).
+ *
+ * Single reader for the quorum branch (C1): {@link evaluateJoin} and the
+ * approval cancellation gate (`approval-handler.ts` `shouldCancel`) both read
+ * the count through this function, so the two consumers cannot interpret the
+ * same `{ quorum: N }` value differently.
+ */
+export function readQuorum(strategy: ResolvedJoinStrategy): number | undefined {
+  return typeof strategy === "object" ? strategy.quorum : undefined;
 }
 
 /**
@@ -247,8 +268,21 @@ export function evaluateJoin(
   );
 
   // quorum:N — need at least N answers; fail early if that becomes impossible.
-  if (typeof strategy === "object" && "quorum" in strategy) {
-    const n = strategy.quorum;
+  // The object discriminant both narrows `strategy` for the `all` branch
+  // below and is the branch whose count `readQuorum` reads (the single reader
+  // shared with the approval cancellation gate).
+  if (typeof strategy === "object") {
+    const n = readQuorum(strategy);
+    if (n === undefined) {
+      // Impossible for a ResolvedJoinStrategy produced by the resolver or
+      // validated on hydration; an untyped caller could still hand over an
+      // object without a count. Wait (fail safe) rather than treat it as
+      // "all" — the pre-union evaluator waited in exactly this case too.
+      return {
+        kind: "waiting",
+        reasons: [`${label}: quorum strategy carries no count`],
+      };
+    }
     if (answerCount >= n) {
       return {
         kind: "satisfied",
@@ -307,29 +341,42 @@ export function evaluateJoin(
   }
 
   // all — need every upstream to answer; any failure aborts immediately.
-  if (failedCount > 0) {
+  if (strategy === JoinStrategy.All) {
+    if (failedCount > 0) {
+      return {
+        kind: "failed",
+        reasons: [
+          `${label}: "all" failed — ${failedCount} upstream(s) signaled ` +
+            `escalate/revise before all answered`,
+        ],
+      };
+    }
+    if (answerCount === upstream.length) {
+      return {
+        kind: "satisfied",
+        reasons: [
+          `${label}: "all" met — every upstream (${answerCount}/${upstream.length}) answered`,
+        ],
+      };
+    }
     return {
-      kind: "failed",
+      kind: "waiting",
       reasons: [
-        `${label}: "all" failed — ${failedCount} upstream(s) signaled ` +
-          `escalate/revise before all answered`,
+        `${label}: "all" waiting — ${answerCount}/${upstream.length} upstream(s) ` +
+          `answered, ${pendingCount} still pending`,
       ],
     };
   }
-  if (answerCount === upstream.length) {
-    return {
-      kind: "satisfied",
-      reasons: [
-        `${label}: "all" met — every upstream (${answerCount}/${upstream.length}) answered`,
-      ],
-    };
-  }
+
+  // Exhaustiveness guard: #ResolvedJoinStrategy has exactly the three members
+  // handled above, so this branch is unreachable today — but a fourth member
+  // added to the union fails to compile here (the assignment to `never`)
+  // instead of silently falling through into "all" semantics. Fail safe
+  // (wait) rather than guess.
+  const unhandled: never = strategy;
   return {
     kind: "waiting",
-    reasons: [
-      `${label}: "all" waiting — ${answerCount}/${upstream.length} upstream(s) ` +
-        `answered, ${pendingCount} still pending`,
-    ],
+    reasons: [`${label}: unhandled join strategy ${String(unhandled)}`],
   };
 }
 

@@ -172,7 +172,14 @@ export function scanPersistedStates(stateDir: string): PersistedStateScan {
 
 // ── Summary builder ────────────────────────────────────────────────────────
 
-/** Pure projection of one hydrated {@link EngineState} into a JSON summary. */
+/**
+ * Pure projection of one hydrated {@link EngineState} into a JSON summary.
+ *
+ * @internal No production caller — `graph-tools.ts` imports only
+ * {@link scanPersistedStates}. Retained as a published surface (this package
+ * ships `dist/`, so the export is not removed) and exercised by
+ * `tests/graph/persisted-state.test.ts`; see FIX-PLAN B19.
+ */
 export function buildPersistedSummary(state: EngineState): PersistedStateSummary {
   const nodeStatusCounts: Record<string, number> = {};
   const nodes: PersistedNodeSummary[] = [];
@@ -207,6 +214,9 @@ export function buildPersistedSummary(state: EngineState): PersistedStateSummary
  * Scan the store and return the cross-session summary of every graph that
  * loaded successfully, ordered most-recently-updated first. Total — never
  * throws (delegates to {@link scanPersistedStates}).
+ *
+ * @internal No production caller (see {@link buildPersistedSummary}); retained
+ * as a published surface per FIX-PLAN B19.
  */
 export function scanPersistedSummaries(stateDir: string): PersistedStateSummary[] {
   const { loaded } = scanPersistedStates(stateDir);
@@ -217,7 +227,13 @@ export function scanPersistedSummaries(stateDir: string): PersistedStateSummary[
 
 // ── Node / loop / budget accessors ─────────────────────────────────────────
 
-/** Return a node's runtime state, or `undefined` if absent. */
+/**
+ * Return a node's runtime state, or `undefined` if absent.
+ *
+ * @internal Convenience accessor over `state.nodes` with no production caller
+ * (the tools layer reads the maps directly); retained as a published surface
+ * per FIX-PLAN B19.
+ */
 export function getNode(
   state: EngineState,
   nodeId: string,
@@ -225,12 +241,20 @@ export function getNode(
   return state.nodes.get(nodeId);
 }
 
-/** List all node runtime states (stable iteration order). */
+/**
+ * List all node runtime states (stable iteration order).
+ *
+ * @internal No production caller — see {@link getNode} (FIX-PLAN B19).
+ */
 export function listNodes(state: EngineState): NodeRuntimeState[] {
   return [...state.nodes.values()];
 }
 
-/** Return a loop group's runtime state, or `undefined` if absent. */
+/**
+ * Return a loop group's runtime state, or `undefined` if absent.
+ *
+ * @internal No production caller — see {@link getNode} (FIX-PLAN B19).
+ */
 export function getLoopGroup(
   state: EngineState,
   loopId: string,
@@ -238,12 +262,20 @@ export function getLoopGroup(
   return state.loopGroups.get(loopId);
 }
 
-/** List all loop group runtime states (stable iteration order). */
+/**
+ * List all loop group runtime states (stable iteration order).
+ *
+ * @internal No production caller — see {@link getNode} (FIX-PLAN B19).
+ */
 export function listLoopGroups(state: EngineState): LoopGroupRuntimeState[] {
   return [...state.loopGroups.values()];
 }
 
-/** Return the graph's cumulative budget consumption. */
+/**
+ * Return the graph's cumulative budget consumption.
+ *
+ * @internal No production caller — see {@link getNode} (FIX-PLAN B19).
+ */
 export function getBudget(state: EngineState): GraphBudgetState {
   return state.budget;
 }

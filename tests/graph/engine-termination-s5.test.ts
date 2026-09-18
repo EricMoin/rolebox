@@ -88,7 +88,7 @@ function unrootedCycleGraph(): GraphDeclaration {
 
 /** Fresh per-instance dedupe context. */
 function freshCtx(): TerminationContext {
-  return { terminalComplete: false, terminalBlocked: false };
+  return { terminalComplete: false, terminalBlocked: false, terminalEpoch: 0 };
 }
 
 /** Recording onGraphTerminal spy. */
@@ -123,7 +123,7 @@ describe("M4 done bucket (done ≠ completed)", () => {
     const { events, cb } = spy();
     checkGraphTermination(state, cb, freshCtx());
 
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     expect(events).toHaveLength(1);
     expect(events[0].isBlocked).toBe(false);
     expect(events[0].nodeStatusSummaries.completed).toBe(0);
@@ -197,7 +197,7 @@ describe("L17 cancelled bucket", () => {
     const { events, cb } = spy();
     checkGraphTermination(state, cb, freshCtx());
 
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     expect(events).toHaveLength(1);
     expect(events[0].nodeStatusSummaries.completed).toBe(0);
     expect(events[0].nodeStatusSummaries.cancelled).toBe(1);
@@ -218,7 +218,7 @@ describe("L9 deadlock-guard order hardening", () => {
 
     expect(state.nodes.get("a")!.status).toBe(NodeStatus.Escalate);
     expect(state.nodes.get("b")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     expect(events).toHaveLength(1);
     expect(events[0].isBlocked).toBe(false);
     expect(events[0].nodeStatusSummaries.escalate).toBe(2);

@@ -53,7 +53,37 @@ export type NodeSignalEmittedListener = (
   payload: unknown,
 ) => void;
 
+/**
+ * Membership test over one of the typed signal-category vocabularies with a
+ * loose `string` key.
+ *
+ * This module's public surface deliberately accepts plain strings:
+ * `recordSignalToLedger` is also the write path for non-signal context stashes
+ * (`approval_payload`), and the `is*` classification helpers take an arbitrary
+ * `string` so a caller can ask about any value. Widening the *parameter* here —
+ * rather than the vocabulary, which stays `ReadonlySet<SignalType>` in
+ * `signal-constants.ts` — keeps the typo-proof vocabulary intact without an
+ * `as` cast or a duplicated set.
+ */
+function categoryHas(vocabulary: ReadonlySet<string>, value: string): boolean {
+  return vocabulary.has(value);
+}
+
 // ── Shared ledger-write helper ──────────────────────────────────────────────
+
+/**
+ * Maximum number of signal events retained per node in
+ * {@link SignalLedgerEntry.history} (Y19).
+ *
+ * The history is append-only and every non-critical flush serializes the whole
+ * graph state, so an unbounded history made a long-running loop's ledger grow
+ * linearly with its round count and re-serialize that growth on every write.
+ * Retaining the most recent events bounds the graph_status stream / since
+ * window without touching the authoritative signals / lastSignalAt fields.
+ * Mirrors recorder.ts's CHECKPOINT_HISTORY_CAP (50) for the per-node
+ * checkpoint trace.
+ */
+export const SIGNAL_LEDGER_HISTORY_LIMIT = 50;
 
 /**
  * Record a signal into the per-node ledger WITHOUT firing terminating
@@ -66,8 +96,9 @@ export type NodeSignalEmittedListener = (
  * - Writes `node.signalsObserved[type] = value` (payload normalized to `null`
  *   when absent, mirroring `SignalBridge.record` semantics).
  * - Updates the graph-level `signalLedger` entry (signals, lastSignalAt,
- *   ordered history) — the single ledger-write path that
- *   {@link SignalBridge.record} delegates to.
+ *   ordered history trimmed to the most recent
+ *   {@link SIGNAL_LEDGER_HISTORY_LIMIT} events) — the single ledger-write path
+ *   that {@link SignalBridge.record} delegates to.
  * - Does NOT fire terminating listeners: firing is the control-flow concern
  *   owned by {@link SignalBridge.record}. Synthetic producers must not trigger
  *   re-entrant advancement, so they route through this pure helper instead.
@@ -100,7 +131,7 @@ export function recordSignalToLedger(
   // Only real signals enter the ledger history. Non-signal context stashes
   // (e.g. `approval_payload`) are written to node.signalsObserved but never
   // synthesized as ledger events.
-  if (ALL_SIGNAL_TYPES.has(type)) {
+  if (categoryHas(ALL_SIGNAL_TYPES, type)) {
     const event: SignalLedgerEvent = { signal: type, payload: value, atMs: now, source };
     const existing = state.signalLedger.get(nodeId);
     if (existing) {
@@ -108,6 +139,15 @@ export function recordSignalToLedger(
       existing.lastSignalAt = now;
       if (existing.history) {
         existing.history.push(event);
+        // Bound the append-only history (Y19): keep the most recent events and
+        // drop the oldest. signals / lastSignalAt above always carry the latest
+        // write regardless of trimming.
+        if (existing.history.length > SIGNAL_LEDGER_HISTORY_LIMIT) {
+          existing.history.splice(
+            0,
+            existing.history.length - SIGNAL_LEDGER_HISTORY_LIMIT,
+          );
+        }
       } else {
         existing.history = [event];
       }
@@ -200,18 +240,18 @@ export class SignalBridge {
   // ── Signal classification helpers (single source: categories above) ───
 
   isTerminating(type: string): boolean {
-    return TERMINATING_SIGNALS.has(type);
+    return categoryHas(TERMINATING_SIGNALS, type);
   }
 
   isPausing(type: string): boolean {
-    return PAUSING_SIGNALS.has(type);
+    return categoryHas(PAUSING_SIGNALS, type);
   }
 
   isHandoff(type: string): boolean {
-    return HANDOFF_SIGNALS.has(type);
+    return categoryHas(HANDOFF_SIGNALS, type);
   }
 
   isInfo(type: string): boolean {
-    return INFO_SIGNALS.has(type);
+    return categoryHas(INFO_SIGNALS, type);
   }
 }

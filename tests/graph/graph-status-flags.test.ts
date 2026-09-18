@@ -34,10 +34,10 @@ import {
   createGraphToolSet,
   GraphToolSet,
   UNSUPPORTED_GRAPH_STATUS_FLAGS,
-} from "../../src/graph/tools/graph-tools";
-import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools";
-import type { EngineState, RoundHistoryEntry, CheckpointRecord } from "../../src/types.engine-v2";
-import { NodeStatus } from "../../src/constants";
+} from "../../src/graph/tools/graph-tools.ts";
+import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools.ts";
+import type { EngineState, RoundHistoryEntry, CheckpointRecord } from "../../src/types.engine-v2.ts";
+import { NodeStatus } from "../../src/constants.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 

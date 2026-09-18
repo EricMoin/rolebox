@@ -25,15 +25,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createGraphToolSet, type GraphToolSet } from "../../src/graph/tools/graph-tools";
-import { createGraphTools } from "../../src/graph/tools/index";
-import { createEngineState, provision } from "../../src/graph/engine/engine-state";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence";
-import { EnginePhase, NodeStatus } from "../../src/constants";
-import type { EngineState } from "../../src/types.engine-v2";
-import type { GraphDeclaration } from "../../src/types.graph-v2";
-import type { DispatchTask } from "../../src/dispatch/types";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
+import { createGraphToolSet, type GraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { createGraphTools } from "../../src/graph/tools/index.ts";
+import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
+import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import { EnginePhase, NodeStatus } from "../../src/constants.ts";
+import type { EngineState } from "../../src/types.engine-v2.ts";
+import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
+import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 
 /**
  * Reach the live engine state behind a toolset's registry entry. Mirrors the

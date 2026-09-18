@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import {
   createGraphToolSet,
   GraphToolSet,
-} from "../../src/graph/tools/graph-tools";
+} from "../../src/graph/tools/graph-tools.ts";
 import {
   filterNodes,
   filterByQuery,
@@ -24,11 +24,11 @@ import {
   filterByAgent,
   filterByDateWindow,
   type StatusQuery,
-} from "../../src/graph/tools/status-queries";
-import { NodeStatus } from "../../src/constants";
-import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2";
-import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence";
+} from "../../src/graph/tools/status-queries.ts";
+import { NodeStatus } from "../../src/constants.ts";
+import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
+import type { GraphStatusArgs } from "../../src/graph/tools/graph-tools.ts";
+import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
 
 // ── fixed epoch timestamps for deterministic date-window assertions ─────────
 const T0 = 1_700_000_000_000; // +0s

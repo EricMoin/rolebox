@@ -9,6 +9,7 @@
  * (`src/types.engine-v2.ts`):
  *
  *   - `EngineState.checkpoints[nodeId]`      — lifecycle-transition snapshots
+ *     (DERIVED latest view of `checkpointHistory[nodeId]` — see Y9 below)
  *   - `LoopGroupRuntimeState.rounds[]`        — completed traversal-round history
  *   - `NodeRuntimeState.artifacts`            — genuinely produced artifact paths
  *   - `NodeRuntimeState.evidence`             — genuinely emitted evidence references
@@ -38,6 +39,7 @@ import type {
   RoundHistoryEntry,
 } from "../../types.engine-v2.ts";
 import { markDirty } from "./engine-persistence.ts";
+import { asRecord } from "./signal-payload.ts";
 
 // ── Checkpoints (EngineState.checkpoints) ───────────────────────────────────
 
@@ -63,14 +65,23 @@ const CHECKPOINT_HISTORY_CAP = 50;
  * from real data: the node's own id, the actual `to` status, and a genuine
  * epoch-ms timestamp.
  *
- * In parallel, the same record is APPENDED to
- * `EngineState.checkpointHistory[nodeId]` (an ordered, additive list), so every
- * transition a node passes through is retained for traceability — not just the
- * latest one. Both fields are written from the same real data; neither is ever
- * fabricated.
+ * The same record is APPENDED to `EngineState.checkpointHistory[nodeId]` (an
+ * ordered, additive list), so every transition a node passes through is
+ * retained for traceability — not just the latest one.
  *
- * When `state` is falsy (standalone unit construction without an engine), this
- * is a no-op — no checkpoint is invented for a state that does not exist.
+ * Y9 write-side contract (N1): `checkpointHistory` is the AUTHORITATIVE
+ * append-only list and `checkpoints` is its DERIVED latest-snapshot view.
+ * There is exactly one write source — the history — and the single-snapshot
+ * field is assigned from the history's tail, so the two fields can never
+ * disagree (the previous implementation wrote the same record into both slots
+ * independently, which is only consistent by construction-by-hand). A legacy
+ * state that carries a `checkpoints` entry but no history keeps that entry
+ * until the node's next transition; the derived view then holds the new
+ * transition (the old snapshot was only ever a latest-snapshot, not history).
+ *
+ * `state` is required (B12): every caller is a live engine state. The former
+ * `if (!state) return` guard was unreachable under the declared signature and
+ * its JSDoc invited a construction mode no caller uses.
  */
 export function recordCheckpointForNode(
   state: EngineState,
@@ -79,13 +90,8 @@ export function recordCheckpointForNode(
   to: NodeStatus,
   at: number,
 ): void {
-  if (!state) return;
   const record: CheckpointRecord = { nodeId: node.nodeId, status: to, at };
-  if (!state.checkpoints) {
-    state.checkpoints = {};
-  }
-  state.checkpoints[node.nodeId] = record;
-  // Append to the ordered per-node history (append-only traceability).
+  // Append to the authoritative ordered per-node history.
   if (!state.checkpointHistory) {
     state.checkpointHistory = {};
   }
@@ -98,6 +104,13 @@ export function recordCheckpointForNode(
     history.splice(0, history.length - CHECKPOINT_HISTORY_CAP);
   }
   state.checkpointHistory[node.nodeId] = history;
+  // Derive the latest-snapshot view from the authoritative history (Y9). A
+  // defensive copy keeps the two fields from aliasing the same record object.
+  const latest = history[history.length - 1];
+  if (!state.checkpoints) {
+    state.checkpoints = {};
+  }
+  state.checkpoints[node.nodeId] = { ...latest };
   state.updatedAt = at;
   markDirty(state);
 }
@@ -164,14 +177,12 @@ export function deriveNodeEvidence(node: NodeRuntimeState): string[] {
   for (const type of TERMINATING_SIGNALS_BY_SEVERITY) {
     const payload = node.signalsObserved[type];
     if (payload === null || payload === undefined) continue;
-    if (typeof payload === "object" && !Array.isArray(payload)) {
-      const evidence = (payload as Record<string, unknown>).evidence;
-      if (
-        Array.isArray(evidence) &&
-        evidence.every((e) => typeof e === "string")
-      ) {
-        return [...evidence];
-      }
+    const evidence = asRecord(payload)?.evidence;
+    if (
+      Array.isArray(evidence) &&
+      evidence.every((e) => typeof e === "string")
+    ) {
+      return [...evidence];
     }
   }
   return [];

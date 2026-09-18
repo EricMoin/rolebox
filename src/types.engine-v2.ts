@@ -17,7 +17,7 @@
  */
 
 import type { GraphDeclaration, LoopGroupDecl, NodeBudgetSpec } from "./types.graph-v2.ts";
-import type { EnginePhase, JoinStrategy, NodeStatus } from "./constants.ts";
+import type { EnginePhase, NodeStatus } from "./constants.ts";
 import type { MaterializedResultRef } from "./dispatch/types.ts";
 import type { UsageRecord } from "./dispatch/budget/budget-tracker.ts";
 
@@ -96,26 +96,50 @@ export interface EngineState {
   pendingCompletions: string[];
 
   /**
-   * Optional per-node checkpoint store: lifecycle transition snapshots keyed
-   * by node ID. Backs the `graph_status` `include_checkpoint` flag.
+   * DERIVED VIEW of {@link checkpointHistory}: the latest lifecycle-transition
+   * snapshot per node, keyed by node ID. Backs the `graph_status`
+   * `include_checkpoint` flag.
+   *
+   * CONTRACT (Y9): `checkpointHistory` is the AUTHORITATIVE record; this field
+   * is a convenience projection and `checkpoints[nodeId]` must equal the last
+   * element of `checkpointHistory[nodeId]` whenever the history entry exists.
+   * It is retained for backward compatibility with readers and persisted files
+   * written before the history existed — not as an independent source of
+   * truth.
+   *
+   * Writer contract (recorder.ts): append the transition to
+   * `checkpointHistory[nodeId]`, then set `checkpoints[nodeId]` to that same
+   * snapshot, so the two can never disagree.
+   *
+   * Reader contract (graph_status / graph-tools.ts): read
+   * `checkpointHistory` first; fall back to this field ONLY when the history
+   * for that node is absent (files authored before the history field, or a
+   * graph whose checkpoints predate it). A fallback result is a documented
+   * degradation — the reader cannot distinguish "history truncated" from
+   * "history never recorded" — and must not be used when history exists.
    *
    * OPTIONAL-ADDITIVE — absent until a checkpoint is recorded (subtask 2).
-   * The engine and persistence layer treat its absence and an empty record
-   * identically; it never carries fabricated values.
+   * Absence and an empty record are treated identically; it never carries
+   * fabricated values.
    */
   checkpoints?: Record<string, CheckpointRecord>;
 
   /**
-   * Optional append-only per-node checkpoint history: an ordered list of
+   * AUTHORITATIVE append-only per-node checkpoint history: an ordered list of
    * lifecycle-transition snapshots keyed by node ID, in the order transitions
    * occurred (earliest first). Backs the `graph_status` `include_checkpoint`
-   * flag with full traceability — unlike {@link checkpoints} (which retains
-   * only the latest snapshot), this preserves every recorded transition.
+   * flag with full traceability — every recorded transition is preserved,
+   * unlike the derived {@link checkpoints} view (which retains only the
+   * latest).
+   *
+   * CONTRACT (Y9): this is the source of truth for `graph_status` checkpoint
+   * reporting. Writers append here and then refresh {@link checkpoints};
+   * readers prefer this field and use {@link checkpoints} only as the
+   * documented pre-history fallback.
    *
    * OPTIONAL-ADDITIVE — absent until a checkpoint is recorded (subtask 7).
-   * The engine and persistence layer treat its absence and an empty record
-   * identically; it never carries fabricated values. The existing
-   * {@link checkpoints} record is kept alongside it for backward compat.
+   * Absence and an empty record are treated identically; it never carries
+   * fabricated values.
    */
   checkpointHistory?: Record<string, CheckpointRecord[]>;
 
@@ -149,6 +173,22 @@ export interface EngineState {
    */
   terminalNotified?: { complete: boolean; blocked: boolean };
 }
+
+// ── Join Strategy (runtime) ─────────────────────────────────────────────
+
+/**
+ * Runtime join strategy for a convergence node — the resolved projection of
+ * the declaration's `JoinConfig` (C1).
+ *
+ * `"all"` / `"any"` stay strings; `quorum:N` becomes `{ quorum: N }` so the
+ * required count travels with the strategy. The declared union forces
+ * `quorum` to exist on the quorum branch, so a bare `"quorum"` string is not
+ * representable at either boundary. `readQuorum` in
+ * `src/graph/engine/join-evaluator.ts` is the single reader of the count; the
+ * approval cancellation gate (`approval-handler.ts` `shouldCancel`) and
+ * `evaluateJoin` both go through it.
+ */
+export type ResolvedJoinStrategy = "all" | "any" | { quorum: number };
 
 // ── Node Runtime State ──────────────────────────────────────────────────
 
@@ -211,10 +251,13 @@ export interface NodeRuntimeState {
   /** Results collected from upstream edges, keyed by source node ID */
   upstreamResults: Map<string, EdgePayload>;
   /**
-   * Join strategy from the node declaration.
-   * For "quorum" strategy, wraps the JoinStrategy string with the required count.
+   * Join strategy from the node declaration (see
+   * {@link ResolvedJoinStrategy}). Populated at provision time by
+   * `resolveJoinStrategy` and re-validated on persisted-state load; a legacy
+   * persisted bare `"quorum"` string is normalized to `{ quorum: 1 }` by the
+   * persistence layer, never hydrated as-is.
    */
-  joinStrategy: JoinStrategy | { quorum: number };
+  joinStrategy: ResolvedJoinStrategy;
   /** Whether the join strategy is satisfied (all required upstream results received) */
   joinSatisfied: boolean;
 

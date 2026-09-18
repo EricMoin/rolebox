@@ -32,6 +32,7 @@
 
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { createSubLogger } from "../../logger.ts";
+import { errorText } from "../../utils/error-text.ts";
 import { metrics } from "../../dispatch/persistence/metrics.ts";
 import {
   enqueueNotify,
@@ -159,22 +160,38 @@ function enqueueWithRetry(params: EnqueueWithRetryParams): Promise<boolean> {
       }
     }
     metrics.counter("graph_notify_failed_total").inc();
-    log.warn(
-      failMessage,
-      lastError instanceof Error ? lastError.message : String(lastError),
-    );
+    // C3: total error text. The former
+    // `lastError instanceof Error ? lastError.message : String(lastError)`
+    // threw on a value with no primitive conversion (`Object.create(null)`)
+    // from inside the failure path of the retry loop — the one place whose
+    // entire job is to log the failure.
+    log.warn(failMessage, errorText(lastError));
     return false;
   });
 }
 
 /**
- * The completion handler the factory returns. It satisfies the engine seam
- * `(event: NodeCompletionEvent) => void` structurally (a return value is
- * ignored by the seam); the resolved boolean tells the caller whether a
- * notification was dispatched (`true`) or suppressed by opt-out / dedupe /
- * missing session (`false`), which makes it awaitable in tests.
+ * The notifier seam shape shared by all three factories (contract C5 / Y2).
+ *
+ * A consumer implementation may be synchronous or async, and the engine only
+ * ever observes the return value through thenable isolation
+ * (`<void Promise.resolve(ret).catch(handler)>`) — it never awaits it. Declaring
+ * that explicitly removes the old "declared `=> void`, implemented as
+ * `Promise<boolean>`" mismatch that forced the engine to re-discover the
+ * promise at runtime with a duck-typed assertion.
+ *
+ * The concrete factories resolve a `boolean` (whether a notification was
+ * actually dispatched) so tests can await them, but the seam type deliberately
+ * does not promise that value: no engine call site consumes it.
  */
-export type GraphCompletionHandler = (event: NodeCompletionEvent) => Promise<boolean>;
+export type GraphNotifyHandler<Event> = (event: Event) => void | Promise<unknown>;
+
+/**
+ * Completion seam handler shape (see {@link GraphNotifyHandler}). The factory
+ * resolves `true` when a reminder was dispatched and `false` when it was
+ * suppressed by opt-out / dedupe / a missing session.
+ */
+export type GraphCompletionHandler = GraphNotifyHandler<NodeCompletionEvent>;
 
 // ── Dedupe key ──────────────────────────────────────────────────────────────
 
@@ -186,6 +203,31 @@ export type GraphCompletionHandler = (event: NodeCompletionEvent) => Promise<boo
  */
 function dedupeKey(event: NodeCompletionEvent): string {
   return `${event.graphId}::${event.nodeId}::${event.signalType}::${event.startedAt ?? ""}`;
+}
+
+/**
+ * Upper bound on a notifier run's dedupe epoch (Y26). The completion key
+ * carries a per-execution `startedAt`, so a long-lived notifier observing a
+ * long-running loop would otherwise grow its `notified` set without bound.
+ * Once the limit is crossed the OLDEST key is evicted (a `Set` preserves
+ * insertion order), which can only matter for a replay of a very old event —
+ * the epoch is a best-effort idempotence guard, not a durable ledger.
+ */
+export const GRAPH_NOTIFY_DEDUPE_LIMIT = 512;
+
+/**
+ * Claim a dedupe key for the current run epoch. Returns `false` when the key
+ * was already claimed (an idempotent replay — the caller must drop it). The
+ * epoch is bounded: see {@link GRAPH_NOTIFY_DEDUPE_LIMIT}.
+ */
+function claimDedupe(notified: Set<string>, key: string): boolean {
+  if (notified.has(key)) return false;
+  notified.add(key);
+  if (notified.size > GRAPH_NOTIFY_DEDUPE_LIMIT) {
+    const oldest = notified.values().next();
+    if (!oldest.done) notified.delete(oldest.value);
+  }
+  return true;
 }
 
 // ── Reminder text ───────────────────────────────────────────────────────────
@@ -263,8 +305,7 @@ export function createGraphNotifier(
     // event are one logical notification, so they must not re-enter the dedupe
     // epoch nor allow a concurrent duplicate send.
     const key = dedupeKey(event);
-    if (notified.has(key)) return false;
-    notified.add(key);
+    if (!claimDedupe(notified, key)) return false;
 
     const text = buildGraphCompletionText(event);
     return enqueueWithRetry({
@@ -285,15 +326,41 @@ export function createGraphNotifier(
 // ── Graph-Terminal Notifier ──────────────────────────────────────────────────
 
 /**
- * The graph-terminal handler the factory returns. Satisfies the engine seam
- * `(event: GraphTerminalEvent) => void` structurally; the resolved boolean tells
- * the caller whether a notification was dispatched (`true`) or suppressed.
+ * Graph-terminal seam handler shape (see {@link GraphNotifyHandler}). The
+ * factory resolves `true` when a reminder was dispatched and `false` when it
+ * was suppressed.
  */
-export type GraphTerminalHandler = (event: GraphTerminalEvent) => Promise<boolean>;
+export type GraphTerminalHandler = GraphNotifyHandler<GraphTerminalEvent>;
 
-/** Per-run dedupe key: `graphId::terminalType` (complete / blocked). */
+/**
+ * Terminal epoch carried by a {@link GraphTerminalEvent} (Y26).
+ *
+ * The engine models terminal notification as a RESETTABLE epoch: a retry or
+ * another re-open path clears the two-layer claim (`terminalComplete` /
+ * `terminalBlocked` and the persisted `state.terminalNotified`) AND advances
+ * the per-instance epoch counter, which `engine-termination.ts` stamps on every
+ * emitted event (`GraphTerminalEvent.terminalEpoch`, contract C5/Y26). A
+ * notifier instance reused across such a re-open must therefore key its dedupe
+ * on the epoch — a key of only `graphId::terminalType` cannot tell "an
+ * idempotent replay of the same epoch" from "a new epoch's genuine
+ * `[GRAPH COMPLETE]`", and silently drops the second notification.
+ *
+ * Read defensively: the field is owned by the engine's terminal event, and a
+ * non-numeric value (an event built by a foreign / older producer or a test
+ * double) reads as epoch `0` — the notifier then degrades to the previous
+ * per-graph+type dedupe instead of failing.
+ */
+function terminalEpochOf(event: GraphTerminalEvent): number {
+  return typeof event.terminalEpoch === "number" ? event.terminalEpoch : 0;
+}
+
+/**
+ * Per-run dedupe key: `graphId::terminalType::epoch` (complete / blocked). The
+ * epoch distinguishes a genuine re-completion after a retry / re-open from an
+ * idempotent replay of the same terminal event (Y26).
+ */
 function terminalDedupeKey(event: GraphTerminalEvent): string {
-  return `${event.graphId}::${event.isBlocked ? "blocked" : "complete"}`;
+  return `${event.graphId}::${event.isBlocked ? "blocked" : "complete"}::${terminalEpochOf(event)}`;
 }
 
 /**
@@ -408,10 +475,12 @@ export function buildPropagatedBlockedText(args: {
  * as {@link createGraphNotifier}, EXCEPT it injects with `noReply: false` so the
  * terminal reminder wakes the orchestrator (per-node completions stay silent).
  * Dedupe is per terminal type (complete / blocked)
- * per graph, per notifier run epoch — a blocked-then-resumed-then-completed graph
- * fires two distinct messages, but a second idempotent fire of the same type is
- * dropped. Per-loop-graph re-entry (separate `graph_run`) creates a fresh
- * notifier with a clean dedupe epoch.
+ * per graph, per engine terminal epoch (Y26) — a blocked-then-resumed-then-completed
+ * graph fires two distinct messages, and a retry / re-open that legitimately
+ * reaches a terminal phase again re-notifies (new epoch), while a second
+ * idempotent fire of the same type within one epoch is dropped. Per-loop-graph
+ * re-entry (separate `graph_run`) creates a fresh notifier with a clean dedupe
+ * epoch.
  *
  * @returns a handler that is a no-op when disabled (silent), a no-op that logs
  *   an explicit warning when no emperor session is configured (F6), drops
@@ -446,8 +515,7 @@ export function createGraphTerminalNotifier(
     // Dedupe key claimed BEFORE the first attempt — retries of the same
     // terminal event are one logical notification (see createGraphNotifier).
     const key = terminalDedupeKey(event);
-    if (notified.has(key)) return false;
-    notified.add(key);
+    if (!claimDedupe(notified, key)) return false;
 
     const text = buildGraphTerminalText(event);
     return enqueueWithRetry({
@@ -475,13 +543,11 @@ export function createGraphTerminalNotifier(
 // ── Graph-Stall Notifier ─────────────────────────────────────────────────────
 
 /**
- * The stall handler the factory returns. Satisfies the engine seam
- * `(event: NodeStallEvent) => void` structurally; the resolved boolean tells
- * the caller whether a notification was dispatched (`true`) or suppressed by
- * opt-out / dedupe / missing session (`false`), which makes it awaitable in
- * tests.
+ * Node-stall seam handler shape (see {@link GraphNotifyHandler}). The factory
+ * resolves `true` when a reminder was dispatched and `false` when it was
+ * suppressed by opt-out / dedupe / a missing session.
  */
-export type GraphStallHandler = (event: NodeStallEvent) => Promise<boolean>;
+export type GraphStallHandler = GraphNotifyHandler<NodeStallEvent>;
 
 /**
  * Per-run dedupe key for stall episodes: `graphId::nodeId::stallWarnedAt`.
@@ -565,8 +631,7 @@ export function createGraphStallNotifier(
     // stall episode are one logical notification, so they must not re-enter
     // the dedupe epoch nor allow a concurrent duplicate send.
     const key = stallDedupeKey(event);
-    if (notified.has(key)) return false;
-    notified.add(key);
+    if (!claimDedupe(notified, key)) return false;
 
     const text = buildGraphStallText(event);
     return enqueueWithRetry({

@@ -180,7 +180,7 @@ describe("propagateRevise (unit)", () => {
     // Traversal consumed once.
     expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
     // impl re-entered ready and is in the frontier.
-    expect(impl.status).toBe(NodeStatus.Ready);
+    expect<NodeStatus>(impl.status).toBe(NodeStatus.Ready);
     expect(isInFrontier(state, "impl")).toBe(true);
     // Revision feedback merged into impl's re-execution prompt.
     expect(impl.prompt).toContain("Revision feedback");
@@ -200,7 +200,7 @@ describe("propagateRevise (unit)", () => {
     const report = propagateRevise(state, review, { findings: ["still broken"] });
 
     // The revise node flips completed → done with the exhaustion reason.
-    expect(review.status).toBe(NodeStatus.Done);
+    expect<NodeStatus>(review.status).toBe(NodeStatus.Done);
     expect(review.errorReason).toBe("max_traversals exhausted");
     expect(report.escalated).toEqual(["review"]);
     expect(report.reason).toBe("max_traversals exhausted");
@@ -742,5 +742,158 @@ describe("non-loop fan-in cascade cancellation — shared-upstream guard", () =>
     expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate);
     expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running); // NOT cancelled
     expect(state.nodes.get("D")!.status).toBe(NodeStatus.Pending); // still waiting
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y14 — escalate propagation is forward-only: revise back-edges are excluded
+//
+// `propagateEscalationForward` walks OUTBOUND edges. An
+// `on_signal(revise_needed)` back-edge is loop routing, not forward flow:
+// walking it let an escalation travel BACKWARD into the loop entry (a fan-in
+// precisely because of that back-edge), escalate it, and then cascade-cancel
+// still-running nodes the entry fed.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Loop group [A, P, R] with the reviewer's revise back-edge R → A. A is a
+ * fan-in (`all`) over the external seed S and that back-edge; P is a fan-in
+ * over A and the still-running seed S2.
+ */
+function backEdgeEscalateGraph(): GraphDeclaration {
+  return {
+    version: 2,
+    name: "back-edge-escalate",
+    nodes: [
+      { id: "S", agent: "a0", prompt: "seed" },
+      { id: "S2", agent: "a1", prompt: "seed-2" },
+      { id: "A", agent: "a2", prompt: "impl", join: { strategy: "all" } },
+      { id: "P", agent: "a3", prompt: "peer", join: { strategy: "all" } },
+      { id: "R", agent: "a4", prompt: "review" },
+      { id: "sink", agent: "a5", prompt: "sink" },
+    ],
+    edges: [
+      { from: "S", to: "A", type: "always" },
+      { from: "R", to: "A", type: "on_signal", signal_filter: ["revise_needed"] },
+      { from: "A", to: "R", type: "on_signal", signal_filter: ["answer"] },
+      { from: "A", to: "P", type: "always" },
+      { from: "S2", to: "P", type: "always" },
+      { from: "R", to: "sink", type: "on_signal", signal_filter: ["answer"] },
+    ],
+    loop_groups: [{ id: "lg", nodes: ["A", "P", "R"], max_traversals: 5 }],
+  };
+}
+
+describe("propagateEscalate — forward-only: revise back-edges excluded (Y14)", () => {
+  it("does not walk the reviewer's revise back-edge back into the loop entry", () => {
+    const state = buildState(backEdgeEscalateGraph());
+    const a = state.nodes.get("A")!;
+    const p = state.nodes.get("P")!;
+    const r = state.nodes.get("R")!;
+
+    // The loop already consumed a traversal (the reviewer revised once before
+    // escalating), so the entry's join counts the revise back-edge as an
+    // upstream again — the precondition that made the backward walk escalate.
+    state.loopGroups.get("lg")!.traversalCount = 1;
+    a.status = NodeStatus.Completed;
+    p.status = NodeStatus.Running;
+    markEscalated(state, r, "review exploded");
+
+    const report = propagateEscalate(state, r, { reason: "review exploded" });
+
+    // The back-edge target A is NOT a forward escalation target: no escalate
+    // payload was recorded into it and its completed status is preserved.
+    expect(report.escalated).toEqual([]);
+    expect(report.absorbed).toEqual([]);
+    expect(a.status).toBe(NodeStatus.Completed);
+    expect(a.upstreamResults.has("R")).toBe(false);
+    // The forward lane is unaffected: R → sink is a transparent single-input
+    // pass-through, and P (behind the back-edge) was never reached.
+    expect(p.status).toBe(NodeStatus.Running);
+    expect(r.status).toBe(NodeStatus.Escalate);
+  });
+
+  it("engine: an escalate from the reviewer does not cascade-cancel the entry's peers", async () => {
+    const { state, engine } = buildEngine(backEdgeEscalateGraph());
+
+    await engine.dispatchReady();
+    expect(fakeStatuses(state)).toContainEqual(["S", NodeStatus.Running]);
+    expect(fakeStatuses(state)).toContainEqual(["S2", NodeStatus.Running]);
+
+    // S answers → A (join all over [S] on the first traversal) is dispatched.
+    await engine.onNodeSignalEmitted("S", "answer", "seed");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+
+    // A answers → R is dispatched; P records A's answer but keeps waiting on S2.
+    await engine.onNodeSignalEmitted("A", "answer", "impl v1");
+    expect(state.nodes.get("R")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("P")!.status).toBe(NodeStatus.Pending);
+    expect(state.nodes.get("P")!.upstreamResults.has("A")).toBe(true);
+
+    // Round 1: the reviewer revises → one traversal consumed, A re-entered (so
+    // the entry's join counts the back-edge again from here on).
+    await engine.onNodeSignalEmitted("R", "revise_needed", { findings: ["fix 1"] });
+    expect(state.loopGroups.get("lg")!.traversalCount).toBe(1);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    await engine.onNodeSignalEmitted("A", "answer", "impl v2");
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+
+    // Round 2: the reviewer escalates. The revise back-edge R → A is not forward
+    // flow, so the escalation must neither escalate A nor reach P (and S2 must
+    // survive).
+    await engine.onNodeSignalEmitted("R", "escalate", { reason: "review exploded" });
+
+    expect(state.nodes.get("R")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    expect(state.nodes.get("P")!.status).toBe(NodeStatus.Pending);
+    expect(state.nodes.get("S2")!.status).toBe(NodeStatus.Running);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y15 — a revise must not revive an escalate-terminal loop member
+//
+// `escalate → ready` exists for propagateEscalate's automatic-retry lane, which
+// increments `retryCount` and applies the budget / backoff gate. A revise
+// re-entry used to accept any status `canTransitionNode(..., Ready)` allowed —
+// including `escalate` — re-dispatching a terminally failed member with none
+// of that accounting.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("propagateRevise — re-entry whitelist (Y15)", () => {
+  it("leaves an escalate-terminal loop member untouched (no revive, no bypassed retry accounting)", () => {
+    const state = buildState(loopGraph(5));
+    const impl = state.nodes.get("impl")!;
+    const review = state.nodes.get("review")!;
+
+    // impl ran, then terminally failed; review is about to revise.
+    impl.status = NodeStatus.Completed;
+    markEscalated(state, impl, "impl exploded");
+    impl.signalsObserved["escalate"] = "impl exploded";
+    const retryCountBefore = impl.retryCount;
+
+    const report = propagateRevise(state, review, { findings: ["try again"] });
+
+    expect<NodeStatus>(impl.status).toBe(NodeStatus.Escalate);
+    expect(report.revisedUpstream).toEqual([]);
+    expect(report.escalated).toEqual([]);
+    expect(isInFrontier(state, "impl")).toBe(false);
+    // The retry lane's bookkeeping is not silently bypassed.
+    expect(impl.retryCount).toBe(retryCountBefore);
+    expect(impl.retryBackoffUntil).toBeUndefined();
+    expect(impl.signalsObserved["escalate"]).toBe("impl exploded");
+  });
+
+  it("still re-enters a blocked loop member (the approval pause is a legal revision target)", () => {
+    const state = buildState(loopGraph(5));
+    const impl = state.nodes.get("impl")!;
+    const review = state.nodes.get("review")!;
+    impl.status = NodeStatus.Blocked;
+
+    const report = propagateRevise(state, review, { findings: ["revise it"] });
+
+    expect<NodeStatus>(impl.status).toBe(NodeStatus.Ready);
+    expect(report.revisedUpstream).toEqual(["impl"]);
+    expect(isInFrontier(state, "impl")).toBe(true);
   });
 });

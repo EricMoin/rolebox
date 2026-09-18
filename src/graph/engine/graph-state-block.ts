@@ -5,11 +5,19 @@
  * injected into the system prompt each turn: "where am I in the workflow,
  * what runs next", sourced from {@link EngineState} (the engine-v2 runtime).
  *
- * The renderer is deliberately pure and defensive. It takes a snapshot list
- * (see `GraphToolSet.liveEngineStates()`), renders only the fields that are
- * present, and returns `""` when there is nothing to show. The injection site
- * treats an empty string as a clean no-op, so no stray tags ever reach the
- * prompt when no graph is live.
+ * The renderer is pure. It takes a snapshot list (see
+ * `GraphToolSet.liveEngineStates()`), renders the fields the `EngineState`
+ * contract guarantees, and returns `""` when there is nothing to show. The
+ * injection site treats an empty string as a clean no-op, so no stray tags
+ * ever reach the prompt when no graph is live.
+ *
+ * Comment on the `?? fallback` / truthiness guards removed here (B2): every
+ * one of them tested a field the types declare non-optional
+ * (`state.nodes`, `state.loopGroups`, `state.phase`, `state.graphId`,
+ * `state.graphDeclaration`, `g.traversalCount`, `g.maxTraversals`), so it was
+ * unreachable for any state that can exist. Its only real effect was to render
+ * a corrupt state as a plausible-looking block instead of a visible failure.
+ * Genuinely optional fields (a node's `errorReason`) keep their guards.
  *
  * Design reference: `.rolebox/design/engine-state-machine.md`.
  */
@@ -27,7 +35,7 @@ function esc(value: unknown): string {
 }
 
 function nodeList(state: EngineState): NodeRuntimeState[] {
-  return state.nodes ? [...state.nodes.values()] : [];
+  return [...state.nodes.values()];
 }
 
 function joinIds(nodes: readonly NodeRuntimeState[]): string {
@@ -35,9 +43,9 @@ function joinIds(nodes: readonly NodeRuntimeState[]): string {
 }
 
 function renderGraph(state: EngineState): string {
-  const graphId = state.graphId ?? "?";
-  const phase = state.phase ?? "idle";
-  const name = state.graphDeclaration?.name ?? graphId;
+  const graphId = state.graphId;
+  const phase = state.phase;
+  const name = state.graphDeclaration.name;
 
   const active = nodeList(state).filter((n) => n.status === NodeStatus.Running);
   const pending = nodeList(state).filter(
@@ -51,13 +59,13 @@ function renderGraph(state: EngineState): string {
   lines.push(`    <active_nodes>${joinIds(active)}</active_nodes>`);
   lines.push(`    <pending_nodes>${joinIds(pending)}</pending_nodes>`);
 
-  const loops = state.loopGroups ? [...state.loopGroups.values()] : [];
+  const loops = [...state.loopGroups.values()];
   if (loops.length > 0) {
     lines.push("    <loop_groups>");
     for (const g of loops) {
-      const count = g.traversalCount ?? 0;
-      const cap = g.maxTraversals ?? 0;
-      lines.push(`      <loop id="${esc(g.id)}" traversals="${esc(count)}/${esc(cap)}" />`);
+      lines.push(
+        `      <loop id="${esc(g.id)}" traversals="${esc(g.traversalCount)}/${esc(g.maxTraversals)}" />`,
+      );
     }
     lines.push("    </loop_groups>");
   }
@@ -89,7 +97,7 @@ function renderGraph(state: EngineState): string {
  *   caller treats the empty string as a clean no-op.
  */
 export function buildEngineGraphStateBlock(states: readonly EngineState[]): string {
-  if (!states || states.length === 0) return "";
+  if (states.length === 0) return "";
   const graphs = states.map(renderGraph);
   return `<graph_state>\n${graphs.join("\n")}\n</graph_state>`;
 }

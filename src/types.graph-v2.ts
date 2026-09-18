@@ -13,7 +13,7 @@
  * Design reference: .rolebox/design/graph-model.md
  */
 
-import type { JoinStrategy, GraphTemplate } from "./constants.ts";
+import type { GraphTemplate } from "./constants.ts";
 
 // ── Graph Declaration ───────────────────────────────────────────────────
 
@@ -149,23 +149,40 @@ export interface RetryConfig {
  * determines when all required upstream results are received. What the
  * node does with the merged input (validate, synthesize, approve) is
  * the agent's business — the engine only enforces the join.
+ *
+ * A DISCRIMINATED union (C1): `quorum` exists exactly on the `"quorum"`
+ * branch, so a quorum strategy cannot be declared without its required-answer
+ * count. The former optional `quorum?: number` made `{ strategy: "quorum" }`
+ * type-check and then silently degrade to a count of 1 at runtime; the
+ * declaration side (validator-v2 rule 9) now rejects a missing count instead.
  */
-export interface JoinConfig {
-  /**
-   * Strategy for determining when all required upstream results are received.
-   * - "all": wait for every upstream to signal answer
-   * - "any": proceed as soon as one upstream signals answer
-   * - "quorum": proceed when N upstreams signal answer
-   */
-  strategy: JoinStrategy;
-  /** Number of required answers when strategy is "quorum" (N in quorum:N) */
-  quorum?: number;
-}
+export type JoinConfig =
+  | {
+      /** Wait for every upstream to signal `answer`. */
+      strategy: "all";
+    }
+  | {
+      /** Proceed as soon as one upstream signals `answer`. */
+      strategy: "any";
+    }
+  | {
+      /** Proceed when N upstreams signal `answer`. */
+      strategy: "quorum";
+      /**
+       * Number of required answers (N in `quorum:N`). Must be a positive
+       * integer no greater than the node's in-degree (validator-v2 rule 9).
+       */
+      quorum: number;
+    };
 
 // ── Loop Group ──────────────────────────────────────────────────────────
 
 /**
  * Session-isolation mode for a loop group's rounds.
+ *
+ * Defined once, in `src/loop/types.ts` (the module that owns loop round
+ * state), and re-exported here so the graph declaration and the loop
+ * subsystem share one union instead of two drift-prone copies (B28).
  *
  * The engine's loop rounds re-dispatch members within the SAME engine state
  * (propagateRevise increments `traversalCount` on the shared node, see
@@ -174,7 +191,8 @@ export interface JoinConfig {
  * engine — requesting it returns a documented-unsupported error, never a
  * silent no-op.
  */
-export type LoopMode = "inherit" | "fresh";
+import type { LoopMode } from "./loop/types.ts";
+export type { LoopMode };
 
 /**
  * Bounded-cycle loop group declaration.

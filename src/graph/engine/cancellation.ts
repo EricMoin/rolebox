@@ -113,8 +113,10 @@ export interface CancelScopeReport {
 function downstreamClosure(state: EngineState, seed: readonly string[]): Set<string> {
   const closure = new Set<string>(seed);
   const queue = [...seed];
-  while (queue.length > 0) {
-    const current = queue.shift() as string;
+  // Index cursor instead of queue.shift(): the loop bound keeps the read in
+  // bounds without pop-and-assert, and no element is moved per iteration (B23).
+  for (let next = 0; next < queue.length; next += 1) {
+    const current = queue[next];
     for (const edge of state.graphDeclaration.edges) {
       if (edge.from !== current) continue;
       if (closure.has(edge.to)) continue;

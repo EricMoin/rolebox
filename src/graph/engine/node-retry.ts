@@ -125,8 +125,17 @@ export interface RetryReport extends RetryResetReport {
  * Preserves the accumulated counters (`sessionsSpawned`, `tokensConsumed`,
  * `traversalCount`, `retryCount`) and the node's static identity (`agent`,
  * `prompt` — the prompt may be mutated for `modify_prompt`, done by the caller).
- * The `result`, recorded signals, dispatch task ids, join accumulation, and error
- * reason are all dropped so a re-run starts from a clean execution state.
+ * The `result`, recorded signals, dispatch task ids, join accumulation, error
+ * reason, and any leftover automatic-retry backoff deadline are all dropped so a
+ * re-run starts from a clean execution state.
+ *
+ * `retryBackoffUntil` (Y10) must be cleared with the rest: it is the
+ * escalate-retry gate's withheld-until stamp, and a node sitting in a backoff
+ * window is a legal retry target (it is `ready`, not `running`/`blocked`).
+ * Leaving the stamp behind made `retryNode` silently suppress the re-dispatch
+ * the caller just asked for (`reDispatched === 0`) until the unrelated window
+ * expired — contradicting this module's "re-marks the target ready so it is
+ * picked up by _dispatchReadyNodes" contract.
  */
 function resetNodeRun(node: NodeRuntimeState): void {
   node.signalsObserved = {};
@@ -137,6 +146,7 @@ function resetNodeRun(node: NodeRuntimeState): void {
   node.upstreamResults = new Map();
   node.joinSatisfied = false;
   node.completedAt = undefined;
+  node.retryBackoffUntil = undefined;
 }
 
 /**

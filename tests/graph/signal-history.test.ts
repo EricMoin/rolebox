@@ -6,7 +6,10 @@ import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { DispatchParentContext } from "../../src/graph/engine/dispatch-bridge.ts";
 import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
-import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
+import {
+  SignalBridge,
+  SIGNAL_LEDGER_HISTORY_LIMIT,
+} from "../../src/graph/engine/signal-bridge.ts";
 import {
   AdvanceEngine,
   type NodeDispatchPort,
@@ -252,5 +255,56 @@ describe("synthetic signals — ledger history completeness", () => {
     expect(entry!.history![0].signal).toBe("answer");
     expect(entry!.history![0].source).toBe("race_guard");
     expect(entry!.lastSignalAt).toBe(entry!.history![0].atMs);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y19 — the ledger history is bounded
+//
+// Every recorded signal appends a SignalLedgerEvent, and every non-critical
+// flush serializes the whole graph state, so an unbounded history grew with a
+// long-running loop's round count. The ledger now keeps the most recent
+// SIGNAL_LEDGER_HISTORY_LIMIT events.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("SignalBridge.record — bounded ledger history (Y19)", () => {
+  it("trims to the most recent SIGNAL_LEDGER_HISTORY_LIMIT events, keeping signals/lastSignalAt current", () => {
+    const state = buildState();
+    const bridge = new SignalBridge();
+    const total = SIGNAL_LEDGER_HISTORY_LIMIT + 7;
+
+    for (let i = 0; i < total; i += 1) {
+      bridge.record(state, "A", "progress", i);
+    }
+
+    const entry = state.signalLedger.get("A")!;
+    expect(entry.history).toHaveLength(SIGNAL_LEDGER_HISTORY_LIMIT);
+    // The newest events survive, the oldest are dropped.
+    expect(entry.history![0].payload).toBe(total - SIGNAL_LEDGER_HISTORY_LIMIT);
+    const newest = entry.history![entry.history!.length - 1];
+    expect(newest.payload).toBe(total - 1);
+    // Ordering is preserved across the trim.
+    for (let i = 1; i < entry.history!.length; i += 1) {
+      expect(entry.history![i].atMs).toBeGreaterThanOrEqual(entry.history![i - 1].atMs);
+    }
+    // The authoritative single-value fields still carry the latest write.
+    expect(entry.signals.progress).toBe(total - 1);
+    expect(entry.lastSignalAt).toBe(newest.atMs);
+  });
+
+  it("keeps every event while the history is at or below the limit", () => {
+    const state = buildState();
+    const bridge = new SignalBridge();
+
+    for (let i = 0; i < SIGNAL_LEDGER_HISTORY_LIMIT; i += 1) {
+      bridge.record(state, "A", "progress", i);
+    }
+
+    const entry = state.signalLedger.get("A")!;
+    expect(entry.history).toHaveLength(SIGNAL_LEDGER_HISTORY_LIMIT);
+    expect(entry.history![0].payload).toBe(0);
+    expect(entry.history![SIGNAL_LEDGER_HISTORY_LIMIT - 1].payload).toBe(
+      SIGNAL_LEDGER_HISTORY_LIMIT - 1,
+    );
   });
 });

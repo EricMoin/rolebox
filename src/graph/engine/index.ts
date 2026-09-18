@@ -21,7 +21,7 @@
  *
  * Design: the engine is a role-agnostic primitive. This barrel only wires the
  * runtime; it carries no dispatch or role logic itself. The dispatch surface
- * is an injected seam (see {@link EngineRuntimeOptions.dispatch}) so callers
+ * is an injected seam (see {@link CreateEngineOptions.dispatch}) so callers
  * and tests can avoid real sub-agent dispatch. External integration (wiring
  * this runtime into the platform entry points and re-exporting it from the
  * package root) lives in `src/graph/tools/graph-tools.ts`.
@@ -33,6 +33,7 @@ import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { DispatchTask } from "../../dispatch/types.ts";
 import type { GraphDeclaration } from "../../types.graph-v2.ts";
 import { EnginePhase, NodeStatus } from "../../constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type {
   EngineState,
   NodeLivenessState,
@@ -54,6 +55,7 @@ import {
   type GraphTerminalEvent,
 } from "./engine-advance.ts";
 import { SignalBridge } from "./signal-bridge.ts";
+import { logWarn } from "./log-warn.ts";
 import {
   BudgetBridge,
 } from "./budget-bridge.ts";
@@ -61,6 +63,11 @@ import {
   DispatchBridge,
   type DispatchParentContext,
 } from "./dispatch-bridge.ts";
+import {
+  type ApproveReport,
+  type PruneReport,
+  type RejectReport,
+} from "./approval-handler.ts";
 import defaultConditionResolver from "./condition-resolver.ts";
 import {
   EnginePersistence,
@@ -129,8 +136,8 @@ export interface EngineRuntime {
    * Transition the engine from `idle` to `executing` and dispatch the ready
    * root nodes. Provisioning is applied first if it has not run yet.
    *
-   * Requires a dispatch seam (see {@link EngineRuntimeOptions.dispatch} or
-   * {@link EngineRuntimeOptions.manager}); without one, this rejects with a
+   * Requires a dispatch seam (see {@link CreateEngineOptions.dispatch} or
+   * {@link CreateEngineOptions.manager}); without one, this rejects with a
    * clear error.
    */
   run(): Promise<void>;
@@ -167,10 +174,31 @@ export interface EngineRuntime {
   adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void>;
 
   /**
-   * Return a read-only snapshot of the current {@link EngineState}. The
-   * snapshot's collections (`nodes`, `edges`, `frontier`, `signalLedger`,
-   * `loopGroups`, ...) are freshly allocated deep-enough clones — mutating
-   * them does not affect the live engine.
+   * Return a snapshot of the current {@link EngineState}.
+   *
+   * Isolation contract (Y24) — what is FRESH in the returned object:
+   *
+   * - the `nodes` map and every mutable leaf of each node: its
+   *   `signalsObserved` record, its `upstreamResults` map INCLUDING every
+   *   {@link EdgePayload} in it (`artifacts` array and `budgetConsumed`
+   *   object), `tokensConsumed`, `artifacts` / `evidence` arrays, the declared
+   *   `budget` spec, the `result` ref, and the `liveness` carrier;
+   * - `frontier`, `budget`, `pendingCompletions`, `terminalNotified`;
+   * - the `signalLedger` map and each entry's `signals` / `history` containers;
+   * - the `loopGroups` map, each group record, and each round entry (including
+   *   its `nodeIds` array);
+   * - the `checkpoints` / `checkpointHistory` containers (the
+   *   {@link CheckpointRecord} values inside are immutable snapshots and are
+   *   shared);
+   * - the entire `graphDeclaration` (a structural clone).
+   *
+   * Deliberately SHARED, and therefore NOT safe to mutate — the contents of a
+   * signal payload value (inside `signalsObserved` or a ledger entry's
+   * `history[].payload`). Treat the snapshot as read-only below that level: a
+   * signal payload is arbitrary JSON produced by a worker, and deep-cloning
+   * every payload on every call would be unbounded work. The previous JSDoc
+   * promised unconditional isolation and invited mutation; this contract is the
+   * accurate one.
    *
    * Caveat (monitor M7): the snapshot is taken synchronously without acquiring
    * the advancing lock, so while a critical section is in flight
@@ -186,8 +214,18 @@ export interface EngineRuntime {
    * `cancelled`, cancels in-flight dispatch tasks via the dispatch seam, and
    * advances the engine lifecycle to `complete`. `blocked` (needs_approval)
    * nodes await the human and are left untouched.
+   *
+   * @returns a {@link CancelScopeReport} describing the teardown (contract C7):
+   *   every node id as `target`, the ids actually retired to
+   *   `cancelled → done` in `cancelled`, the ids left untouched
+   *   (`completed` / `blocked` / terminal) in `skipped`, and the dispatch task
+   *   ids handed to the cancel seam in `cancelCalls`. The report is the
+   *   authoritative "who was cancelled" answer — consumers no longer have to
+   *   re-derive it by filtering `errorReason` text (Y29), a filter that both
+   *   over-counted previously scoped cancels and silently broke if the reason
+   *   wording changed.
    */
-  cancel(): Promise<void>;
+  cancel(): Promise<CancelScopeReport>;
 
   /**
    * Approve a blocked `needs_approval` node: `blocked → completed`, record an
@@ -196,9 +234,20 @@ export interface EngineRuntime {
    *
    * @param nodeId  The `needs_approval` node currently `blocked`.
    * @param payload Optional approval output (defaults to the node's recorded
-   *                `need_approval` summary, else an accept marker).
+   *                `need_approval` summary, else an accept marker). Must be a
+   *                JSON value: a `bigint`, function, symbol, circular
+   *                reference, or an object whose property read throws is
+   *                rejected with a `TypeError` BEFORE the node changes state
+   *                (R6).
+   * @returns an {@link ApproveReport} (contract C6) — `applied: false` for an
+   *          idempotent no-op (the node was not `blocked`), so the caller no
+   *          longer has to diff two `status()` snapshots to learn whether its
+   *          decision took effect.
+   * @throws when `nodeId` is not a node of this graph, and when `payload` is
+   *         not a JSON value; neither case applies the approval, so the node's
+   *         state is unchanged.
    */
-  approveNode(nodeId: string, payload?: unknown): Promise<void>;
+  approveNode(nodeId: string, payload?: unknown): Promise<ApproveReport>;
 
   /**
    * Reject a blocked `needs_approval` node: `blocked → ready` (re-enter with
@@ -207,8 +256,13 @@ export interface EngineRuntime {
    *
    * @param nodeId  The `needs_approval` node currently `blocked`.
    * @param reason  Optional human-supplied rejection reason.
+   * @returns a {@link RejectReport} (contract C6): the lane the rejection took
+   *          (`escalate` / `revise`), or `already_resolved` with the node's
+   *          status at the time of the no-op replay.
+   * @throws when `nodeId` is not a node of this graph; the rejection is not
+   *         applied in that case.
    */
-  rejectNode(nodeId: string, reason?: string): Promise<void>;
+  rejectNode(nodeId: string, reason?: string): Promise<RejectReport>;
 
   /**
    * Partially approve a blocked `needs_approval` node: accept the `approved`
@@ -222,13 +276,19 @@ export interface EngineRuntime {
    * @param approved  Upstream node ids the human accepted.
    * @param rejected  Upstream node ids the human rejected (re-executed).
    * @param reason    Optional rejection feedback for the re-executed branches.
+   * @returns a {@link PruneReport} (contract C6) naming the dependents this
+   *          verdict cancelled and the ones that survive on their remaining
+   *          approved upstreams (empty when the gate was not `blocked`, i.e.
+   *          the verdict was a no-op).
+   * @throws when `nodeId` is not a node of this graph; the verdict is not
+   *         applied in that case.
    */
   partialApprove(
     nodeId: string,
     approved: string[],
     rejected: string[],
     reason?: string,
-  ): Promise<void>;
+  ): Promise<PruneReport>;
 
   /**
    * Retry a terminal graph's node (`tool-merge-map.md` §2.2
@@ -466,8 +526,13 @@ export interface CreateEngineOptions {
    * engine behavior is unchanged without it. Notification logic (a notifier)
    * never lives here — this is a role-agnostic DI seam like
    * {@link CreateEngineOptions.dispatch} (see {@link NodeCompletionEvent}).
+   *
+   * Contract (C5 / Y2): a notifier may be synchronous or return a promise; the
+   * engine isolates the return value and never awaits it
+   * (`void Promise.resolve(ret).catch(handler)` in engine-advance.ts), so both
+   * implementations satisfy the seam without a cast.
    */
-  onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  onNodeCompletion?: (event: NodeCompletionEvent) => void | Promise<unknown>;
   /**
    * Optional write-side durable graph event log (graph monitoring). When
    * present, the engine records node dispatch and node terminal transitions
@@ -484,8 +549,12 @@ export interface CreateEngineOptions {
    * is unchanged without it. Notification logic never lives here — this is a
    * role-agnostic DI seam like {@link CreateEngineOptions.onNodeCompletion}
    * (see {@link GraphTerminalEvent}).
+   *
+   * Contract (C5 / Y2): synchronous or promise-returning — the engine isolates
+   * the return value and never awaits it (engine-termination.ts
+   * `fireGraphTerminal`).
    */
-  onGraphTerminal?: (event: GraphTerminalEvent) => void;
+  onGraphTerminal?: (event: GraphTerminalEvent) => void | Promise<unknown>;
   /**
    * Optional node-stall notification seam (node-anomaly-detection subtask 5).
    * Wired into the opt-in {@link NodeLivenessMonitor} instantiated alongside
@@ -496,8 +565,11 @@ export interface CreateEngineOptions {
    * role-agnostic DI seam like {@link CreateEngineOptions.onNodeCompletion}
    * (see {@link NodeStallEvent}). Callback exceptions are swallowed (logged)
    * so a monitor tick never breaks.
+   *
+   * Contract (C5 / Y2): synchronous or promise-returning; the runtime contains
+   * a synchronous throw and never awaits the returned promise.
    */
-  onNodeStall?: (event: NodeStallEvent) => void;
+  onNodeStall?: (event: NodeStallEvent) => void | Promise<unknown>;
   /**
    * Optional node-liveness feed seam (node-anomaly-detection subtask 2). Wired
    * into the advance engine's identical seam: when present, the engine records
@@ -521,22 +593,46 @@ function defaultGraphId(name: string): string {
   return `${name}-${Date.now()}-${engineSeq}`;
 }
 
-/** Minimal, dependency-free warning logger (no sub-logger import cycle). */
-function logWarn(message: string): void {
-  // eslint-disable-next-line no-console
-  console.warn(message);
-}
-
 // ── Snapshot helpers ────────────────────────────────────────────────────────
 
-/** Deep-enough clone of a node's runtime state for a snapshot. */
+/**
+ * Clone a node's runtime state for a snapshot (Y24).
+ *
+ * Every mutable leaf the engine itself writes is copied: the `signalsObserved`
+ * record, the `upstreamResults` map AND each {@link EdgePayload} inside it
+ * (including that payload's `artifacts` array and `budgetConsumed` object), the
+ * token / artifact / evidence / budget / liveness carriers, and the
+ * materialized-result ref. `new Map(n.upstreamResults)` alone copies only the
+ * map structure — the payload objects and their arrays stayed shared with the
+ * live node, so a consumer that mutated the snapshot silently rewrote live (and
+ * persisted) state despite the documented "mutating them does not affect the
+ * live engine" promise.
+ *
+ * Deliberately still SHARED (see the isolation contract on
+ * {@link EngineRuntime.status}): signal payload VALUES inside
+ * `signalsObserved` — payloads are arbitrary JSON, and a deep copy of every
+ * one on every `status()` call would cost more than it protects.
+ */
 function cloneNode(n: NodeRuntimeState): NodeRuntimeState {
   return {
     ...n,
     signalsObserved: { ...n.signalsObserved },
-    upstreamResults: new Map(n.upstreamResults),
+    upstreamResults: new Map(
+      [...n.upstreamResults].map(([sourceId, payload]) => [
+        sourceId,
+        {
+          ...payload,
+          artifacts: [...payload.artifacts],
+          budgetConsumed: { ...payload.budgetConsumed },
+        },
+      ]),
+    ),
     tokensConsumed: { ...n.tokensConsumed },
     result: n.result ? { ...n.result } : undefined,
+    // Optional mutable arrays the recorder / completion paths append to.
+    artifacts: n.artifacts ? [...n.artifacts] : undefined,
+    evidence: n.evidence ? [...n.evidence] : undefined,
+    budget: n.budget ? { ...n.budget } : undefined,
     // C-WIRE (node-anomaly-detection subtask 1): the liveness carrier is a
     // mutable object — clone it so a snapshot consumer's in-place heartbeat /
     // stall mutation can never alias the live node's liveness state. Absent →
@@ -569,8 +665,11 @@ function snapshotEngineState(state: EngineState): EngineState {
           // Monitor (M7): `rounds` is an append-only array — deep-enough clone
           // it (fresh entry objects, mirroring engine-persistence.ts:221-227) so
           // a snapshot consumer's in-place push/mutation can never alias the
-          // live loop-group history.
-          rounds: g.rounds ? g.rounds.map((r) => ({ ...r })) : undefined,
+          // live loop-group history. Y24: the entry's `nodeIds` array is itself
+          // mutable, so it is copied too — the entry object alone was not enough.
+          rounds: g.rounds
+            ? g.rounds.map((r) => ({ ...r, nodeIds: [...r.nodeIds] }))
+            : undefined,
         },
       ]),
     ),
@@ -652,6 +751,43 @@ const throwOnDispatch: NodeDispatchPort & { isNoDispatchSeamStub?: boolean } = {
   },
 };
 
+/**
+ * Narrow the dispatch seam to the recovery surface (B14).
+ *
+ * Recovery's consumers guard on exactly one member — `getTask`, the only way to
+ * read a dispatched task's live status. The previous
+ * `this.dispatchPort as DispatchRecoveryPort` assertions asserted the WHOLE
+ * (fully optional) recovery interface instead of checking that member: they
+ * compiled even when the underlying port could not look a task up, and a rename
+ * on either side would have kept compiling while `getTask` silently evaluated
+ * to `undefined` at runtime. A type predicate ties the narrowing to the runtime
+ * check.
+ */
+function hasTaskLookup(
+  port: NodeDispatchPort,
+): port is NodeDispatchPort & DispatchRecoveryPort {
+  return typeof port.getTask === "function";
+}
+
+// ── C6 report plumbing ──────────────────────────────────────────────────────
+
+/**
+ * C6 makes the runtime's approve / reject / partial-approve entry points
+ * return the engine's authoritative report, so a caller never has to diff two
+ * `status()` snapshots to learn whether its decision took effect.
+ *
+ * The advance engine answers those report types DIRECTLY: `approveNode`
+ * projects `approveBlockedNode`'s return value, `rejectNode` forwards
+ * `rejectBlockedNode`'s report, and `partialApprove` forwards
+ * `pruneDownstreamSubgraph`'s report — so the runtime methods below are pure
+ * pass-throughs and there is exactly ONE decision procedure: the primitive that
+ * performs the mutation. The earlier state/snapshot derivation lived here and
+ * has been removed (V1 §6.2): reading a node status before and after the awaited
+ * call is a SECOND judgement over a window in which another critical section may
+ * have run, and re-running the prune against a snapshot duplicated a decision
+ * the engine had already made.
+ */
+
 // ── EngineRuntime implementation ────────────────────────────────────────────
 
 class EngineRuntimeImpl implements EngineRuntime {
@@ -670,10 +806,16 @@ class EngineRuntimeImpl implements EngineRuntime {
    * handler. Started on `run()`/`recover()`, stopped by `cancel()`/`dispose()`.
    */
   private readonly staleWatcher?: NodeStalenessWatcher;
-  private readonly onNodeCompletion?: (event: NodeCompletionEvent) => void;
+  private readonly onNodeCompletion?: (
+    event: NodeCompletionEvent,
+  ) => void | Promise<unknown>;
   private readonly graphEvents?: GraphEventRecorder;
-  private readonly onGraphTerminal?: (event: GraphTerminalEvent) => void;
-  private readonly onNodeStall?: (event: NodeStallEvent) => void;
+  private readonly onGraphTerminal?: (
+    event: GraphTerminalEvent,
+  ) => void | Promise<unknown>;
+  private readonly onNodeStall?: (
+    event: NodeStallEvent,
+  ) => void | Promise<unknown>;
   /**
    * Opt-in heartbeat-based liveness monitor (subtask 5). Absent unless
    * `nodeStaleTimeoutMs` is configured (instantiated beside the
@@ -771,10 +913,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       // unchanged. When a probe-gated node IS timed out (probe false), its
       // result is folded into the timeout reason for diagnostics (S1).
       const dispatchAliveProbe = (node: NodeRuntimeState): boolean =>
-        isDispatchTaskLive(
-          this.dispatchPort as DispatchRecoveryPort,
-          node.dispatchTaskId ?? "",
-        );
+        isDispatchTaskLive(this.dispatchPort, node.dispatchTaskId ?? "");
       this.staleWatcher = new NodeStalenessWatcher({
         nodeStaleTimeoutMs: opts.nodeStaleTimeoutMs,
         intervalMs: opts.sweeperIntervalMs,
@@ -831,6 +970,20 @@ class EngineRuntimeImpl implements EngineRuntime {
    *    joins (a timed-out upstream must not silently stall a fan-in), matching
    *    the recovery orphan path's escalate re-emission.
    *
+   * Y11 (containment parity): this hard-stall entry point must complete the
+   * SAME triple the dispatch-failure branch completes inside the advancing
+   * critical section (M7, `_containAdvanceError`) — record the failure,
+   * PROPAGATE it to the downstream convergence joins, and re-check graph
+   * termination — rather than leaving propagation to a later deferred drain.
+   * The triple is driven through {@link AdvanceEngine.onNodeSignalEmitted},
+   * whose critical section records the signal, runs the escalate propagation
+   * (retry gate re-entry / cascade cancel / fan-in escalation) and terminates
+   * with the termination check. The `finally` below guarantees the
+   * termination re-check for this path even when that entry rejects before its
+   * section runs (the signal-ledger write happens before the lock is
+   * acquired) — a timed-out node must never leave the graph without a terminal
+   * re-evaluation.
+   *
    * Fire-and-forget: the watcher ticks from a timer, so the (async) escalation
    * is driven without awaiting — the advance engine's re-entrancy guard
    * serializes it against any in-flight critical section.
@@ -840,16 +993,24 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Subtask 2: fire-and-forget — the escalate advance is contained inside
     // the advance engine, but attach a catch so a regression can never surface
     // an unhandled rejection from this timer-driven site.
-    void this.advance.onNodeSignalEmitted(
-      nodeId,
-      "escalate",
-      { error: errorReason },
-      "recovery",
-    ).catch((err) => {
-      logWarn(
-        `engine: stale-node escalate advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
-      );
-    });
+    void this.advance
+      .onNodeSignalEmitted(nodeId, "escalate", { error: errorReason }, "recovery")
+      .catch((err) => {
+        logWarn(
+          `engine: stale-node escalate advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${errorText(err)}`,
+        );
+      })
+      .finally(() => {
+        // Y11: the termination re-check is part of this path's contract, not a
+        // side effect of a successful advance — re-run it unconditionally.
+        try {
+          this.advance.checkTermination();
+        } catch (err) {
+          logWarn(
+            `engine: termination re-check after stale-node timeout failed for graph "${this.state.graphId}": ${errorText(err)}`,
+          );
+        }
+      });
   }
 
   /**
@@ -877,7 +1038,7 @@ class EngineRuntimeImpl implements EngineRuntime {
     } catch (err) {
       logWarn(
         `engine: onNodeStall consumer threw for node "${nodeId}" in graph "${this.state.graphId}" — ` +
-          `swallowed so a monitor tick never breaks: ${String(err)}`,
+          `swallowed so a monitor tick never breaks: ${errorText(err)}`,
       );
     }
   }
@@ -909,7 +1070,7 @@ class EngineRuntimeImpl implements EngineRuntime {
   ): Promise<void> {
     return this.advance.handleFeedSessionEvent(nodeId, kind, reason).catch((err) => {
       logWarn(
-        `engine: feed-session advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+        `engine: feed-session advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${errorText(err)}`,
       );
     });
   }
@@ -1045,8 +1206,8 @@ class EngineRuntimeImpl implements EngineRuntime {
     this.livenessMonitor?.start(this.state);
 
     // Reconcile running nodes against the dispatch system (requires getTask).
-    const port = this.dispatchPort as DispatchRecoveryPort;
-    if (!port.getTask) {
+    const port = this.dispatchPort;
+    if (!hasTaskLookup(port)) {
       // No way to reconcile — adopt the state and re-dispatch any ready nodes
       // whose tasks were never launched (blocked / approval-resume cases).
       // Monitor (M6): WITHOUT getTask this path cannot apply timeout semantics
@@ -1081,7 +1242,7 @@ class EngineRuntimeImpl implements EngineRuntime {
           void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery").catch(
             (err) => {
               logWarn(
-                `engine-recover: reconcile emitSignal advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+                `engine-recover: reconcile emitSignal advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${errorText(err)}`,
               );
             },
           );
@@ -1090,7 +1251,7 @@ class EngineRuntimeImpl implements EngineRuntime {
     } catch (err) {
       // A single bad node must not abort recovery — adopt the rest.
       logWarn(
-        `engine-recover: reconcile failed for graph "${this.state.graphId}": ${String(err)}`,
+        `engine-recover: reconcile failed for graph "${this.state.graphId}": ${errorText(err)}`,
       );
       // Monitor (M6): reconcileEngine may have timed out some nodes before it
       // threw — surface every node now in the `timeout` status through the
@@ -1121,7 +1282,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       void port.cancelTask?.(oc.taskId).catch((err) => {
         logWarn(
           `engine-recover: cancelTask failed for orphaned task ${oc.taskId} ` +
-            `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${String(err)}`,
+            `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${errorText(err)}`,
         );
       });
     }
@@ -1154,8 +1315,8 @@ class EngineRuntimeImpl implements EngineRuntime {
     // Reconcile adopted `running` nodes against the dispatch system so a node
     // whose worker finished (or vanished) while the toolset was rebuilding the
     // engine still advances — identical semantics to `recover()`.
-    const port = this.dispatchPort as DispatchRecoveryPort;
-    if (port.getTask) {
+    const port = this.dispatchPort;
+    if (hasTaskLookup(port)) {
       try {
         const report = reconcileEngine(
           this.state,
@@ -1175,7 +1336,7 @@ class EngineRuntimeImpl implements EngineRuntime {
             void this.advance.onNodeSignalEmitted(nodeId, type, payload, "recovery").catch(
               (err) => {
                 logWarn(
-                  `engine-adopt: reconcile emitSignal advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${String(err)}`,
+                  `engine-adopt: reconcile emitSignal advance failed for node "${nodeId}" in graph "${this.state.graphId}": ${errorText(err)}`,
                 );
               },
             );
@@ -1192,7 +1353,7 @@ class EngineRuntimeImpl implements EngineRuntime {
           void port.cancelTask?.(oc.taskId).catch((err) => {
             logWarn(
               `engine-adopt: cancelTask failed for orphaned task ${oc.taskId} ` +
-                `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${String(err)}`,
+                `(node "${oc.nodeId}") in graph "${this.state.graphId}": ${errorText(err)}`,
             );
           });
         }
@@ -1201,7 +1362,7 @@ class EngineRuntimeImpl implements EngineRuntime {
         }
       } catch (err) {
         logWarn(
-          `engine-adopt: reconcile failed for graph "${this.state.graphId}": ${String(err)}`,
+          `engine-adopt: reconcile failed for graph "${this.state.graphId}": ${errorText(err)}`,
         );
       }
     }
@@ -1255,8 +1416,11 @@ class EngineRuntimeImpl implements EngineRuntime {
    * engine lifecycle to `complete`. `blocked` (needs_approval) nodes are left
    * for the human; terminal nodes are untouched. Best-effort cancellation is
    * never awaited to completion — the graph teardown proceeds regardless.
+   *
+   * @returns the {@link CancelScopeReport} for this teardown (contract C7) —
+   *   see {@link EngineRuntime.cancel} for the field semantics.
    */
-  async cancel(): Promise<void> {
+  async cancel(): Promise<CancelScopeReport> {
     this.sweeper.stop();
     // Monitor (M3): a cancelled graph must not keep ticking the opt-in
     // staleness watcher.
@@ -1268,12 +1432,27 @@ class EngineRuntimeImpl implements EngineRuntime {
 
     // Cancel in-flight dispatch tasks (best-effort), then cancel the nodes.
     const reason = "cancelled by engine.cancel()";
+    // Contract C7: the teardown already decides who is retired and who is left
+    // alone — collect that decision instead of discarding it. The whole graph
+    // is the target set (loop groups need no expansion here: every member is
+    // already a node of this graph).
+    const report: CancelScopeReport = {
+      target: [...this.state.nodes.keys()],
+      cancelled: [],
+      skipped: [],
+      cancelCalls: [],
+    };
     for (const node of this.state.nodes.values()) {
       if (node.status === NodeStatus.Running && node.dispatchTaskId) {
-        try {
-          await this.dispatchPort.cancelTask?.(node.dispatchTaskId);
-        } catch {
-          // best-effort — teardown continues without a cancellation ack
+        const taskId = node.dispatchTaskId;
+        const port = this.dispatchPort;
+        if (port.cancelTask) {
+          report.cancelCalls.push(taskId);
+          try {
+            await port.cancelTask(taskId);
+          } catch {
+            // best-effort — teardown continues without a cancellation ack
+          }
         }
       }
       if (
@@ -1284,6 +1463,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       ) {
         markCancelled(this.state, node, reason);
         markDone(this.state, node);
+        report.cancelled.push(node.nodeId);
         // Monitor (H4): cancellation is a lifecycle transition performed
         // OUTSIDE the signal-driven advancement — surface each cancelled node
         // through the same completion seam + durable event log as
@@ -1295,6 +1475,11 @@ class EngineRuntimeImpl implements EngineRuntime {
           reason,
           NodeStatus.Done,
         );
+      } else {
+        // Left untouched: `completed`, `blocked` (awaiting the human) or
+        // already terminal. Reported so a consumer can tell "nothing to do"
+        // apart from "cancelled".
+        report.skipped.push(node.nodeId);
       }
     }
     this.state.frontier = [];
@@ -1333,14 +1518,16 @@ class EngineRuntimeImpl implements EngineRuntime {
     // flush-on-terminate: the graph reached `complete` (cancel teardown) — drain
     // any pending debounced non-critical write so the on-disk state is complete.
     this.persistence?.flush();
+
+    return report;
   }
 
-  async approveNode(nodeId: string, payload?: unknown): Promise<void> {
-    await this.advance.approveNode(nodeId, payload);
+  async approveNode(nodeId: string, payload?: unknown): Promise<ApproveReport> {
+    return this.advance.approveNode(nodeId, payload);
   }
 
-  async rejectNode(nodeId: string, reason?: string): Promise<void> {
-    await this.advance.rejectNode(nodeId, reason);
+  async rejectNode(nodeId: string, reason?: string): Promise<RejectReport> {
+    return this.advance.rejectNode(nodeId, reason);
   }
 
   async partialApprove(
@@ -1348,8 +1535,8 @@ class EngineRuntimeImpl implements EngineRuntime {
     approved: string[],
     rejected: string[],
     reason?: string,
-  ): Promise<void> {
-    await this.advance.partialApprove(nodeId, approved, rejected, reason);
+  ): Promise<PruneReport> {
+    return this.advance.partialApprove(nodeId, approved, rejected, reason);
   }
 
   async retryNode(
@@ -1437,6 +1624,14 @@ export function createEngine(
 }
 
 // ── Re-exports (public engine API surface) ──────────────────────────────────
+//
+// B17: every symbol below stays exported — this package publishes `dist/`, so
+// removing a name is a breaking change for consumers even when the current
+// repository has no importer. The `@internal` tags mark the groups that have no
+// production consumer outside `src/graph/engine` (verified by grep across
+// `src`): they are engine machinery kept for compatibility and for the graph
+// test suite, NOT a supported consumer surface. Treat anything tagged
+// `@internal` as able to change shape without a major version bump.
 
 /** The top-level engine state container — re-exported for consumer typing. */
 export type { EngineState } from "../../types.engine-v2.ts";
@@ -1448,6 +1643,8 @@ export type { EngineState } from "../../types.engine-v2.ts";
  * coordinates the Phase 2 primitives (traversal counting, revise re-dispatch,
  * escalation cascade, upstream cancellation). The fingerprint / tracker
  * helpers are exported for direct, testable use.
+ *
+ * @internal Consumed by `engine-advance.ts` and the graph test suite only.
  */
 export {
   executeLoopStep,
@@ -1456,23 +1653,42 @@ export {
   fingerprintPayload,
   extractUnresolved,
 } from "./loop-group-executor.ts";
+/** @internal Loop-report shapes (see the group above). */
 export type {
   LoopOutcome,
   LoopStepReport,
   LoopEscalatePayload,
 } from "./loop-group-executor.ts";
+
+/** @internal Cancellation seam shape, structurally satisfied by the dispatch port. */
 export type { CancelDispatchPort } from "./cascade-canceller.ts";
+
+/**
+ * Scoped / cascade cancellation primitive. {@link CancelScopeReport} is public
+ * (returned by {@link EngineRuntime.cancelNodes} and {@link EngineRuntime.cancel});
+ * the primitive itself, its options and its notification hook are
+ * engine-internal.
+ */
 export {
   cancelNodes,
   type CancelScopeOptions,
   type CancelScopeReport,
   type CancelNodeNotifier,
 } from "./cancellation.ts";
+
+/** @internal Approval-context assembly, consumed by `engine-advance.ts`. */
 export {
   buildApprovalPayload,
   type ApprovalPayload,
   type ApprovalUpstreamResult,
 } from "./approval-payload.ts";
+
+/**
+ * Approval-gate state primitives and the R6 payload normalization helpers.
+ *
+ * @internal Consumed by `engine-advance.ts` and the graph test suite. The
+ * public result shapes are re-exported separately below.
+ */
 export {
   approveBlockedNode,
   rejectBlockedNode,
@@ -1480,16 +1696,36 @@ export {
   reenterRejectedUpstreams,
   resetRejectedUpstreams,
   mergeRejectionFeedback,
-  type RejectReport,
-  type PruneReport,
+  approveReport,
+  normalizeApprovalPayload,
+  approvalResultText,
+  type ApprovalJsonValue,
 } from "./approval-handler.ts";
-export {
-  resetNodeForRetry,
-  retryNode,
-  type RetryNodeOptions,
-  type RetryResetReport,
-  type RetryReport,
-} from "./node-retry.ts";
+
+/**
+ * Approval-gate result shapes (contract C6) — public: the `EngineRuntime`
+ * approve / reject / partial-approve entry points return them, and the tool
+ * layer consumes them instead of diffing `status()` snapshots. {@link ReentryReport}
+ * was previously defined but never re-exported (B17).
+ */
+export type {
+  ApproveReport,
+  RejectReport,
+  PruneReport,
+  ReentryReport,
+} from "./approval-handler.ts";
+
+/**
+ * Node retry control path — public. {@link RetryReport} is what
+ * {@link EngineRuntime.retryNode} resolves.
+ */
+export { retryNode } from "./node-retry.ts";
+export type { RetryNodeOptions, RetryReport } from "./node-retry.ts";
+/** @internal Retry reset primitive — one `retryNode` step, exported for tests. */
+export { resetNodeForRetry } from "./node-retry.ts";
+/** @internal Reset-scope report used inside `retryNode`'s implementation. */
+export type { RetryResetReport } from "./node-retry.ts";
+
 export type { NodeDispatchPort } from "./engine-advance.ts";
 export type { NodeLivenessFeed } from "./engine-advance.ts";
 export type {
@@ -1503,12 +1739,12 @@ export type {
 } from "./engine-recovery.ts";
 export {
   GraphEventRecorder,
-  graphEventsHash,
-  graphEventsPath,
   readGraphEventLog,
   type GraphEventRecord,
   type GraphEventType,
 } from "./graph-events.ts";
+/** @internal Event-log path / hash helpers — no consumer outside the engine. */
+export { graphEventsHash, graphEventsPath } from "./graph-events.ts";
 export {
   type PhaseEventSink,
   type BudgetEventSink,
@@ -1531,4 +1767,5 @@ export type {
   GraphCompletionHandler,
   GraphStallHandler,
   GraphTerminalHandler,
+  GraphNotifyHandler,
 } from "./graph-notify.ts";

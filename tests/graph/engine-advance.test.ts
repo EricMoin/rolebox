@@ -7,9 +7,14 @@ import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { NodeRuntimeState, EngineState } from "../../src/types.engine-v2.ts";
 import type { DispatchTask, DispatchTaskStatus, MaterializedResultRef } from "../../src/dispatch/types.ts";
 import type { DispatchParentContext, TaskTerminatedCallback } from "../../src/graph/engine/dispatch-bridge.ts";
-import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
-import { markEscalated } from "../../src/graph/engine/node-lifecycle.ts";
+import {
+  addToFrontier,
+  createEngineState,
+  provision,
+} from "../../src/graph/engine/engine-state.ts";
+import { markEscalated, markReady } from "../../src/graph/engine/node-lifecycle.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
+import { defaultConditionResolver } from "../../src/graph/engine/condition-resolver.ts";
 import {
   AdvanceEngine,
   type NodeDispatchPort,
@@ -30,10 +35,15 @@ import { GraphEventRecorder } from "../../src/graph/engine/graph-events.ts";
 class FakeDispatch implements NodeDispatchPort {
   calls: { nodeId: string; agent: string; prompt: string; parentSession: string }[] = [];
   private held = new Set<string>();
+  private failing = new Set<string>();
   private releasers = new Map<string, Array<() => void>>();
 
   hold(nodeId: string): void {
     this.held.add(nodeId);
+  }
+  /** Make `executeNode` reject for `nodeId` (dispatch-failure path). */
+  fail(nodeId: string): void {
+    this.failing.add(nodeId);
   }
   release(nodeId: string): void {
     this.held.delete(nodeId);
@@ -52,6 +62,9 @@ class FakeDispatch implements NodeDispatchPort {
       prompt: node.prompt,
       parentSession: parentContext.sessionID,
     });
+    if (this.failing.has(node.nodeId)) {
+      return Promise.reject(new Error(`dispatch exploded for ${node.nodeId}`));
+    }
     if (this.held.has(node.nodeId)) {
       return new Promise<DispatchTask>((resolve) => {
         const rs = this.releasers.get(node.nodeId) ?? [];
@@ -1386,5 +1399,483 @@ describe("control-path lock acquisition (R1)", () => {
     expect(fake.calls.filter((c) => c.nodeId === "B").length).toBe(before + 1);
     expect(state.phase).toBe(EnginePhase.Executing);
     expect(state.advancingLock).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// R4 — a kickoff that loses the lock race is deferred, never dropped
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Regression (R4 / signal-driven F1). `dispatchReady()` used to
+ * `return Promise.resolve()` when the advancement lock was held: the caller
+ * awaited "success" while nothing was dispatched. The in-flight section's
+ * finally only drained `pendingCompletions`, and `_dispatchReadyNodes`
+ * snapshots the frontier once per pass — so a ready node that appeared after
+ * that snapshot (exactly what `recover()`'s synchronous `rebuildFrontier()`
+ * does while a fire-and-forget advance holds the lock) was never picked up and
+ * the graph hung in `executing`.
+ *
+ * Old behaviour: the contended kickoff is silently dropped. New behaviour: it
+ * is flagged and re-run by the in-flight section's finally, after the drain.
+ */
+describe("R4: dispatchReady under lock contention is deferred, not dropped", () => {
+  it("re-runs the pass for a ready node created after the in-flight pass's snapshot", async () => {
+    const { state, engine, fake } = buildEngine(retryPlusBranchGraph());
+    await engine.dispatchReady(); // A and C running
+    expect(fake.calls.map((c) => c.nodeId)).toEqual(["A", "C"]);
+
+    // Open a signal-driven section and hold B's launch so the pass cannot finish.
+    fake.hold("B");
+    const pA = engine.onNodeSignalEmitted("A", "answer", "from-A");
+    expect(state.advancingLock).toBe(true);
+    expect(fake.calls.map((c) => c.nodeId)).toEqual(["A", "C", "B"]);
+
+    // A ready node appears AFTER the in-flight pass took its frontier snapshot.
+    markReady(state, state.nodes.get("D")!);
+    addToFrontier(state, "D");
+
+    // The kickoff loses the race — the pre-fix code dropped it right here.
+    await engine.dispatchReady();
+    expect(state.advancingLock).toBe(true); // the in-flight section still owns it
+    expect(state.nodes.get("D")!.status).toBe(NodeStatus.Ready); // not dispatched yet
+
+    // Releasing the held launch lets the owner's finally drain AND consume the
+    // deferred kickoff.
+    fake.release("B");
+    await pA;
+    expect(state.nodes.get("D")!.status).toBe(NodeStatus.Running);
+    expect(fake.calls.map((c) => c.nodeId)).toEqual(["A", "C", "B", "D"]);
+    expect(state.advancingLock).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y3 — advancement-lock ownership is modeled by a token
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Y3: advancement-lock ownership", () => {
+  it("_runCriticalSection fails fast when the caller does not hold the lock", async () => {
+    const { state, engine } = buildEngine(linearGraph());
+    // Private-invariant probe (the established convention for internals): the
+    // entry check is only reachable by misuse, so it is driven directly.
+    const internals = engine as unknown as {
+      _runCriticalSection: (
+        token: object,
+        work: () => Promise<void>,
+      ) => Promise<void>;
+    };
+
+    await expect(
+      internals._runCriticalSection({}, async () => {}),
+    ).rejects.toThrow(/without holding the advancing lock/);
+    // The rejected entry neither ran the work nor touched the state lock.
+    expect(state.advancingLock).toBe(false);
+  });
+
+  it("a contended dispatchReady does not release the in-flight section's lock", async () => {
+    const { state, engine, fake } = buildEngine(linearGraph());
+    await engine.dispatchReady();
+    fake.hold("B");
+    const pA = engine.onNodeSignalEmitted("A", "answer", "x");
+    expect(state.advancingLock).toBe(true);
+
+    await engine.dispatchReady(); // deferred — must not release the owner's lock
+    expect(state.advancingLock).toBe(true);
+
+    fake.release("B");
+    await pA;
+    expect(state.advancingLock).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// R5 — on_condition intra-group loop-backs consume a traversal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Regression (R5 / graph-signal F1). The re-entry counting gate used to be
+ * `edge.type === "always"`, so an `on_condition` loop-back inside a declared
+ * loop group consumed no traversal: `max_traversals` never fired,
+ * `loopGroup.traversalCount` stayed 0, and the cycle could run unbounded.
+ *
+ * The fixture needs an external root: intra-group `on_condition` edges (unlike
+ * intra-group `always` edges) are not excluded from in-degree, so a bare
+ * B ⇄ C `on_condition` cycle would have no node at in-degree zero and provision
+ * would leave the whole graph pending.
+ *
+ * Old behaviour: traversalCount stays 0 and the loop keeps re-entering.
+ * New behaviour: every intra-group `on_condition` re-entry consumes one
+ * traversal; at the cap the re-entry target is retired `completed → done` with
+ * reason `"max_traversals exhausted"`.
+ */
+describe("R5: on_condition intra-group loop-backs consume a traversal", () => {
+  function onConditionLoopGraph(maxTraversals: number): GraphDeclaration {
+    return {
+      version: 2,
+      name: "on-condition-loop",
+      nodes: [
+        { id: "A", agent: "a0", prompt: "seed" },
+        { id: "B", agent: "a1", prompt: "worker", join: { strategy: "any" } },
+        { id: "C", agent: "a2", prompt: "reviewer" },
+      ],
+      edges: [
+        { from: "A", to: "B", type: "always" },
+        {
+          from: "B",
+          to: "C",
+          type: "on_condition",
+          condition: "signal_observed(answer)",
+        },
+        {
+          from: "C",
+          to: "B",
+          type: "on_condition",
+          condition: "signal_observed(answer)",
+        },
+      ],
+      loop_groups: [{ id: "lg", nodes: ["B", "C"], max_traversals: maxTraversals }],
+    };
+  }
+
+  function buildLoop(maxTraversals: number): {
+    state: EngineState;
+    engine: AdvanceEngine;
+  } {
+    const state = createEngineState(
+      onConditionLoopGraph(maxTraversals),
+      "g-on-condition-loop",
+    );
+    provision(state);
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: new FakeDispatch(),
+      // The production resolver: the cycle relies on signal_observed(answer)
+      // remaining true on the re-entered nodes.
+      conditionResolver: defaultConditionResolver,
+    });
+    return { state, engine };
+  }
+
+  it("consumes one traversal per intra-group on_condition re-entry and fires the cap", async () => {
+    const { state, engine } = buildLoop(2);
+    const group = () => state.loopGroups.get("lg")!;
+
+    await engine.dispatchReady(); // A running
+    await engine.onNodeSignalEmitted("A", "answer", "seed"); // B → running
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    await engine.onNodeSignalEmitted("B", "answer", "b1"); // B → C (first entry)
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Running);
+    expect(group().traversalCount).toBe(0); // first entry is not a re-entry
+
+    await engine.onNodeSignalEmitted("C", "answer", "c1"); // C → B re-entry #1
+    expect(group().traversalCount).toBe(1);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+
+    await engine.onNodeSignalEmitted("B", "answer", "b2"); // B → C re-entry #2
+    expect(group().traversalCount).toBe(2);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Running);
+
+    // Cap reached: the re-entry target retires done instead of re-entering.
+    await engine.onNodeSignalEmitted("C", "answer", "c2");
+    expect(group().traversalCount).toBe(2);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("B")!.errorReason).toBe("max_traversals exhausted");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y11 — a failed dispatch fails the downstream fan-in join inline
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Regression (Y11 / lifecycle F2). The dispatch-failure branch only wrote the
+ * escalate to the ledger and queued a deferred completion. The deferred
+ * re-advance cannot propagate it: the node is already `timeout`, so
+ * `_applySignalTransition`'s H1 migrated gate skips it and the M7 inline
+ * propagation never runs for the deferred pass.
+ *
+ * Old behaviour: the multi-input fan-in J stays `pending` forever (the F3
+ * dead-end predicate never counts an `always` edge), so the graph hangs in
+ * `executing`. New behaviour: the escalate propagates inline, J's `all` join
+ * fails, and J escalates.
+ */
+describe("Y11: a failed dispatch fails the downstream fan-in join inline", () => {
+  function dispatchFailureJoinGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "dispatch-failure-join",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+        { id: "J", agent: "a3", prompt: "p3", join: { strategy: "all" } },
+      ],
+      edges: [
+        { from: "A", to: "J", type: "always" },
+        { from: "B", to: "J", type: "always" },
+      ],
+    };
+  }
+
+  it("escalates the multi-input join instead of leaving it pending forever", async () => {
+    const fake = new FakeDispatch();
+    const { state, engine } = buildEngine(dispatchFailureJoinGraph(), fake);
+    fake.fail("A");
+
+    await engine.dispatchReady();
+
+    const a = state.nodes.get("A")!;
+    expect(a.status).toBe(NodeStatus.Timeout);
+    expect(a.errorReason).toMatch(/node dispatch failed/);
+    // The escalate reached the join's accumulated results AND failed it.
+    const j = state.nodes.get("J")!;
+    expect(j.upstreamResults.get("A")?.fromSignal).toBe("escalate");
+    expect(j.status).toBe(NodeStatus.Escalate);
+    expect(j.errorReason).toMatch(/node dispatch failed/);
+    expect(state.advancingLock).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y12 — partialApprove validates its member lists before mutating
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("Y12: partialApprove member validation", () => {
+  /** Drive gatePartialGraph to the blocked gate P with S2 answered and X live. */
+  async function blockPartialGate(rig: TestRig): Promise<void> {
+    await rig.engine.dispatchReady();
+    await rig.engine.onNodeSignalEmitted("S1", "answer", "r1");
+    await rig.engine.onNodeSignalEmitted("S2", "answer", "r2");
+    await rig.engine.onNodeSignalEmitted("P", "need_approval", "summary");
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+  }
+
+  it("throws for ids outside the gate's upstream set, overlaps, and the gate itself", async () => {
+    const rig = buildEngine(gatePartialGraph());
+    await blockPartialGate(rig);
+
+    // D is a DOWNSTREAM of the gate — a legal node id, but not an upstream.
+    await expect(
+      rig.engine.partialApprove("P", ["S1", "D"], ["S2"]),
+    ).rejects.toThrow(/not an upstream/);
+    await expect(
+      rig.engine.partialApprove("P", ["S1"], ["S1"]),
+    ).rejects.toThrow(/both the approved and rejected/);
+    await expect(
+      rig.engine.partialApprove("P", ["P"], ["S2"]),
+    ).rejects.toThrow(/gate node/);
+
+    // Nothing was mutated by the rejected verdicts: S2 did not re-enter, X was
+    // not pruned, the gate stayed blocked, and no verdict marker was stashed.
+    expect(rig.state.nodes.get("S2")!.status).toBe(NodeStatus.Completed);
+    expect(rig.state.nodes.get("X")!.status).toBe(NodeStatus.Running);
+    expect(rig.state.nodes.get("P")!.status).toBe(NodeStatus.Blocked);
+    expect(rig.state.nodes.get("P")!.signalsObserved["partial_approve"]).toBeUndefined();
+  });
+
+  it("still accepts a valid partition of the upstream set", async () => {
+    const rig = buildEngine(gatePartialGraph());
+    await blockPartialGate(rig);
+
+    await rig.engine.partialApprove("P", ["S1"], ["S2"], "fix branch 2");
+
+    expect(rig.state.nodes.get("S2")!.status).toBe(NodeStatus.Running);
+    expect(rig.state.nodes.get("X")!.status).toBe(NodeStatus.Done);
+    expect(rig.state.nodes.get("P")!.signalsObserved["partial_approve"]).toBeDefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y13 / B7 — superseded-subscription purge and the ledger contract
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Dispatch port that registers termination listeners but cannot remove them. */
+class SubscribeOnlyDispatch implements NodeDispatchPort {
+  private seq = 0;
+  executeNode(
+    node: NodeRuntimeState,
+    _ctx: DispatchParentContext,
+  ): Promise<DispatchTask> {
+    const id = `task-${node.nodeId}-${++this.seq}`;
+    return Promise.resolve({
+      ...makeTask(node.nodeId),
+      id,
+      sessionId: `sess-${id}`,
+    });
+  }
+  onTaskTerminated(_taskId: string, _cb: TaskTerminatedCallback): void {
+    // Registered in the port; no removal surface is exposed.
+  }
+}
+
+describe("Y13: superseded-subscription purge keeps entries the port cannot unregister", () => {
+  it("keeps the ledger entry when removeTaskTerminatedListener is absent", async () => {
+    // Single node: the retry scope must be quiescent (M11) — a linear graph's
+    // B would still be running after A answers.
+    const state = createEngineState(standaloneNode("A", "a1"), "g-1");
+    provision(state);
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: new SubscribeOnlyDispatch(),
+    });
+
+    await engine.dispatchReady();
+    expect(engine.getTerminationSubscriptions().map((s) => s.taskId)).toEqual([
+      "task-A-1",
+    ]);
+
+    await engine.onNodeSignalEmitted("A", "answer", "done");
+    const report = await engine.retryNode("A");
+    expect(report.reDispatched).toBe(1);
+
+    // The superseded listener is STILL registered in the port (no removal
+    // surface), so the ledger must keep it — otherwise a later dispose could
+    // never unregister it (the zombie subscription M11 exists to prevent).
+    // Pre-fix the entry was dropped unconditionally.
+    const ids = engine.getTerminationSubscriptions().map((s) => s.taskId);
+    expect(ids).toContain("task-A-1"); // kept
+    expect(ids).toContain("task-A-2"); // the fresh re-dispatch's own entry
+  });
+
+  it("returns element-level copies from getTerminationSubscriptions (B7)", async () => {
+    // A port with onTaskTerminated is required for the engine to record a
+    // subscription at all.
+    const state = createEngineState(standaloneNode("A", "a1"), "g-1");
+    provision(state);
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: new SubscribeOnlyDispatch(),
+    });
+    await engine.dispatchReady();
+
+    const first = engine.getTerminationSubscriptions();
+    expect(first).toHaveLength(1);
+    const originalTaskId = first[0].taskId;
+    first[0].taskId = "mutated";
+
+    expect(engine.getTerminationSubscriptions()[0].taskId).toBe(originalTaskId);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Y16 — loop-lane retirements reach the completion seam
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Regression (Y16 / graph-signal F4). The loop lane called `executeLoopStep`
+ * and discarded its report, so a `stuck` / `max_traversals exhausted`
+ * retirement (which advances the reviewer `completed → done` with no signal)
+ * never reached the completion seam / event log — while the non-loop lane
+ * surfaced the same outcome through `_notifyPropagatedEscalations`.
+ *
+ * Old behaviour: only the reviewer's own `revise_needed` / `answer` completion
+ * event. New behaviour: a second event with `signalType: "escalate"`,
+ * `nodeStatus: done` and reason `"max_traversals exhausted"`.
+ */
+describe("Y16: loop-lane retirements reach the completion seam", () => {
+  /** entry → impl → review, with a review → impl revise back-edge (loop {impl, review}). */
+  function loopNotifyGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "loop-notify",
+      nodes: [
+        { id: "entry", agent: "a0", prompt: "seed" },
+        { id: "impl", agent: "a1", prompt: "implement", join: { strategy: "any" } },
+        { id: "review", agent: "a2", prompt: "review" },
+      ],
+      edges: [
+        { from: "entry", to: "impl", type: "always" },
+        { from: "impl", to: "review", type: "on_signal", signal_filter: ["answer"] },
+        { from: "review", to: "impl", type: "on_signal", signal_filter: ["revise_needed"] },
+      ],
+      // 0 traversals available → the very first revision is already at the cap.
+      loop_groups: [{ id: "lg", nodes: ["impl", "review"], max_traversals: 0 }],
+    };
+  }
+
+  async function driveExhaustedReview(
+    reviewSignal: "revise_needed" | "answer",
+  ): Promise<{ state: EngineState; events: NodeCompletionEvent[] }> {
+    const events: NodeCompletionEvent[] = [];
+    const state = createEngineState(loopNotifyGraph(), "g-loop-notify");
+    provision(state);
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: new FakeDispatch(),
+      onNodeCompletion: (e) => { events.push(e); },
+    });
+
+    await engine.dispatchReady();
+    await engine.onNodeSignalEmitted("entry", "answer", "seed");
+    await engine.onNodeSignalEmitted("impl", "answer", "v1");
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Running);
+
+    await engine.onNodeSignalEmitted(
+      "review",
+      reviewSignal,
+      reviewSignal === "answer"
+        ? { verdict: "revise", findings: ["still broken"] }
+        : { findings: ["still broken"] },
+    );
+    expect(state.nodes.get("review")!.status).toBe(NodeStatus.Done);
+    expect(state.nodes.get("review")!.errorReason).toBe("max_traversals exhausted");
+    return { state, events };
+  }
+
+  it("surfaces the revise-lane retirement", async () => {
+    const { events } = await driveExhaustedReview("revise_needed");
+    const retirement = events.find(
+      (e) => e.nodeId === "review" && e.nodeStatus === NodeStatus.Done,
+    );
+    expect(retirement).toBeDefined();
+    expect(retirement!.signalType).toBe("escalate");
+    expect(retirement!.payload).toBe("max_traversals exhausted");
+  });
+
+  it("surfaces the answer-downgrade lane retirement", async () => {
+    const { events } = await driveExhaustedReview("answer");
+    const retirement = events.find(
+      (e) => e.nodeId === "review" && e.nodeStatus === NodeStatus.Done,
+    );
+    expect(retirement).toBeDefined();
+    expect(retirement!.signalType).toBe("escalate");
+    expect(retirement!.payload).toBe("max_traversals exhausted");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C5 — an async graph-terminal notifier is contained
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("C5: async graph-terminal notifier containment", () => {
+  it("contains a rejecting async onGraphTerminal without an unhandled rejection", async () => {
+    const state = createEngineState(standaloneNode("A", "a1"), "g-terminal-async");
+    provision(state);
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: new FakeDispatch(),
+      onGraphTerminal: async () => {
+        throw new Error("terminal notifier boom");
+      },
+    });
+
+    const { list, detach } = captureUnhandledRejections();
+    try {
+      await engine.dispatchReady();
+      await engine.onNodeSignalEmitted("A", "answer", "ok");
+      await tick();
+      await tick();
+
+      expect(list).toEqual([]);
+      expect(state.phase).toBe(EnginePhase.Complete);
+    } finally {
+      detach();
+    }
   });
 });

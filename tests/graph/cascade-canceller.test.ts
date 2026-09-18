@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { NodeStatus } from "../../src/constants.ts";
-import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
+import type { GraphDeclaration, JoinConfig } from "../../src/types.graph-v2.ts";
 import type { EdgePayload, NodeRuntimeState, EngineState } from "../../src/types.engine-v2.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
@@ -54,11 +54,11 @@ function diamondGraph(): GraphDeclaration {
   };
 }
 
-/** A diamond whose sink declares a specific join strategy. */
-function diamondWithJoin(strategy: "all" | "any" | "quorum", quorum?: number): GraphDeclaration {
+/** A diamond whose sink declares the given join config (C1: quorum carries its count). */
+function diamondWithJoin(join: JoinConfig): GraphDeclaration {
   const g = diamondGraph();
   const sink = g.nodes.find((n) => n.id === "sink")!;
-  sink.join = strategy === "quorum" ? { strategy: "quorum", quorum } : { strategy };
+  sink.join = join;
   return g;
 }
 
@@ -108,7 +108,7 @@ function setRunning(state: EngineState, id: string, taskId: string): void {
 describe("cancelPendingUpstreams — satisfied verdict", () => {
   it("cancels the still-running upstreams to cancelled → done", () => {
     // `any` join: b answers (recorded, resolved) → satisfied while c is running.
-    const { state, sink, port } = buildRig(diamondWithJoin("any"));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b"));
 
     const verdict = evaluateJoin(state, sink);
@@ -130,7 +130,7 @@ describe("cancelPendingUpstreams — satisfied verdict", () => {
     // quorum:1 with 3 upstreams would be ideal, but the diamond has {b, c}.
     // Use a quorum:1 diamond where the first answer satisfies while the other
     // sibling is still running.
-    const { state, sink, port } = buildRig(diamondWithJoin("quorum", 1));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "quorum", quorum: 1 }));
     collectUpstreamResults(state, sink, payload("b"));
 
     expect(evaluateJoin(state, sink).kind).toBe("satisfied");
@@ -158,7 +158,7 @@ describe("cancelPendingUpstreams — satisfied verdict", () => {
   });
 
   it("does not require a cancel seam (lifecycle-only retirement)", () => {
-    const { state, sink } = buildRig(diamondWithJoin("any"));
+    const { state, sink } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b"));
 
     // No dispatch port passed → still retires c to `done`, just no cancel call.
@@ -188,7 +188,7 @@ describe("cancelPendingUpstreams — failed verdict", () => {
   });
 
   it("cancels outstanding upstreams when a quorum becomes impossible", () => {
-    const { state, sink, port } = buildRig(diamondWithJoin("quorum", 2));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "quorum", quorum: 2 }));
     // c escalates while b is still running → answer=0, pending=1 → 0+1 < 2
     // → quorum impossible, and b is still outstanding.
     collectUpstreamResults(state, sink, payload("c", "escalate"));
@@ -225,7 +225,7 @@ describe("cancelPendingUpstreams — waiting verdict", () => {
 
   it("waits while a partial failure still leaves the join reachable", () => {
     // `any`: b escalated (recorded), c still running and could still answer.
-    const { state, sink, port } = buildRig(diamondWithJoin("any"));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b", "escalate"));
 
     expect(evaluateJoin(state, sink).kind).toBe("waiting");
@@ -243,7 +243,7 @@ describe("cancelPendingUpstreams — waiting verdict", () => {
 describe("partial-failure retention", () => {
   it("retains escalate signals in upstreamResults when the join allows continuation", () => {
     // `any`: b escalated, c answers → satisfied despite the partial failure.
-    const { state, sink, port } = buildRig(diamondWithJoin("any"));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b", "escalate"));
     collectUpstreamResults(state, sink, payload("c"));
 
@@ -267,7 +267,7 @@ describe("partial-failure retention", () => {
 
 describe("cancelPendingUpstreams — contract", () => {
   it("retires cancelled nodes through the cancelled → done lifecycle", () => {
-    const { state, sink, port } = buildRig(diamondWithJoin("any"));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b"));
     cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
 
@@ -280,7 +280,7 @@ describe("cancelPendingUpstreams — contract", () => {
   });
 
   it("never touches upstreams that already produced a payload", () => {
-    const { state, sink, port } = buildRig(diamondWithJoin("any"));
+    const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b"));
     collectUpstreamResults(state, sink, payload("c", "revise_needed"));
 
@@ -305,7 +305,7 @@ describe("cancelPendingUpstreams — contract", () => {
   });
 
   it("resolves getJoinStrategy as the same strategy the canceller acts on", () => {
-    const { state, sink } = buildRig(diamondWithJoin("quorum", 1));
+    const { state, sink } = buildRig(diamondWithJoin({ strategy: "quorum", quorum: 1 }));
     expect(getJoinStrategy(state, sink)).toEqual({ quorum: 1 });
     // sanity: the quorum:1 verdict is satisfied on the first answer
     collectUpstreamResults(state, sink, payload("b"));

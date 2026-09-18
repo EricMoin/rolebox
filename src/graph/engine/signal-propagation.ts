@@ -27,6 +27,10 @@
  *   escalates too, and the walk continues. Single-input (non-convergence)
  *   nodes are transparent pass-throughs.
  *
+ *   `on_signal(revise_needed)` back-edges are loop-routing edges, not forward
+ *   flow: the walk never traverses them (Y14), so an escalation cannot travel
+ *   backward into the loop group it came from and cascade-cancel its peers.
+ *
  * Both functions are **pure state-mutation** steps. They mutate node lifecycle
  * status and the frontier only — they never dispatch. Dispatch of the
  * re-marked-ready nodes is done by the caller's existing `_dispatchReadyNodes`
@@ -62,8 +66,30 @@ import {
   getUpstreamNodeIds,
   isReviseBackEdge,
 } from "./join-evaluator.ts";
+import {
+  extractReason,
+  revisionText,
+  SIGNAL_KEY,
+} from "./signal-payload.ts";
 import { deriveNodeArtifacts } from "./recorder.ts";
 import { markDirty } from "./engine-persistence.ts";
+
+/**
+ * Node states a `revise_needed` back-edge may re-enter (Y15).
+ *
+ * `completed` is the loop re-entry edge, `pending` has not started yet, and
+ * `blocked` is paused for approval (revision feedback re-opens it). `escalate`
+ * is deliberately absent: `escalate → ready` is the automatic-retry lane owned
+ * by {@link propagateEscalate}, which increments `retryCount` and applies the
+ * budget / backoff gate — reviving a failed node here would bypass all of it.
+ * `running`/`ready` targets are not re-entered either (a revision must not
+ * disturb a node that is already in flight).
+ */
+const REVISE_REENTRY_STATUSES: ReadonlySet<NodeStatus> = new Set([
+  NodeStatus.Completed,
+  NodeStatus.Pending,
+  NodeStatus.Blocked,
+]);
 
 // ── Report ──────────────────────────────────────────────────────────────────
 
@@ -72,8 +98,9 @@ import { markDirty } from "./engine-persistence.ts";
  *
  * The fields are intentionally separate so a single call can be inspected
  * precisely: which upstream nodes were re-marked `ready` (revise), which nodes
- * were escalated (exhaustion / join failure), which node was re-marked `ready`
- * for an automatic retry (escalate), and where the escalation was absorbed.
+ * were retired terminally (stuck / exhaustion / join failure), which node was
+ * re-marked `ready` for an automatic retry (escalate), and where the
+ * escalation was absorbed.
  *
  * Note on the removed `rootReached` field (former review finding F3/L8): the
  * interface used to promise "escalation reached the graph root (graph will
@@ -95,7 +122,13 @@ export interface SignalPropagationReport {
   kind: "revise" | "escalate";
   /** (revise) Upstream nodes re-marked `ready` and added to the frontier. */
   revisedUpstream: string[];
-  /** Nodes escalated by this propagation (traversal exhaustion / join failure). */
+  /**
+   * Nodes this propagation retired terminally: an `escalate` transition for a
+   * join failure / no-loop-group revision, or `done` for the `stuck` /
+   * `max_traversals exhausted` exits (Y17 — the list does not imply the node's
+   * status is `escalate`; read the actual status when that distinction
+   * matters).
+   */
   escalated: string[];
   /** The escalating node that was re-marked `ready` for an automatic retry. */
   retried: string[];
@@ -106,38 +139,10 @@ export interface SignalPropagationReport {
 }
 
 // ── Payload → text helpers ──────────────────────────────────────────────────
-
-/** Best-effort short reason string from an `escalate` payload. */
-function extractReason(payload: unknown): string {
-  if (typeof payload === "string") return payload || "escalated";
-  if (payload && typeof payload === "object") {
-    const obj = payload as { reason?: unknown; error?: unknown; message?: unknown };
-    if (typeof obj.reason === "string") return obj.reason;
-    if (typeof obj.error === "string") return obj.error;
-    if (typeof obj.message === "string") return obj.message;
-  }
-  return "escalated";
-}
-
-/** Best-effort human-readable revision feedback from a `revise_needed` payload. */
-function revisionText(payload: unknown): string {
-  if (typeof payload === "string") return payload;
-  if (payload && typeof payload === "object") {
-    const obj = payload as Record<string, unknown>;
-    for (const key of ["findings", "verdict", "reason", "feedback", "review"]) {
-      const value = obj[key];
-      if (typeof value === "string") return value;
-      if (
-        Array.isArray(value) &&
-        value.every((item) => typeof item === "string")
-      ) {
-        return value.map((item) => `- ${item}`).join("\n");
-      }
-    }
-    return JSON.stringify(payload);
-  }
-  return "";
-}
+//
+// The payload narrowing (`extractReason` / `revisionText`) is shared engine
+// vocabulary from `signal-payload.ts` (contract C2 / Y18); this module used to
+// carry its own copies, each asserting `as Record<string, unknown>`.
 
 /** Append revision feedback to a node's re-execution prompt for the given round. */
 function mergeRevisionFeedback(
@@ -182,10 +187,11 @@ function activatesOnRevise(edge: EdgeDeclaration): boolean {
  *    `max_traversals exhausted`.
  * 4. Otherwise the traversal counter is incremented and every upstream target
  *    reachable via an `on_signal(revise_needed)` back-edge within the loop
- *    group re-enters `ready` (added to the frontier) with the revision feedback
- *    merged into its re-execution prompt. The caller's `_dispatchReadyNodes`
- *    step re-dispatches them (completed → ready is the loop re-entry edge,
- *    node-lifecycle.ts).
+ *    group that may legitimately re-open (`completed` / `pending` / `blocked`
+ *    — see {@link REVISE_REENTRY_STATUSES}) re-enters `ready` (added to the
+ *    frontier) with the revision feedback merged into its re-execution prompt.
+ *    The caller's `_dispatchReadyNodes` step re-dispatches them (completed →
+ *    ready is the loop re-entry edge, node-lifecycle.ts).
  *
  * The escalating node is expected to already be `completed` (the reviewing
  * pass finished); exhausting the cap flips it to `done`
@@ -237,11 +243,13 @@ export function propagateRevise(
     if (!activatesOnRevise(edge)) continue;
 
     const target = state.nodes.get(edge.to);
-    // Only targets inside the same loop group and in a state from which `ready`
-    // is reachable are re-entered (completed / pending / blocked — never a
-    // still-running or terminal node).
+    // Only targets inside the same loop group, and only from a state a
+    // revision may legitimately re-open (see {@link REVISE_REENTRY_STATUSES}).
+    // A reachability probe (`canTransitionNode(..., Ready)`) would also accept
+    // `escalate`, whose `→ ready` edge belongs to propagateEscalate's
+    // retry/budget gate — not to this lane (Y15).
     if (!target || target.loopGroupId !== groupId) continue;
-    if (!canTransitionNode(target.status, NodeStatus.Ready)) continue;
+    if (!REVISE_REENTRY_STATUSES.has(target.status)) continue;
 
     target.prompt = mergeRevisionFeedback(target.prompt, round, payload);
     markReady(state, target);
@@ -373,7 +381,7 @@ export function propagateEscalate(
     canTransitionNode(node.status, NodeStatus.Ready)
   ) {
     node.retryCount += 1;
-    node.prompt = `${node.prompt}\n\n[Automatic retry ${node.retryCount}]: previous attempt escalated — ${extractReason(payload)}`;
+    node.prompt = `${node.prompt}\n\n[Automatic retry ${node.retryCount}]: previous attempt escalated — ${extractReason(payload) ?? "escalated"}`;
     // Backoff: withhold the re-dispatch until now + backoff_ms when the
     // qualifying retry edge declares one. Written here so no policy info is
     // lost; the dispatch step consumes it before re-dispatching.
@@ -391,7 +399,7 @@ export function propagateEscalate(
     // `clearSignalLedgerEntry` in node-retry.ts) so `_latestTerminating`
     // returns null and the drain skips the retried node; the ledger entry is
     // lazily re-created by `signal-bridge.ts:record` when the node emits again.
-    delete node.signalsObserved["escalate"];
+    delete node.signalsObserved[SIGNAL_KEY.escalate];
     state.signalLedger.delete(node.nodeId);
     markReady(state, node);
     addToFrontier(state, node.nodeId);
@@ -407,6 +415,11 @@ export function propagateEscalate(
 /**
  * BFS over outbound edges, escalating join-failed convergence nodes and
  * stopping at absorbed ones. Single-input nodes pass through untouched.
+ *
+ * `on_signal(revise_needed)` back-edges are skipped: they route revisions
+ * backward into the loop group and are not forward flow (Y14) — following one
+ * would let an escalation walk back to the loop entry, escalate it, and have
+ * the caller's cascade retire still-running same-group peers.
  */
 function propagateEscalationForward(
   state: EngineState,
@@ -417,11 +430,17 @@ function propagateEscalationForward(
   const visited = new Set<string>([start.nodeId]);
   const queue: NodeRuntimeState[] = [start];
 
-  while (queue.length > 0) {
-    const current = queue.shift() as NodeRuntimeState;
+  // Index cursor instead of `queue.shift()`: the loop bound keeps the read in
+  // bounds without pop-and-assert, and no element is moved per iteration (B23).
+  for (let next = 0; next < queue.length; next += 1) {
+    const current = queue[next];
 
     for (const edge of state.graphDeclaration.edges) {
       if (edge.from !== current.nodeId) continue;
+      // Forward-only (module JSDoc): a revise back-edge routes revisions
+      // backward into the loop group, so the escalate walk must not traverse
+      // it (Y14).
+      if (isReviseBackEdge(edge)) continue;
       const target = state.nodes.get(edge.to);
       if (!target || visited.has(target.nodeId)) continue;
       visited.add(target.nodeId);
@@ -439,7 +458,7 @@ function propagateEscalationForward(
       const verdict = evaluateJoin(state, target);
       if (verdict.kind === "failed") {
         if (canTransitionNode(target.status, NodeStatus.Escalate)) {
-          markEscalated(state, target, extractReason(payload));
+          markEscalated(state, target, extractReason(payload) ?? "escalated");
           report.escalated.push(target.nodeId);
           queue.push(target); // its failure may fail the next convergence node
         }
@@ -475,7 +494,7 @@ function recordEscalate(
   const edgePayload: EdgePayload = {
     fromNode: source.nodeId,
     fromSignal: "escalate",
-    result: extractReason(payload),
+    result: extractReason(payload) ?? "escalated",
     // For escalate the node may not have a materialized result — deriveNodeArtifacts
     // legitimately returns [] in that case; do not hardcode an empty list.
     artifacts: source.artifacts ?? deriveNodeArtifacts(source),

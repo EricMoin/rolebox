@@ -617,7 +617,26 @@ function canonicalize(value: unknown, depth = 0): string {
       .map((k) => `${JSON.stringify(k)}:${canonicalize((value as Record<string, unknown>)[k], depth + 1)}`);
     return `{${entries.join(",")}}`;
   }
-  return JSON.stringify(value);
+  return scalarToCanonicalText(value);
+}
+
+/**
+ * Canonical text for a non-container value (B3).
+ *
+ * `JSON.stringify` alone cannot back the `string` return: it answers
+ * `undefined` for functions and symbols and THROWS for BigInt. JSON text is
+ * used whenever JSON can represent the value; otherwise the value's own string
+ * form (the decimal digits for BigInt, source text for a function, `Symbol(x)`)
+ * keeps the function total — a fingerprint must be a string, never `undefined`,
+ * and must never throw.
+ */
+function scalarToCanonicalText(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    // BigInt (and anything else JSON refuses) — its own string form is stable.
+    return String(value);
+  }
 }
 
 /**

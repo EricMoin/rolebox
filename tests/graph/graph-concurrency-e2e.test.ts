@@ -31,22 +31,22 @@ import { mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
-import { createDispatchManager } from "../../src/dispatch/factory";
-import { DispatchManager } from "../../src/dispatch/core/manager";
-import type { DispatchManagerConfig } from "../../src/dispatch/config";
-import { RoleMode } from "../../src/constants";
-import type { ResolvedRole } from "../../src/types";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import { createGraphToolSet } from "../../src/graph/tools/graph-tools";
+import { createDispatchManager } from "../../src/dispatch/factory.ts";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import type { DispatchManagerConfig } from "../../src/dispatch/config.ts";
+import { RoleMode } from "../../src/constants.ts";
+import type { ResolvedRole } from "../../src/types.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import {
   DispatchBridge,
   graphParentContext,
-} from "../../src/graph/engine/dispatch-bridge";
+} from "../../src/graph/engine/dispatch-bridge.ts";
 import {
   createEngineState,
   registerNode,
-} from "../../src/graph/engine/engine-state";
-import type { GraphDeclaration } from "../../src/types.graph-v2";
+} from "../../src/graph/engine/engine-state.ts";
+import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

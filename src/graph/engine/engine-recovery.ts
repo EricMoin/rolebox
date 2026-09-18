@@ -53,6 +53,7 @@
  */
 
 import { NodeStatus } from "../../constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import {
   SWEEPER_INTERVAL_MS,
   ADVANCING_LOCK_TIMEOUT_MS,
@@ -72,6 +73,7 @@ import {
   markNonCriticalDirty,
 } from "./engine-persistence.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
+import { logWarn } from "./log-warn.ts";
 import type { SignalType } from "./signal-bridge.ts";
 import { TERMINATING_SIGNALS } from "./signal-bridge.ts";
 import type { TaskTerminatedCallback } from "./dispatch-bridge.ts";
@@ -204,6 +206,17 @@ export type RecoveryEmitSignal = (
 // ── Status → signal mapping (shared by live seam + recovery) ────────────────
 
 /**
+ * String-typed view of the terminating-signal vocabulary.
+ *
+ * The dispatch subsystem types a task's `terminatingSignal.type` as a plain
+ * `string`, while `TERMINATING_SIGNALS` is a `ReadonlySet<SignalType>` (Y5).
+ * Testing membership through this view keeps the check assertion-free and
+ * compiles against both the tuple-derived typed set and its historical
+ * `Set<string>` shape.
+ */
+const TERMINATING_SIGNAL_NAMES: ReadonlySet<string> = TERMINATING_SIGNALS;
+
+/**
  * Map a dispatch task's terminal status to the terminating engine signal that
  * advances its node:
  *
@@ -240,7 +253,7 @@ export function mapDispatchStatusToSignal(
       // hardcoded answer default. This preserves the signal type so loop
       // back-edges (on_signal(revise_needed)) and other terminating-signal
       // consumers activate correctly.
-      if (task?.terminatingSignal && TERMINATING_SIGNALS.has(task.terminatingSignal.type)) {
+      if (task?.terminatingSignal && TERMINATING_SIGNAL_NAMES.has(task.terminatingSignal.type)) {
         return {
           type: task.terminatingSignal.type as SignalType,
           payload: task.terminatingSignal.payload,
@@ -389,12 +402,43 @@ export function captureNodeUsage(
     node.tokensConsumed.inputTokens = usage.inputTokens;
     node.tokensConsumed.outputTokens = usage.outputTokens;
     node.tokensConsumed.cost = usage.cost;
-    // Per-node token counters are non-critical churn — route through the
-    // debounced tier rather than forcing a synchronous write.
-    markNonCriticalDirty(state);
+    // Y23: the graph-level counters fed above are a DISPATCH GATE
+    // (budget-bridge.ts::checkGraphBudget compares `state.budget` against the
+    // declaration's `max_total_*` ceilings), so they must NOT ride the
+    // debounced non-critical tier: a crash inside the debounce window — or a
+    // `dispose()` that deliberately drops the pending write — would
+    // under-count consumption and silently re-open the ceiling after a
+    // restart. Mark the mutation critical so the owning critical section /
+    // recovery pass writes it through synchronously (the per-node counters in
+    // the same snapshot ride along).
+    markDirty(state);
   } catch {
     // best-effort — a throwing tracker must never corrupt node advancement
   }
+}
+
+/**
+ * Refund a terminating dispatch's net-live session slot
+ * (`state.budget.sessionsSpawned - 1`).
+ *
+ * Y20 single choke point: the live listener path
+ * ({@link subscribeTaskTermination}) and every `reconcileEngine` terminal /
+ * orphan disposition share this helper. Before, only the listener refunded —
+ * the reconcile `cancelled` branch and both orphan branches (no
+ * `dispatchTaskId` / vanished task) marked the node terminal without the
+ * refund, so every restart-window cancellation permanently inflated the
+ * counter (the opposite direction of the failure mode the two-tier policy
+ * documented).
+ *
+ * Guarded on `status === Running`: the refund is a property of a running
+ * dispatch being retired, so a call for an already-terminal node (a
+ * re-entrant listener, a second reconcile pass) is a no-op and cannot
+ * double-refund. `sessionsSpawned` no longer gates dispatch (see
+ * budget-bridge.ts) — this keeps the net-live display counter honest.
+ */
+function refundSessionSlot(state: EngineState, node: NodeRuntimeState): void {
+  if (node.status !== NodeStatus.Running) return;
+  applyBudgetDelta(state, { sessions: -1 });
 }
 
 // ── Re-subscription (live seam + recovery share this) ───────────────────────
@@ -469,7 +513,7 @@ export function subscribeTaskTermination(
     // removed, so this refund no longer gates dispatch — `sessionsSpawned`
     // remains a NET-LIVE display counter, and the -1 refund keeps it accurate.
     if (status === "cancelled" || status === "timeout") {
-      applyBudgetDelta(state, { sessions: -1 });
+      refundSessionSlot(state, current);
     }
     if (status === "cancelled") {
       markCancelled(state, current, "dispatch task cancelled");
@@ -576,6 +620,9 @@ export function reconcileEngine(
       for (const m of matches) {
         orphanCancellations.push({ nodeId: node.nodeId, taskId: m.id });
       }
+      // Y20: the orphaned session is cancelled by the caller — refund its
+      // net-live slot exactly like the listener path's cancelled branch.
+      refundSessionSlot(state, node);
       markTimedOut(state, node, ORPHAN_REASON);
       timedOut.push(node.nodeId);
       deferred.push({
@@ -588,6 +635,9 @@ export function reconcileEngine(
 
     const task = safeGetTask(port, taskId);
     if (!task) {
+      // Y20: a vanished task is retired exactly like an orphaned one — the
+      // session slot must be refunded here too.
+      refundSessionSlot(state, node);
       markTimedOut(state, node, ORPHAN_REASON);
       timedOut.push(node.nodeId);
       deferred.push({
@@ -630,8 +680,16 @@ export function reconcileEngine(
       // before the deferred signal is emitted. Idempotent replace.
       captureNodeUsage(state, node, port);
       if (task.status === "cancelled") {
+        // Y20: the listener path refunds a cancelled dispatch's net-live slot;
+        // the restart-window reconcile must not disagree.
+        refundSessionSlot(state, node);
         markCancelled(state, node, "dispatch task cancelled during restart");
       } else {
+        // The dispatch layer refunds a `timeout` task exactly like a cancelled
+        // one (the listener path above refunds both statuses), so mirror that
+        // here as well — otherwise a restart-window timeout permanently
+        // inflates the net-live counter.
+        if (task.status === "timeout") refundSessionSlot(state, node);
         const sig = mapDispatchStatusToSignal(task.status, task);
         if (sig) {
           deferred.push({
@@ -752,8 +810,14 @@ export function hydrateEngineState(
   target.signalLedger = clonedLedger as typeof source.signalLedger;
   target.startedAt = source.startedAt;
   target.updatedAt = source.updatedAt;
-  target.advancingLock = source.advancingLock;
-  target.pendingCompletions = source.pendingCompletions;
+  // R2(c): `advancingLock` / `pendingCompletions` describe the critical
+  // section of the process that WROTE the file — they are never adopted. A
+  // fresh process has no section running and no in-memory deferred queue, so
+  // the hydrated state always starts unlocked with an empty queue. This is the
+  // same reset `clearStaleCriticalSection` applies right after this call in
+  // `recover()`; enforcing it here keeps every hydration path consistent.
+  target.advancingLock = false;
+  target.pendingCompletions = [];
   // Runtime-only dirty flags are never adopted from a persisted source — a
   // recovered state starts clean (critical and non-critical both false).
   target.isDirty = false;
@@ -1133,6 +1197,43 @@ export class EngineLockSweeper {
   }
 }
 
+// ── Watchdog tick-failure accounting (Y22) ──────────────────────────────────
+
+/**
+ * Re-emit a watchdog degradation warning every Nth consecutive tick failure.
+ * The FIRST failure is always logged; the interval only throttles the repeat,
+ * so a permanently broken watchdog cannot flood the log while still being
+ * observable (Y22 — the two `setInterval` bodies used to swallow their
+ * exception with an empty `catch {}`, making a dead watchdog indistinguishable
+ * from an idle one).
+ */
+const TICK_FAILURE_LOG_EVERY = 20;
+
+/**
+ * Record one failed periodic watchdog tick (Y22).
+ *
+ * @param label                Watchdog name for the log line ("staleness
+ *                             watcher" / "liveness monitor").
+ * @param consecutiveFailures  The current consecutive-failure count (0 after a
+ *                             successful tick).
+ * @param err                  The thrown value — rendered with `errorText` so
+ *                             a non-Error throw never breaks the logger.
+ * @returns The incremented consecutive-failure count.
+ */
+function recordTickFailure(
+  label: string,
+  consecutiveFailures: number,
+  err: unknown,
+): number {
+  const next = consecutiveFailures + 1;
+  if (next === 1 || next % TICK_FAILURE_LOG_EVERY === 0) {
+    logWarn(
+      `engine-recovery: ${label} tick failed (${next} consecutive) — watchdog degraded: ${errorText(err)}`,
+    );
+  }
+  return next;
+}
+
 // ── Stale-node watcher (monitor M3) ─────────────────────────────────────────
 
 /** Options for {@link NodeStalenessWatcher}. */
@@ -1214,10 +1315,26 @@ export class NodeStalenessWatcher {
   private readonly intervalMs: number;
   private readonly nodeStaleTimeoutMs: number;
   private timer?: ReturnType<typeof setInterval>;
+  /**
+   * Consecutive failed periodic ticks (Y22). Non-zero means the watchdog is
+   * DEGRADED — a tick threw and therefore never ran. Reset by the next
+   * successful tick; the count throttles the degradation log line.
+   */
+  private tickFailures = 0;
 
   constructor(private readonly opts: NodeStalenessWatcherOptions) {
     this.intervalMs = opts.intervalMs ?? SWEEPER_INTERVAL_MS;
     this.nodeStaleTimeoutMs = opts.nodeStaleTimeoutMs;
+  }
+
+  /** Consecutive failed periodic ticks since the last successful one (Y22). */
+  get consecutiveTickFailures(): number {
+    return this.tickFailures;
+  }
+
+  /** Whether the periodic tick is currently degraded (≥1 consecutive failure). */
+  get tickDegraded(): boolean {
+    return this.tickFailures > 0;
   }
 
   /**
@@ -1345,8 +1462,16 @@ export class NodeStalenessWatcher {
     this.timer = setInterval(() => {
       try {
         this.tick(state);
-      } catch {
-        // A tick must never take down the process.
+        this.tickFailures = 0; // a successful tick clears the degradation streak
+      } catch (err) {
+        // A tick must never take down the process — but a swallowed failure
+        // must not make a dead watchdog look idle either (Y22): count the
+        // consecutive failures and log the first one / the Nth repeat.
+        this.tickFailures = recordTickFailure(
+          "staleness watcher",
+          this.tickFailures,
+          err,
+        );
       }
     }, this.intervalMs);
     // Don't keep the process alive just because a tick interval is pending.
@@ -1523,6 +1648,12 @@ export class NodeLivenessMonitor {
   private readonly stallWarnMs: number;
   private readonly stallGraceMs: number;
   private timer?: ReturnType<typeof setInterval>;
+  /**
+   * Consecutive failed periodic ticks (Y22). Non-zero means the monitor is
+   * DEGRADED — a tick threw and therefore never ran. Reset by the next
+   * successful tick; the count throttles the degradation log line.
+   */
+  private tickFailures = 0;
 
   constructor(private readonly opts: NodeLivenessMonitorOptions) {
     this.intervalMs = opts.intervalMs ?? SWEEPER_INTERVAL_MS;
@@ -1623,8 +1754,7 @@ export class NodeLivenessMonitor {
           } catch (err) {
             logWarn(
               `engine-recovery: onStall consumer threw for node "${node.nodeId}" — ` +
-                `swallowed so a tick never breaks: ` +
-                `${err instanceof Error ? err.message : String(err)}`,
+                `swallowed so a tick never breaks: ${errorText(err)}`,
             );
           }
         }
@@ -1648,14 +1778,32 @@ export class NodeLivenessMonitor {
     return timedOut;
   }
 
+  /** Consecutive failed periodic ticks since the last successful one (Y22). */
+  get consecutiveTickFailures(): number {
+    return this.tickFailures;
+  }
+
+  /** Whether the periodic tick is currently degraded (≥1 consecutive failure). */
+  get tickDegraded(): boolean {
+    return this.tickFailures > 0;
+  }
+
   /** Start the periodic tick. Opt-in — never auto-started. */
   start(state: EngineState): void {
     this.stop();
     this.timer = setInterval(() => {
       try {
         this.tick(state);
-      } catch {
-        // A tick must never take down the process.
+        this.tickFailures = 0; // a successful tick clears the degradation streak
+      } catch (err) {
+        // A tick must never take down the process — but a swallowed failure
+        // must not make a dead monitor look idle either (Y22): count the
+        // consecutive failures and log the first one / the Nth repeat.
+        this.tickFailures = recordTickFailure(
+          "liveness monitor",
+          this.tickFailures,
+          err,
+        );
       }
     }, this.intervalMs);
     // Don't keep the process alive just because a tick interval is pending.
@@ -1684,15 +1832,8 @@ function formatIdle(ms: number): string {
     : `${Math.round(clamped / 60_000)}m`;
 }
 
-/** Minimal, dependency-free warning logger (no createSubLogger import cycle). */
-function logWarn(message: string): void {
-  // eslint-disable-next-line no-console
-  console.warn(message);
-}
-
 /** Minimal, dependency-free info logger. */
 function logInfo(message: string): void {
-  // eslint-disable-next-line no-console
   console.info(message);
 }
 

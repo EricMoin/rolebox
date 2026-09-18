@@ -454,7 +454,7 @@ describe("engine-level graph-budget breach — escalate root, cancel pending dow
       signalBridge: new SignalBridge(),
       dispatch: fake,
       budget: new BudgetBridge(makeTracker(), g),
-      onNodeCompletion: (e) => events.push(e),
+      onNodeCompletion: (e) => { events.push(e); },
     });
 
     // A is ready (root); B is pending downstream via an always edge.

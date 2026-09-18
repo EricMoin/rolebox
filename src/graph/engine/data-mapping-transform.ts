@@ -106,22 +106,12 @@ function matchesExcluded(path: string, excludeSet: Set<string>): boolean {
  * original text is preserved as a safe fallback).
  */
 function keepJsonKeys(result: string, fieldsSet: Set<string>): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result);
-  } catch {
-    // Not valid JSON — cannot apply field whitelist, return original unchanged.
+  const obj = parseJsonObject(result);
+  if (obj === null) {
+    // Not valid JSON, or not a JSON object — the include-whitelist is
+    // meaningless for that shape, so the original text passes through.
     return result;
   }
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    Array.isArray(parsed)
-  ) {
-    // Non-object JSON — include-whitelist is meaningless, return original.
-    return result;
-  }
-  const obj = parsed as Record<string, unknown>;
   const kept: Record<string, unknown> = {};
   let changed = false;
   for (const [key, value] of Object.entries(obj)) {
@@ -140,20 +130,8 @@ function keepJsonKeys(result: string, fieldsSet: Set<string>): string {
  * unchanged — key-stripping only applies to object shapes.
  */
 function stripJsonKeys(result: string, excludeSet: Set<string>): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result);
-  } catch {
-    return result;
-  }
-  if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    Array.isArray(parsed)
-  ) {
-    return result;
-  }
-  const obj = parsed as Record<string, unknown>;
+  const obj = parseJsonObject(result);
+  if (obj === null) return result;
   let changed = false;
   for (const key of excludeSet) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
@@ -162,4 +140,25 @@ function stripJsonKeys(result: string, excludeSet: Set<string>): string {
     }
   }
   return changed ? JSON.stringify(obj) : result;
+}
+
+/**
+ * Parse `result` as a single top-level JSON object, or answer `null`.
+ *
+ * Shared by {@link keepJsonKeys} and {@link stripJsonKeys}, which previously
+ * duplicated this parse-and-guard preamble (B4). Malformed JSON, `null`, and
+ * arrays/scalars all answer `null`: the key-level transforms only apply to
+ * object shapes, and every other shape keeps the original text.
+ */
+function parseJsonObject(result: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed as Record<string, unknown>;
 }

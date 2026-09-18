@@ -23,8 +23,10 @@
  *      group exists (pure-cycle deadlock). WARNING when no roots exist
  *      but no loop groups are declared. Additionally flags loop groups
  *      whose member nodes have no incoming edges from outside the group.
- *   9. `join.quorum` bounds for quorum-strategy nodes — quorum must be a
- *      positive integer, and must not exceed the node's in-degree (the
+ *   9. `join.quorum` presence + bounds for quorum-strategy nodes — a
+ *      quorum-strategy declaration MUST carry its required-answer count
+ *      (absence is an error, never a silent default), the count must be a
+ *      positive integer, and it must not exceed the node's in-degree (the
  *      join would be unsatisfiable). The upper-bound check is deferred
  *      while a node has no incoming edges yet (incremental construction).
  *  10. per-node `budget.timeout_ms` / `budget.max_retries` bounds —
@@ -517,18 +519,24 @@ function checkLoopGroupRoots(
 // ── Rule 9: join quorum bounds ─────────────────────────────────────────────
 
 /**
- * Enforce numeric bounds on `join.quorum` for quorum-strategy nodes.
+ * Enforce presence and numeric bounds of `join.quorum` for quorum-strategy
+ * nodes.
  *
- * The zod tool layer already rejects non-positive-integer quorums up front,
- * but this validator is the defense-in-depth gate for non-zod callers (direct
+ * The zod tool layer rejects non-positive-integer quorums up front, but this
+ * validator is the defense-in-depth gate for non-zod callers (direct
  * `GraphToolSet` usage, persisted-state loads) — a structurally-broken quorum
  * would otherwise pass validation and misbehave at runtime:
- *   - quorum <= 0 → `evaluateJoin` (join-evaluator.ts:245) is satisfied by
+ *   - a MISSING count (`{ strategy: "quorum" }`) is a declaration error (C1):
+ *     the pre-union code defaulted it to 1 (`join.quorum ?? 1`) and thereby
+ *     silently re-interpreted the author's "quorum" as "any". The runtime
+ *     resolver keeps its defensive default for untyped legacy input, but the
+ *     declaration boundary must not fabricate the number.
+ *   - quorum <= 0 → `evaluateJoin` (join-evaluator.ts) is satisfied by
  *     ZERO upstream answers (`answerCount >= n` with n <= 0), so a fan-in
  *     convergence node dispatches at graph start, ignoring its declared
  *     upstreams — a DAG-order violation.
  *   - quorum > in-degree → the join is unsatisfiable; the runtime force-fails
- *     the node ("quorum impossible", join-evaluator.ts:255) on every run.
+ *     the node ("quorum impossible", join-evaluator.ts) on every run.
  *
  * In-degree here is the number of DISTINCT upstream source ids over ALL
  * incoming edges (mirroring join-evaluator `getUpstreamNodeIds` with default
@@ -557,11 +565,23 @@ function checkJoinQuorumBounds(graph: GraphDocument, errors: string[]): void {
   for (const node of graph.nodes) {
     const join = node.join;
     if (join === undefined || join.strategy !== "quorum") continue;
-    const quorum = join.quorum ?? 1; // documented default (join-evaluator.ts:65)
 
-    if (!Number.isInteger(quorum) || quorum < 1) {
+    // Read through an `unknown` view: the declared union (C1) requires the
+    // count on this branch, so this check exists for declarations the compiler
+    // cannot see — hand-built objects and hydrated raw records. Absence is an
+    // ERROR, never the old `?? 1` silent downgrade to "any"-like semantics.
+    const quorum: unknown = join.quorum;
+    if (quorum === undefined) {
       errors.push(
-        `node "${node.id}" join quorum must be a positive integer (got ${quorum})`,
+        `node "${node.id}" join strategy is "quorum" but no "quorum" count was provided ` +
+          `— declare it as "quorum:N" or { strategy: "quorum", quorum: N }`,
+      );
+      continue;
+    }
+
+    if (typeof quorum !== "number" || !Number.isInteger(quorum) || quorum < 1) {
+      errors.push(
+        `node "${node.id}" join quorum must be a positive integer (got ${String(quorum)})`,
       );
       continue;
     }

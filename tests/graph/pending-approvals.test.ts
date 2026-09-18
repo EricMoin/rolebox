@@ -12,14 +12,14 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createGraphToolSet } from "../../src/graph/tools/graph-tools";
+import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 import {
   listPendingApprovals,
   type PendingApprovalEntry,
-} from "../../src/graph/tools/status-queries";
-import { NodeStatus } from "../../src/constants";
-import type { EngineState } from "../../src/types.engine-v2";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence";
+} from "../../src/graph/tools/status-queries.ts";
+import { NodeStatus } from "../../src/constants.ts";
+import type { EngineState } from "../../src/types.engine-v2.ts";
+import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
 
 const T0 = 1_700_000_000_000;
 

@@ -160,8 +160,9 @@ export function transitionNode(
 
   // Auto-save a lifecycle checkpoint on every status change (subtask C-RECORD).
   // Fires for every transition because ALL convenience transitions funnel
-  // through this single choke point. No-ops when state is falsy (standalone
-  // construction without an engine) — nothing is fabricated.
+  // through this single choke point. `state` is REQUIRED (B12): every caller
+  // passes a live engine state, and the recorder's former "falsy state is a
+  // no-op" guard was removed as unreachable — nothing is fabricated.
   recordCheckpointForNode(state, node, from, to, now);
 
   return node;

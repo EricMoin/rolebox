@@ -34,6 +34,7 @@ import {
   adoptPriorNodeStates,
   EngineLockSweeper,
   NodeStalenessWatcher,
+  NodeLivenessMonitor,
   hydrateEngineState,
   clearRecoveredQuiescentBlockedGuard,
   ORPHAN_REASON,
@@ -789,6 +790,81 @@ describe("reconcileEngine", () => {
     expect(report.deferred[0]).toMatchObject({ nodeId: "A", type: "escalate" });
     expect((report.deferred[0].payload as { error: string }).error).toBe("kaboom");
   });
+
+  // ── Y20: the reconcile paths refund the net-live session slot ─────────────
+
+  /** A running node with a live-session slot counted in the graph budget. */
+  function runningNodeWithSlot(graphId: string): EngineState {
+    const state = buildState(singleNodeGraph(), graphId);
+    const node = state.nodes.get("A")!;
+    node.status = NodeStatus.Running;
+    node.dispatchTaskId = "task-A";
+    state.budget.sessionsSpawned = 1;
+    return state;
+  }
+
+  it("Y20: a cancelled task during restart refunds the net-live slot", () => {
+    const state = runningNodeWithSlot("rec-refund-cancelled");
+    const port = {
+      getTask: () => makeTask("task-A", "cancelled"),
+      onTaskTerminated: () => {},
+    };
+    reconcileEngine(state, port as never, () => {});
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Cancelled);
+    expect(state.budget.sessionsSpawned).toBe(0);
+  });
+
+  it("Y20: a vanished task (orphan) refunds the net-live slot", () => {
+    const state = runningNodeWithSlot("rec-refund-orphan");
+    const port = { getTask: () => undefined, onTaskTerminated: () => {} };
+    reconcileEngine(state, port as never, () => {});
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(state.budget.sessionsSpawned).toBe(0);
+  });
+
+  it("Y20: a running node with no dispatchTaskId refunds the orphaned slot", () => {
+    const state = runningNodeWithSlot("rec-refund-noTaskId");
+    state.nodes.get("A")!.dispatchTaskId = undefined;
+    const port = { getTask: () => undefined, onTaskTerminated: () => {} };
+    reconcileEngine(state, port as never, () => {});
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
+    expect(state.budget.sessionsSpawned).toBe(0);
+  });
+
+  it("Y20: a restart-window timeout refunds the slot (listener parity)", () => {
+    const state = runningNodeWithSlot("rec-refund-timeout");
+    const port = {
+      getTask: () => makeTask("task-A", "timeout"),
+      onTaskTerminated: () => {},
+    };
+    const report = reconcileEngine(state, port as never, () => {});
+    expect(report.deferred[0]).toMatchObject({ nodeId: "A", type: "escalate" });
+    expect(state.budget.sessionsSpawned).toBe(0);
+  });
+
+  it("Y20: a completed task keeps counting (no refund)", () => {
+    const state = runningNodeWithSlot("rec-no-refund-completed");
+    const port = {
+      getTask: () => makeTask("task-A", "completed"),
+      onTaskTerminated: () => {},
+    };
+    reconcileEngine(state, port as never, () => {});
+    expect(state.budget.sessionsSpawned).toBe(1);
+  });
+
+  it("Y20: a second reconcile pass cannot double-refund", () => {
+    const state = runningNodeWithSlot("rec-refund-idempotent");
+    const port = {
+      getTask: () => makeTask("task-A", "cancelled"),
+      onTaskTerminated: () => {},
+    };
+    reconcileEngine(state, port as never, () => {});
+    // The node is no longer `running`, so the second pass skips it entirely —
+    // the Running guard in refundSessionSlot is the choke point that makes the
+    // refund exactly-once.
+    reconcileEngine(state, port as never, () => {});
+    expect(state.budget.sessionsSpawned).toBe(0);
+  });
 });
 
 // ── rebuildFrontier ─────────────────────────────────────────────────────────
@@ -1135,7 +1211,7 @@ describe("engine.recover() integration", () => {
       stateDir: dir,
       graphId,
       dispatch: plainFake,
-      onNodeCompletion: (e) => events.push(e),
+      onNodeCompletion: (e) => { events.push(e); },
     });
     await engine.recover();
 
@@ -1181,7 +1257,7 @@ describe("engine.recover() integration", () => {
       stateDir: dir,
       graphId,
       dispatch: throwingPort as unknown as NodeDispatchPort,
-      onNodeCompletion: (e) => events.push(e),
+      onNodeCompletion: (e) => { events.push(e); },
     });
     await engine.recover();
 
@@ -1710,7 +1786,7 @@ describe("NodeStalenessWatcher", () => {
     expect(node.status).toBe(NodeStatus.Running);
     // Past the deadline — marked timeout + reported through the callback.
     expect(watcher.tick(state, 1_000 + 30_000)).toEqual(["A"]);
-    expect(node.status).toBe(NodeStatus.Timeout);
+    expect<NodeStatus>(node.status).toBe(NodeStatus.Timeout);
     expect(timedOutIds).toEqual(["A"]);
     expect(reasons[0]).toContain("staleness");
   });
@@ -1724,7 +1800,7 @@ describe("NodeStalenessWatcher", () => {
     const watcher = new NodeStalenessWatcher({ nodeStaleTimeoutMs: 30_000 });
     // 5s elapsed: stale under the per-node budget, fresh under the watcher-wide one.
     expect(watcher.tick(state, 1_000 + 5_000)).toEqual(["A"]);
-    expect(node.status).toBe(NodeStatus.Timeout);
+    expect<NodeStatus>(node.status).toBe(NodeStatus.Timeout);
   });
 
   it("does not touch non-running nodes, even with an ancient startedAt", () => {
@@ -1829,7 +1905,9 @@ describe("reconcileEngine re-subscription out-param (M4)", () => {
     expect(subs.listeners[0].taskId).toBe("task-A");
     // The surfaced callback is the exact function the port registered — a valid
     // removeTaskTerminatedListener handle.
-    expect(subs.listeners[0].callback).toBe(registered.get("task-A"));
+    // Operands swapped: the same identity check, with the possibly-undefined
+    // Map lookup in the actual position (the expected side rejects `undefined`).
+    expect(registered.get("task-A")).toBe(subs.listeners[0].callback);
   });
 
   it("is a no-op collection for non-live nodes (orphaned / terminal)", () => {
@@ -1841,5 +1919,116 @@ describe("reconcileEngine re-subscription out-param (M4)", () => {
     const report = reconcileEngine(state, {} as never, () => {}, subs);
     expect(report.timedOut).toEqual(["A"]);
     expect(subs.listeners).toEqual([]);
+  });
+});
+
+// ── Y22: a failed watchdog tick is counted and logged, never silent ─────────
+
+describe("watchdog tick failure accounting (Y22)", () => {
+  /** Poll a predicate until it holds or the deadline passes. */
+  async function waitFor(
+    predicate: () => boolean,
+    timeoutMs = 1000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2));
+    }
+  }
+
+  /**
+   * A state whose node-map iteration throws — a deterministic per-tick fault.
+   * (`Map#values` is an own-property override; returning `never` satisfies the
+   * method signature.)
+   */
+  function throwingState(graphId: string): EngineState {
+    const state = buildState(singleNodeGraph(), graphId);
+    state.nodes.values = () => {
+      throw new Error("tick boom");
+    };
+    return state;
+  }
+
+  it("NodeStalenessWatcher: logs the degradation and counts consecutive failures", async () => {
+    const state = throwingState("tick-fail-stale");
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 10_000,
+      intervalMs: 1,
+    });
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      watcher.start(state);
+      await waitFor(() => watcher.consecutiveTickFailures > 0);
+      watcher.stop();
+      expect(watcher.tickDegraded).toBe(true);
+      expect(watcher.consecutiveTickFailures).toBeGreaterThan(0);
+      expect(
+        warnings.some(
+          (w) =>
+            w.includes("staleness watcher tick failed") &&
+            w.includes("watchdog degraded") &&
+            w.includes("tick boom"),
+        ),
+      ).toBe(true);
+    } finally {
+      watcher.stop();
+      console.warn = original;
+    }
+  });
+
+  it("NodeStalenessWatcher: a successful tick clears the degradation streak", async () => {
+    const state = buildState(singleNodeGraph(), "tick-recover-stale");
+    const originalValues = state.nodes.values.bind(state.nodes);
+    state.nodes.values = () => {
+      throw new Error("tick boom");
+    };
+    const watcher = new NodeStalenessWatcher({
+      nodeStaleTimeoutMs: 10_000,
+      intervalMs: 1,
+    });
+    watcher.start(state);
+    try {
+      await waitFor(() => watcher.consecutiveTickFailures > 0);
+      state.nodes.values = originalValues;
+      await waitFor(() => watcher.consecutiveTickFailures === 0);
+      expect(watcher.tickDegraded).toBe(false);
+    } finally {
+      watcher.stop();
+    }
+  });
+
+  it("NodeLivenessMonitor: logs the degradation and counts consecutive failures", async () => {
+    const state = throwingState("tick-fail-liveness");
+    const monitor = new NodeLivenessMonitor({
+      nodeStaleTimeoutMs: 10_000,
+      intervalMs: 1,
+    });
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      monitor.start(state);
+      await waitFor(() => monitor.consecutiveTickFailures > 0);
+      monitor.stop();
+      expect(monitor.tickDegraded).toBe(true);
+      expect(monitor.consecutiveTickFailures).toBeGreaterThan(0);
+      expect(
+        warnings.some(
+          (w) =>
+            w.includes("liveness monitor tick failed") &&
+            w.includes("watchdog degraded") &&
+            w.includes("tick boom"),
+        ),
+      ).toBe(true);
+    } finally {
+      monitor.stop();
+      console.warn = original;
+    }
   });
 });

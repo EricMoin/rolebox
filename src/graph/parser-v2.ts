@@ -28,6 +28,15 @@
  *     RetryConfig); both forms are accepted.
  *   - `join.strategy` uses the `"quorum:N"` combined string form (YAML §2.3.1)
  *     which is expanded into `{ strategy: "quorum", quorum: N }` (TS JoinConfig).
+ *     An unrecognized strategy — including a bare `"quorum"` with no count —
+ *     is a deserialization ERROR, exactly like an unknown edge `type`: the
+ *     join shapes downstream fan-in semantics, so dropping it silently would
+ *     re-interpret "first answer wins" as "wait for everyone" (Y6).
+ *   - `loop_groups[].mode` is read and checked against `LoopMode` instead of
+ *     being dropped; an unknown value is a deserialization error (Y6).
+ *   - `template` / `max_iterations` are mapped onto the declaration (they used
+ *     to be documented as round-trip metadata but were never read, so every
+ *     parse → serialize lost them) (Y6).
  *
  * Design reference: .rolebox/design/dag-yaml-schema.md (Appendix B canonical
  * example), src/types.graph-v2.ts, src/constants.ts (JoinStrategy).
@@ -36,6 +45,7 @@
 import { readFileSync } from "node:fs";
 import yaml from "js-yaml";
 import { createSubLogger } from "../logger.ts";
+import { errorText } from "../utils/error-text.ts";
 import { validateGraphDeclaration } from "./validator-v2.ts";
 import type {
   GraphDeclaration,
@@ -49,7 +59,11 @@ import type {
   NodeBudgetSpec,
   GraphBudgetSpec,
 } from "../types.graph-v2.ts";
-import { JoinStrategy, JOIN_STRATEGY_VALUES } from "../constants.ts";
+import {
+  GRAPH_TEMPLATE_VALUES,
+  JOIN_STRATEGY_VALUES,
+  isGraphTemplate,
+} from "../constants.ts";
 
 /**
  * A graph document as parsed from disk. `version` is optional at the type level
@@ -89,7 +103,7 @@ export function parseGraph(source: string | unknown): GraphParseResult {
       return {
         ok: false,
         errors: [
-          `YAML parse error: ${err instanceof Error ? err.message : String(err)}`,
+          `YAML parse error: ${errorText(err)}`,
         ],
       };
     }
@@ -148,7 +162,26 @@ export function parseGraph(source: string | unknown): GraphParseResult {
 
   const graph: GraphDocument = { version, name, nodes, edges };
 
-  const budget = mapGraphBudget(g.budget);
+  // Declaration metadata. Both fields are documented as round-trip metadata,
+  // so they are mapped rather than dropped: a declared template is retained
+  // when it names a registered topology (built-in or runtime-registered) and
+  // rejected when it does not, mirroring the unknown-edge-type contract.
+  const template = asString(g.template);
+  if (template !== null) {
+    if (isGraphTemplate(template)) {
+      graph.template = template;
+    } else {
+      errors.push(
+        `"template" has unknown value "${template}" (expected one of: ` +
+          `${[...GRAPH_TEMPLATE_VALUES].join(", ")})`,
+      );
+    }
+  }
+
+  const maxIterations = asNumber(g.max_iterations);
+  if (maxIterations !== undefined) graph.max_iterations = maxIterations;
+
+  const budget = mapNumericSpec(g.budget, GRAPH_BUDGET_FIELDS);
   if (budget !== undefined) graph.budget = budget;
 
   if (loop_groups.length > 0) graph.loop_groups = loop_groups;
@@ -186,12 +219,12 @@ function mapNode(raw: unknown, index: number, errors: string[]): NodeConfig {
   if (needsApproval !== undefined) node.needs_approval = needsApproval;
 
   if (rec.join !== undefined) {
-    const join = mapJoin(rec.join);
+    const join = mapJoin(rec.join, `node[${index}]`, errors);
     if (join !== undefined) node.join = join;
   }
 
   if (rec.budget !== undefined) {
-    const budget = mapNodeBudget(rec.budget);
+    const budget = mapNumericSpec(rec.budget, NODE_BUDGET_FIELDS);
     if (budget !== undefined) node.budget = budget;
   }
 
@@ -272,36 +305,116 @@ function mapLoopGroup(
     max_traversals: maxTraversals ?? 0,
   };
 
+  // `mode` used to be ignored entirely: a declared mode vanished on
+  // parse → serialize, and `fresh` never reached the documented-unsupported
+  // check. Read it and reject an unknown value instead of dropping it (Y6) —
+  // an unrecognized mode is a declaration error, not neutral metadata.
+  if (rec.mode !== undefined) {
+    const mode = asString(rec.mode);
+    if (mode === "inherit" || mode === "fresh") {
+      lg.mode = mode;
+    } else {
+      errors.push(
+        `loop_groups[${index}] has unknown "mode" ${JSON.stringify(rec.mode)} ` +
+          `(expected "inherit" or "fresh")`,
+      );
+    }
+  }
+
   return lg;
 }
 
-function mapJoin(raw: unknown): JoinConfig | undefined {
+/**
+ * Map a declared `join` into the {@link JoinConfig} discriminated union.
+ *
+ * Unlike the other field mappers this one REPORTS instead of dropping: an
+ * unrecognized strategy, a missing `strategy`, or a `"quorum"` without a
+ * count is pushed onto `errors` (same contract as an unknown edge `type`),
+ * because a silently dropped join changes fan-in semantics — the node falls
+ * back to `"all"` and waits for every upstream (Y6).
+ */
+function mapJoin(
+  raw: unknown,
+  label: string,
+  errors: string[],
+): JoinConfig | undefined {
   // YAML §2.3.1 encodes the strategy as a single string: "all" | "any" | "quorum:N".
   const str = asString(raw);
-  if (str !== null) return parseJoinStrategyString(str.trim());
+  if (str !== null) {
+    const strategyText = str.trim();
+    if (strategyText === "quorum") {
+      errors.push(
+        `${label} join strategy "quorum" requires its count in the string form ` +
+          `(expected "quorum:N", e.g. "quorum:2")`,
+      );
+      return undefined;
+    }
+    const join = parseJoinStrategyString(strategyText);
+    if (join === undefined) {
+      errors.push(unknownJoinStrategyMessage(label, strategyText));
+    }
+    return join;
+  }
 
   const rec = asRecord(raw);
-  if (rec === null) return undefined;
+  if (rec === null) {
+    errors.push(`${label} "join" must be a string or an object`);
+    return undefined;
+  }
 
   const strategyRaw = asString(rec.strategy);
-  if (strategyRaw === null) return undefined;
+  if (strategyRaw === null) {
+    errors.push(`${label} join is missing required field "strategy"`);
+    return undefined;
+  }
 
-  const join = parseJoinStrategyString(strategyRaw.trim());
-  if (join === undefined) return undefined;
+  // The object form may spell the count in the strategy itself ("quorum:2") or
+  // in the sibling `quorum` key; an explicit, numeric key wins over the
+  // combined form.
+  const strategyText = strategyRaw.trim();
+  const combined = parseJoinStrategyString(strategyText);
+  if (combined !== undefined) {
+    if (combined.strategy !== "quorum") return combined;
+    const explicit = asNumber(rec.quorum);
+    return { strategy: "quorum", quorum: explicit ?? combined.quorum };
+  }
 
-  const quorum = asNumber(rec.quorum);
-  if (quorum !== undefined) join.quorum = quorum;
-  return join;
+  if (strategyText === "quorum") {
+    const quorum = asNumber(rec.quorum);
+    if (quorum === undefined) {
+      errors.push(
+        `${label} join strategy "quorum" requires a numeric "quorum" count ` +
+          `(e.g. { strategy: "quorum", quorum: 2 })`,
+      );
+      return undefined;
+    }
+    return { strategy: "quorum", quorum };
+  }
+
+  errors.push(unknownJoinStrategyMessage(label, strategyText));
+  return undefined;
 }
 
+/** Shared "unknown join strategy" diagnostic (vocabulary read from constants). */
+function unknownJoinStrategyMessage(label: string, value: string): string {
+  return (
+    `${label} has unknown join strategy "${value}" ` +
+    `(expected one of: ${JOIN_STRATEGY_VALUES.join(", ")}; ` +
+    `"quorum" must carry its count as "quorum:N")`
+  );
+}
+
+/**
+ * Parse the combined `"all" | "any" | "quorum:N"` strategy STRING form
+ * (YAML §2.3.1). A bare `"quorum"` carries no count in this form and answers
+ * `undefined`; the object form expresses it with a sibling `quorum` key.
+ */
 function parseJoinStrategyString(s: string): JoinConfig | undefined {
   const quorumMatch = /^quorum\s*:\s*(\d+)$/i.exec(s);
   if (quorumMatch !== null) {
     return { strategy: "quorum", quorum: Number(quorumMatch[1]) };
   }
-  if ((JOIN_STRATEGY_VALUES as readonly string[]).includes(s)) {
-    return { strategy: s as JoinStrategy };
-  }
+  if (s === "all" || s === "any") return { strategy: s };
   return undefined;
 }
 
@@ -337,42 +450,51 @@ function mapRetry(raw: unknown): RetryConfig | undefined {
   return retry;
 }
 
+/**
+ * Numeric fields of {@link NodeBudgetSpec}, in declaration order. The
+ * `satisfies` check pins every member to a real key of the spec, so a renamed
+ * or removed field fails to compile instead of being parsed as a stray key.
+ */
 const NODE_BUDGET_FIELDS = [
   "max_input_tokens",
   "max_output_tokens",
   "max_cost_usd",
   "timeout_ms",
   "max_retries",
-] as const;
+] as const satisfies readonly (keyof NodeBudgetSpec)[];
 
-function mapNodeBudget(raw: unknown): NodeBudgetSpec | undefined {
-  const rec = asRecord(raw);
-  if (rec === null) return undefined;
-
-  const budget: NodeBudgetSpec = {};
-  for (const field of NODE_BUDGET_FIELDS) {
-    const value = asNumber(rec[field]);
-    if (value !== undefined) (budget as Record<string, unknown>)[field] = value;
-  }
-  return Object.keys(budget).length > 0 ? budget : undefined;
-}
-
+/** Numeric fields of {@link GraphBudgetSpec}, in declaration order. */
 const GRAPH_BUDGET_FIELDS = [
   "max_total_input_tokens",
   "max_total_output_tokens",
   "max_total_cost_usd",
-] as const;
+] as const satisfies readonly (keyof GraphBudgetSpec)[];
 
-function mapGraphBudget(raw: unknown): GraphBudgetSpec | undefined {
+/**
+ * Map the listed numeric fields of a budget record (Y7).
+ *
+ * One generic helper for the node- and graph-level budgets, which previously
+ * had two byte-identical copies that both wrote through
+ * `(budget as Record<string, unknown>)[field]`. `fields` is a readonly array
+ * of keys of the target spec, so the result is a `Partial` of exactly those
+ * keys and is assignable to the spec WITHOUT that cast — the cast was what let
+ * a misspelled or removed field name pass silently. Malformed values are
+ * dropped (the module's lenient scalar contract); a record with no usable
+ * field answers `undefined`.
+ */
+function mapNumericSpec<K extends string>(
+  raw: unknown,
+  fields: readonly K[],
+): Partial<Record<K, number>> | undefined {
   const rec = asRecord(raw);
   if (rec === null) return undefined;
 
-  const budget: GraphBudgetSpec = {};
-  for (const field of GRAPH_BUDGET_FIELDS) {
+  const spec: Partial<Record<K, number>> = {};
+  for (const field of fields) {
     const value = asNumber(rec[field]);
-    if (value !== undefined) (budget as Record<string, unknown>)[field] = value;
+    if (value !== undefined) spec[field] = value;
   }
-  return Object.keys(budget).length > 0 ? budget : undefined;
+  return Object.keys(spec).length > 0 ? spec : undefined;
 }
 
 // ── Scalar coercers (lenient — malformed values are dropped, not thrown) ─
@@ -438,11 +560,7 @@ export function importGraphFromFile(filePath: string): GraphDeclaration | null {
   try {
     source = readFileSync(filePath, "utf-8");
   } catch (err) {
-    log.warn(
-      `cannot read graph file "${filePath}": ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+    log.warn(`cannot read graph file "${filePath}": ${errorText(err)}`);
     return null;
   }
 
@@ -471,6 +589,19 @@ export function importGraphFromFile(filePath: string): GraphDeclaration | null {
   }
 
   // Structural validation guarantees `version === 2`, which is exactly a
-  // GraphDeclaration. Narrow the optional-version document to the declared type.
-  return document as GraphDeclaration;
+  // GraphDeclaration. Narrow the optional-version document with the predicate
+  // below instead of asserting the cross-module contract — if the validator
+  // ever relaxes the version rule, that shows up here rather than as a silent
+  // `as` (B1).
+  if (!isV2Document(document)) return null;
+  return document;
+}
+
+/**
+ * Whether a parsed document is exactly a v2 declaration. A type predicate so
+ * {@link importGraphFromFile} narrows `GraphDocument` to `GraphDeclaration`
+ * on the strength of the version check instead of asserting it (B1).
+ */
+function isV2Document(document: GraphDocument): document is GraphDeclaration {
+  return document.version === 2;
 }

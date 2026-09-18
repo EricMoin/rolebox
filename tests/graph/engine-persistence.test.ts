@@ -96,7 +96,7 @@ function buildRichState(): EngineState {
       sidecarPath: "/tmp/res-A.txt",
       totalChars: 5,
       hadFence: true,
-      materializedAt: "2026-07-25T00:00:00.000Z",
+      materializedAt: Date.parse("2026-07-25T00:00:00.000Z"),
     },
     signalsObserved: { answer: "done", progress: { step: 1 } },
     sessionsSpawned: 2,
@@ -219,8 +219,12 @@ describe("EnginePersistence", () => {
     expect(l.phase).toBe(EnginePhase.Executing);
     expect(l.startedAt).toBe(100);
     expect(l.updatedAt).toBe(250);
-    expect(l.advancingLock).toBe(true);
-    expect(l.pendingCompletions).toEqual(["A"]);
+    // R2(c): the persisted file still carries the crashed process's
+    // critical-section fields, but hydration resets them — this process holds
+    // no lock and has no in-memory deferred queue to replay. Every other field
+    // survives the round trip (see the assertions below).
+    expect(l.advancingLock).toBe(false);
+    expect(l.pendingCompletions).toEqual([]);
     expect(l.frontier).toEqual(["B"]);
     expect(l.graphDeclaration).toEqual(richDeclaration());
 
@@ -246,7 +250,7 @@ describe("EnginePersistence", () => {
       sidecarPath: "/tmp/res-A.txt",
       totalChars: 5,
       hadFence: true,
-      materializedAt: "2026-07-25T00:00:00.000Z",
+      materializedAt: Date.parse("2026-07-25T00:00:00.000Z"),
     });
     expect(a.signalsObserved).toEqual({ answer: "done", progress: { step: 1 } });
     expect(a.tokensConsumed).toEqual({ inputTokens: 10, outputTokens: 5, cost: 0.15 });
@@ -285,12 +289,22 @@ describe("EnginePersistence", () => {
     expect(l.signalLedger.get("A")).toEqual({ signals: { answer: "done" }, lastSignalAt: 200 });
   });
 
-  it("is lossless at the DTO level: serialize(load(save(state))) === serialize(state)", () => {
+  it("is lossless at the DTO level after one normalizing hydration (R2(c) fixpoint)", () => {
     const state = buildRichState();
     const dtoBefore = serializeEngineState(state);
     store.save(state);
     const loaded = store.load("graph-1")!;
-    expect(serializeEngineState(loaded)).toEqual(dtoBefore);
+    // The FIRST hydration normalizes only the runtime-only critical-section
+    // fields (R2(c)); every other serialized field must be lossless.
+    expect(serializeEngineState(loaded)).toEqual({
+      ...dtoBefore,
+      advancingLock: false,
+      pendingCompletions: [],
+    });
+    // From the second generation on, the round trip is an exact fixpoint.
+    store.save(loaded);
+    const reloaded = store.load("graph-1")!;
+    expect(serializeEngineState(reloaded)).toEqual(serializeEngineState(loaded));
   });
 
   it("does not mutate the input state during save", () => {
@@ -773,8 +787,13 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     store.save(state);
     const loaded = store.load("graph-1")!;
 
-    // DTO-level lossless equality across the whole container.
-    expect(serializeEngineState(loaded)).toEqual(dtoBefore);
+    // DTO-level lossless equality across the whole container, except for the
+    // runtime-only critical-section fields reset by R2(c).
+    expect(serializeEngineState(loaded)).toEqual({
+      ...dtoBefore,
+      advancingLock: false,
+      pendingCompletions: [],
+    });
     // Version unchanged.
     expect(dtoBefore.version).toBe(ENGINE_PERSISTENCE_VERSION);
 
@@ -1138,7 +1157,7 @@ describe("two-tier persistence (Q2 Option A)", () => {
 describe("snapshotEngineState preserves terminalNotified (bug 3 part a)", () => {
   /** Fresh per-instance dedupe context (mirrors engine-termination-s4.test.ts). */
   function freshCtx(): TerminationContext {
-    return { terminalComplete: false, terminalBlocked: false };
+    return { terminalComplete: false, terminalBlocked: false, terminalEpoch: 0 };
   }
 
   /** Quiesce a single-node graph so checkGraphTermination sees a terminal state. */
@@ -1162,7 +1181,7 @@ describe("snapshotEngineState preserves terminalNotified (bug 3 part a)", () => 
     state.phase = EnginePhase.Executing;
     quiesce(state);
     const events: GraphTerminalEvent[] = [];
-    checkGraphTermination(state, (e) => events.push(e), freshCtx());
+    checkGraphTermination(state, (e) => { events.push(e); }, freshCtx());
     expect(events).toHaveLength(1);
     expect(state.terminalNotified).toEqual({ complete: true, blocked: false });
 
@@ -1343,5 +1362,215 @@ describe("R2 — out-of-vocabulary persisted enums are corrupt (null)", () => {
       nodes: { ...nodes, A: { ...nodes["A"], status: "bogus" } },
     } as unknown as Parameters<typeof deserializeEngineState>[0];
     expect(() => deserializeEngineState(poisoned)).toThrow(/not a valid NodeStatus/);
+  });
+});
+
+// ── R2: node-level required-field gate (trust boundary) ─────────────────────
+//
+// The top-level gate used to prove only that `nodes` was an object, so a
+// `{ status, joinStrategy }` stub passed every gate and hydrated. A missing
+// `tokensConsumed` then became `{}` through `{ ...undefined }` and the three
+// budget-bridge `>=` comparisons against a declared `max_total_*` were all
+// false — a silent budget-gate shutdown. These tests pin the new
+// corrupt-to-clean-start behaviour: a node missing a required field no longer
+// loads (previously it "barely loaded").
+
+describe("R2 — node-level required fields are corrupt (null), never hydrated", () => {
+  /** Serialize the rich state with one node-level entry mutated/removed. */
+  function fileWithNodeEntry(
+    mutate: (node: Record<string, unknown>) => Record<string, unknown>,
+  ): string {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const nodes = dto.nodes as Record<string, Record<string, unknown>>;
+    return JSON.stringify({
+      ...dto,
+      nodes: { ...nodes, A: mutate({ ...nodes["A"] }) },
+    });
+  }
+
+  it("returns null when a node is missing tokensConsumed (the budget-gate hole)", () => {
+    const raw = fileWithNodeEntry((node) => {
+      delete node.tokensConsumed;
+      return node;
+    });
+    expect(() => loadEngineStateFromJson(raw)).not.toThrow();
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("returns null when tokensConsumed is empty or has a non-numeric counter", () => {
+    for (const tokens of [
+      {},
+      { inputTokens: 1, outputTokens: 2 },
+      { inputTokens: "1", outputTokens: 2, cost: 0 },
+    ]) {
+      expect(
+        loadEngineStateFromJson(
+          fileWithNodeEntry((n) => ({ ...n, tokensConsumed: tokens })),
+        ),
+      ).toBeNull();
+    }
+  });
+
+  it("returns null when agent / prompt / needsApproval are missing or wrongly typed", () => {
+    expect(
+      loadEngineStateFromJson(
+        fileWithNodeEntry((n) => {
+          delete n.agent;
+          return n;
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      loadEngineStateFromJson(fileWithNodeEntry((n) => ({ ...n, prompt: 42 }))),
+    ).toBeNull();
+    expect(
+      loadEngineStateFromJson(
+        fileWithNodeEntry((n) => ({ ...n, needsApproval: "yes" })),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when signalsObserved / upstreamResults are not objects", () => {
+    expect(
+      loadEngineStateFromJson(
+        fileWithNodeEntry((n) => ({ ...n, signalsObserved: [] })),
+      ),
+    ).toBeNull();
+    expect(
+      loadEngineStateFromJson(
+        fileWithNodeEntry((n) => {
+          delete n.upstreamResults;
+          return n;
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("deserializeEngineState's defensive path throws (never legalizes a partial node)", () => {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const nodes = dto.nodes as Record<string, Record<string, unknown>>;
+    const poisoned = {
+      ...dto,
+      nodes: {
+        ...nodes,
+        A: { status: "completed", joinStrategy: "all" },
+      },
+    } as unknown as Parameters<typeof deserializeEngineState>[0];
+    expect(() => deserializeEngineState(poisoned)).toThrow(
+      /is missing a required field/,
+    );
+  });
+
+  it("a complete node still hydrates (a valid file is unaffected)", () => {
+    const loaded = loadEngineStateFromJson(
+      JSON.stringify(serializeEngineState(buildRichState())),
+    );
+    expect(loaded).not.toBeNull();
+    expect(loaded!.nodes.get("A")!.tokensConsumed).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      cost: 0.15,
+    });
+  });
+
+  it("carries the node's declared budget through the DTO (declared field, not spread-only)", () => {
+    const state = buildRichState();
+    state.nodes.get("A")!.budget = { timeout_ms: 1234, max_input_tokens: 99 };
+    const dto = serializeEngineState(state);
+    // The old hand-mirrored DTO did not declare `budget`; it survived only via
+    // the untyped `...rest` spread. The derived DTO declares it, so the
+    // staleness watcher's per-node `timeout_ms` is covered by contract.
+    expect(dto.nodes["A"]!.budget).toEqual({
+      timeout_ms: 1234,
+      max_input_tokens: 99,
+    });
+    expect(deserializeEngineState(dto).nodes.get("A")!.budget).toEqual({
+      timeout_ms: 1234,
+      max_input_tokens: 99,
+    });
+  });
+});
+
+// ── R2(c): runtime-only critical-section fields are reset on hydration ──────
+
+describe("R2(c) — advancingLock / pendingCompletions reset on hydration", () => {
+  it("persists the crash-time lock/queue for diagnostics but hydrates them reset", () => {
+    const state = buildRichState(); // advancingLock=true, pendingCompletions=["A"]
+    const dto = serializeEngineState(state);
+    expect(dto.advancingLock).toBe(true);
+    expect(dto.pendingCompletions).toEqual(["A"]);
+
+    const loaded = deserializeEngineState(dto);
+    expect(loaded.advancingLock).toBe(false);
+    expect(loaded.pendingCompletions).toEqual([]);
+  });
+});
+
+// ── C1/R2: legacy bare joinStrategy "quorum" is normalized with a warning ────
+
+describe("C1 — persisted joinStrategy normalization at the trust boundary", () => {
+  /** Capture console.warn output around one call. */
+  function captureWarnings<T>(fn: () => T): { result: T; warnings: string[] } {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)).join(" "));
+    };
+    try {
+      return { result: fn(), warnings };
+    } finally {
+      console.warn = original;
+    }
+  }
+
+  /** Serialize the rich state with node A's joinStrategy overridden. */
+  function withJoinStrategy(joinStrategy: unknown): string {
+    const dto = serializeEngineState(buildRichState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const nodes = dto.nodes as Record<string, Record<string, unknown>>;
+    return JSON.stringify({
+      ...dto,
+      nodes: {
+        ...nodes,
+        A: { ...nodes["A"], joinStrategy },
+      },
+    });
+  }
+
+  it('normalizes a legacy bare "quorum" to { quorum: 1 } and logs the downgrade', () => {
+    const { result, warnings } = captureWarnings(() =>
+      loadEngineStateFromJson(withJoinStrategy("quorum")),
+    );
+    expect(result).not.toBeNull();
+    expect(result!.nodes.get("A")!.joinStrategy).toEqual({ quorum: 1 });
+    expect(
+      warnings.some(
+        (w) => w.includes('legacy bare "quorum"') && w.includes('node "A"'),
+      ),
+    ).toBe(true);
+  });
+
+  it("still rejects a genuinely unknown joinStrategy string", () => {
+    // `JOIN_STRATEGY_VALUES` must NOT be used to admit arbitrary members — the
+    // declaration vocabulary contains "quorum", the persistence boundary does
+    // not accept it verbatim.
+    expect(loadEngineStateFromJson(withJoinStrategy("bogus"))).toBeNull();
+  });
+
+  it("admits 'all' / 'any' / a positive-integer quorum object unchanged", () => {
+    const all = loadEngineStateFromJson(withJoinStrategy("all"));
+    expect(all!.nodes.get("A")!.joinStrategy).toBe("all");
+    const any = loadEngineStateFromJson(withJoinStrategy("any"));
+    expect(any!.nodes.get("A")!.joinStrategy).toBe("any");
+    const quorum = loadEngineStateFromJson(withJoinStrategy({ quorum: 3 }));
+    expect(quorum!.nodes.get("A")!.joinStrategy).toEqual({ quorum: 3 });
   });
 });

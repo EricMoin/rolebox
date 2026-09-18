@@ -22,17 +22,17 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/core/manager";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import {
   DispatchBridge,
   graphParentContext,
-} from "../../src/graph/engine/dispatch-bridge";
+} from "../../src/graph/engine/dispatch-bridge.ts";
 import {
   createEngineState,
   registerNode,
-} from "../../src/graph/engine/engine-state";
-import type { GraphDeclaration } from "../../src/types.graph-v2";
-import { createMockClient, parentContext } from "../dispatch/helpers";
+} from "../../src/graph/engine/engine-state.ts";
+import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
+import { createMockClient, parentContext } from "../dispatch/helpers.ts";
 
 const WORKDIR = "/work/dir-for-dispatch-per-parent";
 const GRAPH_ID = "g-per-parent";

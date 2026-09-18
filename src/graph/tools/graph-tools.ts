@@ -31,6 +31,10 @@
  * - **`graph_run`** (non dry-run) builds a manager-backed runtime via
  *   `createEngine(declaration, { manager, graphId, parentContext })` and calls
  *   `run()`. `dry_run` validates the structure without executing.
+ * - The stateless render / format half — tree + summary renderers, pagination,
+ *   the C-WIRE flag entry extractors, declaration lookups — lives in
+ *   `./status-render.ts` (Y30), so this module keeps the registry, the deps and
+ *   the engine assembly. The public toolset contract is unchanged.
  *
  * ## Design-vs-code divergences (tool-merge-map.md §2.2 → real types)
  *
@@ -55,11 +59,14 @@
  *    `retry:true` (or `modify_prompt` set), `graph_run` re-opens and re-dispatches
  *    that node after `run()` instead of reporting it `retry_pending`. The
  *    `retry_pending` field is therefore gone from {@link GraphRunResult}.
- * 5. `graph_cancel` — the engine's {@link EngineRuntime.cancel} is whole-graph
- *    only (there is no node/loop-scoped teardown primitive in Phase 4). A
- *    `node_id` / `loop_id` target is applied as a **filter** on the cancelled
- *    result set rather than a scoped cancellation. `cascade` is accepted and
- *    forwarded for API-shape compatibility.
+ * 5. `graph_cancel` — the engine's {@link EngineRuntime.cancel} retires every
+ *    cancellable node for a whole-graph cancel (plus the teardown, terminal
+ *    transition and persistence flush), and {@link EngineRuntime.cancelNodes}
+ *    is the real node/loop-scoped primitive (a loop target expands to its full
+ *    member set, and `cascade` walks the forward closure). Both branches
+ *    report the engine's authoritative `CancelScopeReport` retired set — the
+ *    tool layer never reverse-infers "what was cancelled" from `errorReason`
+ *    text.
  * 6. **Observed & confirmed:** `engine-state.registerNode`
  *    (`src/graph/engine/engine-state.ts:222-225`) correctly calls
  *    `resolveJoinStrategy(config.join)` to propagate the node's declared join
@@ -70,9 +77,7 @@
  * Design reference: `.rolebox/design/tool-merge-map.md` §2.2.
  */
 
-import { readFileSync, existsSync, writeFileSync, renameSync } from "node:fs";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
-import type { MaterializedResultRef } from "../../dispatch/types.ts";
 import type {
   GraphDeclaration,
   NodeConfig,
@@ -90,10 +95,6 @@ import type {
   EngineState,
   NodeRuntimeState,
   LoopGroupRuntimeState,
-  RoundHistoryEntry,
-  CheckpointRecord,
-  SignalLedgerEvent,
-  GraphBudgetState,
 } from "../../types.engine-v2.ts";
 import {
   createEngine,
@@ -119,6 +120,7 @@ import {
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { enqueueNotify } from "../../dispatch/notification.ts";
 import { createSubLogger } from "../../logger.ts";
+import { errorText } from "../../utils/error-text.ts";
 import { validateGraphDeclaration } from "../validator-v2.ts";
 import { serializeGraphDeclaration } from "../serialize.ts";
 import {
@@ -130,7 +132,6 @@ import {
   groupCompletedNodes,
   limitNodes,
   listPendingApprovals,
-  toEpochMs,
   type GroupByMode,
   type StatusQuery,
 } from "./status-queries.ts";
@@ -138,6 +139,34 @@ import {
   scanPersistedStates,
   type PersistedStateScan,
 } from "./persisted-state.ts";
+// Stateless render / format helpers extracted from this module (Y30). They
+// carry no registry, deps or engine wiring — the stateful surface stays below.
+import {
+  artifactsEvidenceEntries,
+  budgetSummary,
+  buildNodeFilter,
+  checkpointEntries,
+  crossSessionBudget,
+  crossSessionViewRequested,
+  flagData,
+  flagSectionsActive,
+  loopDeclMode,
+  loopNodeIds,
+  loopRoundEntries,
+  metricsSummary,
+  paginate,
+  persistedEmptyNote,
+  progressForNode,
+  renderTree,
+  resultText,
+  shallowCloneDeclaration,
+  signalStreamEntries,
+  visibleNodeMap,
+  writeAtomic,
+  type GraphBudgetSummary,
+  type GraphFlagData,
+  type GraphLoopSummary,
+} from "./status-render.ts";
 
 // Module logger (exported so tests can spy on the degradation warnings, F6).
 export const log = createSubLogger("graph:tools");
@@ -569,9 +598,57 @@ export interface GraphApproveResult {
   applied: boolean;
 }
 
-// ── Tool set ─────────────────────────────────────────────────────────────────
+// ── graph_status JSON result shapes (Y27) ───────────────────────────────────
 
-const DEFAULT_MAX_CHARS = 16000;
+/**
+ * One node row of the `graph_status` JSON snapshot — the typed shape of
+ * {@link GraphToolSet.nodeSummary}. Optional keys are emitted only when their
+ * source data is present, so the serialized shape is unchanged from the
+ * pre-typing implementation; the difference is that a rename or a removed key
+ * now fails to compile instead of silently changing the JSON output.
+ */
+export interface GraphNodeSummary extends GraphFlagData {
+  node_id: string;
+  status: NodeStatus;
+  agent: string;
+  needs_approval: boolean;
+  loop_group: string | undefined;
+  traversal_count: number;
+  retry_count: number;
+  dispatch_session_id?: string;
+  dispatch_task_id?: string;
+  error: string | undefined;
+  progress?: unknown;
+  last_signal_at?: number;
+  output?: string;
+  last_activity_at?: number;
+  idle_ms?: number;
+  heartbeat_source?: string;
+  stall_status?: string;
+  stall_warned_at?: number;
+  stall_reason?: string;
+}
+
+/**
+ * The `graph_status` JSON snapshot (format=json, graph-scoped). Built as a
+ * typed object — the C-WIRE flag keys arrive through {@link flagData} spread at
+ * the call site, and `budget` / `loops` / `metrics` are conditionally
+ * spread, so no key is ever written as an explicit `undefined` that only
+ * `JSON.stringify` happens to drop. The key names are the public JSON
+ * contract and must not change.
+ */
+export interface GraphStatusSnapshot extends GraphFlagData {
+  graph_id: string;
+  phase: string;
+  nodes: GraphNodeSummary[];
+  budget?: GraphBudgetSummary;
+  loops?: GraphLoopSummary[];
+  metrics?: string;
+  notification_degraded?: boolean;
+  notification_degraded_statuses?: string[];
+}
+
+// ── Tool set ─────────────────────────────────────────────────────────────────
 
 /**
  * F2 production defaults applied to every engine this toolset builds (in
@@ -806,19 +883,16 @@ export class GraphToolSet {
     if (!this.deps.stateDir) return;
     // The recorder's `kind` slot is the serialized `status` string
     // (graph-events.ts writes it verbatim into the record's generic status
-    // field); its type union predates the newer "stall" kind, so the kind is
-    // widened at this boundary — the record shape is identical.
-    new GraphEventRecorder(this.deps.stateDir).notificationDegraded(
-      graphId,
-      kind as "completion" | "terminal",
-    );
+    // field). Its parameter is the same three-value union, so the kind is
+    // forwarded as-is — no widening assertion at this boundary (Y32).
+    new GraphEventRecorder(this.deps.stateDir).notificationDegraded(graphId, kind);
   }
 
   /**
    * Read-only helper backing the graph_status degraded hint: read the graph's
    * durable event log (`.rolebox/state/graph-events-{hash}.ndjson`) and return
    * the deduped `status` values of any `notification_degraded` events
-   * (`"completion"` / `"terminal"`), in file order. Empty when no stateDir is
+   * (`"completion"` / `"terminal"` / `"stall"`), in file order. Empty when no stateDir is
    * configured, no log file exists, or no degraded event was recorded — and
    * never throws, so a missing / corrupt log can never break a status query
    * (total, observability-only, mirroring the recorder's own total discipline).
@@ -985,9 +1059,7 @@ export class GraphToolSet {
         await runtime.adoptPrior(found);
       } catch (err) {
         log.warn(
-          `graph-tools: adoptPrior (approval recovery) failed for graph "${graphId}": ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `graph-tools: adoptPrior (approval recovery) failed for graph "${graphId}": ${errorText(err)}`,
         );
       }
       const entry: GraphEntry = {
@@ -1006,6 +1078,11 @@ export class GraphToolSet {
   }
 
   /** Commit a candidate declaration: validate → store → rebuild runtime.
+   *
+   * The toolset never retains a reference to a caller-supplied object: the
+   * construction tools copy every object / array they receive before it enters
+   * the candidate declaration (Y31), so the validated declaration stored here
+   * cannot be mutated afterwards through the caller's `args`.
    *
    * When the graph already has a runtime with execution progress (a
    * construction tool was called AFTER `graph_run` — e.g. the emperor adds a
@@ -1051,9 +1128,7 @@ export class GraphToolSet {
         // fire-and-forget commit site.
         void runtime.adoptPrior(priorState).catch((err: unknown) => {
           log.warn(
-            `graph-tools: adoptPrior failed for graph "${graphId}": ${
-              err instanceof Error ? err.message : String(err)
-            }`,
+            `graph-tools: adoptPrior failed for graph "${graphId}": ${errorText(err)}`,
           );
         });
       }
@@ -1072,16 +1147,6 @@ export class GraphToolSet {
     });
   }
 
-  private static shallowCloneDeclaration(d: GraphDeclaration): GraphDeclaration {
-    return {
-      ...d,
-      nodes: d.nodes.map((n) => ({ ...n })),
-      edges: d.edges.map((e) => ({ ...e })),
-      loop_groups: d.loop_groups?.map((g) => ({ ...g })),
-      budget: d.budget ? { ...d.budget } : undefined,
-    };
-  }
-
   // ── graph_create ───────────────────────────────────────────────────────────
 
   graph_create(args: GraphCreateArgs, invokingSessionId?: string, agent?: string): GraphCreateResult {
@@ -1096,7 +1161,10 @@ export class GraphToolSet {
       edges: [],
     };
     if (budget && Object.keys(budget).length > 0) {
-      declaration.budget = budget;
+      // Copy: the committed declaration must not alias the caller's object
+      // (Y31) — a later mutation of `args.budget` would otherwise rewrite the
+      // structurally-validated declaration held by the registry.
+      declaration.budget = { ...budget };
     }
 
     // Generate a unique graph id. Deterministic for tests when a single graph
@@ -1143,14 +1211,15 @@ export class GraphToolSet {
       node.needs_approval = true;
     }
     if (args.join) {
-      node.join = args.join;
+      // Copy: never retain the caller's JoinConfig object (Y31).
+      node.join = { ...args.join };
     }
     const budget: NodeBudgetSpec = { ...(args.budget ?? {}) };
     if (args.timeout_ms !== undefined) budget.timeout_ms = args.timeout_ms;
     if (args.max_retries !== undefined) budget.max_retries = args.max_retries;
     if (Object.keys(budget).length > 0) node.budget = budget;
 
-    const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
+    const candidate = shallowCloneDeclaration(entry.declaration);
     candidate.nodes.push(node);
     this.commit(args.graph_id, candidate, invokingSessionId, agent);
     return { node_id: args.id, graph_id: args.graph_id, created: true };
@@ -1177,7 +1246,9 @@ export class GraphToolSet {
 
     const edge: EdgeDeclaration = { from: args.from, to: args.to, type };
     if (args.signal_filter && args.signal_filter.length > 0) {
-      edge.signal_filter = args.signal_filter;
+      // Copy: never retain the caller's array (Y31) — the same discipline the
+      // retry / loop-nodes fields already follow below and above.
+      edge.signal_filter = [...args.signal_filter];
     }
     if (args.condition) {
       edge.condition = args.condition;
@@ -1189,10 +1260,10 @@ export class GraphToolSet {
     ) {
       const mapping: DataMapping = {};
       if (args.data_passthrough_include && args.data_passthrough_include.length > 0) {
-        mapping.fields = args.data_passthrough_include;
+        mapping.fields = [...args.data_passthrough_include];
       }
       if (args.data_passthrough_exclude && args.data_passthrough_exclude.length > 0) {
-        mapping.exclude = args.data_passthrough_exclude;
+        mapping.exclude = [...args.data_passthrough_exclude];
       }
       if (args.data_passthrough_max_chars !== undefined) {
         mapping.maxChars = args.data_passthrough_max_chars;
@@ -1205,7 +1276,7 @@ export class GraphToolSet {
         : { ...args.retry };
     }
 
-    const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
+    const candidate = shallowCloneDeclaration(entry.declaration);
     candidate.edges.push(edge);
     this.commit(args.graph_id, candidate, invokingSessionId, agent);
 
@@ -1247,7 +1318,7 @@ export class GraphToolSet {
       loop.mode = "inherit";
     }
 
-    const candidate = GraphToolSet.shallowCloneDeclaration(entry.declaration);
+    const candidate = shallowCloneDeclaration(entry.declaration);
     const groups = [...(candidate.loop_groups ?? [])];
     groups.push(loop);
     candidate.loop_groups = groups;
@@ -1722,9 +1793,7 @@ export class GraphToolSet {
         return true;
       } catch (err) {
         log.warn(
-          `graph-tools: failed to propagate blocked gate for graph "${event.graphId}" to outermost session "${outermost}": ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `graph-tools: failed to propagate blocked gate for graph "${event.graphId}" to outermost session "${outermost}": ${errorText(err)}`,
         );
         return false;
       }
@@ -1753,9 +1822,7 @@ export class GraphToolSet {
         if (nodeId) return { graphId, runtime: entry.runtime, nodeId };
       } catch (err) {
         log.warn(
-          `graph-tools: getNodeIdForSession threw for graph "${graphId}" (session "${sessionId}") — skipped: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `graph-tools: getNodeIdForSession threw for graph "${graphId}" (session "${sessionId}") — skipped: ${errorText(err)}`,
         );
       }
     }
@@ -1806,7 +1873,7 @@ export class GraphToolSet {
     if (scope !== "session") {
       if (noTarget) {
         // A filter/group/budget view without a target = a cross-session aggregate.
-        if (this.crossSessionViewRequested(args)) {
+        if (crossSessionViewRequested(args)) {
           return this.renderCrossSession(args, scope);
         }
         return this.renderScopedGraphList(scope);
@@ -1852,7 +1919,7 @@ export class GraphToolSet {
     // Filter/query surface (query / status / agent / from_date / to_date). Built
     // via the pure `status-queries.ts` module: an honest subset of the node set,
     // never fabricated rows. `undefined` when no filter is active.
-    const nodeFilter: Set<string> | undefined = this.buildNodeFilter(state, args);
+    const nodeFilter: Set<string> | undefined = buildNodeFilter(state, args);
     return this.renderGraph(state, args, nodeFilter);
   }
 
@@ -1861,20 +1928,6 @@ export class GraphToolSet {
   /** Scan the on-disk engine-state store under `stateDir` (default cwd). */
   private persistedScan(): PersistedStateScan {
     return scanPersistedStates(this.deps.stateDir ?? process.cwd());
-  }
-
-  /** True when a filter/group_by/include_budget view is active (drives the
-   * cross-session aggregate rather than the plain graph list). */
-  private crossSessionViewRequested(args: GraphStatusArgs): boolean {
-    return (
-      args.query !== undefined ||
-      args.status !== undefined ||
-      args.agent !== undefined ||
-      args.from_date !== undefined ||
-      args.to_date !== undefined ||
-      args.group_by !== undefined ||
-      args.include_budget === true
-    );
   }
 
   /** Registry states followed by persisted states, deduped by graphId (registry
@@ -1933,7 +1986,7 @@ export class GraphToolSet {
     const scopedArgs: GraphStatusArgs = { ...args };
 
     if (args.format === "json") {
-      return this.paginate(
+      return paginate(
         JSON.stringify(
           {
             scope,
@@ -1960,7 +2013,7 @@ export class GraphToolSet {
       // Honest empty state: distinguishes a genuinely empty store.
       if (scope === "persisted" && scan.count === 0) {
         return (
-          `No pending approvals.\n\n` + this.persistedEmptyNote(scan)
+          `No pending approvals.\n\n` + persistedEmptyNote(scan)
         );
       }
       return `Pending approvals (0)  [scope: ${scope}]\n  no pending approvals`;
@@ -1977,22 +2030,7 @@ export class GraphToolSet {
         lines.push(`    payload: ${e.approvalPayloadSummary}`);
       }
     }
-    return this.paginate(lines.join("\n"), scopedArgs);
-  }
-
-  /** Honest-empty note for a persisted store that yielded no hydrated graph. */
-  private persistedEmptyNote(scan: PersistedStateScan): string {
-    if (scan.count === 0) {
-      return (
-        `No persisted graphs found under ${scan.stateDirectory}. Run a graph to a ` +
-        `persisted checkpoint to enable cross-session (scope=persisted) queries.`
-      );
-    }
-    // Files present but none hydrated — corrupt / version-mismatched reads.
-    return (
-      `Persisted graphs: none hydrated — ${scan.skipped} file(s) skipped ` +
-      `(${scan.skippedFiles.join(", ")}).`
-    );
+    return paginate(lines.join("\n"), scopedArgs);
   }
 
   /** No-target list for persisted/all scope: persisted graphs are shown, and an
@@ -2001,7 +2039,7 @@ export class GraphToolSet {
     const scan = this.persistedScan();
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
     if (states.length === 0) {
-      if (scope === "persisted") return this.persistedEmptyNote(scan);
+      if (scope === "persisted") return persistedEmptyNote(scan);
       return "No graphs exist. Call graph_create to open a graph registry slot.";
     }
     const lines = states.map((s) => `  ${s.graphId}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`);
@@ -2021,7 +2059,7 @@ export class GraphToolSet {
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
 
     if (states.length === 0) {
-      if (scope === "persisted") return this.persistedEmptyNote(scan);
+      if (scope === "persisted") return persistedEmptyNote(scan);
       return "No graphs exist. Call graph_create to open a graph registry slot.";
     }
 
@@ -2050,11 +2088,11 @@ export class GraphToolSet {
       for (const n of matched) rows.push({ graphId: s.graphId, node: n });
     }
 
-    const budget = args.include_budget ? this.crossSessionBudget(states) : undefined;
+    const budget = args.include_budget ? crossSessionBudget(states) : undefined;
     const capped = args.limit && args.limit > 0 ? rows.slice(0, args.limit) : rows;
 
     if (args.format === "json") {
-      return this.paginate(
+      return paginate(
         JSON.stringify(
           {
             scope,
@@ -2100,7 +2138,7 @@ export class GraphToolSet {
           `cost: ${budget.totalCost.toFixed(4)}`,
       );
     }
-    return this.paginate(lines.join("\n"), args);
+    return paginate(lines.join("\n"), args);
   }
 
   /** `group_by` buckets across sessions: completed nodes from every graph in
@@ -2135,7 +2173,7 @@ export class GraphToolSet {
       .map(([key, m]) => ({ key, count: m.count, nodes: m.nodes }));
 
     if (args.format === "json") {
-      return this.paginate(
+      return paginate(
         JSON.stringify({ scope: args.scope, group_by: mode, graphs: states.length, buckets }, null, 2),
         args,
       );
@@ -2152,23 +2190,6 @@ export class GraphToolSet {
       for (const n of b.nodes) lines.push(`    ${n.graph_id}::${n.node_id}`);
     }
     return lines.join("\n");
-  }
-
-  /** Sum the cumulative budget consumption across the graphs in scope. */
-  private crossSessionBudget(states: EngineState[]): GraphBudgetState {
-    const total: GraphBudgetState = {
-      sessionsSpawned: 0,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCost: 0,
-    };
-    for (const s of states) {
-      total.sessionsSpawned += s.budget.sessionsSpawned;
-      total.totalInputTokens += s.budget.totalInputTokens;
-      total.totalOutputTokens += s.budget.totalOutputTokens;
-      total.totalCost += s.budget.totalCost;
-    }
-    return total;
   }
 
   /** Resolve a single graph target for persisted/all scope (registry wins for
@@ -2234,69 +2255,26 @@ export class GraphToolSet {
     if (args.node_id) {
       return this.renderNode(state, args.node_id, scopedArgs);
     }
-    const nodeFilter = this.buildNodeFilter(state, scopedArgs);
+    const nodeFilter = buildNodeFilter(state, scopedArgs);
     return this.renderGraph(state, scopedArgs, nodeFilter);
   }
 
-
-  /**
-   * Build the set of node ids matching the active filter/query args, or return
-   * `undefined` when no filter is present (the renderer then shows all nodes).
-   * The matching is delegated entirely to the pure `status-queries.ts` module.
-   */
-  private buildNodeFilter(state: EngineState, args: GraphStatusArgs): Set<string> | undefined {
-    const query: StatusQuery = {
-      query: args.query,
-      status: args.status,
-      agent: args.agent,
-      from_date: args.from_date,
-      to_date: args.to_date,
-    };
-    const hasFilter =
-      query.query !== undefined ||
-      query.status !== undefined ||
-      query.agent !== undefined ||
-      query.from_date !== undefined ||
-      query.to_date !== undefined;
-    if (!hasFilter) return undefined;
-    const matched = filterNodes(state.nodes, query);
-    return new Set(matched.map((n) => n.nodeId));
-  }
-
-  /**
-   * Materialize the node set narrowed to `nodeFilter` as a `Map<nodeId, node>`
-   * (or the whole state node map when no filter is active). Used by the
-   * `group_by` view, which needs a keyed node set rather than an id list.
-   */
-  private visibleNodeMap(
-    state: EngineState,
-    nodeFilter?: Set<string>,
-  ): ReadonlyMap<string, NodeRuntimeState> {
-    if (!nodeFilter) return state.nodes;
-    const map = new Map<string, NodeRuntimeState>();
-    for (const id of nodeFilter) {
-      const node = state.nodes.get(id);
-      if (node) map.set(id, node);
-    }
-    return map;
-  }
 
   // ── graph_cancel ───────────────────────────────────────────────────────────
 
   async graph_cancel(args: GraphCancelArgs): Promise<GraphCancelResult> {
     const entry = this.getEntry(args.graph_id);
 
-    // No target → whole-graph cancel (existing behavior): every node is retired.
+    // No target → whole-graph cancel (existing behavior): every cancellable node
+    // is retired. The reported set is the engine's authoritative
+    // CancelScopeReport (contract C7) — never a post-hoc filter of the
+    // `errorReason` text. The old filter (`status === Done &&
+    // errorReason.startsWith("cancelled")`) double-counted a node that an
+    // earlier scoped cancel had already retired, and would silently answer `[]`
+    // if the engine ever reworded the reason (Y29).
     if (!args.node_id && !args.loop_id) {
-      await entry.runtime.cancel();
-      const state = entry.runtime.status();
-      // After the lifecycle fix, cancelled nodes are transitioned Cancelled→Done;
-      // filter by Done status with a cancellation error reason to identify them.
-      const cancelled = [...state.nodes.values()]
-        .filter((n) => n.status === NodeStatus.Done && n.errorReason?.startsWith("cancelled"))
-        .map((n) => n.nodeId)
-        .sort();
-      return { cancelled, graph_id: args.graph_id };
+      const report = await entry.runtime.cancel();
+      return { cancelled: [...report.cancelled].sort(), graph_id: args.graph_id };
     }
 
     // Scoped target → the real scoped / cascade primitive. A loop target is
@@ -2307,7 +2285,7 @@ export class GraphToolSet {
     // never a post-hoc filter of a whole-graph teardown.
     const state = entry.runtime.status();
     const targetIds = args.loop_id
-      ? this.loopNodeIds(state, args.loop_id)
+      ? loopNodeIds(state, args.loop_id)
       : [args.node_id as string];
     const cascade = args.cascade ?? args.loop_id !== undefined;
     const report = entry.runtime.cancelNodes(targetIds, { cascade });
@@ -2391,37 +2369,43 @@ export class GraphToolSet {
         // `notification_degraded` markers, surface them on the snapshot. The
         // conditional spread keeps the output byte-identical otherwise.
         const degradedStatuses = this.notificationDegradedStatuses(state.graphId);
-        const snapshot = {
+        const snapshot: GraphStatusSnapshot = {
           graph_id: state.graphId,
           phase: state.phase,
           nodes: limitNodes(visibleNodes(), args.limit).map((n) =>
             this.nodeSummary(state, n, args),
           ),
-          budget: args.include_budget ? this.budgetSummary(state) : undefined,
-          loops: args.include_loops
-            ? [...state.loopGroups.values()].map((l) =>
-                this.loopSummary(state, l, this.loopNodeIds(state, l.id)),
-              )
-            : undefined,
-          metrics: args.include_metrics ? this.metricsSummary(state) : undefined,
+          // Conditional spreads: an unset flag leaves its key out entirely
+          // instead of writing an explicit `undefined` that only
+          // JSON.stringify happens to drop (Y27).
+          ...(args.include_budget ? { budget: budgetSummary(state) } : {}),
+          ...(args.include_loops
+            ? {
+                loops: [...state.loopGroups.values()].map((l) =>
+                  this.loopSummary(state, l, loopNodeIds(state, l.id)),
+                ),
+              }
+            : {}),
+          ...(args.include_metrics ? { metrics: metricsSummary(state) } : {}),
           ...(degradedStatuses.length > 0
             ? {
                 notification_degraded: true,
                 notification_degraded_statuses: degradedStatuses,
               }
             : {}),
+          // C-WIRE: the structured flag data (round history / checkpoints /
+          // artifacts+evidence / signal stream) is spread from the pure
+          // `flagData` helper. Empty when no flag is set (byte-identical).
+          ...flagData(state, args),
         };
-        // C-WIRE: merge structured flag data (round/checkpoint/artifacts/evidence/
-        // stream) onto the snapshot. No-op when none are set (byte-identical).
-        this.mergeFlagData(snapshot, state, args);
         // Monitor M8/M9: every JSON output flows through paginate so
         // max_chars/offset/tail apply, with an explicit truncation marker when
         // content is dropped (see {@link paginate}).
-        return this.paginate(JSON.stringify(snapshot, null, 2), args);
+        return paginate(JSON.stringify(snapshot, null, 2), args);
       }
       case "tree":
         return this.appendFlagSections(
-          this.renderTree(state, nodeFilter, args.depth),
+          renderTree(state, nodeFilter, args.depth),
           state,
           args,
         );
@@ -2446,9 +2430,9 @@ export class GraphToolSet {
     args: GraphStatusArgs,
     nodeFilter?: Set<string>,
   ): string {
-    const buckets = groupCompletedNodes(this.visibleNodeMap(state, nodeFilter), args.group_by!);
+    const buckets = groupCompletedNodes(visibleNodeMap(state, nodeFilter), args.group_by!);
     if (args.format === "json") {
-      return this.paginate(
+      return paginate(
         JSON.stringify(
           {
             group_by: args.group_by,
@@ -2509,17 +2493,17 @@ export class GraphToolSet {
       lines.push("");
       lines.push("  Loops:");
       for (const l of state.loopGroups.values()) {
-        const mode = this.loopDeclMode(state, l.id);
+        const mode = loopDeclMode(state, l.id);
         lines.push(
           `    ${l.id}  [${l.traversalCount}/${l.maxTraversals}]` +
             `${mode !== undefined ? `  mode=${mode}` : ""}` +
-            `  nodes: ${this.loopNodeIds(state, l.id).join(", ")}`,
+            `  nodes: ${loopNodeIds(state, l.id).join(", ")}`,
         );
       }
     }
     if (args.include_metrics) {
       lines.push("");
-      lines.push(`  Metrics — ${this.metricsSummary(state)}`);
+      lines.push(`  Metrics — ${metricsSummary(state)}`);
     }
     // F6 observability: append an explicit hint when the graph's durable event
     // log records a degraded notification seam (no emperor session resolved).
@@ -2533,7 +2517,7 @@ export class GraphToolSet {
         );
       }
     }
-    return this.paginate(lines.join("\n"), args);
+    return paginate(lines.join("\n"), args);
   }
 
   private renderNode(state: EngineState, nodeId: string, args: GraphStatusArgs): string {
@@ -2548,9 +2532,11 @@ export class GraphToolSet {
       // data (checkpoints / artifacts / evidence / signal stream), mirroring the
       // text render's appendFlagSections scoping. Paginated like every other
       // JSON output so max_chars/offset/tail apply.
-      const summary = this.nodeSummary(state, node, args);
-      this.mergeFlagData(summary, state, { ...args, node_id: nodeId });
-      return this.paginate(JSON.stringify(summary, null, 2), args);
+      const summary: GraphNodeSummary = {
+        ...this.nodeSummary(state, node, args),
+        ...flagData(state, { ...args, node_id: nodeId }),
+      };
+      return paginate(JSON.stringify(summary, null, 2), args);
     }
     const lines: string[] = [];
     lines.push(`Node "${nodeId}"`);
@@ -2564,7 +2550,7 @@ export class GraphToolSet {
     if (node.dispatchTaskId) lines.push(`  dispatch_task_id: ${node.dispatchTaskId}`);
     if (node.errorReason) lines.push(`  error: ${node.errorReason}`);
     if (args.include_progress) {
-      const prog = this.progressForNode(state, node);
+      const prog = progressForNode(state, node);
       if (prog.recorded) {
         const stamp = prog.lastSignalAt
           ? `  (last_signal_at: ${new Date(prog.lastSignalAt).toISOString()})`
@@ -2581,7 +2567,7 @@ export class GraphToolSet {
     }
     if (args.include_output && node.result) {
       lines.push("  output:");
-      lines.push(this.paginate(GraphToolSet.resultText(node.result), args).replace(/^/gm, "    "));
+      lines.push(paginate(resultText(node.result), args).replace(/^/gm, "    "));
     }
     // Liveness (subtask 7 display): running nodes ALWAYS show their recorded
     // liveness; non-running nodes only when include_liveness is set. Nodes with
@@ -2620,26 +2606,28 @@ export class GraphToolSet {
       throw new Error(`graph_status: unknown loop group "${loopId}" in graph "${state.graphId}".`);
     }
     if (args.format === "json") {
-      const summary = this.loopSummary(state, loop, this.loopNodeIds(state, loopId));
-      // C-WIRE: merge loop-scoped round history into the loop JSON when asked.
-      this.mergeFlagData(summary, state, { ...args, loop_id: loopId });
-      return this.paginate(JSON.stringify(summary, null, 2), args);
+      const summary: GraphLoopSummary = {
+        ...this.loopSummary(state, loop, loopNodeIds(state, loopId)),
+        // C-WIRE: loop-scoped round history merges into the loop JSON when asked.
+        ...flagData(state, { ...args, loop_id: loopId }),
+      };
+      return paginate(JSON.stringify(summary, null, 2), args);
     }
     const lines: string[] = [];
     lines.push(`Loop "${loopId}"`);
     lines.push(`  traversals: ${loop.traversalCount}/${loop.maxTraversals}`);
-    lines.push(`  nodes: ${this.loopNodeIds(state, loopId).join(", ")}`);
+    lines.push(`  nodes: ${loopNodeIds(state, loopId).join(", ")}`);
     // Loop mode surfaced only when explicitly declared (default render stays
     // byte-identical). 'inherit' documents that rounds re-dispatch within the
     // same engine state (no per-round session isolation).
-    const mode = this.loopDeclMode(state, loopId);
+    const mode = loopDeclMode(state, loopId);
     if (mode === "inherit") {
       lines.push(`  mode: inherit  (rounds re-dispatch within the same engine state)`);
     }
     if (loop.consecutiveStale) {
       lines.push(`  consecutive_stale: ${loop.consecutiveStale}`);
     }
-    for (const nodeId of this.loopNodeIds(state, loopId)) {
+    for (const nodeId of loopNodeIds(state, loopId)) {
       const node = state.nodes.get(nodeId);
       if (node) {
         lines.push(`    ${nodeId.padEnd(18)} ${node.status}`);
@@ -2651,34 +2639,18 @@ export class GraphToolSet {
   // ── C-WIRE observability flags (subtask 3) ─────────────────────────────────
 
   /**
-   * True when any of the seven C-WIRE observability flags is active. When none
-   * are set, `appendFlagSections` / `mergeFlagData` are no-ops and the base
-   * render is returned byte-identical to legacy output.
-   */
-  private flagSectionsActive(args: GraphStatusArgs): boolean {
-    return (
-      args.include_history ||
-      args.round !== undefined ||
-      args.include_checkpoint ||
-      args.include_artifacts ||
-      args.include_evidence ||
-      args.stream ||
-      args.since !== undefined
-    );
-  }
-
-  /**
    * Append the honest text sections produced by any active C-WIRE flag onto a
    * base render, separated by a blank line. Returns `base` unchanged when no
-   * flag is active. Every section reads REAL recorded data or an explicit
-   * honest-empty note — never fabricated rows.
+   * flag is active (see `flagSectionsActive` in status-render.ts). Every
+   * section reads REAL recorded data or an explicit honest-empty note — never
+   * fabricated rows.
    */
   private appendFlagSections(
     base: string,
     state: EngineState,
     args: GraphStatusArgs,
   ): string {
-    if (!this.flagSectionsActive(args)) return base;
+    if (!flagSectionsActive(args)) return base;
     const sections: string[] = [];
     if (args.include_history || args.round !== undefined) {
       sections.push(this.renderRoundHistory(state, args));
@@ -2695,157 +2667,10 @@ export class GraphToolSet {
     return [base, ...sections].join("\n\n");
   }
 
-  /**
-   * Merge structured C-WIRE flag data onto a JSON snapshot object (json
-   * formats). No-op when no flag is active, so the snapshot stays
-   * byte-identical otherwise. Data is extracted from the same genuine engine
-   * fields as the text renderers.
-   */
-  private mergeFlagData(
-    target: Record<string, unknown>,
-    state: EngineState,
-    args: GraphStatusArgs,
-  ): void {
-    if (!this.flagSectionsActive(args)) return;
-    if (args.include_history || args.round !== undefined) {
-      target.round_history = this.loopRoundEntries(state, args);
-    }
-    if (args.include_checkpoint) {
-      target.checkpoints = this.checkpointEntries(state, args.node_id);
-    }
-    if (args.include_artifacts || args.include_evidence) {
-      target.artifacts_evidence = this.artifactsEvidenceEntries(
-        state,
-        args,
-        args.node_id,
-      );
-    }
-    if (args.stream || args.since !== undefined) {
-      target.signal_stream = this.signalStreamEntries(state, args, args.node_id);
-    }
-  }
-
-  /**
-   * Extract the per-loop round history from `LoopGroupRuntimeState.rounds[]`,
-   * scoped to one loop (when `args.loop_id`) and optionally filtered to a single
-   * `args.round`. Sorted ascending by round index. `rounds` is OPTIONAL-ADDITIVE
-   * — absent (or empty) until a round is recorded; never fabricated.
-   */
-  private loopRoundEntries(
-    state: EngineState,
-    args: GraphStatusArgs,
-  ): Array<{ loop_id: string; rounds: RoundHistoryEntry[]; requested_round?: number }> {
-    const groups = args.loop_id
-      ? [...state.loopGroups.values()].filter((l) => l.id === args.loop_id)
-      : [...state.loopGroups.values()];
-    return groups.map((l) => {
-      const rounds = [...(l.rounds ?? [])].sort((a, b) => a.round - b.round);
-      const filtered =
-        args.round !== undefined
-          ? rounds.filter((r) => r.round === args.round)
-          : rounds;
-      return { loop_id: l.id, rounds: filtered, requested_round: args.round };
-    });
-  }
-
-  /**
-   * Extract per-node lifecycle checkpoints from `EngineState.checkpointHistory`
-   * (`Record<nodeId, CheckpointRecord[]>` — the ordered, append-only list),
-   * scoped to a node when `nodeId` is given. When a node has no recorded history
-   * yet, falls back to `EngineState.checkpoints` (`Record<nodeId, CheckpointRecord>`)
-   * for backward compat so the latest snapshot still surfaces. Absent until a
-   * checkpoint is recorded (subtask 2 / subtask 7).
-   */
-  private checkpointEntries(
-    state: EngineState,
-    nodeId?: string,
-  ): Array<{ node_id: string; checkpoints: CheckpointRecord[] }> {
-    const out: Array<{ node_id: string; checkpoints: CheckpointRecord[] }> = [];
-    const ids = new Set([
-      ...Object.keys(state.checkpoints ?? {}),
-      ...Object.keys(state.checkpointHistory ?? {}),
-    ]);
-    for (const id of ids) {
-      if (nodeId !== undefined && id !== nodeId) continue;
-      const history = state.checkpointHistory?.[id];
-      // Prefer the ordered history when present; else fall back to the single
-      // latest checkpoint (backward compat with the pre-history `checkpoints` record).
-      const cps =
-        history && history.length > 0
-          ? [...history]
-          : state.checkpoints?.[id]
-            ? [state.checkpoints[id]]
-            : [];
-      if (cps.length === 0) continue;
-      out.push({ node_id: id, checkpoints: cps });
-    }
-    return out;
-  }
-
-  /**
-   * Extract per-node artifacts / evidence from `NodeRuntimeState.artifacts[]` /
-   * `.evidence[]`, scoped to a node when `nodeId` is given. Nodes with no
-   * recorded array for a requested flag are omitted from that entry (honest
-   * absence — never invented values).
-   */
-  private artifactsEvidenceEntries(
-    state: EngineState,
-    args: GraphStatusArgs,
-    nodeId?: string,
-  ): Array<{ node_id: string; artifacts?: string[]; evidence?: string[] }> {
-    const out: Array<{ node_id: string; artifacts?: string[]; evidence?: string[] }> = [];
-    for (const n of state.nodes.values()) {
-      if (nodeId !== undefined && n.nodeId !== nodeId) continue;
-      const entry: { node_id: string; artifacts?: string[]; evidence?: string[] } = {
-        node_id: n.nodeId,
-      };
-      if (args.include_artifacts && n.artifacts && n.artifacts.length > 0) {
-        entry.artifacts = [...n.artifacts];
-      }
-      if (args.include_evidence && n.evidence && n.evidence.length > 0) {
-        entry.evidence = [...n.evidence];
-      }
-      // Honest omission: a node with no recorded data for any requested flag is
-      // not invented into the list (mirrors the text renderer).
-      if (entry.artifacts === undefined && entry.evidence === undefined) continue;
-      out.push(entry);
-    }
-    return out;
-  }
-
-  /**
-   * Extract per-node timestamped signal-event histories from
-   * `SignalLedgerEntry.history[]`, scoped to a node when `nodeId` is given.
-   * When `args.since` is a valid ISO-8601 timestamp, events strictly before it
-   * are filtered out; an INVALID `since` throws (aligned with the
-   * from_date/to_date filter surface). Sorted ascending by `atMs`. An
-   * absent/empty `history` yields an empty event list — the caller surfaces the
-   * honest "no events" note.
-   */
-  private signalStreamEntries(
-    state: EngineState,
-    args: GraphStatusArgs,
-    nodeId?: string,
-  ): Array<{ node_id: string; events: SignalLedgerEvent[] }> {
-    // Monitor L2: an invalid `since` THROWS (via the shared toEpochMs, the same
-    // throw pattern as from_date/to_date) instead of silently ignoring the bound
-    // — a garbage timestamp must never silently broaden a stream.
-    const sinceMs = args.since !== undefined ? toEpochMs(args.since) : undefined;
-    const out: Array<{ node_id: string; events: SignalLedgerEvent[] }> = [];
-    for (const [id, ledger] of state.signalLedger) {
-      if (nodeId !== undefined && id !== nodeId) continue;
-      const events = [...(ledger.history ?? [])]
-        .filter((e) => sinceMs === undefined || e.atMs >= sinceMs)
-        .sort((a, b) => a.atMs - b.atMs);
-      out.push({ node_id: id, events });
-    }
-    return out;
-  }
-
   /** Text section: per-loop round history (`include_history` / `round`). */
   private renderRoundHistory(state: EngineState, args: GraphStatusArgs): string {
     const lines = ["## Loop Round History"];
-    const entries = this.loopRoundEntries(state, args);
+    const entries = loopRoundEntries(state, args);
     if (entries.length === 0) {
       lines.push("  no loop rounds recorded");
       return lines.join("\n");
@@ -2878,7 +2703,7 @@ export class GraphToolSet {
   /** Text section: per-node lifecycle checkpoints (`include_checkpoint`). */
   private renderCheckpoints(state: EngineState, args: GraphStatusArgs): string {
     const lines = ["## Checkpoints"];
-    const entries = this.checkpointEntries(state, args.node_id);
+    const entries = checkpointEntries(state, args.node_id);
     if (entries.length === 0) {
       lines.push("  no checkpoint recorded");
       return lines.join("\n");
@@ -2897,7 +2722,7 @@ export class GraphToolSet {
   /** Text section: per-node artifacts / evidence (`include_artifacts` / `include_evidence`). */
   private renderArtifactsEvidence(state: EngineState, args: GraphStatusArgs): string {
     const lines = ["## Artifacts / Evidence"];
-    const entries = this.artifactsEvidenceEntries(state, args, args.node_id);
+    const entries = artifactsEvidenceEntries(state, args, args.node_id);
     let any = false;
     for (const e of entries) {
       if (!e.artifacts && !e.evidence) continue;
@@ -2915,7 +2740,7 @@ export class GraphToolSet {
   /** Text section: timestamped signal-event history (`stream` / `since`). */
   private renderSignalStream(state: EngineState, args: GraphStatusArgs): string {
     const lines = ["## Signal Stream"];
-    const entries = this.signalStreamEntries(state, args, args.node_id);
+    const entries = signalStreamEntries(state, args, args.node_id);
     let any = false;
     for (const e of entries) {
       if (e.events.length === 0) continue;
@@ -2939,55 +2764,6 @@ export class GraphToolSet {
     return lines.join("\n");
   }
 
-  private renderTree(state: EngineState, nodeFilter?: Set<string>, depth?: number): string {
-    // Visible node ids: the filter set, or every node when no filter is active.
-    const visible = nodeFilter
-      ? new Set([...nodeFilter].filter((id) => state.nodes.has(id)))
-      : new Set(state.nodes.keys());
-    // Child adjacency from edges; render BFS from roots — restricted to visible nodes.
-    const children = new Map<string, string[]>();
-    for (const id of visible) children.set(id, []);
-    for (const edge of state.graphDeclaration.edges) {
-      if (!visible.has(edge.from) || !visible.has(edge.to)) continue;
-      const list = children.get(edge.from) ?? [];
-      list.push(edge.to);
-      children.set(edge.from, list);
-    }
-    const roots = state.graphDeclaration.nodes
-      .filter((n) => visible.has(n.id))
-      .filter((n) => !state.graphDeclaration.edges.some((e) => e.to === n.id && visible.has(e.from)))
-      .map((n) => n.id);
-
-    // Depth cutoff: `undefined` means full depth (byte-identical to legacy).
-    // `d > maxDepth` is always false when maxDepth is undefined, so the pruned
-    // nodes are never marked visited and are simply absent from the output.
-    const maxDepth = depth;
-    const lines: string[] = [];
-    lines.push(`Graph "${state.graphId}" [${state.phase}]`);
-    const visited = new Set<string>();
-    const render = (id: string, prefix: string, d: number): void => {
-      if (maxDepth !== undefined && d > maxDepth) return;
-      if (visited.has(id)) {
-        // Back-edge within a loop group — already rendered upstream. Annotate
-        // it and stop so tree rendering never recurses on the cycle.
-        const n = state.nodes.get(id);
-        lines.push(`${prefix}${id} ${n ? `[${n.status}] (back-edge)` : "(back-edge)"}`);
-        return;
-      }
-      visited.add(id);
-      const node = state.nodes.get(id);
-      const label = node ? `${node.nodeId} [${node.status}]` : id;
-      lines.push(`${prefix}${label}`);
-      for (const child of children.get(id) ?? []) {
-        render(child, `${prefix}  `, d + 1);
-      }
-    };
-    for (const root of roots) {
-      if (!visited.has(root)) render(root, "", 0);
-    }
-    return lines.join("\n");
-  }
-
   // ── Status helpers ─────────────────────────────────────────────────────────
 
   /**
@@ -2999,7 +2775,7 @@ export class GraphToolSet {
    */
   private exportGraph(declaration: GraphDeclaration, exportPath: string): string {
     const serialized = serializeGraphDeclaration(declaration);
-    this.writeAtomic(exportPath, serialized);
+    writeAtomic(exportPath, serialized);
     return (
       `Exported graph declaration (${declaration.nodes.length} nodes, ` +
       `${declaration.edges.length} edges, ` +
@@ -3044,8 +2820,8 @@ export class GraphToolSet {
           `graph_status: node "${args.node_id}" has no materialized result to export.`,
         );
       }
-      const text = GraphToolSet.resultText(node.result);
-      this.writeAtomic(exportPath, text);
+      const text = resultText(node.result);
+      writeAtomic(exportPath, text);
       return (
         `Exported node "${args.node_id}" result (${text.length} chars) to ${exportPath}\n` +
         text
@@ -3055,7 +2831,7 @@ export class GraphToolSet {
     // Mode 2 — metrics JSON snapshot export.
     if (args.include_metrics) {
       const serialized = JSON.stringify(this.metricsSnapshot(state), null, 2);
-      this.writeAtomic(exportPath, serialized);
+      writeAtomic(exportPath, serialized);
       return `Exported graph metrics snapshot to ${exportPath}\n${serialized}`;
     }
 
@@ -3079,26 +2855,18 @@ export class GraphToolSet {
     return {
       graph_id: state.graphId,
       phase: state.phase,
-      summary: this.metricsSummary(state),
+      summary: metricsSummary(state),
       node_counts: counts,
-      budget: this.budgetSummary(state),
+      budget: budgetSummary(state),
     };
   }
 
-  /**
-   * Atomically write `content` to `exportPath`: write to a sibling
-   * `<path>.<pid>.tmp` file, then rename it into place. Renaming is atomic on
-   * POSIX filesystems, so a reader never observes a partially-written target
-   * and no `.tmp` artifact remains after a successful write.
-   */
-  private writeAtomic(exportPath: string, content: string): void {
-    const tmpPath = `${exportPath}.${process.pid}.tmp`;
-    writeFileSync(tmpPath, content, "utf8");
-    renameSync(tmpPath, exportPath);
-  }
-
-  private nodeSummary(state: EngineState, n: NodeRuntimeState, args: GraphStatusArgs) {
-    const progress = args.include_progress ? this.progressForNode(state, n) : undefined;
+  private nodeSummary(
+    state: EngineState,
+    n: NodeRuntimeState,
+    args: GraphStatusArgs,
+  ): GraphNodeSummary {
+    const progress = args.include_progress ? progressForNode(state, n) : undefined;
     return {
       node_id: n.nodeId,
       status: n.status,
@@ -3126,7 +2894,7 @@ export class GraphToolSet {
       // Monitor M9: surface the node's materialized result text as an `output`
       // field, only when include_output was requested.
       ...(args.include_output && n.result
-        ? { output: GraphToolSet.resultText(n.result) }
+        ? { output: resultText(n.result) }
         : {}),
       // Liveness (subtask 7 display): merge snake_case liveness fields when the
       // node has RECORDED liveness AND (it is running OR include_liveness is
@@ -3151,47 +2919,12 @@ export class GraphToolSet {
     };
   }
 
-  /**
-   * Extract a node's recorded `progress` signal, if any, from the engine state.
-   *
-   * The graph engine records every signal a node emits into both
-   * `node.signalsObserved[type]` and the graph-level `state.signalLedger[nodeId]`
-   * (`signal-bridge.ts:record`). `progress` is an INFO signal (one of
-   * `INFO_SIGNALS`), so — when a node emitted progress during execution — its
-   * latest payload is genuinely available here. Note this is the **latest**
-   * payload per node, not a timestamped multi-event history (the design's
-   * `dispatch_stream`-style `since`-based history is unbacked — see
-   * {@link UNSUPPORTED_GRAPH_STATUS_FLAGS} `stream`/`since`).
-   */
-  private progressForNode(state: EngineState, node: NodeRuntimeState) {
-    const recorded = node.signalsObserved["progress"] !== undefined;
-    const payload = recorded ? node.signalsObserved["progress"] : undefined;
-    // Monitor L1: `lastSignalAt` is the node's LAST SIGNAL time of ANY type —
-    // the graph-level `SignalLedgerEntry.lastSignalAt` (updated by
-    // signal-bridge.ts:record on every signal, progress or not), NOT a
-    // progress-specific stamp. It rides along with the progress payload so a
-    // consumer gets a recency anchor, but it is named for what it actually is.
-    const lastSignalAt = state.signalLedger.get(node.nodeId)?.lastSignalAt;
-    return { recorded, payload, lastSignalAt };
-  }
-
-  private budgetSummary(state: EngineState) {
-    return {
-      graph: state.budget,
-      nodes: [...state.nodes.values()].map((n) => ({
-        node_id: n.nodeId,
-        sessions: n.sessionsSpawned,
-        tokens: {
-          input: n.tokensConsumed.inputTokens,
-          output: n.tokensConsumed.outputTokens,
-        },
-        cost: n.tokensConsumed.cost,
-      })),
-    };
-  }
-
-  private loopSummary(state: EngineState, l: LoopGroupRuntimeState, nodeIds: string[]) {
-    const mode = this.loopDeclMode(state, l.id);
+  private loopSummary(
+    state: EngineState,
+    l: LoopGroupRuntimeState,
+    nodeIds: string[],
+  ): GraphLoopSummary {
+    const mode = loopDeclMode(state, l.id);
     return {
       loop_id: l.id,
       traversals: `${l.traversalCount}/${l.maxTraversals}`,
@@ -3201,60 +2934,6 @@ export class GraphToolSet {
       // byte-identical): 'inherit' records rounds share the same engine state.
       ...(mode !== undefined ? { mode } : {}),
     };
-  }
-
-  private metricsSummary(state: EngineState): string {
-    const counts = new Map<string, number>();
-    for (const n of state.nodes.values()) {
-      counts.set(n.status, (counts.get(n.status) ?? 0) + 1);
-    }
-    const parts = [...counts.entries()]
-      .map(([status, count]) => `${status}=${count}`)
-      .join(", ");
-    return `phase=${state.phase} ${parts}`;
-  }
-
-  /** Apply max_chars / offset / tail pagination to a string output.
-   *
-   * Monitor L3: when truncation actually drops content, a `…[truncated: N more
-   * chars]` marker is APPENDED to the tail of the returned text (N = the number
-   * of chars NOT included in the result), so a consumer can tell the output was
-   * cut and by how much. The marker is emitted for both tail mode (head
-   * dropped) and head mode (tail dropped) — the returned slice is always
-   * `max_chars` chars, the marker rides after it. No truncation → no marker
-   * (byte-identical to legacy output). */
-  private paginate(text: string, args: GraphStatusArgs): string {
-    const maxChars = args.max_chars ?? DEFAULT_MAX_CHARS;
-    if (maxChars <= 0 || text.length <= maxChars) {
-      return args.offset ? text.slice(args.offset) : text;
-    }
-    const slice = args.tail
-      ? text.slice(Math.max(0, text.length - maxChars))
-      : text.slice(args.offset ?? 0, (args.offset ?? 0) + maxChars);
-    const dropped = text.length - slice.length;
-    return `${slice}\n…[truncated: ${dropped} more chars]`;
-  }
-
-  /**
-   * Resolve the member node ids of a loop group from the graph **declaration**.
-   * The runtime {@link LoopGroupRuntimeState} does not carry the member list;
-   * it lives on `graphDeclaration.loop_groups`.
-   */
-  private loopNodeIds(state: EngineState, loopId: string): string[] {
-    const group = state.graphDeclaration.loop_groups?.find((g) => g.id === loopId);
-    return group ? [...group.nodes] : [];
-  }
-
-  /**
-   * Resolve a loop group's declared session-isolation `mode` from the graph
-   * **declaration**. Like the member list, the mode lives on
-   * `graphDeclaration.loop_groups` (the runtime {@link LoopGroupRuntimeState}
-   * does not carry it). Returns `undefined` when unset — callers must omit it
-   * from output to keep the default render byte-identical.
-   */
-  private loopDeclMode(state: EngineState, loopId: string): LoopMode | undefined {
-    const group = state.graphDeclaration.loop_groups?.find((g) => g.id === loopId);
-    return group?.mode;
   }
 
   /**
@@ -3286,15 +2965,6 @@ export class GraphToolSet {
     );
   }
 
-  /** Read a materialized node result from its sidecar file, best-effort. */
-  private static resultText(ref: MaterializedResultRef): string {
-    if (ref.fetchError) return `[fetch error: ${ref.fetchError}]`;
-    try {
-      return existsSync(ref.sidecarPath) ? readFileSync(ref.sidecarPath, "utf8") : "";
-    } catch {
-      return "";
-    }
-  }
 }
 
 /** Statuses that count as genuinely "active" for graph_run's active_nodes list.

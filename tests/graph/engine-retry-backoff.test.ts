@@ -302,4 +302,39 @@ describe("engine escalate-retry backoff", () => {
     expect(adopted.retryCount).toBe(1);
     expect(adopted.retryBackoffUntil).toBe(priorA.retryBackoffUntil);
   });
+
+  // ── (f): an explicit retry beats the withheld window (Y10) ───────────────
+
+  it("an explicit retry during the backoff window clears retryBackoffUntil and dispatches immediately", async () => {
+    const fake = new BackoffDispatch(() => "error");
+    const engine = createEngine(
+      // A 5s window: the explicit retry must not wait for it.
+      linearDecl("backoff-explicit-retry", { max: 2, backoff_ms: 5_000 }),
+      { dispatch: fake },
+    );
+    await engine.run();
+
+    // A escalated once → re-marked Ready with the withheld window.
+    await waitFor(() => {
+      const a = engine.status().nodes.get("A");
+      return (
+        a !== undefined &&
+        a.status === NodeStatus.Ready &&
+        a.retryCount === 1
+      );
+    }, 500);
+    expect(fake.dispatches("A")).toBe(1);
+    expect(engine.status().nodes.get("A")!.retryBackoffUntil).toBeDefined();
+
+    // Old behaviour: resetNodeForRetry left the stamp in place, so
+    // _isBackoffPending skipped the freshly-readied node and retryNode reported
+    // reDispatched === 0 until the unrelated 5s window expired. New behaviour:
+    // the explicit retry clears the stamp and dispatches at once.
+    const report = await engine.retryNode("A");
+    expect(report.reDispatched).toBe(1);
+    expect(fake.dispatches("A")).toBe(2);
+    expect(engine.status().nodes.get("A")!.retryBackoffUntil).toBeUndefined();
+
+    engine.dispose();
+  });
 });

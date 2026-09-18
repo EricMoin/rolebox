@@ -44,25 +44,91 @@ export const SIGNAL_TYPE: Record<Uppercase<SignalType>, SignalType> = {
   ESCALATE: "escalate",
 };
 
+// ── Signal categories ───────────────────────────────────────────────────
+//
+// Each category is written once, as a literal tuple checked against
+// `SignalType` by `satisfies`. The tuples — not widened `Set<string>`s — are
+// the definition site, so a misspelled member fails to compile and the
+// category sets cannot accumulate values outside the vocabulary.
+
 /** Signals that satisfy `continue_until` — terminate the node's run. */
-export const TERMINATING_SIGNALS = new Set<string>(["answer", "revise_needed", "escalate"]);
+const TERMINATING_SIGNAL_TYPES = [
+  "answer",
+  "revise_needed",
+  "escalate",
+] as const satisfies readonly SignalType[];
 
 /** Signals that trigger a pausing transition (approval / blocked / clarification). */
-export const PAUSING_SIGNALS = new Set<string>(["need_approval", "blocked", "need_clarification"]);
+const PAUSING_SIGNAL_TYPES = [
+  "need_approval",
+  "blocked",
+  "need_clarification",
+] as const satisfies readonly SignalType[];
 
 /** Signals that route work elsewhere without terminating. */
-export const HANDOFF_SIGNALS = new Set<string>(["handoff"]);
+const HANDOFF_SIGNAL_TYPES = ["handoff"] as const satisfies readonly SignalType[];
 
 /** Informational signals with no state transition. */
-export const INFO_SIGNALS = new Set<string>(["progress"]);
+const INFO_SIGNAL_TYPES = ["progress"] as const satisfies readonly SignalType[];
+
+/** Signals that satisfy `continue_until` — terminate the node's run. */
+export const TERMINATING_SIGNALS: ReadonlySet<SignalType> = new Set(
+  TERMINATING_SIGNAL_TYPES,
+);
+
+/** Signals that trigger a pausing transition (approval / blocked / clarification). */
+export const PAUSING_SIGNALS: ReadonlySet<SignalType> = new Set(
+  PAUSING_SIGNAL_TYPES,
+);
+
+/** Signals that route work elsewhere without terminating. */
+export const HANDOFF_SIGNALS: ReadonlySet<SignalType> = new Set(
+  HANDOFF_SIGNAL_TYPES,
+);
+
+/** Informational signals with no state transition. */
+export const INFO_SIGNALS: ReadonlySet<SignalType> = new Set(INFO_SIGNAL_TYPES);
 
 /** All 8 signal types — union of the four categories above. */
-export const ALL_SIGNAL_TYPES = new Set<string>([
-  ...TERMINATING_SIGNALS,
-  ...PAUSING_SIGNALS,
-  ...HANDOFF_SIGNALS,
-  ...INFO_SIGNALS,
+export const ALL_SIGNAL_TYPES: ReadonlySet<SignalType> = new Set([
+  ...TERMINATING_SIGNAL_TYPES,
+  ...PAUSING_SIGNAL_TYPES,
+  ...HANDOFF_SIGNAL_TYPES,
+  ...INFO_SIGNAL_TYPES,
 ]);
+
+/** Every signal type named by one of the four category tuples above. */
+type CategorizedSignalType =
+  | (typeof TERMINATING_SIGNAL_TYPES)[number]
+  | (typeof PAUSING_SIGNAL_TYPES)[number]
+  | (typeof HANDOFF_SIGNAL_TYPES)[number]
+  | (typeof INFO_SIGNAL_TYPES)[number];
+
+/**
+ * Compile-time proof that the four categories cover the vocabulary exactly.
+ *
+ * `Exclude<SignalType, CategorizedSignalType>` is a union of every signal type
+ * missing from all four tuples; if it is not `never`, the empty object cannot
+ * satisfy the required keys and this declaration fails to compile. Adding a
+ * member to {@link SIGNAL_TYPES} therefore forces a categorization decision
+ * instead of silently leaving it out of {@link ALL_SIGNAL_TYPES}.
+ */
+const _signalCategoryCoverage = {} satisfies Record<
+  Exclude<SignalType, CategorizedSignalType>,
+  true
+>;
+
+/**
+ * Union of the signal types that terminate a node's run.
+ *
+ * Exported for the engine's node-completion seam (`NodeCompletionEvent` in
+ * `src/graph/engine/engine-advance.ts`), which carries one of these for a
+ * signal-driven transition plus its own synthetic `"timeout"` marker — so the
+ * engine-side field is `TerminatingSignalType | "timeout"`, not this union
+ * alone. The engine adds the timeout literal because a timeout is not a
+ * signal.
+ */
+export type TerminatingSignalType = (typeof TERMINATING_SIGNAL_TYPES)[number];
 
 /**
  * Terminating signals in descending severity order.

@@ -268,6 +268,7 @@ describe("M1a — budget pre-check escalation notification", () => {
           exceeded: true,
           reason: "graph budget exhausted",
         }),
+        checkNodeBudget: () => ({ exceeded: false }),
       },
     });
 
@@ -290,6 +291,7 @@ describe("M1a — budget pre-check escalation notification", () => {
           exceeded: true,
           reason: "budget cap",
         }),
+        checkNodeBudget: () => ({ exceeded: false }),
       },
       graphEvents: recorder,
     });
@@ -356,7 +358,7 @@ describe("M1c — deadlock-guard synthetic escalation notification", () => {
     engine.checkTermination(); // public H4 wrapper around _checkTermination
 
     expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
-    expect(state.phase).toBe(EnginePhase.Complete);
+    expect<EnginePhase>(state.phase).toBe(EnginePhase.Complete);
     expect(events).toHaveLength(1);
     expect(events[0].nodeId).toBe("A");
     expect(events[0].signalType).toBe("escalate");

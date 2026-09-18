@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { validateGraphDeclaration } from "../../src/graph/validator-v2";
-import type { GraphDocument } from "../../src/graph/parser-v2";
+import { validateGraphDeclaration } from "../../src/graph/validator-v2.ts";
+import type { GraphDocument } from "../../src/graph/parser-v2.ts";
 
 describe("validateGraphDeclaration — checkLoopGroupRoots", () => {
   it("accepts an always-cycle declared inside a loop group (intra-group always-edges excluded from in-degree)", () => {
@@ -297,5 +297,81 @@ describe("validateGraphDeclaration — edge condition vocabulary (rule 3b)", () 
         (m) => m.includes('edge from="a" -> "b" is type "on_condition"') && m.includes('no "condition"'),
       ),
     ).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rule 9 — join quorum presence + bounds (C1 / R3)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * A declaration as it arrives from OUTSIDE the type system — a hand-built or
+ * corrupt record. `JSON.parse` answers `any`, which is the honest type for the
+ * validator's defense-in-depth inputs: the declared `JoinConfig` discriminated
+ * union (C1) cannot even express the malformed shapes this rule rejects.
+ */
+function untypedGraph(source: unknown): GraphDocument {
+  return JSON.parse(JSON.stringify(source));
+}
+
+describe("validateGraphDeclaration — join quorum presence + bounds (rule 9)", () => {
+  /** Two upstreams (a, b) feeding `sink`, whose join is supplied untyped. */
+  function quorumGraph(join: unknown): GraphDocument {
+    return untypedGraph({
+      version: 2,
+      name: "quorum",
+      nodes: [
+        { id: "a", agent: "test-agent", prompt: "test" },
+        { id: "b", agent: "test-agent", prompt: "test" },
+        { id: "sink", agent: "test-agent", prompt: "test", join },
+      ],
+      edges: [
+        { from: "a", to: "sink", type: "always" },
+        { from: "b", to: "sink", type: "always" },
+      ],
+    });
+  }
+
+  it("rejects a quorum strategy with no count instead of defaulting it to 1", () => {
+    const errors = validateGraphDeclaration(quorumGraph({ strategy: "quorum" })).errors;
+    expect(
+      errors.some((e) => e.includes('node "sink"') && e.includes('no "quorum" count')),
+    ).toBe(true);
+  });
+
+  it("rejects a non-positive or fractional quorum count", () => {
+    for (const quorum of [0, -1, 1.5]) {
+      const errors = validateGraphDeclaration(
+        quorumGraph({ strategy: "quorum", quorum }),
+      ).errors;
+      expect(errors.some((e) => e.includes("positive integer"))).toBe(true);
+    }
+  });
+
+  it("rejects a quorum that exceeds the node's in-degree", () => {
+    const errors = validateGraphDeclaration(
+      quorumGraph({ strategy: "quorum", quorum: 3 }),
+    ).errors;
+    expect(errors.some((e) => e.includes("exceeds its in-degree (2)"))).toBe(true);
+  });
+
+  it("accepts a positive quorum within the in-degree", () => {
+    const result = validateGraphDeclaration(
+      quorumGraph({ strategy: "quorum", quorum: 2 }),
+    );
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("accepts a quorum node with no incoming edges yet (upper bound deferred)", () => {
+    const graph = untypedGraph({
+      version: 2,
+      name: "incremental",
+      nodes: [
+        { id: "sink", agent: "test-agent", prompt: "test", join: { strategy: "quorum", quorum: 2 } },
+      ],
+      edges: [],
+    });
+    expect(validateGraphDeclaration(graph).errors).toEqual([]);
   });
 });

@@ -26,6 +26,17 @@
  *   breach); when no declaration budget is present, the tracker result is the
  *   only gate.
  *
+ *   Durability of those counters (Y23): since they are a dispatch GATE, not
+ *   telemetry, `captureNodeUsage` marks the mutation CRITICAL — the owning
+ *   critical section / recovery pass writes them through synchronously rather
+ *   than leaving them to the 500 ms debounced tier. One window remains and is
+ *   knowingly accepted: a crash between a task's termination and that
+ *   write-through (and `dispose()`, which deliberately drops a pending
+ *   debounced write) can UNDER-count the last terminations, so a restarted
+ *   graph may dispatch slightly past `max_total_*`. That is the only error
+ *   direction that weakens the ceiling; the tracker tier
+ *   (`isRequestBudgetExceeded`) is independent of these counters.
+ *
  *   `EngineState.budget.sessionsSpawned` remains a NET-LIVE display counter
  *   (incremented per successful dispatch in `engine-advance.ts`, decremented
  *   on cancelled/timeout termination in `engine-recovery.ts`) and no longer
@@ -80,7 +91,9 @@ export class BudgetBridge {
    *    `max_total_output_tokens` / `max_total_cost_usd`), compares the
    *    cumulative `EngineState.budget` counters (`>=` means breach) and
    *    returns the first breach with a descriptive reason. The counters are
-   *    fed by `engine-recovery.ts::captureNodeUsage` at task termination.
+   *    fed by `engine-recovery.ts::captureNodeUsage` at task termination —
+   *    write-through (critical), with the documented crash-window
+   *    under-count caveat (Y23) in the class header.
    *
    * No declared graph budget → the tracker result is the only gate (and
    * `state.budget.sessionsSpawned`, a NET-LIVE display counter, never gates).

@@ -30,9 +30,9 @@ import { z } from "zod";
 import {
   createGraphToolSet,
   type GraphToolSet,
-} from "../../src/graph/tools/graph-tools";
-import { createGraphTools } from "../../src/graph/tools/index";
-import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance";
+} from "../../src/graph/tools/graph-tools.ts";
+import { createGraphTools } from "../../src/graph/tools/index.ts";
+import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 

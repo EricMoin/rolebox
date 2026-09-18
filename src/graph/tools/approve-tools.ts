@@ -31,6 +31,7 @@
 import { z } from "zod";
 import type { CanonicalToolDef } from "../../platform/types.ts";
 import { defineTool } from "../../platform/ports/tool-factory.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type { GraphToolSet, GraphApproveAction } from "./graph-tools.ts";
 
 /** Render a plain-object tool result as an agent-readable JSON string. */
@@ -69,18 +70,22 @@ export function createGraphApproveTool(
             "into the node's re-execution prompt).",
         ),
       payload: z
-        .unknown()
+        // B26: the payload is serialized (stashed as the node's
+        // `approval_payload` and later JSON-summarized), so it must be a JSON
+        // value. `z.unknown()` let a cyclic object / BigInt / function reach
+        // `JSON.stringify`; `z.json()` rejects those at the tool boundary.
+        .json()
         .optional()
         .describe(
-          "Optional approval output passed downstream on the answer edge " +
-            "(used when action=approve).",
+          "Optional JSON approval output passed downstream on the answer " +
+            "edge (used when action=approve).",
         ),
     },
     async execute(args) {
       try {
         return json(await toolset.graph_approve(args));
       } catch (err) {
-        return `graph_approve failed: ${(err as Error).message}`;
+        return `graph_approve failed: ${errorText(err)}`;
       }
     },
   });

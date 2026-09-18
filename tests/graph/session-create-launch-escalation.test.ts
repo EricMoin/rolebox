@@ -37,11 +37,11 @@
  */
 
 import { describe, it, expect, afterEach } from "bun:test";
-import { DispatchManager } from "../../src/dispatch/core/manager";
-import type { ISessionClient } from "../../src/platform/ports/session-client";
-import type { SessionInfo, Message, SessionStatus } from "../../src/session/types";
-import { createGraphToolSet } from "../../src/graph/tools/graph-tools";
-import { SessionCreateRejectedError } from "../../src/platform/types";
+import { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import type { ISessionClient } from "../../src/platform/ports/session-client.ts";
+import type { SessionInfo, Message, SessionStatus } from "../../src/session/types.ts";
+import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { SessionCreateRejectedError } from "../../src/platform/types.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -134,7 +134,6 @@ function buildWorld(onCreate: (attempt: number) => Promise<SessionInfo | null>):
 } {
   const { client, createCalls } = clientWithCreate(onCreate);
   const manager = new DispatchManager(client, {
-    maxConcurrent: 5,
     taskTtlMs: 5_000,
     ...RETRY_CONFIG,
   });

@@ -6,7 +6,7 @@ import {
   shortSessionId,
   barSegments,
   statusGlyph,
-} from "../../src/utils/display-helpers";
+} from "../../src/utils/display-helpers.ts";
 
 // ── formatDuration ─────────────────────────────────────────────────────────
 

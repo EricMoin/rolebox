@@ -47,9 +47,15 @@ describe("win32 branch passes the correct type argument", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
     const spy = spyOn(fs, "symlinkSync");
-    spy.mockImplementation((target: string, link: string, type?: string) => {
-      calls.push([target, link, type ?? "undefined"]);
-    });
+    spy.mockImplementation(
+      (
+        target: fs.PathLike,
+        link: fs.PathLike,
+        type?: "dir" | "file" | "junction" | null,
+      ) => {
+        calls.push([String(target), String(link), type ?? "undefined"]);
+      },
+    );
     try {
       createDirSymlink("C:\\target", "C:\\link");
       expect(calls).toEqual([["C:\\target", "C:\\link", "junction"]]);
@@ -63,9 +69,15 @@ describe("win32 branch passes the correct type argument", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
     const spy = spyOn(fs, "symlinkSync");
-    spy.mockImplementation((target: string, link: string, type?: string) => {
-      calls.push([target, link, type ?? "undefined"]);
-    });
+    spy.mockImplementation(
+      (
+        target: fs.PathLike,
+        link: fs.PathLike,
+        type?: "dir" | "file" | "junction" | null,
+      ) => {
+        calls.push([String(target), String(link), type ?? "undefined"]);
+      },
+    );
     try {
       createFileSymlink("C:\\target.txt", "C:\\link.txt");
       expect(calls).toEqual([["C:\\target.txt", "C:\\link.txt", "file"]]);
@@ -79,9 +91,15 @@ describe("win32 branch passes the correct type argument", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
     const spy = spyOn(fs, "symlinkSync");
-    spy.mockImplementation((target: string, link: string, type?: string) => {
-      calls.push([target, link, type ?? "undefined"]);
-    });
+    spy.mockImplementation(
+      (
+        target: fs.PathLike,
+        link: fs.PathLike,
+        type?: "dir" | "file" | "junction" | null,
+      ) => {
+        calls.push([String(target), String(link), type ?? "undefined"]);
+      },
+    );
     try {
       createDirSymlink("C:/skills/a/b", "C:/rolebox/link");
       expect(calls).toEqual([["C:\\skills\\a\\b", "C:\\rolebox\\link", "junction"]]);
@@ -95,9 +113,15 @@ describe("win32 branch passes the correct type argument", () => {
     setPlatformForTest("win32");
     const calls: string[][] = [];
     const spy = spyOn(fs, "symlinkSync");
-    spy.mockImplementation((target: string, link: string, type?: string) => {
-      calls.push([target, link, type ?? "undefined"]);
-    });
+    spy.mockImplementation(
+      (
+        target: fs.PathLike,
+        link: fs.PathLike,
+        type?: "dir" | "file" | "junction" | null,
+      ) => {
+        calls.push([String(target), String(link), type ?? "undefined"]);
+      },
+    );
     try {
       createFileSymlink("C:/skills/a.txt", "C:/rolebox/link.txt");
       expect(calls).toEqual([["C:\\skills\\a.txt", "C:\\rolebox\\link.txt", "file"]]);

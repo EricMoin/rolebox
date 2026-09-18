@@ -92,7 +92,7 @@ function buildEngine(
     signalBridge: bridge,
     dispatch: new FakeDispatch(),
     // `noSeam` exercises the default no-op path (callback omitted).
-    ...(opts.noSeam ? {} : { onNodeCompletion: (e) => events.push(e) }),
+    ...(opts.noSeam ? {} : { onNodeCompletion: (e) => { events.push(e); } }),
   });
   return { state, engine, events };
 }
@@ -247,5 +247,17 @@ describe("onNodeCompletion seam", () => {
     events.length = 0;
     engine.notifyNodeTimeout("A"); // already timeout — still fires on explicit call
     expect(events).toHaveLength(1);
+  });
+
+  it("notifyNodeTimeout is a no-op for an unknown node id (B9 contract)", () => {
+    const events: NodeCompletionEvent[] = [];
+    const { engine } = buildEngine(singleNode("A", "a1"), events);
+
+    // B9: the two notification entries now share one contract — best-effort
+    // observability, unknown node id → strict no-op, never a throw. The former
+    // getNode() call threw "Unknown node id" while notifyNodeTerminal returned
+    // silently.
+    expect(() => engine.notifyNodeTimeout("NOPE")).not.toThrow();
+    expect(events).toHaveLength(0);
   });
 });
