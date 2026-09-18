@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -11,6 +12,8 @@ import {
 import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  escapeTomlString,
+  normalizeLinkTarget,
   registerCodexPlugin,
   removeCodexPluginBundle,
   resolveRoleboxPackageRoot,
@@ -51,16 +54,12 @@ function restoreEnv(key: string, value: string | undefined): void {
   else process.env[key] = value;
 }
 
-function escapedToml(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 function managedBlock(marketplaceDir: string): string {
   return [
     MANAGED_START,
     "[marketplaces.rolebox]",
     'source_type = "local"',
-    `source = "${escapedToml(marketplaceDir)}"`,
+    `source = "${escapeTomlString(marketplaceDir)}"`,
     '[plugins."rolebox@rolebox"]',
     "enabled = true",
     MANAGED_END,
@@ -85,6 +84,7 @@ function bundlePaths(): CodexPluginBundlePaths {
     skillsLinkPath: join(marketplaceDir(), "plugins", "rolebox", "skills"),
     configPath: configPath(),
     serverEntry: SERVER_ENTRY,
+    serverEntryExists: existsSync(SERVER_ENTRY),
   };
 }
 
@@ -187,17 +187,24 @@ describe("writeCodexPluginBundle", () => {
   });
 
   it("honours serverEntry and runtimeCommand overrides", () => {
-    const bundle = writeCodexPluginBundle({
+    const customEntry = join(codexHome, "custom-server.js");
+    const opts = {
       codexHome,
       packageRoot: PACKAGE_ROOT,
       version: "1.0.0",
-      serverEntry: join(codexHome, "custom-server.js"),
+      serverEntry: customEntry,
       runtimeCommand: "bun",
-    });
+    };
 
+    // A missing artifact is reported, never thrown — the bundle still writes.
+    const bundle = writeCodexPluginBundle(opts);
     const mcp = JSON.parse(readFileSync(bundle.mcpConfigPath, "utf-8")) as Record<string, any>;
     expect(mcp.mcpServers.rolebox.command).toBe("bun");
-    expect(mcp.mcpServers.rolebox.args).toEqual([join(codexHome, "custom-server.js")]);
+    expect(mcp.mcpServers.rolebox.args).toEqual([customEntry]);
+    expect(bundle.serverEntryExists).toBe(false);
+
+    writeFileSync(customEntry, "// built entry\n", "utf-8");
+    expect(writeCodexPluginBundle(opts).serverEntryExists).toBe(true);
   });
 
   it("is idempotent — a second write leaves bytes and the skills link identical", () => {
@@ -219,6 +226,33 @@ describe("writeCodexPluginBundle", () => {
     expect(readFileSync(second.marketplaceManifestPath, "utf-8")).toBe(snapshot.marketplace);
     expect(readlinkSync(second.skillsLinkPath)).toBe(snapshot.link);
     expect(lstatSync(second.skillsLinkPath).ino).toBe(snapshot.ino);
+  });
+});
+
+describe("escapeTomlString", () => {
+  it("escapes the TOML basic-string short escapes", () => {
+    expect(escapeTomlString('a\\b"c')).toBe('a\\\\b\\"c');
+    expect(escapeTomlString("\b\t\n\f\r")).toBe("\\b\\t\\n\\f\\r");
+  });
+
+  it("writes the remaining control characters as \\uXXXX and leaves the rest alone", () => {
+    expect(escapeTomlString("\u0000\u001b\u007f")).toBe("\\u0000\\u001B\\u007F");
+    // Non-ASCII and ordinary path characters are untouched.
+    expect(escapeTomlString("/home/üsér/日本語/codex")).toBe("/home/üsér/日本語/codex");
+  });
+});
+
+describe("normalizeLinkTarget", () => {
+  it("strips the Windows extended-length prefix from a drive path", () => {
+    expect(normalizeLinkTarget("\\\\?\\C:\\Users\\dev\\rolebox")).toBe("C:\\Users\\dev\\rolebox");
+  });
+
+  it("collapses a UNC junction to a plain UNC path", () => {
+    expect(normalizeLinkTarget("\\\\?\\UNC\\server\\share\\dir")).toBe("\\\\server\\share\\dir");
+  });
+
+  it("leaves a plain path untouched", () => {
+    expect(normalizeLinkTarget("/home/dev/.codex/skills")).toBe("/home/dev/.codex/skills");
   });
 });
 
@@ -287,7 +321,7 @@ describe("registerCodexPlugin / unregisterCodexPlugin", () => {
 
     const raw = readFileSync(configPath(), "utf-8");
     const sourceLine = raw.split("\n").find((line) => line.startsWith("source = "));
-    expect(sourceLine).toBe(`source = "${escapedToml(weird)}"`);
+    expect(sourceLine).toBe(`source = "${escapeTomlString(weird)}"`);
   });
 
   it("preserves unrelated tables and comments verbatim and restores the original bytes on unregister", () => {
@@ -334,6 +368,139 @@ describe("registerCodexPlugin / unregisterCodexPlugin", () => {
     registerCodexPlugin(configPath(), marketplaceDir());
     expect(readFileSync(configPath(), "utf-8")).toBe(first);
   });
+
+  it("ignores the start marker when it appears inside a TOML string", () => {
+    const original = `note = "${MANAGED_START}"\nmodel = "gpt-5"\n`;
+    writeFileSync(configPath(), original, "utf-8");
+    registerCodexPlugin(configPath(), marketplaceDir());
+    const registered = readFileSync(configPath(), "utf-8");
+
+    // The note line survives and the real block is recognized as the region,
+    // so re-registering is byte-identical instead of eating the note line.
+    expect(registered).toBe(`${original}\n${managedBlock(marketplaceDir())}\n`);
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: false });
+    expect(readFileSync(configPath(), "utf-8")).toBe(registered);
+  });
+
+  it("ignores marker lines inside a multi-line TOML string and keeps the user bytes", () => {
+    const original = `note = """\n${MANAGED_START}\n"""\nmodel = "gpt-5"\n`;
+    writeFileSync(configPath(), `${original}\n${managedBlock("/stale/marketplace")}\n`, "utf-8");
+
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(
+      `${original}\n${managedBlock(marketplaceDir())}\n`,
+    );
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: false });
+
+    expect(unregisterCodexPlugin(configPath())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(original);
+  });
+
+  it("ignores start and end markers inside a multi-line literal string", () => {
+    const original = `note = '''\n${MANAGED_START}\n${MANAGED_END}\n'''\n`;
+    writeFileSync(configPath(), original, "utf-8");
+
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(
+      `${original}\n${managedBlock(marketplaceDir())}\n`,
+    );
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: false });
+  });
+
+  it("does not refuse a start marker that is only multi-line string content", () => {
+    const original = `note = """\n${MANAGED_START}\n"""\n`;
+    writeFileSync(configPath(), original, "utf-8");
+
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(
+      `${original}\n${managedBlock(marketplaceDir())}\n`,
+    );
+  });
+
+  it("does not open a string on a comment or on a triple quote closed in place", () => {
+    const original = '# cite """ in a comment\nnote = """ok"""\nmodel = "gpt-5"\n';
+    writeFileSync(configPath(), original, "utf-8");
+
+    registerCodexPlugin(configPath(), marketplaceDir());
+    const registered = readFileSync(configPath(), "utf-8");
+
+    expect(registered).toBe(`${original}\n${managedBlock(marketplaceDir())}\n`);
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: false });
+  });
+
+  it("recognizes an indented managed block", () => {
+    const original = 'model = "gpt-5"\n';
+    writeFileSync(configPath(), original, "utf-8");
+    registerCodexPlugin(configPath(), marketplaceDir());
+    const registered = readFileSync(configPath(), "utf-8");
+    writeFileSync(configPath(), registered.replace(`${MANAGED_START}\n`, `  ${MANAGED_START}\n`), "utf-8");
+
+    expect(unregisterCodexPlugin(configPath())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(original);
+  });
+
+  it("refuses a lone start marker instead of appending a second block", () => {
+    const original = `model = "gpt-5"\n${MANAGED_START}\n`;
+    writeFileSync(configPath(), original, "utf-8");
+
+    let error: Error | undefined;
+    try {
+      registerCodexPlugin(configPath(), marketplaceDir());
+    } catch (caught) {
+      error = caught as Error;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain(configPath());
+    expect(error?.message).toContain(MANAGED_START);
+    expect(error?.message).toContain(MANAGED_END);
+    expect(error?.message).toMatch(/remove the stray start marker/i);
+    // No second block was appended and the user's bytes are untouched.
+    expect(readFileSync(configPath(), "utf-8")).toBe(original);
+  });
+
+  it("repairs duplicate managed blocks: the first is refreshed and the rest removed", () => {
+    const original = '# user config\nmodel = "gpt-5"\n';
+    const stale = managedBlock("/stale/marketplace");
+    writeFileSync(configPath(), `${original}\n${stale}\n${stale}\n`, "utf-8");
+
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(
+      `${original}\n${managedBlock(marketplaceDir())}\n`,
+    );
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: false });
+  });
+
+  it("removes every duplicate managed block on unregister", () => {
+    const original = 'model = "gpt-5"\n';
+    writeFileSync(
+      configPath(),
+      `${original}\n${managedBlock(marketplaceDir())}\n${managedBlock("/other/marketplace")}\n`,
+      "utf-8",
+    );
+
+    expect(unregisterCodexPlugin(configPath())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(original);
+  });
+
+  it("restores a CRLF config byte for byte on unregister", () => {
+    const original = 'model = "gpt-5"\r\n[mcp_servers.other]\r\n';
+    writeFileSync(configPath(), original, "utf-8");
+
+    expect(registerCodexPlugin(configPath(), marketplaceDir())).toEqual({ changed: true });
+    expect(unregisterCodexPlugin(configPath())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(original);
+  });
+
+  it("keeps user content appended after the block on unregister", () => {
+    const original = 'model = "gpt-5"\n';
+    writeFileSync(configPath(), original, "utf-8");
+    registerCodexPlugin(configPath(), marketplaceDir());
+
+    appendFileSync(configPath(), 'approval_policy = "never"\n');
+    expect(unregisterCodexPlugin(configPath())).toEqual({ changed: true });
+    expect(readFileSync(configPath(), "utf-8")).toBe(`${original}approval_policy = "never"\n`);
+  });
 });
 
 describe("removeCodexPluginBundle", () => {
@@ -359,19 +526,33 @@ describe("resolveRoleboxPackageRoot", () => {
 });
 
 describe("rolebox sync codex", () => {
-  async function runSync(target = "codex"): Promise<string[]> {
+  async function runSyncResult(
+    target = "codex",
+  ): Promise<{ logs: string[]; error: unknown }> {
     const logs: string[] = [];
     const origLog = console.log;
     const origWarn = console.warn;
+    const origError = console.error;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
     console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+    console.error = (...args: unknown[]) => logs.push(args.join(" "));
+    let error: unknown;
     try {
       const { sync } = await import("../../src/cli/commands/sync.ts");
       await sync(target);
+    } catch (caught) {
+      error = caught;
     } finally {
       console.log = origLog;
       console.warn = origWarn;
+      console.error = origError;
     }
+    return { logs, error };
+  }
+
+  async function runSync(target = "codex"): Promise<string[]> {
+    const { logs, error } = await runSyncResult(target);
+    if (error !== undefined) throw error;
     return logs;
   }
 
@@ -404,11 +585,21 @@ describe("rolebox sync codex", () => {
     expect(lstatSync(bundle.skillsLinkPath).isSymbolicLink()).toBe(true);
     expect(linkTarget(bundle.skillsLinkPath)).toBe(resolve(join(codexHome, "skills")));
 
+    // The missing-artifact warning is driven by the real entry's existence,
+    // so assert whichever branch this checkout is in.
+    const missingEntryWarning = `Warning: the Codex MCP server entry ${SERVER_ENTRY} does not exist`;
+    if (existsSync(SERVER_ENTRY)) {
+      expect(output).not.toContain(missingEntryWarning);
+    } else {
+      expect(output).toContain(missingEntryWarning);
+      expect(output).toContain("Build or reinstall rolebox before starting Codex");
+    }
+
     const config = readFileSync(bundle.configPath, "utf-8");
     expect(config).toContain(MANAGED_START);
     expect(config).toContain("[marketplaces.rolebox]");
     expect(config).toContain('source_type = "local"');
-    expect(config).toContain(`source = "${escapedToml(bundle.marketplaceDir)}"`);
+    expect(config).toContain(`source = "${escapeTomlString(bundle.marketplaceDir)}"`);
     expect(config).toContain('[plugins."rolebox@rolebox"]');
     expect(config).toContain("enabled = true");
     expect(config).toContain(MANAGED_END);
@@ -458,5 +649,43 @@ describe("rolebox sync codex", () => {
     expect(after.startsWith(original)).toBe(true);
     expect(after).toContain(MANAGED_START);
     expect(after).toContain(MANAGED_END);
+  });
+
+  it("warns with the missing server entry path before Codex is started", async () => {
+    const { warnIfCodexServerEntryMissing } = await import("../../src/cli/commands/sync.ts");
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+    try {
+      warnIfCodexServerEntryMissing({ serverEntry: "/missing/entry.js", serverEntryExists: false });
+      warnIfCodexServerEntryMissing({ serverEntry: SERVER_ENTRY, serverEntryExists: true });
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("/missing/entry.js");
+    expect(warnings[0]).toContain("Build or reinstall rolebox before starting Codex");
+  });
+
+  it("reports the partial Codex sync when config.toml registration fails, then rethrows", async () => {
+    const original = `model = "gpt-5"\n${MANAGED_START}\n`;
+    writeFileSync(configPath(), original, "utf-8");
+
+    const { logs, error } = await runSyncResult();
+    const output = logs.join("\n");
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("without a matching end marker");
+    // The bundle WAS written; the registration was not.
+    const bundle = bundlePaths();
+    expect(existsSync(bundle.marketplaceDir)).toBe(true);
+    expect(existsSync(bundle.mcpConfigPath)).toBe(true);
+    expect(readFileSync(bundle.configPath, "utf-8")).toBe(original);
+    // The report names both halves and says a retry is safe.
+    expect(output).toContain(`wrote the marketplace directory ${bundle.marketplaceDir}`);
+    expect(output).toContain(`registering it in ${bundle.configPath} failed`);
+    expect(output).toContain("without a matching end marker");
+    expect(output).toContain("safe to repeat");
   });
 });

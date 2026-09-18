@@ -133,17 +133,118 @@ function isOpencodePluginRegistered(configPath: string): boolean {
 }
 
 /**
+ * Strip an unquoted `#` comment from a TOML line, so a commented-out table is
+ * never mistaken for a live registration.
+ */
+function stripTomlComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (quote !== null) {
+      if (char === "\\" && quote === '"') i++;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") quote = char;
+    else if (char === "#") return line.slice(0, i);
+  }
+  return line;
+}
+
+/**
+ * Split a TOML key or dotted key path into its segments, tolerating
+ * whitespace around the dots and quoted keys (`plugins."rolebox@x"`).
+ * Returns null when the text is not a well-formed key.
+ */
+function splitTomlKey(text: string): string[] | null {
+  const parts: string[] = [];
+  let index = 0;
+  while (index < text.length) {
+    while (index < text.length && /\s/.test(text[index])) index++;
+    if (index === text.length) break;
+
+    let key: string;
+    if (text[index] === '"' || text[index] === "'") {
+      const quote = text[index];
+      const keyStart = ++index;
+      while (index < text.length && text[index] !== quote) {
+        if (text[index] === "\\" && quote === '"') index++;
+        index++;
+      }
+      if (index === text.length) return null;
+      key = text.slice(keyStart, index);
+      index++;
+    } else {
+      const keyStart = index;
+      while (index < text.length && text[index] !== "." && !/\s/.test(text[index])) index++;
+      key = text.slice(keyStart, index);
+      if (key === "") return null;
+    }
+
+    parts.push(key);
+    while (index < text.length && /\s/.test(text[index])) index++;
+    if (index === text.length) break;
+    if (text[index] !== ".") return null;
+    index++;
+  }
+  return parts.length > 0 ? parts : null;
+}
+
+/** Parse a `[table]` / `[[array-of-tables]]` line into its key path. */
+function parseTomlTableHeader(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("[")) return null;
+  const arrayTable = trimmed.startsWith("[[");
+  const open = arrayTable ? "[[" : "[";
+  const close = arrayTable ? "]]" : "]";
+  if (!trimmed.endsWith(close)) return null;
+  return splitTomlKey(trimmed.slice(open.length, trimmed.length - close.length));
+}
+
+/** Whether a parsed table path names a rolebox registration table. */
+function isRoleboxTable(table: string[]): boolean {
+  if (table.length < 2) return false;
+  const [root, name] = table;
+  if (root === "mcp_servers" && name === PLUGIN_ID) return true;
+  if (root === "marketplaces" && name === PLUGIN_ID) return true;
+  return root === "plugins" && name.startsWith(`${PLUGIN_ID}@`);
+}
+
+/**
  * Whether a Codex `config.toml` carries a rolebox registration: an MCP server
- * table, a local marketplace table, or the plugin enablement table
- * (`[plugins."rolebox@<marketplace>"]`). Table headers may carry optional
- * inner whitespace, so the brackets are matched leniently.
+ * table (or an inline `rolebox = { ... }` entry in `[mcp_servers]`), a local
+ * marketplace table, or the plugin enablement table
+ * (`[plugins."rolebox@<marketplace>"]`).
+ *
+ * A line-oriented scan, not a TOML parser: it skips blank and comment lines,
+ * tracks the current table header (tolerating whitespace around dots and
+ * quoted keys), and never throws. A table header quoted inside a multi-line
+ * string is still counted — full TOML parsing is deliberately out of scope for
+ * a status check.
  */
 function isCodexRegistered(configText: string): boolean {
-  return (
-    /^[ \t]*\[\s*mcp_servers\s*\.\s*rolebox\s*\]/m.test(configText) ||
-    /^[ \t]*\[\s*marketplaces\s*\.\s*rolebox\s*\]/m.test(configText) ||
-    /^[ \t]*\[\s*plugins\s*\.\s*"rolebox@[^"]*"\s*\]/m.test(configText)
-  );
+  let table: string[] | null = null;
+
+  for (const rawLine of configText.split("\n")) {
+    const line = stripTomlComment(rawLine).trim();
+    if (line === "") continue;
+
+    if (line.startsWith("[")) {
+      table = parseTomlTableHeader(line);
+      if (table !== null && isRoleboxTable(table)) return true;
+      continue;
+    }
+
+    // Inline MCP server entry: `rolebox = { command = "node", ... }`.
+    if (table !== null && table.length === 1 && table[0] === "mcp_servers") {
+      const equals = line.indexOf("=");
+      if (equals > 0) {
+        const key = splitTomlKey(line.slice(0, equals));
+        if (key !== null && key.length === 1 && key[0] === PLUGIN_ID) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // ── Descriptors ────────────────────────────────────────────────────────────

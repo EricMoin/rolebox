@@ -91,19 +91,10 @@ export function piCapabilities(): PlatformCapabilities {
  *
  * Codex drives rolebox over MCP only — a plugin bundle registering rolebox's
  * MCP server — so every host-integration capability is absent except
- * multi-step tool execution, which the MCP tool surface provides.
+ * multi-step tool execution, which the MCP tool surface provides. That is
+ * exactly {@link minimalCapabilities}'s shape, so this delegates instead of
+ * duplicating a block that could drift.
  */
 export function codexCapabilities(): PlatformCapabilities {
-  return {
-    hasBackgroundTasks: false,
-    hasSessionFork: false,
-    hasSessionCreate: false,
-    hasSessionAbort: false,
-    hasAgentFileSync: false,
-    hasMultiStepTools: true,
-    hasEventStream: false,
-    hasSessionStatus: false,
-    hasRoleSwitch: false,
-    platformId: "codex",
-  };
+  return minimalCapabilities("codex");
 }

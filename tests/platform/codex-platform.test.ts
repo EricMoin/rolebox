@@ -149,6 +149,48 @@ describe("codex registry descriptor", () => {
 
     expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(true);
   });
+
+  it('detects the quoted [mcp_servers."rolebox"] registration form', () => {
+    writeCodexConfig('[mcp_servers."rolebox"]\ncommand = "node"\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(true);
+  });
+
+  it('detects the quoted [marketplaces."rolebox"] registration form', () => {
+    writeCodexConfig('[marketplaces."rolebox"]\nsource_type = "local"\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(true);
+  });
+
+  it('detects quoted keys with whitespace around the dots', () => {
+    writeCodexConfig('[ mcp_servers . "rolebox" ]\ncommand = "node"\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(true);
+  });
+
+  it("detects an inline rolebox entry inside the [mcp_servers] section", () => {
+    writeCodexConfig('[mcp_servers]\nrolebox = { command = "node", args = ["/tmp/server.js"] }\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(true);
+  });
+
+  it("does not treat a rolebox key outside [mcp_servers] as a registration", () => {
+    writeCodexConfig('rolebox = { command = "node" }\n\n[mcp_servers.other]\nrolebox = "not-a-server"\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(false);
+  });
+
+  it("does not treat a rolebox key under a commented-out header as a registration", () => {
+    writeCodexConfig('# [mcp_servers]\nrolebox = { command = "node" }\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(false);
+  });
+
+  it("detects a registration header followed by a trailing comment", () => {
+    writeCodexConfig('[mcp_servers.rolebox] # added by rolebox sync codex\ncommand = "node"\n');
+
+    expect(getPlatformDescriptor("codex").detectIntegration()?.registered).toBe(true);
+  });
 });
 
 describe("codexCapabilities", () => {

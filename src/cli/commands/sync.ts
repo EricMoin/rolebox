@@ -57,6 +57,22 @@ function readPackageVersion(packageRoot: string): string {
 }
 
 /**
+ * Warn when the bundle points Codex at an MCP server entry that does not
+ * exist yet. A source checkout that was never built still syncs — Codex just
+ * cannot start the server until rolebox is built or reinstalled.
+ */
+export function warnIfCodexServerEntryMissing(bundle: {
+  serverEntry: string;
+  serverEntryExists: boolean;
+}): void {
+  if (bundle.serverEntryExists) return;
+  console.warn(
+    `Warning: the Codex MCP server entry ${bundle.serverEntry} does not exist. ` +
+      "Build or reinstall rolebox before starting Codex (for a source checkout, `bun run build`).",
+  );
+}
+
+/**
  * Deploy every locked role into the sync target as a symlink to its shared
  * source.
  *
@@ -173,7 +189,20 @@ export async function sync(target: string, relink = false): Promise<void> {
       packageRoot,
       version: readPackageVersion(packageRoot),
     });
-    registerCodexPlugin(bundle.configPath, bundle.marketplaceDir);
+    warnIfCodexServerEntryMissing(bundle);
+    try {
+      registerCodexPlugin(bundle.configPath, bundle.marketplaceDir);
+    } catch (error) {
+      // The bundle is already on disk; name what did and did not happen before
+      // failing, and say that a retry is safe (both steps are idempotent).
+      console.error(
+        `Codex plugin: wrote the marketplace directory ${bundle.marketplaceDir}, ` +
+          `but registering it in ${bundle.configPath} failed: ` +
+          `${error instanceof Error ? error.message : String(error)}. ` +
+          "Fix the cause and re-run `rolebox sync codex` — the sync is safe to repeat.",
+      );
+      throw error;
+    }
     console.log(`Codex plugin: registered ${bundle.marketplaceDir} in ${bundle.configPath}`);
   }
 
