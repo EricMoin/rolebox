@@ -57,6 +57,7 @@ let tmpConfigDir: string;
 let tmpDataDir: string;
 let savedPiDir: string | undefined;
 let savedDshHome: string | undefined;
+let savedCodexHome: string | undefined;
 
 beforeEach(() => {
   tmpConfigDir = mkdtempSync(join(tmpdir(), "rolebox-pick-config-"));
@@ -64,10 +65,16 @@ beforeEach(() => {
 
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
   process.env.XDG_DATA_HOME = tmpDataDir;
+  // Isolate the pi / dsh / codex sync targets too — the uninstall flows below
+  // sweep symlinks across ALL platform sync targets, and without these
+  // overrides they would touch the real ~/.pi/agent/rolebox, ~/.dsh/rolebox and
+  // ~/.codex/rolebox on the developer's machine.
   savedPiDir = process.env.PI_CODING_AGENT_DIR;
   savedDshHome = process.env.DSH_HOME;
+  savedCodexHome = process.env.CODEX_HOME;
   process.env.PI_CODING_AGENT_DIR = join(tmpConfigDir, "pi-agent");
   process.env.DSH_HOME = join(tmpConfigDir, "dsh-home");
+  process.env.CODEX_HOME = join(tmpConfigDir, "codex-home");
 
   // Simulate a TTY so the interactive flows pass the stdin guard.
   Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
@@ -92,6 +99,8 @@ afterEach(() => {
   else process.env.PI_CODING_AGENT_DIR = savedPiDir;
   if (savedDshHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = savedDshHome;
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
   Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
   rmSync(tmpConfigDir, { recursive: true, force: true });
   rmSync(tmpDataDir, { recursive: true, force: true });

@@ -16,19 +16,23 @@ let tmpConfigDir: string;
 let tmpDataDir: string;
 let savedPiDir: string | undefined;
 let savedDshHome: string | undefined;
+let savedCodexHome: string | undefined;
 
 beforeEach(() => {
   tmpConfigDir = mkdtempSync(join(tmpdir(), "rolebox-uninstall-config-"));
   tmpDataDir = mkdtempSync(join(tmpdir(), "rolebox-uninstall-data-"));
   process.env.XDG_CONFIG_HOME = tmpConfigDir;
   process.env.XDG_DATA_HOME = tmpDataDir;
-  // Isolate the pi / dsh sync targets too — uninstall sweeps symlinks across
-  // ALL platform sync targets, and without these overrides it would touch the
-  // real ~/.pi/agent/rolebox and ~/.dsh/rolebox on the developer's machine.
+  // Isolate the pi / dsh / codex sync targets too — uninstall sweeps symlinks
+  // across ALL platform sync targets, and without these overrides it would
+  // touch the real ~/.pi/agent/rolebox, ~/.dsh/rolebox and ~/.codex/rolebox on
+  // the developer's machine.
   savedPiDir = process.env.PI_CODING_AGENT_DIR;
   savedDshHome = process.env.DSH_HOME;
+  savedCodexHome = process.env.CODEX_HOME;
   process.env.PI_CODING_AGENT_DIR = join(tmpConfigDir, "pi-agent");
   process.env.DSH_HOME = join(tmpConfigDir, "dsh-home");
+  process.env.CODEX_HOME = join(tmpConfigDir, "codex-home");
 });
 
 afterEach(() => {
@@ -38,6 +42,8 @@ afterEach(() => {
   else process.env.PI_CODING_AGENT_DIR = savedPiDir;
   if (savedDshHome === undefined) delete process.env.DSH_HOME;
   else process.env.DSH_HOME = savedDshHome;
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
   rmSync(tmpConfigDir, { recursive: true, force: true });
   rmSync(tmpDataDir, { recursive: true, force: true });
 });
@@ -82,6 +88,13 @@ async function installRole(
 }
 
 describe("uninstall", () => {
+  it("isolates the codex sync target inside the temporary config dir", async () => {
+    // Regression guard: uninstall sweeps every sync target, so CODEX_HOME must
+    // resolve under the temp dir instead of the developer's real ~/.codex.
+    const { getSyncTarget } = await import("../../../src/cli/paths.ts");
+    expect(getSyncTarget("codex")).toBe(join(tmpConfigDir, "codex-home", "rolebox"));
+  });
+
   it("removes role directory from disk", async () => {
     const rolePath = await installRole("my-role", "my-registry", "1.0.0");
 
