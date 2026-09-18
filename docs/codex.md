@@ -9,9 +9,9 @@ the bundle and registers it. There is no Codex plugin process of rolebox's own �
 tool call reaches rolebox over MCP.
 
 Parity is enforced by the Codex tests: `tests/platform/codex-mcp.test.ts` (the protocol
-and the entry-point tool surface), `tests/platform/codex-platform.test.ts` (path
-resolution, the registry descriptor and capabilities), and `tests/cli/codex-sync.test.ts`
-(the generated bundle and `config.toml` registration). See
+and the canonical tool surface), `tests/platform/codex-platform.test.ts` (path resolution,
+the registry descriptor, capabilities and registration detection), and
+`tests/cli/codex-sync.test.ts` (the generated bundle and `config.toml` registration). See
 [compatibility.md](compatibility.md) for the harness matrix and
 [limitations.md](limitations.md) for the non-goals.
 
@@ -50,6 +50,14 @@ when the MCP server boots.
 target gets), prints the usual `Synced N roles to codex` line, and then reports
 `Codex plugin: registered {marketplaceDir} in {configPath}`.
 
+The bundle is written before the registration is attempted, so when registration fails the
+command prints both halves — `Codex plugin: wrote the marketplace directory
+{marketplaceDir}, but registering it in {configPath} failed: {reason}` — says the sync is
+safe to repeat, and re-raises the error rather than printing the success line. A recorded
+server entry that does not exist (a source checkout that was never built) does not fail
+the sync: the bundle is still written and registered, and a warning names the missing
+`dist/entries/codex.js` path and suggests `bun run build`.
+
 ## What `rolebox sync codex` writes
 
 | Path | Contents |
@@ -79,18 +87,34 @@ enabled = true
 ```
 
 Sync is idempotent. Every generated file is rewritten with identical bytes for identical
-options, an existing correct `skills` symlink is left untouched, and an existing managed
-block is replaced in place — no byte outside the block is modified. When the block is
+options, an existing correct `skills` symlink is left untouched, and existing managed
+blocks are replaced in place — no byte outside the block is modified. When the block is
 appended for the first time, a single newline separates it from the existing config: a
 blank line when the file already ends with one, otherwise it terminates the last line.
 A real directory sitting where the `skills` symlink belongs is never destroyed.
 
+Duplicate blocks left behind by a hand-edit are repaired rather than duplicated: the first
+is replaced with the fresh block and every later one is removed. A start marker without a
+matching end marker is refused with an error naming the config file and both markers — the
+file is left untouched, and the stray marker has to be deleted by hand before the next
+sync. The marketplace path is emitted as a TOML basic string, with the `\b`, `\t`, `\n`,
+`\f`, `\r`, `\"` and `\\` short escapes and `\uXXXX` for every other control
+character, so a home directory containing them cannot produce an unparseable
+`config.toml`.
+
 ## Verify it took effect
 
 - `rolebox status` prints a **Codex Integration** section. Its `Plugin + MCP` line reads
-  `registered` once `{codexHome}/config.toml` contains a rolebox marketplace table, a
-  `[plugins."rolebox@<marketplace>"]` table, or an `[mcp_servers.rolebox]` table; the
-  section also lists the sync target and the per-target synced role count.
+  `registered` once `{codexHome}/config.toml` registers rolebox in any of the spellings
+  Codex accepts: a marketplace table (`[marketplaces.rolebox]` or
+  `[marketplaces."rolebox"]`), a plugin table (`[plugins."rolebox@<marketplace>"]`), or
+  an MCP server registration — `[mcp_servers.rolebox]`, or an inline
+  `rolebox = { ... }` entry inside a `[mcp_servers]` table. Blank and comment lines are
+  skipped, whitespace around dotted keys is tolerated, quoted key segments are accepted,
+  and a trailing comment on the header is ignored; the section also lists the sync target
+  and the per-target synced role count. Detection is a line-oriented scan rather than a
+  TOML parse, so multi-line strings are not understood: a rolebox table header written
+  inside one still counts as registered.
 - Or inspect the files directly: `{codexHome}/config.toml` contains the managed block,
   and the four generated entries under `{codexHome}/rolebox-marketplace` exist (three
   JSON manifests plus the `skills` symlink).
@@ -101,33 +125,57 @@ A real directory sitting where the `skills` symlink belongs is never destroyed.
 
 The server entry is `rolebox mcp` (which imports `src/entries/codex.ts` and serves until
 stdin closes); the package also exports it as `rolebox/codex`
-(`dist/entries/codex.js`). Codex starts it from the generated `.mcp.json`.
+(`dist/entries/codex.js`). Codex starts it from the generated `.mcp.json`. Importing the
+module never starts the server or reads stdin, but it is not free of module-level side
+effects: the module-level logger opens its log file and installs its `exit`, `SIGINT`
+and `SIGTERM` flush handlers on first evaluation.
 
 - **Transport**: newline-delimited JSON-RPC 2.0 on stdin/stdout — one JSON object per
-  line. stdout carries protocol messages only; diagnostics go to stderr
-  (`[rolebox codex] ...`) and rolebox's own logger writes to its log file.
+  line. stdout is a protocol-only channel: the entry captures the real
+  `process.stdout.write` for the server and redirects everything written to
+  `process.stdout` afterwards — a third-party library logging to stdout, or a console
+  bound to `process.stdout` — to stderr, so stray output cannot corrupt the stream. That
+  guarantee covers writes through `process.stdout` after the guard is installed (both
+  `rolebox mcp` and a direct `node dist/entries/codex.js` go through it); it does not
+  cover bytes written straight to fd 1, and a global `console.log` is diverted only where
+  the runtime routes it through `process.stdout` — Node does (the generated `.mcp.json`
+  launches `command: node`), while Bun writes it to fd 1 natively (the `rolebox` bin's
+  shebang selects Bun). An embedder that calls `startCodexMcpServer()` itself gets no
+  guard. Diagnostics go to stderr (`[rolebox codex] ...`) and rolebox's own logger writes
+  to its log file.
 - **Methods**: `initialize`, `ping`, `tools/list`, `tools/call`.
 - **initialize**: echoes the client's requested protocol version when it is one of
   `2025-06-18`, `2025-03-26` or `2024-11-05`, and answers `2025-06-18` otherwise;
   advertises `capabilities: { tools: { listChanged: false } }` and
   `serverInfo: { name: "rolebox", version: <package version> }`.
-- **Notifications**: any message without an id is never answered;
-  `notifications/initialized` and `notifications/cancelled` are accepted and ignored
-  (cancellation of an in-flight call is not wired on this transport).
+- **Notifications**: any message without an id is never answered. Notifications are
+  handled the moment they arrive instead of queueing behind the in-flight request, so
+  `notifications/cancelled` aborts the running call it names — `requestId`, string or
+  number — passing its `params.reason` (default `cancelled by client`) to the abort
+  signal the tool context carries. A cancellation for an id that is not in flight, and
+  every other notification including `notifications/initialized`, is a no-op. The server
+  does not abandon the call: it still finishes with whatever the tool body returns or
+  throws and still gets a normal response.
 - **tools/list**: every registered tool as `{ name, description, inputSchema }` with a
   JSON Schema object per tool. The list is always one page — a cursor is tolerated and
   ignored, and no `nextCursor` is returned.
 - **tools/call**: `{ name, arguments }` returns
-  `{ content: [ { type: "text", text } ], isError?: true }`. An unknown tool name, invalid
-  arguments, and a tool that throws are all `isError` results carrying a correction, not
-  protocol errors — only a malformed `tools/call` envelope (no tool name) is a protocol
-  error.
+  `{ content: [ { type: "text", text }, ... ], isError?: true }`. The first block is
+  always the tool's text output; an image attachment then arrives as an MCP
+  `{ type: "image", data, mimeType }` block holding the base64 payload — `web_fetch` is
+  the only tool that produces one today. Only a `type: "file"` attachment whose mime
+  starts with `image/` and whose URL is a base64 `data:` URI is converted; every other
+  attachment (a PDF, for instance) and every malformed data URI is dropped, keeping its
+  existing text line as its only representation. An unknown tool name, invalid arguments,
+  and a tool that throws are all `isError` results carrying a correction, not protocol
+  errors — only a malformed `tools/call` envelope (no tool name) is a protocol error.
 - **Errors**: malformed JSON line → `-32700` (null id); invalid request → `-32600`;
   unknown method → `-32601`; malformed `tools/call` envelope → `-32602`; internal error
   → `-32603`.
-- **Ordering and lifetime**: messages are handled one at a time and answered in request
-  order. `serve()` resolves when stdin ends; the process never calls `process.exit`. A
-  boot failure is reported on stderr and sets a non-zero exit code.
+- **Ordering and lifetime**: requests are handled strictly one at a time and answered in
+  request order; notifications are the one exception (above). `serve()` resolves when
+  stdin ends; the server never calls `process.exit`. A boot failure is reported on
+  stderr and sets a non-zero exit code.
 - **Session id**: `ROLEBOX_SESSION_ID` when set, else a `sessionId` / `sessionID` /
   `session_id` string in the `initialize` `clientInfo`, else `codex`.
 - **Context**: `metadata()` and `ask()` are documented no-ops — stdio MCP has no
@@ -167,9 +215,10 @@ session client and no dispatch backend, plus `load_role_skill` — 15 tools:
   symlink. The sweep is best-effort and never touches a real directory or file.
 - The generated bundle and the managed block are removed by
   `removeCodexPluginBundle(codexHome)` (removes `{codexHome}/rolebox-marketplace`) and
-  `unregisterCodexPlugin(configPath)` (removes exactly the managed block, restoring the
-  surrounding bytes). Both are exported from `src/platform/adapters/codex/plugin-bundle.ts`
-  and the Codex adapter barrel, but **no CLI command currently calls them** — today the
-  removal is manual: delete `{codexHome}/rolebox-marketplace` and the block between the
-  two `rolebox (managed)` marker comments in `{codexHome}/config.toml`. Neither function
-  touches `{codexHome}/skills` or `{codexHome}/rolebox`.
+  `unregisterCodexPlugin(configPath)` (removes every managed block — a hand-edited
+  duplicate included — restoring the surrounding bytes). Both are exported from
+  `src/platform/adapters/codex/plugin-bundle.ts` and the Codex adapter barrel, but **no CLI
+  command currently calls them** — today the removal is manual: delete
+  `{codexHome}/rolebox-marketplace` and the block between the two `rolebox (managed)`
+  marker comments in `{codexHome}/config.toml`. Neither function touches
+  `{codexHome}/skills` or `{codexHome}/rolebox`.
