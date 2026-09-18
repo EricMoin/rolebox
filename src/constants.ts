@@ -97,6 +97,7 @@ export const SyncTarget = {
   Opencode: "opencode",
   Pi: "pi",
   Dsh: "dsh",
+  Codex: "codex",
 } as const;
 
 /** All valid SyncTarget values, for runtime validation and cleanup sweeps. */

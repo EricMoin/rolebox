@@ -26,6 +26,7 @@ import {
   defaultPlatformPaths,
   piPlatformPaths,
   dshPlatformPaths,
+  codexPlatformPaths,
   type PlatformPaths,
 } from "./paths.ts";
 import { PLUGIN_ID } from "../constants.ts";
@@ -131,6 +132,20 @@ function isOpencodePluginRegistered(configPath: string): boolean {
   }
 }
 
+/**
+ * Whether a Codex `config.toml` carries a rolebox registration: an MCP server
+ * table, a local marketplace table, or the plugin enablement table
+ * (`[plugins."rolebox@<marketplace>"]`). Table headers may carry optional
+ * inner whitespace, so the brackets are matched leniently.
+ */
+function isCodexRegistered(configText: string): boolean {
+  return (
+    /^[ \t]*\[\s*mcp_servers\s*\.\s*rolebox\s*\]/m.test(configText) ||
+    /^[ \t]*\[\s*marketplaces\s*\.\s*rolebox\s*\]/m.test(configText) ||
+    /^[ \t]*\[\s*plugins\s*\.\s*"rolebox@[^"]*"\s*\]/m.test(configText)
+  );
+}
+
 // ── Descriptors ────────────────────────────────────────────────────────────
 
 const opencodeDescriptor: PlatformDescriptor = {
@@ -169,6 +184,36 @@ const dshDescriptor: PlatformDescriptor = {
   detectIntegration: () => null,
 };
 
+const codexDescriptor: PlatformDescriptor = {
+  id: "codex",
+  label: "Codex",
+  paths: codexPlatformPaths,
+  // Codex registration is detected in `<codexHome>/config.toml`: the local
+  // marketplace table and the plugin enablement table that `rolebox sync codex`
+  // writes, or an `[mcp_servers.rolebox]` table registering the same server
+  // without the plugin bundle. A missing or unreadable config reports
+  // unregistered — detection never throws.
+  detectIntegration() {
+    const configPath = join(codexPlatformPaths().configDir, "config.toml");
+    let registered = false;
+    try {
+      if (existsSync(configPath)) {
+        registered = isCodexRegistered(readFileSync(configPath, "utf-8"));
+      }
+    } catch {
+      registered = false;
+    }
+    return {
+      mechanism: "Plugin + MCP",
+      registered,
+      detail: registered ? "registered" : "not found in codex config",
+      hint: registered
+        ? undefined
+        : `Run \`rolebox sync codex\` to register the rolebox plugin in ${tildify(configPath)}`,
+    };
+  },
+};
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 /** Every host platform rolebox can target. Order = CLI display order. */
@@ -176,6 +221,7 @@ export const PLATFORM_REGISTRY: readonly PlatformDescriptor[] = [
   opencodeDescriptor,
   piDescriptor,
   dshDescriptor,
+  codexDescriptor,
 ];
 
 /**

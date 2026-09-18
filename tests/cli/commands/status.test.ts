@@ -14,13 +14,14 @@ process.env.XDG_DATA_HOME = statusDataDir;
 import { createPathsMockPayload } from "../../helpers/paths-mock";
 
 // Redirect every sync target under XDG_CONFIG_HOME so tests never touch a
-// developer's real ~/.pi/agent or ~/.dsh directories.
+// developer's real ~/.pi/agent, ~/.dsh or ~/.codex directories.
 function targetBase(target: string): string {
   const xdg = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
   if (target === "opencode") return join(xdg, "opencode");
   if (target === "pi") return join(xdg, "pi-agent");
   if (target === "dsh") return join(xdg, "dsh");
-  throw new Error(`Unknown sync target: "${target}". Supported targets: opencode, pi, dsh`);
+  if (target === "codex") return join(xdg, "codex");
+  throw new Error(`Unknown sync target: "${target}". Supported targets: opencode, pi, dsh, codex`);
 }
 
 mock.module("../../../src/cli/paths", () => createPathsMockPayload({
@@ -47,16 +48,24 @@ afterAll(() => {
 });
 
 let tmpDir: string;
+let savedCodexHome: string | undefined;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-status-test-"));
   process.env.XDG_CONFIG_HOME = tmpDir;
   process.env.XDG_DATA_HOME = tmpDir;
+  // status() asks every platform descriptor for its integration status; the
+  // codex descriptor reads <configDir>/config.toml, so point CODEX_HOME at the
+  // temp dir and never at a developer's real ~/.codex.
+  savedCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = join(tmpDir, "codex");
 });
 
 afterEach(() => {
   delete process.env.XDG_CONFIG_HOME;
   delete process.env.XDG_DATA_HOME;
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -217,10 +226,10 @@ describe("status", () => {
     expect(parsed.roles[0].version).toBe("2.0.0");
     expect(parsed.opencode).toBeDefined();
     expect(parsed.opencode.pluginRegistered).toBeDefined();
-    // All three sync targets must be reported.
+    // Every registered sync target must be reported.
     expect(parsed.targets).toBeInstanceOf(Array);
     const targetNames = parsed.targets.map((t: any) => t.target).sort();
-    expect(targetNames).toEqual(["dsh", "opencode", "pi"]);
+    expect(targetNames).toEqual(["codex", "dsh", "opencode", "pi"]);
     for (const t of parsed.targets) {
       expect(typeof t.syncTarget).toBe("string");
       expect(typeof t.present).toBe("boolean");

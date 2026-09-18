@@ -54,7 +54,8 @@ export async function uninstall(roleId: string): Promise<void> {
   }
 
   // Clean up sync symlinks across every supported target platform
-  // (opencode / pi / dsh) — the role may have been synced to any of them.
+  // (opencode / pi / dsh / codex) — the role may have been synced to any of
+  // them.
   for (const target of SYNC_TARGET_VALUES) {
     try {
       const syncTarget = getSyncTarget(target);

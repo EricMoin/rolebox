@@ -94,3 +94,30 @@ export function dshPlatformPaths(): PlatformPaths {
     sessionsDir: join(dshHome, "sessions"),
   };
 }
+
+/**
+ * Returns platform paths for the Codex platform.
+ *
+ * Per Codex's documented environment variables, the Codex home directory
+ * resolves as `$CODEX_HOME` when set (non-blank), otherwise `~/.codex`; a blank
+ * env value is treated as unset.
+ *
+ * - `configDir`: Codex home (`$CODEX_HOME` or `~/.codex`)
+ * - `agentsDir`: `{configDir}/skills` (mirrors the pi/dsh pattern — Codex has
+ *   no native agent-file registry, so rolebox agent files live under the home
+ *   tree)
+ * - `skillsDir`: `{configDir}/skills`
+ *
+ * Codex has no rolebox-owned sessions directory, so `sessionsDir` is omitted.
+ */
+export function codexPlatformPaths(): PlatformPaths {
+  const codexHome = process.env.CODEX_HOME?.trim()
+    ? process.env.CODEX_HOME
+    : join(os.homedir(), ".codex");
+  return {
+    platformId: "codex",
+    configDir: codexHome,
+    agentsDir: join(codexHome, "skills"),
+    skillsDir: join(codexHome, "skills"),
+  };
+}

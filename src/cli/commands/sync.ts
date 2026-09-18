@@ -1,7 +1,12 @@
 import { defineCommand } from "citty";
 import { loadLock } from "../config.ts";
-import { getSyncTarget, getRolePath } from "../paths.ts";
+import { getSyncTarget, getTargetConfigDir, getRolePath } from "../paths.ts";
 import { SyncTarget } from "../../constants.ts";
+import {
+  writeCodexPluginBundle,
+  registerCodexPlugin,
+  resolveRoleboxPackageRoot,
+} from "../../platform/adapters/codex/plugin-bundle.ts";
 import {
   scanAvailableModels,
   findPlaceholderRoles,
@@ -13,6 +18,7 @@ import {
   lstatSync,
   unlinkSync,
   readdirSync,
+  readFileSync,
   statSync,
   cpSync,
   rmSync,
@@ -36,6 +42,18 @@ function makeBackupPath(syncTarget: string, role: string): string {
     n++;
   }
   return backupPath;
+}
+
+/**
+ * Read the package version the way `src/cli/main.ts` does — from the
+ * package.json at the resolved package root — so the Codex plugin manifest is
+ * stamped with the real released version instead of a hardcoded one.
+ */
+function readPackageVersion(packageRoot: string): string {
+  const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as {
+    version: string;
+  };
+  return pkg.version;
 }
 
 /**
@@ -143,6 +161,22 @@ export async function sync(target: string, relink = false): Promise<void> {
   if (cleaned > 0) parts.push(`${cleaned} cleaned`);
   console.log(parts.join(", "));
 
+  // ── Codex plugin bundle ─────────────────────────────────────────────
+  // Codex is extended through a local plugin marketplace, not role symlinks
+  // alone: write the bundle (manifest, MCP config, marketplace manifest,
+  // skills link) and register it in the Codex config.toml. Every other target
+  // is untouched by this branch.
+  if (target === SyncTarget.Codex) {
+    const packageRoot = resolveRoleboxPackageRoot(import.meta.url);
+    const bundle = writeCodexPluginBundle({
+      codexHome: getTargetConfigDir(target),
+      packageRoot,
+      version: readPackageVersion(packageRoot),
+    });
+    registerCodexPlugin(bundle.configPath, bundle.marketplaceDir);
+    console.log(`Codex plugin: registered ${bundle.marketplaceDir} in ${bundle.configPath}`);
+  }
+
   // ── Relinked role directories ───────────────────────────────────────
   // Only populated by an explicit `--relink`. The original directory was
   // copied to `backup` before the symlink replaced it, so no local edits are
@@ -208,12 +242,12 @@ export async function sync(target: string, relink = false): Promise<void> {
 export default defineCommand({
   meta: {
     name: "sync",
-    description: "Deploy roles to target tool (opencode | pi | dsh)",
+    description: "Deploy roles to target tool (opencode | pi | dsh | codex)",
   },
   args: {
     target: {
       type: "positional",
-      description: "Sync target: opencode, pi, or dsh (default: opencode)",
+      description: "Sync target: opencode, pi, dsh, or codex (default: opencode)",
       default: SyncTarget.Opencode,
     },
     relink: {

@@ -25,6 +25,26 @@ Pi runs `PiLightweightServiceStack` instead of the full PluginCore service stack
 - Recovery engine (`RecoveryService` / `RecoveryEngine` crash and error-recovery strategies; only graph-engine startup recovery runs on Pi)
 - TUI (the interactive terminal UI binary is opencode-only)
 
+## Codex (MCP) parity
+
+The Codex tool surface is pinned by `tests/platform/codex-mcp.test.ts`: the MCP server (`rolebox mcp`) registers the canonical intersection `buildCanonicalTools` assembles for a harness with no session client and no dispatch backend, plus `load_role_skill` — 15 tools. See [compatibility.md](compatibility.md) for the parity matrix and [codex.md](codex.md) for the documented surface.
+
+- `session_*` tools are absent: the stdio MCP transport exposes no rolebox session client.
+- `dispatch_*` / `loop_*` / `task_*` are withheld, and the `graph_*` tools are not registered either — the Codex entry builds the canonical tool set without a dispatch manager, so the graph tools are never constructed. No stubs stand in for any of them.
+- `asset_hot_reload` is opencode-only and is not on the MCP surface.
+- There is no permission prompt on the MCP transport: `context.ask()` is a documented no-op, so a tool that would request permission on another harness (for example `interactive_terminal` open) runs without a prompt.
+
+### Platform-inherent gaps (explicit non-goals on Codex)
+
+Codex drives rolebox purely over MCP instead of the PluginCore service stack, so these opencode-only subsystems are out of scope on Codex:
+
+- Hot reload (`asset_hot_reload` tool + `HotReloadService`)
+- Extensions (the PluginCore `ExtensionService` extension loader)
+- Recovery engine (`RecoveryService` / `RecoveryEngine`)
+- TUI (the interactive terminal UI binary is opencode-only)
+- Role switching (no in-session active-role switcher)
+- Hooks-driven activation (`chat.message` / `session.idle` / tool interception) — the MCP transport carries no host event stream, so activation happens per MCP call
+
 ## hashline_edit concurrency semantics
 
 `hashline_edit` serializes edits to the same file **within a single process** (per-path async mutex covering the full read → validate → compute → recheck → write cycle) and rejects duplicate file paths in one batch, folding them by filesystem identity (dev+inode) so symlink aliases, hardlink aliases, case aliases on case-insensitive filesystems (darwin/win32), and trailing-slash spellings of the same file are all caught.

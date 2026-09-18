@@ -29,6 +29,10 @@
       "import": "./dist/entries/dsh.js",
       "types": "./dist/entries/dsh.d.ts"
     },
+    "./codex": {
+      "import": "./dist/entries/codex.js",
+      "types": "./dist/entries/codex.d.ts"
+    },
     "./dsh/cordis.patch.yml": "./dsh/cordis.patch.yml",
     "./dsh/package.json": "./package.json",
     "./client": {
@@ -63,6 +67,7 @@
     "pi-extension",
     "pi-package",
     "dsh",
+    "codex",
     "deepseek",
     "ai-agent",
     "llm",

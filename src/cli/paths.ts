@@ -136,6 +136,7 @@ export function getRolesDir(): string {
  * - `"opencode"` → `{~/.config/opencode}/rolebox`
  * - `"pi"` → `{$PI_CODING_AGENT_DIR or ~/.pi/agent}/rolebox`
  * - `"dsh"` → `{$DSH_HOME or ~/.dsh}/rolebox`
+ * - `"codex"` → `{$CODEX_HOME or ~/.codex}/rolebox`
  *
  * Each path matches where the corresponding runtime entry point resolves
  * its `roleboxDir` (see `resolveRoleboxDirectories` in platform/factory.ts).
@@ -150,6 +151,7 @@ export function getSyncTarget(target: string): string {
  * - `opencode` → `~/.config/opencode`
  * - `pi` → `$PI_CODING_AGENT_DIR` or `~/.pi/agent`
  * - `dsh` → `$DSH_HOME` or `~/.dsh`
+ * - `codex` → `$CODEX_HOME` or `~/.codex`
  */
 export function getTargetConfigDir(target: string): string {
   return resolveSyncTargetPaths(target).configDir;
@@ -161,6 +163,7 @@ export function getTargetConfigDir(target: string): string {
  * - `opencode` → `{~/.config/opencode}/skills`
  * - `pi` → `{~/.pi/agent}/skills`
  * - `dsh` → `{~/.dsh}/skills`
+ * - `codex` → `{$CODEX_HOME or ~/.codex}/skills`
  */
 export function getTargetSkillsDir(target: string): string {
   return resolveSyncTargetPaths(target).skillsDir;

@@ -8,14 +8,21 @@ import type { RoleboxConfig, LockEntry } from "../../src/cli/types";
 import type { PromptApi } from "../../src/cli/pick.ts";
 
 let tmpDir: string;
+let savedCodexHome: string | undefined;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-config-test-"));
   process.env.XDG_CONFIG_HOME = tmpDir;
+  // The platform registry includes codex, so registry-driven target sweeps must
+  // not resolve (or stat) a developer's real ~/.codex.
+  savedCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = join(tmpDir, "codex");
 });
 
 afterEach(() => {
   delete process.env.XDG_CONFIG_HOME;
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -473,7 +480,7 @@ describe("sync-target resolution (platform parity)", () => {
     expect(getTargetSkillsDir("dsh")).toBe(join(dshHome, "skills"));
   });
 
-  it("(ii) an unknown --target throws the registry error listing opencode, pi, dsh", async () => {
+  it("(ii) an unknown --target throws the registry error listing opencode, pi, dsh, codex", async () => {
     const { getSyncTarget } = await importPaths();
 
     let message = "";
@@ -487,6 +494,7 @@ describe("sync-target resolution (platform parity)", () => {
     expect(message).toContain("opencode");
     expect(message).toContain("pi");
     expect(message).toContain("dsh");
+    expect(message).toContain("codex");
   });
 
   it("(iii) omitting --target preserves the opencode default (backward compatibility)", async () => {
@@ -572,7 +580,7 @@ describe("config target menu (interactive)", () => {
     const target = await resolveConfigTarget({ interactive: true, prompts });
 
     expect(target).toBe("opencode");
-    expect(offeredTargets(select)).toEqual(["opencode", "pi", "dsh"]);
+    expect(offeredTargets(select)).toEqual(["opencode", "pi", "dsh", "codex"]);
   });
 
   it("(b) selecting pi resolves the role dir under the pi root", async () => {
@@ -613,7 +621,7 @@ describe("config target menu (interactive)", () => {
     const target = await resolveConfigTarget({ interactive: true, role: "ghost-role", prompts });
 
     expect(target).toBe("dsh");
-    expect(offeredTargets(select)).toEqual(["opencode", "pi", "dsh"]);
+    expect(offeredTargets(select)).toEqual(["opencode", "pi", "dsh", "codex"]);
   });
 
   it("(b3) run() with an explicit --target writes through that target's sync root", async () => {

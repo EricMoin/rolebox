@@ -5,7 +5,7 @@
 # rolebox
 
 <p align="center">
-  An agent-harness plugin — for <a href="https://github.com/sst/opencode">opencode</a>, <a href="https://pi.dev">pi</a>, and <a href="https://www.npmjs.com/package/@deepseek-ai/dsh">dsh</a> —
+  An agent-harness plugin — for <a href="https://github.com/sst/opencode">opencode</a>, <a href="https://pi.dev">pi</a>, <a href="https://www.npmjs.com/package/@deepseek-ai/dsh">dsh</a>, and <a href="docs/codex.md">Codex</a> —
   with persistent memory, multi-agent dispatch, LSP integration, and engineering-team workflows.
 </p>
 
@@ -52,8 +52,9 @@ The graph engine is how the team runs: `graph_create` → `graph_add_node` / `gr
 | [opencode](https://github.com/sst/opencode) | `~/.config/opencode` | `~/.config/opencode/rolebox` | `~/.config/opencode/skills` | `XDG_CONFIG_HOME` |
 | [pi](https://pi.dev) | `~/.pi/agent` | `~/.pi/agent/rolebox` | `~/.pi/agent/skills` | `PI_CODING_AGENT_DIR` |
 | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) | `~/.dsh` | `~/.dsh/rolebox` | `~/.dsh/skills` | `DSH_HOME` |
+| [Codex](docs/codex.md) | `~/.codex` | `~/.codex/rolebox` | `~/.codex/skills` | `CODEX_HOME` |
 
-On every harness a `rolebox/` directory in the **current working directory** takes precedence over the global roles directory; registry roles install with `rolebox install <name>` and deploy with `rolebox sync <opencode|pi|dsh>`. Jump to setup: [opencode](#opencode) · [pi](#pi) · [dsh](#dsh)
+On every harness a `rolebox/` directory in the **current working directory** takes precedence over the global roles directory; registry roles install with `rolebox install <name>` and deploy with `rolebox sync <opencode|pi|dsh|codex>`. Jump to setup: [opencode](#opencode) · [pi](#pi) · [dsh](#dsh) · [codex](#codex)
 
 ---
 
@@ -87,6 +88,15 @@ mkdir -p ~/.dsh/rolebox && cd ~/.dsh/rolebox && rolebox init my-agent -y   # $DS
 ```
 
 Restart the harness. A non-bundle dsh install instead needs one `- insert:` row naming the profile-relative `./node_modules/rolebox/dist/entries/dsh.js` in the profile's `cordis.patch.yml` — see [examples/dsh/cordis.patch.yml](examples/dsh/cordis.patch.yml). Profile patch semantics, the web role-switch dock, and the `/rolebox` REST surface are documented in [docs/dsh-plugin-contract.md](docs/dsh-plugin-contract.md).
+
+### codex
+
+```bash
+npm install -g rolebox     # or run from a checkout built with `bun run build`
+rolebox sync codex
+```
+
+`rolebox sync codex` writes the local plugin bundle under `$CODEX_HOME/rolebox-marketplace` (`~/.codex/rolebox-marketplace` by default), registers it in the Codex `config.toml`, and deploys installed roles to `$CODEX_HOME/rolebox`. The bundle starts the rolebox MCP server (`rolebox mcp`), which exposes rolebox's canonical tools over stdio. Restart Codex afterwards. Details: [docs/codex.md](docs/codex.md).
 
 > **Deprecated entry paths.** The former `dist/index.js`, `dist/pi-extension.js`, and `dist/dsh-plugin.js` artifacts still resolve as generated re-export aliases, but they are deprecated — new checkouts and profile rows should use the canonical `dist/entries/*.js` paths instead.
 
@@ -138,7 +148,8 @@ Install any role from the [oh-my-role registry](https://github.com/EricMoin/oh-m
 | `rolebox install [name]` | Install a role from the registry (picker when omitted) |
 | `rolebox status` | List installed roles and their status |
 | `rolebox info [name]` | Inspect one role in detail (picker when omitted) |
-| `rolebox sync <target>` | Deploy installed roles to `opencode` / `pi` / `dsh` |
+| `rolebox sync <target>` | Deploy installed roles to `opencode` / `pi` / `dsh` / `codex` |
+| `rolebox mcp` | Run the rolebox MCP server on stdio (Codex integration) |
 | `rolebox config [name]` | Configure a role's models (`--target` selects the harness) |
 | `rolebox monitor` | Runtime dashboard (TUI): loops, graph workflows, dispatch |
 | `rolebox memory search <query>` | Full-text search across persistent memory |
@@ -148,7 +159,7 @@ Install any role from the [oh-my-role registry](https://github.com/EricMoin/oh-m
 
 ## Model Alias Configuration
 
-Registry roles often ship placeholder model names; map them once in `role_config.yaml` — `~/.config/opencode/role_config.yaml`, `~/.pi/agent/role_config.yaml`, or `~/.dsh/role_config.yaml` (the harness config directory). Unrecognized values pass through unchanged with a warning. Full resolution chain, error handling, and hot-reload: [docs/model-aliases.md](docs/model-aliases.md).
+Registry roles often ship placeholder model names; map them once in `role_config.yaml` — `~/.config/opencode/role_config.yaml`, `~/.pi/agent/role_config.yaml`, `~/.dsh/role_config.yaml`, or `~/.codex/role_config.yaml` (the harness config directory). Unrecognized values pass through unchanged with a warning. Full resolution chain, error handling, and hot-reload: [docs/model-aliases.md](docs/model-aliases.md).
 
 ---
 
@@ -168,6 +179,7 @@ Registry roles often ship placeholder model names; map them once in `role_config
 | Extensions | [extensions.md](docs/extensions.md) | Registry | [registry.md](docs/registry.md) | Error Handling | [error-handling.md](docs/error-handling.md) |
 | Limitations | [limitations.md](docs/limitations.md) | Compatibility | [compatibility.md](docs/compatibility.md) | dsh Plugin Contract | [dsh-plugin-contract.md](docs/dsh-plugin-contract.md) |
 | dsh Provider Notes | [dsh-provider-notes.md](docs/dsh-provider-notes.md) | Install/Update Audit | [audit-install-update-platform.md](docs/audit-install-update-platform.md) | CLI Output Audit | [audit-progress-ui.md](docs/audit-progress-ui.md) |
+| Codex | [codex.md](docs/codex.md) | Compatibility | [compatibility.md](docs/compatibility.md) | Limitations | [limitations.md](docs/limitations.md) |
 
 ---
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+- **Codex is a supported harness** — rolebox now targets Codex through a generated local plugin marketplace plus a rolebox MCP server: `rolebox sync codex` writes `<codexHome>/rolebox-marketplace` (the marketplace manifest plus `plugins/rolebox` carrying `.codex-plugin/plugin.json`, `.mcp.json` and a `skills` symlink to `<codexHome>/skills`), deploys installed roles to `<codexHome>/rolebox`, and registers one managed block in `<codexHome>/config.toml`, with the Codex home resolved from `$CODEX_HOME` when set and non-blank and `~/.codex` otherwise. The plugin starts the rolebox MCP server (`rolebox mcp`, also exported as `rolebox/codex`), a newline-delimited JSON-RPC 2.0 stdio server exposing 15 canonical tools — hashline_read/hashline_edit, memory_write/memory_recall/memory_list, web_search/web_read/web_fetch, asset_search/asset_inspect/asset_validate, reference_search, load_role_skill, signal and interactive_terminal — with no `session_*`, `dispatch_*`, `loop_*`, `task_*` or `graph_*` tools, no role switching, TUI, hot reload, extension loader or hooks-driven activation; the generated layout, the MCP protocol surface and those non-goals are documented in [docs/codex.md](docs/codex.md).
+
 ### Bug Fixes
 
 - **Dispatch teardown always releases its resources** — `DispatchManager.dispose()` now runs its release tail in a `finally`, so a throwing state flush can no longer leave the watchdog timers running or the state lock held. Pending debounced progress writes are flushed and their timers cleared on teardown, so no write can fire after a manager is disposed.
