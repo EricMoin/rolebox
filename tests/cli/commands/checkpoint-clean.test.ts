@@ -36,6 +36,8 @@ beforeEach(() => {
 afterEach(() => {
   process.cwd = origCwd;
   Date.now = origDateNow;
+  // The --all test sets exitCode 1; process-global, so it must not leak into the run's exit status (Bun ignores "= undefined").
+  process.exitCode = 0;
   rmSync(tmpDir, { recursive: true, force: true });
   Object.defineProperty(process.stdin, "isTTY", {
     value: origStdinIsTTY,
