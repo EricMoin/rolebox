@@ -121,12 +121,15 @@ alias/passthrough path — prefer the explicit `provider/model-id` form.
     return aliased;
   }
 
-  // Priority 3: unrecognized → info + passthrough original
-  log.info(
-    `Model "${model}" is not a known model and has no alias configured. ` +
-      `Passing through as-is. You can add an alias in role_config.yaml under the "model_aliases" key. ` +
-      `Example: model_aliases:\n  "${model}": provider/model_id`,
-  );
+  // Priority 3: unrecognized → info once per model per generation + passthrough
+  if (!reportedModels.has(model)) {
+    reportedModels.add(model);
+    log.info(
+      `Model "${model}" is not a known model and has no alias configured. ` +
+        `Passing through as-is. You can add an alias in role_config.yaml under the "model_aliases" key. ` +
+        `Example: model_aliases:\n  "${model}": provider/model_id`,
+    );
+  }
   return model;
 ```
 

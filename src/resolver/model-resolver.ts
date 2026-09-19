@@ -26,6 +26,12 @@ let initialized = false;
 let knownModelIds: Set<string> = new Set();
 let modelAliases: Map<string, string> = new Map();
 
+// Advisory reports already emitted for the current cache generation.  These
+// are hot-path guards: resolveModel runs once per role and per subagent on
+// every discovery and hot reload, so an identical line must not repeat.
+let reportedModels = new Set<string>();
+let uninitializedWarned = false;
+
 // ── Test seams ────────────────────────────────────────────────────────────
 
 /** @internal Test seam — swap the module-level logger for a mock. */
@@ -36,13 +42,16 @@ export function __setLoggerForTest(mockLog: Logger<ILogObj>): void {
 /**
  * @internal Test seam — reset all module-level state to defaults.
  *
- * Clears `initialized`, `knownModelIds`, `modelAliases`, and restores
+ * Clears `initialized`, `knownModelIds`, `modelAliases`, the per-generation
+ * advisory state (`reportedModels`, `uninitializedWarned`), and restores
  * the default logger. Useful for test isolation between scenario groups.
  */
 export function __resetForTest(): void {
   initialized = false;
   knownModelIds = new Set();
   modelAliases = new Map();
+  reportedModels = new Set();
+  uninitializedWarned = false;
   log = createSubLogger("model-resolver");
 }
 
@@ -56,6 +65,11 @@ export function __resetForTest(): void {
  * `opencode.jsonc` or `role_config.yaml` take effect on the next
  * `initModelResolver()` call (which happens at every bootstrap and
  * hot-reload cycle).
+ *
+ * Advisory logs are scoped to a cache generation: this call clears
+ * `reportedModels` and `uninitializedWarned`, so each distinct unresolvable
+ * model is reported once per generation and the not-initialized warning is
+ * re-armed.
  *
  * @param configDir — path to the opencode config directory (contains
  *   `opencode.jsonc` and `role_config.yaml`).  When omitted, falls back
@@ -72,18 +86,26 @@ export function initModelResolver(configDir?: string): void {
   // 2. Load model aliases from role_config.yaml
   modelAliases = loadModelAliases(dir);
 
+  // 3. New cache generation → re-arm the advisory reports
+  reportedModels = new Set();
+  uninitializedWarned = false;
+
   initialized = true;
 }
 
 /**
  * Resolve a model string through the fallback chain:
  *
- *   1. Not initialized → warn + passthrough original.
+ *   1. Not initialized → warn once per generation + passthrough original.
  *   2. Empty / whitespace-only → passthrough original.
  *   3. Found in `knownModelIds` (from opencode.jsonc) → passthrough original
  *      (already a canonical `provider/model_id`).
  *   4. Found in `modelAliases` → return the **single-hop** mapped value.
- *   5. Neither → `log.info` a hint + passthrough original.
+ *   5. Neither → `log.info` a hint + passthrough original.  The hint is
+ *      emitted at most once per distinct model per generation.
+ *
+ * Advisory state is per cache generation: `initModelResolver()` and
+ * `__resetForTest()` clear it, so a fresh generation re-reports.
  *
  * @param model — the model string to resolve (from a role's `model:` field).
  * @returns The resolved canonical model string, or the original string if
@@ -95,12 +117,15 @@ export function resolveModel(model: string): string {
     return model;
   }
 
-  // Guard: not initialized → warn + passthrough
+  // Guard: not initialized → warn once per generation + passthrough
   if (!initialized) {
-    log.warn(
-      `Model resolver not initialized; passing through model "${model}" as-is. ` +
-        `Call initModelResolver() before resolveModel().`,
-    );
+    if (!uninitializedWarned) {
+      uninitializedWarned = true;
+      log.warn(
+        `Model resolver not initialized; passing through model "${model}" as-is. ` +
+          `Call initModelResolver() before resolveModel().`,
+      );
+    }
     return model;
   }
 
@@ -115,16 +140,28 @@ export function resolveModel(model: string): string {
     return aliased;
   }
 
-  // Priority 3: unrecognized → info + passthrough original
-  log.info(
-    `Model "${model}" is not a known model and has no alias configured. ` +
-      `Passing through as-is. You can add an alias in role_config.yaml under the "model_aliases" key. ` +
-      `Example: model_aliases:\n  "${model}": provider/model_id`,
-  );
+  // Priority 3: unrecognized → info once per model per generation + passthrough
+  if (!reportedModels.has(model)) {
+    reportedModels.add(model);
+    log.info(
+      `Model "${model}" is not a known model and has no alias configured. ` +
+        `Passing through as-is. You can add an alias in role_config.yaml under the "model_aliases" key. ` +
+        `Example: model_aliases:\n  "${model}": provider/model_id`,
+    );
+  }
   return model;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
+
+/**
+ * Narrow an unknown value to a plain (non-array) record, or `null`.
+ */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 /**
  * Read and parse `{configDir}/role_config.yaml`, extracting the
@@ -133,23 +170,25 @@ export function resolveModel(model: string): string {
  * Graceful degradation — never throws:
  * - Missing file → empty Map (no log).
  * - Malformed YAML → warn + empty Map.
+ * - `model_aliases` absent or null → empty Map (no log).
+ * - `model_aliases` not a mapping (string, number, boolean, array) →
+ *   warn + empty Map.
  * - Invalid alias entries (empty key, non-string value, empty-string value) →
  *   warn for each skipped entry.
  *
  * @param configDir — absolute path to the opencode config directory.
  */
-function loadModelAliases(configDir?: string): Map<string, string> {
-  const dir = configDir ?? getOpencodeConfigDir();
-  const configPath = join(dir, "role_config.yaml");
+function loadModelAliases(configDir: string): Map<string, string> {
+  const configPath = join(configDir, "role_config.yaml");
 
   if (!existsSync(configPath)) {
     return new Map();
   }
 
-  let doc: unknown;
+  let parsed: unknown;
   try {
     const raw = readFileSync(configPath, "utf-8");
-    doc = parseYaml(raw);
+    parsed = parseYaml(raw);
   } catch {
     log.warn(
       `Failed to parse ${configPath}; model aliases will not be available.`,
@@ -157,18 +196,28 @@ function loadModelAliases(configDir?: string): Map<string, string> {
     return new Map();
   }
 
-  if (typeof doc !== "object" || doc === null) {
+  const doc = asRecord(parsed);
+  if (doc === null) {
     return new Map();
   }
 
-  const rawAliases = (doc as Record<string, unknown>).model_aliases;
-  if (typeof rawAliases !== "object" || rawAliases === null) {
+  const rawAliases = doc.model_aliases;
+  if (rawAliases === undefined || rawAliases === null) {
+    return new Map();
+  }
+
+  const aliasRecord = asRecord(rawAliases);
+  if (aliasRecord === null) {
+    const kind = Array.isArray(rawAliases) ? "array" : typeof rawAliases;
+    log.warn(
+      `Ignoring "model_aliases" in ${configPath}: expected a mapping of name to model id, got ${kind}`,
+    );
     return new Map();
   }
 
   const result = new Map<string, string>();
 
-  for (const [key, value] of Object.entries(rawAliases)) {
+  for (const [key, value] of Object.entries(aliasRecord)) {
     // Skip empty-string keys (YAML can produce these)
     if (key.length === 0) {
       log.warn(`Skipping empty alias key in ${configPath}`);

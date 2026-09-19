@@ -1,8 +1,9 @@
 /**
  * Tests for the model resolver (src/resolver/model-resolver.ts).
  *
- * Covers 18 unit tests + 9 integration tests as defined in the
- * model-placeholder-fallback strategy (Step 6):
+ * Covers the unit + integration tests defined in the
+ * model-placeholder-fallback strategy (Step 6), plus per-generation
+ * advisory de-duplication regressions:
  *
  * Unit tests (resolveModel / initModelResolver / loadModelAliases):
  *   1.  Known model → passthrough unchanged, no log
@@ -23,6 +24,10 @@
  *  16.  Alias value is empty string → warn, skipped
  *  17.  Alias value is an array → warn, skipped
  *  18.  Valid aliases mixed with invalid entries → valid work, invalid skipped
+ *  19. Repeated unrecognized resolves of one model → 1 info; 2nd model → 2
+ *  20. Second initModelResolver generation → the same model reported again
+ *  21. Repeated resolves before init → exactly 1 warn
+ *  22. `model_aliases` declared as an array → warn + empty aliases
  *
  * Integration tests (end-to-end via discoverRoles / bootstrapRoles):
  *   I1. Role with explicit model resolved via known models
@@ -252,6 +257,87 @@ describe("resolveModel", () => {
     expect(resolveModel("A")).toBe("B");
     // B itself maps to test-provider/model-one
     expect(resolveModel("B")).toBe("test-provider/model-one");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── Unit: advisory de-duplication (per cache generation) ────────────────
+
+describe("resolveModel advisory de-duplication", () => {
+  // --- Test 19: one info per distinct unrecognized model per generation ---
+  it("reports each unrecognized model at most once per generation", () => {
+    const dir = setupConfigDir(OPencodeJsonc());
+    initModelResolver(dir);
+
+    for (let i = 0; i < 5; i++) {
+      expect(resolveModel("ghost/model-x")).toBe("ghost/model-x");
+    }
+    expect(capturedInfos).toHaveLength(1);
+
+    for (let i = 0; i < 5; i++) {
+      expect(resolveModel("ghost/model-y")).toBe("ghost/model-y");
+    }
+    expect(capturedInfos).toHaveLength(2);
+
+    const msg = JSON.stringify(capturedInfos);
+    expect(msg).toContain("ghost/model-x");
+    expect(msg).toContain("ghost/model-y");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // --- Test 20: a new generation re-arms the report ---
+  it("re-reports a model after a second initModelResolver generation", () => {
+    const dir = setupConfigDir(OPencodeJsonc());
+
+    initModelResolver(dir);
+    expect(resolveModel("ghost/re-armed")).toBe("ghost/re-armed");
+    expect(resolveModel("ghost/re-armed")).toBe("ghost/re-armed");
+    expect(capturedInfos).toHaveLength(1);
+
+    // New generation → the same model is reported once more
+    initModelResolver(dir);
+    expect(resolveModel("ghost/re-armed")).toBe("ghost/re-armed");
+    expect(resolveModel("ghost/re-armed")).toBe("ghost/re-armed");
+    expect(capturedInfos).toHaveLength(2);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // --- Test 21: one not-initialized warn per generation ---
+  it("warns at most once per generation when not initialized", () => {
+    // beforeEach resets the resolver, so it is uninitialized here
+    for (let i = 0; i < 5; i++) {
+      expect(resolveModel("pre-init-model")).toBe("pre-init-model");
+    }
+
+    expect(capturedWarns).toHaveLength(1);
+    const msg = JSON.stringify(capturedWarns);
+    expect(msg).toContain("not initialized");
+    expect(msg).toContain("pre-init-model");
+  });
+
+  // --- Test 22: model_aliases as an array → warn + empty aliases ---
+  it("warns and ignores a model_aliases value that is an array", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rolebox-mr-unit-"));
+    writeFileSync(join(dir, "opencode.jsonc"), OPencodeJsonc(), "utf-8");
+    writeFileSync(
+      join(dir, "role_config.yaml"),
+      'model_aliases:\n  - "one"\n  - "two"\n',
+      "utf-8",
+    );
+
+    initModelResolver(dir);
+
+    expect(capturedWarns).toHaveLength(1);
+    const msg = JSON.stringify(capturedWarns);
+    expect(msg).toContain("model_aliases");
+    expect(msg).toContain(join(dir, "role_config.yaml"));
+    expect(msg).toContain("array");
+
+    // No bogus numeric aliases were registered from the array indices
+    expect(resolveModel("0")).toBe("0");
 
     rmSync(dir, { recursive: true, force: true });
   });
