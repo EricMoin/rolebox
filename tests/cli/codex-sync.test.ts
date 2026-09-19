@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import {
   escapeTomlString,
   normalizeLinkTarget,
@@ -519,9 +520,20 @@ describe("resolveRoleboxPackageRoot", () => {
   });
 
   it("throws when no package.json exists in the bounded ancestor chain", () => {
-    expect(() => resolveRoleboxPackageRoot("file:///nonexistent/a/b/c/mod.ts")).toThrow(
-      /Could not resolve the rolebox package root/,
-    );
+    // The URL must come from a real path: a literal "file:///nonexistent/..." has no
+    // Windows drive letter and fileURLToPath rejects it before the walk. Ten nested dirs
+    // exceed the walk's 8-ancestor bound, so every probed dir stays inside the empty tree.
+    const emptyRoot = mkdtempSync(join(tmpdir(), "rolebox-no-package-root-"));
+    try {
+      const moduleUrl = pathToFileURL(
+        join(emptyRoot, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "mod.ts"),
+      ).href;
+      expect(() => resolveRoleboxPackageRoot(moduleUrl)).toThrow(
+        /Could not resolve the rolebox package root/,
+      );
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
   });
 });
 
