@@ -284,7 +284,7 @@ export class DshRoleSwitchWebRoute {
     );
     const result = await this.switcher.activate(parsed.role, session);
     if (!result.ok) {
-      return sendJson(res, 400, errorBody(result.error ?? "Role switch failed"));
+      return sendJson(res, 400, errorBody(result.error));
     }
     this._log.info("Role switched via web route", { session, role: parsed.role });
     return sendJson(res, 200, { ok: true, session, role: parsed.role });

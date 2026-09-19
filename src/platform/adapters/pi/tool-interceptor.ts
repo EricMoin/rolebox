@@ -30,6 +30,7 @@ import { appendCorrection } from "../../../hooks/context.ts";
 import type { HookState } from "../../../hooks/state.ts";
 import type { HookDeps } from "../../../hooks/deps.ts";
 import type { CanonicalToolContext } from "../../types.ts";
+import { err, ok, type Result } from "../../../utils/result.ts";
 
 /**
  * Optional hook wiring for the interceptor. When absent, validation and
@@ -47,9 +48,7 @@ export interface ToolInterceptorHooks {
  * Outcome of running the tool-before pipeline against a Pi invocation.
  * `ok: false` carries the human-readable error to return to the model.
  */
-export type ToolBeforeOutcome =
-  | { ok: true; args: Record<string, unknown> }
-  | { ok: false; error: string };
+export type ToolBeforeOutcome = Result<Record<string, unknown>, string>;
 
 /**
  * Run the shared handleToolBefore pipeline against a Pi tool invocation.
@@ -77,14 +76,14 @@ export async function interceptToolBefore(
       hooks?.state,
       hooks?.deps,
     );
-    return { ok: true, args: output.args };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    return ok(output.args);
+  } catch (caught) {
+    const error = caught instanceof Error ? caught.message : String(caught);
     // Correction injection: surface the rejection in the next system
     // transform, not only as a tool result.
     if (hooks?.state) {
       appendCorrection(hooks.state.pendingCorrections, context.sessionID, error);
     }
-    return { ok: false, error };
+    return err(error);
   }
 }

@@ -207,7 +207,7 @@ export class PiToolFactory implements IToolFactory {
         if (!check.ok) return toPiResult(check.error);
         // Params arrive as Record<string, unknown> from Pi's runtime.
         // The schema guarantees shape compatibility — cast through unknown.
-        const result = await def.execute(check.args as any, context);
+        const result = await def.execute(check.value as any, context);
         return toPiResult(result);
       },
     };

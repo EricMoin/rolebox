@@ -454,9 +454,9 @@ export function createWebFetchTool() {
       // ── LAYER 1: Request Validation ──────────────────────────────────────
       // 1a. SSRF protection
       const urlCheck = validateUrl(url);
-      if (!urlCheck.valid) {
-        log.warn("SSRF guard blocked URL", { url, reason: urlCheck.reason });
-        return formatError(url, `Blocked: ${urlCheck.reason}`);
+      if (!urlCheck.ok) {
+        log.warn("SSRF guard blocked URL", { url, reason: urlCheck.error });
+        return formatError(url, `Blocked: ${urlCheck.error}`);
       }
 
       // 1b. Build format-aware Accept header

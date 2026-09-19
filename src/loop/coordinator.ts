@@ -9,6 +9,7 @@ import {
   failLoop,
 } from "./worker-dispatch.js";
 import { createSubLogger } from "../logger.ts";
+import { err, ok } from "../utils/result.ts";
 import { createHash } from "node:crypto";
 
 const log = createSubLogger("loop/coordinator");
@@ -249,7 +250,7 @@ export class LoopCoordinator {
   }): RegisterResult {
     // ── Check: already active for this session ──────────────────
     if (this.loops.has(input.originSessionId)) {
-      return { ok: false, reason: "loop already active for this session" };
+      return err("loop already active for this session");
     }
 
     // ── (a) Compute prompt fingerprint ──────────────────────────
@@ -289,12 +290,10 @@ export class LoopCoordinator {
         const ancestor = this.loops.get(ancestorId);
         if (!ancestor) break;
         if (ancestor.promptFingerprint === promptFingerprint) {
-          return {
-            ok: false,
-            reason:
-              "identical task already looping in ancestor chain " +
+          return err(
+            "identical task already looping in ancestor chain " +
               "— refine the task or report blockage instead",
-          };
+          );
         }
         ancestorId = ancestor.parentLoopId;
       }
@@ -308,13 +307,11 @@ export class LoopCoordinator {
       const currentCount = countTreeNonTerminal(this.loops, rootId);
       // +1 for the loop being registered (not yet in this.loops)
       if (currentCount + 1 > MAX_TREE_WORKER_SESSIONS) {
-        return {
-          ok: false,
-          reason:
-            `tree worker budget exhausted: ${currentCount} active ` +
+        return err(
+          `tree worker budget exhausted: ${currentCount} active ` +
             `(max ${MAX_TREE_WORKER_SESSIONS}) — some loops must complete ` +
             `before spawning more`,
-        };
+        );
       }
     }
 
@@ -343,7 +340,7 @@ export class LoopCoordinator {
     this._persist();
     void Promise.resolve().then(() => this._kickoffFromActivating(input.originSessionId));
 
-    return { ok: true };
+    return ok();
   }
 
   async onOriginIdle(originSessionId: string): Promise<void> {

@@ -1,4 +1,5 @@
 import { createSubLogger } from "../logger.ts";
+import { err, ok, type Result } from "../utils/result.ts";
 
 const log = createSubLogger("web:ssrf");
 
@@ -9,11 +10,6 @@ const IPV6_RE = /^[0-9a-f:]+$/i;
 const INTERNAL_HOSTNAME_RE = /^(.*\.)?(local|internal)$/i;
 
 const LOCALHOST_RE = /^localhost$/i;
-
-export interface ValidationResult {
-  valid: boolean;
-  reason?: string;
-}
 
 /**
  * Parse the host portion of a URL, stripping port and userinfo.
@@ -181,23 +177,23 @@ function isInternalHostname(host: string): boolean {
  * - Internal hostnames (localhost, *.local, *.internal)
  *
  * @param url - The URL to validate.
- * @returns `{ valid: true }` if the URL is safe, or `{ valid: false, reason }` if rejected.
+ * @returns `ok()` if the URL is safe, or `err(reason)` describing why the URL was rejected.
  */
-export function validateUrl(url: string): ValidationResult {
+export function validateUrl(url: string): Result<void, string> {
   // 1. Basic sanity — must be a non-empty string
   if (!url || typeof url !== "string") {
-    return { valid: false, reason: "URL must be a non-empty string" };
+    return err("URL must be a non-empty string");
   }
 
   const trimmed = url.trim();
   if (trimmed.length === 0) {
-    return { valid: false, reason: "URL must be a non-empty string" };
+    return err("URL must be a non-empty string");
   }
 
   // 2. Protocol check (before URL parsing to catch data:/javascript: URLs)
   const protocolMatch = trimmed.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
   if (!protocolMatch) {
-    return { valid: false, reason: "URL is missing a protocol scheme" };
+    return err("URL is missing a protocol scheme");
   }
 
   const protocol = protocolMatch[1].toLowerCase();
@@ -205,7 +201,7 @@ export function validateUrl(url: string): ValidationResult {
   // Reject non-http(s) protocols
   if (protocol !== "http" && protocol !== "https") {
     log.debug(`Rejected non-http protocol: ${protocol}://`);
-    return { valid: false, reason: `Protocol '${protocol}:' is not allowed. Only http: and https: are permitted` };
+    return err(`Protocol '${protocol}:' is not allowed. Only http: and https: are permitted`);
   }
 
   // 3. Parse the URL
@@ -213,28 +209,28 @@ export function validateUrl(url: string): ValidationResult {
   try {
     parsed = new URL(trimmed);
   } catch {
-    return { valid: false, reason: "URL is malformed and cannot be parsed" };
+    return err("URL is malformed and cannot be parsed");
   }
 
   const host = parsed.hostname;
 
   // 4. Reject empty hostnames
   if (!host || host.length === 0) {
-    return { valid: false, reason: "URL has no hostname" };
+    return err("URL has no hostname");
   }
 
   // 5. Check internal hostnames
   if (isInternalHostname(host)) {
     log.debug(`Rejected internal hostname: ${host}`);
-    return { valid: false, reason: `Hostname '${host}' resolves to an internal or local-only address` };
+    return err(`Hostname '${host}' resolves to an internal or local-only address`);
   }
 
   // 6. Check IP-based private addresses
   if (isPrivateIp(host)) {
     log.debug(`Rejected private IP: ${host}`);
-    return { valid: false, reason: `IP address '${host}' is a private, loopback, or link-local address` };
+    return err(`IP address '${host}' is a private, loopback, or link-local address`);
   }
 
   log.debug(`URL validated: ${trimmed}`);
-  return { valid: true };
+  return ok();
 }

@@ -1,3 +1,5 @@
+import type { Result } from "../utils/result.ts";
+
 /**
  * Session-isolation mode for a loop's rounds.
  *
@@ -19,11 +21,11 @@ export type LoopMode = "inherit" | "fresh";
 /**
  * Result of registering a loop with the LoopService.
  * `ok: true` means registration succeeded and the loop was dispatched.
- * `ok: false; reason` describes why registration was rejected (e.g. loop
+ * `ok: false; error` describes why registration was rejected (e.g. loop
  * already active for the session, identical task in an ancestor chain, tree
  * worker budget exhausted).
  */
-export type RegisterResult = { ok: true } | { ok: false; reason: string };
+export type RegisterResult = Result<void, string>;
 
 /**
  * Orchestrator phase of a loop execution.

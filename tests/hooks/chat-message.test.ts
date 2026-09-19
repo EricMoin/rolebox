@@ -367,7 +367,7 @@ describe("handleChatMessage — loop function activation", () => {
     const getLoopState = mock(() => null);
     const register = mock(() => ({
       ok: false,
-      reason: "loop already active for this session",
+      error: "loop already active for this session",
     }));
     const state = makeState();
     state.activeLoopManager = {

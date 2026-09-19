@@ -1,5 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { ROLE_YAML } from "../../../constants.ts";
+import { err, ok, type Result } from "../../../utils/result.ts";
 
 /**
  * Validates a role ID string against naming rules.
@@ -13,40 +14,34 @@ import { ROLE_YAML } from "../../../constants.ts";
  * - Auto-lowercase on normalization
  *
  * @param input - The raw role ID string to validate.
- * @returns Validation result with normalized (lowercased) ID or error.
+ * @returns `ok({ normalized })` with the normalized (lowercased) ID, or
+ *   `err(reason)` when a rule is violated. A rejected input carries no
+ *   normalized value — callers keep their own input on that path.
  */
-export function validateInitRoleId(input: string): {
-  valid: boolean;
-  error?: string;
-  normalized: string;
-} {
+export function validateInitRoleId(input: string): Result<{ normalized: string }, string> {
   if (input === "") {
-    return { valid: false, error: "Role ID must not be empty", normalized: input };
+    return err("Role ID must not be empty");
   }
 
   let normalized = input.toLowerCase().replace(/\s+/g, "-");
 
   if (normalized.length > 100) {
-    return { valid: false, error: "Role ID must be 1–100 characters", normalized: input };
+    return err("Role ID must be 1–100 characters");
   }
 
   if (normalized.includes("--")) {
-    return { valid: false, error: "Role ID must not contain '--' (reserved)", normalized: input };
+    return err("Role ID must not contain '--' (reserved)");
   }
 
   if (normalized.includes("/") || normalized.includes("\\")) {
-    return { valid: false, error: "Role ID must not contain path separators", normalized: input };
+    return err("Role ID must not contain path separators");
   }
 
   if (!/^[a-z0-9_-]+$/.test(normalized)) {
-    return {
-      valid: false,
-      error: "Role ID may only contain ASCII letters, digits, hyphens, and underscores",
-      normalized: input,
-    };
+    return err("Role ID may only contain ASCII letters, digits, hyphens, and underscores");
   }
 
-  return { valid: true, normalized };
+  return ok({ normalized });
 }
 
 /**

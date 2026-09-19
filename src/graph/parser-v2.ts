@@ -46,6 +46,7 @@ import { readFileSync } from "node:fs";
 import yaml from "js-yaml";
 import { createSubLogger } from "../logger.ts";
 import { errorText } from "../utils/error-text.ts";
+import { err, ok, type Result } from "../utils/result.ts";
 import { validateGraphDeclaration } from "./validator-v2.ts";
 import type {
   GraphDeclaration,
@@ -76,9 +77,7 @@ export type GraphDocument = Omit<GraphDeclaration, "version"> & {
 };
 
 /** Result of parsing — a discriminated union so callers never cast. */
-export type GraphParseResult =
-  | { ok: true; graph: GraphDocument }
-  | { ok: false; errors: string[] };
+export type GraphParseResult = Result<GraphDocument, string[]>;
 
 // ── Edge type vocabulary ─────────────────────────────────────────────────
 
@@ -90,43 +89,35 @@ const EDGE_TYPES: readonly EdgeType[] = ["always", "on_signal", "on_condition"];
  * Deserialize a graph from a YAML/JSON string or an already-parsed object.
  *
  * @param source - YAML/JSON text, or a parsed object tree.
- * @returns `{ ok: true, graph }` on success, or `{ ok: false, errors }` with
- *   human-readable deserialization errors on failure. Never throws for
- *   malformed *content*; throws nothing at all on the happy path.
+ * @returns `ok(graph)` on success, or `err(errors)` with the human-readable
+ *   deserialization errors on failure. Never throws for malformed *content*;
+ *   throws nothing at all on the happy path.
  */
 export function parseGraph(source: string | unknown): GraphParseResult {
   let parsed: unknown;
   if (typeof source === "string") {
     try {
       parsed = yaml.load(source);
-    } catch (err) {
-      return {
-        ok: false,
-        errors: [
-          `YAML parse error: ${errorText(err)}`,
-        ],
-      };
+    } catch (caught) {
+      return err([`YAML parse error: ${errorText(caught)}`]);
     }
   } else {
     parsed = source;
   }
 
   if (parsed === null || parsed === undefined) {
-    return { ok: false, errors: ["graph document is empty"] };
+    return err(["graph document is empty"]);
   }
 
   const root = asRecord(parsed);
   if (root === null) {
-    return { ok: false, errors: ["graph document root is not an object"] };
+    return err(["graph document root is not an object"]);
   }
 
   // Primary key `graph:`; legacy `dag:` accepted as an alias (§dag-yaml-schema 4.1).
   const g = asRecord(root.graph) ?? asRecord(root.dag);
   if (g === null) {
-    return {
-      ok: false,
-      errors: ['missing "graph:" (or legacy "dag:") block in document'],
-    };
+    return err(['missing "graph:" (or legacy "dag:") block in document']);
   }
 
   const errors: string[] = [];
@@ -186,8 +177,8 @@ export function parseGraph(source: string | unknown): GraphParseResult {
 
   if (loop_groups.length > 0) graph.loop_groups = loop_groups;
 
-  if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, graph };
+  if (errors.length > 0) return err(errors);
+  return ok(graph);
 }
 
 // ── Field mappers ────────────────────────────────────────────────────────
@@ -567,12 +558,12 @@ export function importGraphFromFile(filePath: string): GraphDeclaration | null {
   const parsed = parseGraph(source);
   if (!parsed.ok) {
     log.warn(
-      `graph file "${filePath}" failed to parse: ${parsed.errors.join("; ")}`,
+      `graph file "${filePath}" failed to parse: ${parsed.error.join("; ")}`,
     );
     return null;
   }
 
-  const document: GraphDocument = parsed.graph;
+  const document: GraphDocument = parsed.value;
   // Execution-mode validation: a serialized graph file that CANNOT run — an
   // uncontained revise-free cycle (deadlocks at run) or an unknown
   // on_condition name (never-satisfiable edge) — is rejected here (null)

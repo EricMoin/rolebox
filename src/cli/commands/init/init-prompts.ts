@@ -56,7 +56,7 @@ export async function runInteractiveWizard(
         return 'Role name must not be empty.';
       }
       const result = validateInitRoleId(value);
-      if (!result.valid) return result.error;
+      if (!result.ok) return result.error;
     },
   });
 
@@ -65,7 +65,9 @@ export async function runInteractiveWizard(
     return null;
   }
 
-  const roleId = defaults.roleId ?? validateInitRoleId(name).normalized;
+  // A failed validation carries no payload: keep the raw input, as before.
+  const nameValidation = validateInitRoleId(name);
+  const roleId = defaults.roleId ?? (nameValidation.ok ? nameValidation.value.normalized : name);
 
   const description = await clack.text({
     message: 'Short description:',

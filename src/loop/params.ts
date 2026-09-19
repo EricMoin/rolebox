@@ -1,21 +1,16 @@
 import type { FunctionCall } from "../function/parser.js";
 import type { LoopMode } from "./types.js";
 import { DEFAULT_ITERATIONS, MAX_ITERATIONS_HARD_CAP } from "./constants.js";
+import { err, ok, type Result } from "../utils/result.ts";
 
-export interface ValidLoopParams {
-  valid: true;
+export interface LoopParams {
   iterations: number;
   mode: LoopMode;
   clamped?: boolean;
   warning?: string;
 }
 
-export interface InvalidLoopParams {
-  valid: false;
-  reason: string;
-}
-
-export type LoopParamsResult = ValidLoopParams | InvalidLoopParams;
+export type LoopParamsResult = Result<LoopParams, string>;
 
 const FRESH_ALIASES = new Set(["no-inherit", "off", "false"]);
 const INHERIT_ALIASES = new Set(["on", "true"]);
@@ -51,7 +46,7 @@ export function parseLoopParams(call: FunctionCall): LoopParamsResult {
   }
 
   if (iterations < 1) {
-    return { valid: false, reason: "iterations must be >= 1" };
+    return err("iterations must be >= 1");
   }
 
   let clamped = false;
@@ -79,5 +74,5 @@ export function parseLoopParams(call: FunctionCall): LoopParamsResult {
     }
   }
 
-  return { valid: true, iterations, mode, ...(clamped ? { clamped } : {}), ...(warning ? { warning } : {}) };
+  return ok({ iterations, mode, ...(clamped ? { clamped } : {}), ...(warning ? { warning } : {}) });
 }

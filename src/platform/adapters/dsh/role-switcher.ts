@@ -65,6 +65,7 @@
 
 import { RoleMode } from "../../../constants.ts";
 import { createSubLogger, formatError } from "../../../logger.ts";
+import { err, ok, type Result } from "../../../utils/result.ts";
 import type { AgentDefinition } from "../../types.ts";
 import type { ActiveRoleEntry } from "./active-role-store.ts";
 import type { DshAgentRegistrar } from "./agent-registrar.ts";
@@ -345,32 +346,32 @@ export class DshRoleSwitcher {
    *
    * @param roleId    - Role id to activate, or `null` to clear.
    * @param sessionId - The dsh session id the switch applies to.
-   * @returns `{ ok: true }` on success, or `{ ok: false, error }` when the
-   *          role is unknown or not primary.
+   * @returns `ok()` on success, or `err(...)` with the reason when the role
+   *          is unknown or not primary.
    */
   async activate(
     roleId: string | null,
     sessionId: string,
-  ): Promise<{ ok: boolean; error?: string }> {
+  ): Promise<Result<void, string>> {
     if (roleId === null) {
       this.activeRole.set(sessionId, null);
       this._log.info("Active role cleared", { sessionId });
       this.notifyActiveRoleChanged(sessionId, null);
-      return { ok: true };
+      return ok();
     }
 
     const role = this.registrar.getRegisteredAgents().find((a) => a.id === roleId);
     if (!role) {
-      return { ok: false, error: `Unknown role: ${roleId}` };
+      return err(`Unknown role: ${roleId}`);
     }
     if ((role.mode ?? RoleMode.Primary) !== RoleMode.Primary) {
-      return { ok: false, error: `Role '${roleId}' is not a primary role` };
+      return err(`Role '${roleId}' is not a primary role`);
     }
 
     this.activeRole.set(sessionId, role.id);
     this._log.info("Active role switched", { sessionId, role: role.id });
     this.notifyActiveRoleChanged(sessionId, role.id);
-    return { ok: true };
+    return ok();
   }
 
   /**

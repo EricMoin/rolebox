@@ -158,13 +158,14 @@ export async function handleChatMessage(
       appendCorrection(state.pendingCorrections, input.sessionID, "Loop call not found in parsed functions");
     } else {
       const result = parseLoopParams(loopCall);
-      if (!result.valid) {
-        appendCorrection(state.pendingCorrections, input.sessionID, `Invalid loop params: ${result.reason}`);
+      if (!result.ok) {
+        appendCorrection(state.pendingCorrections, input.sessionID, `Invalid loop params: ${result.error}`);
       } else {
-        const clamped = result.clamped ? ` (clamped to ${result.iterations})` : "";
-        const warn = result.warning ? ` (${result.warning})` : "";
-        if (result.clamped || result.warning) {
-          appendCorrection(state.pendingCorrections, input.sessionID, `Loop: ${result.iterations} iterations${clamped}${warn}`);
+        const params = result.value;
+        const clamped = params.clamped ? ` (clamped to ${params.iterations})` : "";
+        const warn = params.warning ? ` (${params.warning})` : "";
+        if (params.clamped || params.warning) {
+          appendCorrection(state.pendingCorrections, input.sessionID, `Loop: ${params.iterations} iterations${clamped}${warn}`);
         }
         // Forward optional objective from |loop| syntax args (subtask 4)
         const objective: string | undefined = loopCall.args.objective;
@@ -172,12 +173,12 @@ export async function handleChatMessage(
           originSessionId: input.sessionID,
           agent: agentId,
           prompt: cleanedText,
-          mode: result.mode,
-          iterations: result.iterations,
+          mode: params.mode,
+          iterations: params.iterations,
           objective,
         });
         if (!registerResult.ok) {
-          appendCorrection(state.pendingCorrections, input.sessionID, `Loop not started: ${registerResult.reason}`);
+          appendCorrection(state.pendingCorrections, input.sessionID, `Loop not started: ${registerResult.error}`);
         }
         // Activation acknowledgment is handled by the orchestrator prompt (T3)
       }

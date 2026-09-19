@@ -101,7 +101,7 @@ describe("parseGraph — canonical Appendix B round-trip", () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
 
-    const graph = parsed.graph;
+    const graph = parsed.value;
     expect(graph.version).toBe(2);
     expect(graph.name).toBe("review-team-plus");
     // node count = 5
@@ -158,7 +158,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.nodes[0].join).toEqual({ strategy: "quorum", quorum: 3 });
+    expect(result.value.nodes[0].join).toEqual({ strategy: "quorum", quorum: 3 });
   });
 
   it("maps a bare numeric `retry` into RetryConfig { max }", () => {
@@ -174,7 +174,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.edges[0].retry).toEqual({ max: 3 });
+    expect(result.value.edges[0].retry).toEqual({ max: 3 });
   });
 
   it("maps `data_passthrough.include` into DataMapping.fields", () => {
@@ -198,7 +198,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.edges[0].data_passthrough?.fields).toEqual(["verdict", "findings"]);
+    expect(result.value.edges[0].data_passthrough?.fields).toEqual(["verdict", "findings"]);
   });
 
   it("round-trips data_passthrough exclude and max_chars", () => {
@@ -221,7 +221,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.edges[0].data_passthrough).toEqual({
+    expect(result.value.edges[0].data_passthrough).toEqual({
       exclude: ["internal", "tmp.json"],
       maxChars: 500,
     });
@@ -242,7 +242,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.edges[0].data_passthrough?.fields).toEqual(["x"]);
+    expect(result.value.edges[0].data_passthrough?.fields).toEqual(["x"]);
   });
 
   it("reports deserialization errors for missing required fields", () => {
@@ -255,7 +255,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors.some((e) => e.includes('"prompt"'))).toBe(true);
+    expect(result.error.some((e) => e.includes('"prompt"'))).toBe(true);
   });
 
   it("reports an unknown edge type", () => {
@@ -271,7 +271,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors.some((e) => e.includes('unknown type "sometimes"'))).toBe(true);
+    expect(result.error.some((e) => e.includes('unknown type "sometimes"'))).toBe(true);
   });
 
   it("reports a missing top-level graph block", () => {
@@ -292,7 +292,7 @@ describe("parseGraph — deserialization", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(
-      result.errors.some(
+      result.error.some(
         (e) => e.includes("node[0]") && e.includes('unknown join strategy "sometimes"'),
       ),
     ).toBe(true);
@@ -308,7 +308,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors.some((e) => e.includes("requires its count in the string form"))).toBe(true);
+    expect(result.error.some((e) => e.includes("requires its count in the string form"))).toBe(true);
   });
 
   it("rejects the object form \`{ strategy: quorum }\` with no count", () => {
@@ -321,7 +321,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors.some((e) => e.includes('requires a numeric "quorum" count'))).toBe(true);
+    expect(result.error.some((e) => e.includes('requires a numeric "quorum" count'))).toBe(true);
   });
 
   it("maps the object form \`{ strategy: quorum, quorum: 2 }\`", () => {
@@ -334,7 +334,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.nodes[0].join).toEqual({ strategy: "quorum", quorum: 2 });
+    expect(result.value.nodes[0].join).toEqual({ strategy: "quorum", quorum: 2 });
   });
 
   it("lets an explicit \`quorum\` key override a combined \`quorum:N\` strategy string", () => {
@@ -347,7 +347,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.nodes[0].join).toEqual({ strategy: "quorum", quorum: 2 });
+    expect(result.value.nodes[0].join).toEqual({ strategy: "quorum", quorum: 2 });
   });
 
   // ── declaration metadata is mapped instead of dropped (Y6) ───────────────
@@ -365,8 +365,8 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.template).toBe("review-loop");
-    expect(result.graph.max_iterations).toBe(7);
+    expect(result.value.template).toBe("review-loop");
+    expect(result.value.max_iterations).toBe(7);
   });
 
   it("reports an unknown template value", () => {
@@ -380,7 +380,7 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors.some((e) => e.includes('unknown value "not-a-topology"'))).toBe(true);
+    expect(result.error.some((e) => e.includes('unknown value "not-a-topology"'))).toBe(true);
   });
 
   it("maps loop_groups[].mode and rejects an unknown mode", () => {
@@ -394,17 +394,17 @@ describe("parseGraph — deserialization", () => {
     const inherit = parseGraph({ graph: group("inherit") });
     expect(inherit.ok).toBe(true);
     if (!inherit.ok) return;
-    expect(inherit.graph.loop_groups?.[0].mode).toBe("inherit");
+    expect(inherit.value.loop_groups?.[0].mode).toBe("inherit");
 
     const fresh = parseGraph({ graph: group("fresh") });
     expect(fresh.ok).toBe(true);
     if (!fresh.ok) return;
-    expect(fresh.graph.loop_groups?.[0].mode).toBe("fresh");
+    expect(fresh.value.loop_groups?.[0].mode).toBe("fresh");
 
     const bad = parseGraph({ graph: group("sometimes") });
     expect(bad.ok).toBe(false);
     if (bad.ok) return;
-    expect(bad.errors.some((e) => e.includes('has unknown "mode"'))).toBe(true);
+    expect(bad.error.some((e) => e.includes('has unknown "mode"'))).toBe(true);
   });
 
   // ── budgets are keyed by the spec, not by whatever the input carried (Y7) ─
@@ -428,11 +428,11 @@ describe("parseGraph — deserialization", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.graph.nodes[0].budget).toEqual({
+    expect(result.value.nodes[0].budget).toEqual({
       max_input_tokens: 120,
       max_cost_usd: 0.5,
     });
-    expect(result.graph.budget).toEqual({ max_total_output_tokens: 42 });
+    expect(result.value.budget).toEqual({ max_total_output_tokens: 42 });
   });
 });
 

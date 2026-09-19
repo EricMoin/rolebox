@@ -18,6 +18,8 @@
  * @module
  */
 
+import { err, ok, type Result } from "../../../utils/result.ts";
+
 /** Protocol versions this server implements, newest first. */
 export const MCP_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
 
@@ -113,22 +115,14 @@ export type ParsedMessage =
   | { kind: "notification"; method: string; params: unknown };
 
 /** Result of {@link parseMessageLine}: a message or a JSON-RPC error to return. */
-export type ParseResult =
-  | { ok: true; value: ParsedMessage }
-  | { ok: false; error: { code: number; message: string } };
+export type ParseResult = Result<ParsedMessage, { code: number; message: string }>;
 
 function parseError(detail: string): ParseResult {
-  return {
-    ok: false,
-    error: { code: JsonRpcErrorCode.ParseError, message: `Parse error: ${detail}` },
-  };
+  return err({ code: JsonRpcErrorCode.ParseError, message: `Parse error: ${detail}` });
 }
 
 function invalidRequest(detail: string): ParseResult {
-  return {
-    ok: false,
-    error: { code: JsonRpcErrorCode.InvalidRequest, message: `Invalid Request: ${detail}` },
-  };
+  return err({ code: JsonRpcErrorCode.InvalidRequest, message: `Invalid Request: ${detail}` });
 }
 
 /**
@@ -165,7 +159,7 @@ export function parseMessageLine(line: string): ParseResult {
 
   const params = record.params;
   if (!("id" in record) || record.id === undefined) {
-    return { ok: true, value: { kind: "notification", method: record.method, params } };
+    return ok({ kind: "notification", method: record.method, params });
   }
 
   const id = record.id;
@@ -173,5 +167,5 @@ export function parseMessageLine(line: string): ParseResult {
     return invalidRequest('"id" must be a string or a number');
   }
 
-  return { ok: true, value: { kind: "request", id, method: record.method, params } };
+  return ok({ kind: "request", id, method: record.method, params });
 }

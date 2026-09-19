@@ -61,69 +61,80 @@ function makeConfig(overrides?: Partial<InitConfig>): InitConfig {
 describe("validateInitRoleId", () => {
   it("accepts a valid kebab-case role ID", () => {
     const result = validateInitRoleId("my-role");
-    expect(result.valid).toBe(true);
-    expect(result.normalized).toBe("my-role");
-    expect(result.error).toBeUndefined();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the success arm");
+    expect(result.value.normalized).toBe("my-role");
+    expect(result).not.toHaveProperty("error");
   });
 
   it("normalises spaces to hyphens and lowercases", () => {
     const result = validateInitRoleId("My Cool Role");
-    expect(result.valid).toBe(true);
-    expect(result.normalized).toBe("my-cool-role");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the success arm");
+    expect(result.value.normalized).toBe("my-cool-role");
   });
 
   it("accepts underscores in role IDs", () => {
     const result = validateInitRoleId("code_reviewer");
-    expect(result.valid).toBe(true);
-    expect(result.normalized).toBe("code_reviewer");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the success arm");
+    expect(result.value.normalized).toBe("code_reviewer");
   });
 
   it("accepts mixed hyphens and underscores", () => {
     const result = validateInitRoleId("my-role_v2");
-    expect(result.valid).toBe(true);
-    expect(result.normalized).toBe("my-role_v2");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the success arm");
+    expect(result.value.normalized).toBe("my-role_v2");
   });
 
   it("rejects empty input", () => {
     const result = validateInitRoleId("");
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the failure arm");
     expect(result.error).toContain("empty");
   });
 
   it("rejects double-dash (reserved separator)", () => {
     const result = validateInitRoleId("parent--child");
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the failure arm");
     expect(result.error).toContain("--");
   });
 
   it("rejects path separators", () => {
     const slashResult = validateInitRoleId("my/role");
-    expect(slashResult.valid).toBe(false);
+    expect(slashResult.ok).toBe(false);
+    if (slashResult.ok) throw new Error("expected the failure arm");
     expect(slashResult.error).toContain("path separator");
 
     const backslashResult = validateInitRoleId("my\\role");
-    expect(backslashResult.valid).toBe(false);
+    expect(backslashResult.ok).toBe(false);
+    if (backslashResult.ok) throw new Error("expected the failure arm");
     expect(backslashResult.error).toContain("path separator");
   });
 
   it("rejects non-ASCII characters", () => {
     const result = validateInitRoleId("café-role");
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the failure arm");
     expect(result.error).toContain("ASCII");
   });
 
   it("rejects too-long role IDs (>100 chars)", () => {
     const longName = "a".repeat(101);
     const result = validateInitRoleId(longName);
-    expect(result.valid).toBe(false);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected the failure arm");
     expect(result.error).toContain("1–100");
   });
 
   it("accepts exactly 100 chars", () => {
     const name100 = "a".repeat(100);
     const result = validateInitRoleId(name100);
-    expect(result.valid).toBe(true);
-    expect(result.normalized).toBe(name100);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the success arm");
+    expect(result.value.normalized).toBe(name100);
   });
 });
 

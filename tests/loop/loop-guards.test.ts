@@ -350,7 +350,7 @@ describe("(b) Fingerprint dedup", () => {
 
     expect(gcResult.ok).toBe(false);
     if (!gcResult.ok) {
-      expect(gcResult.reason).toContain("identical task already looping in ancestor chain");
+      expect(gcResult.error).toContain("identical task already looping in ancestor chain");
     }
   });
 
@@ -442,7 +442,7 @@ describe("(b) Fingerprint dedup", () => {
 
     expect(secondResult.ok).toBe(false);
     if (!secondResult.ok) {
-      expect(secondResult.reason).toContain("loop already active for this session");
+      expect(secondResult.error).toContain("loop already active for this session");
     }
   });
 });
@@ -693,8 +693,8 @@ describe("(d) Tree worker session budget", () => {
 
     expect(overBudget.ok).toBe(false);
     if (!overBudget.ok) {
-      expect(overBudget.reason).toContain("tree worker budget exhausted");
-      expect(overBudget.reason).toContain("30");
+      expect(overBudget.error).toContain("tree worker budget exhausted");
+      expect(overBudget.error).toContain("30");
     }
   });
 
@@ -755,8 +755,8 @@ describe("(d) Tree worker session budget", () => {
 
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) {
-      expect(rejected.reason).toContain("max");
-      expect(rejected.reason).toContain("complete");
+      expect(rejected.error).toContain("max");
+      expect(rejected.error).toContain("complete");
     }
   });
 });
@@ -942,15 +942,15 @@ describe("Edge cases", () => {
 
     const success = c.register(REGISTER_INPUT);
     expect(success.ok).toBe(true);
-    // On success, 'reason' should not exist
-    expect("reason" in success).toBe(false);
+    // On success, 'error' should not exist
+    expect("error" in success).toBe(false);
 
     // Trigger rejection
     const dup = c.register(REGISTER_INPUT);
     expect(dup.ok).toBe(false);
     if (!dup.ok) {
-      expect(typeof dup.reason).toBe("string");
-      expect(dup.reason.length).toBeGreaterThan(0);
+      expect(typeof dup.error).toBe("string");
+      expect(dup.error.length).toBeGreaterThan(0);
     }
   });
 

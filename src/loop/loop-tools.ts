@@ -262,7 +262,7 @@ function renderTreePrefix(ancestorsLast: boolean[], isLast: boolean): string {
  * tool returns immediately (non-blocking). On success it returns the origin
  * session ID so callers can track progress with loop_status / loop_output /
  * loop_history. On rejection it forwards the coordinator's RegisterResult
- * reason back to the agent as a correction.
+ * error back to the agent as a correction.
  *
  * The origin session ID and acting agent are resolved from the canonical tool
  * context (sessionID / agent), mirroring the dispatch tool's pattern. On
@@ -346,7 +346,7 @@ export function createLoopStartTool(
       if (!result.ok) {
         // Registration rejected — return the reason as a
         // correction to guide the agent toward a valid request.
-        return `Loop not started: ${result.reason}`;
+        return `Loop not started: ${result.error}`;
       }
 
       return (

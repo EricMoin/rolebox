@@ -34,12 +34,12 @@ export async function init(nameArg: string | undefined, yes: boolean, templateAr
     const rawName = nameArg ?? deriveRoleId(basename(process.cwd()));
     const validation = validateInitRoleId(rawName);
 
-    if (!validation.valid) {
+    if (!validation.ok) {
       throw new Error(`Invalid role name '${rawName}': ${validation.error}`);
     }
 
-    const roleName = validation.normalized;
-    const roleId = validation.normalized;
+    const roleName = validation.value.normalized;
+    const roleId = validation.value.normalized;
 
     config = {
       name: roleName,

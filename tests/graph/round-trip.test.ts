@@ -177,9 +177,9 @@ describe("serializeGraphDeclaration", () => {
     const parsed = parseGraph(serializeGraphDeclaration(d));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.graph.template).toBe("review-loop");
-    expect(parsed.graph.max_iterations).toBe(4);
-    expect(parsed.graph.loop_groups?.[0].mode).toBe("inherit");
+    expect(parsed.value.template).toBe("review-loop");
+    expect(parsed.value.max_iterations).toBe(4);
+    expect(parsed.value.loop_groups?.[0].mode).toBe("inherit");
   });
 });
 
