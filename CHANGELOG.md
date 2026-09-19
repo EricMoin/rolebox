@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.10.0
 
 ### Features
 
 - **Codex is a supported harness** — rolebox now targets Codex through a generated local plugin marketplace plus a rolebox MCP server: `rolebox sync codex` writes `<codexHome>/rolebox-marketplace` (the marketplace manifest plus `plugins/rolebox` carrying `.codex-plugin/plugin.json`, `.mcp.json` and a `skills` symlink to `<codexHome>/skills`), deploys installed roles to `<codexHome>/rolebox`, and registers one managed block in `<codexHome>/config.toml`, with the Codex home resolved from `$CODEX_HOME` when set and non-blank and `~/.codex` otherwise. The plugin starts the rolebox MCP server (`rolebox mcp`, also exported as `rolebox/codex`), a newline-delimited JSON-RPC 2.0 stdio server exposing 15 canonical tools — hashline_read/hashline_edit, memory_write/memory_recall/memory_list, web_search/web_read/web_fetch, asset_search/asset_inspect/asset_validate, reference_search, load_role_skill, signal and interactive_terminal — with no `session_*`, `dispatch_*`, `loop_*`, `task_*` or `graph_*` tools, no role switching, TUI, hot reload, extension loader or hooks-driven activation; the generated layout, the MCP protocol surface and those non-goals are documented in [docs/codex.md](docs/codex.md).
+
+- **dsh roles reload in-process, without a restart** (ce96f44) — `POST /rolebox/reload` (served by the dsh role-switch route, with the monitor panel's "Reload roles" control as its entry point) performs an in-process, non-destructive role reload: roles are re-discovered and re-resolved into the live containers in place and the agent catalog is re-synced, so installing or editing a role no longer needs a host restart. Because consumers capture the resolved-role snapshot by reference, the four role-snapshot tools (`asset_search`, `asset_inspect`, `asset_validate`, `reference_search`) are rebuilt as one disposable generation and the lazy skill catalog is invalidated, while discovery and resolution run against local containers and every post-swap mutation is guarded by an in-memory rollback — a failed reload leaves the previous roles, role functions and open-role registry in place, so no partially swapped state is observable.
 
 ### Bug Fixes
 
@@ -13,6 +15,22 @@
 - **Dispatch health is config-aware** — a stopped budget sampler now reads as a stopped pipeline only when a budget limit is actually configured, so a manager with no configured limits no longer reports unhealthy merely because its sampler was never armed, and a manager with configured limits no longer reports healthy while its sampler is dead.
 
 - **Process-fatal events are recorded without changing host behaviour** — a new observation-only reporter flushes rolebox state and writes one structured log entry on `uncaughtException` / `unhandledRejection`. It never exits, re-throws, or alters the host's exit code, installs and removes exactly its own process listeners, and reports at most one event per process.
+
+- **Graph Engine v2 correctness fixes** (7a7c67e) — Persistence DTOs are derived from the runtime types and validated per node, so a partial node state can no longer load as valid and silently disable the `max_total_*` budget gates after recovery; join quorum is a discriminated union that carries its count instead of a quantity-free member each consumer read differently; a dispatch kickoff that contends for the advancing lock is deferred and replayed instead of dropped, so a graph cannot sit in `executing` with no work in flight; `on_condition` loop-backs consume a traversal, which makes `max_traversals` enforceable for that shape; and the approval payload is serialized before the node is marked complete, so an unserializable payload can no longer complete a node and strand its downstream join. The same pass stops escalate propagation from walking revise back-edges, validates `partialApprove` member lists, scopes the terminal-notification dedupe key to the engine epoch, returns approval reports instead of `void`, and routes `graph_cancel` through the authority `CancelScopeReport` rather than matching `errorReason` text.
+
+- **Session tool output hardened** (62298b1) — `formatDate` no longer throws on a non-finite or out-of-range timestamp, so one malformed session record can no longer abort a whole tool call; durations no longer render as `NaNh NaNm`; markdown table cells are escaped so a title containing `|` or a newline cannot break the table; number grouping is locale-independent; and `formatDiff` is a real LCS unified diff with hunk headers, context lines and a missing-newline marker instead of an index comparison that marked every line of a file as changed when a single line was inserted at the top.
+
+- **The CLI checkpoint list tolerates malformed rows** (8855f9c) — `rolebox checkpoint list` coerces and validates each row as it reads the checkpoint file, tolerates a missing or unparseable `created_at` through the shared timestamp helper, and keeps nulls out of the sort comparator, so a single bad entry (a missing phase or a numeric task id) no longer throws `TypeError` outside every try and reduces the command to a bare header with no rows.
+
+- **Truncation budgets display columns** (9615bfb) — `truncate()` sliced UTF-16 code units, so a wide or CJK title could overrun its column budget and a cut could split a surrogate pair into `U+FFFD`; it now budgets display columns, which also composes with the padding helpers. Behavior change: a non-ASCII string truncates at roughly half the previous character count, because each wide character costs two columns.
+
+- **Model-alias advisories are de-duplicated per cache generation** (45344c1) — Each unresolvable model is reported once per cache generation instead of once per role, so a config with N such roles no longer emits N identical four-line advisory logs on every discovery and hot reload; `initModelResolver` re-arms the reports so the next load after a config edit still warns, and a non-mapping `model_aliases` value is rejected instead of registering bogus numeric aliases.
+
+### Refactors
+
+- **Harness entries consolidated under `src/entries`** (85b2423, 9655230, 45406e4) — The three harness entries now live in `src/entries` (`opencode.ts`, `pi.ts`, `dsh.ts`) and publish at `dist/entries/*`; `dist/index.js`, `dist/pi-extension.js` and `dist/dsh-plugin.js` are still generated as re-export aliases, so existing out-of-package harness configs keep working, and the alias build unlinks stale legacy declarations so a previously built outDir cannot publish them. The opencode entry's `roleFunctionsMap` re-export is restored.
+
+- **One shared text-format module** (1c98377, 13db0d1) — The duplicated duration, truncation, padding, bar and byte formatters now delegate to a single pure `src/utils/text-format.ts`, with documented invalid-input sentinels, surrogate-safe truncation, ANSI- and East-Asian-width-aware measurement, markdown cell escaping and locale-independent number grouping.
 
 ## 1.9.0
 
