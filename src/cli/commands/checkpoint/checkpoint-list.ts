@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { bold, dim } from "../../format.ts";
+import { formatDuration, formatTimestamp, truncateText } from "../../../utils/text-format.ts";
 import { FileSystemCheckpointStore } from "../../../dispatch/checkpoint/checkpoint-store.ts";
 import { DEFAULT_CHECKPOINT_TTL_MS } from "../../../dispatch/config.ts";
 
@@ -30,25 +31,45 @@ function resolveProjectRoot(start: string): string {
 }
 
 /**
- * Format a duration in ms to a human-readable relative time string.
+ * Epoch milliseconds for a row's `created_at`, or `null` when it is missing,
+ * non-ISO or otherwise unparseable.
+ *
+ * `created_at` is copied unvalidated out of parsed JSON, so every consumer has
+ * to tolerate a malformed value instead of letting an `Invalid Date` reach the
+ * sort comparator or a `toISOString()` call.
  */
-function formatExpiresIn(createdAt: string, ttlMs: number): string {
-  const created = new Date(createdAt).getTime();
-  const expires = created + ttlMs;
-  const remaining = expires - Date.now();
-  if (remaining <= 0) return dim("expired");
-  if (remaining < 60_000) return `${Math.round(remaining / 1000)}s`;
-  if (remaining < 3_600_000) return `${Math.round(remaining / 60_000)}m`;
-  if (remaining < 86_400_000) return `${Math.round(remaining / 3_600_000)}h`;
-  return `${Math.round(remaining / 86_400_000)}d`;
+function createdAtMs(createdAt: string): number | null {
+  const ms = Date.parse(createdAt);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /**
- * Truncate a string to maxLen, appending "…" if truncated.
+ * Trust-boundary coercion for a field copied out of unvalidated checkpoint
+ * JSON.
+ *
+ * The canonical display helpers are typed `string` on purpose, so a value that
+ * is not a non-empty string is replaced here instead of deep in the renderer:
+ * `"-"` for fields with no other source, the file-derived task id for
+ * `task_id`. `Date.parse` already tolerates every malformed `created_at`.
  */
-function truncate(s: string, maxLen: number): string {
-  if (s.length <= maxLen) return s;
-  return s.slice(0, maxLen - 1) + "\u2026";
+function textField(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+/**
+ * Format a duration in ms to a human-readable relative time string.
+ *
+ * `dim("unknown")` when `created_at` (or the derived remaining time) is
+ * unparseable, `dim("expired")` for a non-positive remaining time; otherwise a
+ * one-line delegation to `formatDuration(…, "largest")`.
+ */
+function formatExpiresIn(createdAt: string, ttlMs: number): string {
+  const created = createdAtMs(createdAt);
+  if (created === null) return dim("unknown");
+  const remaining = created + ttlMs - Date.now();
+  if (!Number.isFinite(remaining)) return dim("unknown");
+  if (remaining <= 0) return dim("expired");
+  return formatDuration(remaining, "largest");
 }
 
 export const listCommand = defineCommand({
@@ -123,11 +144,11 @@ export const listCommand = defineCommand({
 
         for (const entry of entries) {
           rows.push({
-            task_id: entry.task_id || taskId,
-            checkpoint_id: entry.checkpoint_id,
-            phase: entry.phase,
-            completed: (entry.completed_items || []).length,
-            remaining: (entry.remaining_items || []).length,
+            task_id: textField(entry.task_id, taskId),
+            checkpoint_id: textField(entry.checkpoint_id, "-"),
+            phase: textField(entry.phase, "-"),
+            completed: Array.isArray(entry.completed_items) ? entry.completed_items.length : 0,
+            remaining: Array.isArray(entry.remaining_items) ? entry.remaining_items.length : 0,
             created_at: entry.created_at,
             ttl_ms: entry.ttl_ms ?? DEFAULT_CHECKPOINT_TTL_MS,
           });
@@ -143,10 +164,18 @@ export const listCommand = defineCommand({
       return;
     }
 
-    // Sort by created_at descending (most recent first)
-    rows.sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    );
+    // Sort by created_at descending (most recent first). Rows whose created_at
+    // cannot be parsed have no position in time and sort last, so a malformed
+    // value can never produce a NaN comparator.
+    rows.sort((a, b) => {
+      const aMs = createdAtMs(a.created_at);
+      const bMs = createdAtMs(b.created_at);
+      if (aMs === null || bMs === null) {
+        if (aMs === bMs) return 0;
+        return aMs === null ? 1 : -1;
+      }
+      return bMs - aMs;
+    });
 
     // Render table
     console.log(
@@ -155,10 +184,12 @@ export const listCommand = defineCommand({
     console.log(dim("  " + "\u2500".repeat(98)));
 
     for (const row of rows) {
-      const created = new Date(row.created_at).toISOString().slice(0, 19).replace("T", " ");
+      // Canonical total timestamp: a malformed created_at renders "unknown"
+      // instead of throwing RangeError from toISOString().
+      const created = formatTimestamp(Date.parse(row.created_at));
       const expires = formatExpiresIn(row.created_at, row.ttl_ms);
       console.log(
-        `  ${dim(truncate(row.task_id, 20).padEnd(20))} ${dim(truncate(row.checkpoint_id, 22).padEnd(22))} ${truncate(row.phase, 16).padEnd(16)} ${String(row.completed).padEnd(6)} ${String(row.remaining).padEnd(6)} ${created} ${expires}`,
+        `  ${dim(truncateText(row.task_id, 20).padEnd(20))} ${dim(truncateText(row.checkpoint_id, 22).padEnd(22))} ${truncateText(row.phase, 16).padEnd(16)} ${String(row.completed).padEnd(6)} ${String(row.remaining).padEnd(6)} ${created} ${expires}`,
       );
     }
   },

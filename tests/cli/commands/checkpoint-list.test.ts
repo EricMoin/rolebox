@@ -11,6 +11,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { stripAnsi } from "../../../src/utils/text-format.ts";
 
 // ── Shared setup ───────────────────────────────────────────────────
 
@@ -557,5 +558,147 @@ describe("checkpoint-list", () => {
     await run();
 
     expect(logs.some((l) => l.includes("No checkpoints found"))).toBe(true);
+  });
+
+  // ── Malformed created_at (copied unvalidated from JSON) ─────────────
+
+  it("renders a malformed created_at as unknown instead of throwing", async () => {
+    const dir = checkpointsDir();
+    mkdirSync(dir, { recursive: true });
+    await writeFile(
+      join(dir, "bad-dates.json"),
+      JSON.stringify([
+        {
+          task_id: "bad-dates",
+          checkpoint_id: "cp-non-iso",
+          phase: "impl",
+          completed_items: [],
+          remaining_items: [],
+          created_at: "not-a-date",
+          ttl_ms: 86_400_000,
+        },
+        {
+          task_id: "bad-dates",
+          checkpoint_id: "cp-missing",
+          phase: "impl",
+          completed_items: [],
+          remaining_items: [],
+          // created_at intentionally omitted
+          ttl_ms: 86_400_000,
+        },
+      ]),
+      "utf-8",
+    );
+
+    const { logs, run } = captureLogs(() => runList({}));
+    await run();
+
+    const allOutput = logs.join("\n");
+    expect(allOutput).toContain("cp-non-iso");
+    expect(allOutput).toContain("cp-missing");
+    // Both rows degrade in both the Created and the Expires column.
+    expect(allOutput.split("unknown").length - 1).toBeGreaterThanOrEqual(4);
+    expect(allOutput).not.toContain("Invalid Date");
+    expect(allOutput).not.toContain("NaN");
+  });
+
+  it("sorts an unparseable created_at last instead of producing NaN order", async () => {
+    await createCheckpointFile("task-order", [
+      {
+        task_id: "task-order",
+        checkpoint_id: "cp-mid",
+        phase: "p",
+        completed_items: [],
+        remaining_items: [],
+        created_at: "2026-07-10T00:00:00.000Z",
+      },
+      {
+        task_id: "task-order",
+        checkpoint_id: "cp-bad",
+        phase: "p",
+        completed_items: [],
+        remaining_items: [],
+        created_at: "nope",
+      },
+      {
+        task_id: "task-order",
+        checkpoint_id: "cp-new",
+        phase: "p",
+        completed_items: [],
+        remaining_items: [],
+        created_at: "2026-07-15T00:00:00.000Z",
+      },
+    ]);
+
+    const { logs, run } = captureLogs(() => runList({}));
+    await run();
+
+    const allOutput = logs.join("\n");
+    expect(allOutput.indexOf("cp-new")).toBeLessThan(allOutput.indexOf("cp-mid"));
+    expect(allOutput.indexOf("cp-mid")).toBeLessThan(allOutput.indexOf("cp-bad"));
+  });
+
+  // ── Malformed entry fields (copied unvalidated from JSON) ───────────
+
+  it("renders placeholders for a malformed entry and still lists later entries", async () => {
+    const dir = checkpointsDir();
+    mkdirSync(dir, { recursive: true });
+    await writeFile(
+      join(dir, "task-malformed.json"),
+      JSON.stringify([
+        {
+          task_id: 42,
+          // checkpoint_id and phase intentionally omitted
+          completed_items: { done: 3 },
+          remaining_items: "not-an-array",
+          created_at: "2026-07-15T10:00:00.000Z",
+          ttl_ms: 86_400_000,
+        },
+        {
+          task_id: "task-malformed",
+          checkpoint_id: "cp-valid",
+          phase: "ok",
+          completed_items: ["a"],
+          remaining_items: [],
+          created_at: "2026-07-15T09:00:00.000Z",
+          ttl_ms: 86_400_000,
+        },
+      ]),
+      "utf-8",
+    );
+
+    const { logs, run } = captureLogs(() => runList({}));
+    await run();
+
+    const lines = logs.map(stripAnsi);
+    const rows = lines.filter(
+      (l) => l.startsWith("  ") && l.includes("task-malformed"),
+    );
+    expect(rows.length).toBe(2);
+
+    // Malformed entry: the non-string task_id falls back to the file name, the
+    // missing checkpoint_id / phase render as "-" and the non-array counts as 0.
+    const expectedMalformed =
+      "  " +
+      "task-malformed".padEnd(20) +
+      " " +
+      "-".padEnd(22) +
+      " " +
+      "-".padEnd(16) +
+      " " +
+      "0".padEnd(6) +
+      " " +
+      "0".padEnd(6) +
+      " " +
+      "2026-07-15 10:00:00";
+    expect(rows[0]).toContain(expectedMalformed);
+
+    // The valid entry that follows still renders — one malformed entry no
+    // longer aborts the whole command.
+    expect(rows[1]).toContain("cp-valid");
+
+    const allOutput = lines.join("\n");
+    expect(allOutput).not.toContain("undefined");
+    expect(allOutput).not.toContain("NaN");
   });
 });
