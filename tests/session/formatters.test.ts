@@ -12,6 +12,16 @@ import {
   formatTodoList,
 } from "../../src/session/formatters.ts";
 
+/**
+ * Body lines of the first file block, i.e. everything after its `+++ b/`
+ * header. Returns `[]` when the file produced no block.
+ */
+function diffBody(result: string): string[] {
+  const lines = result.split("\n");
+  const header = lines.findIndex((line) => line.startsWith("+++ "));
+  return header === -1 ? [] : lines.slice(header + 1);
+}
+
 describe("relativeTime", () => {
   const now = Date.now();
 
@@ -42,6 +52,12 @@ describe("relativeTime", () => {
     expect(relativeTime(now - 2 * 86_400_000)).toBe("2 days ago");
     expect(relativeTime(now - 30 * 86_400_000)).toBe("30 days ago");
   });
+
+  it("degrades non-finite input instead of rendering NaN", () => {
+    expect(relativeTime(NaN)).toBe("unknown");
+    expect(relativeTime(Infinity)).toBe("unknown");
+    expect(relativeTime(-Infinity)).toBe("unknown");
+  });
 });
 
 describe("formatDate", () => {
@@ -54,6 +70,19 @@ describe("formatDate", () => {
 
   it("handles epoch", () => {
     expect(formatDate(0)).toBe("1970-01-01 00:00:00");
+  });
+
+  it("never throws on non-finite or out-of-range timestamps", () => {
+    expect(() => formatDate(NaN)).not.toThrow();
+    expect(formatDate(NaN)).toBe("unknown");
+    expect(formatDate(Infinity)).toBe("unknown");
+    expect(formatDate(-Infinity)).toBe("unknown");
+    expect(() => formatDate(8.7e15)).not.toThrow();
+    expect(formatDate(8.7e15)).toBe("unknown");
+  });
+
+  it("renders negative epochs", () => {
+    expect(formatDate(-1)).toBe("1969-12-31 23:59:59");
   });
 });
 
@@ -78,6 +107,12 @@ describe("formatDuration", () => {
     expect(formatDuration(7_200_000)).toBe("2h 0m");
     expect(formatDuration(7_500_000)).toBe("2h 5m");
     expect(formatDuration(25 * 3_600_000)).toBe("25h 0m");
+  });
+
+  it("degrades non-finite durations instead of rendering NaN", () => {
+    expect(formatDuration(NaN)).toBe("0s");
+    expect(formatDuration(Infinity)).toBe("0s");
+    expect(formatDuration(-Infinity)).toBe("0s");
   });
 });
 
@@ -117,6 +152,39 @@ describe("formatSessionTable", () => {
       },
     ]);
     expect(result).toContain("(untitled)");
+  });
+
+  it("keeps a title containing a pipe and a newline inside one row", () => {
+    const result = formatSessionTable([
+      {
+        id: "ses_row",
+        projectID: "proj1",
+        directory: "/tmp",
+        title: "a|b\nc",
+        version: "1",
+        time: { created: 1705314600000, updated: 1705318200000 },
+      },
+    ]);
+    const rows = result.split("\n");
+    expect(rows.length).toBe(3); // header, separator, one data row
+    expect(result).toContain("a\\|b<br>c");
+    expect(rows[2].startsWith("| ses_row |")).toBe(true);
+  });
+
+  it("does not throw when a timestamp is missing or out of range", () => {
+    const result = formatSessionTable([
+      {
+        id: "ses_bad",
+        projectID: "proj1",
+        directory: "/tmp",
+        title: "Bad time",
+        version: "1",
+        time: { created: NaN, updated: Infinity },
+      },
+    ]);
+    expect(result).toContain("ses_bad");
+    expect(result).toContain("unknown -> unknown");
+    expect(result).toContain("| 0s |");
   });
 });
 
@@ -177,6 +245,26 @@ describe("formatSessionListTable", () => {
     );
     expect(result).toContain(`| ${longId} |`);
     expect(result).not.toContain("...");
+  });
+
+  it("keeps a title containing a pipe and a newline inside one row", () => {
+    const result = formatSessionListTable(
+      [
+        {
+          id: "ses_row",
+          projectID: "p1",
+          directory: "/tmp",
+          title: "a|b\nc",
+          version: "1",
+          time: { created: 1705314600000, updated: 1705318200000 },
+        },
+      ],
+      { ses_row: 2 },
+    );
+    const rows = result.split("\n");
+    expect(rows.length).toBe(3); // header, separator, one data row
+    expect(result).toContain("a\\|b<br>c");
+    expect(result).toContain("| 2 |");
   });
 });
 
@@ -436,6 +524,44 @@ describe("formatMessages", () => {
     // Should not throw; unknown types are silently skipped
     expect(result).toContain("[Message 1] user (1970-01-01 00:00:00)");
   });
+
+  it("does not throw and renders a fallback date for an invalid timestamp", () => {
+    const result = formatMessages([
+      {
+        info: { id: "m1", sessionID: "s1", role: "user" as const, time: { created: NaN } },
+        parts: [],
+      },
+    ]);
+    expect(result).toContain("[Message 1] user (unknown)");
+  });
+
+  it("does not render NaN for a non-finite cost", () => {
+    const result = formatMessages([
+      {
+        info: {
+          id: "m2", sessionID: "s1", role: "assistant" as const,
+          modelID: "gpt-4", providerID: "openai", cost: NaN, time: { created: 0 },
+        },
+        parts: [],
+      },
+    ]);
+    expect(result).toContain("Cost: $?");
+    expect(result).not.toContain("NaN");
+  });
+
+  it("truncates without splitting a surrogate pair", () => {
+    const text = `a${"\u{1F600}".repeat(400)}`;
+    const result = formatMessages([
+      {
+        info: { id: "m1", sessionID: "s1", role: "user" as const, time: { created: 0 } },
+        parts: [{ id: "p1", sessionID: "s1", messageID: "m1", type: "text", text }],
+      },
+    ]);
+    expect(result).toContain("...");
+    expect(result).not.toContain("\uFFFD");
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(result)).toBe(false);
+    expect(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(result)).toBe(false);
+  });
 });
 
 describe("formatStats", () => {
@@ -523,6 +649,34 @@ describe("formatStats", () => {
     expect(result).not.toContain("Models Used");
     expect(result).not.toContain("Tool Usage");
   });
+
+  it("renders token counts with locale-independent separators", () => {
+    const result = formatStats(sampleStats);
+    // Deterministic grouping via formatCount, never toLocaleString.
+    expect(result).toContain("1,000");
+    expect(result).toContain("\n  Input:       1,000\n");
+  });
+
+  it("aligns the token label column", () => {
+    const lines = formatStats(sampleStats).split("\n");
+    expect(lines).toContain("  Input:       1,000");
+    expect(lines).toContain("  Output:      500");
+    expect(lines).toContain("  Reasoning:   200");
+    expect(lines).toContain("  Cache read:  300");
+    expect(lines).toContain("  Cache write: 100");
+  });
+
+  it("does not render NaN for a non-finite cost", () => {
+    const result = formatStats({ ...sampleStats, totalCost: NaN });
+    expect(result).toContain("Total Cost: $?");
+    expect(result).not.toContain("NaN");
+  });
+
+  it("degrades non-finite counts instead of rendering NaN", () => {
+    const result = formatStats({ ...sampleStats, totalInputTokens: NaN });
+    expect(result).toContain("  Input:       ?");
+    expect(result).not.toContain("NaN");
+  });
 });
 
 describe("formatDiff", () => {
@@ -571,6 +725,97 @@ describe("formatDiff", () => {
     ]);
     const blocks = result.split("--- a/");
     expect(blocks.length >= 3).toBe(true); // summary + 2 file blocks
+  });
+
+  it("treats an inserted top line as one addition, not every line as changed", () => {
+    const result = formatDiff([
+      { file: "a.ts", before: "1\n2\n3", after: "0\n1\n2\n3", additions: 1, deletions: 0 },
+    ]);
+    const body = diffBody(result);
+    expect(body).toContain("@@ -1,3 +1,4 @@");
+    expect(body.filter((line) => line.startsWith("+"))).toEqual(["+0"]);
+    expect(body.filter((line) => line.startsWith("-"))).toEqual([]);
+    expect(body).toContain(" 1");
+    expect(body).toContain(" 2");
+    expect(body).toContain(" 3");
+  });
+
+  it("emits exactly one - and one + for a one-line change in a single hunk", () => {
+    const result = formatDiff([
+      { file: "a.ts", before: "1\n2\n3", after: "1\nX\n3", additions: 1, deletions: 1 },
+    ]);
+    const body = diffBody(result);
+    expect(body.filter((line) => line.startsWith("@@"))).toEqual(["@@ -1,3 +1,3 @@"]);
+    expect(body.filter((line) => line.startsWith("-"))).toEqual(["-2"]);
+    expect(body.filter((line) => line.startsWith("+"))).toEqual(["+X"]);
+  });
+
+  it("skips a file block when the content is unchanged", () => {
+    const result = formatDiff([
+      { file: "same.ts", before: "a\nb\n", after: "a\nb\n", additions: 0, deletions: 0 },
+    ]);
+    expect(result).not.toContain("--- a/");
+    expect(result).not.toContain("+++ b/");
+    expect(result).toContain("Files changed: 1");
+  });
+
+  it("skips only the unchanged file and keeps the block separator", () => {
+    const result = formatDiff([
+      { file: "a.ts", before: "x", after: "y", additions: 1, deletions: 1 },
+      { file: "same.ts", before: "a\n", after: "a\n", additions: 0, deletions: 0 },
+      { file: "b.ts", before: "a", after: "b", additions: 1, deletions: 1 },
+    ]);
+    expect(result).not.toContain("--- a/same.ts");
+    expect(result.split("--- a/").length).toBe(3); // summary + a.ts + b.ts
+    expect(result).toContain("\n\n--- a/b.ts");
+  });
+
+  it("marks a side that does not end in a newline", () => {
+    const result = formatDiff([
+      { file: "a.ts", before: "a\nb", after: "a\nc", additions: 1, deletions: 1 },
+    ]);
+    const body = diffBody(result);
+    expect(body).toContain("-b");
+    expect(body).toContain("+c");
+    expect(body.filter((line) => line === "\\ No newline at end of file").length).toBe(2);
+  });
+
+  it("does not emit a phantom trailing line for content ending in a newline", () => {
+    const result = formatDiff([
+      { file: "a.ts", before: "a\n", after: "a\nb\n", additions: 1, deletions: 0 },
+    ]);
+    const body = diffBody(result);
+    expect(body).toContain("+b");
+    expect(body.some((line) => line === "+")).toBe(false);
+    expect(body).not.toContain("\\ No newline at end of file");
+  });
+
+  it("caps a large file body and reports the dropped line count", () => {
+    const before = `${Array.from({ length: 500 }, (_, i) => `old-${i}`).join("\n")}\n`;
+    const after = `${Array.from({ length: 500 }, (_, i) => `new-${i}`).join("\n")}\n`;
+    const result = formatDiff([
+      { file: "big.ts", before, after, additions: 500, deletions: 500 },
+    ]);
+    const body = diffBody(result);
+    expect(body.length).toBe(401); // 400 body lines + the cap marker
+    expect(body[400]).toBe("... (601 more lines)");
+  });
+
+  it("falls back to a bounded coarse diff past the matrix guard", () => {
+    // 200_000 x 200_000 lines would need a 4e10-cell LCS table; the guard keeps
+    // the shared prefix/suffix as context and presents the middle as one removed
+    // block plus one added block.
+    const before = [...Array(100_000).fill("A"), "P", "X", "Y", ...Array(99_997).fill("A")].join("\n");
+    const after = [...Array(100_000).fill("A"), "Q", "X", "W", ...Array(99_997).fill("A")].join("\n");
+    const result = formatDiff([
+      { file: "huge.ts", before, after, additions: 2, deletions: 2 },
+    ]);
+    const body = diffBody(result);
+    expect(body).toContain("-P");
+    expect(body).toContain("-X");
+    expect(body).toContain("+Q");
+    expect(body).toContain("+X"); // an LCS diff would keep X as context, not re-add it
+    expect(result.split("\n").length).toBeLessThan(30); // bounded, not 200k lines
   });
 });
 
@@ -656,6 +901,25 @@ describe("formatSearchResults", () => {
     const result = formatSearchResults(manyMatches, 25, 25);
     expect(result).toContain("more matches");
   });
+
+  it("collapses newlines so one match cannot inject extra lines", () => {
+    const result = formatSearchResults(
+      [
+        {
+          sessionID: "ses_1", sessionTitle: "S|1\nX",
+          messageID: "msg_1", role: "user",
+          text: "a\nb", contextBefore: "p\nq", contextAfter: "r\ns",
+        },
+      ],
+      1, 1,
+    );
+    expect(result).toContain("**a b**");
+    expect(result).toContain("(S|1 X)");
+    expect(result).toContain("...p q");
+    expect(result).toContain("r s...");
+    // header (4 lines) + one 3-line match block; no injected rows.
+    expect(result.split("\n").length).toBe(6);
+  });
 });
 
 describe("formatTodoList", () => {
@@ -680,5 +944,14 @@ describe("formatTodoList", () => {
     expect(result).toContain("[x] [high] Done");
     expect(result).toContain("[~] [medium] Doing");
     expect(result).toContain("[ ] [low] Todo");
+  });
+
+  it("collapses newlines so one todo cannot inject extra lines", () => {
+    const result = formatTodoList([
+      { content: "Do\nthis", status: "pending", priority: "low", id: "1" },
+      { content: "Done", status: "completed", priority: "high", id: "2" },
+    ]);
+    expect(result.split("\n").length).toBe(3);
+    expect(result).toContain("  [ ] [low] Do this");
   });
 });
