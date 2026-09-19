@@ -331,7 +331,7 @@ describe("resolveModel advisory de-duplication", () => {
     initModelResolver(dir);
 
     expect(capturedWarns).toHaveLength(1);
-    const msg = JSON.stringify(capturedWarns);
+    const msg = capturedWarns.flat().join(" ");
     expect(msg).toContain("model_aliases");
     expect(msg).toContain(join(dir, "role_config.yaml"));
     expect(msg).toContain("array");
