@@ -235,16 +235,18 @@ describe("truncate", () => {
 
   it("handles multibyte Chinese characters correctly", async () => {
     const { truncate } = await importMonitor();
-    // JS .slice() on strings: "你好世界".length = 4
-    expect(truncate("你好世界", 3)).toBe("你好\u2026");
-    expect(truncate("你好世界", 4)).toBe("你好世界");
+    // The budget is display COLUMNS, not UTF-16 code units: "你好世界" is
+    // 4 code units but 8 columns (each CJK glyph occupies 2), so a 3- or
+    // 4-column budget keeps exactly one glyph plus the ellipsis.
+    expect(truncate("你好世界", 3)).toBe("你\u2026");
+    expect(truncate("你好世界", 4)).toBe("你\u2026");
   });
 
   it("handles emoji characters", async () => {
     const { truncate } = await importMonitor();
     const emojiStr = "abc🔥def";
-    // "abc🔥def".length = 7. slice(0, 5) = "abc🔥" (🔥 is 2 code units),
-    // but with maxLen=6: slice(0, 5) + "…" = "abc🔥" + "…"
+    // "abc" (3 columns) + "🔥" (2) fills the 5-column prefix inside the
+    // 6-column budget; the ellipsis takes the final column.
     expect(truncate(emojiStr, 6)).toBe("abc🔥\u2026");
   });
 });

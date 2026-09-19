@@ -6,40 +6,49 @@
  * @module
  */
 
+import {
+  formatDuration as formatDurationText,
+  progressBarParts,
+  truncateText,
+} from "./text-format.ts";
+
 // ── Duration formatting ──────────────────────────────────────────────────
 
 /**
  * Format a millisecond duration as a human-readable string.
  * Returns "?" for invalid or negative inputs.
+ *
+ * One-line delegation to `formatDuration(…, "monitor")` in `./text-format.ts`.
  */
 export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "?";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.floor((ms % 60000) / 1000);
-  return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  return formatDurationText(ms, "monitor");
 }
 
 /**
  * Format a millisecond duration as a compact single-unit string for inline display.
  * Returns "0s" for zero or negative values.
+ *
+ * One-line delegation to `formatDuration(…, "narrow")` in `./text-format.ts`.
  */
 export function compactDuration(ms: number): string {
-  if (ms <= 0) return "0s";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-  return `${Math.floor(ms / 60000)}m`;
+  return formatDurationText(ms, "narrow");
 }
 
 // ── Text helpers ─────────────────────────────────────────────────────────
 
 /**
  * Truncate a string with an ellipsis character ("…") if it exceeds maxLen.
+ *
+ * One-line delegation to `truncateText` in `./text-format.ts`. CONTRACT
+ * CHANGE: `maxLen` is a display-COLUMN budget that includes the ellipsis; at
+ * HEAD it budgeted UTF-16 code units. The two agree for ASCII but not for wide
+ * characters — CJK and emoji occupy two columns each, so
+ * `truncate("你好世界", 3)` is `"你…"`. The column budget is the correct
+ * semantic for a terminal width budget and is what makes composition with the
+ * padding helpers meaningful.
  */
 export function truncate(s: string, maxLen: number): string {
-  if (s.length <= maxLen) return s;
-  return s.slice(0, maxLen - 1) + "\u2026";
+  return truncateText(s, maxLen);
 }
 
 /**
@@ -63,11 +72,11 @@ export function shortSessionId(id: string): string {
 /**
  * Compute the number of filled and empty segments for a progress bar
  * of the given width.
+ *
+ * One-line delegation to `progressBarParts` in `./text-format.ts`.
  */
 export function barSegments(current: number, total: number, width = 6): { filled: number; empty: number } {
-  if (total <= 0) return { filled: 0, empty: width };
-  const filled = Math.max(0, Math.min(width, Math.round((current / total) * width)));
-  return { filled, empty: width - filled };
+  return progressBarParts(current, total, width);
 }
 
 // ── Status glyphs ────────────────────────────────────────────────────────
