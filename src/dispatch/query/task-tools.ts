@@ -26,6 +26,7 @@ import {
   resultSidecarPath,
 } from "../completion/result-extractor.ts";
 import { formatDuration, formatDurationBetween } from "./format-utils.ts";
+import { formatTimestamp } from "../../utils/text-format.ts";
 import { createSubLogger } from "../../logger.ts";
 
 const log = createSubLogger("task:tools");
@@ -44,8 +45,14 @@ const STATUS_COLUMNS = [
   "timeout",
 ] as const;
 
+/**
+ * Render a `Date` as `YYYY-MM-DD HH:mm:ss` in UTC.
+ *
+ * One-line delegation to the canonical `formatTimestamp`; an invalid `Date`
+ * now renders `unknown` instead of throwing `RangeError: Invalid Date`.
+ */
 function formatDate(date: Date): string {
-  return date.toISOString().slice(0, 19).replace("T", " ");
+  return formatTimestamp(date.getTime());
 }
 
 /** Resolve an output path inside the workspace, rejecting path traversal. */

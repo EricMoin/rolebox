@@ -54,6 +54,7 @@
 
 import { NodeStatus } from "../../constants.ts";
 import { errorText } from "../../utils/error-text.ts";
+import { formatDuration } from "../../utils/text-format.ts";
 import {
   SWEEPER_INTERVAL_MS,
   ADVANCING_LOCK_TIMEOUT_MS,
@@ -1824,12 +1825,12 @@ export class NodeLivenessMonitor {
 /**
  * Compact idle-time rendering for timeout reasons ("42s" for sub-minute,
  * "12m" for minutes). Negative skew (clock moved backwards) clamps to zero.
+ *
+ * One-line delegation to `formatDuration(…, "largest")`, which additionally
+ * rolls up to hours and days instead of pinning everything to minutes.
  */
 function formatIdle(ms: number): string {
-  const clamped = Math.max(0, ms);
-  return clamped < 60_000
-    ? `${Math.round(clamped / 1_000)}s`
-    : `${Math.round(clamped / 60_000)}m`;
+  return formatDuration(Math.max(0, ms), "largest");
 }
 
 /** Minimal, dependency-free info logger. */

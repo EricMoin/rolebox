@@ -33,6 +33,7 @@
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { createSubLogger } from "../../logger.ts";
 import { errorText } from "../../utils/error-text.ts";
+import { formatDuration } from "../../utils/text-format.ts";
 import { metrics } from "../../dispatch/persistence/metrics.ts";
 import {
   enqueueNotify,
@@ -232,15 +233,16 @@ function claimDedupe(notified: Set<string>, key: string): boolean {
 
 // ── Reminder text ───────────────────────────────────────────────────────────
 
-/** Format an epoch-ms duration as a compact human-readable string. */
+/**
+ * Format an epoch-ms duration as a compact human-readable string.
+ *
+ * The `undefined` guard stays local; the rendering is a one-line delegation to
+ * `formatDuration(…, "stall")`. Negative clock skew (a `completedAt` before
+ * `startedAt`) now renders the ? sentinel like every other invalid stall input.
+ */
 export function formatGraphDuration(startedAt?: number, completedAt?: number): string {
   if (startedAt === undefined || completedAt === undefined) return "?";
-  const ms = completedAt - startedAt;
-  if (ms < 0) return "0s";
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.floor((ms % 60_000) / 1000);
-  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  return formatDuration(completedAt - startedAt, "stall");
 }
 
 /**
@@ -563,14 +565,12 @@ function stallDedupeKey(event: NodeStallEvent): string {
 /**
  * Format an idle duration (ms) as a compact human-readable string — the same
  * style as {@link formatGraphDuration}: `<60s → "X.Xs"`, else `"Xm Ys"`;
- * a negative value (clock skew) renders `"?"`.
+ * a negative value (clock skew) renders the ? sentinel.
+ *
+ * One-line delegation to `formatDuration(…, "stall")`.
  */
 export function formatStallIdle(idleMs: number): string {
-  if (idleMs < 0) return "?";
-  if (idleMs < 60_000) return `${(idleMs / 1000).toFixed(1)}s`;
-  const minutes = Math.floor(idleMs / 60_000);
-  const seconds = Math.floor((idleMs % 60_000) / 1000);
-  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  return formatDuration(idleMs, "stall");
 }
 
 /**

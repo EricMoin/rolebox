@@ -1,5 +1,6 @@
 import { bar, SYM_ARROW, SYM_OK, SYM_FAIL } from "./format.ts";
 import { formatDuration } from "../utils/display-helpers.ts";
+import { formatBytes as formatBytesText } from "../utils/text-format.ts";
 
 /**
  * Self-contained progress reporting for the role download/install pipeline.
@@ -79,19 +80,15 @@ const DEGRADED_LOG_INTERVAL_MS = 2000;
 
 // ── Pure formatting helpers (exported for tests) ─────────────────────
 
-/** Format a byte count with binary units, e.g. `1.2MB`, `850KB`, `512B`. */
+/**
+ * Format a byte count with binary units, e.g. `1.2MB`, `850KB`, `512B`.
+ *
+ * One-line delegation to the canonical `formatBytes`. Every finite,
+ * non-negative value renders exactly as before; non-finite input now renders
+ * the invalid sentinel `?` instead of `NaNB` / `InfinityB`.
+ */
 export function formatBytes(n: number): string {
-  const value = Math.max(0, n);
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = value;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  if (i === 0) return `${Math.round(v)}B`;
-  const str = v >= 100 ? String(Math.round(v)) : v.toFixed(1);
-  return `${str}${units[i]}`;
+  return formatBytesText(n);
 }
 
 /** Format a transfer rate in bytes/second, e.g. `850KB/s`. */

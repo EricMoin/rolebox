@@ -3,6 +3,7 @@ import type { DispatchTask, NotificationPayload } from "./types.ts";
 import { createSubLogger } from "../logger.ts";
 import { metrics } from "./persistence/metrics.ts";
 import { buildReminder, type ReminderField } from "../prompt/reminder.ts";
+import { formatDuration } from "../utils/text-format.ts";
 
 const log = createSubLogger("dispatch:notify");
 
@@ -276,20 +277,17 @@ export async function notifyParent(
   return enqueueNotify(task.parentSessionId, doNotify);
 }
 
+/**
+ * Duration shown in the completion reminder.
+ *
+ * A negative delta (clock skew) keeps its explicit `"0s"` clamp rather than the
+ * canonical `"stall"` sentinel; every other value delegates to
+ * `formatDuration`. That ladder is total, so an invalid `Date` renders `"?"`
+ * instead of the old literal `NaNm NaNs` text.
+ */
 function computeDuration(start: Date, end?: Date): string {
   const endTime = end ?? new Date();
   const ms = endTime.getTime() - start.getTime();
   if (ms < 0) return "0s";
-
-  const seconds = ms / 1000;
-  if (seconds < 60) {
-    return `${seconds.toFixed(1)}s`;
-  }
-
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.floor(seconds % 60);
-  if (remainingSeconds === 0) {
-    return `${minutes}m`;
-  }
-  return `${minutes}m ${remainingSeconds}s`;
+  return formatDuration(ms, "stall");
 }

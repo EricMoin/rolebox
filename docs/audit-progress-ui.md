@@ -54,7 +54,7 @@ So a single large role tarball over a slow link produces: one initial message (i
 
 - `format.ts` — ANSI color/wrap helpers: `bold`, `dim`, `red`, `green`, `yellow`, `cyan`, `magenta`, `white`, `gray`, `soft`, `border`, `sub`, `bright`.
 - `format.ts` — status symbols and phase glyphs: `SYM_OK`, `SYM_FAIL`, `SYM_WARN`, `SYM_ARROW`, `SYM_BULLET`, plus phase icons `SYM_DISPATCH` (`▶`), `SYM_AWAIT` (`◷`), `SYM_SUMMARIZE` (`◆`), `SYM_COMPLETE` (`✓`), `SYM_ERROR` (`✗`), `SYM_CANCELLED` (`⊘`).
-- `format.ts` — `stripAnsi`, `padEnd`, `padRight` for alignment that survives ANSI codes.
+- `format.ts` — `stripAnsi`, `padEnd` for alignment that survives ANSI codes; `padEnd` targets display columns (ANSI- and East-Asian-width aware).
 - `format.ts` — **`bar(current, total, width=10)`** — draws `■■■□□□□□□□`-style determinate bars. Directly reusable for the download byte-progress.
 
 Verbatim from `src/cli/format.ts`:
@@ -103,9 +103,7 @@ export const SYM_CANCELLED = "⊘";
 
 ```ts
 export function bar(current: number, total: number, width = 10): string {
-  const filled = Math.max(0, Math.min(width, Math.round((current / total) * width)));
-  const empty = Math.max(0, width - filled);
-  return "■".repeat(filled) + "□".repeat(empty);
+  return progressBar(current, total, width);
 }
 ```
 
@@ -123,12 +121,7 @@ Verbatim from `src/utils/display-helpers.ts`:
 
 ```ts
 export function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "?";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.floor((ms % 60000) / 1000);
-  return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  return formatDurationText(ms, "monitor");
 }
 ```
 
@@ -136,9 +129,7 @@ export function formatDuration(ms: number): string {
 
 ```ts
 export function barSegments(current: number, total: number, width = 6): { filled: number; empty: number } {
-  if (total <= 0) return { filled: 0, empty: width };
-  const filled = Math.max(0, Math.min(width, Math.round((current / total) * width)));
-  return { filled, empty: width - filled };
+  return progressBarParts(current, total, width);
 }
 ```
 

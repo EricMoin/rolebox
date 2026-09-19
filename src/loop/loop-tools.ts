@@ -25,6 +25,7 @@ import type { LoopState, LoopPhase, RoundRecord, LoopMode } from "./types.ts";
 import { applyWindow, DEFAULT_MAX_RESULT_CHARS } from "../dispatch/completion/result-extractor.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import type { CanonicalToolDef } from "../platform/types.ts";
+import { formatDuration, truncateText } from "../utils/text-format.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool-facing type definitions
@@ -150,19 +151,19 @@ function buildMetricsSnapshot(
   };
 }
 
-/** Format milliseconds as a human-readable duration string. */
+/**
+ * Format milliseconds as a human-readable duration string.
+ *
+ * One-line delegation to `formatDuration(…, "decimal")`; invalid input now
+ * renders the ? sentinel instead of NaNms text.
+ */
 function formatDurationMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.floor((ms % 60_000) / 1000);
-  return `${m}m ${s}s`;
+  return formatDuration(ms, "decimal");
 }
 
-/** Truncate a session ID with ellipsis for display. */
+/** Truncate a session ID with an ASCII ellipsis for display. */
 function shortenId(id: string, len = 20): string {
-  if (id.length <= len) return id;
-  return id.slice(0, len - 3) + "...";
+  return truncateText(id, len, "...");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

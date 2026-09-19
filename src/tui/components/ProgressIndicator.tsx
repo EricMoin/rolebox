@@ -10,6 +10,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { ThemeColors } from "../helpers.ts";
 import { rgbaToCSS, BOLD, DIM, G_BAR_ON, G_BAR_OFF, G_SUB } from "../helpers.ts";
+import { progressBarParts } from "../../utils/text-format";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -17,11 +18,17 @@ const BAR_WIDTH = 10;
 
 // ── Bar computation ────────────────────────────────────────────────────────
 
+/**
+ * Segment counts for `percentage` of a `width`-character bar.
+ *
+ * One-line delegation to the canonical `progressBarParts` at a nominal total of
+ * 100. The replaced local formula was `Math.round((percentage / 100) * width)`
+ * with the same 0/100 clamping, so the rendered bar is identical for every
+ * finite percentage; the only divergence is a non-finite percentage, which the
+ * snapshot data cannot produce and which previously produced a degenerate bar.
+ */
 function barSegments(percentage: number, width: number): { filled: number; empty: number } {
-  if (percentage <= 0) return { filled: 0, empty: width };
-  if (percentage >= 100) return { filled: width, empty: 0 };
-  const filled = Math.round((percentage / 100) * width);
-  return { filled, empty: width - filled };
+  return progressBarParts(percentage, 100, width);
 }
 
 // ── Render: Progress indicator ────────────────────────────────────────────

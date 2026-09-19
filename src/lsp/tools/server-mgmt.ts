@@ -1,6 +1,7 @@
 import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { z } from "zod";
 import type { LspClientManager } from "../client-manager.ts";
+import { formatDuration } from "../../utils/text-format.ts";
 
 export function createLspServersTool(
   clientManager: LspClientManager,
@@ -31,7 +32,7 @@ export function createLspServersTool(
 
         for (const server of running) {
           const uptimeMs = Date.now() - server.startedAt.getTime();
-          const uptime = formatUptime(uptimeMs);
+          const uptime = formatDuration(uptimeMs, "clock");
           const capSummary = summarizeCapabilities(server.capabilities);
           lines.push(
             `| ${server.languageId} | ${server.pid} | ${server.status} | ${uptime} | ${capSummary} |`,
@@ -113,15 +114,6 @@ export function createLspRestartServerTool(
       }
     },
   });
-}
-
-function formatUptime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
 }
 
 function summarizeCapabilities(caps: any): string {

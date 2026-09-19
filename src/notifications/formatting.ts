@@ -1,3 +1,5 @@
+import { truncateText } from "../utils/text-format.ts";
+
 // ── Text Escaping ──────────────────────────────────────────────────────
 
 /**
@@ -58,13 +60,12 @@ export function buildWindowsToastScript(
 /**
  * Truncate a string with a trailing "…" if it exceeds `maxLen`.
  * Returns `""` when `maxLen <= 0`.
+ *
+ * One-line delegation to the canonical `truncateText` in
+ * `src/utils/text-format.ts` (same "…" and same inclusive budget).
  */
 export function truncate(str: string, maxLen: number): string {
-  if (maxLen <= 0) return "";
-  if (str.length > maxLen) {
-    return str.slice(0, maxLen - 1) + "…";
-  }
-  return str;
+  return truncateText(str, maxLen);
 }
 
 // ── macOS Notification (osascript) ────────────────────────────────────

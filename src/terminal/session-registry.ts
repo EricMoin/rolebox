@@ -24,6 +24,7 @@
 import { spawn as cpSpawn } from "node:child_process";
 import { createSubLogger } from "../logger.ts";
 import { TerminalScreen } from "./screen-buffer.ts";
+import { stripAnsi as canonicalStripAnsi } from "../utils/text-format.ts";
 
 const log = createSubLogger("interactive-terminal");
 
@@ -184,10 +185,15 @@ let counter = 0;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-const ANSI_RE = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
-
+/**
+ * Remove ANSI escape sequences (CSI, OSC and two-character escapes).
+ *
+ * One-line delegation to the canonical `stripAnsi` in `src/utils/text-format.ts`;
+ * that module adopted this module's proven `ANSI_RE` verbatim, so PTY snapshot
+ * behaviour is unchanged.
+ */
 export function stripAnsi(s: string): string {
-  return s.replace(ANSI_RE, "");
+  return canonicalStripAnsi(s);
 }
 
 function sleep(ms: number): Promise<void> {

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getDataDir } from "./paths.ts";
 import { compareVersions } from "./commands/update.ts";
+import { displayWidth, padDisplayEnd, padDisplayStart } from "../utils/text-format.ts";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -128,15 +129,17 @@ function printUpdateNotice(currentVersion: string, latestVersion: string): void 
 
 /**
  * Center-pad a string (accounting for ANSI escape codes in visible length).
+ *
+ * Composed from the canonical `padDisplayStart` + `padDisplayEnd` so the
+ * padding uses the same display-width model as every other surface. For ASCII
+ * text, `""` and oversized input the result is byte-identical to the previous
+ * `" ".repeat` implementation; wide (CJK/emoji) text differs, because those
+ * code points now count as two display columns instead of one UTF-16 code
+ * unit — a CJK title is padded less and the emitted line is narrower.
  */
 function centerPad(text: string, width: number): string {
-  const visible = stripAnsi(text);
-  const padding = Math.max(0, width - visible.length);
-  const left = Math.floor(padding / 2);
-  const right = padding - left;
-  return " ".repeat(left) + text + " ".repeat(right);
-}
-
-function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*m/g, "");
+  const textWidth = displayWidth(text);
+  const left = Math.floor(Math.max(0, width - textWidth) / 2);
+  const centered = padDisplayStart(text, textWidth + left);
+  return padDisplayEnd(centered, width);
 }

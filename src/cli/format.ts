@@ -7,6 +7,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import {
+  padDisplayEnd,
+  progressBar,
+  stripAnsi as canonicalStripAnsi,
+} from "../utils/text-format.ts";
 
 // ── ANSI Colors ──────────────────────────────────────────────────
 
@@ -52,33 +57,37 @@ export const HLTH_ERROR = red("●");
 
 // ── Layout Helpers ───────────────────────────────────────────────
 
+/**
+ * Remove ANSI escape sequences (CSI, OSC and two-character escapes).
+ *
+ * One-line delegation to the canonical `stripAnsi` in `src/utils/text-format.ts`.
+ */
 export function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*m/g, "");
+  return canonicalStripAnsi(s);
 }
 
+/**
+ * Pad with spaces on the right until `width` display columns are reached.
+ *
+ * One-line delegation to the canonical `padDisplayEnd`; never truncates.
+ */
 export function padEnd(s: string, width: number): string {
-  const visible = stripAnsi(s).length;
-  const padding = Math.max(0, width - visible);
-  return s + " ".repeat(padding);
-}
-
-export function padRight(s: string, width: number): string {
-  const visible = stripAnsi(s).length;
-  const padding = Math.max(0, width - visible);
-  return s + " ".repeat(padding);
+  return padDisplayEnd(s, width);
 }
 
 /**
  * Draw a filled progress bar. Useful for showing rounds/task completion.
+ *
+ * One-line delegation to the canonical `progressBar` (same ■/□ glyphs). A
+ * non-positive `total` now renders an empty bar instead of a full one.
+ *
  * @param current — completed count
- * @param total — total count (must be > 0)
+ * @param total — total count
  * @param width — total character width of the bar (default 10)
  * @returns a visual bar like ■■■□□□□□□□ for 3/10
  */
 export function bar(current: number, total: number, width = 10): string {
-  const filled = Math.max(0, Math.min(width, Math.round((current / total) * width)));
-  const empty = Math.max(0, width - filled);
-  return "■".repeat(filled) + "□".repeat(empty);
+  return progressBar(current, total, width);
 }
 
 export function printHeader(title: string): void {

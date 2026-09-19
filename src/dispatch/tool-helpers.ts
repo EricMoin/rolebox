@@ -1,17 +1,13 @@
 import type { DispatchTask } from "./types.ts";
 import { applyWindow, applySidecarWindow, extractResultBlock, spillToFile, formatResultEnvelope, DEFAULT_MAX_RESULT_CHARS } from "./completion/result-extractor.ts";
 import { getDataDir } from "../cli/paths.ts";
+import { formatDuration } from "./query/format-utils.ts";
 
-export function formatDuration(task: DispatchTask): string {
-  const end = task.completedAt ?? new Date();
-  const ms = end.getTime() - task.startedAt.getTime();
-  if (ms < 0) return "0s";
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remain = seconds % 60;
-  return `${minutes}m ${remain}s`;
-}
+/**
+ * Re-exported so existing `./tool-helpers.ts` consumers keep working; the
+ * implementation lives in the shared `./query/format-utils.ts`.
+ */
+export { formatDuration };
 
 export function parentContextFromTool(context: {
   sessionID: string;
