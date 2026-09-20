@@ -13,10 +13,14 @@ export const ROLE_MODE_VALUES: readonly RoleMode[] = Object.values(RoleMode);
 
 // ── Skill Scope ────────────────────────────────────────────────────────
 
-/** Where a skill was resolved from. */
+/**
+ * Where a skill was resolved from. `Rolebox` is a role-local skill;
+ * `Global` is a skill from the harness's global skills directory, whose
+ * location is resolved by the platform layer.
+ */
 export const SkillScope = {
   Rolebox: "rolebox",
-  Opencode: "opencode",
+  Global: "global",
 } as const;
 
 export type SkillScope = (typeof SkillScope)[keyof typeof SkillScope];

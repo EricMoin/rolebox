@@ -152,7 +152,7 @@ export interface RoleConfig {
 
 /**
  * A resolved skill reference after locating the corresponding SKILL.md file
- * in either the role's local skills directory or the opencode global skills directory.
+ * in either the role's local skills directory or the harness's global skills directory.
  */
 export interface ResolvedSkill {
   /** Skill name (matches the directory or frontmatter name) */

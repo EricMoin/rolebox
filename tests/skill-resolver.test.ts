@@ -101,7 +101,7 @@ describe("resolveSkills", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-skill");
-    expect(result[0].scope).toBe("opencode");
+    expect(result[0].scope).toBe("global");
     expect(toPosixPath(result[0].filePath)).toContain("/my-skill/SKILL.md");
   });
 
@@ -115,7 +115,7 @@ describe("resolveSkills", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("my-skill");
-    expect(result[0].scope).toBe("opencode");
+    expect(result[0].scope).toBe("global");
     expect(toPosixPath(result[0].filePath)).toContain("/my-skill.md");
   });
 
@@ -192,7 +192,7 @@ describe("resolveSkills", () => {
     expect(result[0].scope).toBe("rolebox");
   });
 
-  it("batch dedup priority: rolebox wins over opencode when both exist across multiple skills", async () => {
+  it("batch dedup priority: rolebox wins over global when both exist across multiple skills", async () => {
     const roleDir = tmpDir();
     const globalDir = tmpDir();
 
@@ -222,9 +222,9 @@ describe("resolveSkills", () => {
     expect(b.scope).toBe("rolebox");
     expect(toPosixPath(b.filePath)).toContain("/skills/skill-b/SKILL.md");
 
-    // skill-c: only in global -> opencode scope
+    // skill-c: only in global -> global scope
     const c = result.find(s => s.name === "skill-c")!;
-    expect(c.scope).toBe("opencode");
+    expect(c.scope).toBe("global");
     expect(toPosixPath(c.filePath)).toContain("/skill-c/SKILL.md");
   });
 

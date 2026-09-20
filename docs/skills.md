@@ -29,8 +29,8 @@ When reviewing code, check:
 // Resolution priority:
 //  1. {roleDir}/skills/{name}/SKILL.md  (role-local directory)
 //  2. {roleDir}/skills/{name}.md        (role-local single-file)
-//  3. {globalSkillsDir}/{name}/SKILL.md (global directory)
-//  4. {globalSkillsDir}/{name}.md       (global single-file)
+//  3. {globalSkillsDir}/{name}/SKILL.md (global skills dir, harness-resolved)
+//  4. {globalSkillsDir}/{name}.md       (global skills dir, harness-resolved)
 function buildCandidates(
   name: string,
   roleDir: string,
@@ -40,8 +40,8 @@ function buildCandidates(
   return [
     { scope: SkillScope.Rolebox, pattern: skillDirPath(roleSkillsDir, name) },
     { scope: SkillScope.Rolebox, pattern: skillFilePath(roleSkillsDir, name) },
-    { scope: SkillScope.Opencode, pattern: skillDirPath(globalSkillsDir, name) },
-    { scope: SkillScope.Opencode, pattern: skillFilePath(globalSkillsDir, name) },
+    { scope: SkillScope.Global, pattern: skillDirPath(globalSkillsDir, name) },
+    { scope: SkillScope.Global, pattern: skillFilePath(globalSkillsDir, name) },
   ];
 }
 ```

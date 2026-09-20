@@ -81,21 +81,21 @@ describe("buildAgentPrompt", () => {
       makeSkill({
         name: "my-skill",
         description: "Does something useful",
-        scope: "opencode",
+        scope: "global",
       }),
     ];
     const result = buildAgentPrompt(role, skills);
 
     expect(result).toContain("<name>my-skill</name>");
     expect(result).toContain("<description>Does something useful</description>");
-    expect(result).toContain("<scope>opencode</scope>");
+    expect(result).toContain("<scope>global</scope>");
   });
 
   it("includes all skills when multiple are provided", () => {
     const role = makeRole();
     const skills = [
       makeSkill({ name: "skill-a", description: "First skill", scope: "rolebox" }),
-      makeSkill({ name: "skill-b", description: "Second skill", scope: "opencode" }),
+      makeSkill({ name: "skill-b", description: "Second skill", scope: "global" }),
       makeSkill({ name: "skill-c", description: "Third skill", scope: "rolebox" }),
     ];
     const result = buildAgentPrompt(role, skills);
