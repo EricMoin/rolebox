@@ -1,0 +1,94 @@
+name: Host versions
+
+# Policy: the platform host packages (@opencode-ai/*, @deepseek-ai/*,
+# @earendil-works/*) are devDependencies and must follow their published
+# channel. scripts/host-versions.ts holds the tracked table and the channel per
+# package; `bun run check:hosts` compares each resolved version against it.
+#
+# Scheduled, not on push/pull_request: a host publishing a new version is not a
+# defect in whichever pull request happens to be open at that moment, so it must
+# never block unrelated PRs. It only has to be visible — daily — together with
+# the answer to "would the bump survive the event-vocabulary guards?". The
+# upgrade runs only inside this ephemeral runner: no commit, no push, no PR, and
+# contents: read is the whole permission set.
+
+on:
+  schedule:
+    # Daily at 06:23 UTC. An off-minute cron keeps this out of the top-of-hour
+    # Actions load spike.
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        # --frozen-lockfile: never rewrite the committed lockfile while checking.
+        run: bun install --frozen-lockfile
+
+      - name: Check host versions (exit 1 = drift)
+        id: check
+        shell: bash
+        run: |
+          set +e
+          bun run check:hosts 2>&1 | tee /tmp/host-versions.txt
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -eq 1 ]; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "### Host version check"
+            echo
+            sed "s/^/    /" /tmp/host-versions.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Exit 1 is drift, reported by the final step after the upgrade
+          # attempt below has run. Anything else is a real failure of the check.
+          if [ "$status" -ne 1 ]; then
+            exit "$status"
+          fi
+
+      - name: Attempt the upgrade in this runner
+        id: upgrade
+        # Only when the check reported drift, and never fatal by itself: the log
+        # must show whether `bun run update:hosts` (bump, install, typecheck,
+        # vocabulary guards) is clean before the job fails.
+        if: steps.check.outputs.drift == 'true'
+        continue-on-error: true
+        run: bun run update:hosts
+
+      - name: Fail the job with the drift summary
+        if: always() && steps.check.outputs.drift == 'true'
+        shell: bash
+        run: |
+          if [ "${{ steps.upgrade.outcome }}" = "success" ]; then
+            verdict="PASSED: bun run update:hosts installs, typechecks and passes the vocabulary guards"
+          else
+            verdict="FAILED: the bump is not guard-clean; read the upgrade step above"
+          fi
+
+          {
+            echo "### Host drift detected"
+            echo
+            echo "At least one tracked host package is behind its published channel."
+            echo "Upgrade attempt in this runner: $verdict."
+            echo
+            echo "Remedy from a clean tree: bun run update:hosts (or bun run update:hosts --dry-run to preview)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit 1

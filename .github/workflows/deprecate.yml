@@ -2,11 +2,8 @@ name: Deprecate
 
 # Manual registry-maintenance workflow.
 #
-# The tag-driven `publish.yml` workflow is the release button. This separate,
-# manually-triggered workflow exists because local npm credentials for this
-# repository are unavailable — every registry write goes through GitHub Actions
-# using the repository NPM_TOKEN secret. It marks a version range as deprecated,
-# so installers see an upgrade notice.
+# Marks a version range as deprecated, so installers see an upgrade notice.
+# Requires the repository NPM_TOKEN secret.
 #
 # Run from the Actions tab (workflow_dispatch) or:
 #   gh workflow run deprecate.yml \

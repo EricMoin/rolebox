@@ -137,3 +137,16 @@ Support directories (helpers, not modules): `tests/helpers/`, `tests/integration
 - **No unrelated refactors**; do not rename, reformat, or "clean up" code outside your task.
 - **Match existing style** in the file and module you are editing.
 - Run `bun run typecheck` before declaring work done.
+
+---
+
+## Host package versions
+
+Host packages — `@opencode-ai/*`, `@deepseek-ai/*`, `@earendil-works/*` — are devDependencies that track their published channel at `latest`; the `@deepseek-ai/dsh-*` packages track `next`. The policy table lives in `scripts/host-versions.ts`; `bun run check:hosts` compares each resolved version against its channel and exits 1 when one is behind. The `host-versions.yml` workflow runs that daily and fails on drift, so a host release never blocks an unrelated PR.
+
+```sh
+bun run update:hosts            # bump pins, reinstall, typecheck, vocabulary guards
+bun run update:hosts --dry-run  # print the edits, touch nothing
+```
+
+Releases are manual — there is no tag-triggered publish workflow.
