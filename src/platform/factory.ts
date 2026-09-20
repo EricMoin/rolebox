@@ -34,6 +34,11 @@ export interface RoleboxDirectories {
   globalSkillsDir: string;
   /** Platform configuration directory (e.g. ~/.config/opencode). */
   configDir: string;
+  /**
+   * Platform identifier of the running harness (e.g. `"opencode"`, `"pi"`,
+   * `"dsh"`) — selects which harness's model catalog the resolver reads.
+   */
+  platformId: string;
   /** Path to the built-in functions directory (package root's functions/). */
   builtinDir: string;
 }
@@ -103,7 +108,13 @@ export function resolveRoleboxDirectories(
     "functions",
   );
 
-  return { roleboxDir, globalSkillsDir, configDir: paths.configDir, builtinDir };
+  return {
+    roleboxDir,
+    globalSkillsDir,
+    configDir: paths.configDir,
+    platformId,
+    builtinDir,
+  };
 }
 
 /**
@@ -123,6 +134,7 @@ export async function initializeRoleboxRuntime(
     roleboxDir: dirs.roleboxDir,
     globalSkillsDir: dirs.globalSkillsDir,
     configDir: dirs.configDir,
+    platformId: dirs.platformId,
     builtinDir: dirs.builtinDir,
     roleFunctionsMap,
   });

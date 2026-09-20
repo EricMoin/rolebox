@@ -3,7 +3,8 @@
  *
  * Replaces placeholder/bare-name model strings with canonical
  * `provider/model_id` values using a two-source fallback chain:
- *   1. Known models (from opencode.jsonc) — passthrough if already canonical.
+ *   1. Known models (from the RUNNING harness's catalog — `opencode.jsonc`,
+ *      `settings.yaml` or `models.json`) — passthrough if already canonical.
  *   2. User-configurable aliases (from role_config.yaml) — single-hop mapping.
  *
  * Unrecognized models pass through unchanged with a log message.
@@ -16,8 +17,11 @@ import { load as parseYaml } from "js-yaml";
 import { createSubLogger } from "../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
-import { scanAvailableModels } from "../cli/model-utils.ts";
-import { getOpencodeConfigDir } from "../cli/paths.ts";
+import {
+  resolveSyncTarget,
+  scanModelsForTarget,
+} from "../platform/model-catalog/index.ts";
+import { resolvePlatformPaths } from "../platform/registry.ts";
 
 // ── Module-level mutable state (reloaded on every `initModelResolver` call) ──
 
@@ -61,8 +65,8 @@ export function __resetForTest(): void {
  * Initialize (or re-initialize) the model resolver from the filesystem.
  *
  * Every call reloads **both** caches from disk — there is no idempotency
- * check and no lazy initialization.  This guarantees that edits to
- * `opencode.jsonc` or `role_config.yaml` take effect on the next
+ * check and no lazy initialization.  This guarantees that edits to the running
+ * harness's model catalog or `role_config.yaml` take effect on the next
  * `initModelResolver()` call (which happens at every bootstrap and
  * hot-reload cycle).
  *
@@ -71,16 +75,26 @@ export function __resetForTest(): void {
  * model is reported once per generation and the not-initialized warning is
  * re-armed.
  *
- * @param configDir — path to the opencode config directory (contains
- *   `opencode.jsonc` and `role_config.yaml`).  When omitted, falls back
- *   to the XDG-aware `getOpencodeConfigDir()`.
+ * @param configDir — config home of the running harness (contains that
+ *   harness's model catalog — `opencode.jsonc` / `settings.yaml` /
+ *   `models.json` — and `role_config.yaml`).  When omitted, falls back to the
+ *   config home `resolvePlatformPaths(platformId)` resolves; the catalog and
+ *   the aliases are always read from the SAME directory.
+ * @param platformId — platform identifier of the running harness.  Selects
+ *   which harness catalog is read; unknown or omitted falls back to opencode,
+ *   matching the lenient `resolvePlatformPaths` contract.  When the harness
+ *   declares no models of its own, its catalog seed (opencode) is read from
+ *   the seed's own default home.
  */
-export function initModelResolver(configDir?: string): void {
-  const dir = configDir ?? getOpencodeConfigDir();
+export function initModelResolver(configDir?: string, platformId?: string): void {
+  const dir = configDir ?? resolvePlatformPaths(platformId).configDir;
+  const resolvedTarget = resolveSyncTarget(platformId);
 
-  // 1. Load known model IDs from opencode.jsonc
-  const opencodeConfigPath = join(dir, "opencode.jsonc");
-  const models = scanAvailableModels(opencodeConfigPath);
+  // 1. Load known model IDs from the running harness's catalog (seeded from
+  //    opencode when the harness declares no models of its own)
+  const models = scanModelsForTarget(resolvedTarget, {
+    configDirs: { [resolvedTarget]: dir },
+  });
   knownModelIds = new Set(models.map((m) => m.id));
 
   // 2. Load model aliases from role_config.yaml
@@ -98,8 +112,8 @@ export function initModelResolver(configDir?: string): void {
  *
  *   1. Not initialized → warn once per generation + passthrough original.
  *   2. Empty / whitespace-only → passthrough original.
- *   3. Found in `knownModelIds` (from opencode.jsonc) → passthrough original
- *      (already a canonical `provider/model_id`).
+ *   3. Found in `knownModelIds` (from the running harness's catalog) →
+ *      passthrough original (already a canonical `provider/model_id`).
  *   4. Found in `modelAliases` → return the **single-hop** mapped value.
  *   5. Neither → `log.info` a hint + passthrough original.  The hint is
  *      emitted at most once per distinct model per generation.

@@ -43,6 +43,8 @@ const ENV_KEYS = [
   "XDG_DATA_HOME",
   "PI_CODING_AGENT_DIR",
   "DSH_HOME",
+  "HOME",
+  "OPENCODE_CONFIG_DIR",
 ] as const;
 
 let savedEnv: Record<string, string | undefined>;
@@ -105,6 +107,10 @@ beforeEach(() => {
   process.env.XDG_DATA_HOME = xdgData;
   process.env.PI_CODING_AGENT_DIR = join(xdgConfig, "pi-agent");
   process.env.DSH_HOME = join(xdgConfig, "dsh-home");
+  // The opencode descriptors resolve HOME's .opencode pair and
+  // OPENCODE_CONFIG_DIR at call time; both stay inside the tmp tree.
+  process.env.HOME = join(xdgConfig, "home");
+  process.env.OPENCODE_CONFIG_DIR = join(xdgConfig, "opencode-config-dir");
 });
 
 afterEach(() => {

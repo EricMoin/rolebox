@@ -208,7 +208,7 @@ export class DshRoleboxReloader {
 
     // 1. Re-initialize the model resolver so edits to the platform config take
     //    effect without a process restart (:302-304).
-    initModelResolver(this.directories.configDir);
+    initModelResolver(this.directories.configDir, this.directories.platformId);
 
     // 2. Re-discover roles from disk.
     const newRoles = await discoverRoles(this.directories.roleboxDir);

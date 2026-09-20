@@ -396,7 +396,7 @@ describe.skipIf(!hasOpencode())("E2E hook pipeline (real server)", () => {
       `name: Helper\ndescription: helper\nmode: subagent\nprompt: |\n  You are a helper.\n`,
     );
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [primary],
       client: realClient,
       roleFunctionsMap,

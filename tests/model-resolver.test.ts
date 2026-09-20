@@ -17,7 +17,7 @@
  *   9.  initModelResolver called twice → always reloads from disk
  *  10.  initModelResolver with different configDir → reloads from new dir
  *  11.  Cache isolation via __resetForTest
- *  12.  Known models config missing → scanAvailableModels returns [], only aliases
+ *  12.  Known models config missing → readOpencodeCatalog returns [], only aliases
  *  13.  Alias key is empty string → warn, skipped
  *  14.  Alias value is null → warn, skipped
  *  15.  Alias value is numeric → warn, skipped
@@ -28,6 +28,12 @@
  *  20. Second initModelResolver generation → the same model reported again
  *  21. Repeated resolves before init → exactly 1 warn
  *  22. `model_aliases` declared as an array → warn + empty aliases
+ *  23. Platform-aware catalog: under `pi` the resolver reads `models.json`,
+ *      under `dsh` it reads `settings.yaml` — a same-home `opencode.jsonc`
+ *      is NOT that harness's catalog
+ *  24. Omitted / unknown platform id still reads `opencode.jsonc`
+ *  25. A harness declaring no models is seeded from opencode read through the
+ *      seed's own default home (XDG_CONFIG_HOME)
  *
  * Integration tests (end-to-end via discoverRoles / bootstrapRoles):
  *   I1. Role with explicit model resolved via known models
@@ -40,6 +46,7 @@
  *   I8. Single-hop alias chain: A→B and B→C → resolveModel("A") returns "B"
  *   I9. Bootstrap-level init: bootstrapRoles() resolves model without explicit
  *       initModelResolver call
+ *  I10. bootstrapRoles({ platformId }) threads the id to the harness catalog
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -65,6 +72,30 @@ import { createSubLogger } from "../src/logger";
 let capturedWarns: unknown[][] = [];
 let capturedInfos: unknown[][] = [];
 
+// ── Env seams ────────────────────────────────────────────────────────────
+//
+// The platform-aware catalog reads may reach a DEFAULT path: the opencode seed
+// hop, the HOME .opencode pair, OPENCODE_CONFIG_DIR, or a config home resolved
+// from the platform env. Every seam is redirected into a per-test tmpdir, so
+// no case reads the developer's real home (mirrors
+// tests/cli/config-target-models.test.ts).
+
+const ORIGINAL_XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME;
+const ORIGINAL_PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
+const ORIGINAL_DSH_HOME = process.env.DSH_HOME;
+const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_OPENCODE_CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR;
+
+let envHome: string;
+
+function restoreEnv(name: string, original: string | undefined): void {
+  if (original === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = original;
+  }
+}
+
 const mockLogger = {
   warn: (...args: unknown[]) => { capturedWarns.push(args); },
   info: (...args: unknown[]) => { capturedInfos.push(args); },
@@ -82,6 +113,22 @@ beforeEach(() => {
   capturedInfos = [];
   __resetForTest();
   __setLoggerForTest(mockLogger);
+
+  envHome = mkdtempSync(join(tmpdir(), "rolebox-mr-home-"));
+  process.env.XDG_CONFIG_HOME = envHome;
+  process.env.PI_CODING_AGENT_DIR = join(envHome, "pi-agent");
+  process.env.DSH_HOME = join(envHome, "dsh-home");
+  process.env.HOME = join(envHome, "home");
+  process.env.OPENCODE_CONFIG_DIR = join(envHome, "opencode-config-dir");
+});
+
+afterEach(() => {
+  restoreEnv("XDG_CONFIG_HOME", ORIGINAL_XDG_CONFIG_HOME);
+  restoreEnv("PI_CODING_AGENT_DIR", ORIGINAL_PI_AGENT_DIR);
+  restoreEnv("DSH_HOME", ORIGINAL_DSH_HOME);
+  restoreEnv("HOME", ORIGINAL_HOME);
+  restoreEnv("OPENCODE_CONFIG_DIR", ORIGINAL_OPENCODE_CONFIG_DIR);
+  rmSync(envHome, { recursive: true, force: true });
 });
 
 // ── Fixture helpers ──────────────────────────────────────────────────────
@@ -89,7 +136,7 @@ beforeEach(() => {
 /**
  * Bare-bones opencode.jsonc with one provider + multiple models.
  *
- * The real `scanAvailableModels()` reads:
+ * The real `readOpencodeCatalog()` reads:
  *   provider.{providerKey}.models.{modelKey}
  * — note the extra `.models` nesting level (matching the opencode.jsonc schema).
  */
@@ -107,6 +154,33 @@ const OPencodeJsonc = (extraProvider?: string) => `{
     }
   }
 }`;
+
+/**
+ * Bare-bones pi `models.json`: provider id → models[] → `${provider id}/${id}`.
+ */
+const PI_MODELS = `{
+  "providers": {
+    "pi-example": {
+      "models": [
+        { "id": "pi-model-one", "name": "Pi Model One" },
+        { "id": "pi-model-two" }
+      ]
+    }
+  }
+}`;
+
+/**
+ * Bare-bones dsh `settings.yaml`:
+ * `llm-pi-ai.providers.<route>.models[]` → `<route>/<model id>`.
+ */
+const DSH_SETTINGS = `
+llm-pi-ai:
+  providers:
+    dsh-example:
+      models:
+        - id: dsh-model-one
+          name: Dsh Model One
+`;
 
 /** Write {dir}/role_config.yaml with the given aliases object as YAML. */
 function writeAliasYaml(dir: string, aliases: Record<string, unknown>): void {
@@ -553,6 +627,83 @@ describe("initModelResolver + loadModelAliases", () => {
   });
 });
 
+// ── Unit: platform-aware catalogs ───────────────────────────────────────
+
+describe("initModelResolver platform-aware catalogs", () => {
+  // --- Test 23: pi reads its own models.json from the harness home ---
+  it("reads pi's own models.json (not opencode.jsonc) under the pi platform id", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rolebox-mr-unit-"));
+    writeFileSync(join(dir, "models.json"), PI_MODELS, "utf-8");
+    // Same home, different filename: under pi this document is NOT the catalog.
+    writeFileSync(join(dir, "opencode.jsonc"), OPencodeJsonc(), "utf-8");
+
+    initModelResolver(dir, "pi");
+
+    // Declared in pi's models.json → known, no advisory log.
+    expect(resolveModel("pi-example/pi-model-one")).toBe("pi-example/pi-model-one");
+    expect(capturedInfos).toHaveLength(0);
+
+    // Only declared in opencode.jsonc → NOT known while running under pi.
+    expect(resolveModel("test-provider/model-one")).toBe("test-provider/model-one");
+    expect(capturedInfos).toHaveLength(1);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // --- Test 24: dsh reads its own settings.yaml from the harness home ---
+  it("reads the dsh settings.yaml under the dsh platform id", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rolebox-mr-unit-"));
+    writeFileSync(join(dir, "settings.yaml"), DSH_SETTINGS, "utf-8");
+    // Same home, different filename: under dsh this document is NOT the catalog.
+    writeFileSync(join(dir, "opencode.jsonc"), OPencodeJsonc(), "utf-8");
+
+    initModelResolver(dir, "dsh");
+
+    expect(resolveModel("dsh-example/dsh-model-one")).toBe("dsh-example/dsh-model-one");
+    expect(capturedInfos).toHaveLength(0);
+
+    expect(resolveModel("test-provider/model-one")).toBe("test-provider/model-one");
+    expect(capturedInfos).toHaveLength(1);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // --- Test 25: omitted / unknown platform id → opencode.jsonc ---
+  it("keeps reading opencode.jsonc for an omitted or unknown platform id", () => {
+    const omittedDir = setupConfigDir(OPencodeJsonc());
+    const unknownDir = setupConfigDir(OPencodeJsonc());
+
+    initModelResolver(omittedDir);
+    expect(resolveModel("test-provider/model-one")).toBe("test-provider/model-one");
+    expect(capturedInfos).toHaveLength(0);
+
+    initModelResolver(unknownDir, "not-a-harness");
+    expect(resolveModel("test-provider/model-two")).toBe("test-provider/model-two");
+    expect(capturedInfos).toHaveLength(0);
+
+    rmSync(omittedDir, { recursive: true, force: true });
+    rmSync(unknownDir, { recursive: true, force: true });
+  });
+
+  // --- Test 26: a harness with no catalog of its own is seeded from opencode
+  //     read through the seed's OWN default home (XDG_CONFIG_HOME) ---
+  it("seeds dsh from the opencode catalog under the seed's own default home", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rolebox-mr-unit-"));
+    // No settings.yaml → the seed hop reads opencode's default home, which the
+    // per-test XDG_CONFIG_HOME seam redirects into the isolated tmpdir.
+    const opencodeHome = join(envHome, "opencode");
+    mkdirSync(opencodeHome, { recursive: true });
+    writeFileSync(join(opencodeHome, "opencode.jsonc"), OPencodeJsonc(), "utf-8");
+
+    initModelResolver(dir, "dsh");
+
+    expect(resolveModel("test-provider/model-one")).toBe("test-provider/model-one");
+    expect(capturedInfos).toHaveLength(0);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 // Integration tests (via discoverRoles / bootstrapRoles)
 // ═════════════════════════════════════════════════════════════════════════
@@ -927,6 +1078,58 @@ describe("integration: bootstrap-level init", () => {
     const resolvedRole = result.resolvedRoles.find((r) => r.id === "test-role");
     expect(resolvedRole).toBeDefined();
     expect(resolvedRole!.config.model).toBe("test-provider/model-one");
+
+    // Cleanup
+    rmSync(configDir, { recursive: true, force: true });
+    rmSync(roleDir, { recursive: true, force: true });
+    rmSync(skillsDir, { recursive: true, force: true });
+    rmSync(builtinDir, { recursive: true, force: true });
+  });
+
+  // --- I10: bootstrapRoles threads platformId to the harness catalog ---
+  it("I10: bootstrapRoles resolves a role declared only in the pi catalog", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "rolebox-mr-int-config-"));
+    const roleDir = mkdtempSync(join(tmpdir(), "rolebox-mr-int-roles-"));
+    const skillsDir = mkdtempSync(join(tmpdir(), "rolebox-mr-int-skills-"));
+    const builtinDir = mkdtempSync(join(tmpdir(), "rolebox-mr-int-builtin-"));
+
+    // The role's model is declared ONLY in pi's models.json.
+    writeFileSync(join(configDir, "models.json"), PI_MODELS, "utf-8");
+
+    const roleDirPath = join(roleDir, "pi-role");
+    mkdirSync(roleDirPath, { recursive: true });
+    writeFileSync(
+      join(roleDirPath, "role.yaml"),
+      [
+        "name: Pi Role",
+        "description: Platform-aware bootstrap test",
+        "prompt: I am a pi role.",
+        "model: pi-example/pi-model-one",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    // Ensure resolver is NOT initialized before bootstrap
+    __resetForTest();
+    __setLoggerForTest(mockLogger);
+
+    const result = await bootstrapRoles({
+      roleboxDir: roleDir,
+      globalSkillsDir: skillsDir,
+      configDir,
+      platformId: "pi",
+      builtinDir,
+      roleFunctionsMap: new Map(),
+    });
+
+    expect(result.discovered).toBe(1);
+    expect(result.resolved).toBe(1);
+
+    // The pi model counts as known → no "not a known model" advisory.
+    expect(capturedInfos).toHaveLength(0);
+    const resolvedRole = result.resolvedRoles.find((r) => r.id === "pi-role");
+    expect(resolvedRole).toBeDefined();
+    expect(resolvedRole!.config.model).toBe("pi-example/pi-model-one");
 
     // Cleanup
     rmSync(configDir, { recursive: true, force: true });

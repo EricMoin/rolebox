@@ -49,11 +49,6 @@ mock.module("../../src/cli/paths", () => ({
     }
     throw new Error(`Unknown sync target: "${t}". Supported targets: opencode`);
   },
-  getOpencodeConfigPath: () => {
-    const xdg = process.env.XDG_CONFIG_HOME;
-    if (xdg) return join(xdg, "opencode", "opencode.jsonc");
-    return join(homedir(), ".config", "opencode", "opencode.jsonc");
-  },
   getOpencodeSkillsDir: () => {
     const xdg = process.env.XDG_CONFIG_HOME;
     if (xdg) return join(xdg, "opencode", "skills");
@@ -98,12 +93,20 @@ describe("CLI E2E", () => {
   let dataDir: string;
   let origFetch: typeof globalThis.fetch;
   let origExit: typeof process.exit;
+  let origHome: string | undefined;
+  let origOpencodeConfigDir: string | undefined;
 
   beforeEach(() => {
     configDir = mkdtempSync(join(tmpdir(), "rolebox-e2e-config-"));
     dataDir = mkdtempSync(join(tmpdir(), "rolebox-e2e-data-"));
     process.env.XDG_CONFIG_HOME = configDir;
     process.env.XDG_DATA_HOME = dataDir;
+    // The opencode descriptors read the HOME .opencode pair and
+    // OPENCODE_CONFIG_DIR at call time; keep both inside the tmp tree.
+    origHome = process.env.HOME;
+    process.env.HOME = join(configDir, "home");
+    origOpencodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+    process.env.OPENCODE_CONFIG_DIR = join(configDir, "opencode-config-dir");
     origFetch = globalThis.fetch;
     origExit = process.exit;
     (process as any).exit = ((_code?: number) => { throw new Error("EXIT"); }) as any;
@@ -116,6 +119,10 @@ describe("CLI E2E", () => {
     globalThis.fetch = origFetch;
     delete process.env.XDG_CONFIG_HOME;
     delete process.env.XDG_DATA_HOME;
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+    if (origOpencodeConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = origOpencodeConfigDir;
     rmSync(configDir, { recursive: true, force: true });
     rmSync(dataDir, { recursive: true, force: true });
   });

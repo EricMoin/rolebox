@@ -1,6 +1,8 @@
 import type { Hooks } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction } from "../types.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
+import type { PlatformCapabilities } from "../platform/capabilities.ts";
+import { resolvePlatformCapabilities } from "../platform/registry.ts";
 import { hookState } from "../hooks/state.ts";
 import { normalizeWorkspaceDir } from "../utils/state-paths.ts";
 import { functionRuntime } from "../function/runtime-state.ts";
@@ -85,12 +87,25 @@ export interface CreatePluginHooksConfig {
   globalSkillsDir?: string;
   configDir?: string;
   builtinDir?: string;
+  /**
+   * Explicit capability declaration for the host that owns this entry.
+   * Preferred over `platformId`: the entry knows what its platform supports.
+   */
+  capabilities?: PlatformCapabilities;
+  /**
+   * Platform id used to resolve `capabilities` when they are not declared.
+   * An unknown or omitted id resolves to the minimal set (with a warning) —
+   * never to opencode's.
+   */
+  platformId?: string;
 }
 
 export async function createPluginHooks(config: CreatePluginHooksConfig) {
   const { resolvedRoles, session, roleFunctionsMap, directory, roleboxDir, globalSkillsDir, configDir, builtinDir } = config;
   const rawDir = directory ?? process.cwd();
   const dir = normalizeWorkspaceDir(rawDir);
+  const capabilities =
+    config.capabilities ?? resolvePlatformCapabilities(config.platformId);
 
   for (const resolved of resolvedRoles) {
     if (resolved.config.auto_activate?.length) {
@@ -114,7 +129,7 @@ export async function createPluginHooks(config: CreatePluginHooksConfig) {
   core.registerService(new HookService());
   core.registerService(new HealthMonitorService());
 
-  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
+  await core.init({ session, resolvedRoles, roleFunctionsMap, rawDirectory: rawDir, directory: dir, capabilities, core, bus: core.getBus(), roleboxDir, globalSkillsDir, configDir, builtinDir });
 
   // Register sync shutdown handlers (async disposal is fire-and-forget). The
   // flush is hoisted out of the guard so the observation-only fatal reporter

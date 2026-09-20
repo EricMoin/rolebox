@@ -31,6 +31,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { HotReloadService } from "../../src/core/services/hot-reload-service.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { roleOpenRegistry } from "../../src/resolver/registry.ts";
 import type { ResolvedRole, ResolvedSubAgent } from "../../src/types.ts";
 
@@ -58,6 +59,9 @@ function makeCtx(dir: string, core: any = makeMockCore()): any {
     globalSkillsDir: join(dir, "global-skills"),
     configDir: join(dir, "config"),
     builtinDir: dir,
+    // Always present on a real PluginContext; the reload reads it to select
+    // the harness's model catalog.
+    capabilities: opencodeCapabilities(),
   };
 }
 

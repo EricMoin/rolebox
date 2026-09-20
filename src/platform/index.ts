@@ -30,7 +30,14 @@ export type {
 // ── Context and capabilities ─────────────────────────────────────────────────
 export type { PlatformContext } from "./context.ts";
 export type { PlatformCapabilities } from "./capabilities.ts";
-export { defaultCapabilities, minimalCapabilities } from "./capabilities.ts";
+export {
+  opencodeCapabilities,
+  piCapabilities,
+  dshCapabilities,
+  codexCapabilities,
+  minimalCapabilities,
+} from "./capabilities.ts";
+export { resolvePlatformCapabilities } from "./registry.ts";
 
 // ── Factory ──────────────────────────────────────────────────────────────────
 export { defineTool } from "./ports/tool-factory.ts";

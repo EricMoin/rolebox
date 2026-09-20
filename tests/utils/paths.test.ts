@@ -17,14 +17,23 @@ import {
 } from "../../src/utils/paths.ts";
 
 const FAKE_HOME = "/Users/fakeuser";
+const ORIGINAL_PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 
 let homedirSpy: ReturnType<typeof spyOn>;
 
 beforeEach(() => {
+  // platformAgentsDir("pi") prefers PI_CODING_AGENT_DIR over homedir(), so an
+  // ambient override would decide the expectation instead of the mock below.
+  delete process.env.PI_CODING_AGENT_DIR;
   homedirSpy = spyOn(os, "homedir").mockReturnValue(FAKE_HOME);
 });
 
 afterEach(() => {
+  if (ORIGINAL_PI_CODING_AGENT_DIR === undefined) {
+    delete process.env.PI_CODING_AGENT_DIR;
+  } else {
+    process.env.PI_CODING_AGENT_DIR = ORIGINAL_PI_CODING_AGENT_DIR;
+  }
   homedirSpy.mockRestore();
 });
 

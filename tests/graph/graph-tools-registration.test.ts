@@ -19,7 +19,7 @@ import { createGraphTools } from "../../src/graph/tools/index.ts";
 import type { ResolvedRole } from "../../src/types.ts";
 import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
 import { defineTool } from "../../src/platform/ports/tool-factory.ts";
-import { defaultCapabilities } from "../../src/platform/capabilities.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ function makeBaseOpts(): BuildToolsOptions {
   return {
     resolvedRoles: [makeResolvedRole()],
     directory: "/tmp/test",
-    capabilities: defaultCapabilities(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

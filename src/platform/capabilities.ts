@@ -29,10 +29,12 @@ export interface PlatformCapabilities {
 }
 
 /**
- * Default capabilities for the opencode platform.
- * All features are supported.
+ * Capabilities for the opencode platform — the reference host, where every
+ * host-integration feature except in-session role switching is available.
+ *
+ * Deliberately NOT named "default": no host inherits this set by omission.
  */
-export function defaultCapabilities(): PlatformCapabilities {
+export function opencodeCapabilities(): PlatformCapabilities {
   return {
     hasBackgroundTasks: true,
     hasSessionFork: true,
@@ -83,6 +85,29 @@ export function piCapabilities(): PlatformCapabilities {
     hasSessionStatus: true,
     hasRoleSwitch: true,
     platformId: "pi",
+  };
+}
+
+/**
+ * Capabilities declared for the dsh platform. Values reflect what the dsh
+ * adapters actually support (session fork/create/status via the SessionStore
+ * adapter; event streaming via the event bus; in-session active-role
+ * switching via the DshRoleSwitcher + the `/rolebox` host routes). Currently
+ * advisory — `buildCanonicalTools` documents that capabilities are "not
+ * consulted in Phase 1 tool assembly" — but kept honest for future consumers.
+ */
+export function dshCapabilities(): PlatformCapabilities {
+  return {
+    platformId: "dsh",
+    hasBackgroundTasks: false,
+    hasSessionFork: true,
+    hasSessionCreate: true,
+    hasSessionAbort: false,
+    hasAgentFileSync: false,
+    hasMultiStepTools: true,
+    hasEventStream: true,
+    hasSessionStatus: true,
+    hasRoleSwitch: true,
   };
 }
 

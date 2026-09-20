@@ -30,6 +30,16 @@ import {
   type PlatformPaths,
 } from "./paths.ts";
 import { PLUGIN_ID } from "../constants.ts";
+import { getOpencodeConfigPaths, loadOpencodeConfig } from "./opencode-config.ts";
+import {
+  opencodeCapabilities,
+  piCapabilities,
+  dshCapabilities,
+  codexCapabilities,
+  minimalCapabilities,
+  type PlatformCapabilities,
+} from "./capabilities.ts";
+import { createSubLogger } from "../logger.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -63,6 +73,12 @@ export interface PlatformDescriptor {
   /** Resolve this platform's directory layout. */
   paths: () => PlatformPaths;
   /**
+   * The capability set this host actually supports. Declared HERE, with the
+   * descriptor, so a harness is described in exactly one place and no host can
+   * inherit another host's capabilities by omission.
+   */
+  capabilities: () => PlatformCapabilities;
+  /**
    * Detect whether rolebox is registered with the host tool.
    *
    * Returns `null` when the platform exposes NO detectable registration
@@ -81,55 +97,25 @@ function tildify(p: string): string {
 }
 
 /**
- * Strip `//` line and block comments from JSONC while preserving string
- * literals. Shared by any descriptor whose host config is JSONC (opencode).
+ * Whether rolebox appears in the opencode config's `plugin` array.
+ *
+ * Reads the MERGED `opencode.json` + `opencode.jsonc` documents (see
+ * src/platform/opencode-config.ts), so a rolebox entry in either file counts
+ * and the measured "a `plugin` array in `opencode.jsonc` REPLACES the one in
+ * `opencode.json`" rule falls out of the merge. A missing or malformed
+ * document contributes nothing rather than suppressing the other.
  */
-function stripJsonComments(input: string): string {
-  let result = "";
-  let i = 0;
-  while (i < input.length) {
-    if (input[i] === '"') {
-      result += '"';
-      i++;
-      while (i < input.length && input[i] !== '"') {
-        if (input[i] === "\\") {
-          result += input[i] + (input[i + 1] || "");
-          i += 2;
-        } else {
-          result += input[i];
-          i++;
-        }
-      }
-      if (i < input.length) {
-        result += '"';
-        i++;
-      }
-    } else if (input[i] === "/" && input[i + 1] === "/") {
-      while (i < input.length && input[i] !== "\n") i++;
-    } else if (input[i] === "/" && input[i + 1] === "*") {
-      i += 2;
-      while (i < input.length && !(input[i] === "*" && input[i + 1] === "/")) i++;
-      i += 2;
-    } else {
-      result += input[i];
-      i++;
-    }
-  }
-  return result;
-}
+function isOpencodePluginRegistered(configDir?: string): boolean {
+  const config = loadOpencodeConfig(configDir);
+  if (config === null) return false;
 
-/** Whether the opencode config's `plugin` array lists rolebox. */
-function isOpencodePluginRegistered(configPath: string): boolean {
-  if (!existsSync(configPath)) return false;
-  try {
-    const parsed = JSON.parse(stripJsonComments(readFileSync(configPath, "utf-8"))) as {
-      plugin?: string[];
-    };
-    if (!Array.isArray(parsed.plugin)) return false;
-    return parsed.plugin.some((p) => p === PLUGIN_ID || p.startsWith(`${PLUGIN_ID}@`));
-  } catch {
-    return false;
-  }
+  const plugin = config.plugin;
+  if (!Array.isArray(plugin)) return false;
+
+  const entries: readonly unknown[] = plugin;
+  return entries.some(
+    (entry) => entry === PLUGIN_ID || (typeof entry === "string" && entry.startsWith(`${PLUGIN_ID}@`)),
+  );
 }
 
 /**
@@ -253,16 +239,18 @@ const opencodeDescriptor: PlatformDescriptor = {
   id: "opencode",
   label: "OpenCode",
   paths: defaultPlatformPaths,
+  capabilities: opencodeCapabilities,
   detectIntegration() {
-    const configPath = join(defaultPlatformPaths().configDir, "opencode.jsonc");
-    const registered = isOpencodePluginRegistered(configPath);
+    const configDir = defaultPlatformPaths().configDir;
+    const registered = isOpencodePluginRegistered(configDir);
+    const [jsonPath, jsoncPath] = getOpencodeConfigPaths(configDir);
     return {
       mechanism: "Plugin",
       registered,
       detail: registered ? "registered" : "not found in opencode config",
       hint: registered
         ? undefined
-        : `Add "${PLUGIN_ID}" to the "plugin" array in ${tildify(configPath)}`,
+        : `Add "${PLUGIN_ID}" to the "plugin" array in ${tildify(jsoncPath)} or ${tildify(jsonPath)}`,
     };
   },
 };
@@ -271,6 +259,7 @@ const piDescriptor: PlatformDescriptor = {
   id: "pi",
   label: "pi",
   paths: piPlatformPaths,
+  capabilities: piCapabilities,
   // pi registers extensions under {configDir}/extensions but has no single
   // manifest rolebox owns; no honest detection mechanism yet.
   detectIntegration: () => null,
@@ -280,6 +269,7 @@ const dshDescriptor: PlatformDescriptor = {
   id: "dsh",
   label: "dsh",
   paths: dshPlatformPaths,
+  capabilities: dshCapabilities,
   // dsh registration is a cordis profile bundle reconciled by `dsh plugin`;
   // not inspectable from a single file rolebox owns. No detection yet.
   detectIntegration: () => null,
@@ -289,6 +279,7 @@ const codexDescriptor: PlatformDescriptor = {
   id: "codex",
   label: "Codex",
   paths: codexPlatformPaths,
+  capabilities: codexCapabilities,
   // Codex registration is detected in `<codexHome>/config.toml`: the local
   // marketplace table and the plugin enablement table that `rolebox sync codex`
   // writes, or an `[mcp_servers.rolebox]` table registering the same server
@@ -348,4 +339,34 @@ export function resolvePlatformPaths(id?: string): PlatformPaths {
   if (!id) return defaultPlatformPaths();
   const found = PLATFORM_REGISTRY.find((p) => p.id === id);
   return found ? found.paths() : defaultPlatformPaths();
+}
+
+let warnedUndeclaredPlatform = false;
+
+/**
+ * Resolve the capability set for a platform id.
+ *
+ * A known id answers with the set its own descriptor declares. An unknown or
+ * omitted id answers with {@link minimalCapabilities} — fail-closed — and
+ * warns once, because claiming support a host does not have turns a graceful
+ * degradation into a runtime failure. Unlike path resolution there is
+ * deliberately NO full-support fallback: opencode's set is reached by asking
+ * for `"opencode"`, never by asking for nothing.
+ */
+export function resolvePlatformCapabilities(id?: string): PlatformCapabilities {
+  if (id) {
+    const found = PLATFORM_REGISTRY.find((p) => p.id === id);
+    if (found) return found.capabilities();
+  }
+  if (!warnedUndeclaredPlatform) {
+    warnedUndeclaredPlatform = true;
+    // Created here, not at module scope: logger.ts imports cli/paths.ts, which
+    // imports this file — a top-level createSubLogger() call would touch
+    // logger state still in its temporal dead zone.
+    createSubLogger("platform:registry").warn(
+      "No platform capabilities declared — degrading to minimal; pass capabilities or a known platformId",
+      { platformId: id ?? "(none)" },
+    );
+  }
+  return minimalCapabilities(id ?? "unknown");
 }

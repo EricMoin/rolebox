@@ -15,7 +15,7 @@
  * literals to exercise exactly that mismatch.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import type { RoleModelEntry } from "../../src/cli/model-utils.ts";
+import type { RoleModelEntry } from "../../src/cli/role-models.ts";
 
 /** A win32-style role dir, as `path.join` would build it on Windows. */
 const WIN_ROLE_DIR = "C:\\roles\\demo";
@@ -31,12 +31,11 @@ const WINDOWS_ENTRIES: RoleModelEntry[] = [
   { path: SUBAGENT_PATH, name: "a", model: "old/model" },
 ];
 
-// Register the model-utils mock BEFORE importing config.ts so
+// Register the role-models mock BEFORE importing config.ts so
 // `runNonInteractive` can be driven with the same Windows-shaped entries a
 // win32 `scanRoleModels` would produce. Mirrors the seam at
 // tests/cli/commands/sync.test.ts:53. `--isolate` keeps this process-local.
-mock.module("../../src/cli/model-utils", () => ({
-  scanModelsForTarget: () => [],
+mock.module("../../src/cli/role-models", () => ({
   scanRoleModels: (roleDir: string) =>
     roleDir === WIN_ROLE_DIR ? WINDOWS_ENTRIES : [],
 }));

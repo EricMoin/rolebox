@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { DispatchService } from "../src/core/services/dispatch-service.ts";
 import { LoopService } from "../src/core/services/loop-service.ts";
 import { EventBus } from "../src/core/event-bus.ts";
-import { piCapabilities, defaultCapabilities } from "../src/platform/capabilities.ts";
+import { minimalCapabilities, opencodeCapabilities, piCapabilities } from "../src/platform/capabilities.ts";
 import type { PluginCoreLike } from "../src/core/service.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -231,13 +231,12 @@ describe("DispatchService — Pi graceful degradation", () => {
 });
 
 describe("DispatchService — normal capabilities (no degradation)", () => {
-  it("init() with defaultCapabilities (all true) does not degrade", async () => {
+  it("init() with opencodeCapabilities does not degrade", async () => {
     const { core, serviceMap } = createMiniCore();
     const svc = new DispatchService();
     serviceMap.set("dispatch-service", svc);
 
-    // Use default capabilities (opencode mode — all features supported)
-    const ctx = createServiceCtx(core, undefined);
+    const ctx = createServiceCtx(core, opencodeCapabilities());
     ctx.session = createMockSessionClient() as any;
 
     // With a valid session client and full capabilities, init should succeed
@@ -246,13 +245,15 @@ describe("DispatchService — normal capabilities (no degradation)", () => {
     expect(svc.isDegraded()).toBe(false);
   });
 
-  it("init() without capabilities defaults to no degradation", async () => {
+  it("init() with minimal capabilities but an injected session client does not degrade", async () => {
     const { core, serviceMap } = createMiniCore();
-    const svc = new DispatchService();
+    const sessionClient = createMockSessionClient() as any;
+    const svc = new DispatchService({ sessionClient });
     serviceMap.set("dispatch-service", svc);
 
-    // No capabilities = opencode full support
-    const ctx = createServiceCtx(core, undefined);
+    // The degradation guard checks the CONSTRUCTOR-injected client, so a host
+    // with no session-create capability is still survivable when one is given.
+    const ctx = createServiceCtx(core, minimalCapabilities("test-host"));
     ctx.session = createMockSessionClient() as any;
 
     await svc.init(ctx);

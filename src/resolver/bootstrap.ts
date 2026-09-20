@@ -25,6 +25,12 @@ export interface BootstrapRolesOptions {
   globalSkillsDir: string;
   /** OpenCode config directory (parent of rolebox/ and skills/). */
   configDir: string;
+  /**
+   * Platform identifier of the running harness — selects which harness's model
+   * catalog the model resolver reads (`opencode.jsonc` / `settings.yaml` /
+   * `models.json`). Unknown or omitted → opencode.
+   */
+  platformId?: string;
   /** Path to the built-in functions directory (rolebox package's functions/). */
   builtinDir: string;
   /** Map to populate with roleId/subagentId → resolved functions. */
@@ -53,11 +59,11 @@ export interface BootstrapRolesResult {
  * inline code in index.ts and pi-extension.ts).
  */
 export async function bootstrapRoles(opts: BootstrapRolesOptions): Promise<BootstrapRolesResult> {
-  const { roleboxDir, globalSkillsDir, configDir, builtinDir, roleFunctionsMap } = opts;
+  const { roleboxDir, globalSkillsDir, configDir, platformId, builtinDir, roleFunctionsMap } = opts;
 
   // Initialize model resolver before role discovery so that load-time
   // model resolution (via resolveModel) has access to known models and aliases.
-  initModelResolver(configDir);
+  initModelResolver(configDir, platformId);
 
   const roles = await discoverRoles(roleboxDir);
 

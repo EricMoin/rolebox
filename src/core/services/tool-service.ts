@@ -14,7 +14,6 @@ import { createTaskTools } from "../../dispatch/query/task-tools.ts";
 import { createFunctionGraphTool } from "../../function/function-graph.ts";
 import type { HotReloadService } from "./hot-reload-service.ts";
 import { buildCanonicalTools } from "../../platform/tool-assembly.ts";
-import { defaultCapabilities } from "../../platform/capabilities.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -126,7 +125,7 @@ export class ToolService implements PluginService {
       subagentModelKey,
       resolvedRoles: ctx.resolvedRoles,
       directory: ctx.directory,
-      capabilities: ctx.capabilities ?? defaultCapabilities(),
+      capabilities: ctx.capabilities,
       // Subtask 3 (graph-notify source): thread the emperor session identity +
       // session client into the graph engine's completion AND graph-terminal
       // seams. The emperor/orchestrator session is the session whose execution

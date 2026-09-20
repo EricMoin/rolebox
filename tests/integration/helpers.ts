@@ -324,7 +324,7 @@ export async function createTestContext(): Promise<TestContext> {
 
   // ── Create hooks via production composition ─────────────────────────
   const client = createMockClient();
-  const hooks = await createPluginHooks({
+  const hooks = await createPluginHooks({ platformId: "opencode",
     resolvedRoles: [role],
     client,
     roleFunctionsMap,

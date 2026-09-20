@@ -209,15 +209,27 @@ const DIRECTOR_SKILL_BODY = [
 
 let tmpDir: string;
 let originalCwd: string;
+let originalHome: string | undefined;
+let originalOpencodeConfigDir: string | undefined;
 
 beforeEach(() => {
   originalCwd = process.cwd();
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-dsh-skill-reg-"));
   process.chdir(tmpDir);
+  // apply() boots descriptors that read HOME's .opencode pair and
+  // OPENCODE_CONFIG_DIR; keep both inside the temp tree.
+  originalHome = process.env.HOME;
+  process.env.HOME = join(tmpDir, "home");
+  originalOpencodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = join(tmpDir, "opencode-config-dir");
 });
 
 afterEach(() => {
   process.chdir(originalCwd);
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalOpencodeConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = originalOpencodeConfigDir;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

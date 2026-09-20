@@ -33,7 +33,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { PiLightweightServiceStack } from "../src/platform/adapters/pi/service-stack.ts";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
-import { defaultCapabilities } from "../src/platform/capabilities.ts";
+import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import { createTaskTools } from "../src/dispatch/query/task-tools.ts";
 import { createMemoryUpdateTool } from "../src/memory/tools.ts";
 import { createFunctionGraphTool } from "../src/function/function-graph.ts";
@@ -303,7 +303,7 @@ describe("Pi ↔ opencode tool-surface parity (S11)", () => {
       resolvedRoles: [makeRole()],
       directory: process.cwd(),
       sessionClient: makeSessionClient() as unknown as ISessionClient,
-      capabilities: defaultCapabilities(),
+      capabilities: opencodeCapabilities(),
       dispatchManager: makeDispatchManager(),
       taskToolsOverride: buildTaskTools() as never,
       extraTools: buildExtraTools() as never,

@@ -57,7 +57,7 @@ import type {
   DshToolPresentation,
 } from "../src/platform/adapters/dsh/tool-factory.ts";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
-import { defaultCapabilities } from "../src/platform/capabilities.ts";
+import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import type {
   DshSpawnDelegate,
   DshSubagentProvider,
@@ -1548,7 +1548,7 @@ describe("dsh native tool-presentation surface", () => {
       buildCanonicalTools({
         resolvedRoles: [],
         directory: process.cwd(),
-        capabilities: defaultCapabilities(),
+        capabilities: opencodeCapabilities(),
       }),
     ) as Record<string, DshToolDefinition>;
   }

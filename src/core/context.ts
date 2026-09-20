@@ -33,6 +33,9 @@ export interface PluginContext {
   /** Builtin functions directory path (for resolver context). */
   builtinDir?: string;
   /** Platform capabilities for feature detection and graceful degradation.
-   * When absent, all capabilities are assumed supported (full opencode platform). */
-  capabilities?: PlatformCapabilities;
+   * Always present: the composition layer resolves the entry's explicit
+   * declaration (or its platformId) BEFORE constructing the context, so an
+   * undeclared host degrades to the minimal set instead of silently
+   * claiming full opencode support. */
+  capabilities: PlatformCapabilities;
 }

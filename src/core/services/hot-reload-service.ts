@@ -299,9 +299,10 @@ export class HotReloadService implements PluginService {
   private async performFullReload(): Promise<HotReloadResult> {
     log.info("Hot reload — full re-discovery and re-resolution");
 
-    // Re-initialize model resolver so edits to opencode.jsonc and
+    // Re-initialize model resolver so edits to the running harness's model
+    // catalog (opencode.jsonc / settings.yaml / models.json) and
     // role_config.yaml take effect without a process restart.
-    initModelResolver(this.ctx.configDir!);
+    initModelResolver(this.ctx.configDir!, this.ctx.capabilities.platformId);
 
     // 1. Re-discover roles from disk
     const newRoles = await discoverRoles(this.ctx.roleboxDir!);

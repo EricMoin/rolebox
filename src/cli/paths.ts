@@ -47,10 +47,6 @@ export function getOpencodeConfigDir(): string {
   return defaultPlatformPaths().configDir;
 }
 
-export function getOpencodeConfigPath(): string {
-  return join(getOpencodeConfigDir(), "opencode.jsonc");
-}
-
 export function getOpencodeSkillsDir(): string {
   return defaultPlatformPaths().skillsDir;
 }

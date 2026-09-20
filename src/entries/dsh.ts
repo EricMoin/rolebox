@@ -100,7 +100,7 @@ import {
   buildRoleSnapshotTools,
   ROLE_SNAPSHOT_TOOL_KEYS,
 } from "../platform/tool-assembly.ts";
-import type { PlatformCapabilities } from "../platform/capabilities.ts";
+import { dshCapabilities } from "../platform/capabilities.ts";
 import { buildAvailableFunctionsBlock } from "../prompt/builder.ts";
 import { ProcessFatalReporter } from "../core/process-fatal-reporter.ts";
 import { createGraphTools } from "../graph/tools/index.ts";
@@ -807,28 +807,6 @@ function probeLlmRoutes(
   return undefined;
 }
 
-/**
- * Capabilities declared for the dsh platform. Values reflect what the dsh
- * adapters actually support (session fork/create/status via the SessionStore
- * adapter; event streaming via the event bus; in-session active-role
- * switching via the DshRoleSwitcher + the `/rolebox` host routes). Currently
- * advisory — `buildCanonicalTools` documents that capabilities are "not
- * consulted in Phase 1 tool assembly" — but kept honest for future
- * consumers.
- */
-const dshCapabilities: PlatformCapabilities = {
-  platformId: "dsh",
-  hasBackgroundTasks: false,
-  hasSessionFork: true,
-  hasSessionCreate: true,
-  hasSessionAbort: false,
-  hasAgentFileSync: false,
-  hasMultiStepTools: true,
-  hasEventStream: true,
-  hasSessionStatus: true,
-  hasRoleSwitch: true,
-};
-
 // ── apply ───────────────────────────────────────────────────────────────────
 
 /**
@@ -1331,7 +1309,7 @@ export async function apply(
       resolvedRoles,
       directory: process.cwd(),
       sessionClient: sessionAdapter,
-      capabilities: dshCapabilities,
+      capabilities: dshCapabilities(),
     }),
     ...graphTools,
     ...loopTools,

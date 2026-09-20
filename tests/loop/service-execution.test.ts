@@ -214,7 +214,7 @@ describe("Loop service E2E via chat.message hook", () => {
     // Inject the stateful DispatchManager mock — DispatchService.init reuses it
     // from hookState.managerMap instead of building a real manager.
     hookState.managerMap.set(tmpDir, mocks.dispatchManager as unknown as DispatchManager);
-    hooks = await createPluginHooks({
+    hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [],
       session: new OpencodeSessionAdapter(mocks.client),
       roleFunctionsMap: new Map(),

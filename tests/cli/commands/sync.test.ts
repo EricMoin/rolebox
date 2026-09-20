@@ -49,9 +49,14 @@ beforeEach(() => {
     },
   }));
 
-  // Mock model-utils to suppress placeholder detection (no real opencode config in tests)
-  mock.module("../../../src/cli/model-utils", () => ({
-    scanAvailableModels: () => [],
+  // Mock the model catalog and the role scanner to suppress placeholder
+  // detection (no real opencode config in tests). BOTH module specifiers must
+  // be mocked: a partial mock of the consumer's import makes it fail with
+  // `SyntaxError: Export named ... not found`.
+  mock.module("../../../src/platform/model-catalog/index", () => ({
+    scanModelsForTarget: () => [],
+  }));
+  mock.module("../../../src/cli/role-models", () => ({
     findPlaceholderRoles: () => [],
   }));
 

@@ -114,7 +114,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -143,7 +143,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -174,7 +174,7 @@ describe("session.idle CONTINUE", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -200,7 +200,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -220,7 +220,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan" }); // no continue_until
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -244,7 +244,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -268,7 +268,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -298,7 +298,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -332,7 +332,7 @@ describe("session.idle CONTINUE", () => {
     const graphSpy = spyOn(GraphToolSet.prototype, "hasInflightGraphsForSession");
     graphSpy.mockReturnValue(true);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -364,7 +364,7 @@ describe("session.idle CONTINUE", () => {
     const graphSpy = spyOn(GraphToolSet.prototype, "hasInflightGraphsForSession");
     graphSpy.mockReturnValue(false);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -392,7 +392,7 @@ describe("session.idle CONTINUE", () => {
     const fn = makeResolvedFn({ name: "plan", continue_until: "plan_todos_complete" });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -433,7 +433,7 @@ describe("session.idle CONTINUE", () => {
     const promptStub = mock(() => Promise.reject(new Error("network down")));
     (adapter as unknown as { prompt: (...args: unknown[]) => Promise<unknown> }).prompt = promptStub;
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: adapter,
       roleFunctionsMap,
@@ -477,7 +477,7 @@ describe("auto-continue counter persistence (regression)", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -534,7 +534,7 @@ describe("auto-continue counter persistence (regression)", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -586,7 +586,7 @@ describe("dispatch-notification counter persistence (regression)", () => {
     });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -649,7 +649,7 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
     const fn = makeResolvedFn({ name: "synthesize", continue_until: ANY_CONDITION });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -692,7 +692,7 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
     const fn = makeResolvedFn({ name: "synthesize", continue_until: ANY_CONDITION });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -736,7 +736,7 @@ describe("graph-continuation: structured { any: [...] } continue_until (subtask 
     const fn = makeResolvedFn({ name: "synthesize", continue_until: ANY_CONDITION });
     roleFunctionsMap.set("test-primary", [fn]);
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,
@@ -787,7 +787,7 @@ describe("graph-continuation: graph suppression + session-ledger fallback (subta
     // ToolService.init resolves the mocked method via the prototype.
     const graphSpy = spyOn(GraphToolSet.prototype, "hasInflightGraphsForSession");
 
-    const hooks = await createPluginHooks({
+    const hooks = await createPluginHooks({ platformId: "opencode",
       resolvedRoles: [makePrimaryRole()],
       session: new OpencodeSessionAdapter(client),
       roleFunctionsMap,

@@ -7,11 +7,9 @@ import {
   registerCodexPlugin,
   resolveRoleboxPackageRoot,
 } from "../../platform/adapters/codex/plugin-bundle.ts";
-import {
-  scanAvailableModels,
-  findPlaceholderRoles,
-} from "../model-utils.ts";
-import type { RoleModelEntry } from "../model-utils.ts";
+import { scanModelsForTarget } from "../../platform/model-catalog/index.ts";
+import { findPlaceholderRoles } from "../role-models.ts";
+import type { RoleModelEntry } from "../role-models.ts";
 import {
   existsSync,
   mkdirSync,
@@ -240,7 +238,11 @@ export async function sync(target: string, relink = false): Promise<void> {
   }
 
   // ── Placeholder detection ───────────────────────────────────────────
-  const availableModels = scanAvailableModels();
+  // The project cwd contributes opencode's project-level documents: a model
+  // declared only in the project must not be reported as unconfigured.
+  const availableModels = scanModelsForTarget(target, {
+    projectDir: process.cwd(),
+  });
   const knownModelIds = availableModels.map((m) => m.id);
 
   // Scan each synced role for placeholder models

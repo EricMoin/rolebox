@@ -67,7 +67,7 @@ describe("LoopManager integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {
@@ -127,7 +127,7 @@ describe("LoopManager integration", () => {
       pendingCorrections.clear();
       userMessagedSessions.clear();
       const client = pluginMockClient();
-      hooks = await createPluginHooks({ resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
+      hooks = await createPluginHooks({ platformId: "opencode", resolvedRoles: [], session: new OpencodeSessionAdapter(client), roleFunctionsMap: new Map(), roleGraphMap: new Map(), directory: tmpDir });
     });
 
     afterEach(() => {

@@ -1,6 +1,7 @@
 import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { HotReloadService } from "../../src/core/services/hot-reload-service.ts";
 import { clearExtensionModuleCache } from "../../src/extensions/loader.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { HookService } from "../../src/core/services/hook-service.ts";
 import { hookState } from "../../src/hooks/state.ts";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -32,6 +33,9 @@ function makeCtx(dir: string, core: any = makeMockCore()) {
     globalSkillsDir: dir,
     configDir: dir,
     builtinDir: dir,
+    // Always present on a real PluginContext; the reload reads it to select
+    // the harness's model catalog.
+    capabilities: opencodeCapabilities(),
   };
 }
 

@@ -146,14 +146,26 @@ describe("existing platform path helpers", () => {
   it("still resolve for opencode and pi", () => {
     const home = homedir();
 
-    const opencode = defaultPlatformPaths();
-    expect(opencode.platformId).toBe("opencode");
-    expect(opencode.configDir).toBe(join(home, ".config", "opencode"));
-    expect(opencode.skillsDir).toBe(join(opencode.configDir, "skills"));
+    // These are the homedir fallbacks; clear ambient platform overrides so the
+    // assertions describe the fallback rather than the developer's environment.
+    const savedXdg = process.env.XDG_CONFIG_HOME;
+    const savedPiDir = process.env.PI_CODING_AGENT_DIR;
+    delete process.env.XDG_CONFIG_HOME;
+    delete process.env.PI_CODING_AGENT_DIR;
 
-    const pi = piPlatformPaths();
-    expect(pi.platformId).toBe("pi");
-    expect(pi.configDir).toBe(join(home, ".pi", "agent"));
+    try {
+      const opencode = defaultPlatformPaths();
+      expect(opencode.platformId).toBe("opencode");
+      expect(opencode.configDir).toBe(join(home, ".config", "opencode"));
+      expect(opencode.skillsDir).toBe(join(opencode.configDir, "skills"));
+
+      const pi = piPlatformPaths();
+      expect(pi.platformId).toBe("pi");
+      expect(pi.configDir).toBe(join(home, ".pi", "agent"));
+    } finally {
+      if (savedXdg !== undefined) process.env.XDG_CONFIG_HOME = savedXdg;
+      if (savedPiDir !== undefined) process.env.PI_CODING_AGENT_DIR = savedPiDir;
+    }
   });
 });
 

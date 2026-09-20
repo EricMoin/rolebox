@@ -51,7 +51,7 @@ export interface PathsMockOpts {
   getDataDir?: () => string;
   /** Override for getConfigDir. */
   getConfigDir?: () => string;
-  /** Additional named exports to override (e.g. getSyncTarget, getOpencodeConfigPath). */
+  /** Additional named exports to override (e.g. getSyncTarget, getOpencodeSkillsDir). */
   extra?: Record<string, unknown>;
 }
 

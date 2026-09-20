@@ -7,7 +7,7 @@ import type { ResolvedRole } from "../src/types.ts";
 import type { ISessionClient } from "../src/platform/ports/session-client.ts";
 import type { DispatchManager } from "../src/dispatch/core/manager.ts";
 import { defineTool } from "../src/platform/ports/tool-factory.ts";
-import { defaultCapabilities } from "../src/platform/capabilities.ts";
+import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import { z } from "zod";
 
 // ── Test fixtures ──────────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ function makeBaseOpts(): BuildToolsOptions {
   return {
     resolvedRoles: [makeResolvedRole()],
     directory: "/tmp/test",
-    capabilities: defaultCapabilities(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

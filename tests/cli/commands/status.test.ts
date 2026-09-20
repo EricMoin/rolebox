@@ -29,11 +29,6 @@ mock.module("../../../src/cli/paths", () => createPathsMockPayload({
     getSyncTarget: (target: string) => join(targetBase(target), "rolebox"),
     getTargetConfigDir: (target: string) => targetBase(target),
     getTargetSkillsDir: (target: string) => join(targetBase(target), "skills"),
-    getOpencodeConfigPath: () => {
-      const xdg = process.env.XDG_CONFIG_HOME;
-      if (xdg) return join(xdg, "opencode", "opencode.jsonc");
-      return join(homedir(), ".config", "opencode", "opencode.jsonc");
-    },
     getOpencodeSkillsDir: () => {
       const xdg = process.env.XDG_CONFIG_HOME;
       if (xdg) return join(xdg, "opencode", "skills");
@@ -49,6 +44,8 @@ afterAll(() => {
 
 let tmpDir: string;
 let savedCodexHome: string | undefined;
+let savedHome: string | undefined;
+let savedOpencodeConfigDir: string | undefined;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "rolebox-status-test-"));
@@ -56,9 +53,15 @@ beforeEach(() => {
   process.env.XDG_DATA_HOME = tmpDir;
   // status() asks every platform descriptor for its integration status; the
   // codex descriptor reads <configDir>/config.toml, so point CODEX_HOME at the
-  // temp dir and never at a developer's real ~/.codex.
+  // temp dir and never at a developer's real ~/.codex. The opencode descriptor
+  // resolves HOME's .opencode pair and OPENCODE_CONFIG_DIR at call time, so
+  // redirect both away from a developer's real home too.
   savedCodexHome = process.env.CODEX_HOME;
   process.env.CODEX_HOME = join(tmpDir, "codex");
+  savedHome = process.env.HOME;
+  process.env.HOME = join(tmpDir, "home");
+  savedOpencodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = join(tmpDir, "opencode-config-dir");
 });
 
 afterEach(() => {
@@ -66,6 +69,10 @@ afterEach(() => {
   delete process.env.XDG_DATA_HOME;
   if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = savedCodexHome;
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  if (savedOpencodeConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = savedOpencodeConfigDir;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

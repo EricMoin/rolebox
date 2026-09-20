@@ -17,7 +17,7 @@ import type {
   DshJsonSchema,
 } from "../../src/platform/adapters/dsh/tool-factory.ts";
 import type { DshContentBlock } from "../../src/platform/adapters/dsh/agent-registrar.ts";
-import { defaultCapabilities } from "../../src/platform/capabilities.ts";
+import { opencodeCapabilities } from "../../src/platform/capabilities.ts";
 import { defineTool } from "../../src/platform/ports/tool-factory.ts";
 import type { CanonicalToolDef } from "../../src/platform/types.ts";
 import type { ResolvedRole } from "../../src/types.ts";
@@ -44,7 +44,7 @@ function makeBaseOpts(): BuildToolsOptions {
   return {
     resolvedRoles: [makeResolvedRole()],
     directory: "/tmp/test",
-    capabilities: defaultCapabilities(),
+    capabilities: opencodeCapabilities(),
   };
 }
 

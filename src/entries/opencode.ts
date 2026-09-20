@@ -10,6 +10,7 @@ import { loadProjectConfig, applyProjectConfig } from "../project-config.ts";
 import { PLUGIN_ID } from "../constants.ts";
 import { createSubLogger, getLogFilePath, configureLogDirectory } from "../logger.ts";
 import { resolveRoleboxDirectories, initializeRoleboxRuntime } from "../platform/factory.ts";
+import { opencodeCapabilities } from "../platform/capabilities.ts";
 
 const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
   configureLogDirectory(ctx.directory);
@@ -50,6 +51,7 @@ const RoleboxPlugin: Plugin = async (ctx: PluginInput) => {
     globalSkillsDir: dirs.globalSkillsDir,
     configDir: dirs.configDir,
     builtinDir: dirs.builtinDir,
+    capabilities: opencodeCapabilities(),
   });
 };
 

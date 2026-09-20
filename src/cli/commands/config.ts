@@ -5,10 +5,12 @@ import { join, relative } from "node:path";
 import { getSyncTarget } from "../paths.ts";
 import { samePath } from "../../utils/paths.ts";
 import { SyncTarget, SYNC_TARGET_VALUES } from "../../constants.ts";
-import { scanModelsForTarget, scanRoleModels } from "../model-utils.ts";
+import { scanModelsForTarget } from "../../platform/model-catalog/index.ts";
+import { scanRoleModels } from "../role-models.ts";
 import { assertInteractiveContext, pickSyncedRole, pickTarget } from "../pick.ts";
 import type { PromptApi } from "../pick.ts";
-import type { ModelOption, RoleModelEntry } from "../model-utils.ts";
+import type { ModelOption } from "../../platform/model-catalog/index.ts";
+import type { RoleModelEntry } from "../role-models.ts";
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -104,12 +106,22 @@ export type ConfigPrompts = Omit<PromptApi, "log"> & {
 
 // ── Interactive Flow ──────────────────────────────────────────────
 
+/**
+ * Interactive model configuration for one role.
+ *
+ * `projectDir` selects the directory whose project-level opencode documents
+ * contribute models; it is a parameter (not an ambient `process.cwd()` read at
+ * the call sites below) so a test can exercise a project config without
+ * `process.chdir()`, which is process-global and unsafe under Bun's parallel
+ * test files.
+ */
 export async function runInteractive(
   roleDir: string,
   target: string,
   prompts: ConfigPrompts = clack,
+  projectDir: string = process.cwd(),
 ): Promise<void> {
-  const available = scanModelsForTarget(target);
+  const available = scanModelsForTarget(target, { projectDir });
   const allEntries = scanRoleModels(roleDir);
 
   if (allEntries.length === 0) {

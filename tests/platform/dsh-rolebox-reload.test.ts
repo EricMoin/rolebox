@@ -45,6 +45,9 @@ let configDir: string;
 let globalSkillsDir: string;
 let builtinDir: string;
 let originalHotReloadEnv: string | undefined;
+let originalXdgConfigHome: string | undefined;
+let originalHome: string | undefined;
+let originalOpencodeConfigDir: string | undefined;
 
 beforeEach(() => {
   roleboxDir = mkdtempSync(join(tmpdir(), "rolebox-dsh-reload-"));
@@ -60,18 +63,34 @@ beforeEach(() => {
 
   originalHotReloadEnv = process.env.ROLEBOX_HOT_RELOAD;
   delete process.env.ROLEBOX_HOT_RELOAD;
+
+  // The dsh catalog seeds from opencode when dsh declares no models; redirect
+  // that seed's config home, HOME .opencode pair and OPENCODE_CONFIG_DIR so no
+  // real config is read.
+  originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = roleboxDir;
+  originalHome = process.env.HOME;
+  process.env.HOME = join(roleboxDir, "home");
+  originalOpencodeConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  process.env.OPENCODE_CONFIG_DIR = join(roleboxDir, "opencode-config-dir");
 });
 
 afterEach(() => {
   if (originalHotReloadEnv === undefined) delete process.env.ROLEBOX_HOT_RELOAD;
   else process.env.ROLEBOX_HOT_RELOAD = originalHotReloadEnv;
+  if (originalXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalOpencodeConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = originalOpencodeConfigDir;
   roleOpenRegistry.clear();
   rmSync(roleboxDir, { recursive: true, force: true });
 });
 
 /** Directories fixture mirroring resolveRoleboxDirectories()'s shape. */
 function directories() {
-  return { roleboxDir, globalSkillsDir, configDir, builtinDir };
+  return { roleboxDir, globalSkillsDir, configDir, platformId: "dsh", builtinDir };
 }
 
 /** Write a role dir with role.yaml plus its role-local skills/<name>/SKILL.md. */

@@ -24,7 +24,7 @@ import { tmpdir as osTmpdir } from "node:os";
 
 import type { OpencodeClient } from "@opencode-ai/sdk";
 import { buildCanonicalTools } from "../src/platform/tool-assembly.ts";
-import { defaultCapabilities } from "../src/platform/capabilities.ts";
+import { opencodeCapabilities } from "../src/platform/capabilities.ts";
 import { createGraphToolSet } from "../src/graph/tools/index.ts";
 import { PluginCore } from "../src/core/plugin-core.ts";
 import { HotReloadService } from "../src/core/services/hot-reload-service.ts";
@@ -168,7 +168,7 @@ describe("buildCanonicalTools — graphTools reuse", () => {
     const tools = buildCanonicalTools({
       resolvedRoles: [makeRole()],
       directory: process.cwd(),
-      capabilities: defaultCapabilities(),
+      capabilities: opencodeCapabilities(),
       dispatchManager: makeDispatchManager(),
       graphTools: prebuilt,
     });
@@ -188,7 +188,7 @@ describe("buildCanonicalTools — graphTools reuse", () => {
     const tools = buildCanonicalTools({
       resolvedRoles: [makeRole()],
       directory: process.cwd(),
-      capabilities: defaultCapabilities(),
+      capabilities: opencodeCapabilities(),
       dispatchManager: makeDispatchManager(),
     });
     await (tools.graph_create as never as {
