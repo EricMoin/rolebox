@@ -38,14 +38,23 @@
  * `tool-factory.ts` adapter. `getHandlers().tool` is therefore an empty
  * record, kept for IHookProvider port conformance.
  *
- * All dsh types are structural (duck-typed). This module does NOT import
- * `@deepseek-ai/*` (or `@opencode-ai/*`).
+ * The dsh runtime types are structural (duck-typed). `@deepseek-ai/*` is imported
+ * type-only — the cordis `Events` interface plus the service augmentations that extend it,
+ * which is what makes the mapping table in `wire()` compiler-checked — and those imports
+ * erase at build time. This module MUST NOT value-import `@deepseek-ai/*` and MUST NOT
+ * import from `@opencode-ai/*`.
  *
  * @module
  */
 
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
+import type { Events } from "@deepseek-ai/cordis";
+// Type-only service imports: their `declare module "@deepseek-ai/cordis"` augmentations add
+// `tools/*` and `session/event` to `Events`, which types the mapping table in `wire()`.
+// They are erased at runtime — this module never value-imports `@deepseek-ai/*`.
+import type {} from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-tools";
 import { createSubLogger } from "../../../logger.ts";
 import type { IHookProvider } from "../../ports/hook-provider.ts";
 import type { DshCordisContext } from "./event-bridge.ts";
@@ -193,8 +202,11 @@ export class DshHookProvider implements IHookProvider {
    * Register the dsh event listeners for the mapped hook kinds.
    */
   private wire(): void {
-    // dsh event → rolebox hook kind
-    const mappings: Array<{ dshEvent: string; kind: DshHookKind }> = [
+    // dsh event → rolebox hook kind. `dshEvent` is `keyof Events`, so every name is checked
+    // against the cordis event vocabulary (augmented by the type-only service imports at the
+    // top of this module): a name the host does not declare fails `tsc` instead of silently
+    // never firing.
+    const mappings: Array<{ dshEvent: keyof Events; kind: DshHookKind }> = [
       // tool-before → tools/pre-execute (allow/deny/ask waterfall, §3.5)
       { dshEvent: "tools/pre-execute", kind: "tool-before" },
       // tool-after → tools/post-execute (accept/replace/block gate, §3.5)
@@ -210,7 +222,10 @@ export class DshHookProvider implements IHookProvider {
     // the waterfall so the framework's `decision.kind` read throws
     // ("Cannot read properties of undefined (reading 'kind')") on EVERY tool
     // call. `tools/result` (emit) and `session/event` have no `next`.
-    const waterfallEvents = new Set(["tools/pre-execute", "tools/post-execute"]);
+    const waterfallEvents = new Set<keyof Events>([
+      "tools/pre-execute",
+      "tools/post-execute",
+    ]);
 
     for (const { dshEvent, kind } of mappings) {
       const listener = (...args: unknown[]): unknown => {

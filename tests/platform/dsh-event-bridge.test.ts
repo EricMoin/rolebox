@@ -322,7 +322,10 @@ describe("mapDshEventType", () => {
     // SessionEvent sub-types
     expect(mapDshEventType("user/message")).toBe("message.created");
     expect(mapDshEventType("assistant/message")).toBe("message.created");
-    expect(mapDshEventType("assistant/chunk")).toBe("part.updated");
+    // `assistant/chunk` was a dead key — absent from the harness's
+    // KNOWN_SESSION_EVENT_TYPES (guarded in dsh-event-vocabulary.test.ts) — so it now
+    // resolves to "unknown" like any other unmapped type.
+    expect(mapDshEventType("assistant/chunk")).toBe("unknown");
     expect(mapDshEventType("tool/call")).toBe("part.created");
     expect(mapDshEventType("tool/result")).toBe("message.updated");
     expect(mapDshEventType("turn/start")).toBe("session.status");
@@ -335,24 +338,46 @@ describe("mapDshEventType", () => {
   });
 });
 
-describe("DshEventBridge is SDK-free", () => {
-  it("contains no @opencode-ai or @deepseek-ai imports", () => {
-    const source = readFileSync(
-      resolve(import.meta.dir, "../../src/platform/adapters/dsh/event-bridge.ts"),
-      "utf-8",
-    );
-    // Check import specifiers only — docstrings legitimately mention the
-    // package scopes when documenting the "must not import" rule.
+describe("DshEventBridge import boundary", () => {
+  /** Import statements of a source file, with their statement-level `type` modifier. */
+  function extractImports(
+    source: string,
+  ): Array<{ typeOnly: boolean; specifier: string }> {
     const importRe =
-      /import\s+(?:type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+["']([^"']+)["']/g;
-    const specifiers: string[] = [];
+      /import\s+(type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+["']([^"']+)["']/g;
+    const imports: Array<{ typeOnly: boolean; specifier: string }> = [];
     let match: RegExpExecArray | null;
     while ((match = importRe.exec(source)) !== null) {
-      specifiers.push(match[1]);
+      imports.push({ typeOnly: match[1] !== undefined, specifier: match[2] });
     }
-    const forbidden = specifiers.filter(
-      (s) => s.includes("@opencode-ai/") || s.includes("@deepseek-ai/"),
+    return imports;
+  }
+
+  it("never imports @opencode-ai, and only type-imports @deepseek-ai", () => {
+    // Check import statements only — docstrings legitimately mention the package scopes
+    // when documenting the boundary rule.
+    const imports = extractImports(
+      readFileSync(
+        resolve(import.meta.dir, "../../src/platform/adapters/dsh/event-bridge.ts"),
+        "utf-8",
+      ),
     );
+    // `@deepseek-ai/cordis` is imported type-only for the `Events` vocabulary (erased at
+    // build time); a VALUE import of any platform SDK would add a runtime dependency to
+    // src/, and `@opencode-ai/*` is forbidden outright.
+    const forbidden = imports
+      .filter(
+        ({ typeOnly, specifier }) =>
+          specifier.includes("@opencode-ai/") ||
+          (specifier.includes("@deepseek-ai/") && !typeOnly),
+      )
+      .map(({ specifier }) => specifier);
     expect(forbidden).toEqual([]);
+
+    // Sanity check: the pattern must actually see the type-only @deepseek-ai imports, so a
+    // broken regex cannot make this boundary test pass vacuously.
+    expect(
+      imports.some((i) => i.typeOnly && i.specifier === "@deepseek-ai/cordis"),
+    ).toBe(true);
   });
 });

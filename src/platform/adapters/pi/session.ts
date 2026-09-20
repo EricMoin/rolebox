@@ -14,7 +14,9 @@
  * Session directory structure:
  *   {sessionDir}/{workspace-dir-name}/{sessionId}.jsonl
  *
- * Must NOT import from any Pi or opencode SDK.
+ * The optional pi host package is imported **type-only**, so the event vocabulary this
+ * replayer switches on is compiler-checked while the import erases at build time. This
+ * module MUST NOT value-import the host and MUST NOT import from any opencode SDK.
  *
  * @module
  */
@@ -34,6 +36,10 @@ import type {
   SessionStatus,
 } from "../../types.ts";
 import type { Part, MessageInfo } from "../../../session/types.ts";
+import type {
+  PiJsonEventType,
+  PiRuntimeOnlyEventType,
+} from "./event-bridge.ts";
 import { readSession } from "./sidecar-persister.ts";
 
 /**
@@ -690,7 +696,10 @@ export class PiSessionAdapter implements ISessionClient {
     for (const rawEvent of events) {
       const event = rawEvent as Record<string, unknown>;
       const type = typeof event.type === "string" ? event.type : "";
-      switch (type) {
+      // Sidecar lines are replayed structurally, so `type` is an arbitrary string; the
+      // assertion narrows only the switch LABEL set to the host vocabulary. Unknown names
+      // still fall through to `default`.
+      switch (type as PiJsonEventType) {
         case "message_start": {
           // pi 0.81.x payload: { type, message } — adopt a message shell.
           // Classify as assistant ONLY when the role is exactly "assistant"
@@ -776,7 +785,10 @@ export class PiSessionAdapter implements ISessionClient {
           } else if (Array.isArray(m.content)) {
             for (const entry of m.content) {
               const partId = `p-${rebuilt.length}-${Date.now()}`;
-              switch (entry.type) {
+              // Content-entry types come off the wire as arbitrary strings; the assertion
+              // narrows the LABEL set to the runtime-only pi content vocabulary, so a dead
+              // label is a compile error while unknown entries still hit `default`.
+              switch (entry.type as PiRuntimeOnlyEventType) {
                 case "text":
                   rebuilt.push({
                     id: partId,
@@ -855,19 +867,6 @@ export class PiSessionAdapter implements ISessionClient {
               time: { start: Date.now() },
             });
           }
-          break;
-        }
-        case "reasoning": {
-          const last = messages[messages.length - 1];
-          if (!last) break;
-          last.parts.push({
-            id: String(event.id ?? `reasoning-${Date.now()}`),
-            sessionID: last.info.sessionID,
-            messageID: last.info.id,
-            type: "reasoning",
-            text: typeof event.text === "string" ? event.text : "",
-            time: { start: Date.now() },
-          });
           break;
         }
         case "tool_execution_start": {
@@ -959,7 +958,7 @@ export class PiSessionAdapter implements ISessionClient {
           break;
         }
         default:
-          // Non-message events (turn_end, agent_*, session.*, step-finish,
+          // Non-message events (turn_end, agent_*, session.*,
           // tool_execution_update, ...) do not change the transcript.
           break;
       }

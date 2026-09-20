@@ -1,3 +1,4 @@
+import type { Hooks } from "@opencode-ai/plugin";
 import type { ResolvedRole, ResolvedFunction } from "../types.ts";
 import type { ISessionClient } from "../platform/ports/session-client.ts";
 import { hookState } from "../hooks/state.ts";
@@ -41,7 +42,9 @@ function listDegradedServices(core: PluginCore): string[] {
  * diagnostic is the error log emitted by the caller, not a thrown Error that
  * would take the whole plugin (and server) down. Never return undefined —
  * opencode iterates the handler map, so absent keys must be real no-ops and
- * `tool` must be a usable (empty) tool map.
+ * `tool` must be a usable (empty) tool map. The key set is checked against the
+ * host's `Hooks` contract (`satisfies Hooks`), so a renamed or removed
+ * opencode hook key fails the build instead of silently degrading to a no-op.
  */
 function buildNoOpHandlers(): Record<string, unknown> {
   const noop = async () => {};
@@ -55,7 +58,7 @@ function buildNoOpHandlers(): Record<string, unknown> {
     "experimental.chat.system.transform": noop,
     "experimental.session.compacting": noop,
     dispose: noop,
-  };
+  } satisfies Hooks;
 }
 
 // Re-exports backed by hookState (unchanged — consumers import these directly)

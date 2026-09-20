@@ -32,6 +32,7 @@ import type { AgentDefinition } from "../../types.ts";
 import type { PiAgentRegistrar } from "./agent-registrar.ts";
 import type { ActiveAgentRef } from "./active-agent.ts";
 import { createActiveAgentRef } from "./active-agent.ts";
+import type { PiEventType } from "./event-bridge.ts";
 
 /** Session entry customType used to persist the active role selection. */
 const ACTIVE_ROLE_ENTRY = "rolebox-active-role";
@@ -253,7 +254,9 @@ export function wireRoleSwitcher(options: RoleSwitcherOptions): void {
 
   // ── Per-turn system prompt injection ────────────────────────────────────
 
-  pi.on("before_agent_start", async (event: any) => {
+  // `satisfies PiEventType` keeps the hook name checked against the host's Extension API
+  // union even though `pi` itself is `any` (optional peer — see the module doc).
+  pi.on("before_agent_start" satisfies PiEventType, async (event: any) => {
     const activeRoleId = activeAgent.get();
     if (!activeRoleId) return undefined;
     try {
@@ -269,7 +272,7 @@ export function wireRoleSwitcher(options: RoleSwitcherOptions): void {
 
   // ── Cross-session restore ───────────────────────────────────────────────
 
-  pi.on("session_start", async (_event: any, ctx: any) => {
+  pi.on("session_start" satisfies PiEventType, async (_event: any, ctx: any) => {
     try {
       const entries: any[] = ctx?.sessionManager?.getEntries?.() ?? [];
       // Find the most recent persisted active-role entry.

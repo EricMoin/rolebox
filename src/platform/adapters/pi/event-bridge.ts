@@ -2,11 +2,25 @@
  * PiEventBridge — IEventBridge adapter for Pi (plugin) platform events.
  *
  * Translates Pi Extension API raw events into CanonicalEvents and
- * dispatches them to registered handlers. Does NOT import from
- * any Pi SDK (@opencode-ai/plugin or @opencode-ai/sdk).
+ * dispatches them to registered handlers.
+ *
+ * The host vocabulary is imported **type-only** from the optional
+ * `@earendil-works/pi-coding-agent` peer, so the literal tables below are
+ * compiler-checked while the imports erase at build time. This module MUST NOT
+ * value-import the host and MUST NOT import from `@opencode-ai/*`.
  *
  * @module
  */
+
+// Type-only host imports: `ExtensionEvent` is the Extension API's discriminated event
+// union, `JsonAgentSessionEvent` the `pi --mode json` stdout union. They exist only to
+// check the literal vocabularies below — pi is an optional runtime peer supplied by the
+// host, so these imports must never gain a runtime form (same pattern as
+// dsh/event-bridge.ts:37-43).
+import type {
+  ExtensionEvent,
+  JsonAgentSessionEvent,
+} from "@earendil-works/pi-coding-agent";
 
 import type {
   CanonicalEvent,
@@ -15,12 +29,69 @@ import type {
   IEventBridge,
 } from "../../ports/event-bridge.ts";
 
+// ── Pi vocabulary ───────────────────────────────────────────────────────────
+
+/**
+ * Event names the pi Extension API can deliver, taken from the host's own
+ * discriminated union (`ExtensionEvent`; `ExtensionAPI.on` declares the matching
+ * overload set). A key the host does not declare — or a typo — is a compile error
+ * in {@link PI_EVENT_TYPE_MAP} instead of a mapping that can never fire.
+ */
+export type PiEventType = ExtensionEvent["type"];
+
+/**
+ * Extension-API event names the legacy `pi --mode json` stream carried at the top level.
+ *
+ * `tool_call` / `tool_result` are extension events, not members of the JSON-stream union
+ * (`JsonAgentSessionEvent` carries `tool_execution_*` instead), but rolebox's stream parser
+ * handles them — kept working and still host-checked through `satisfies`.
+ */
+const PI_LEGACY_STREAM_EVENT_TYPES = [
+  "tool_call",
+  "tool_result",
+] as const satisfies readonly ExtensionEvent["type"][];
+
+/**
+ * pi vocabulary rolebox parses that the installed host declarations do NOT publish.
+ *
+ * Real at runtime, but not compiler-checkable from the host's root type surface:
+ *   - `text`     — content-block discriminant, e.g. `dist/core/tools/bash.js:173`
+ *                  (`content: [{ type: "text", text }]`) and the plain-text
+ *                  `--mode json` event rolebox still parses;
+ *   - `thinking` — content-block discriminant, `dist/core/compaction/utils.js:106`
+ *                  (`block.type === "thinking"`);
+ *   - `toolCall` — content-block discriminant,
+ *                  `dist/core/compaction/branch-summarization.js:235`.
+ *
+ * Those are content types of the transitive `@earendil-works/pi-ai` package
+ * (`TextContent` :242, `ThinkingContent` :247, `ToolCall` :261), which the host does not
+ * re-export from its root; importing that package directly would make an optional peer's
+ * internal a build dependency, so the vocabulary is recorded here instead.
+ */
+export type PiRuntimeOnlyEventType = "text" | "thinking" | "toolCall";
+
+/**
+ * The `pi --mode json` stdout vocabulary rolebox's parsers switch on: the host's declared
+ * wire union, the legacy extension names older streams used, and the runtime-only literals.
+ *
+ * Switch labels are checked against this union, so a name no installed source can emit is a
+ * compile error instead of a case that can never run.
+ */
+export type PiJsonEventType =
+  | JsonAgentSessionEvent["type"]
+  | (typeof PI_LEGACY_STREAM_EVENT_TYPES)[number]
+  | PiRuntimeOnlyEventType;
+
 // ── Pi-to-canonical event type mapping ─────────────────────────────────────
 
 /**
  * Mapping from Pi Extension API event type strings to canonical event types.
+ *
+ * `Partial` is intentional: rolebox handles a subset of the host's Extension API events.
+ * The `satisfies` guard makes a key the host does not declare — or a typo — a compile
+ * error instead of a dead mapping. Unmapped host events resolve to "unknown" by design.
  */
-const PI_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
+export const PI_EVENT_TYPE_MAP = {
   session_start: "session.created",
   session_shutdown: "session.deleted",
   agent_start: "session.updated",
@@ -31,14 +102,24 @@ const PI_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
   message_end: "message.completed",
   tool_call: "part.created",
   tool_result: "part.updated",
-};
+} as const satisfies Partial<Record<PiEventType, CanonicalEventType>>;
+
+/**
+ * String-keyed view used by the tolerant lookup in {@link mapPiEventType}.
+ *
+ * `piType` arrives as an arbitrary string (the host union is not validated at runtime), so
+ * the typed table is widened once, here. Every key is host-declared — enforced by the
+ * `satisfies` guard above — and any non-key resolves to "unknown", so the widening cannot
+ * smuggle in an unchecked mapping.
+ */
+const PI_EVENT_TYPE_LOOKUP: Record<string, CanonicalEventType> = PI_EVENT_TYPE_MAP;
 
 /**
  * Map a Pi Extension API event type string to a CanonicalEventType.
  * Unknown or unmapped types resolve to "unknown".
  */
 export function mapPiEventType(piType: string): CanonicalEventType {
-  return PI_EVENT_TYPE_MAP[piType] ?? "unknown";
+  return PI_EVENT_TYPE_LOOKUP[piType] ?? "unknown";
 }
 
 // ── Adapter implementation ─────────────────────────────────────────────────

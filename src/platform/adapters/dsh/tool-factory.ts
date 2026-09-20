@@ -14,7 +14,8 @@
  * ── register-ready raw JSON Schema (parameters AND output.schema) ───────────
  * The dsh plugin registers each compiled tool via `ctx.tools.register(def)`
  * DIRECTLY — it does NOT wrap the definition in `defineTool()` (the adapter
- * MUST NOT import `@deepseek-ai/dsh-tools`). This is load-bearing: unlike
+ * MUST NOT value-import `@deepseek-ai/dsh-tools`; type-only imports erase at
+ * build time — see ── Imports ──). This is load-bearing: unlike
  * `defineTool()`, `register()` performs NO `parameters` compilation — verified
  * at source, it only asserts `output.schema` and then stores the definition
  * object as-is (dsh-tools lib/index.js:2755-2763). Only `defineTool()`
@@ -46,17 +47,24 @@
  * rejected.
  *
  * ── Imports ────────────────────────────────────────────────────────────────
- * `@deepseek-ai/dsh-tools` is NOT a build-time dependency of this repo (the
- * dsh host provides it at runtime, pinned 0.1.5-rc.1). Following the Pi
- * adapter precedent (`src/platform/adapters/pi/tool-factory.ts` uses loose
- * typing for its optional peer dependency), this adapter emits
- * structurally-compatible plain objects and defines local structural types
- * mirroring the documented DSL. The returned object is opaque per
- * `IToolFactory` ("only the platform runtime interprets it"); the dsh plugin
- * layer registers it directly with `ctx.tools.register(compiled)`.
+ * `@deepseek-ai/dsh-tools` IS a declared devDependency of this repo
+ * (`package.json`), so its TYPES may be imported type-only — such an import
+ * is erased at build time, and the dsh host provides the module at runtime,
+ * at the `package.json` pin (see `src/platform/adapters/dsh/event-bridge.ts`, which
+ * does exactly this for the cordis `Events` augmentation). The RUNTIME rule
+ * still holds: this adapter consumes the host structurally (ctx / service
+ * surface) and MUST NOT gain a runtime (value) import of any host package.
+ * Following the Pi adapter precedent
+ * (`src/platform/adapters/pi/tool-factory.ts` uses loose typing for its
+ * optional peer dependency), this adapter emits structurally-compatible plain
+ * objects and defines local structural types mirroring the documented DSL.
+ * The returned object is opaque per `IToolFactory` ("only the platform
+ * runtime interprets it"); the dsh plugin layer registers it directly with
+ * `ctx.tools.register(compiled)`.
  *
- * MUST NOT import any package from the opencode platform SDK or the
- * deepseek dsh-tools SDK.
+ * MUST NOT value-import any package from the opencode platform SDK or the
+ * deepseek dsh-tools SDK — the host surface is consumed structurally, and a
+ * runtime (value) dependency on a host package is the line never crossed.
  */
 
 import { z } from "zod";

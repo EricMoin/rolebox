@@ -23,15 +23,24 @@
  * field (e.g. `user/message`, `turn/end`, `todo/write`) refines the canonical
  * mapping; the raw sub-type is preserved as `rawType`.
  *
- * The cordis ctx is consumed structurally (duck-typed). This module does NOT
- * import `@deepseek-ai/cordis` or any `@deepseek-ai/*` package, and MUST NOT
- * import from `@opencode-ai/*`.
+ * The cordis ctx is consumed structurally (duck-typed) and the dsh payload shapes
+ * are structural too. `@deepseek-ai/*` is imported type-only — the cordis `Events`
+ * interface and the `declare module` augmentations that extend it — so those imports
+ * erase at build time. This module MUST NOT value-import `@deepseek-ai/*` and MUST
+ * NOT import from `@opencode-ai/*`.
  *
  * @module
  */
 
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
+import type { Events } from "@deepseek-ai/cordis";
+// Type-only service imports: each package ships a `declare module "@deepseek-ai/cordis"`
+// augmentation adding its own events to `Events`. Importing them (erased at runtime) is what
+// makes the bus-level table and the subscription lists below compiler-checked.
+import type {} from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-skill";
+import type {} from "@deepseek-ai/dsh-tools";
 import { createSubLogger } from "../../../logger.ts";
 import type {
   CanonicalEvent,
@@ -48,6 +57,10 @@ import type {
  * Only `on` / `emit` are required — the two event operations the bridge uses
  * (cordis `Context` proxies both to its `EventsService`; see
  * `dsh-plugin-contract.md` §2.5). `on` returns a disposer, matching cordis.
+ *
+ * The event name stays `string` on purpose: this is the generic bus surface, which must
+ * accept any structural host ctx. Vocabulary narrowing belongs at the call sites — here via
+ * {@link DSH_SESSION_EVENTS} and in hook-provider.ts via its `keyof Events` mapping table.
  */
 export interface DshCordisContext {
   /** Subscribe to a cordis/dsh event. Returns an unsubscribe disposer. */
@@ -59,15 +72,17 @@ export interface DshCordisContext {
 // ── dsh-to-canonical event type mapping ──────────────────────────────────────
 
 /**
- * Mapping from dsh event type strings to canonical event types.
+ * Cordis bus-level dsh events → canonical event types.
  *
- * Includes both top-level service events (`session/created`, `tools/result`,
- * ...) and the `SessionEvent` sub-types carried inside `session/event`
- * payloads (`user/message`, `turn/end`, `todo/write`, ... — see
- * `dsh-plugin-contract.md` §4.1 for the full vocabulary). Unrecognised types
- * resolve to "unknown".
+ * These are the names `ctx.on(...)` accepts. `keyof Events` is augmented by the
+ * `@deepseek-ai/dsh-*` service packages imported (type-only) above, so a bus name the host
+ * does not declare — or a typo — fails `tsc` here instead of silently never firing.
+ *
+ * `SessionEvent` sub-types carried inside `session/event` payloads are a DIFFERENT
+ * vocabulary (payload discriminators, never bus names); they live in
+ * {@link DSH_SESSION_EVENT_TYPE_MAP}.
  */
-const DSH_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
+const DSH_BUS_EVENT_TYPE_MAP = {
   // Session service events (dsh-session §4.1)
   "session/created": "session.created",
   "session/disposed": "session.deleted",
@@ -78,25 +93,52 @@ const DSH_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
   "tools/result": "part.updated",
   "tools/change": "session.updated",
 
-  // SessionEvent sub-types carried by session/event payloads
+  // `skills/change` (dsh skill service, index.ts:298) is the unfiltered
+  // catalog-invalidation notification — a provider/catalog may be stale and
+  // consumers should refetch. Forwarded on the same generic bucket rolebox
+  // already uses for the analogous registry-change notification `tools/change`.
+  "skills/change": "session.updated",
+} as const satisfies Partial<Record<keyof Events, CanonicalEventType>>;
+
+/**
+ * `SessionEvent` sub-types carried inside `session/event` payloads → canonical event types.
+ *
+ * These are the `type` discriminators of appended session-log events, not cordis bus names,
+ * so `keyof Events` cannot check them. The installed `SessionEventType` union is likewise
+ * incomplete — several sub-types are declared by service packages that are not installed —
+ * so the key set is guarded by `tests/platform/dsh-event-vocabulary.test.ts` against the
+ * authoritative generated runtime catalog `KNOWN_SESSION_EVENT_TYPES`
+ * (the catalog shipped by the pinned `@deepseek-ai/dsh-session`; membership, not a size).
+ *
+ * `assistant/chunk` is deliberately absent: it is not in `KNOWN_SESSION_EVENT_TYPES` (it
+ * survives only in legacy fixtures, and dsh's own tests assert it never reaches a session
+ * log), so that entry could never match.
+ *
+ * Vocabulary: `dsh-plugin-contract.md` §4.1. Every entry maps onto a canonical kind that
+ * already exists above — no new vocabulary is introduced.
+ */
+export const DSH_SESSION_EVENT_TYPE_MAP = {
+  // Message appends.
   "user/message": "message.created",
   "assistant/message": "message.created",
-  "assistant/chunk": "part.updated",
+
+  // Tool lifecycle.
   "tool/call": "part.created",
   "tool/result": "message.updated",
+
+  // Turn / step lifecycle.
   "turn/start": "session.status",
   "turn/end": "session.idle",
   "step/start": "session.status",
   "step/end": "session.status",
+
+  // Log-only state / snapshot records.
   "todo/write": "session.updated",
   "request/header": "session.updated",
   "request/context": "session.updated",
   "session/end-seed": "session.updated",
 
-  // Previously-dropped session-log events (resolved to "unknown" before this
-  // table grew). Vocabulary: `@deepseek-ai/dsh-session` known-event-types.ts
-  // (`KNOWN_SESSION_EVENT_TYPES`). Every entry maps onto a canonical kind that
-  // already exists above — no new vocabulary is introduced.
+  // Session-log events that resolved to "unknown" before this table grew.
 
   // Lifecycle state transitions (a start/end or awaiting/resolved pair) →
   // `session.status`, the same bucket as `turn/start` · `step/start` ·
@@ -124,20 +166,28 @@ const DSH_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
   "plan/mode": "session.updated",
   "subagent/catalog": "session.updated",
   "subagent/descriptor": "session.updated",
+} as const satisfies Record<string, CanonicalEventType>;
 
-  // `skills/change` (dsh skill service, index.ts:298) is the unfiltered
-  // catalog-invalidation notification — a provider/catalog may be stale and
-  // consumers should refetch. Forwarded on the same generic bucket rolebox
-  // already uses for the analogous registry-change notification `tools/change`.
-  "skills/change": "session.updated",
-};
+/** String-keyed views used by the tolerant lookup in {@link mapDshEventType}. */
+const DSH_BUS_EVENT_LOOKUP: Record<string, CanonicalEventType> = DSH_BUS_EVENT_TYPE_MAP;
+const DSH_SESSION_EVENT_LOOKUP: Record<string, CanonicalEventType> =
+  DSH_SESSION_EVENT_TYPE_MAP;
 
 /**
  * Map a dsh event type string to a CanonicalEventType.
- * Unknown or unmapped types resolve to "unknown".
+ *
+ * Looks up both host vocabularies in turn — cordis bus names (`session/created`,
+ * `tools/result`, ...) and `session/event` payload sub-types (`user/message`,
+ * `turn/end`, ...) — because both reach this function as a `rawType`. The `string`
+ * parameter is deliberate: callers pass raw, unvalidated host discriminators. Unknown or
+ * unmapped types resolve to "unknown".
  */
 export function mapDshEventType(dshType: string): CanonicalEventType {
-  return DSH_EVENT_TYPE_MAP[dshType] ?? "unknown";
+  return (
+    DSH_BUS_EVENT_LOOKUP[dshType] ??
+    DSH_SESSION_EVENT_LOOKUP[dshType] ??
+    "unknown"
+  );
 }
 
 /** Top-level dsh session service events the bridge subscribes to. */
@@ -146,10 +196,13 @@ export const DSH_SESSION_EVENTS = [
   "session/disposed",
   "session/event",
   "session/flush",
-] as const;
+] as const satisfies readonly (keyof Events)[];
 
 /** Top-level dsh tools service events the bridge subscribes to. */
-export const DSH_TOOLS_EVENTS = ["tools/result", "tools/change"] as const;
+export const DSH_TOOLS_EVENTS = [
+  "tools/result",
+  "tools/change",
+] as const satisfies readonly (keyof Events)[];
 
 /**
  * Top-level dsh skill service events the bridge subscribes to.
@@ -158,7 +211,9 @@ export const DSH_TOOLS_EVENTS = ["tools/result", "tools/change"] as const;
  * when a skill provider, runtime contribution, or provider-backed catalog
  * changes (`@deepseek-ai/dsh-skill` index.ts:298).
  */
-export const DSH_SKILL_EVENTS = ["skills/change"] as const;
+export const DSH_SKILL_EVENTS = [
+  "skills/change",
+] as const satisfies readonly (keyof Events)[];
 
 // ── Adapter implementation ───────────────────────────────────────────────────
 

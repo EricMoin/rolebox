@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { load as loadYaml } from "js-yaml";
 import { PiLightweightServiceStack } from "../platform/adapters/pi/service-stack.ts";
 import { PiEventBridge } from "../platform/adapters/pi/event-bridge.ts";
+import type { PiEventType } from "../platform/adapters/pi/event-bridge.ts";
 import { PiAgentRegistrar } from "../platform/adapters/pi/agent-registrar.ts";
 import { createPiHookPipeline } from "../platform/adapters/pi/hook-pipeline.ts";
 import {
@@ -429,7 +430,7 @@ export function wirePiSessionStatusEvents(
         });
       }
     };
-    pi.on("agent_start", onAgentStart);
+    pi.on("agent_start" satisfies PiEventType, onAgentStart);
 
     // pi.on("agent_settled") → session.status idle. Fires after the agent
     // finishes with no retry/compaction pending — the turn is terminal.
@@ -449,7 +450,7 @@ export function wirePiSessionStatusEvents(
         });
       }
     };
-    pi.on("agent_settled", onAgentSettled);
+    pi.on("agent_settled" satisfies PiEventType, onAgentSettled);
   }
 
   return {
@@ -1251,7 +1252,7 @@ export default async function (pi: any): Promise<void> {
     // to avoid crashing the Pi runtime if eventBridge.emit() fails.
 
     /** Wrap a Pi event handler so errors are logged but never thrown to Pi. */
-    function wireEvent(piEventName: string): void {
+    function wireEvent(piEventName: PiEventType): void {
       if (typeof pi.on !== "function") return;
       pi.on(piEventName, async (event: unknown, _ctx: unknown) => {
         try {
@@ -1408,7 +1409,7 @@ export default async function (pi: any): Promise<void> {
       // agent_settled: fires after agent finishes and no retry/compaction
       // is pending. Use this to recover loops whose workers completed
       // while the agent was busy streaming or processing.
-      pi.on("agent_settled", async (_event: unknown, _ctx: unknown) => {
+      pi.on("agent_settled" satisfies PiEventType, async (_event: unknown, _ctx: unknown) => {
         try {
           await loopCoordinator.reSubscribeListeners();
           log.debug("agent_settled: loop listeners re-subscribed");
@@ -1421,7 +1422,7 @@ export default async function (pi: any): Promise<void> {
       // (quit, reload, new session, resume, fork). Cancel any active loop
       // bound to this session, then dispose the coordinator to release
       // all resources.
-      pi.on("session_shutdown", async (_event: unknown, ctx: any) => {
+      pi.on("session_shutdown" satisfies PiEventType, async (_event: unknown, ctx: any) => {
         try {
           const sessionId = ctx?.sessionManager?.getSessionId?.();
           if (sessionId) {
@@ -1437,7 +1438,7 @@ export default async function (pi: any): Promise<void> {
       // before_agent_start: fires before each LLM call. Scan the system
       // prompt and user prompt for the [rolebox:stop-loop] marker. When
       // found, cancel the active loop for this session.
-      pi.on("before_agent_start", async (event: any, ctx: any) => {
+      pi.on("before_agent_start" satisfies PiEventType, async (event: any, ctx: any) => {
         try {
           const marker = "[rolebox:stop-loop]";
           const systemPrompt = typeof event?.systemPrompt === "string" ? event.systemPrompt : "";
@@ -1469,7 +1470,7 @@ export default async function (pi: any): Promise<void> {
     // available_functions on top of it would duplicate the parent-side
     // prompt machinery.
     if (!isChildProcess && typeof pi.on === "function") {
-      pi.on("before_agent_start", async (event: any, ctx: unknown) => {
+      pi.on("before_agent_start" satisfies PiEventType, async (event: any, ctx: unknown) => {
         try {
           const agents = registrar.getRegisteredAgents();
           if (agents.length === 0) return;
@@ -1560,7 +1561,7 @@ export default async function (pi: any): Promise<void> {
     // so that Pi knows which skill files to load for each agent.
 
     if (typeof pi.on === "function") {
-      pi.on("resources_discover", async (_event: unknown, _ctx: unknown) => {
+      pi.on("resources_discover" satisfies PiEventType, async (_event: unknown, _ctx: unknown) => {
         try {
           const skillPaths = registrar.getSkillPaths();
           return { skillPaths };

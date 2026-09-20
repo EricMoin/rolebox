@@ -3,7 +3,7 @@
  *
  * Confirmed bug (live reproduction on the opencode platform): graph node
  * subagents are dispatched through the opencode SDK (`session.create`), so
- * their activity events (`part.created` / `part.updated` / `message.updated`)
+ * their activity events (`message.part.updated` / `message.updated`)
  * arrive at the plugin's `event` hook. But nothing relayed them into the
  * graph engine's liveness machinery:
  *
@@ -22,8 +22,8 @@
  *   1. The tool-service feed threading is proven by `resolveSessionOwner`
  *      resolving the dispatched subagent session to its node.
  *   2. The hook-service relay is proven by firing the `event` handler with
- *      part.* activity and observing the node's liveness heartbeat update
- *      (`heartbeatSource: "session"`).
+ *      `message.part.updated` activity and observing the node's liveness
+ *      heartbeat update (`heartbeatSource: "session"`).
  *   3. An active-but-slow node (session heartbeats every 20 s across 120 s of
  *      virtual time) is NOT escalated or timed out; a genuinely idle node
  *      still warns (stalling) then hard-stalls (timeout).
@@ -45,8 +45,12 @@ import { SessionService } from "../src/core/services/session-service.ts";
 import { RecoveryService } from "../src/core/services/recovery-service.ts";
 import { ExtensionService } from "../src/core/services/extension-service.ts";
 import { ToolService } from "../src/core/services/tool-service.ts";
-import { HookService } from "../src/core/services/hook-service.ts";
+import { HookService, LIVENESS_ACTIVITY_TYPES } from "../src/core/services/hook-service.ts";
 import { HealthMonitorService } from "../src/core/services/health-monitor-service.ts";
+import {
+  mapOpencodeEventType,
+  OPENCODE_EVENT_TYPE_MAP,
+} from "../src/platform/adapters/opencode/event-bridge.ts";
 import { OpencodeSessionAdapter } from "../src/platform/adapters/opencode/session.ts";
 import type { ResolvedRole, ResolvedFunction } from "../src/types.ts";
 import { RoleMode } from "../src/constants.ts";
@@ -213,13 +217,13 @@ describe("opencode liveness relay — subagent activity keeps graph nodes alive"
       const before = node.liveness!.lastActivityAt!;
       await eventHandler({
         event: {
-          type: "part.created",
+          type: "message.part.updated",
           properties: { sessionID: SUBAGENT_SESSION_ID },
         },
       });
       await eventHandler({
         event: {
-          type: "part.updated",
+          type: "message.part.updated",
           properties: { sessionID: SUBAGENT_SESSION_ID },
         },
       });
@@ -292,12 +296,12 @@ describe("opencode liveness relay — subagent activity keeps graph nodes alive"
       // Unknown session — resolves to no owner, must not throw.
       await expect(
         eventHandler({
-          event: { type: "part.updated", properties: { sessionID: "ses-ghost" } },
+          event: { type: "message.part.updated", properties: { sessionID: "ses-ghost" } },
         }),
       ).resolves.toBeUndefined();
       // No session id at all — extraction no-ops.
       await expect(
-        eventHandler({ event: { type: "part.created", properties: {} } }),
+        eventHandler({ event: { type: "message.part.updated", properties: {} } }),
       ).resolves.toBeUndefined();
       // Non-activity canonical type (session.error is not a heartbeat source)
       // — relay skips; no throw.
@@ -311,6 +315,47 @@ describe("opencode liveness relay — subagent activity keeps graph nodes alive"
       ).resolves.toBeUndefined();
     } finally {
       await core.dispose();
+    }
+  });
+});
+
+// ── Host event-vocabulary guard ──────────────────────────────────────────────
+
+describe("opencode event-type map — keys are host wire events", () => {
+  it("maps message.part.updated; the removed fictional names resolve to unknown", () => {
+    // The real wire event for streaming/tool parts. Before the fix the table
+    // keyed the fictional `part.updated`, so this returned "unknown" and the
+    // liveness relay never fired for genuine part activity.
+    expect(mapOpencodeEventType("message.part.updated")).toBe("part.updated");
+    // These four were never opencode wire events (the host delivers
+    // message.part.updated / message.part.removed); they must not map.
+    for (const dead of [
+      "message.created",
+      "message.completed",
+      "part.created",
+      "part.updated",
+    ]) {
+      expect(mapOpencodeEventType(dead)).toBe("unknown");
+    }
+    // Unmapped host events also resolve to "unknown" by design.
+    expect(mapOpencodeEventType("message.part.removed")).toBe("unknown");
+  });
+});
+
+// ── Liveness-set linkage guard ───────────────────────────────────────────────
+
+describe("liveness activity set — produced by the opencode wire table", () => {
+  it("every LIVENESS_ACTIVITY_TYPES entry is a value of OPENCODE_EVENT_TYPE_MAP", () => {
+    // The relay is fed only by the opencode `event` hook, so a canonical type
+    // that no wire event produces can never fire — the dead `part.created`
+    // entry this set used to carry was exactly that.
+    const produced: string[] = Object.values(OPENCODE_EVENT_TYPE_MAP);
+    // Non-vacuity: both sides must be populated, or a subset check between two
+    // empty collections would pass without proving any linkage.
+    expect(produced.length).toBeGreaterThan(0);
+    expect(LIVENESS_ACTIVITY_TYPES.size).toBeGreaterThan(0);
+    for (const type of LIVENESS_ACTIVITY_TYPES) {
+      expect(produced).toContain(type);
     }
   });
 });

@@ -11,7 +11,9 @@
  * stderr buffer, exit code, and agent configuration. The spawn pattern
  * follows the project convention established in lsp/client-manager.ts.
  *
- * Must NOT import from @earendil-works/pi-coding-agent.
+ * MUST NOT import the pi host package (@earendil-works/pi-coding-agent) — the
+ * JSON-stream vocabulary is consumed as types from ./event-bridge.ts, which imports
+ * the host type-only.
  */
 
 import { spawn } from "node:child_process";
@@ -26,8 +28,15 @@ import { createSubLogger } from "../../../logger.ts";
 import type { Logger } from "tslog";
 import type { ILogObj } from "tslog";
 import type { ISessionClient } from "../../ports/session-client.ts";
-import type { IEventBridge } from "../../ports/event-bridge.ts";
+import type {
+  CanonicalEventType,
+  IEventBridge,
+} from "../../ports/event-bridge.ts";
 import { PiSessionAdapter, hasInFlightToolPart } from "./session.ts";
+import type {
+  PiJsonEventType,
+  PiRuntimeOnlyEventType,
+} from "./event-bridge.ts";
 import {
   appendEvent,
   scanOrphanedSessions,
@@ -131,11 +140,21 @@ interface PiAssistantMessageEvent {
 }
 
 /**
+ * Top-level `type` values the `pi --mode json` parser recognizes: the host wire vocabulary
+ * plus the rolebox canonical names the stream may echo back (handled as debug no-ops).
+ */
+type PiStreamEventType = PiJsonEventType | CanonicalEventType;
+
+/**
  * Shape of a single JSON event line emitted by `pi --mode json` on stdout.
  * Each line is one JSON event object with at minimum a `type` field.
+ *
+ * The type is declared as the recognized vocabulary so the switch in
+ * `_handleJsonEvent` checks every case label; parsing stays structural
+ * (`JSON.parse` is unchecked) and unknown values fall through to its `default`.
  */
 interface PiJsonEvent {
-  type: string;
+  type: PiStreamEventType;
   /** Unique identifier for the event/message element. */
   id?: string;
   /** Session identifier associated with the event. */
@@ -144,7 +163,7 @@ interface PiJsonEvent {
   messageID?: string;
   /** Role of the message sender ("user" | "assistant"). */
   role?: string;
-  /** Text content for text/reasoning events. */
+  /** Text content for the plain-text stream event. */
   text?: string;
   /** Tool name for tool events. */
   tool?: string;
@@ -152,12 +171,6 @@ interface PiJsonEvent {
   callID?: string;
   /** Tool state for tool result events. */
   state?: Record<string, unknown>;
-  /** Reason for step-finish events. */
-  reason?: string;
-  /** Cost data. */
-  cost?: number;
-  /** Token usage data. */
-  tokens?: Record<string, unknown>;
   /** Tool input for legacy tool_call events. */
   input?: Record<string, unknown>;
   /** Tool output for legacy tool_result events. */
@@ -226,11 +239,14 @@ const ACTIVITY_HEARTBEAT_INTERVAL_MS = 1_000;
  * - `error` / `session.*` / `message.created` / `message.completed` /
  *   `part.created` / `part.updated` are already canonical or non-activity —
  *   relaying them would risk feedback loops or duplicate completion signals.
+ *
+ * Every entry is checked against {@link PiJsonEventType}, so a name the installed
+ * host cannot emit fails `tsc` here instead of sitting in the set unreachable.
  */
 const PART_CREATE_ACTIVITY_EVENTS: ReadonlySet<string> = new Set([
   "tool_execution_start",
   "tool_call",
-]);
+] satisfies PiJsonEventType[]);
 
 const PART_UPDATE_ACTIVITY_EVENTS: ReadonlySet<string> = new Set([
   "message_start",
@@ -239,14 +255,12 @@ const PART_UPDATE_ACTIVITY_EVENTS: ReadonlySet<string> = new Set([
   "tool_execution_update",
   "tool_execution_end",
   "text",
-  "reasoning",
   "tool_result",
-  "step-finish",
   "turn_start",
   "agent_start",
   "agent_end",
   "agent_settled",
-]);
+] satisfies PiJsonEventType[]);
 
 /** True when the raw event type represents genuine child-session activity. */
 function isActivityEventType(type: string): boolean {
@@ -1343,7 +1357,10 @@ export class PiProcessSessionAdapter implements ISessionClient {
           } else if (Array.isArray(m?.content)) {
             for (const entry of m.content) {
               const partId = `p-${rebuilt.length}-${Date.now()}`;
-              switch (entry.type) {
+              // Content-entry types come off the wire as arbitrary strings; the assertion
+              // narrows the LABEL set to the runtime-only pi content vocabulary, so a dead
+              // label is a compile error while unknown entries still hit `default`.
+              switch (entry.type as PiRuntimeOnlyEventType) {
                 case "text":
                   rebuilt.push({
                     id: partId,
@@ -1584,22 +1601,6 @@ export class PiProcessSessionAdapter implements ISessionClient {
         break;
       }
 
-      case "reasoning": {
-        const last = record.messages[record.messages.length - 1];
-        if (!last) break;
-
-        const reasoningText = event.text ?? "";
-        last.parts.push({
-          id: event.id ?? `reasoning-${Date.now()}`,
-          sessionID: event.sessionID ?? "",
-          messageID: event.messageID ?? last.info.id,
-          type: "reasoning",
-          text: reasoningText,
-          time: { start: Date.now() },
-        });
-        break;
-      }
-
       case "tool_call": {
         const last = record.messages[record.messages.length - 1];
         if (!last) break;
@@ -1651,43 +1652,6 @@ export class PiProcessSessionAdapter implements ISessionClient {
               },
             };
           }
-        }
-        break;
-      }
-
-      case "step-finish": {
-        const last = record.messages[record.messages.length - 1];
-        if (!last) {
-          // step-finish may arrive as its own event without a preceding message_start.
-          // Create a synthetic message for it.
-          const stepMsg: Message = {
-            info: {
-              id: event.id ?? `step-${Date.now()}`,
-              sessionID: event.sessionID ?? "",
-              role: "assistant",
-              time: { created: Date.now(), completed: Date.now() },
-            },
-            parts: [],
-          };
-          record.messages.push(stepMsg);
-          // Don't break — fall through to add the step-finish part.
-        }
-
-        if (last) {
-          last.parts.push({
-            id: event.id ?? `step-finish-${Date.now()}`,
-            sessionID: event.sessionID ?? "",
-            messageID: last.info.id,
-            type: "step-finish",
-            reason: (event.reason as string) ?? "unknown",
-            cost: (event.cost as number) ?? 0,
-            tokens: (event.tokens as {
-              input: number;
-              output: number;
-              reasoning: number;
-              cache: { read: number; write: number };
-            }) ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          });
         }
         break;
       }

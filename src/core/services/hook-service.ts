@@ -1,9 +1,9 @@
 import type { PluginService } from "../service.ts";
 import type { PluginContext } from "../context.ts";
 import type { EventBus } from "../event-bus.ts";
-import type { Config } from "@opencode-ai/plugin";
+import type { Config, Hooks } from "@opencode-ai/plugin";
 import { normalizeOpencodeEvent } from "../../platform/adapters/opencode/event-bridge.ts";
-import type { CanonicalEvent } from "../../platform/types.ts";
+import type { CanonicalEvent, CanonicalEventType } from "../../platform/types.ts";
 import type { GraphToolSet } from "../../graph/tools/index.ts";
 import { functionRuntime } from "../../function/runtime-state.ts";
 import { sessionSignalLedger } from "../../signal/session-signal-ledger.ts";
@@ -35,13 +35,19 @@ const log = createSubLogger("hook-service");
 /**
  * Canonical activity event types that refresh the owning graph node's liveness
  * heartbeat (the opencode analog of the Pi liveness relay's `heartbeatOn`
- * subscriptions in pi-extension.ts:1117-1167). Each maps genuine session
- * activity — tool-call parts, streaming part updates, message updates, a
- * finished turn — to `recordLivenessHeartbeat(nodeId, "session")` via the
- * GraphToolSet's `sessionId → nodeId` reverse index.
+ * subscriptions in pi-extension.ts:1117-1167). Each entry names the opencode
+ * wire event that produces it:
+ *
+ *   - `part.updated`    ← `message.part.updated` (tool-call / streaming parts)
+ *   - `message.updated` ← `message.updated`
+ *   - `session.idle`    ← `session.idle` (finished turn)
+ *
+ * Each maps genuine session activity to `recordLivenessHeartbeat(nodeId,
+ * "session")` via the GraphToolSet's `sessionId → nodeId` reverse index.
+ *
+ * Exported for the liveness-linkage test (tests/opencode-liveness-relay.test.ts).
  */
-const LIVENESS_ACTIVITY_TYPES: ReadonlySet<string> = new Set([
-  "part.created",
+export const LIVENESS_ACTIVITY_TYPES: ReadonlySet<CanonicalEventType> = new Set([
   "part.updated",
   "message.updated",
   "session.idle",
@@ -216,8 +222,9 @@ export class HookService implements PluginService {
    * machinery (false-positive regression fix for the opencode platform).
    *
    * A graph node dispatches its subagent through the opencode SDK
-   * (`session.create`), and that subagent's events — `part.created` /
-   * `part.updated` / `message.updated` / `session.idle` — arrive here through
+   * (`session.create`), and that subagent's activity events —
+   * `message.part.updated` / `message.updated` / `session.idle` (canonical
+   * `part.updated` / `message.updated` / `session.idle`) — arrive here through
    * the plugin's `event` hook. For each, resolve the owning graph node via
    * the GraphToolSet's `sessionId → nodeId` reverse index (populated at
    * launch when a liveness feed is wired onto the engine — see tool-service)
@@ -375,7 +382,7 @@ export class HookService implements PluginService {
       dispose: async () => {
         try { await this.customHookRegistry?.dispose(); } catch { /* best effort */ }
       },
-    };
+    } satisfies Hooks;
     return handlers;
   }
 }

@@ -16,6 +16,9 @@
  *      through detectCompletion as an error signal.
  *   5. detectCompletion reports "completed" with idle session status after
  *      a fully successful event stream.
+ *   6. The dead pi literals removed by the two-source audit (step-finish,
+ *      reasoning) contribute nothing to the transcript, while the
+ *      runtime-only plain-text event still parses.
  *
  * Fixture shapes mirror the field names actually read by the rewrite of
  * _handleJsonEvent in src/platform/adapters/pi/process-session.ts
@@ -1024,5 +1027,88 @@ describe("buildSpawnArgs — deterministic spawn arguments", () => {
       "--model", "claude-sonnet-4",
       "Task: Hi",
     ]);
+  });
+});
+
+// ── Dead-vocabulary regression (two-source audit) ───────────────────────────
+
+describe("PiProcessSessionAdapter — dead pi vocabulary vs the runtime-only text event", () => {
+  let adapter: PiProcessSessionAdapter;
+
+  beforeEach(() => {
+    adapter = new PiProcessSessionAdapter();
+  });
+
+  it("ignores step-finish / reasoning events that no installed pi source emits", async () => {
+    const record = await createRecord(adapter);
+
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        {
+          type: "message_start",
+          messageID: MESSAGE_ID,
+          sessionID: SESSION_ID,
+          message: { role: "assistant" },
+        },
+        {
+          type: "step-finish",
+          id: "evt_dead_step_finish",
+          messageID: MESSAGE_ID,
+          sessionID: SESSION_ID,
+          reason: "stop",
+          cost: 0.01,
+          tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        {
+          type: "reasoning",
+          id: "evt_dead_reasoning",
+          messageID: MESSAGE_ID,
+          sessionID: SESSION_ID,
+          text: "dead reasoning text",
+        },
+      ),
+    );
+
+    // The message shell exists; neither dead event contributed a part.
+    expect(record.messages).toHaveLength(1);
+    expect(record.messages[0].parts).toEqual([]);
+  });
+
+  it("still parses the runtime-only plain-text stream event", async () => {
+    const record = await createRecord(adapter);
+
+    feedJsonl(
+      adapter,
+      record,
+      jsonl(
+        {
+          type: "message_start",
+          messageID: MESSAGE_ID,
+          sessionID: SESSION_ID,
+          message: { role: "assistant" },
+        },
+        {
+          type: "text",
+          id: "evt_text_1",
+          messageID: MESSAGE_ID,
+          sessionID: SESSION_ID,
+          text: "legacy ",
+        },
+        {
+          type: "text",
+          id: "evt_text_2",
+          messageID: MESSAGE_ID,
+          sessionID: SESSION_ID,
+          text: "text",
+        },
+      ),
+    );
+
+    // The two plain-text events accumulate into one text part, exactly as before.
+    const parts = textParts(lastAssistantMessage(record));
+    expect(parts).toHaveLength(1);
+    expect(parts[0].text).toBe("legacy text");
   });
 });

@@ -6,10 +6,13 @@
  *
  * Opencode SDK events are NOT imported here — the normalization function
  * accepts { type: string; properties?: unknown } which is the structural
- * contract of every opencode Event variant.
+ * contract of every opencode Event variant. The host's own `Hooks` type IS
+ * imported (type-only) to derive the wire event-name vocabulary below.
  *
  * @module
  */
+
+import type { Hooks } from "@opencode-ai/plugin";
 
 import type {
   CanonicalEvent,
@@ -18,12 +21,22 @@ import type {
 
 // ── Opencode-to-canonical event type mapping ────────────────────────────────
 
+/** The opencode event names the host can actually deliver (from the host's own Hooks type). */
+type OpencodeEventType = Parameters<NonNullable<Hooks["event"]>>[0]["event"]["type"];
+
 /**
  * Mapping from opencode SDK event type strings to canonical event types.
  * Most opencode SDK event types match canonical names directly.
  * Unrecognised types resolve to "unknown".
+ *
+ * `Partial` is intentional: rolebox handles a subset of the host's ~32
+ * events. The `satisfies` guard makes a key the host does not declare — or a
+ * typo — a compile error instead of a dead mapping. Unmapped host events
+ * (e.g. `message.part.removed`) resolve to "unknown" by design.
+ *
+ * Exported for the liveness-linkage test (`tests/opencode-liveness-relay.test.ts`).
  */
-const OPENCODE_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
+export const OPENCODE_EVENT_TYPE_MAP = {
   // Session lifecycle
   "session.idle": "session.idle",
   "session.status": "session.status",
@@ -32,20 +45,24 @@ const OPENCODE_EVENT_TYPE_MAP: Record<string, CanonicalEventType> = {
   "session.updated": "session.updated",
   "session.deleted": "session.deleted",
   // Message lifecycle
-  "message.created": "message.created",
   "message.updated": "message.updated",
-  "message.completed": "message.completed",
-  // Part lifecycle (tool calls / results)
-  "part.created": "part.created",
-  "part.updated": "part.updated",
-};
+  // Part lifecycle (tool calls / results / streaming updates)
+  "message.part.updated": "part.updated",
+} satisfies Partial<Record<OpencodeEventType, CanonicalEventType>>;
 
 /**
  * Map an opencode SDK event type string to a CanonicalEventType.
  * Unknown or unmapped types resolve to "unknown".
  */
 export function mapOpencodeEventType(rawType: string): CanonicalEventType {
-  return OPENCODE_EVENT_TYPE_MAP[rawType] ?? "unknown";
+  // Invariant: rawType comes off the wire, so it is an arbitrary string rather
+  // than a narrowed host literal. Every key in the table is host-declared
+  // (enforced by the `satisfies` above); any non-key is "unknown", so widening
+  // the lookup key cannot smuggle in an unchecked mapping.
+  const map = OPENCODE_EVENT_TYPE_MAP as Partial<
+    Record<string, CanonicalEventType>
+  >;
+  return map[rawType] ?? "unknown";
 }
 
 // ── Normalization ───────────────────────────────────────────────────────────

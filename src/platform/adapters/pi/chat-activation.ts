@@ -55,6 +55,7 @@ import { LOOP_PROGRESS_MARKER } from "../../../loop/constants.ts";
 import { COPILOT_MARKER } from "../../../copilot/constants.ts";
 import { createSubLogger } from "../../../logger.ts";
 import { extractPiSessionId, extractPiAgent } from "./system-transform.ts";
+import type { PiEventType } from "./event-bridge.ts";
 
 const log = createSubLogger("pi-chat-activation");
 
@@ -314,7 +315,9 @@ export function wirePiChatActivation(
     return { unsubscribe: () => {} };
   }
 
-  pi.on("message_start", async (event: unknown, ctx: unknown) => {
+  // `satisfies PiEventType` keeps the hook name checked against the host's Extension API
+  // union even though `pi` itself is loosely typed (optional peer).
+  pi.on("message_start" satisfies PiEventType, async (event: unknown, ctx: unknown) => {
     try {
       await runPiChatActivation(
         (event ?? {}) as Record<string, unknown>,

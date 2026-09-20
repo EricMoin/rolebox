@@ -118,25 +118,7 @@ export type ToolPart = {
     | { status: "error"; error: string; time: { start: number; end: number } };
 };
 
-export type StepFinishPart = {
-  id: string;
-  sessionID: string;
-  messageID: string;
-  type: "step-finish";
-  reason: string;
-  cost: number;
-  tokens: {
-    input: number;
-    output: number;
-    reasoning: number;
-    cache: {
-      read: number;
-      write: number;
-    };
-  };
-};
-
-export type Part = TextPart | ReasoningPart | ToolPart | StepFinishPart | {
+export type Part = TextPart | ReasoningPart | ToolPart | {
   id: string;
   sessionID: string;
   messageID: string;
