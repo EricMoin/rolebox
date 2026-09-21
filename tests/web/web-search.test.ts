@@ -1,9 +1,16 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
+import { __configureHostPacing } from "../../src/web/http-utils";
+
+// The per-origin pacing gate defaults to a 1000 ms gap (plus jitter) between
+// request starts to the same origin. This suite is offline and reuses the same
+// mocked origins, so disable the gate; afterEach restores the disabled state.
+__configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
 
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
 });
 
 function mockResponse(body: string, status = 200) {
@@ -443,6 +450,254 @@ describe("Result limits and empty results", () => {
     });
 
     expect(result).toContain("No Results Found");
+  });
+});
+
+// -----------------------------------------------------------------------
+// npm routing precision
+// -----------------------------------------------------------------------
+
+describe("Auto routing precision", () => {
+  it("does not query the npm registry for a general multi-word query", async () => {
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = mock((url: string) => {
+      requestedUrls.push(url);
+      return Promise.resolve(mockResponse(`
+Title: Parsing YAML in Python
+URL Source: https://example.com/yaml-python
+Markdown Content: How to parse YAML with PyYAML.
+`));
+    });
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "how to parse yaml in python",
+      source: "auto",
+      max_results: 5,
+    });
+
+    expect(requestedUrls.some((u) => u.includes("registry.npmjs.org"))).toBe(false);
+    expect(result).toContain("Parsing YAML in Python");
+    expect(result).toContain("via Jina");
+  });
+
+  it("routes a bare package name and an npm keyword query to npm", async () => {
+    const npmResponse = {
+      objects: [
+        {
+          package: {
+            name: "lodash",
+            version: "4.17.21",
+            description: "Lodash modular utilities",
+            links: { npm: "https://www.npmjs.com/package/lodash" },
+          },
+        },
+      ],
+    };
+
+    for (const query of ["lodash", "npm lodash"]) {
+      const requestedUrls: string[] = [];
+
+      globalThis.fetch = mock((url: string) => {
+        requestedUrls.push(url);
+        return Promise.resolve(mockResponse(JSON.stringify(npmResponse)));
+      });
+
+      const { createWebSearchTool } = await import("../../src/web/web-search");
+      const tool = createWebSearchTool();
+      const result = await tool.execute({ query, source: "auto", max_results: 5 });
+
+      expect(requestedUrls.some((u) => u.includes("registry.npmjs.org"))).toBe(true);
+      expect(result).toContain("lodash@4.17.21");
+      expect(result).toContain("via npm");
+    }
+  });
+
+  it("keeps a general multi-word package query out of the npm registry", async () => {
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = mock((url: string) => {
+      requestedUrls.push(url);
+      return Promise.resolve(mockResponse(`
+Title: Comparing Python package managers
+URL Source: https://example.com/python-package-managers
+Markdown Content: pip, poetry and uv compared.
+`));
+    });
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "python package manager comparison",
+      source: "auto",
+      max_results: 5,
+    });
+
+    // Mentioning "package" must not route the query to the registry...
+    expect(requestedUrls.some((u) => u.includes("registry.npmjs.org"))).toBe(false);
+    // ...and the query that is routed keeps its single spaces.
+    const jinaUrl = requestedUrls.find((u) => u.startsWith("https://s.jina.ai/")) ?? "";
+    expect(jinaUrl).toContain("python%20package%20manager%20comparison");
+    for (const url of requestedUrls) {
+      expect(url).not.toContain("%20%20");
+      expect(url).not.toContain("  ");
+    }
+    expect(result).toContain("Comparing Python package managers");
+    expect(result).toContain("via Jina");
+  });
+
+  it("forwards only the package name for keyword-wrapped npm lookups", async () => {
+    const npmResponse = {
+      objects: [
+        {
+          package: {
+            name: "lodash",
+            version: "4.17.21",
+            description: "Lodash modular utilities",
+            links: { npm: "https://www.npmjs.com/package/lodash" },
+          },
+        },
+      ],
+    };
+
+    for (const query of ["lodash", "npm lodash", "lodash npm package"]) {
+      const requestedUrls: string[] = [];
+
+      globalThis.fetch = mock((url: string) => {
+        requestedUrls.push(url);
+        return Promise.resolve(mockResponse(JSON.stringify(npmResponse)));
+      });
+
+      const { createWebSearchTool } = await import("../../src/web/web-search");
+      const tool = createWebSearchTool();
+      const result = await tool.execute({ query, source: "auto", max_results: 5 });
+
+      const npmUrl = requestedUrls.find((u) => u.includes("registry.npmjs.org")) ?? "";
+      expect(npmUrl).toContain("text=lodash&");
+      expect(npmUrl).not.toContain("%20");
+      expect(result).toContain("lodash@4.17.21");
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
+// Result hygiene
+// -----------------------------------------------------------------------
+
+describe("Result hygiene", () => {
+  it("deduplicates results that share a normalized URL", async () => {
+    const jinaMarkdown = `
+Title: Duplicate One
+URL Source: https://example.com/dup/
+Markdown Content: First copy.
+---
+
+Title: Duplicate Two
+URL Source: https://example.com/dup
+Markdown Content: Second copy.
+`;
+
+    globalThis.fetch = mock(() => Promise.resolve(mockResponse(jinaMarkdown)));
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({ query: "duplicate", source: "jina", max_results: 5 });
+
+    expect(result).toContain("Duplicate One");
+    expect(result).not.toContain("Duplicate Two");
+    const occurrences = result.split("https://example.com/dup").length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it("escapes link delimiters in titles and snippets", async () => {
+    const jinaMarkdown = `
+Title: Array [index] access
+URL Source: https://example.com/array
+Markdown Content: Use arr[0] to read the first item.
+`;
+
+    globalThis.fetch = mock(() => Promise.resolve(mockResponse(jinaMarkdown)));
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({ query: "array access", source: "jina", max_results: 5 });
+
+    expect(result).toContain("Array \\[index\\] access");
+    expect(result).toContain("arr\\[0\\]");
+    expect(result).toContain("(https://example.com/array)");
+  });
+});
+
+// -----------------------------------------------------------------------
+// Query normalization
+// -----------------------------------------------------------------------
+
+describe("Query normalization", () => {
+  it("collapses doubled whitespace before provider requests", async () => {
+    const npmResponse = {
+      objects: [
+        {
+          package: {
+            name: "lodash",
+            version: "4.17.21",
+            description: "Lodash modular utilities",
+            links: { npm: "https://www.npmjs.com/package/lodash" },
+          },
+        },
+      ],
+    };
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = mock((url: string) => {
+      requestedUrls.push(url);
+      return Promise.resolve(mockResponse(JSON.stringify(npmResponse)));
+    });
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "lodash  npm   package",
+      source: "auto",
+      max_results: 5,
+    });
+
+    const npmUrl = requestedUrls.find((u) => u.includes("registry.npmjs.org")) ?? "";
+    expect(npmUrl).toContain("text=lodash&");
+    for (const url of requestedUrls) {
+      expect(url).not.toContain("%20%20");
+    }
+    expect(result).toContain("lodash@4.17.21");
+  });
+
+  it("collapses doubled whitespace in a general Jina query", async () => {
+    const jinaMarkdown = `
+Title: Parsing YAML in Python
+URL Source: https://example.com/yaml-python
+Markdown Content: How to parse YAML with PyYAML.
+`;
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = mock((url: string) => {
+      requestedUrls.push(url);
+      return Promise.resolve(mockResponse(jinaMarkdown));
+    });
+
+    const { createWebSearchTool } = await import("../../src/web/web-search");
+    const tool = createWebSearchTool();
+    const result = await tool.execute({
+      query: "how  to   parse yaml",
+      source: "auto",
+      max_results: 5,
+    });
+
+    const jinaUrl = requestedUrls.find((u) => u.startsWith("https://s.jina.ai/")) ?? "";
+    expect(jinaUrl).toContain("how%20to%20parse%20yaml");
+    for (const url of requestedUrls) {
+      expect(url).not.toContain("%20%20");
+    }
+    expect(result).toContain("Parsing YAML in Python");
   });
 });
 

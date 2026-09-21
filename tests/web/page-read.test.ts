@@ -1,9 +1,16 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
+import { __configureHostPacing } from "../../src/web/http-utils";
+
+// The per-origin pacing gate defaults to a 1000 ms gap (plus jitter) between
+// request starts to the same origin. This suite is offline and reuses the same
+// mocked origins, so disable the gate; afterEach restores the disabled state.
+__configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
 
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  __configureHostPacing({ minIntervalMs: 0, jitterMs: 0 });
 });
 
 // -----------------------------------------------------------------------
@@ -170,4 +177,66 @@ describe("page-read tool", () => {
     },
     30000,
   );
+
+  it("reports blocking when Jina errors and the local fetch is challenged", async () => {
+    const challengeBody =
+      '<html><head><title>Just a moment...</title></head><body>' +
+      '<div id="cf-chl-opt">Enable JavaScript and cookies to continue</div></body></html>';
+
+    globalThis.fetch = mock((url: string) => {
+      if (url.startsWith("https://r.jina.ai/")) {
+        // Jina answers 200 with an error body: that is a failure, not content.
+        return Promise.resolve(new Response("Warning: Target URL returned error 403", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        }));
+      }
+      return Promise.resolve(new Response(challengeBody, {
+        status: 403,
+        headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+      }));
+    });
+
+    const { createPageReadTool } = await import("../../src/web/page-read");
+    const tool = createPageReadTool();
+    const result = await tool.execute({ url: "https://example.com/protected" });
+
+    expect(result).toContain("Error Reading Page");
+    expect(result).toContain("https://example.com/protected");
+    expect(result).toContain("All sources failed");
+    expect(result).toContain("blocking");
+    // Neither the Jina error text nor the challenge page may be the answer.
+    expect(result).not.toContain("Warning: Target URL returned error");
+    expect(result).not.toContain("cf-chl-opt");
+  });
+
+  it("returns a long legitimate page instead of calling its interstitial phrase a block", async () => {
+    // The phrase is inside the inspected head, but the page is far larger than
+    // the advisory marker scan may judge, so the local fetch must answer.
+    const article =
+      "<html><body><main><h1>Bot detection explained</h1>" +
+      "<p>Some pages ask: verify you are human.</p>" +
+      `<p>${"Ordinary article text. ".repeat(2000)}</p></main></body></html>`;
+
+    globalThis.fetch = mock((url: string) => {
+      if (url.startsWith("https://r.jina.ai/")) {
+        // Jina answers 200 with an error body: fail fast to the local fetch.
+        return Promise.resolve(new Response("Warning: Target URL returned error 403", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        }));
+      }
+      return Promise.resolve(new Response(article, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }));
+    });
+
+    const { createPageReadTool } = await import("../../src/web/page-read");
+    const tool = createPageReadTool();
+    const result = await tool.execute({ url: "https://example.com/article" });
+
+    expect(result).toContain("Bot detection explained");
+    expect(result).not.toContain("All sources failed");
+  });
 });

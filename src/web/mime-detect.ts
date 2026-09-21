@@ -104,7 +104,9 @@ function isGenericMime(mime: string): boolean {
  *    the header for generic/mismatched types.
  * 2. If the Content-Type header provides a specific, non-generic MIME, trust it
  *    (unless magic bytes detected something of a different category).
- * 3. If neither source yields a result, default to `application/octet-stream`.
+ * 3. With no magic signature and a generic header, a text-category header
+ *    (e.g. `text/plain`) is still trusted; anything else defaults to
+ *    `application/octet-stream`.
  *
  * @param contentTypeHeader — The value of the Content-Type response header (or null).
  * @param bodyStart — The first few bytes of the response body (≥12 bytes preferred).
@@ -130,6 +132,11 @@ export function detectContentType(
   } else if (magicMime) {
     resolvedMime = magicMime;
   } else if (headerMime && !isGenericMime(headerMime)) {
+    resolvedMime = headerMime;
+  } else if (headerMime && headerCategory(headerMime) === "text") {
+    // A generic text header (in practice `text/plain`) still describes the
+    // body: with no magic signature to override it, it beats the unknown-binary
+    // fallback instead of being discarded as no information at all.
     resolvedMime = headerMime;
   } else {
     resolvedMime = "application/octet-stream";

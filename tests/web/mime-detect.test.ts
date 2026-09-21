@@ -167,6 +167,18 @@ describe("detectContentType", () => {
   });
 
   // -----------------------------------------------------------------------
+  // Generic text header with no magic signature
+  // -----------------------------------------------------------------------
+
+  it("keeps a generic text/plain header when no magic bytes match", () => {
+    const body = new TextEncoder().encode("hello plain world");
+    const result = detectContentType("text/plain; charset=utf-8", body);
+    expect(result.mime).toBe("text/plain");
+    expect(result.isText).toBe(true);
+    expect(result.isBinary).toBe(false);
+  });
+
+  // -----------------------------------------------------------------------
   // No header, no magic → fallback
   // -----------------------------------------------------------------------
 

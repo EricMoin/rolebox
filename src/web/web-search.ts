@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import { z } from "zod";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { createSubLogger } from "../logger.ts";
-import { TokenBucket, fetchWithRetry, BROWSER_USER_AGENT } from "./http-utils.ts";
+import { TokenBucket, fetchWithRetry, buildBrowserHeaders } from "./http-utils.ts";
 import { detectBrowserCapabilities } from "./browser-detect.ts";
 import { searchWithCrawlee } from "./crawlee-backend.ts";
 
@@ -18,6 +18,9 @@ interface SearchResult {
 // Rate limiters
 const jinaBucket = new TokenBucket(15); // 15 RPM for Jina (shared anonymous limit)
 const ddgBucket = new TokenBucket(25); // 25 RPM for DuckDuckGo
+
+/** Accept header for the DuckDuckGo HTML endpoint. */
+const DDG_ACCEPT = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8";
 
 export function createWebSearchTool() {
   return defineTool({
@@ -44,7 +47,10 @@ export function createWebSearchTool() {
         .describe("Maximum number of results to return"),
     },
     async execute(args) {
-      const { query, source, max_results } = args;
+      const { source, max_results } = args;
+      // Normalize once: trim the ends and collapse internal whitespace runs so
+      // routing and every provider URL see the same single-spaced query.
+      const query = args.query.trim().replace(/\s+/g, " ");
       log.info("Web search", { query, source, max_results });
 
       let results: SearchResult[] = [];
@@ -71,11 +77,14 @@ export function createWebSearchTool() {
           break;
       }
 
-      if (results.length === 0) {
+      // Deduplicate by normalized URL, keep first-seen order and the cap.
+      const uniqueResults = dedupeResults(results).slice(0, max_results);
+
+      if (uniqueResults.length === 0) {
         return `## No Results Found\n\nQuery: "${query}"\n\nNo results were found from the selected source(s). Try:\n- Different search terms\n- A different source (e.g., source: "duckduckgo" or source: "wikipedia")`;
       }
 
-      return formatResults(results, query);
+      return formatResults(uniqueResults, query);
     },
   });
 }
@@ -94,8 +103,8 @@ async function searchJina(
     const response = await fetchWithRetry(
       url,
       { headers: { Accept: "text/markdown" } },
-      2,
-      2000,
+      1,
+      500,
     );
     const text = await response.text();
     return parseJinaResults(text, maxResults);
@@ -164,13 +173,13 @@ async function searchDuckDuckGo(
       {
         method: "POST",
         headers: {
+          ...buildBrowserHeaders({ accept: DDG_ACCEPT }),
           "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": BROWSER_USER_AGENT,
         },
         body: new URLSearchParams({ q: query, kl: "wt-wt" }).toString(),
       },
-      2,
-      2000,
+      1,
+      500,
     );
     const html = await response.text();
     const $ = cheerio.load(html);
@@ -219,7 +228,7 @@ async function searchWikipedia(
 ): Promise<SearchResult[]> {
   try {
     const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=${maxResults}&origin=*`;
-    const response = await fetchWithRetry(url, {}, 2, 1000);
+    const response = await fetchWithRetry(url, {}, 1, 500);
     const data = (await response.json()) as {
       query?: {
         search?: Array<{
@@ -255,7 +264,7 @@ async function searchNpm(
 ): Promise<SearchResult[]> {
   try {
     const url = `https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(query)}&size=${maxResults}`;
-    const response = await fetchWithRetry(url, {}, 2, 1000);
+    const response = await fetchWithRetry(url, {}, 1, 500);
     const data = (await response.json()) as {
       objects?: Array<{
         package: {
@@ -294,7 +303,7 @@ async function searchHackerNews(
 ): Promise<SearchResult[]> {
   try {
     const url = `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=${maxResults}`;
-    const response = await fetchWithRetry(url, {}, 2, 1000);
+    const response = await fetchWithRetry(url, {}, 1, 500);
     const data = (await response.json()) as {
       hits?: Array<{
         title: string;
@@ -324,6 +333,44 @@ async function searchHackerNews(
 // 6. Auto routing
 // ---------------------------------------------------------------------------
 
+/**
+ * Matches a whole query that is exactly one package name, scoped or not:
+ * `@scope/name` or `name`, built from letters, digits, `.`, `_` and `-`.
+ */
+const PACKAGE_NAME_PATTERN = /^@?[a-z0-9][\w.-]*(?:\/[a-z0-9][\w.-]*)?$/i;
+
+/** The npm/package keywords a package-lookup query may be wrapped in. */
+const NPM_KEYWORDS = /npm|package/gi;
+
+/**
+ * The text to send to the npm registry, or null when the query is a general
+ * search instead of a package lookup.
+ *
+ * Exactly two shapes are package lookups:
+ *
+ * 1. the whole trimmed query is one package name ("lodash", "@scope/name") —
+ *    it is forwarded verbatim, because stripping keywords out of a real name
+ *    would corrupt it ("npm-run-all");
+ * 2. dropping the npm/package keywords and collapsing whitespace leaves
+ *    exactly one package name ("npm lodash", "lodash npm package").
+ *
+ * A query that merely mentions a keyword ("python package manager
+ * comparison") is a general search and must never reach the registry.
+ *
+ * @param query - Raw user query.
+ */
+function npmLookupQuery(query: string): string | null {
+  const trimmed = query.trim();
+  if (PACKAGE_NAME_PATTERN.test(trimmed)) return trimmed;
+
+  const stripped = trimmed
+    .replace(NPM_KEYWORDS, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (stripped === "" || stripped.includes(" ")) return null;
+  return PACKAGE_NAME_PATTERN.test(stripped) ? stripped : null;
+}
+
 async function searchAuto(
   query: string,
   maxResults: number,
@@ -331,15 +378,9 @@ async function searchAuto(
   const lowerQuery = query.toLowerCase();
 
   // Detect specialized sources
-  if (
-    lowerQuery.includes("npm") ||
-    lowerQuery.includes("package") ||
-    /^@?\w[\w-]*\/?\w*/.test(lowerQuery)
-  ) {
-    const npmResults = await searchNpm(
-      query.replace(/npm|package/gi, "").trim() || query,
-      maxResults,
-    );
+  const npmQuery = npmLookupQuery(query);
+  if (npmQuery !== null) {
+    const npmResults = await searchNpm(npmQuery, maxResults);
     if (npmResults.length > 0) return npmResults;
   }
 
@@ -375,13 +416,47 @@ async function searchAuto(
 // 7. Output formatter
 // ---------------------------------------------------------------------------
 
+/** Case-insensitive URL form used to detect duplicate results. */
+function normalizeResultUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/\/$/, "");
+    return `${parsed.protocol}//${parsed.host.toLowerCase()}${path}${parsed.search}`;
+  } catch {
+    return url.trim().toLowerCase();
+  }
+}
+
+/**
+ * Drop duplicate results, keeping the first occurrence of each normalized URL
+ * (lowercase host, no trailing slash) and the original first-seen order.
+ *
+ * @param results - Provider results, in provider order.
+ */
+function dedupeResults(results: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  const unique: SearchResult[] = [];
+  for (const result of results) {
+    const key = normalizeResultUrl(result.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(result);
+  }
+  return unique;
+}
+
+/** Escape markdown link delimiters so a title cannot break out of the link. */
+function escapeLinkText(text: string): string {
+  return text.replace(/[[\]]/g, (char) => `\\${char}`);
+}
+
 function formatResults(results: SearchResult[], query: string): string {
   const lines = [`## Search Results for "${query}"\n`];
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
-    lines.push(`${i + 1}. **[${r.title}](${r.url})** _(via ${r.source})_`);
+    lines.push(`${i + 1}. **[${escapeLinkText(r.title)}](${r.url})** _(via ${r.source})_`);
     if (r.snippet) {
-      lines.push(`   ${r.snippet}`);
+      lines.push(`   ${escapeLinkText(r.snippet)}`);
     }
     lines.push("");
   }

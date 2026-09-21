@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { defineTool } from "../platform/ports/tool-factory.ts";
 import { createSubLogger } from "../logger.ts";
-import { TokenBucket, fetchWithRetry, fetchWithTimeout, BROWSER_USER_AGENT } from "./http-utils.ts";
+import { TokenBucket, fetchWithRetry, fetchWithTimeout, buildBrowserHeaders } from "./http-utils.ts";
+import { detectBlockSignal, isJinaErrorBody } from "./bot-detection.ts";
+import { decodeText, readBodyCapped } from "./response-body.ts";
 import { convertHtmlToMarkdown } from "./html-to-markdown.ts";
 import { detectBrowserCapabilities } from "./browser-detect.ts";
 import { validateUrl } from "./ssrf-guard.ts";
@@ -12,8 +14,20 @@ const log = createSubLogger("web:read");
 
 const MAX_OUTPUT_BYTES = 30 * 1024;
 
+/** How many leading body characters are inspected for an interstitial. */
+const BLOCK_INSPECT_CHARS = 8192;
+
 // Rate limiter for Jina Reader (conservative 15 RPM for anonymous)
 const jinaBucket = new TokenBucket(15);
+
+/**
+ * Mutable slot the local fetch fills in when it sees a bot-protection block,
+ * so the caller's final error can say the site refused automated access. The
+ * reason already names the provider, so that is the only thing carried.
+ */
+interface BlockContext {
+  reason: string | null;
+}
 
 /**
  * Factory function to create the web_read tool.
@@ -71,10 +85,18 @@ export function createPageReadTool() {
 
       // Final fallback: local fetch + Turndown
       log.info("All browser backends exhausted, falling back to local fetch", { url });
-      const localResult = await tryLocalFetch(url);
+      const block: BlockContext = { reason: null };
+      const localResult = await tryLocalFetch(url, block);
       if (localResult) return localResult;
 
       // All failed
+      if (block.reason !== null) {
+        return formatError(
+          url,
+          `All sources failed. The site appears to be blocking automated access (${block.reason}). ` +
+            'Try engine: "browser" to render the page with a real browser, or retry later.',
+        );
+      }
       return formatError(url, "All sources failed. The URL may be inaccessible or blocking automated access.");
     },
   });
@@ -105,7 +127,13 @@ async function tryJinaReader(
     const jinaUrl = `https://r.jina.ai/${url}`;
     const response = await fetchWithRetry(jinaUrl, { headers }, 2, 2000);
 
-    let content = await response.text();
+    const { bytes } = await readBodyCapped(response);
+    let content = decodeText(bytes, response.headers.get("content-type")).text;
+
+    if (isJinaErrorBody(content)) {
+      log.warn("Jina Reader returned an error body", { url, status: response.status });
+      return null;
+    }
 
     // Truncate if too long
     if (Buffer.byteLength(content, "utf-8") > MAX_OUTPUT_BYTES) {
@@ -126,31 +154,60 @@ async function tryJinaReader(
   }
 }
 
-async function tryLocalFetch(url: string): Promise<string | null> {
+/**
+ * Last-resort static fetch of a page, converted to markdown.
+ *
+ * Reads through {@link readBodyCapped}, decodes with the response charset and
+ * classifies the result with {@link detectBlockSignal}: a corroborated block
+ * (Cloudflare challenge, protection provider header or interstitial marker)
+ * fills the caller's {@link BlockContext} and returns null, so the final error
+ * can say the site refused automated access instead of pretending the page was
+ * simply unavailable.
+ *
+ * @param url - Absolute target URL.
+ * @param block - Mutable slot recording a block signal, when one was seen.
+ * @returns Markdown, or null when the fetch failed or was blocked.
+ */
+async function tryLocalFetch(url: string, block: BlockContext): Promise<string | null> {
   try {
     const response = await fetchWithTimeout(
       url,
-      {
-        headers: {
-          "User-Agent": BROWSER_USER_AGENT,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-      },
+      { headers: buildBrowserHeaders() },
       15000,
     );
+
+    const contentType = response.headers.get("content-type") || "";
+    const { bytes } = await readBodyCapped(response);
+    const { text } = decodeText(bytes, contentType);
+
+    const signal = detectBlockSignal({
+      status: response.status,
+      headers: response.headers,
+      bodySample: text.slice(0, BLOCK_INSPECT_CHARS),
+      // The sample is truncated, so declare the real size; otherwise the
+      // advisory 2xx guard would misread a long legitimate page as blocked.
+      bodyLength: text.length,
+    });
+    if (signal.blocked) {
+      log.warn("Local fetch looks blocked", {
+        url,
+        status: response.status,
+        provider: signal.provider,
+        reason: signal.reason,
+      });
+      block.reason = signal.reason;
+      return null;
+    }
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
 
-    const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("html") && !contentType.includes("xml") && !contentType.includes("text")) {
       throw new Error(`Unsupported content type: ${contentType}`);
     }
 
-    const html = await response.text();
-    const markdown = convertHtmlToMarkdown(html, url);
+    const markdown = convertHtmlToMarkdown(text, url);
 
     log.info("Local fetch succeeded", { url, bytes: Buffer.byteLength(markdown) });
     return markdown;

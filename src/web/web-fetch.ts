@@ -5,11 +5,12 @@ import type { ToolResult } from "../platform/types.ts";
 import { createSubLogger } from "../logger.ts";
 import {
   TokenBucket,
-  fetchWithTimeout,
   fetchWithRetry,
   fetchWithCloudflareRetry,
-  BROWSER_USER_AGENT,
+  buildBrowserHeaders,
 } from "./http-utils.ts";
+import { detectBlockSignal, isJinaErrorBody } from "./bot-detection.ts";
+import { decodeText, readBodyCapped, toArrayBuffer } from "./response-body.ts";
 import { convertHtmlToMarkdown } from "./html-to-markdown.ts";
 import { detectBrowserCapabilities } from "./browser-detect.ts";
 import { fetchWithPlaywright } from "./playwright-backend.ts";
@@ -28,10 +29,59 @@ const jinaBucket = new TokenBucket(15);
 
 // ── Internal types ───────────────────────────────────────────────────────────
 
+/** How many leading body bytes are inspected for a bot-protection interstitial. */
+const BLOCK_INSPECT_BYTES = 8192;
+
+/**
+ * Statuses that mean "try another engine": a server-declared rate limit (429)
+ * or overload (503). A 403 is deliberately absent — this tool returns it with
+ * its body and status unless bot-detection.ts corroborates a block from a
+ * challenge header, a protection-provider header or an interstitial marker.
+ */
+const KILL_STATUSES = new Set([429, 503]);
+
+/** Bot-protection attribution carried alongside a fetch result. */
+interface BlockInfo {
+  provider: string | null;
+  reason: string;
+}
+
 interface FetchResult {
   body: ArrayBuffer;
   contentType: string;
   statusCode: number;
+  /** Set when the response looks like a bot-protection interstitial. */
+  block: BlockInfo | null;
+}
+
+/** Engines this tool can attempt, in the order the plan resolves them. */
+type EngineId = "default" | "jina" | "reader" | "browser";
+
+/** Retry budget handed to one Jina Reader request. */
+interface JinaBudget {
+  maxRetries: number;
+  baseDelayMs: number;
+}
+
+/** An explicitly requested Jina engine keeps its patient retry budget. */
+const JINA_EXPLICIT_BUDGET: JinaBudget = { maxRetries: 2, baseDelayMs: 2000 };
+
+/** An automatic escalation must fail fast instead of stalling the whole tool. */
+const JINA_ESCALATION_BUDGET: JinaBudget = { maxRetries: 1, baseDelayMs: 500 };
+
+/** Everything one engine attempt needs. */
+interface AttemptContext {
+  url: string;
+  headers: Record<string, string>;
+  selector: string | undefined;
+  timeoutSec: number;
+  jinaBudget: JinaBudget;
+}
+
+/** One engine attempt: the result plus the pre-Readability HTML when relevant. */
+interface AttemptOutcome {
+  result: FetchResult;
+  rawHtml?: string;
 }
 
 // ── Accept header builder ────────────────────────────────────────────────────
@@ -61,7 +111,17 @@ function buildAcceptHeader(format: string): string {
 
 /**
  * Default HTTP fetch with Cloudflare retry support.
- * Returns raw response body as ArrayBuffer with status code and content type.
+ *
+ * The body is read through {@link readBodyCapped} so a hostile or endless
+ * response cannot exhaust memory, and the response is classified with
+ * {@link detectBlockSignal} so a challenge page can be told apart from real
+ * content. Transport failures are logged and collapsed into a status-0 result
+ * that carries no body, which is the signal the caller escalates on.
+ *
+ * @param url - Absolute request URL.
+ * @param headers - Request headers, already merged with the browser profile.
+ * @param timeoutSec - Per-attempt timeout in seconds.
+ * @returns Body, content type, status code and any block signal.
  */
 async function fetchDefault(
   url: string,
@@ -75,31 +135,62 @@ async function fetchDefault(
       timeoutSec * 1000,
     );
 
-    const body = await response.arrayBuffer();
+    const { bytes } = await readBodyCapped(response);
     const contentType = response.headers.get("content-type") || "application/octet-stream";
+    const signal = detectBlockSignal({
+      status: response.status,
+      headers: response.headers,
+      bodySample: new TextDecoder("latin1").decode(bytes.subarray(0, BLOCK_INSPECT_BYTES)),
+      // The sample above is truncated, so the real length must be declared:
+      // otherwise the advisory 2xx size guard sees only 8 KB and a long
+      // legitimate page that mentions an interstitial phrase reads as blocked.
+      bodyLength: bytes.byteLength,
+    });
+
+    if (signal.blocked) {
+      log.warn("Default fetch looks blocked", {
+        url,
+        status: response.status,
+        provider: signal.provider,
+        reason: signal.reason,
+      });
+    }
 
     return {
-      body,
+      body: toArrayBuffer(bytes),
       contentType,
       statusCode: response.status,
+      block: signal.blocked ? { provider: signal.provider, reason: signal.reason } : null,
     };
   } catch (error) {
     log.warn("Default fetch failed", {
       url,
       error: error instanceof Error ? error.message : String(error),
     });
-    return { body: new ArrayBuffer(0), contentType: "", statusCode: 0 };
+    return { body: new ArrayBuffer(0), contentType: "", statusCode: 0, block: null };
   }
 }
 
 /**
  * Fetch via Jina Reader for instant, LLM-friendly markdown conversion.
  * Rate-limited with TokenBucket(15). Opt-in browser rendering via X-Engine header.
+ *
+ * The retry budget is a parameter: an explicitly requested Jina engine keeps
+ * the patient budget, while an automatic escalation uses a cheaper one so a
+ * failing provider fails fast. A Jina error body is a failure, not an answer —
+ * the caller must escalate instead of returning the error text as content.
+ *
+ * @param url - Absolute target URL.
+ * @param selector - Optional CSS selector forwarded as X-Target-Selector.
+ * @param timeoutSec - Per-attempt timeout in seconds.
+ * @param budget - Retry budget for the Jina request.
+ * @returns Markdown bytes, or a status-0 result when Jina failed.
  */
 async function fetchViaJina(
   url: string,
   selector: string | undefined,
   timeoutSec: number,
+  budget: JinaBudget,
 ): Promise<FetchResult> {
   try {
     await jinaBucket.acquire();
@@ -115,30 +206,48 @@ async function fetchViaJina(
 
     // Jina Reader: prepend r.jina.ai/ to the target URL
     const jinaUrl = `https://r.jina.ai/${url}`;
-    const response = await fetchWithRetry(jinaUrl, { headers }, 2, 2000);
+    const response = await fetchWithRetry(
+      jinaUrl,
+      { headers },
+      budget.maxRetries,
+      budget.baseDelayMs,
+      timeoutSec * 1000,
+    );
 
-    const text = await response.text();
-    const encoder = new TextEncoder();
-    const encoded = encoder.encode(text);
+    const { bytes } = await readBodyCapped(response);
+    const { text, charset } = decodeText(bytes, response.headers.get("content-type"));
 
-    log.info("Jina Reader succeeded", { url, bytes: encoded.byteLength });
+    if (isJinaErrorBody(text)) {
+      log.warn("Jina Reader returned an error body", { url, status: response.status, charset });
+      return { body: new ArrayBuffer(0), contentType: "", statusCode: 0, block: null };
+    }
+
+    const encoded = new TextEncoder().encode(text);
+
+    log.info("Jina Reader succeeded", { url, bytes: encoded.byteLength, charset });
     return {
-      body: encoded.buffer.slice(0, encoded.byteLength),
+      body: toArrayBuffer(encoded),
       contentType: "text/markdown",
       statusCode: response.status,
+      block: null,
     };
   } catch (error) {
     log.warn("Jina Reader failed", {
       url,
       error: error instanceof Error ? error.message : String(error),
     });
-    return { body: new ArrayBuffer(0), contentType: "", statusCode: 0 };
+    return { body: new ArrayBuffer(0), contentType: "", statusCode: 0, block: null };
   }
 }
 
 /**
  * Fetch via browser automation (Crawlee PlaywrightCrawler → raw Playwright fallback).
  * Detects available backends at runtime via dynamic import.
+ *
+ * @param url - Absolute target URL.
+ * @param selector - Optional CSS selector for the content region.
+ * @param timeoutSec - Navigation timeout in seconds.
+ * @returns Rendered markdown bytes, or a status-0 result when no backend produced HTML.
  */
 async function fetchViaBrowser(
   url: string,
@@ -161,18 +270,149 @@ async function fetchViaBrowser(
   }
 
   if (result !== null) {
-    const encoder = new TextEncoder();
-    const encoded = encoder.encode(result);
+    const encoded = new TextEncoder().encode(result);
     log.info("Browser fetch succeeded", { url, bytes: encoded.byteLength });
     return {
-      body: encoded.buffer.slice(0, encoded.byteLength),
+      body: toArrayBuffer(encoded),
       contentType: "text/markdown",
       statusCode: 200,
+      block: null,
     };
   }
 
   log.warn("All browser backends exhausted", { url });
-  return { body: new ArrayBuffer(0), contentType: "", statusCode: 0 };
+  return { body: new ArrayBuffer(0), contentType: "", statusCode: 0, block: null };
+}
+
+/**
+ * Run one engine attempt.
+ *
+ * The reader engine is the static fetch plus Mozilla Readability; it returns
+ * the raw HTML alongside the extracted article so metadata extraction keeps
+ * working exactly as it did before.
+ *
+ * @param engine - Engine to run.
+ * @param context - URL, headers, selector, timeout and Jina budget.
+ * @returns The attempt result and, for the reader engine, the source HTML.
+ */
+async function runEngine(engine: EngineId, context: AttemptContext): Promise<AttemptOutcome> {
+  const { url, headers, selector, timeoutSec, jinaBudget } = context;
+
+  switch (engine) {
+    case "jina":
+      return { result: await fetchViaJina(url, selector, timeoutSec, jinaBudget) };
+    case "browser":
+      return { result: await fetchViaBrowser(url, selector, timeoutSec) };
+    case "reader": {
+      const result = await fetchDefault(url, headers, timeoutSec);
+      if (result.statusCode === 0 || result.body.byteLength === 0) {
+        return { result };
+      }
+
+      const { text: html } = decodeText(new Uint8Array(result.body), result.contentType);
+      const article = await extractArticle(html, url);
+      if (article === null) {
+        log.info("Readability returned null, using raw HTML", { url });
+        return { result, rawHtml: html };
+      }
+
+      log.info("Readability extracted article", {
+        title: article.title,
+        length: article.length,
+      });
+      const encoded = new TextEncoder().encode(article.content);
+      return {
+        result: {
+          body: toArrayBuffer(encoded),
+          contentType: "text/html",
+          statusCode: result.statusCode,
+          block: result.block,
+        },
+        rawHtml: html,
+      };
+    }
+    case "default":
+    default:
+      return { result: await fetchDefault(url, headers, timeoutSec) };
+  }
+}
+
+/**
+ * Ordered engines to try for the requested engine, stopping at the first
+ * usable result. A browser backend only appears when one is installed.
+ *
+ * @param engine - Engine the caller asked for.
+ * @param browserAvailable - Whether playwright or crawlee is installed.
+ */
+function planAttempts(engine: EngineId, browserAvailable: boolean): EngineId[] {
+  switch (engine) {
+    case "jina":
+      return browserAvailable ? ["jina", "default", "browser"] : ["jina", "default"];
+    case "reader":
+      return browserAvailable ? ["reader", "jina", "browser"] : ["reader", "jina"];
+    case "browser":
+      // No browser backend installed: the static fetch is the honest fallback.
+      return browserAvailable ? ["browser", "default", "jina"] : ["default", "jina"];
+    case "default":
+    default:
+      return browserAvailable ? ["default", "jina", "browser"] : ["default", "jina"];
+  }
+}
+
+/**
+ * Why a result is not good enough to answer with, or null when it is usable.
+ *
+ * Escalation happens on a transport failure, an empty body, a corroborated
+ * block signal or a 429/503 kill status. A bare 403 is returned with its body
+ * and status, as are ordinary client errors (401/404/410, ...).
+ *
+ * @param result - One engine attempt result.
+ */
+function escalationReason(result: FetchResult): string | null {
+  if (result.statusCode === 0) return "transport failure (status 0)";
+  if (result.body.byteLength === 0) return "empty response body";
+  if (result.block !== null) return result.block.reason;
+  if (KILL_STATUSES.has(result.statusCode)) return `HTTP ${result.statusCode} is a bot-protection status`;
+  return null;
+}
+
+/**
+ * Compose the failure paragraph shown when every planned engine failed.
+ *
+ * Names the engines that were attempted, the last block reason when there was
+ * one, and the two escalation levers the caller still has.
+ *
+ * @param attempted - Engines that ran, in order.
+ * @param lastBlock - Last block signal seen, if any.
+ * @param lastStatus - Last non-zero HTTP status seen, if any.
+ */
+function describeFailure(
+  attempted: EngineId[],
+  lastBlock: BlockInfo | null,
+  lastStatus: number,
+): string {
+  const parts = [
+    "All sources failed. The URL may be inaccessible or blocking automated access.",
+    `Engines attempted: ${attempted.join(", ")}.`,
+  ];
+  if (lastBlock !== null) {
+    parts.push(`Last block: ${lastBlock.reason}.`);
+  } else if (lastStatus > 0) {
+    parts.push(`Last response: HTTP ${lastStatus}.`);
+  }
+  parts.push('If the site is blocking automated access, try engine: "browser" or engine: "jina".');
+  return parts.join(" ");
+}
+
+/**
+ * Append the browser-unavailable note to a tool result's output.
+ *
+ * @param result - Result produced by a fetch path.
+ * @param note - Trailing note, or null to return the result unchanged.
+ */
+function appendNote(result: ToolResult, note: string | null): ToolResult {
+  if (note === null || typeof result === "string") return result;
+  return { ...result, output: `${result.output}\n\n${note}` };
 }
 
 // ── Attachment builders ──────────────────────────────────────────────────────
@@ -313,7 +553,10 @@ function resolveFormat(format: string, ct: ContentTypeInfo): string {
 function smartTruncate(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf-8") <= maxBytes) return text;
 
-  const truncated = Buffer.from(text, "utf-8").subarray(0, maxBytes).toString("utf-8");
+  // A cut at a byte boundary can leave a dangling multi-byte character as a
+  // U+FFFD replacement character; drop it instead of printing a broken glyph.
+  const cut = Buffer.from(text, "utf-8").subarray(0, maxBytes).toString("utf-8");
+  const truncated = cut.endsWith("\uFFFD") ? cut.slice(0, -1) : cut;
   const marker = "\n\n... (truncated)";
 
   // Try to break at a paragraph boundary (double newline)
@@ -462,59 +705,63 @@ export function createWebFetchTool() {
       // 1b. Build format-aware Accept header
       const acceptHeader = buildAcceptHeader(effectiveFormat);
 
-      // 1c. Assemble request headers
+      // 1c. Assemble request headers from the shared browser profile; explicit
+      // caller headers always win over the profile.
       const requestHeaders: Record<string, string> = {
-        "User-Agent": BROWSER_USER_AGENT,
-        Accept: acceptHeader,
-        "Accept-Language": "en-US,en;q=0.9",
+        ...buildBrowserHeaders({ accept: acceptHeader }),
         ...customHeaders,
       };
 
-      // ── LAYER 2: Fetch with engine selection ─────────────────────────────
-      let fetchResult: FetchResult;
-      let rawHtml: string | undefined; // preserved for metadata extraction
-
-      switch (effectiveEngine) {
-        case "jina":
-          fetchResult = await fetchViaJina(url, selector, effectiveTimeout);
-          break;
-        case "browser":
-          fetchResult = await fetchViaBrowser(url, selector, effectiveTimeout);
-          break;
-        case "reader": {
-          // Fetch raw HTML first
-          fetchResult = await fetchDefault(url, requestHeaders, effectiveTimeout);
-          if (fetchResult.statusCode > 0) {
-            // Apply Readability extraction
-            const html = new TextDecoder().decode(fetchResult.body);
-            rawHtml = html; // preserve for metadata
-            const article = await extractArticle(html, url);
-            if (article) {
-              log.info("Readability extracted article", {
-                title: article.title,
-                length: article.length,
-              });
-              const encoder = new TextEncoder();
-              const encoded = encoder.encode(article.content);
-              fetchResult = {
-                body: encoded.buffer.slice(0, encoded.byteLength),
-                contentType: "text/html",
-                statusCode: fetchResult.statusCode,
-              };
-            } else {
-              log.info("Readability returned null, using raw HTML", { url });
-            }
-          }
-          break;
-        }
-        default:
-          fetchResult = await fetchDefault(url, requestHeaders, effectiveTimeout);
-          break;
+      // ── LAYER 2: Fetch with bounded engine escalation ────────────────────
+      // Stop at the first usable result (not blocked, non-empty body). The
+      // order is the requested engine first, then the fallbacks it allows.
+      const caps = await detectBrowserCapabilities();
+      const browserAvailable = caps.playwright || caps.crawlee;
+      const attempts = planAttempts(effectiveEngine, browserAvailable);
+      const browserNote =
+        effectiveEngine === "browser" && !browserAvailable
+          ? "> Note: browser engine unavailable (playwright/crawlee not installed); used static fetch."
+          : null;
+      if (browserNote !== null) {
+        log.info("Browser engine requested but unavailable; using the static fetch", { url });
       }
 
-      // Check for empty/error response
-      if (fetchResult.statusCode === 0 || fetchResult.body.byteLength === 0) {
-        return formatError(url, "All sources failed. The URL may be inaccessible or blocking automated access.");
+      const attemptContext: AttemptContext = {
+        url,
+        headers: requestHeaders,
+        selector,
+        timeoutSec: effectiveTimeout,
+        jinaBudget: effectiveEngine === "jina" ? JINA_EXPLICIT_BUDGET : JINA_ESCALATION_BUDGET,
+      };
+
+      let fetchResult: FetchResult | null = null;
+      let rawHtml: string | undefined; // preserved for metadata extraction
+      let lastBlock: BlockInfo | null = null;
+      let lastStatus = 0;
+      const attempted: EngineId[] = [];
+
+      for (const engineId of attempts) {
+        attempted.push(engineId);
+        const outcome = await runEngine(engineId, attemptContext);
+        lastBlock = outcome.result.block ?? lastBlock;
+        if (outcome.result.statusCode > 0) lastStatus = outcome.result.statusCode;
+
+        const reason = escalationReason(outcome.result);
+        if (reason === null) {
+          fetchResult = outcome.result;
+          rawHtml = outcome.rawHtml;
+          break;
+        }
+        log.info("Escalating to the next fetch engine", {
+          url,
+          engine: engineId,
+          reason,
+          status: outcome.result.statusCode,
+        });
+      }
+
+      if (fetchResult === null) {
+        return formatError(url, describeFailure(attempted, lastBlock, lastStatus));
       }
 
       // ── LAYER 3: Content Type Detection ──────────────────────────────────
@@ -535,11 +782,11 @@ export function createWebFetchTool() {
 
       // ── LAYER 4: Binary / Attachment Handling ────────────────────────────
       if (ct.isImage && !ct.isSvg) {
-        return buildImageAttachment(url, ct.mime, fetchResult.body);
+        return appendNote(buildImageAttachment(url, ct.mime, fetchResult.body), browserNote);
       }
 
       if (ct.isPdf) {
-        return buildPdfAttachment(url, fetchResult.body);
+        return appendNote(buildPdfAttachment(url, fetchResult.body), browserNote);
       }
 
       if (ct.isBinary && !ct.isSvg) {
@@ -551,15 +798,14 @@ export function createWebFetchTool() {
       }
 
       // ── LAYER 5: Text Content Decoding ───────────────────────────────────
-      let textContent: string;
-      try {
-        textContent = new TextDecoder().decode(fetchResult.body);
-      } catch (error) {
-        log.warn("Text decoding failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return formatError(url, "Failed to decode response body as text");
-      }
+      // decodeText never throws: it falls back through BOM, header charset,
+      // meta sniff and UTF-8, so a GBK/Big5 page reads instead of turning mojibake.
+      const { text: decodedText, charset } = decodeText(
+        new Uint8Array(fetchResult.body),
+        fetchResult.contentType,
+      );
+      let textContent = decodedText;
+      log.info("Decoded response body", { url, charset, bytes: fetchResult.body.byteLength });
 
       // Save raw HTML for metadata extraction if not already saved
       if (rawHtml === undefined && ct.isHtml) {
@@ -597,8 +843,11 @@ export function createWebFetchTool() {
       }
 
       // ── LAYER 8: Post-Processing ─────────────────────────────────────────
-      // Truncation
+      // Truncate first, then append the note so it is never cut off.
       output = smartTruncate(output, effectiveMaxSize);
+      if (browserNote !== null) {
+        output = `${output}\n\n${browserNote}`;
+      }
 
       // Metadata injection
       if (effectiveIncludeMetadata && rawHtml) {
