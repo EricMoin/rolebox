@@ -18,7 +18,9 @@
  *   - `SessionEvent` envelope keys,
  *   - the cordis `Plugin.Base.Config` type,
  *   - the `dsh.bundle.patch` row shape,
- *   - the two slot keys (`conversation.input.dock`, `settings.section`).
+ *   - the three client slot keys (`conversation.input.dock`, `settings.section`,
+ *     `sidebar.right.pane.tab`), the tab-type registration behind the third
+ *     (the `ctx.sidebarRightTabs` definition mirror).
  *
  * Developer-local by design (decision Q5): it is NOT wired into CI and never
  * vendors or clones dsh. When `DSH_SOURCE_DIR` is unset it prints a notice and
@@ -349,6 +351,8 @@ const DSH = {
   loaderEntry: "vendor/loader/src/config/entry.ts",
   conversationSlots: "packages/client/ui-conversation/src/client/contract/slots.ts",
   settingsSlots: "packages/client/ui-settings/src/client/contract/slots.ts",
+  sidebarRightSlots: "packages/client/ui-sidebar-right/src/client/contract/slots.ts",
+  sidebarRightTabRegistry: "packages/client/ui-sidebar-right/src/client/tab-registry.ts",
 } as const
 
 const MEMBER_SEAMS: MembersSeam[] = [
@@ -613,7 +617,77 @@ function extractSlotMapKeys(absolutePath: string, interfaceName: string): Set<st
   return keys
 }
 
-/** The two client slot keys rolebox contributes into must stay declared by dsh. */
+/** Whether the client source calls `ctx.sidebarRightTabs.register(...)`. */
+function hasTabTypeRegistration(sourceFile: ts.SourceFile): boolean {
+  let found = false
+  const visit = (node: ts.Node): void => {
+    if (found) return
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "register" &&
+      ts.isPropertyAccessExpression(node.expression.expression) &&
+      node.expression.expression.name.text === "sidebarRightTabs"
+    ) {
+      found = true
+      return
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(sourceFile, visit)
+  return found
+}
+
+/**
+ * The right-Sidebar tab type rolebox registers is the other half of its
+ * `sidebar.right.pane.tab` body: the body seat is keyed by the definition's
+ * `id`, and the definition is mirrored structurally. Check the client really
+ * makes the `ctx.sidebarRightTabs.register(...)` call, that dsh still exposes
+ * `SidebarRightTabRegistry.register`, and that every member of the
+ * `DshSidebarRightTabDefinition` mirror is still declared by dsh's
+ * `SidebarRightTabDefinition` (tab-registry.ts:91-134, :224-248).
+ */
+function checkTabTypeRegistration(
+  clientPath: string,
+  clientSource: ts.SourceFile,
+  clientIndex: DeclIndex,
+  dshRoot: string,
+): void {
+  seamCount += 1
+  const seam = "slot.sidebar.right.pane.tab.registration"
+  if (!hasTabTypeRegistration(clientSource)) {
+    report(seam, `no ctx.sidebarRightTabs.register(...) call in ${relFrom(projectRoot, clientPath)}`)
+  }
+  const registryRel = DSH.sidebarRightTabRegistry
+  const registryPath = resolve(dshRoot, registryRel)
+  if (!existsSync(registryPath)) {
+    report(seam, `dsh source file not found: ${registryRel}`)
+    return
+  }
+  const registryIndex = buildIndex([registryPath])
+  const registry = registryIndex.get("SidebarRightTabRegistry")
+  if (registry === undefined || findProperty(registry, "register") === undefined) {
+    report(seam, `SidebarRightTabRegistry.register is not declared in ${registryRel}`)
+  }
+  const source = registryIndex.get("SidebarRightTabDefinition")
+  if (source === undefined) {
+    report(seam, `SidebarRightTabDefinition is not declared in ${registryRel}`)
+    return
+  }
+  const mirror = clientIndex.get("DshSidebarRightTabDefinition")
+  if (mirror === undefined) {
+    report(seam, `DshSidebarRightTabDefinition mirror not found in ${relFrom(projectRoot, clientPath)}`)
+    return
+  }
+  const sourceMembers = collectMembers(source, registryIndex)
+  for (const member of collectMembers(mirror, clientIndex).all) {
+    if (!sourceMembers.all.has(member)) {
+      report(seam, `mirror member "${member}" not found in dsh SidebarRightTabDefinition — dsh likely renamed/removed it (${registryRel})`)
+    }
+  }
+}
+
+/** Every client slot key rolebox contributes into must stay declared by dsh. */
 function checkSlots(dshRoot: string): void {
   const clientPath = resolve(projectRoot, "src/platform/adapters/dsh/web-ui/client.ts")
   if (!existsSync(clientPath)) {
@@ -623,11 +697,13 @@ function checkSlots(dshRoot: string): void {
   }
   const clientSource = createSourceFile(clientPath)
   const dockName = extractConstString(clientSource, "DOCK_SLOT_NAME")
-  const monitorName = extractConstString(clientSource, "MONITOR_SLOT_NAME")
+  const settingsName = extractConstString(clientSource, "SETTINGS_SLOT_NAME")
+  const tabSlotName = extractConstString(clientSource, "MONITOR_TAB_SLOT_NAME")
 
   const seams: Array<{ id: string; roleboxKey: string | undefined; sourceFile: string }> = [
     { id: "slot.conversation.input.dock", roleboxKey: dockName, sourceFile: DSH.conversationSlots },
-    { id: "slot.settings.section", roleboxKey: monitorName, sourceFile: DSH.settingsSlots },
+    { id: "slot.settings.section", roleboxKey: settingsName, sourceFile: DSH.settingsSlots },
+    { id: "slot.sidebar.right.pane.tab", roleboxKey: tabSlotName, sourceFile: DSH.sidebarRightSlots },
   ]
 
   for (const seam of seams) {
@@ -646,6 +722,8 @@ function checkSlots(dshRoot: string): void {
       report(seam.id, `slot key "${seam.roleboxKey}" is not declared in dsh SlotMap (${seam.sourceFile})`)
     }
   }
+
+  checkTabTypeRegistration(clientPath, clientSource, buildIndex([clientPath]), dshRoot)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────

@@ -94,6 +94,7 @@ import {
 } from "../platform/adapters/dsh/web-role-switch-route.ts";
 import type { DshWebServerRouteRegistrar } from "../platform/adapters/dsh/web-role-switch-route.ts";
 import { DshRoleboxMonitorWebRoute } from "../platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import { watchRoleboxState } from "../platform/adapters/dsh/watch-rolebox-state.ts";
 import { DshRoleboxReloader } from "../platform/adapters/dsh/rolebox-reload.ts";
 import {
   buildCanonicalTools,
@@ -979,6 +980,17 @@ export async function apply(
   // MUST share a single prefix registration; a failure logs a warning and
   // degrades — the plugin keeps running without the web surface.
   const routeDisposers: Array<() => void> = [];
+
+  /**
+   * Change-signal sink for the web console's `/rolebox/events` channel.
+   *
+   * A mutable binding rather than a service: the producers below (the loop
+   * coordinator, the graph toolset, the state-directory watcher) are constructed
+   * BEFORE the web route exists, and several of them are optional. Until the
+   * route registers, the sink is a no-op — every producer stays unaware of
+   * whether a console is even connected.
+   */
+  let notifyRoleboxChanged: (reason: "loop" | "graph" | "file") => void = () => {};
   const webServer = probeWebServer(ctx);
   let webRouteRegistered = false;
   let monitorRouteRegistered = false;
@@ -1177,6 +1189,28 @@ export async function apply(
       sessionID ? activeRole.get(sessionID) ?? "" : "",
   });
 
+  // ── Event-driven console updates ─────────────────────────────────────────
+  // Three producers feed the web console's change channel. None of them polls:
+  //   - the loop coordinator's persist hook (above) fires on every loop state
+  //     transition;
+  //   - the toolset's terminal observer fires when a graph settles (the same
+  //     registry the dispatch adapter uses for nested-graph liveness);
+  //   - a debounced watch on the state directory covers what neither hook sees
+  //     — node-level engine writes, dispatch task files, progress and
+  //     checkpoints — because those files are what the snapshot readers read.
+  // The route turns any of them into a coalesced SSE frame; with no console
+  // connected, all three cost a function call and nothing else.
+  routeDisposers.push(
+    graphToolSet.subscribeGraphTerminal(() => {
+      notifyRoleboxChanged("graph");
+    }),
+  );
+  routeDisposers.push(
+    watchRoleboxState(process.cwd(), () => {
+      notifyRoleboxChanged("file");
+    }),
+  );
+
   // Loop mode: the loop coordinator drives worker rounds through the SAME
   // dsh dispatch adapter (dispatchRound/getRoundResult/cancelRound map to
   // subagents.start / run.result / run.dispose), with a LoopStore under the
@@ -1192,6 +1226,9 @@ export async function apply(
     delayMs: 2000,
     persist: (loops) => {
       void loopStore.save(loops);
+      // The coordinator persists on EVERY state transition, which makes this
+      // the loop producer's own change signal — no polling, no extra hook.
+      notifyRoleboxChanged("loop");
     },
   });
   const loopTools = createLoopTools(loopCoordinator, sessionAdapter);
@@ -1285,6 +1322,9 @@ export async function apply(
           delegate: (req, res) => roleSwitchRoute.handle(req, res),
         },
       );
+      // From here on, every producer's signal reaches the SSE channel. Set
+      // before `register` so no change can be missed between the two.
+      notifyRoleboxChanged = (reason) => monitorRoute.notifyChanged(reason);
       const dispose = monitorRoute.register(webServer);
       routeDisposers.push(dispose);
       webRouteRegistered = true;

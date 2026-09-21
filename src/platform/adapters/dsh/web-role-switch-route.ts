@@ -21,7 +21,13 @@
  *
  *   - `GET    /rolebox/roles`          — JSON array of switchable roles
  *                                        (`id`/`name`/`description`/`model`/
- *                                        `mode`, primary roles only).
+ *                                        `mode`/`tools`/`maxSteps`, primary
+ *                                        roles only). `tools` is
+ *                                        `{ allow: string[], deny: string[] }`
+ *                                        (both arrays always present) or
+ *                                        `null` when the definition declares
+ *                                        no policy; `maxSteps` is a number or
+ *                                        `null`.
  *   - `GET    /rolebox/roles/active`   — `{ session, role }` — the active
  *                                        role id for the session, or `null`
  *                                        for the base agent.
@@ -77,9 +83,11 @@ import type { DshSessionLike, DshSessionStoreLike } from "./session.ts";
 
 /**
  * Serialized switchable role — the `GET /rolebox/roles` list item shape.
- * All five keys are always present; `model` / `mode` are `null` when the
- * definition carries no override (they are optional on
- * {@link AgentDefinition}).
+ * All seven keys are always present; `model` / `mode` / `maxSteps` are
+ * `null` when the definition carries no override (they are optional on
+ * {@link AgentDefinition}). `tools` is the definition's tool policy or
+ * `null` when it declares none; when `tools` is non-null both `allow` and
+ * `deny` are present, empty when that half is absent.
  */
 export interface RoleSwitchRoleDto {
   id: string;
@@ -87,6 +95,8 @@ export interface RoleSwitchRoleDto {
   description: string;
   model: string | null;
   mode: string | null;
+  tools: { allow: string[]; deny: string[] } | null;
+  maxSteps: number | null;
 }
 
 /** Stable error shape for every non-2xx JSON response. */
@@ -412,6 +422,15 @@ function toRoleDto(role: AgentDefinition): RoleSwitchRoleDto {
     description: role.description,
     model: role.model ?? null,
     mode: role.mode ?? null,
+    // Arrays are copied, never aliased: the DTO must not share state with
+    // the registered definition.
+    tools: role.tools
+      ? {
+          allow: [...(role.tools.allow ?? [])],
+          deny: [...(role.tools.deny ?? [])],
+        }
+      : null,
+    maxSteps: role.maxSteps ?? null,
   };
 }
 

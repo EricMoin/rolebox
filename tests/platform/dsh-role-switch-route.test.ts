@@ -14,6 +14,7 @@
  *   - register() captures exactly one prefix route at `/rolebox` and returns
  *     a disposer that unregisters it
  *   - GET    /rolebox/roles          — switchable (primary-only) role list
+ *     carrying `model`/`mode`/`tools`/`maxSteps` (`null` when undeclared)
  *   - GET    /rolebox/roles/active   — `{ session, role }`
  *   - POST   /rolebox/roles/switch   — round-trips a switch
  *   - POST   /rolebox/roles/switch with an unknown role → 400 `{ ok:false }`
@@ -283,6 +284,21 @@ async function createFixture(options?: {
   return { switcher, store, route, s1 };
 }
 
+/**
+ * Fixture variant for the DTO payload: register exactly the supplied agent
+ * definitions (callers set the mode) and return a route over them.
+ */
+async function createCatalogRoute(
+  agents: AgentDefinition[],
+): Promise<DshRoleSwitchWebRoute> {
+  const { ctx } = createFakeCtx();
+  const registrar = new DshAgentRegistrar({ subagents: createFakeSubagents() });
+  await registrar.register(agents);
+  const store = makeStore([makeSession("s1")]);
+  const switcher = new DshRoleSwitcher({ registrar, store, ctx });
+  return new DshRoleSwitchWebRoute(switcher, store);
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 describe("DshRoleSwitchWebRoute registration", () => {
@@ -330,6 +346,8 @@ describe("DshRoleSwitchWebRoute routes", () => {
         description: string;
         model: string | null;
         mode: string | null;
+        tools: { allow: string[]; deny: string[] } | null;
+        maxSteps: number | null;
       }>
     >(res);
     // Subagent-mode `gamma` is excluded; primary-only list sorted by id.
@@ -339,6 +357,9 @@ describe("DshRoleSwitchWebRoute routes", () => {
       expect(typeof role.name).toBe("string");
       expect(typeof role.description).toBe("string");
       expect(role.model).toBeNull();
+      // Neither fixture role declares a tool policy or a step budget.
+      expect(role.tools).toBeNull();
+      expect(role.maxSteps).toBeNull();
     }
   });
 
@@ -451,6 +472,78 @@ describe("DshRoleSwitchWebRoute routes", () => {
     expect(res.status).toBe(200);
     expect(json(res)).toEqual({ ok: true, session: "s1", role: null });
     expect(fixture.switcher.getActive("s1")).toBeNull();
+  });
+});
+
+// ── Roles payload: tool policy + max steps ──────────────────────────────────
+
+describe("DshRoleSwitchWebRoute GET /rolebox/roles tool policy / max steps", () => {
+  it("serializes a declared tool policy and maxSteps", async () => {
+    const route = await createCatalogRoute([
+      makeAgent("tau", {
+        mode: RoleMode.Primary,
+        tools: { allow: ["read", "grep"], deny: ["bash"] },
+        maxSteps: 12,
+      }),
+    ]);
+    const { webServer, registered } = createFakeWebServer();
+    route.register(webServer);
+
+    const res = await invoke(registered[0].handler, "GET", "/rolebox/roles");
+
+    expect(res.status).toBe(200);
+    expect(json(res)).toEqual([
+      {
+        id: "tau",
+        name: "tau",
+        description: "description for tau",
+        model: null,
+        mode: RoleMode.Primary,
+        tools: { allow: ["read", "grep"], deny: ["bash"] },
+        maxSteps: 12,
+      },
+    ]);
+  });
+
+  it("keeps both tool arrays present when only one half is declared", async () => {
+    const route = await createCatalogRoute([
+      makeAgent("upsilon", {
+        mode: RoleMode.Primary,
+        tools: { allow: ["read"] },
+      }),
+    ]);
+    const { webServer, registered } = createFakeWebServer();
+    route.register(webServer);
+
+    const res = await invoke(registered[0].handler, "GET", "/rolebox/roles");
+
+    expect(res.status).toBe(200);
+    const roles = json<Array<{ tools: unknown; maxSteps: unknown }>>(res);
+    expect(roles[0].tools).toEqual({ allow: ["read"], deny: [] });
+    expect(roles[0].maxSteps).toBeNull();
+  });
+
+  it("reports null tools and null maxSteps when the definition declares neither", async () => {
+    const route = await createCatalogRoute([
+      makeAgent("chi", { mode: RoleMode.Primary }),
+    ]);
+    const { webServer, registered } = createFakeWebServer();
+    route.register(webServer);
+
+    const res = await invoke(registered[0].handler, "GET", "/rolebox/roles");
+
+    expect(res.status).toBe(200);
+    expect(json(res)).toEqual([
+      {
+        id: "chi",
+        name: "chi",
+        description: "description for chi",
+        model: null,
+        mode: RoleMode.Primary,
+        tools: null,
+        maxSteps: null,
+      },
+    ]);
   });
 });
 

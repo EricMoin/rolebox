@@ -94,6 +94,22 @@ export interface RoleboxMonitorErrorBody {
 }
 
 /**
+ * Why the snapshot moved. Purely informative: the client refetches the whole
+ * composed snapshot either way, and the reason only labels the status line.
+ */
+export type RoleboxChangeReason = "loop" | "graph" | "file";
+
+/**
+ * One frame of the `/rolebox/events` channel.
+ *
+ * `hello` is written on connect so a client can tell "connected and idle" from
+ * "never connected" without sending anything of its own.
+ */
+export type RoleboxEventFrame =
+  | { type: "hello"; at: number; coalesceMs: number }
+  | { type: "changed"; at: number; reason: RoleboxChangeReason };
+
+/**
  * Serialized per-loop summary item — the `GET /rolebox/status` `loops.states`
  * entry shape, projected from a live {@link LoopState}. Optional fields are
  * omitted when absent on the source state (never `undefined`-serialized).
@@ -188,6 +204,21 @@ export class DshRoleboxMonitorWebRoute {
   private readonly stateDir: string;
   private readonly delegate: DshWebRouteLike["handler"] | undefined;
   private readonly _log;
+  /**
+   * Every open `/events` response.
+   *
+   * A set (not a count) because each connection has to be written to, closed on
+   * teardown, and removed on its own `close`; the map's identity is the socket.
+   */
+  private readonly streams = new Set<ServerResponse>();
+  /** Trailing-write timer for the coalescing window, when one is pending. */
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Heartbeat timer, alive only while at least one stream is open. */
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp of the last `changed` frame, for the coalescing window. */
+  private lastFlushAt = 0;
+  /** Reason carried by the pending trailing frame, if any. */
+  private pendingReason: RoleboxChangeReason | null = null;
 
   /**
    * @param switcher        - The dsh role switcher providing per-session
@@ -227,11 +258,121 @@ export class DshRoleboxMonitorWebRoute {
    *          unmount the route.
    */
   register(webServer: DshWebServerRouteRegistrar): () => void {
-    return webServer.register({
+    const unregister = webServer.register({
       kind: "prefix",
       path: ROLEBOX_MONITOR_ROUTE_PREFIX,
       handler: (req, res) => this.handle(req, res),
     });
+    return () => {
+      // Close the channel BEFORE unregistering: an open SSE response is a live
+      // socket, and leaving one behind would keep a client waiting on a route
+      // that no longer exists.
+      this.closeAllStreams();
+      unregister();
+    };
+  }
+
+  // ── Change signals ────────────────────────────────────────────────────────
+
+  /**
+   * Tell every connected console that the rolebox state it is holding is stale.
+   *
+   * Deliberately a SIGNAL and not a payload: the client answers by refetching
+   * the composed snapshot, so the composition stays the single source of truth
+   * and this channel never has to model a delta. Coalesced to at most one frame
+   * per {@link EVENT_COALESCE_MS} so a graph's burst of node completions is one
+   * wake-up rather than hundreds.
+   *
+   * Called from the plugin's own event hooks (loop state persistence, graph
+   * terminal events, the state-directory watcher) — never from a timer.
+   *
+   * @param reason - what kind of change happened (labels the status line).
+   */
+  notifyChanged(reason: RoleboxChangeReason = "file"): void {
+    if (this.streams.size === 0) return;
+    const elapsed = Date.now() - this.lastFlushAt;
+    if (elapsed >= EVENT_COALESCE_MS) {
+      this.flush(reason);
+      return;
+    }
+    // Inside the window: remember the reason and let one trailing frame carry
+    // it, so the burst costs exactly two frames.
+    this.pendingReason = reason;
+    if (this.flushTimer !== null) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      const pending = this.pendingReason ?? reason;
+      this.pendingReason = null;
+      this.flush(pending);
+    }, EVENT_COALESCE_MS - elapsed);
+    this.flushTimer.unref?.();
+  }
+
+  /** Write one `changed` frame to every open stream. */
+  private flush(reason: RoleboxChangeReason): void {
+    this.lastFlushAt = Date.now();
+    const frame: RoleboxEventFrame = { type: "changed", at: this.lastFlushAt, reason };
+    for (const res of this.streams) {
+      this.writeSse(res, frame);
+    }
+  }
+
+  /** Close every open stream and stop the timers that serve them. */
+  private closeAllStreams(): void {
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.pendingReason = null;
+    this.stopHeartbeat();
+    for (const res of this.streams) {
+      try {
+        res.end();
+      } catch {
+        /* already closed by the peer — nothing to end */
+      }
+    }
+    this.streams.clear();
+  }
+
+  /** Start the comment heartbeat if it is not already running. */
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer !== null) return;
+    this.heartbeatTimer = setInterval(() => {
+      for (const res of this.streams) {
+        // A COMMENT frame: invisible to EventSource.onmessage, and enough to
+        // keep an idle channel open between runs.
+        try {
+          res.write(": ping\n\n");
+        } catch {
+          /* the 'close' handler removes a dead stream */
+        }
+      }
+    }, EVENT_HEARTBEAT_MS);
+    this.heartbeatTimer.unref?.();
+  }
+
+  /** Stop the heartbeat (no streams left to keep alive). */
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Write one frame, dropping the stream if the socket has gone away.
+   *
+   * `res.write` on a closed socket does not throw synchronously in every case,
+   * so the `destroyed` check is the cheap guard that keeps a dead connection
+   * from being written to until its `close` event lands.
+   */
+  private writeSse(res: ServerResponse, frame: RoleboxEventFrame): void {
+    if (res.destroyed) {
+      this.streams.delete(res);
+      return;
+    }
+    sendSse(res, frame);
   }
 
   /**
@@ -261,6 +402,9 @@ export class DshRoleboxMonitorWebRoute {
 
       if (method === "GET" && sub === "/status") return this.serveStatus(res);
       if (method === "GET" && sub === "/metrics") return this.serveMetrics(res);
+      if (method === "GET" && sub === EVENTS_SUB_PATH) {
+        return this.serveEvents(req, res);
+      }
 
       if (KNOWN_SUB_PATHS.has(sub)) {
         return sendJson(res, 405, errorBody("Method not allowed"));
@@ -321,12 +465,78 @@ export class DshRoleboxMonitorWebRoute {
   private serveMetrics(res: ServerResponse): void {
     sendJson(res, 200, metrics.snapshot());
   }
+
+  /**
+   * `GET /rolebox/events` — the change-signal channel (server-sent events).
+   *
+   * The response is held open and frames are written when rolebox state moves
+   * ({@link notifyChanged}). Nothing is sent on a schedule: the heartbeat is a
+   * comment that only keeps the socket alive.
+   *
+   * The connection is torn down by the peer's `close` (tab closed, page
+   * reloaded, EventSource disposed) or by {@link closeAllStreams} when the
+   * plugin unloads; either way the set shrinks and the heartbeat stops with the
+   * last stream.
+   *
+   * @param req - the request (read only for the peer's own teardown).
+   * @param res - the response to hold open.
+   */
+  private serveEvents(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      // nginx and friends buffer proxied responses unless told not to, which
+      // would hold every frame until the buffer fills.
+      "X-Accel-Buffering": "no",
+    });
+    res.write(": connected\n\n");
+    this.streams.add(res);
+    this.startHeartbeat();
+    sendSse(res, {
+      type: "hello",
+      at: Date.now(),
+      coalesceMs: EVENT_COALESCE_MS,
+    });
+    const drop = (): void => {
+      this.streams.delete(res);
+      if (this.streams.size === 0) this.stopHeartbeat();
+    };
+    res.on("close", drop);
+    res.on("error", drop);
+    // The request object's own close fires first on some teardown paths (the
+    // client aborting mid-flight), so both edges drop the stream.
+    req.on("close", drop);
+  }
 }
 
 // ── Routing constants ────────────────────────────────────────────────────────
 
+/** Sub-path of the change-signal channel (server-sent events). */
+export const EVENTS_SUB_PATH = "/events";
+
 /** Sub-paths that exist under the `/rolebox` prefix (for `405` vs `404`). */
-const KNOWN_SUB_PATHS = new Set(["/status", "/metrics"]);
+const KNOWN_SUB_PATHS = new Set(["/status", "/metrics", EVENTS_SUB_PATH]);
+
+/**
+ * Shortest gap between two `changed` frames.
+ *
+ * The signal channel exists to say "the snapshot you are holding is stale", and
+ * a single graph can produce a burst of them (every node completion, every
+ * persisted state write). Frames are therefore coalesced into at most one per
+ * window — a console needs to know THAT something moved, not how many times —
+ * which also keeps a burst from turning into a burst of client refetches.
+ */
+export const EVENT_COALESCE_MS = 250;
+
+/**
+ * Comment heartbeat cadence.
+ *
+ * A comment frame is invisible to `EventSource.onmessage` and exists only to
+ * keep intermediaries (proxies, the OS socket) from closing an idle channel
+ * between two runs, when nothing may change for minutes.
+ */
+export const EVENT_HEARTBEAT_MS = 25_000;
 
 // ── Projection helpers ───────────────────────────────────────────────────────
 
@@ -366,6 +576,15 @@ function toLoopSummary(state: LoopState): LoopSummaryDto {
 /** Stable error body for every non-2xx response. */
 function errorBody(message: string): RoleboxMonitorErrorBody {
   return { ok: false, error: message };
+}
+
+/**
+ * Write one server-sent event frame. SSE frames are `field: value` lines ended
+ * by a blank line; `data` carries JSON so a frame can grow fields later
+ * without a protocol change.
+ */
+function sendSse(res: ServerResponse, frame: RoleboxEventFrame): void {
+  res.write("data: " + JSON.stringify(frame) + "\n\n");
 }
 
 /** Send a JSON response with the proper Content-Type and length. */

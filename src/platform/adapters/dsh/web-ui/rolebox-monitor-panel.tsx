@@ -1,77 +1,105 @@
 /**
- * RoleboxMonitorPanel — the rolebox contribution to the dsh
- * `'settings.section'` slot (browser half): a Monitoring page inside the
- * dsh settings panel.
+ * RoleboxMonitorPanel — the rolebox RUN CONSOLE as a dsh RIGHT-SIDEBAR TAB BODY
+ * (browser half).
  *
- * The dsh web app's sidebar column (session list + foot) exposes no
- * third-party list slot (verified against the shipped slots contracts —
- * `settings.trigger` is a single-kind slot already occupied by settings), so
- * the settings panel — reachable from the sidebar gear — is the one additive
- * entry point for monitoring; this component is the page registered there
- * (see `client.ts` for the registration and the structural slot contract).
+ * The page is a right-Sidebar page type: `client.ts` registers the type in
+ * `ctx.sidebarRightTabs` (id/kind `rolebox-monitor`) and this component as
+ * its BODY in the keyed `'sidebar.right.pane.tab'` seat under the type's
+ * `id`. The user opens it from the right-Sidebar guide capsule ("Rolebox") or
+ * from the Rolebox settings page's "Open monitor" control
+ * (`ctx.sidebarRight.openTab`). Monitoring is live, session-scoped evidence,
+ * so it belongs BESIDE the conversation — the sidebar tab — while the
+ * `settings.section` page answers the static question "what roles are
+ * loaded" (`rolebox-roles-panel.tsx`). This body consumes none of the tab's
+ * business data; it renders global rolebox state.
  *
- * The panel is a root-scoped settings page (`{ kind: 'list', scope: 'root' }`
- * with owner share `{ close }`). It renders the rolebox runtime health:
+ * ── What this surface is for ──────────────────────────────────────────────
+ * A developer glancing right from their conversation asks, in order:
  *
- *   - on mount it fetches the composed runtime status from
- *     `GET /rolebox/status` (loop summaries from the LoopCoordinator, live
- *     engine-graph snapshots via the monitor reader, session count / recent
- *     ids from the SessionStore, per-session active roles from the role
- *     switcher) and the metrics snapshot from `GET /rolebox/metrics`
- *     (`metrics.snapshot()` — counters/gauges/histograms; the snapshot
- *     always carries the core dispatch counters/gauges even under the
- *     `ROLEBOX_METRICS` gate) — both same-origin relative paths on the dsh
- *     web server;
- *   - it renders an Engine graphs section (one card per live graph: phase,
- *     node count + per-status node counts, budget tokens/cost, loop-group
- *     ids, last update), a Loops section (origin session, agent, phase,
- *     round progress), a Metrics section (counter and gauge readings —
- *     including the core dispatch counter/gauge — plus histogram
- *     sum/count), and a compact Sessions line (count, recent ids, active
- *     roles);
- *   - a manual Refresh control re-fetches both endpoints; while a fetch is
- *     in flight the panel is `aria-busy` and the control is disabled; the
- *     header status seat (`role="status"`, the live region) reports
- *     load/refresh outcomes and errors;
- *   - a manual "Reload roles" control POSTs `POST /rolebox/reload` (the
- *     in-process, non-destructive role reload) and then re-fetches the role
- *     state through the Refresh path; it is the reload's ONLY entry point (no
- *     CLI/TUI surface) and it NEVER polls — the request is issued from the
- *     click alone, and the status seat reports the outcome or the failure;
- *   - a failed initial load renders an explicit error state (`role="alert"`)
- *     with the server message and a Retry control; an empty snapshot (no
- *     graphs, no loops, no metrics, zero sessions) renders an explicit
- *     empty state; a refresh failure with previously rendered data keeps
- *     the data visible and reports the error on the status seat;
- *   - the body leads with a derived ATTENTION band ("does anything need
- *     me?") before it lists anything, because the panel is opened under time
- *     pressure. State is encoded as a pale tint fill plus the normalised
- *     state WORD, never as coloured text: measured against the host palette,
- *     `state-success-primary` is 2.09:1 and `state-warn-primary` 1.99:1 as
- *     marks on their own tints, so neither can serve as a foreground
- *     indicator. The raw backend phase always stays in the DOM beside the
- *     word, and an unrecognised phase degrades to a neutral chip rather than
- *     to a false success or failure;
- *   - every section guards its payload structurally, so a partially
- *     populated or older backend renders the sections it has instead of
- *     failing the whole panel.
+ *   1. is anything running, and is anything waiting on ME?
+ *   2. which session am I in, and as which role?
+ *   3. what is each run doing right now — which node, which round, for how
+ *      long, at what cost?
+ *   4. if something broke, WHAT broke and why?
  *
- * The slot contract (dsh-client-ui-slots' `SlotCore.register` /
- * `PropsRuntime` / `InjectFace` / `PropsLocale`) is consumed STRUCTURALLY —
- * `@deepseek-ai/dsh-client-ui-slots` is not installed yet, so
- * `RoleboxMonitorPanelProps` duck-types the composed props surface (see the
- * module docstring of `client.ts` for the citation map). The only external
- * module imported is `react`, whose type surface is supplied by the
- * temporary `react.stub.d.ts` in this directory.
+ * The console therefore reads top-down as VERDICT → IDENTITY → EVIDENCE →
+ * REFERENCE, and every section is a LEDGER (aligned rows) rather than a card:
+ * one hairline-separated block per object, one row per unit of work. It is
+ * deliberately denser than the settings page — this surface is an instrument,
+ * and a monitoring instrument that hides its readings behind a click is a
+ * decoration.
+ *
+ * ── Wire contract (the shape the panel actually receives) ─────────────────
+ * `GET /rolebox/status` is composed by `web-rolebox-monitor-route.ts`:
+ *
+ *     { ok, loops: { count, states: LoopSummaryDto[] },
+ *       engineGraphs: EngineGraphSnapshot[],
+ *       sessions: { count, mostRecentId, activeRoles } }
+ *
+ * The previous revision of this panel read `loops` as a bare array or a
+ * keyed map and `sessions.recentIds`, so against the real backend the Loops
+ * section never mounted and the session roster degraded to a bare count. Both
+ * seats are now read in BOTH their real and their tolerant legacy shapes (see
+ * {@link extractLoops} / {@link extractSessions}), and the fields the wire
+ * carries but nothing rendered — per-loop error reason, round and run timing,
+ * worker session, tree parentage, cancel requests; per-graph node ledger,
+ * frontier, start time and staleness — are rendered.
+ *
+ * `GET /rolebox/metrics` returns `metrics.snapshot()` verbatim: named
+ * counters, gauges and histograms whose KEYS may carry Prometheus-style labels
+ * (`name{agent=x}`) and whose histograms carry `buckets/sum/count`. The
+ * panel parses the key (as the TUI monitor and CLI already do), labels the
+ * readings, and derives `avg/p50/p95/n` from the buckets. An empty snapshot
+ * is NOT a silent section: the registry is gated by `ROLEBOX_METRICS`, so an
+ * empty payload renders the reason instead of vanishing.
+ *
+ * ── Design posture ────────────────────────────────────────────────────────
+ *   - Verdict first. {@link renderAttentionBand} is the first child of the
+ *     body and the panel's only focal point.
+ *   - State is never coloured text. The host palette measures
+ *     `state-success-primary` at 2.09:1 and `state-warn-primary` at 1.99:1 as
+ *     marks on their own tints — both fail 3:1 for non-text. A state is
+ *     therefore a tint fill plus the normalised state WORD, with the raw
+ *     backend phase/status string always in the DOM beside it, so nobody has
+ *     to memorise the engine vocabulary and an unrecognised value degrades to
+ *     a neutral chip rather than to a false success or failure.
+ *   - Facts, not sentences. Counts are rendered as labelled fields
+ *     (`Failed 1`), never glued into one dotted metadata line, so the eye can
+ *     scan the label column and the value column independently.
+ *   - Nothing is invented. Every number comes from the payload; the exact
+ *     value of every rounded reading (`1.2k`, `3m`) rides a `title`.
+ *     "All clear" is claimed only when every phase was actually read.
+ *   - Live work leads. Node and session ledgers sort what is RUNNING, BLOCKED
+ *     or FAILED above what is finished or queued, and cap the rest behind an
+ *     accessible disclosure, so the common case (a long graph, one hot node)
+ *     is one glance instead of one scroll.
+ *
+ * The component accepts the framework's `sessionId` standard prop (session
+ * scope) so the roster can mark and lead with the session the user is looking
+ * at; it degrades silently when the host does not supply one.
+ *
+ * CHROME FOR A NARROW COLUMN: the right Sidebar can be docked narrow (about
+ * 280px of content). Every chrome row wraps or truncates with a `title`
+ * recovery, padding is tighter than the settings page's, and the sections stay
+ * strictly single-column.
  *
  * This module is BROWSER code: it must not import node builtins, and it uses
- * the browser `fetch` global with relative (same-origin) paths.
+ * the browser `fetch` global with relative (same-origin) paths. The shared
+ * formatters it imports are pure module-level functions from `src/utils`.
  *
  * @module
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { monitorClass } from "./rolebox-monitor-panel.css.ts";
+import {
+  formatCount,
+  formatRelativeTime,
+} from "../../../../utils/text-format.ts";
+import {
+  formatDuration,
+  shortSessionId,
+} from "../../../../utils/display-helpers.ts";
 
 // ── Endpoint contract ──────────────────────────────────────────────────────
 
@@ -82,20 +110,46 @@ export const STATUS_ENDPOINT = "/rolebox/status";
 export const METRICS_ENDPOINT = "/rolebox/metrics";
 
 /**
- * `POST /rolebox/reload` — in-process, non-destructive role reload
- * (same-origin). The monitor panel is the ONLY entry point to it (locked
- * decision: no CLI/TUI surface), it is triggered MANUALLY (no polling), and a
- * successful reload is followed by a role-state re-fetch.
+ * `GET /rolebox/events` — the change-signal channel (server-sent events).
+ *
+ * The host writes a frame whenever rolebox state moves (a loop transition, a
+ * graph settling, a state file changing) and nothing on a schedule. The console
+ * answers a frame by refetching the composed snapshot, so the snapshot stays
+ * the single source of truth and this channel never carries a delta.
  */
-export const RELOAD_ENDPOINT = "/rolebox/reload";
-
-// ── Structural DTOs (mirror the backend / monitor-reader shapes) ───────────
+export const EVENTS_ENDPOINT = "/rolebox/events";
 
 /**
- * Structural loop-summary DTO — one entry of the `loops` seat of the
- * `GET /rolebox/status` body. Mirrors the `LoopState` runtime projection the
- * backend serializes (`src/loop/types.ts`); every key is optional so a
- * partial backend payload degrades gracefully.
+ * Shortest gap between two signal-driven refetches.
+ *
+ * The host already coalesces its frames; this is the client's own floor, so a
+ * burst that arrives across several frames still costs one request — and so a
+ * console left open on a busy afternoon cannot turn a chatty channel into a
+ * request storm.
+ */
+export const SIGNAL_REFETCH_MS = 600;
+
+/** How often the local clock advances the ages on screen. */
+export const CLOCK_TICK_MS = 1000;
+
+/** How the console is being kept up to date. */
+export type PanelLive = "connecting" | "live" | "manual";
+
+/** The word shown beside the freshness stamp. */
+export const LIVE_LABEL: Record<PanelLive, string> = {
+  connecting: "connecting",
+  live: "live",
+  manual: "manual refresh",
+};
+
+// ── Structural DTOs (mirror the backend shapes) ────────────────────────────
+
+/**
+ * Structural loop-summary DTO — one entry of `loops.states` in the
+ * `GET /rolebox/status` body. Mirrors `LoopSummaryDto`
+ * (web-rolebox-monitor-route.ts), which projects `LoopState`
+ * (`src/loop/types.ts`). Every key is optional so a partial backend payload
+ * degrades gracefully.
  */
 export interface MonitorLoopDto {
   originSessionId?: string;
@@ -104,10 +158,27 @@ export interface MonitorLoopDto {
   current?: number;
   total?: number;
   mode?: string;
+  /** Set when this loop is a tree worker of another loop. */
+  parentLoopId?: string;
+  /** Dispatch task id of the active worker round. */
+  activeWorkerTaskId?: string;
+  /** Session id of the active worker round. */
   activeWorkerSessionId?: string;
+  /** Whether cancellation has been requested but not yet observed. */
+  cancelRequested?: boolean;
+  /** Unix ms when the loop started. */
+  startedAt?: number;
+  /** Unix ms of the most recent state update. */
+  updatedAt?: number;
+  /** Unix ms when the current round started. */
+  roundStartedAt?: number;
+  /** Dispatched rounds recorded so far. */
+  roundCount?: number;
+  /** Failure description while the loop phase is `error`. */
+  errorReason?: string;
 }
 
-/** Structural graph-budget DTO — the `budget` seat of an engine-graph card. */
+/** Structural graph-budget DTO — the `budget` seat of an engine-graph block. */
 export interface MonitorBudgetDto {
   sessionsSpawned?: number;
   totalInputTokens?: number;
@@ -123,42 +194,79 @@ export interface MonitorLoopGroupDto {
 }
 
 /**
- * Structural engine-graph DTO — one item of the `engineGraphs` seat of the
- * `GET /rolebox/status` body. Mirrors `EngineGraphSnapshot`
- * (`src/cli/commands/monitor/monitor-reader-types.ts`); the panel consumes
- * only the display-relevant subset.
+ * Structural per-node DTO — one entry of a graph snapshot's `nodes` seat
+ * (`GraphNodeSnapshot`, monitor-reader-types.ts). This is the developer-facing
+ * core of the console: which node is running, under which agent, how long it
+ * has been going and whether it has already retried.
+ */
+export interface MonitorGraphNodeDto {
+  nodeId?: string;
+  agent?: string;
+  status?: string;
+  /** First signal the node observed (`answer`, `revise_needed`, …). */
+  signalType?: string;
+  /** ISO timestamp when the node started. */
+  startedAt?: string;
+  /** ISO timestamp when the node completed. */
+  completedAt?: string;
+  /** Retries attempted so far. */
+  retryCount?: number;
+  /** Loop group this node belongs to. */
+  loopGroupId?: string;
+  /** Dispatch task id spawned for this node. */
+  dispatchTaskId?: string;
+  /** Session id of the node's dispatch task. */
+  dispatchSessionId?: string;
+}
+
+/**
+ * Structural engine-graph DTO — one item of the `engineGraphs` seat. Mirrors
+ * `EngineGraphSnapshot` (`src/cli/commands/monitor/monitor-reader-types.ts`);
+ * the panel consumes the display-relevant subset.
  */
 export interface MonitorEngineGraphDto {
   graphId?: string;
   phase?: string;
   nodeCount?: number;
   nodeStatusCounts?: Record<string, number>;
+  nodes?: MonitorGraphNodeDto[];
   budget?: MonitorBudgetDto;
+  /** Node ids awaiting dispatch. */
+  frontier?: string[];
   loopGroups?: MonitorLoopGroupDto[];
+  /** ISO timestamp when the graph started. */
+  startedAt?: string;
+  /** ISO timestamp of the last state update. */
   updatedAt?: string;
+  /** Raw epoch-ms of the last state update (source of truth for staleness). */
+  updatedAtMs?: number;
+  /** Whether any per-node checkpoints were recorded. */
+  hasCheckpoints?: boolean;
 }
 
 /**
- * Structural sessions DTO — the `sessions` seat of the `GET /rolebox/status`
- * body (count + recent ids from the SessionStore, per-session active roles
- * from the role switcher). Also accepted as a bare array of `{ id }`
- * records for robustness.
+ * Structural sessions DTO — the `sessions` seat of `GET /rolebox/status`:
+ * count, the most recent id, and the active role per session (a null role means
+ * the session is running the base agent). Also accepted as a bare array of
+ * `{ id }` records for robustness.
  */
 export interface MonitorSessionsDto {
   count?: number;
-  recentIds?: string[];
+  mostRecentId?: string | null;
   activeRoles?: Record<string, string | null>;
+  /** Legacy/array form: ids without roles. */
+  recentIds?: string[];
 }
 
 /**
- * Structural `GET /rolebox/status` success body. All seats are optional:
- * an older or partially populated backend must degrade to the sections it
- * has, never fail the panel.
+ * Structural `GET /rolebox/status` success body. All seats are optional: an
+ * older or partially populated backend must degrade to the sections it has,
+ * never fail the panel.
  */
 export interface MonitorStatusBody {
   timestamp?: string;
-  /** Loop summaries — array, or object-keyed map when serialized as a Map. */
-  loops?: MonitorLoopDto[] | Record<string, MonitorLoopDto>;
+  /** `{ count, states }` on the wire; array/keyed map tolerated. */
+  loops?: { count?: number; states?: MonitorLoopDto[] } | MonitorLoopDto[] | Record<string, MonitorLoopDto>;
   engineGraphs?: MonitorEngineGraphDto[];
   sessions?: MonitorSessionsDto | Array<{ id?: string }>;
 }
@@ -174,6 +282,7 @@ export interface MonitorHistogramDto {
   buckets?: Record<string, number>;
   sum?: number;
   count?: number;
+  labels?: Record<string, string>;
 }
 
 /**
@@ -192,18 +301,20 @@ export interface MonitorMetricsBody {
  * Normalised run state derived from a raw backend phase string.
  *
  * The panel must never make the user memorise the backend vocabulary (engine
- * phases `idle | executing | complete` and the eight-state loop machine
- * `activating | dispatching | awaiting_worker | summarizing | finalizing |
- * complete | cancelled | interrupted | error`), and it must never guess: an
- * unrecognised value degrades to `unknown` — never to a false success or a
- * false failure. `stopped` is deliberately distinct from `failed`: a
- * cancelled or interrupted run stopped, but it did not break, and calling it
- * "Failed" would be a lie.
+ * phases `idle | executing | complete`, the eight-state loop machine, the
+ * nine engine node statuses), and it must never guess: an unrecognised value
+ * degrades to `unknown` — never to a false success or a false failure.
+ * `stopped` is deliberately distinct from `failed`: a cancelled or
+ * interrupted run stopped, but it did not break, and calling it "Failed" would
+ * be a lie. `pending` is the fourth reading a developer needs and the only one
+ * the phase vocabulary alone cannot express — a node waiting for a dispatch
+ * slot is not "running" and certainly not "unknown".
  */
 export type RoleboxRunState =
   | "failed"
   | "blocked"
   | "stopped"
+  | "pending"
   | "complete"
   | "running"
   | "idle"
@@ -214,7 +325,8 @@ export const RUN_STATE_LABEL: Record<RoleboxRunState, string> = {
   failed: "Failed",
   blocked: "Blocked",
   stopped: "Stopped",
-  complete: "Complete",
+  pending: "Queued",
+  complete: "Done",
   running: "Running",
   idle: "Idle",
   unknown: "Unknown",
@@ -256,16 +368,52 @@ export function classifyRunPhase(phase: string | undefined): RoleboxRunState {
 }
 
 /**
+ * Classify an engine NODE status into a {@link RoleboxRunState}.
+ *
+ * Node statuses are not phases and cannot be routed through
+ * {@link classifyRunPhase}: `pending` matches that function's RUNNING set and
+ * would report a queued node as executing, `escalate` matches nothing at all
+ * and would report a node that is waiting on a human as unreadable, and
+ * `ready` is the engine's own name for "awaiting dispatch". Those three are
+ * therefore resolved here, and everything else falls through to the phase
+ * classifier so both surfaces agree on `running` / `complete` / `error`.
+ */
+export function classifyNodeStatus(status: string | undefined): RoleboxRunState {
+  if (typeof status !== "string" || status === "") return "unknown";
+  const value = status.toLowerCase();
+  if (value === "escalate" || value === "blocked") return "blocked";
+  if (value === "pending" || value === "ready") return "pending";
+  return classifyRunPhase(value);
+}
+
+/**
  * The panel's headline verdict. Every label comes from the payload and every
  * count is derived — nothing here is estimated or invented.
  */
 export interface MonitorAttention {
   failed: string[];
   blocked: string[];
-  /** Labels whose phase could not be classified. Not an alarm — a admission. */
+  /** Labels whose phase could not be classified. Not an alarm — an admission. */
   unknown: string[];
+  /** Units actively running (graphs + loops). */
   running: number;
+  /** Units holding a queued node or waiting to start. */
+  pending: number;
+  /** Units finished successfully. */
   complete: number;
+  /**
+   * Units that stopped without breaking — cancelled, interrupted, timed out.
+   *
+   * Counted rather than forgotten: a stopped run is not an alarm, but it IS a
+   * unit the panel draws a row for, and a verdict that cannot see it ends up
+   * contradicting the evidence beneath it ("No graphs or loops are reporting"
+   * printed over a cancelled loop's own row).
+   */
+  stopped: number;
+  /** Units resting at the engine's idle phase (its initial persisted phase). */
+  idle: number;
+  /** Every unit the verdict read — graphs + loops, whatever their state. */
+  units: number;
   needsAttention: boolean;
 }
 
@@ -286,23 +434,31 @@ export function deriveAttention(
   // Named unclassified locally: the word unknown is a reserved type keyword.
   const unclassified: string[] = [];
   let running = 0;
+  let pending = 0;
   let complete = 0;
+  let stopped = 0;
+  let idle = 0;
 
   const note = (state: RoleboxRunState): void => {
     if (state === "running") running += 1;
+    else if (state === "pending") pending += 1;
     else if (state === "complete") complete += 1;
+    else if (state === "stopped") stopped += 1;
+    else if (state === "idle") idle += 1;
   };
 
   for (const graph of graphs) {
     let state = classifyRunPhase(graph.phase);
     for (const [name, count] of Object.entries(graph.nodeStatusCounts ?? {})) {
       if (typeof count !== "number" || count <= 0) continue;
-      // A TERMINAL graph keeps its own verdict. `nodeStatusCounts` is a
-      // snapshot of statuses that OUTLIVE the run — a cancelled or timed-out
-      // node stays in the map for the life of the session — so letting those
-      // counts raise the verdict would pin a permanent red band on finished
-      // work, right beside that graph's own green Complete chip. A monitoring
-      // surface that cries wolf is worse than one that says nothing.
+      // A FINISHED graph keeps its own verdict. A node that timed out, was
+      // cancelled, or simply completed on the way here converged on the
+      // engine's terminal `done` status (`VALID_NODE_TRANSITIONS` in
+      // src/graph/engine/node-lifecycle.ts), so its count is history — work
+      // that ended, one way or another — and letting it raise the band would
+      // pin a permanent red mark on finished work beside that graph's own Done
+      // chip. A monitoring surface that cries wolf is worse than one that says
+      // nothing.
       const key = name.toLowerCase();
       // `blocked` is the ONE node status that stays LIVE across a terminal
       // phase. engine.cancel() deliberately leaves a human-in-the-loop gate for
@@ -350,15 +506,21 @@ export function deriveAttention(
     blocked,
     unknown: unclassified,
     running,
+    pending,
     complete,
+    stopped,
+    idle,
+    units: graphs.length + loops.length,
     needsAttention: failed.length + blocked.length > 0,
   };
 }
 
 /**
- * The band's detail line. Failures and blocks lead; unrecognised phases are
- * named rather than hidden, because a monitoring surface that silently drops
- * what it cannot read under-reports — the worst asymmetry available to it.
+ * One plain-text sentence for the live region and for `title` recoveries.
+ *
+ * Deliberately prose rather than a row of dot-separated tokens: the visible
+ * band renders labelled count fields instead (see {@link renderAttentionBand}),
+ * and a sentence is what a screen reader should hear in one announcement.
  */
 export function describeAttention(attention: MonitorAttention): string {
   const parts: string[] = [];
@@ -371,46 +533,106 @@ export function describeAttention(attention: MonitorAttention): string {
   if (attention.unknown.length > 0) {
     parts.push("Unrecognized: " + attention.unknown.join(", "));
   }
-  if (parts.length > 0) return parts.join(" · ");
-  if (attention.running === 0 && attention.complete === 0) return "No active work";
-  return (
-    attention.running +
-    (attention.running === 1 ? " run active" : " runs active") +
-    " · " +
-    attention.complete +
-    " complete"
-  );
+  if (parts.length > 0) return parts.join(". ");
+  // "Nothing is reporting" is a claim about the PAYLOAD, so it is made only
+  // when the payload genuinely carried no unit. A stopped or idle unit is a
+  // unit: it keeps its own sentence rather than being described as absence.
+  if (attention.units === 0) return "No graphs or loops are reporting";
+  const buckets: string[] = [];
+  if (attention.running > 0) {
+    buckets.push(
+      attention.running + (attention.running === 1 ? " run active" : " runs active"),
+    );
+  }
+  if (attention.pending > 0) buckets.push(attention.pending + " queued");
+  if (attention.complete > 0) buckets.push(attention.complete + " complete");
+  if (attention.stopped > 0) buckets.push(attention.stopped + " stopped");
+  if (attention.idle > 0) buckets.push(attention.idle + " idle");
+  return buckets.length > 0 ? buckets.join(", ") : "Nothing running";
+}
+
+/**
+ * The verdict's attention sentence, agreeing in number: "1 needs attention" /
+ * "2 need attention". Shared by the panel `title` and the live region so the
+ * two can never disagree about the same snapshot.
+ */
+function attentionPhrase(count: number): string {
+  return formatCount(count) + (count === 1 ? " needs attention" : " need attention");
 }
 
 /** Row cap per metric group before the "Show all" disclosure appears. */
 export const GROUP_ROW_LIMIT = 8;
 
+/**
+ * Node rows shown per graph before the "Show all" disclosure appears.
+ *
+ * Four is the number that fits a 280px column beside the graph's own readings
+ * without the block pushing its neighbours off screen; live rows are sorted to
+ * the front, so the cap hides finished work rather than the interesting kind.
+ */
+export const NODE_ROW_LIMIT = 4;
+
+/** Session rows shown in the roster before its disclosure appears. */
+export const SESSION_ROW_LIMIT = 6;
+
+/**
+ * Cells in a loop's round progress bar. The bar is a proportion, not a
+ * per-round ledger: a 200-round loop must not stretch the row.
+ */
+export const ROUND_CELL_LIMIT = 12;
+
+/**
+ * How long one seat's request may hang before it fails into the error path.
+ *
+ * A bare `fetch` has no deadline: a request that never answers leaves the
+ * skeleton on screen with the panel's only control disabled, which is a
+ * recovery path of zero width. The abort is a platform timer, not a scheduled
+ * poll — the panel still issues exactly one request per seat per refresh.
+ */
+export const FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Request options for one seat fetch — a bounded signal where the platform
+ * provides one (`AbortSignal.timeout`, Chrome 103+ / Safari 16+), and nothing
+ * where it does not, so an older host degrades to the unbounded request rather
+ * than throwing.
+ */
+function seatRequestInit(): RequestInit {
+  const timeout = (AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal })
+    ?.timeout;
+  return typeof AbortSignal !== "undefined" && typeof timeout === "function"
+    ? { signal: timeout.call(AbortSignal, FETCH_TIMEOUT_MS) }
+    : {};
+}
+
+/**
+ * How long a non-terminal graph may go without a state update before the
+ * console says so. Purely a presentation threshold over the payload's own
+ * `updatedAtMs` — the panel reports the age, it does not diagnose the cause.
+ */
+export const GRAPH_QUIET_MS = 120_000;
+
 // ── Props ──────────────────────────────────────────────────────────────────
 
 /**
- * Composed props of the settings-page entry — a duck-type of the slot
- * framework's `PropsRuntime<'settings.section'> & InjectFace<...> &
- * PropsLocale<'settings'>` intersection, restricted to the seats this panel
- * acknowledges:
+ * Props of the docked tab body.
  *
- *   - `close` — the owner-share seat of the settings panel
- *     (`{ close }` per the dsh-client-ui-settings settings-panel share).
- *     Declared (optional) so the component satisfies the composed props
- *     structurally; the panel renders no close affordance of its own (the
- *     settings shell owns dismissal).
- *   - `t` — the locale seat promised by declaring a `locale`. Declared
- *     (optional) for the same reason the dock declares it: the panel
- *     renders hardcoded English text (the dictionary keys are not known at
- *     this layer and unknown keys must not be routed through `t`).
+ * The body is registered into the keyed `'sidebar.right.pane.tab'` seat with
+ * no inject face, so the framework hands it the standard session-scope kit plus
+ * the entry's empty business face. `sessionId` is the one standard prop this
+ * component reads: marking the session the user is actually looking at (and
+ * leading the roster with it) is the difference between a list of ids and an
+ * answer to "where am I". It is optional here so a host that supplies a
+ * narrower seat still renders the panel.
  *
- * Members the real composed props carry that this component does not consume
- * are simply not declared: a component with a narrower prop type accepts the
- * broader framework-supplied props structurally.
+ * `t` is declared (optional) only for structural completeness: the panel
+ * renders hardcoded English text (this plugin registers no locale
+ * dictionaries, and unknown keys must not be routed through `t`).
  */
 export interface RoleboxMonitorPanelProps {
-  /** Owner-share seat: closes the settings panel (declared, not consumed). */
-  close?: () => void;
-  /** Locale seat (declared `locale: 'settings'`); accepted, not used. */
+  /** Session the panel is docked beside (session-scope standard prop). */
+  sessionId?: string;
+  /** Locale seat (accepted, not used — hardcoded English copy). */
   t?: (key: string, params?: Record<string, unknown>) => string;
 }
 
@@ -420,6 +642,49 @@ export interface RoleboxMonitorPanelProps {
 interface PanelStatus {
   text: string;
   error: boolean;
+}
+
+/**
+ * One reading in a ledger lane.
+ *
+ * `label` is what the reading MEANS and stays in the accessibility tree; the
+ * glyph is what the eye uses to find it. A lane of twenty readings at 11px is
+ * unreadable as prose and perfectly readable as shapes.
+ */
+interface MetaFact {
+  label: string;
+  value: string;
+  /** Full, unrounded value for the `title` recovery. */
+  title?: string;
+  /** Glyph for the label slot. Omitted ⇒ the label word renders instead. */
+  icon?: RoleboxIcon;
+  /** State glyph for the label slot (the strip legend uses the strip's shapes). */
+  state?: RoleboxRunState;
+  /** Render the label word beside the glyph (for readings a glyph cannot carry). */
+  word?: string;
+}
+
+/**
+ * Parse one `/rolebox/events` frame. Unknown or malformed frames are ignored
+ * rather than thrown: the channel is a hint, and a console that dies on a
+ * frame it does not recognize would be worse than one that ignores it.
+ */
+function parseEventFrame(data: unknown): { type: string } | null {
+  if (typeof data !== "string" || data === "") return null;
+  try {
+    const parsed: unknown = JSON.parse(data);
+    if (!isRecord(parsed) || typeof parsed.type !== "string") return null;
+    return { type: parsed.type };
+  } catch {
+    return null;
+  }
+}
+
+/** The live dot's modifier — the word beside it carries the meaning too. */
+function liveDotModifier(live: PanelLive): string {
+  if (live === "live") return monitorClass.liveDotOn;
+  if (live === "connecting") return monitorClass.liveDotPending;
+  return monitorClass.liveDotOff;
 }
 
 /** Render an error/status message as a string (browser-safe, no node builtins). */
@@ -437,6 +702,11 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/** Non-empty-string guard. */
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /** Normalize an `activeRoles`-shaped record (string or null values only). */
 function asStringOrNullRecord(value: unknown): Record<string, string | null> {
   if (!isRecord(value)) return {};
@@ -447,20 +717,193 @@ function asStringOrNullRecord(value: unknown): Record<string, string | null> {
   return out;
 }
 
-/** Format a number for display; non-finite/absent values render as "—". */
-function formatNumber(value: unknown): string {
-  const n = typeof value === "number" ? value : Number.NaN;
-  return Number.isFinite(n) ? String(n) : "—";
+/** Format a count for display; non-finite/absent values render as "—". */
+function count(value: unknown): string {
+  const n = asNumber(value);
+  return n === undefined ? "—" : formatCount(n);
+}
+
+/** Same as {@link count}, but omits the row entirely when the value is absent. */
+function optionalFact(
+  label: string,
+  value: unknown,
+  format: (n: number) => string,
+  titleFormat: (n: number) => string = formatCount,
+  icon?: RoleboxIcon,
+): MetaFact | null {
+  const n = asNumber(value);
+  if (n === undefined) return null;
+  return { label, value: format(n), title: titleFormat(n), ...(icon ? { icon } : {}) };
+}
+
+/**
+ * Compact a token count for a narrow column: exact under 1000, then `1.2k`
+ * and `3.4M`. The exact figure always rides the row's `title`.
+ */
+function compactTokens(n: number): string {
+  if (Math.abs(n) < 1000) return formatCount(n);
+  if (Math.abs(n) < 1_000_000) return (n / 1000).toFixed(1) + "k";
+  return (n / 1_000_000).toFixed(1) + "M";
+}
+
+/**
+ * Format a currency amount, trimming trailing zeros.
+ *
+ * An amount too small to show at four decimals renders as `<$0.0001` rather
+ * than as a flat `$0`: a spend that happened must not read as no spend. The
+ * exact value always rides the row's `title`.
+ */
+function formatCost(n: number): string {
+  if (n === 0) return "$0";
+  if (Math.abs(n) < 0.0001) return (n < 0 ? ">-$0.0001" : "<$0.0001");
+  const fixed = n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return "$" + fixed;
+}
+
+/** The `title` for a cost fact — always carries the currency symbol. */
+function costTitle(n: number): string {
+  return "$" + formatCount(n);
+}
+
+/**
+ * Reduce an arbitrary identifier to a token safe for `id`/`aria-controls`
+ * wiring: letters, digits, `-` and `_` survive, every other run collapses to a
+ * single dash. Two different graph ids can collide here — which is harmless,
+ * because the pair only has to be unique among the ledgers ON SCREEN, and each
+ * graph renders one.
+ */
+function domIdPart(value: string): string {
+  const safe = value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return safe === "" ? "graph" : safe;
+}
+
+/**
+ * Shorten an identifier for a narrow column.
+ *
+ * dsh session ids are `session-<uuid>`; stripping the constant prefix and
+ * keeping the first eight uuid characters is what distinguishes two sessions at
+ * a glance, which the generic {@link shortSessionId} cannot do (it would render
+ * every dsh session as "ses…" plus a five-character tail). Every other shape
+ * falls through to the shared helper. The full id always rides the `title`.
+ */
+function shortId(id: string | undefined): string {
+  if (id === undefined || id === "") return "unknown";
+  if (id.startsWith("session-")) {
+    const rest = id.slice("session-".length);
+    return rest.slice(0, 8) + "\u2026";
+  }
+  return shortSessionId(id);
+}
+
+/**
+ * Milliseconds a unit of work has been running, measured against the moment
+ * the panel's snapshot landed (`now`). Returns `undefined` for absent,
+ * non-positive or future timestamps — an epoch-0 value is the reader's own
+ * "this field was missing" placeholder, and rendering it as an age would print
+ * a confident "20,717 days ago" over a field that was never written.
+ */
+function elapsedMs(startedAtMs: unknown, now: number): number | undefined {
+  const start = asNumber(startedAtMs);
+  if (start === undefined || start <= 0 || now <= 0) return undefined;
+  const delta = now - start;
+  return delta >= 0 ? delta : undefined;
+}
+
+/**
+ * Parse an ISO timestamp into epoch ms; `undefined` when unreadable or when it
+ * resolves to the epoch itself (the monitor reader substitutes
+ * `new Date(0).toISOString()` for a missing `updatedAt`, so "1970-01-01" means
+ * "no reading", not "very old").
+ */
+function parseIsoMs(value: unknown): number | undefined {
+  if (typeof value !== "string" || value === "") return undefined;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+/**
+ * Split a metric key into its name and Prometheus-style labels, mirroring
+ * `parseMetricKey` in `src/cli/commands/monitor/monitor-helpers.ts` — the CLI,
+ * the TUI and this console must read the same key identically.
+ */
+function parseMetricKey(key: string): {
+  name: string;
+  labels: Record<string, string>;
+} {
+  const braceIdx = key.indexOf("{");
+  if (braceIdx === -1) return { name: key, labels: {} };
+  const name = key.slice(0, braceIdx);
+  const labelsPart = key.endsWith("}") ? key.slice(braceIdx + 1, -1) : key.slice(braceIdx + 1);
+  const labels: Record<string, string> = {};
+  for (const part of labelsPart.split(",")) {
+    const eqIdx = part.indexOf("=");
+    if (eqIdx === -1) continue;
+    labels[part.slice(0, eqIdx)] = part.slice(eqIdx + 1);
+  }
+  return { name, labels };
+}
+
+/**
+ * The bucket boundary at which the observation count first reaches `pct` of
+ * all observations.
+ *
+ * The registry's buckets are CUMULATIVE — `Histogram.observe` increments every
+ * boundary at or above the sample (Prometheus `le` style), so the last bucket
+ * holds the whole population. The counts are therefore compared against the
+ * threshold directly and never accumulated: summing them would count every
+ * observation once per boundary it satisfies and report a p95 far below the
+ * truth. (The CLI/TUI helper this was modelled on does sum them; the console
+ * must not repeat that reading.) Returns `undefined` when nothing was
+ * observed.
+ */
+function histogramPercentile(
+  buckets: Record<string, number>,
+  total: number,
+  pct: number,
+): number | undefined {
+  if (total <= 0) return undefined;
+  const threshold = total * pct;
+  const sorted = Object.entries(buckets)
+    .map(([k, v]) => [Number(k), v] as const)
+    .filter(([boundary, observed]) =>
+      Number.isFinite(boundary) && Number.isFinite(observed),
+    )
+    .sort((a, b) => a[0] - b[0]);
+  for (const [boundary, observed] of sorted) {
+    if (observed >= threshold) return boundary;
+  }
+  return sorted.length > 0 ? sorted[sorted.length - 1]![0] : undefined;
+}
+
+/** Milliseconds as a duration reading, or "—" when the input is unusable. */
+function duration(ms: number | undefined): string {
+  return ms === undefined ? "—" : formatDuration(ms);
 }
 
 // ── Payload extraction (defensive normalization) ───────────────────────────
 
-/** Extract the loop-summary list, tolerating array or object-keyed Map serialization. */
+/**
+ * Extract the loop list from the `loops` seat.
+ *
+ * The wire shape is `{ count, states }` (web-rolebox-monitor-route.ts). The
+ * two older shapes are still accepted — a bare array, and an object-keyed map
+ * produced when a Map is JSON-serialized — because a panel that silently drops
+ * the loops seat is exactly the failure this console was rebuilt to end: the
+ * previous reader sent `{ count, states }` through the map branch and filtered
+ * every entry out, so the Loops section never mounted against the real server.
+ */
 function extractLoops(body: unknown): MonitorLoopDto[] {
   if (!isRecord(body)) return [];
   const loops = body.loops;
   if (Array.isArray(loops)) return loops.filter(isRecord) as MonitorLoopDto[];
-  if (isRecord(loops)) return Object.values(loops).filter(isRecord) as MonitorLoopDto[];
+  if (isRecord(loops)) {
+    if (Array.isArray(loops.states)) {
+      return loops.states.filter(isRecord) as MonitorLoopDto[];
+    }
+    // A keyed map: every value that is itself a record is a loop. `count` and
+    // `states` are filtered out by the record guard for every non-map shape.
+    return Object.values(loops).filter(isRecord) as MonitorLoopDto[];
+  }
   return [];
 }
 
@@ -472,7 +915,17 @@ function extractGraphs(body: unknown): MonitorEngineGraphDto[] {
   return graphs.filter(isRecord) as MonitorEngineGraphDto[];
 }
 
-/** Extract the sessions seat, tolerating a `{ count, recentIds }` object or an array of `{ id }` records. */
+/** Extract the per-node list of one graph snapshot (array only). */
+function extractNodes(graph: MonitorEngineGraphDto): MonitorGraphNodeDto[] {
+  return Array.isArray(graph.nodes)
+    ? (graph.nodes.filter(isRecord) as MonitorGraphNodeDto[])
+    : [];
+}
+
+/**
+ * Extract the sessions seat, tolerating the real `{ count, mostRecentId,
+ * activeRoles }` object and a bare array of `{ id }` records.
+ */
 function extractSessions(body: unknown): MonitorSessionsDto {
   if (!isRecord(body)) return {};
   const raw = body.sessions;
@@ -481,7 +934,7 @@ function extractSessions(body: unknown): MonitorSessionsDto {
       .filter(isRecord)
       .map((session) => (typeof session.id === "string" ? session.id : ""))
       .filter((id) => id.length > 0);
-    return { count: recentIds.length, recentIds };
+    return { count: recentIds.length, recentIds, activeRoles: {} };
   }
   if (isRecord(raw)) {
     const recentIds = Array.isArray(raw.recentIds)
@@ -489,11 +942,56 @@ function extractSessions(body: unknown): MonitorSessionsDto {
       : [];
     return {
       count: asNumber(raw.count),
+      mostRecentId: typeof raw.mostRecentId === "string" ? raw.mostRecentId : null,
       recentIds,
       activeRoles: asStringOrNullRecord(raw.activeRoles),
     };
   }
   return {};
+}
+
+/** One row of the session roster: the id, the role running in it, its rank. */
+interface SessionRow {
+  id: string;
+  role: string | null;
+  /** The session this panel is docked beside. */
+  current: boolean;
+  /** The session the store last touched. */
+  mostRecent: boolean;
+}
+
+/**
+ * Build the session roster from the sessions seat plus the panel's own session.
+ *
+ * Ordering answers the developer's first question ("where am I?") before the
+ * historical one: the docked session leads, the most recently touched session
+ * follows, and the remainder is ordered by id so successive refreshes do not
+ * shuffle the list under the cursor. Ties are impossible: ids are unique.
+ */
+function buildSessionRows(
+  sessions: MonitorSessionsDto,
+  currentSessionId: string | undefined,
+): SessionRow[] {
+  const roles = sessions.activeRoles ?? {};
+  const ids = new Set<string>(Object.keys(roles));
+  for (const id of sessions.recentIds ?? []) ids.add(id);
+  if (typeof sessions.mostRecentId === "string") ids.add(sessions.mostRecentId);
+  if (currentSessionId !== undefined && currentSessionId !== "") {
+    ids.add(currentSessionId);
+  }
+
+  const rows: SessionRow[] = [...ids].map((id) => ({
+    id,
+    role: roles[id] ?? null,
+    current: id === currentSessionId,
+    mostRecent: id === sessions.mostRecentId,
+  }));
+
+  return rows.sort((a, b) => {
+    if (a.current !== b.current) return a.current ? -1 : 1;
+    if (a.mostRecent !== b.mostRecent) return a.mostRecent ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
 }
 
 /** Extract named metric entries (counters/gauges) as `[name, snapshot]` pairs. */
@@ -519,13 +1017,14 @@ function extractHistograms(body: unknown): Array<[string, MonitorHistogramDto]> 
   );
 }
 
-// ── Section renderers ───────────────────────────────────────────────────────
+// ── Shared chrome ──────────────────────────────────────────────────────────
 
 /** Map a run state to its chip modifier class. */
 function chipModifier(state: RoleboxRunState): string {
   if (state === "failed") return monitorClass.chipFailed;
   if (state === "blocked") return monitorClass.chipBlocked;
   if (state === "stopped") return monitorClass.chipStopped;
+  if (state === "pending") return monitorClass.chipPending;
   if (state === "idle") return monitorClass.chipIdle;
   if (state === "complete") return monitorClass.chipComplete;
   if (state === "running") return monitorClass.chipRunning;
@@ -540,33 +1039,216 @@ function chipModifier(state: RoleboxRunState): string {
 function renderChip(state: RoleboxRunState) {
   return (
     <span className={monitorClass.chip + " " + chipModifier(state)}>
+      <StateGlyph state={state} size={14} />
       {RUN_STATE_LABEL[state]}
     </span>
   );
 }
 
-/**
- * The "Show all N" / "Show fewer" disclosure for a metric group, rendered only
- * when the group exceeds {@link GROUP_ROW_LIMIT}. Reference data is demoted,
- * not hidden: the full set stays one click away.
- */
-function renderOverflowToggle(
-  group: string,
-  total: number,
-  expanded: boolean,
-  onToggle: (group: string) => void,
-) {
-  if (total <= GROUP_ROW_LIMIT) return null;
+/** The quiet half of the chip family: a categorical value with no state. */
+function renderTextChip(text: string, title?: string) {
   return (
-    <button
-      type="button"
-      className={monitorClass.more}
-      aria-expanded={expanded}
-      aria-controls={group}
-      onClick={() => onToggle(group)}
+    <span className={monitorClass.chipQuiet} title={title ?? text}>
+      {text}
+    </span>
+  );
+}
+
+/**
+ * The node/run status glyph — a shape channel that survives greyscale,
+ * colour-blindness and a 4px-wide cell. Every glyph is decorative: the status
+ * WORD sits beside it in the same row, so the glyph is `aria-hidden` and the
+ * meaning never depends on it.
+ */
+function StateGlyph({
+  state,
+  size = 16,
+}: {
+  state: RoleboxRunState;
+  size?: number;
+}) {
+  // Same 16 grid and stroke weight as the icon set, so a state mark and a
+  // reading glyph never look like two different drawing styles.
+  const common = {
+    width: size,
+    height: size,
+    viewBox: "0 0 16 16",
+    fill: "none",
+    "aria-hidden": "true",
+  } as const;
+  const stroke = {
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+  } as const;
+  if (state === "complete") {
+    return (
+      <svg {...common}>
+        <path d="m3.5 8.4 3 3 6-7" {...stroke} />
+      </svg>
+    );
+  }
+  if (state === "failed") {
+    return (
+      <svg {...common}>
+        <path d="m4.3 4.3 7.4 7.4M11.7 4.3 4.3 11.7" {...stroke} />
+      </svg>
+    );
+  }
+  if (state === "blocked") {
+    return (
+      <svg {...common}>
+        <rect x="4" y="3.5" width="2.6" height="9" rx="1" fill="currentColor" />
+        <rect x="9.4" y="3.5" width="2.6" height="9" rx="1" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (state === "stopped") {
+    return (
+      <svg {...common}>
+        <circle cx="8" cy="8" r="5.2" {...stroke} />
+        <path d="M4.9 11.1 11.1 4.9" {...stroke} />
+      </svg>
+    );
+  }
+  if (state === "pending") {
+    return (
+      <svg {...common}>
+        <circle cx="8" cy="8" r="4.6" {...stroke} />
+      </svg>
+    );
+  }
+  if (state === "running") {
+    return (
+      <svg {...common}>
+        <path d="M5.4 3.6 12.2 8l-6.8 4.4z" fill="currentColor" />
+      </svg>
+    );
+  }
+  // idle / unknown — a neutral dash: the panel is not claiming a state.
+  return (
+    <svg {...common}>
+      <path d="M4.4 8h7.2" {...stroke} />
+    </svg>
+  );
+}
+
+
+// ── Icon vocabulary ────────────────────────────────────────────────────────
+
+/**
+ * The console's glyph names. One closed set, one 16x16 grid, one stroke weight
+ * (1.3) and one colour source (`currentColor`), so a lane of readings reads as
+ * one instrument instead of a paragraph: the eye lands on the SHAPE and only
+ * consults the value when the shape is the one it is looking for.
+ *
+ * The words did not disappear — every label still renders in the accessibility
+ * tree (see {@link renderFact}) and every icon's meaning is repeated in its
+ * row's `title` — but a dense column of "agent … status … retries … loop …
+ * session" at 11px is noise, and noise is what the console cannot afford.
+ */
+export type RoleboxIcon =
+  | "sessions"
+  | "graphs"
+  | "loops"
+  | "metrics"
+  | "agent"
+  | "session"
+  | "task"
+  | "signal"
+  | "retry"
+  | "in"
+  | "out"
+  | "cost"
+  | "clock"
+  | "start"
+  | "frontier"
+  | "round"
+  | "mode"
+  | "send"
+  | "branch"
+  | "cancel";
+
+/** Path data per icon, drawn as strokes on a 16x16 grid. */
+const ICON_PATHS: Record<RoleboxIcon, string[]> = {
+  sessions: [
+    "M6 2.6a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z",
+    "M1.8 14.2c0-2.6 1.9-4.4 4.2-4.4s4.2 1.8 4.2 4.4",
+    "M11.8 5.2a2.2 2.2 0 1 1 0 4.4 2.2 2.2 0 0 1 0-4.4Z",
+    "M10.6 14.2c0-2 .9-3.4 2.4-3.8",
+  ],
+  graphs: [
+    "M4.6 2.4a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8Z",
+    "M11.6 8.8a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8Z",
+    "M6.3 6.5 9.9 9.5",
+    "M4.6 7.2v4h4.8",
+  ],
+  loops: [
+    "M2 8a6 6 0 0 1 10-4.3",
+    "M14 8a6 6 0 0 1-10 4.3",
+    "M12.4 1.8v2.6h-2.6",
+    "M3.6 14.2v-2.6h2.6",
+  ],
+  metrics: ["M3.2 13V9.4", "M6.4 13V5.6", "M9.6 13V7.6", "M12.8 13V3.4"],
+  agent: [
+    "M8 2.1a3.1 3.1 0 1 1 0 6.2 3.1 3.1 0 0 1 0-6.2Z",
+    "M2.4 14.4c0-2.8 2.4-4.6 5.6-4.6s5.6 1.8 5.6 4.6",
+  ],
+  session: [
+    "M2.4 2.8h11.2v10.4H2.4z",
+    "M5.2 6.4 7.4 8.4 5.2 10.4",
+    "M9 10.4h2.6",
+  ],
+  task: ["M2.6 5.4 4.4 7.2l3-3.4", "M2.6 11.8 4.4 13.6l3-3.4", "M9.6 6.4h4.2", "M9.6 12.8h4.2"],
+  signal: ["M8.6 2.4 4 8.6h3.1L7 13.6l4.6-6.2H8.5z"],
+  retry: ["M13.4 8a5.4 5.4 0 1 1-1.7-3.9", "M13.6 2.4v2.6h-2.6"],
+  in: ["M8 2.6v6.6", "M5.2 6.4 8 9.2l2.8-2.8", "M3 13.2h10"],
+  out: ["M8 9.2V2.6", "M5.2 5.4 8 2.6l2.8 2.8", "M3 13.2h10"],
+  cost: [
+    "M8 2.6a5.4 5.4 0 1 1 0 10.8A5.4 5.4 0 0 1 8 2.6Z",
+    "M8 4.8v6.4",
+    "M6.2 6.6h2.6a1.3 1.3 0 0 1 0 2.6H6.2",
+  ],
+  clock: ["M8 2.6a5.4 5.4 0 1 1 0 10.8A5.4 5.4 0 0 1 8 2.6Z", "M8 5v3.2l2.2 1.3"],
+  start: ["M8 2.6a5.4 5.4 0 1 1 0 10.8A5.4 5.4 0 0 1 8 2.6Z", "M6.6 5.8 10.2 8l-3.6 2.2z"],
+  frontier: ["M2 8h7.8", "M6.8 4.6 10.2 8 6.8 11.4", "M13 2.6v10.8"],
+  round: ["M2.8 4.4A2 2 0 0 1 4.8 2.4h6.4a2 2 0 0 1 2 2v7.2a2 2 0 0 1-2 2H4.8a2 2 0 0 1-2-2z", "M6.6 6.6 8 5.6v4.8"],
+  mode: ["M8 2.6 13.4 5.8 8 9 2.6 5.8z", "M3 8.8 8 11.8l5-3"],
+  send: ["M13.4 2.6 7.2 13.4 5.7 8.7 2.6 7z"],
+  branch: [
+    "M4.8 1.8a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z",
+    "M4.8 10.2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z",
+    "M12 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z",
+    "M4.8 5.8v4.4",
+    "M6.8 4.4c2.8.5 3.8 1.7 3.8 3.6",
+  ],
+  cancel: ["M8 2.6a5.4 5.4 0 1 1 0 10.8A5.4 5.4 0 0 1 8 2.6Z", "m6.2 6.2 3.6 3.6", "m9.8 6.2-3.6 3.6"],
+};
+
+/**
+ * One icon. Decorative by contract: every icon sits beside either its value
+ * (a fact row) or a word (a chip), so it is always `aria-hidden` and never the
+ * only carrier of a meaning.
+ */
+function Icon({ name, size = 14 }: { name: RoleboxIcon; size?: number }) {
+  return (
+    <svg
+      className={monitorClass.icon}
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
     >
-      {expanded ? "Show fewer" : "Show all " + total}
-    </button>
+      {ICON_PATHS[name].map((d) => (
+        <path d={d} key={d} />
+      ))}
+    </svg>
   );
 }
 
@@ -575,23 +1257,23 @@ function renderOverflowToggle(
  * alone, so every error surface pairs its tint with this glyph and its text.
  * A local SVG: the dock's glyphs are deliberately not imported across modules.
  */
-function AlertGlyph() {
+function AlertGlyph({ size = 16 }: { size?: number }) {
   return (
     <svg
-      width={14}
-      height={14}
+      width={size}
+      height={size}
       viewBox="0 0 14 14"
       fill="none"
       aria-hidden="true"
     >
-      <circle cx="7" cy="7" r="5.4" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="7" cy="7" r="5.6" stroke="currentColor" strokeWidth="1.35" />
       <path
-        d="M7 4.3v3.7"
+        d="M7 4.1v4"
         stroke="currentColor"
-        strokeWidth="1.3"
+        strokeWidth="1.5"
         strokeLinecap="round"
       />
-      <circle cx="7" cy="10.1" r=".75" fill="currentColor" />
+      <circle cx="7" cy="10.3" r=".85" fill="currentColor" />
     </svg>
   );
 }
@@ -601,41 +1283,41 @@ function AlertGlyph() {
  * it could not classify every phase, so a check mark never reads "all good"
  * over an admission.
  */
-function QuestionGlyph() {
+function QuestionGlyph({ size = 16 }: { size?: number }) {
   return (
     <svg
-      width={14}
-      height={14}
+      width={size}
+      height={size}
       viewBox="0 0 14 14"
       fill="none"
       aria-hidden="true"
     >
-      <circle cx="7" cy="7" r="5.4" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="7" cy="7" r="5.6" stroke="currentColor" strokeWidth="1.35" />
       <path
-        d="M5.7 5.6a1.4 1.4 0 1 1 2 1.3c-.5.2-.7.6-.7 1.1v.3"
+        d="M5.5 5.5a1.6 1.6 0 1 1 2.3 1.5c-.6.3-.8.7-.8 1.3v.2"
         stroke="currentColor"
-        strokeWidth="1.2"
+        strokeWidth="1.35"
         strokeLinecap="round"
       />
-      <circle cx="7" cy="10.2" r=".7" fill="currentColor" />
+      <circle cx="7" cy="10.4" r=".8" fill="currentColor" />
     </svg>
   );
 }
 
 /** Check glyph — the calm half of the attention band's verdict. */
-function CheckGlyph() {
+function CheckGlyph({ size = 16 }: { size?: number }) {
   return (
     <svg
-      width={14}
-      height={14}
+      width={size}
+      height={size}
       viewBox="0 0 14 14"
       fill="none"
       aria-hidden="true"
     >
       <path
-        d="m3.25 7.5 2.75 2.75 4.75-6"
+        d="m2.8 7.6 3.1 3.1 5.3-6.6"
         stroke="currentColor"
-        strokeWidth={1.5}
+        strokeWidth={1.7}
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -644,116 +1326,863 @@ function CheckGlyph() {
 }
 
 /**
- * One engine-graph card: id + phase head, a definition-list of node and
- * budget readings (node count, per-status node counts, spawned sessions,
- * token in/out, cost), loop-group ids, and the last-update time. Long ids
- * truncate with a `title` recovery, mirroring the dock's protected-name
- * convention. Plain render function (called directly, not as a JSX
- * component — the dock convention keeps the render tree flat).
+ * One reading: a glyph, an optional word, and the value.
+ *
+ * The `<dt>` always carries the label TEXT (visually hidden when the glyph
+ * stands in for it) and the row's `title` repeats it, so the meaning survives
+ * for a screen reader, for a hovering mouse, and for a reader who does not know
+ * the icon yet — while the lane itself stays shapes and numbers.
  */
-function renderGraphCard(graph: MonitorEngineGraphDto) {
-  const counts = Object.entries(graph.nodeStatusCounts ?? {});
+function renderFact(fact: MetaFact, key: string) {
+  const described = fact.label + ": " + (fact.title ?? fact.value);
+  return (
+    <div className={monitorClass.fact} key={key} title={described}>
+      {fact.state !== undefined && (
+        <span className={monitorClass.factIcon} aria-hidden="true">
+          <StateGlyph state={fact.state} />
+        </span>
+      )}
+      {fact.state === undefined && fact.icon !== undefined && (
+        <span className={monitorClass.factIcon} aria-hidden="true">
+          <Icon name={fact.icon} />
+        </span>
+      )}
+      <dt className={fact.word === undefined ? monitorClass.srOnly : monitorClass.factWord}>
+        {fact.word ?? fact.label}
+      </dt>
+      <dd className={monitorClass.factValue}>{fact.value}</dd>
+    </div>
+  );
+}
+
+/** The facts that survived their absent-value guards, or null when none did. */
+function renderFacts(facts: Array<MetaFact | null>, className: string) {
+  const present = facts.filter((fact): fact is MetaFact => fact !== null);
+  if (present.length === 0) return null;
+  return (
+    <dl className={className}>
+      {present.map((fact, index) => renderFact(fact, fact.label + index))}
+    </dl>
+  );
+}
+
+/**
+ * The "Show all N" / "Show fewer" disclosure for a capped ledger, rendered only
+ * when the list exceeds its cap. Reference data is demoted, not hidden: the
+ * full set stays one click away.
+ */
+function renderOverflowToggle(
+  group: string,
+  total: number,
+  limit: number,
+  expanded: boolean,
+  onToggle: (group: string) => void,
+  label: string,
+) {
+  if (total <= limit) return null;
+  return (
+    <button
+      type="button"
+      className={monitorClass.more}
+      aria-expanded={expanded}
+      aria-controls={group}
+      onClick={() => onToggle(group)}
+    >
+      {expanded ? "Show fewer" : "Show all " + total + " " + label}
+    </button>
+  );
+}
+
+// ── Sections ───────────────────────────────────────────────────────────────
+
+/**
+ * The verdict band: the panel's only focal point, and the first thing read.
+ *
+ * Two parts, both derived from the payload: the VERDICT word (with its glyph)
+ * and the FACTS behind it, rendered as labelled count fields. Anything that
+ * actually needs the developer is then named — a row per failed or blocked
+ * unit — because "2 need attention" without saying which two is an alarm, not
+ * an answer. A calm band carries no invented reassurance: with nothing
+ * reporting at all it says so rather than claiming success.
+ */
+function renderAttentionBand(attention: MonitorAttention) {
+  const alert = attention.needsAttention;
+  const unreadable = !alert && attention.unknown.length > 0;
+  // "All clear" is earned by work that is actually progressing or finished.
+  // Units that merely exist — stopped, idle, or none at all — get the plain
+  // reading instead, so the headline never contradicts a row drawn beneath it.
+  const working =
+    attention.running > 0 || attention.pending > 0 || attention.complete > 0;
+  const title = alert
+    ? "Needs attention"
+    : unreadable
+      ? "Partly unreadable"
+      : working
+        ? "All clear"
+        : "Nothing running";
+
+  // The verdict's evidence, drawn in the SAME vocabulary as the strip and the
+  // node rows: the shape that stands for a state is the shape you count.
+  const facts: Array<MetaFact | null> = [
+    attention.failed.length > 0
+      ? { label: "failed", value: formatCount(attention.failed.length), state: "failed" }
+      : null,
+    attention.blocked.length > 0
+      ? { label: "blocked", value: formatCount(attention.blocked.length), state: "blocked" }
+      : null,
+    attention.running > 0
+      ? { label: "running", value: formatCount(attention.running), state: "running" }
+      : null,
+    attention.pending > 0
+      ? { label: "queued", value: formatCount(attention.pending), state: "pending" }
+      : null,
+    attention.complete > 0
+      ? { label: "done", value: formatCount(attention.complete), state: "complete" }
+      : null,
+    attention.stopped > 0
+      ? { label: "stopped", value: formatCount(attention.stopped), state: "stopped" }
+      : null,
+    attention.idle > 0
+      ? { label: "idle", value: formatCount(attention.idle), state: "idle" }
+      : null,
+    attention.unknown.length > 0
+      ? {
+          label: "unreadable",
+          value: formatCount(attention.unknown.length),
+          state: "unknown",
+        }
+      : null,
+  ];
+
+  const named = [
+    ...attention.failed.map((label) => ({ label, state: "failed" as const })),
+    ...attention.blocked.map((label) => ({ label, state: "blocked" as const })),
+    ...attention.unknown.map((label) => ({ label, state: "unknown" as const })),
+  ];
+
+  return (
+    <section
+      className={
+        monitorClass.attention +
+        " " +
+        (alert ? monitorClass.attentionAlert : monitorClass.attentionCalm)
+      }
+      aria-labelledby="rolebox-monitor-attention-title"
+    >
+      <div className={monitorClass.attentionHead}>
+        <span className={monitorClass.attentionGlyph} aria-hidden="true">
+          {alert ? <AlertGlyph /> : unreadable ? <QuestionGlyph /> : <CheckGlyph />}
+        </span>
+        <span
+          id="rolebox-monitor-attention-title"
+          className={monitorClass.attentionTitle}
+        >
+          {title}
+        </span>
+      </div>
+      {renderFacts(facts, monitorClass.attentionFacts)}
+      {named.length > 0 && (
+        <ul className={monitorClass.attentionList}>
+          {named.map((item) => (
+            <li className={monitorClass.attentionItem} key={item.state + item.label}>
+              <span className={monitorClass.attentionItemState}>
+                {RUN_STATE_LABEL[item.state]}
+              </span>
+              <span
+                className={monitorClass.attentionItemLabel}
+                title={item.label}
+              >
+                {item.label.startsWith("session-") ? shortId(item.label) : item.label}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/**
+ * One graph as a ledger block: identity + state, the node strip, the run's
+ * readings, then the node ledger and loop groups.
+ *
+ * The strip carries EXACTLY one cell per node in the graph's own declaration
+ * order — no normalised sampling, so a three-node graph shows three cells and a
+ * thirty-node graph shows thirty. Each cell keeps its own `title`, and the
+ * counts are restated as text in the readings below, so the strip is a
+ * position-preserving overview rather than the only channel.
+ */
+function renderGraphBlock(
+  graph: MonitorEngineGraphDto,
+  now: number,
+  isExpanded: (group: string) => boolean,
+  toggleGroup: (group: string) => void,
+) {
+  const nodes = extractNodes(graph);
+  const counts = Object.entries(graph.nodeStatusCounts ?? {}).filter(
+    ([, value]) => typeof value === "number" && value > 0,
+  );
   const budget = graph.budget ?? {};
   const loopGroups = Array.isArray(graph.loopGroups)
     ? (graph.loopGroups.filter(isRecord) as MonitorLoopGroupDto[])
     : [];
+  const state = classifyRunPhase(graph.phase);
+
+  // Live work first: a developer opens this panel to see the hot node, so the
+  // ledger is ordered by what is happening now (running, blocked, failed,
+  // queued) and only then by declaration order for finished work.
+  const priority = (node: MonitorGraphNodeDto): number => {
+    const s = classifyNodeStatus(node.status);
+    if (s === "running") return 0;
+    if (s === "blocked") return 1;
+    if (s === "failed") return 2;
+    if (s === "pending") return 3;
+    if (s === "stopped") return 4;
+    return 5;
+  };
+  const ordered = nodes
+    .map((node, index) => ({ node, index }))
+    .sort((a, b) => {
+      const delta = priority(a.node) - priority(b.node);
+      return delta !== 0 ? delta : a.index - b.index;
+    })
+    .map((entry) => entry.node);
+
+  const totalNodes = asNumber(graph.nodeCount) ?? nodes.length;
+  // A graph id is arbitrary text (model- or user-supplied), so it is reduced to
+  // a DOM-id-safe token before it names the ledger's list/label pair.
+  const group = "rolebox-monitor-nodes-" + domIdPart(graph.graphId ?? "graph");
+  const expanded = isExpanded(group);
+  const visible = expanded ? ordered : ordered.slice(0, NODE_ROW_LIMIT);
+
+  const rawUpdatedMs = asNumber(graph.updatedAtMs);
+  const updatedMs =
+    rawUpdatedMs !== undefined && rawUpdatedMs > 0
+      ? rawUpdatedMs
+      : parseIsoMs(graph.updatedAt);
+  const quietMs = updatedMs === undefined ? undefined : now - updatedMs;
+  const quiet = quietMs !== undefined && quietMs > GRAPH_QUIET_MS && graph.phase !== "complete";
+
+  // The strip's legend: the SAME shapes the strip draws, counted. The word is
+  // only rendered for a status the shape vocabulary does not already cover.
+  const statusFacts: Array<MetaFact | null> = counts.map(([name, value]) => {
+    const nodeState = classifyNodeStatus(name);
+    return {
+      label: name,
+      value: formatCount(value as number),
+      state: nodeState,
+    };
+  });
+
   return (
-    <div className={monitorClass.graph}>
+    <div className={monitorClass.graph} key={graph.graphId ?? "graph"}>
       <div className={monitorClass.graphHead}>
         <span className={monitorClass.graphId} title={graph.graphId}>
-          {graph.graphId ?? "unknown"}
+          {graph.graphId ?? "unnamed graph"}
         </span>
         <span className={monitorClass.graphState}>
-          <span className={monitorClass.phase} title={graph.phase ?? "unknown"}>
+          <span className={monitorClass.raw} title={graph.phase ?? "unknown"}>
             {graph.phase ?? "unknown"}
           </span>
-          {renderChip(classifyRunPhase(graph.phase))}
+          {renderChip(state)}
         </span>
       </div>
-      <dl className={monitorClass.kv}>
-        <div className={monitorClass.kvRow}>
-          <dt>Nodes</dt>
-          <dd>{formatNumber(graph.nodeCount)}</dd>
-        </div>
-        {counts.map(([name, value]) => (
-          <div className={monitorClass.kvRow} key={name}>
-            <dt>{name}</dt>
-            <dd>{value}</dd>
-          </div>
-        ))}
-        <div className={monitorClass.kvRow}>
-          <dt>Sessions spawned</dt>
-          <dd>{formatNumber(budget.sessionsSpawned)}</dd>
-        </div>
-        <div className={monitorClass.kvRow}>
-          <dt>Tokens in/out</dt>
-          <dd>
-            {formatNumber(budget.totalInputTokens)} /{" "}
-            {formatNumber(budget.totalOutputTokens)}
-          </dd>
-        </div>
-        <div className={monitorClass.kvRow}>
-          <dt>Cost</dt>
-          <dd>{formatNumber(budget.totalCost)}</dd>
-        </div>
-      </dl>
-      {loopGroups.length > 0 && (
-        <div className={monitorClass.graphMeta}>
-          Loops: {loopGroups.map((group) => group.id ?? "?").join(", ")}
+
+      {nodes.length > 0 && (
+        <div className={monitorClass.strip} aria-hidden="true">
+          {nodes.map((node, index) => (
+            <span
+              className={
+                monitorClass.stripCell +
+                " " +
+                stripCellModifier(classifyNodeStatus(node.status))
+              }
+              key={(node.nodeId ?? "node") + index}
+              title={(node.nodeId ?? "node") + " — " + (node.status ?? "unknown")}
+            />
+          ))}
         </div>
       )}
-      <div className={monitorClass.graphMeta} title={graph.updatedAt}>
-        Updated {graph.updatedAt ?? "—"}
-      </div>
+
+      {renderFacts(
+        [
+          // The strip's legend: one field per node status, in the same order
+          // the engine reports them. The total lives on the ledger heading
+          // below, so it is not repeated here.
+          ...statusFacts,
+          optionalFact("frontier", graph.frontier?.length, formatCount, formatCount, "frontier"),
+          optionalFact("sessions", budget.sessionsSpawned, formatCount, formatCount, "sessions"),
+          optionalFact("tokens in", budget.totalInputTokens, compactTokens, formatCount, "in"),
+          optionalFact("tokens out", budget.totalOutputTokens, compactTokens, formatCount, "out"),
+          optionalFact("cost", budget.totalCost, formatCost, costTitle, "cost"),
+          graph.startedAt && parseIsoMs(graph.startedAt) !== undefined
+            ? {
+                label: "started",
+                value: formatRelativeTime(parseIsoMs(graph.startedAt) ?? 0, now),
+                title: graph.startedAt,
+                icon: "start" as const,
+              }
+            : null,
+          updatedMs !== undefined
+            ? {
+                label: "updated",
+                value: formatRelativeTime(updatedMs, now),
+                title: graph.updatedAt ?? "",
+                icon: "clock" as const,
+              }
+            : null,
+        ],
+        monitorClass.facts,
+      )}
+
+      {quiet && (
+        <p className={monitorClass.note}>
+          No state updates for {formatDuration(quietMs ?? 0)}.
+        </p>
+      )}
+
+      {loopGroups.length > 0 &&
+        renderFacts(
+          loopGroups.map((group) => ({
+            label: "loop group",
+            value:
+              (group.id ?? "?") +
+              " " +
+              count(group.traversalCount) +
+              "/" +
+              count(group.maxTraversals),
+            title: group.id ?? "unnamed loop group",
+            icon: "loops" as const,
+          })),
+          monitorClass.facts,
+        )}
+
+      {totalNodes > 0 && (
+        <div className={monitorClass.nodeGroup}>
+          <h4 className={monitorClass.subTitle} id={group + "-title"}>
+            <span className={monitorClass.sectionIcon} aria-hidden="true">
+              <Icon name="graphs" size={14} />
+            </span>
+            Nodes
+            <span className={monitorClass.subCount}>{count(totalNodes)}</span>
+          </h4>
+          {ordered.length > 0 && (
+            <ul className={monitorClass.nodeList} id={group} aria-labelledby={group + "-title"}>
+              {visible.map((node, index) => renderNodeRow(node, now, index))}
+            </ul>
+          )}
+          {renderOverflowToggle(
+            group,
+            ordered.length,
+            NODE_ROW_LIMIT,
+            expanded,
+            toggleGroup,
+            "nodes",
+          )}
+          {totalNodes > ordered.length && (
+            // The snapshot's own node total can exceed the per-node records it
+            // carries; the ledger says so rather than looking complete.
+            <p className={monitorClass.note}>
+              {formatCount(totalNodes - ordered.length)} more node
+              {totalNodes - ordered.length === 1 ? "" : "s"} not reported.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-/** One loop row: origin session, agent, phase, and round progress. */
-function renderLoopRow(loop: MonitorLoopDto) {
+/**
+ * The state's own token, for the two places that tint a shape rather than fill
+ * a cell (a node glyph, a loop glyph).
+ */
+function stateToken(state: RoleboxRunState): string {
+  if (state === "failed") return monitorClass.toneFailed;
+  if (state === "blocked") return monitorClass.toneBlocked;
+  if (state === "stopped") return monitorClass.toneStopped;
+  if (state === "running") return monitorClass.toneRunning;
+  return monitorClass.toneCalm;
+}
+
+/** Strip-cell modifier class for a node state. */
+function stripCellModifier(state: RoleboxRunState): string {
+  if (state === "failed") return monitorClass.stripFailed;
+  if (state === "blocked") return monitorClass.stripBlocked;
+  if (state === "stopped") return monitorClass.stripStopped;
+  if (state === "pending") return monitorClass.stripPending;
+  if (state === "complete") return monitorClass.stripComplete;
+  if (state === "running") return monitorClass.stripRunning;
+  return monitorClass.stripUnknown;
+}
+
+/**
+ * One node row: the node's IDENTITY and its state on the first line, the facts
+ * about it on the second.
+ *
+ * The state is a SHAPE plus a colour (with the raw status word in the row's
+ * `title`), because the graph head already carries the worded chip and because
+ * "status running" spelling out what a play triangle already says is exactly
+ * the text wall this console was rebuilt to remove. The first line is a grid,
+ * so ids align down the column however long they are.
+ */
+function renderNodeRow(node: MonitorGraphNodeDto, now: number, index: number) {
+  const state = classifyNodeStatus(node.status);
+  const startedMs = parseIsoMs(node.startedAt);
+  const completedMs = parseIsoMs(node.completedAt);
+  const spent =
+    startedMs !== undefined && completedMs !== undefined
+      ? completedMs - startedMs
+      : elapsedMs(startedMs, now);
+
+  const facts: Array<MetaFact | null> = [
+    node.agent ? { label: "agent", value: node.agent, title: node.agent, icon: "agent" } : null,
+    node.signalType
+      ? { label: "signal", value: node.signalType, title: node.signalType, icon: "signal" }
+      : null,
+    node.retryCount !== undefined && node.retryCount > 0
+      ? { label: "retries", value: formatCount(node.retryCount), icon: "retry" }
+      : null,
+    node.loopGroupId
+      ? { label: "loop", value: node.loopGroupId, title: node.loopGroupId, icon: "loops" }
+      : null,
+    node.dispatchSessionId
+      ? {
+          label: "session",
+          value: shortId(node.dispatchSessionId),
+          title: node.dispatchSessionId,
+          icon: "session",
+        }
+      : null,
+    node.dispatchTaskId
+      ? {
+          label: "task",
+          value: shortId(node.dispatchTaskId),
+          title: node.dispatchTaskId,
+          icon: "task",
+        }
+      : null,
+  ];
+
   return (
-    <div className={monitorClass.loop}>
-      <span className={monitorClass.loopId} title={loop.originSessionId}>
-        {loop.originSessionId ?? "unknown"}
+    <li
+      className={monitorClass.nodeRow}
+      key={(node.nodeId ?? "node") + index}
+      title={(node.nodeId ?? "unnamed node") + " — " + (node.status ?? "unknown")}
+    >
+      <div className={monitorClass.nodeHead}>
+        <span className={monitorClass.nodeGlyph + " " + stateToken(state)}>
+          <StateGlyph state={state} />
+        </span>
+        <span className={monitorClass.nodeId} title={node.nodeId}>
+          {node.nodeId ?? "unnamed node"}
+        </span>
+        <span className={monitorClass.nodeTime}>{duration(spent)}</span>
+      </div>
+      {renderFacts(facts, monitorClass.nodeFacts)}
+    </li>
+  );
+}
+
+/**
+ * The round progress bar: one cell per requested round, filled up to the round
+ * in flight, with the reading beside it.
+ *
+ * The bar answers "how far through is this?" — a question a "3/5" string makes
+ * the reader do arithmetic to answer, and the reason loop rows get a graphic of
+ * their own. Cells are capped at {@link ROUND_CELL_LIMIT}: past that the bar
+ * reports the ratio it was given and the text carries the exact numbers, rather
+ * than pretending to be pixel-accurate.
+ */
+function renderRoundProgress(current: number | undefined, total: number | undefined) {
+  if (current === undefined || total === undefined || total <= 0) return null;
+  const cells = Math.min(total, ROUND_CELL_LIMIT);
+  const filled = Math.max(0, Math.min(cells, Math.round((current / total) * cells)));
+  return (
+    <span
+      className={monitorClass.progress}
+      title={formatCount(current) + " of " + formatCount(total) + " rounds"}
+    >
+      {Array.from({ length: cells }, (_, index) => (
+        <span
+          className={
+            index < filled
+              ? monitorClass.progressCell + " " + monitorClass.progressOn
+              : monitorClass.progressCell
+          }
+          key={index}
+        />
+      ))}
+      <span className={monitorClass.progressText}>
+        {formatCount(current)}/{formatCount(total)}
       </span>
-      <span className={monitorClass.loopAgent} title={loop.agent ?? "—"}>
-        {loop.agent ?? "—"}
+    </span>
+  );
+}
+
+/**
+ * One loop row. Loops are the rolebox primitive developers drive directly, so
+ * this row answers the four questions a loop raises — which round, how far
+ * through, in which mode, and (on failure) why — plus the worker session that
+ * round is running in.
+ */
+function renderLoopRow(loop: MonitorLoopDto, now: number) {
+  const state = classifyRunPhase(loop.phase);
+  const current = asNumber(loop.current);
+  const total = asNumber(loop.total);
+  const round =
+    current === undefined || total === undefined
+      ? "—"
+      : formatCount(current) + "/" + formatCount(total);
+
+  const facts: Array<MetaFact | null> = [
+    { label: "round", value: round, icon: "round" },
+    elapsedMs(loop.roundStartedAt, now) !== undefined
+      ? {
+          label: "round time",
+          value: duration(elapsedMs(loop.roundStartedAt, now)),
+          icon: "clock",
+        }
+      : null,
+    elapsedMs(loop.startedAt, now) !== undefined
+      ? { label: "elapsed", value: duration(elapsedMs(loop.startedAt, now)), icon: "clock" }
+      : null,
+    loop.mode ? { label: "mode", value: loop.mode, title: loop.mode, icon: "mode" } : null,
+    loop.roundCount !== undefined
+      ? { label: "dispatched", value: formatCount(loop.roundCount), icon: "send" }
+      : null,
+    loop.agent ? { label: "agent", value: loop.agent, title: loop.agent, icon: "agent" } : null,
+    loop.activeWorkerSessionId
+      ? {
+          label: "worker",
+          value: shortId(loop.activeWorkerSessionId),
+          title: loop.activeWorkerSessionId,
+          icon: "session",
+        }
+      : null,
+    loop.parentLoopId
+      ? {
+          label: "parent loop",
+          value: shortId(loop.parentLoopId),
+          title: loop.parentLoopId,
+          icon: "branch",
+        }
+      : null,
+    loop.activeWorkerTaskId
+      ? {
+          label: "task",
+          value: shortId(loop.activeWorkerTaskId),
+          title: loop.activeWorkerTaskId,
+          icon: "task",
+        }
+      : null,
+    loop.cancelRequested
+      ? { label: "cancelling", value: "requested", icon: "cancel" }
+      : null,
+  ];
+
+  return (
+    <div className={monitorClass.loop} key={loop.originSessionId ?? "loop"}>
+      <div className={monitorClass.loopHead}>
+        <span className={monitorClass.loopGlyph + " " + stateToken(state)}>
+          <StateGlyph state={state} />
+        </span>
+        <span className={monitorClass.loopId} title={loop.originSessionId}>
+          {shortId(loop.originSessionId)}
+        </span>
+        {renderChip(state)}
+      </div>
+      <div className={monitorClass.loopBar}>
+        {renderRoundProgress(current, total)}
+        <span className={monitorClass.raw} title={loop.phase ?? "unknown"}>
+          {loop.phase ?? "unknown"}
+        </span>
+      </div>
+      {renderFacts(facts, monitorClass.facts)}
+      {loop.errorReason && (
+        <p className={monitorClass.error}>
+          <span className={monitorClass.errorGlyph} aria-hidden="true">
+            <AlertGlyph size={16} />
+          </span>
+          <span className={monitorClass.errorText} title={loop.errorReason}>
+            {loop.errorReason}
+          </span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A section heading: the glyph that anchors the section, its name, its count,
+ * and an optional note. Every section wears the same head, which is what makes
+ * a narrow column scannable — a reader finds "the one with the bar-chart glyph"
+ * without reading a word.
+ */
+function renderSectionTitle(
+  id: string,
+  icon: RoleboxIcon,
+  title: string,
+  count: string,
+  note?: string,
+) {
+  return (
+    <h3 id={id} className={monitorClass.sectionTitle}>
+      <span className={monitorClass.sectionIcon} aria-hidden="true">
+        <Icon name={icon} size={16} />
       </span>
-      <span className={monitorClass.loopPhase} title={loop.phase ?? "—"}>
-        {loop.phase ?? "—"}
+      {title}
+      <span className={monitorClass.sectionCount}>{count}</span>
+      {note !== undefined && <span className={monitorClass.sectionNote}>{note}</span>}
+    </h3>
+  );
+}
+
+/**
+ * One metric name, its label chips, and its reading — in the panel's shared
+ * chip language, so a metric's labels and a session's role are the same kind of
+ * thing to look at.
+ */
+function renderMetricRow(
+  name: string,
+  labels: Record<string, string>,
+  value: string,
+  title: string,
+) {
+  return (
+    <div className={monitorClass.metricRow} key={name}>
+      <span className={monitorClass.metricName} title={name}>
+        {name}
       </span>
-      {renderChip(classifyRunPhase(loop.phase))}
-      <span className={monitorClass.loopProgress}>
-        {loop.current ?? 0}/{loop.total ?? 0}
+      {Object.entries(labels).map(([label, labelValue]) => (
+        <span className={monitorClass.chipQuiet} key={label}>
+          {label}={labelValue}
+        </span>
+      ))}
+      <span className={monitorClass.metricValue} title={title}>
+        {value}
       </span>
     </div>
   );
 }
 
-/** Compact sessions line: count, recent ids (annotated with active roles). */
-function renderSessionsBlock(sessions: MonitorSessionsDto) {
-  const count = sessions.count ?? 0;
-  const parts =
-    sessions.recentIds?.map((id) => {
-      const role = sessions.activeRoles?.[id];
-      return role === undefined || role === null ? id : id + " (" + role + ")";
-    }) ?? [];
+/**
+ * The latency distribution as a strip: one cell per non-empty bucket, its
+ * WIDTH proportional to how many observations landed at or below that
+ * boundary, so the shape of the tail is visible without arithmetic.
+ *
+ * Widths are geometry that comes from the data, not from a design token, so
+ * this is the one place the module sets an inline length. The cumulative
+ * buckets are differenced back into per-bucket counts first — drawing the
+ * cumulative counts would render a monotone wedge and say nothing.
+ */
+function renderDistribution(buckets: Record<string, number>, samples: number) {
+  if (samples <= 0) return null;
+  const ordered = Object.entries(buckets)
+    .map(([boundary, observed]) => [Number(boundary), observed] as const)
+    .filter(([boundary, observed]) => Number.isFinite(boundary) && observed > 0)
+    .sort((a, b) => a[0] - b[0]);
+  if (ordered.length === 0) return null;
+
+  let previous = 0;
+  const perBucket = ordered.map(([boundary, cumulative]) => {
+    const slice = Math.max(0, cumulative - previous);
+    previous = cumulative;
+    return { boundary, slice };
+  });
+  const peak = perBucket.reduce((max, bucket) => Math.max(max, bucket.slice), 0);
+  if (peak <= 0) return null;
+
+  const first = ordered[0]![0];
+  const last = ordered[ordered.length - 1]![0];
+  return (
+    <span
+      className={monitorClass.chart}
+      aria-hidden="true"
+      title={formatCount(samples) + " samples, ≤" + duration(last)}
+    >
+      <span className={monitorClass.chartBars}>
+        {perBucket.map((bucket) => (
+          <span
+            className={monitorClass.chartBar}
+            key={bucket.boundary}
+            style={{ flexGrow: bucket.slice }}
+          />
+        ))}
+      </span>
+      <span className={monitorClass.chartAxis}>
+        {"≤" + duration(first) + " … ≤" + duration(last)}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * One histogram: the distribution's SHAPE, then its readings as the panel's
+ * usual glyph lanes — the average as the headline value, and p50/p95/samples
+ * as facts beneath it.
+ */
+function renderHistogramRow(name: string, histogram: MonitorHistogramDto) {
+  const parsed = parseMetricKey(name);
+  const buckets = isRecord(histogram.buckets)
+    ? (histogram.buckets as Record<string, number>)
+    : {};
+  const samples = asNumber(histogram.count) ?? 0;
+  const sum = asNumber(histogram.sum) ?? 0;
+  const avg = samples > 0 ? Math.round(sum / samples) : undefined;
+  const p50 = histogramPercentile(buckets, samples, 0.5);
+  const p95 = histogramPercentile(buckets, samples, 0.95);
+
+  return (
+    <div className={monitorClass.metricRow} key={name}>
+      <span className={monitorClass.metricName} title={name}>
+        {parsed.name}
+      </span>
+      {Object.entries(parsed.labels).map(([label, labelValue]) => (
+        <span className={monitorClass.chipQuiet} key={label}>
+          {label}={labelValue}
+        </span>
+      ))}
+      <span className={monitorClass.metricValue}>
+        {samples > 0 ? formatDuration(avg ?? 0) : "no samples"}
+      </span>
+      {samples > 0 && (
+        <div className={monitorClass.metricExtra}>
+          {renderDistribution(buckets, samples)}
+          {renderFacts(
+            [
+              p50 !== undefined
+                ? { label: "p50", value: duration(p50), icon: "clock" as const }
+                : null,
+              p95 !== undefined
+                ? { label: "p95", value: duration(p95), icon: "clock" as const }
+                : null,
+              { label: "samples", value: formatCount(samples), icon: "metrics" as const },
+            ],
+            monitorClass.facts,
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One metric group (counters / gauges / histograms) with its overflow cap. */
+function renderMetricGroup(
+  title: string,
+  icon: RoleboxIcon,
+  group: string,
+  size: number,
+  isExpanded: (group: string) => boolean,
+  toggleGroup: (group: string) => void,
+  rows: unknown[],
+) {
+  if (size === 0) return null;
+  const expanded = isExpanded(group);
+  return (
+    <div className={monitorClass.metricGroup}>
+      <h4 className={monitorClass.subTitle} id={group + "-title"}>
+        <span className={monitorClass.sectionIcon} aria-hidden="true">
+          <Icon name={icon} size={14} />
+        </span>
+        {title}
+        <span className={monitorClass.subCount}>{formatCount(size)}</span>
+      </h4>
+      <div className={monitorClass.metricList} id={group} aria-labelledby={group + "-title"}>
+        {rows.slice(0, expanded ? size : GROUP_ROW_LIMIT)}
+      </div>
+      {renderOverflowToggle(group, size, GROUP_ROW_LIMIT, expanded, toggleGroup, "readings")}
+    </div>
+  );
+}
+
+/** The session roster: who is running what, this session first. */
+function renderSessionSection(
+  rows: SessionRow[],
+  census: number,
+  isExpanded: (group: string) => boolean,
+  toggleGroup: (group: string) => void,
+) {
+  // The heading never claims fewer sessions than the roster lists.
+  const declaredCount = Math.max(census, rows.length);
+  const group = "rolebox-monitor-sessions";
+  const expanded = isExpanded(group);
+  const visible = expanded ? rows : rows.slice(0, SESSION_ROW_LIMIT);
+  const roles = new Set(
+    rows.map((row) => row.role).filter((role): role is string => typeof role === "string"),
+  );
+  // The census can exceed the roster when the backend counts sessions it does
+  // not report identities for; the roster then says so instead of pretending
+  // the list is complete.
+  const unreported = Math.max(0, census - rows.length);
+
   return (
     <section
       className={monitorClass.section}
       aria-labelledby="rolebox-monitor-sessions-title"
     >
-      <h2
-        id="rolebox-monitor-sessions-title"
-        className={monitorClass.sectionTitle}
-      >
-        Sessions
-        <span className={monitorClass.sectionCount}>{count}</span>
-      </h2>
-      <p className={monitorClass.sessions}>
-        {count} session{count === 1 ? "" : "s"}
-        {parts.length > 0 ? " — " + parts.join(", ") : ""}
-      </p>
+      {renderSectionTitle(
+        "rolebox-monitor-sessions-title",
+        "sessions",
+        "Sessions",
+        formatCount(declaredCount),
+        roles.size > 0
+          ? formatCount(roles.size) + " active " + (roles.size === 1 ? "role" : "roles")
+          : undefined,
+      )}
+      {rows.length === 0 ? (
+        <p className={monitorClass.state}>No sessions reported.</p>
+      ) : (
+        <ul className={monitorClass.sessionList} id={group}>
+          {visible.map((row) => (
+            <li
+              className={
+                row.current
+                  ? monitorClass.sessionRow + " " + monitorClass.sessionRowCurrent
+                  : monitorClass.sessionRow
+              }
+              key={row.id}
+            >
+              <span
+                className={
+                  monitorClass.sessionGlyph +
+                  " " +
+                  (row.current ? monitorClass.toneRunning : monitorClass.toneCalm)
+                }
+              >
+                <Icon name={row.current ? "session" : "sessions"} size={14} />
+              </span>
+              <span className={monitorClass.sessionId} title={row.id}>
+                {shortId(row.id)}
+              </span>
+              {renderTextChip(
+                row.role ?? "base",
+                row.role ?? "base agent (no role switched)",
+              )}
+              {row.current && (
+                <span className={monitorClass.sessionMarker}>this session</span>
+              )}
+              {!row.current && row.mostRecent && (
+                <span className={monitorClass.sessionMarker}>latest</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {unreported > 0 && (
+        <p className={monitorClass.note}>
+          {formatCount(unreported)} more session{unreported === 1 ? "" : "s"} not
+          reported by name.
+        </p>
+      )}
+      {renderOverflowToggle(
+        group,
+        rows.length,
+        SESSION_ROW_LIMIT,
+        expanded,
+        toggleGroup,
+        "sessions",
+      )}
     </section>
   );
 }
@@ -761,120 +2190,188 @@ function renderSessionsBlock(sessions: MonitorSessionsDto) {
 // ── The panel ──────────────────────────────────────────────────────────────
 
 /**
- * The Monitoring settings page: fetches `GET /rolebox/status` and
- * `GET /rolebox/metrics` on mount (and on every manual refresh), renders the
- * engine-graph / loop / metrics / sessions readings, and surfaces
- * loading / error / empty states with a live-region status seat
- * (`role="status"`) and an `aria-busy` panel while a fetch is in flight.
- * The header also carries the manual role-reload control
- * (`POST /rolebox/reload`), the reload's only entry point; it never polls.
+ * The run console: fetches `GET /rolebox/status` and `GET /rolebox/metrics`
+ * on mount (and on every manual refresh), then renders the verdict, the session
+ * roster, one ledger block per engine graph, one row per loop, and the metric
+ * readings — with loading / error / empty states that say what is missing and
+ * why. It never polls: the freshness stamp is the snapshot's own time, and
+ * every duration in the body is relative to that moment, so nothing on screen
+ * silently ages.
  *
- * @param props - composed settings-page props (see {@link RoleboxMonitorPanelProps}).
+ * @param props - docked tab-body props (see {@link RoleboxMonitorPanelProps}).
  */
-export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
+export function RoleboxMonitorPanel(props: RoleboxMonitorPanelProps) {
   const [statusBody, setStatusBody] = useState<MonitorStatusBody | null>(null);
-  const [metricsBody, setMetricsBody] = useState<MonitorMetricsBody | null>(
-    null,
-  );
+  const [metricsBody, setMetricsBody] = useState<MonitorMetricsBody | null>(null);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<PanelStatus>({
     text: "Loading monitoring data…",
     error: false,
   });
+  /** Moment the current snapshot landed — the reference for every age. */
+  const [loadedAt, setLoadedAt] = useState(0);
   /**
    * Manual-refresh trigger. The load effect depends on it: bumping the token
    * re-runs the effect (with cleanup of the previous in-flight fetch).
-   * Settings pages are root-scoped, so there is no session dependency.
    */
   const [refreshToken, setRefreshToken] = useState(0);
   /**
-   * Metric groups the user has expanded past {@link GROUP_ROW_LIMIT}. Metrics
-   * are reference data, so the overflow starts collapsed; a new array is always
-   * written so the state comparison sees a change.
+   * Groups the user has expanded past their cap. Reference data starts
+   * collapsed; a new array is always written so the state comparison sees a
+   * change.
    */
   const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
   /**
-   * Manual role-reload trigger (`POST /rolebox/reload`). MANUAL ONLY: the
-   * request is issued from the button's click handler and never from a timer
-   * or an interval — this panel does not poll.
+   * Why the metrics seat is not on screen, or null when it loaded.
+   *
+   * Kept as a message rather than a flag: the metrics endpoint is env-gated and
+   * optional, so when it fails the console must say WHICH thing failed instead
+   * of quietly dropping a section.
    */
-  const [reloading, setReloading] = useState(false);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
   /**
-   * Confirmation of the last successful role reload, held until the
-   * follow-up role-state fetch lands. The fetch owns the status seat's steady
-   * text, so without this hand-off the reload's confirmation would be
-   * overwritten by the refresh the reload itself triggered.
+   * How updates are arriving. `connecting` until the channel answers, `live`
+   * once it does, `manual` when the platform has no EventSource or the channel
+   * never opened — in which case the console behaves exactly as it did before
+   * the channel existed.
    */
-  const [reloadNotice, setReloadNotice] = useState<string | null>(null);
+  const [live, setLive] = useState<PanelLive>("connecting");
+  /**
+   * The local clock. Every age on screen ("12s ago", "8m") is measured against
+   * THIS, not against the moment the snapshot landed, so a run that is still
+   * going counts up while you watch it instead of freezing at its last fetch.
+   */
+  const [now, setNow] = useState(() => Date.now());
+  /** When the snapshot last landed, for the refetch floor (a ref, not state). */
+  const lastLoadRef = useRef(0);
+
+  // The local clock. A single interval, no request: the panel never polls.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), CLOCK_TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
+
+  /**
+   * The change-signal channel.
+   *
+   * One `EventSource` per mounted console. A `changed` frame schedules a
+   * refetch at most once per {@link SIGNAL_REFETCH_MS}; a platform without
+   * `EventSource`, a channel that errors, or a host that predates the endpoint
+   * all degrade to `manual` — the console's original behaviour.
+   *
+   * The subscription itself never restarts: reconnection is the browser's job,
+   * and the load effect is what the frame drives.
+   */
+  useEffect(() => {
+    if (typeof EventSource === "undefined") {
+      setLive("manual");
+      return;
+    }
+    const source = new EventSource(EVENTS_ENDPOINT);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    source.onopen = () => setLive("live");
+    source.onerror = () => setLive("manual");
+    source.onmessage = (event: MessageEvent) => {
+      const frame = parseEventFrame(event.data);
+      if (frame === null || frame.type !== "changed") return;
+      if (timer !== null) return;
+      const wait = Math.max(0, SIGNAL_REFETCH_MS - (Date.now() - lastLoadRef.current));
+      timer = setTimeout(() => {
+        timer = null;
+        setRefreshToken((count) => count + 1);
+      }, wait);
+    };
+    return () => {
+      if (timer !== null) clearTimeout(timer);
+      source.close();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     // Distinguish the first load from a refresh: the skeleton only substitutes
     // for content that has never rendered, and the seat names which one is
     // happening.
-    const isInitialLoad = statusBody === null && metricsBody === null;
-    // Consume a pending role-reload confirmation: the fetch that follows a
-    // successful reload is what reports it, so the seat shows the reload
-    // outcome instead of a bare "Updated at" timestamp. Clearing it here (and
-    // not on the success branch) keeps a stale confirmation from resurfacing
-    // if this follow-up fetch itself fails.
-    const reloadNoticeText = reloadNotice;
-    setReloadNotice(null);
+    const isInitialLoad = statusBody === null;
     setLoading(true);
     setStatus({
       text: isInitialLoad ? "Loading monitoring data…" : "Refreshing…",
       error: false,
     });
 
+    /** One seat's read, settled on its own so neither seat can fail the other. */
+    async function readSeat(
+      endpoint: string,
+    ): Promise<{ ok: true; body: unknown } | { ok: false; error: string }> {
+      try {
+        const response = await fetch(endpoint, seatRequestInit());
+        if (!response.ok) return { ok: false, error: "HTTP " + response.status };
+        const body = (await response.json().catch(() => null)) as unknown;
+        // A 2xx whose body is not an object is a broken contract, not an empty
+        // reading: reporting it as "nothing is running" would under-report.
+        if (!isRecord(body)) {
+          return { ok: false, error: "unexpected response body" };
+        }
+        return { ok: true, body };
+      } catch (err) {
+        return { ok: false, error: toMessage(err) };
+      }
+    }
+
     async function load(): Promise<void> {
       try {
-        const [statusRes, metricsRes] = await Promise.all([
-          fetch(STATUS_ENDPOINT),
-          fetch(METRICS_ENDPOINT),
+        // The two endpoints are INDEPENDENT surfaces — metrics are env-gated and
+        // optional, status is the page — so they settle separately: a metrics
+        // hiccup must not blank a console whose status seat answered.
+        const [statusSeat, metricsSeat] = await Promise.all([
+          readSeat(STATUS_ENDPOINT),
+          readSeat(METRICS_ENDPOINT),
         ]);
         if (cancelled) return;
-        if (!statusRes.ok) throw new Error("HTTP " + statusRes.status);
-        if (!metricsRes.ok) throw new Error("HTTP " + metricsRes.status);
-        const statusData = (await statusRes.json().catch(() => null)) as unknown;
-        const metricsData = (await metricsRes.json().catch(() => null)) as unknown;
-        if (cancelled) return;
-        // Malformed JSON bodies degrade to null → the empty state, never a crash.
-        const nextStatus = isRecord(statusData)
-          ? (statusData as MonitorStatusBody)
-          : null;
-        const nextMetrics = isRecord(metricsData)
-          ? (metricsData as MonitorMetricsBody)
-          : null;
+        const now = Date.now();
+
+        if (metricsSeat.ok) {
+          setMetricsBody(metricsSeat.body as MonitorMetricsBody);
+          setMetricsError(null);
+        } else {
+          // Whatever metrics already on screen stay; the seat reports why.
+          setMetricsError(metricsSeat.error);
+        }
+
+        if (!statusSeat.ok) {
+          setStatus({
+            text: "Failed to load monitoring data: " + statusSeat.error,
+            error: true,
+          });
+          return;
+        }
+
+        const nextStatus = statusSeat.body as MonitorStatusBody;
         setStatusBody(nextStatus);
-        setMetricsBody(nextMetrics);
-        // The seat is the live region, so a refresh announces the VERDICT and
-        // not merely a timestamp.
+        setLoadedAt(now);
+        lastLoadRef.current = now;
+        // The seat is the live region, and it carries the VERDICT alone. The
+        // freshness stamp deliberately lives OUTSIDE it: with updates arriving
+        // on their own, a timestamp inside the region would re-announce itself
+        // every few seconds and bury the one sentence that matters.
         const verdict = deriveAttention(
           extractGraphs(nextStatus),
           extractLoops(nextStatus),
         );
         setStatus({
           text:
-            reloadNoticeText ??
-            ("Updated at " +
-              new Date().toLocaleTimeString() +
-              (verdict.needsAttention
-                ? " — " +
-                  (verdict.failed.length + verdict.blocked.length) +
-                  " need attention"
-                : "") +
-              (verdict.unknown.length > 0
-                ? " — " + verdict.unknown.length + " state unrecognized"
-                : "")),
+            (verdict.needsAttention
+              ? attentionPhrase(verdict.failed.length + verdict.blocked.length)
+              : verdict.unknown.length > 0
+                ? verdict.unknown.length +
+                  (verdict.unknown.length === 1 ? " state" : " states") +
+                  " unreadable"
+                : // A calm refresh says WHAT it saw, not merely that it looked:
+                  // a stopped or idle unit is a reading.
+                  describeAttention(verdict)) +
+            (metricsSeat.ok ? "" : " · metrics unavailable"),
           error: false,
         });
-      } catch (err) {
-        if (!cancelled) {
-          setStatus({
-            text: "Failed to load monitoring data: " + toMessage(err),
-            error: true,
-          });
-        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -894,24 +2391,27 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
   const counters = extractMetrics(metricsBody, "counters");
   const gauges = extractMetrics(metricsBody, "gauges");
   const histograms = extractHistograms(metricsBody);
+  const sessionRows = buildSessionRows(sessions, props.sessionId);
+  const metricCount = counters.length + gauges.length + histograms.length;
+  /**
+   * Sessions the PAYLOAD names.
+   *
+   * Deliberately not `sessionRows.length`: the roster always carries the
+   * session this panel is docked beside (the framework hands the body that id),
+   * so counting its rows would make "nothing is reporting" and "the load
+   * failed" unreachable for every real session — the failed state's Retry
+   * control included. A response with no session census is empty data.
+   */
+  const census = Math.max(
+    asNumber(sessions.count) ?? 0,
+    Object.keys(sessions.activeRoles ?? {}).length,
+    Array.isArray(sessions.recentIds) ? sessions.recentIds.length : 0,
+    typeof sessions.mostRecentId === "string" ? 1 : 0,
+  );
   const hasData =
-    graphs.length > 0 ||
-    loops.length > 0 ||
-    counters.length > 0 ||
-    gauges.length > 0 ||
-    histograms.length > 0 ||
-    (sessions.count ?? 0) > 0;
+    graphs.length > 0 || loops.length > 0 || metricCount > 0 || census > 0;
 
   const attention = deriveAttention(graphs, loops);
-  const attentionCount = attention.failed.length + attention.blocked.length;
-  const attentionDetail = describeAttention(attention);
-  // "All clear" is a claim, so it is made only when every phase was actually
-  // read. Unreadable phases downgrade the headline to a neutral admission.
-  const attentionTitle = attention.needsAttention
-    ? attentionCount + " need attention"
-    : attention.unknown.length > 0
-      ? attention.unknown.length + " state unrecognized"
-      : "All clear";
 
   const isExpanded = (group: string): boolean => expandedGroups.includes(group);
   const toggleGroup = (group: string): void => {
@@ -924,92 +2424,31 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
 
   const refresh = (): void => setRefreshToken((count) => count + 1);
 
-  /**
-   * Reload roles: POST the in-process reload route, then re-fetch the role
-   * state. MANUAL ONLY — this runs from the button's click handler and nothing
-   * else; no timer and no interval is ever scheduled.
-   *
-   * This is NOT the dock's client-side `reload()`
-   * (`role-switch-dock.tsx`), which merely re-reads the role list over GET.
-   * This control is a different concern: it asks the server to re-discover and
-   * re-resolve roles from disk and refresh every consumer of the previous role
-   * state. The two are deliberately not merged.
-   *
-   * A failed reload leaves the previously rendered role state untouched (the
-   * server preserved its state too), so the failure is reported on the status
-   * seat without a follow-up fetch.
-   */
-  const reloadRoles = async (): Promise<void> => {
-    if (reloading) return;
-    setReloading(true);
-    setStatus({ text: "Reloading roles…", error: false });
-    try {
-      const res = await fetch(RELOAD_ENDPOINT, { method: "POST" });
-      const body = (await res.json().catch(() => null)) as unknown;
-      if (!res.ok) {
-        // The route's stable error shape is { ok: false, error, disabled? };
-        // a bodyless failure degrades to the HTTP status.
-        const message =
-          isRecord(body) && typeof body.error === "string"
-            ? body.error
-            : "HTTP " + res.status;
-        setStatus({ text: "Role reload failed: " + message, error: true });
-        return;
-      }
-      const record = isRecord(body) ? body : {};
-      setReloadNotice(
-        "Reloaded roles — " +
-          (asNumber(record.discovered) ?? 0) +
-          " discovered, " +
-          (asNumber(record.resolved) ?? 0) +
-          " resolved, " +
-          (asNumber(record.skipped) ?? 0) +
-          " skipped",
-      );
-      // Re-fetch the role state through the same path the Refresh control
-      // uses; the notice rides that fetch so the seat reports the outcome.
-      setRefreshToken((count) => count + 1);
-    } catch (err) {
-      setStatus({ text: "Role reload failed: " + toMessage(err), error: true });
-    } finally {
-      setReloading(false);
-    }
-  };
-
-  // Body posture: a full loading state only while nothing has rendered yet
-  // (a refresh with data keeps the data visible); the error state only when
-  // there is no data to fall back on (a refresh failure with data reports on
-  // the status seat instead); otherwise the data body or the empty state.
+  // Body posture: a full loading state only while nothing has rendered yet; the
+  // full error state only when there is nothing to fall back on; the data body
+  // (with a retry row when the last status read failed) whenever there is data
+  // to show, and the empty state when there is not. The RETRY control travels
+  // with the message in both error cases — a failed read always has a way back,
+  // whether or not the other seat answered.
   let body: unknown;
   if (loading && statusBody === null && metricsBody === null) {
-    // The live region is the ONLY `.rolebox-monitor-state` here so the status
-    // seat stays unambiguous; the skeleton beside it is decorative, and its
-    // bars mirror the real layout so the panel does not reflow when data lands.
+    // The header seat is the panel's ONE live region and already announces the
+    // load, so the skeleton stays purely decorative: a second live region with
+    // the same sentence would have every screen reader say it twice.
     body = (
       <div className={monitorClass.loading}>
-        <span
-          className={monitorClass.state + " " + monitorClass.stateSr}
-          role="status"
-        >
-          Loading monitoring data…
-        </span>
         <div className={monitorClass.skeleton} aria-hidden="true">
-          <div className={monitorClass.skeletonCard}>
-            <span className={monitorClass.skeletonBarWide} />
-            <span className={monitorClass.skeletonBarHalf} />
-          </div>
-          <div className={monitorClass.skeletonCard}>
-            <span className={monitorClass.skeletonBarWide} />
-            <span className={monitorClass.skeletonBar} />
-            <span className={monitorClass.skeletonBar} />
-            <span className={monitorClass.skeletonBar} />
-          </div>
-          <div className={monitorClass.skeletonCard}>
-            <span className={monitorClass.skeletonBarWide} />
-            <span className={monitorClass.skeletonBar} />
-            <span className={monitorClass.skeletonBar} />
-            <span className={monitorClass.skeletonBar} />
-          </div>
+          {[0, 1].map((section) => (
+            <div className={monitorClass.skeletonCard} key={section}>
+              <span className={monitorClass.skeletonBarWide} />
+              {[0, 1, 2].map((row) => (
+                <div className={monitorClass.skeletonRow} key={row}>
+                  <span className={monitorClass.skeletonIcon} />
+                  <span className={monitorClass.skeletonBar} />
+                </div>
+              ))}
+            </div>
+          ))}
         </div>
       </div>
     );
@@ -1019,234 +2458,215 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
         className={monitorClass.state + " " + monitorClass.stateError}
         role="alert"
       >
-        <span className={monitorClass.attentionGlyph} aria-hidden="true">
-          <AlertGlyph />
+        <span className={monitorClass.errorGlyph} aria-hidden="true">
+          <AlertGlyph size={16} />
         </span>
         <span className={monitorClass.errorText}>{status.text}</span>
-        <button
-          type="button"
-          className={monitorClass.retry}
-          onClick={refresh}
-        >
+        <button type="button" className={monitorClass.retry} onClick={refresh}>
           Retry
         </button>
       </div>
     );
   } else if (!hasData) {
+    // Nothing is happening. Say so, and say what would appear here — an empty
+    // panel is otherwise indistinguishable from a broken one, and a bare
+    // sentence reads as a failure rather than as calm.
     body = (
-      <div className={monitorClass.state} role="status">
-        No monitoring data available
+      <div className={monitorClass.body}>
+        {renderAttentionBand(attention)}
+        <div className={monitorClass.empty} role="status">
+          <span className={monitorClass.emptyIcon} aria-hidden="true">
+            <Icon name="graphs" size={24} />
+          </span>
+          <span className={monitorClass.emptyTitle}>
+            No graphs, loops or sessions are reporting.
+          </span>
+          <span className={monitorClass.emptyHint}>
+            Graphs, loops and their rounds appear here while they run; sessions
+            appear with the role each one is using.
+          </span>
+        </div>
       </div>
     );
   } else {
     body = (
       <div className={monitorClass.body}>
+        {/* A failed status read keeps its message AND its way back, whether or
+            not the other seat answered: partial data must never cost the user
+            their recovery control. Deliberately not a live region — the header
+            seat announces, and this row re-renders on every refresh. */}
+        {status.error && (
+          <div className={monitorClass.error}>
+            <span className={monitorClass.errorGlyph} aria-hidden="true">
+              <AlertGlyph size={16} />
+            </span>
+            <span className={monitorClass.errorText}>{status.text}</span>
+            <button type="button" className={monitorClass.retry} onClick={refresh}>
+              Retry
+            </button>
+          </div>
+        )}
         {/* The verdict leads the evidence. Deliberately NOT role="alert": the
             header seat is the live region, and a band that re-renders on every
             refresh must not re-announce itself. */}
-        <section
-          className={
-            monitorClass.attention +
-            " " +
-            (attention.needsAttention
-              ? monitorClass.attentionAlert
-              : monitorClass.attentionCalm)
-          }
-          aria-labelledby="rolebox-monitor-attention-title"
-        >
-          <span className={monitorClass.attentionGlyph} aria-hidden="true">
-            {attention.needsAttention ? (
-              <AlertGlyph />
-            ) : attention.unknown.length > 0 ? (
-              <QuestionGlyph />
-            ) : (
-              <CheckGlyph />
-            )}
-          </span>
-          <span
-            id="rolebox-monitor-attention-title"
-            className={monitorClass.attentionTitle}
-          >
-            {attentionTitle}
-          </span>
-          <span className={monitorClass.attentionDetail}>
-            {attentionDetail}
-          </span>
-        </section>
+        {renderAttentionBand(attention)}
+
+        {renderSessionSection(sessionRows, census, isExpanded, toggleGroup)}
+
         {graphs.length > 0 && (
           <section
             className={monitorClass.section}
             aria-labelledby="rolebox-monitor-graphs-title"
           >
-            <h2
-              id="rolebox-monitor-graphs-title"
-              className={monitorClass.sectionTitle}
-            >
-              Engine graphs
-              <span className={monitorClass.sectionCount}>
-                {graphs.length}
-              </span>
-            </h2>
-            {graphs.map((graph) => renderGraphCard(graph))}
+            {renderSectionTitle(
+              "rolebox-monitor-graphs-title",
+              "graphs",
+              "Engine graphs",
+              formatCount(graphs.length),
+            )}
+            {graphs.map((graph) =>
+              renderGraphBlock(graph, now, isExpanded, toggleGroup),
+            )}
           </section>
         )}
+
         {loops.length > 0 && (
           <section
             className={monitorClass.section}
             aria-labelledby="rolebox-monitor-loops-title"
           >
-            <h2
-              id="rolebox-monitor-loops-title"
-              className={monitorClass.sectionTitle}
-            >
-              Loops
-              <span className={monitorClass.sectionCount}>{loops.length}</span>
-            </h2>
-            {loops.map((loop) => renderLoopRow(loop))}
+            {renderSectionTitle(
+              "rolebox-monitor-loops-title",
+              "loops",
+              "Loops",
+              formatCount(loops.length),
+            )}
+            <div className={monitorClass.loopList}>
+              {loops.map((loop) => renderLoopRow(loop, now))}
+            </div>
           </section>
         )}
-        {(counters.length > 0 || gauges.length > 0 || histograms.length > 0) && (
-          <section
-            className={monitorClass.section}
-            aria-labelledby="rolebox-monitor-metrics-title"
-          >
-            <h2
-              id="rolebox-monitor-metrics-title"
-              className={monitorClass.sectionTitle}
-            >
-              Metrics
-              <span className={monitorClass.sectionCount}>
-                {counters.length + gauges.length + histograms.length}
-              </span>
-            </h2>
-            {counters.length > 0 && (
-              <div className={monitorClass.metricGroup}>
-                <h3 className={monitorClass.metricGroupTitle}>Counters</h3>
-                <dl className={monitorClass.kv} id="rolebox-monitor-counters">
-                  {counters
-                    .slice(
-                      0,
-                      isExpanded("rolebox-monitor-counters")
-                        ? counters.length
-                        : GROUP_ROW_LIMIT,
-                    )
-                    .map(([name, metric]) => (
-                      <div className={monitorClass.kvRow} key={name}>
-                        <dt className={monitorClass.metricName} title={name}>
-                          {name}
-                        </dt>
-                        <dd className={monitorClass.metricValue}>
-                          {formatNumber(metric.value)}
-                        </dd>
-                      </div>
-                    ))}
-                </dl>
-                {renderOverflowToggle(
-                  "rolebox-monitor-counters",
-                  counters.length,
-                  isExpanded("rolebox-monitor-counters"),
-                  toggleGroup,
-                )}
-              </div>
-            )}
-            {gauges.length > 0 && (
-              <div className={monitorClass.metricGroup}>
-                <h3 className={monitorClass.metricGroupTitle}>Gauges</h3>
-                <dl className={monitorClass.kv} id="rolebox-monitor-gauges">
-                  {gauges
-                    .slice(
-                      0,
-                      isExpanded("rolebox-monitor-gauges")
-                        ? gauges.length
-                        : GROUP_ROW_LIMIT,
-                    )
-                    .map(([name, metric]) => (
-                      <div className={monitorClass.kvRow} key={name}>
-                        <dt className={monitorClass.metricName} title={name}>
-                          {name}
-                        </dt>
-                        <dd className={monitorClass.metricValue}>
-                          {formatNumber(metric.value)}
-                        </dd>
-                      </div>
-                    ))}
-                </dl>
-                {renderOverflowToggle(
-                  "rolebox-monitor-gauges",
-                  gauges.length,
-                  isExpanded("rolebox-monitor-gauges"),
-                  toggleGroup,
-                )}
-              </div>
-            )}
-            {histograms.length > 0 && (
-              <div className={monitorClass.metricGroup}>
-                <h3 className={monitorClass.metricGroupTitle}>Histograms</h3>
-                <dl className={monitorClass.kv} id="rolebox-monitor-histograms">
-                  {histograms
-                    .slice(
-                      0,
-                      isExpanded("rolebox-monitor-histograms")
-                        ? histograms.length
-                        : GROUP_ROW_LIMIT,
-                    )
-                    .map(([name, histogram]) => (
-                      <div className={monitorClass.kvRow} key={name}>
-                        <dt className={monitorClass.metricName} title={name}>
-                          {name}
-                        </dt>
-                        <dd className={monitorClass.metricValue}>
-                          {formatNumber(histogram.count)} samples ·{" "}
-                          {formatNumber(histogram.sum)}ms
-                        </dd>
-                      </div>
-                    ))}
-                </dl>
-                {renderOverflowToggle(
-                  "rolebox-monitor-histograms",
-                  histograms.length,
-                  isExpanded("rolebox-monitor-histograms"),
-                  toggleGroup,
-                )}
-              </div>
-            )}
-          </section>
-        )}
-        {(sessions.count ?? 0) > 0 && renderSessionsBlock(sessions)}
+
+        <section
+          className={monitorClass.section}
+          aria-labelledby="rolebox-monitor-metrics-title"
+        >
+          {renderSectionTitle(
+            "rolebox-monitor-metrics-title",
+            "metrics",
+            "Metrics",
+            formatCount(metricCount),
+          )}
+          {metricCount === 0 ? (
+            // An empty snapshot is explained rather than hidden, and the reason
+            // has to be TRUE: the registry always reports its core dispatch
+            // seats, so "nothing is counted" would be a lie. What the gate
+            // actually takes away is everything else.
+            <p className={monitorClass.state}>
+              {metricsError !== null
+                ? "Metrics could not be loaded: " + metricsError + "."
+                : "No samples recorded. Rolebox measures anything beyond the core dispatch counters only while ROLEBOX_METRICS is set."}
+            </p>
+          ) : (
+            <>
+              {renderMetricGroup(
+                "Counters",
+                "metrics",
+                "rolebox-monitor-counters",
+                counters.length,
+                isExpanded,
+                toggleGroup,
+                counters.map(([name, metric]) => {
+                  const parsed = parseMetricKey(name);
+                  return renderMetricRow(
+                    parsed.name,
+                    { ...parsed.labels, ...(metric.labels ?? {}) },
+                    count(metric.value),
+                    name + " = " + count(metric.value),
+                  );
+                }),
+              )}
+              {renderMetricGroup(
+                "Gauges",
+                "frontier",
+                "rolebox-monitor-gauges",
+                gauges.length,
+                isExpanded,
+                toggleGroup,
+                gauges.map(([name, metric]) => {
+                  const parsed = parseMetricKey(name);
+                  return renderMetricRow(
+                    parsed.name,
+                    { ...parsed.labels, ...(metric.labels ?? {}) },
+                    count(metric.value),
+                    name + " = " + count(metric.value),
+                  );
+                }),
+              )}
+              {renderMetricGroup(
+                "Histograms",
+                "clock",
+                "rolebox-monitor-histograms",
+                histograms.length,
+                isExpanded,
+                toggleGroup,
+                histograms.map(([name, histogram]) =>
+                  renderHistogramRow(name, histogram),
+                ),
+              )}
+            </>
+          )}
+        </section>
       </div>
     );
   }
 
   return (
-    <div
-      className="rolebox-monitor"
-      data-rolebox-monitor
-      aria-busy={loading || reloading}
-    >
+    <div className="rolebox-monitor" data-rolebox-monitor aria-busy={loading}>
       <div className={monitorClass.panel}>
         <header className={monitorClass.header}>
-          <h1 className={monitorClass.title}>Monitoring</h1>
+          <div className={monitorClass.titleRow}>
+            {/* The tab chip carries the surface name; the body keeps its own
+                heading so the reading sections stay named in the a11y tree. */}
+            <h2 className={monitorClass.title}>Rolebox</h2>
+            {/* How updates arrive, and when the snapshot was taken. Outside the
+                live region on purpose (see the status seat below). */}
+            <span
+              className={monitorClass.live}
+              title={
+                live === "live"
+                  ? "Updates arrive when rolebox state changes."
+                  : live === "connecting"
+                    ? "Opening the change channel…"
+                    : "The change channel is unavailable — use Refresh."
+              }
+            >
+              <span
+                className={monitorClass.liveDot + " " + liveDotModifier(live)}
+                aria-hidden="true"
+              />
+              <span className={monitorClass.liveLabel}>{LIVE_LABEL[live]}</span>
+              <span className={monitorClass.liveTime}>
+                {loadedAt === 0
+                  ? "—"
+                  : new Date(loadedAt).toLocaleTimeString()}
+              </span>
+            </span>
+          </div>
           <button
             type="button"
             className={monitorClass.refresh}
-            disabled={loading || reloading}
+            disabled={loading}
             onClick={refresh}
           >
-            {loading && (
+            {loading ? (
               <span className={monitorClass.spinner} aria-hidden="true" />
+            ) : (
+              <span className={monitorClass.buttonGlyph} aria-hidden="true">
+                <Icon name="retry" size={14} />
+              </span>
             )}
             Refresh
-          </button>
-          <button
-            type="button"
-            className={monitorClass.reload}
-            disabled={loading || reloading}
-            onClick={() => void reloadRoles()}
-          >
-            {reloading && (
-              <span className={monitorClass.spinner} aria-hidden="true" />
-            )}
-            Reload roles
           </button>
           <span
             role="status"
@@ -1257,7 +2677,11 @@ export function RoleboxMonitorPanel(_props: RoleboxMonitorPanelProps) {
                 : monitorClass.status
             }
           >
-            {status.text}
+            {/* The body always carries the full message beside its Retry
+                control (the alert state, or the retry row when other seats
+                answered), so the seat states the outcome instead of repeating
+                the sentence verbatim. Its title keeps the full text. */}
+            {status.error ? "Load failed" : status.text}
           </span>
         </header>
         {body}

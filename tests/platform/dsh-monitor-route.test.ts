@@ -35,6 +35,7 @@ import { RoleMode } from "../../src/constants.ts";
 import { DshRoleSwitcher } from "../../src/platform/adapters/dsh/role-switcher.ts";
 import {
   DshRoleboxMonitorWebRoute,
+  EVENT_COALESCE_MS,
   ROLEBOX_MONITOR_ROUTE_PREFIX,
 } from "../../src/platform/adapters/dsh/web-rolebox-monitor-route.ts";
 import type {
@@ -266,6 +267,76 @@ function json<T = any>(result: { text: string }): T {
   return JSON.parse(result.text) as T;
 }
 
+/**
+ * SSE-capable response double.
+ *
+ * A held-open response is not a buffered one: the channel's contract is that it
+ * is written to over time and torn down by the peer, so this double records
+ * every chunk and lets a test fire the peer's own `close`.
+ */
+class SseRes extends MockRes {
+  readonly chunks: string[] = [];
+  destroyed = false;
+  private readonly listeners = new Map<string, Array<() => void>>();
+
+  write(chunk: string): boolean {
+    this.chunks.push(String(chunk));
+    return true;
+  }
+
+  on(event: string, listener: () => void): this {
+    const list = this.listeners.get(event) ?? [];
+    list.push(listener);
+    this.listeners.set(event, list);
+    return this;
+  }
+
+  off(event: string, listener: () => void): this {
+    const list = this.listeners.get(event) ?? [];
+    this.listeners.set(
+      event,
+      list.filter((entry) => entry !== listener),
+    );
+    return this;
+  }
+
+  /** The peer went away (tab closed, page reloaded). */
+  closeFromPeer(): void {
+    this.destroyed = true;
+    for (const listener of this.listeners.get("close") ?? []) listener();
+  }
+
+  /** Everything written so far, as text. */
+  get stream(): string {
+    return this.chunks.join("");
+  }
+}
+
+/** Open the change channel and return the held-open response double. */
+async function openChannel(
+  handler: DshWebRouteLike["handler"],
+): Promise<SseRes> {
+  const req = new MockReq("GET", "/rolebox/events");
+  const res = new SseRes();
+  const pending = handler(
+    req as unknown as IncomingMessage,
+    res as unknown as ServerResponse,
+  );
+  if (pending) await pending;
+  return res;
+}
+
+/** Every parsed `data:` frame a channel has written. */
+function frames(res: SseRes): Array<Record<string, unknown>> {
+  return res.stream
+    .split("\n\n")
+    .filter((block) => block.startsWith("data: "))
+    .map(
+      (block) =>
+        JSON.parse(block.slice("data: ".length)) as Record<string, unknown>,
+    );
+}
+
 // ── Fixture ─────────────────────────────────────────────────────────────────
 
 /**
@@ -317,6 +388,103 @@ describe("DshRoleboxMonitorWebRoute registration", () => {
 
     dispose();
     expect(registered).toHaveLength(0);
+  });
+});
+
+// ── GET /rolebox/events (change channel) ────────────────────────────────────
+
+describe("DshRoleboxMonitorWebRoute GET /rolebox/events", () => {
+  it("holds the response open and greets with a hello frame", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+
+    const res = await openChannel(registered[0].handler);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["Content-Type"]).toContain("text/event-stream");
+    expect(res.headers["Cache-Control"]).toContain("no-cache");
+    // Proxies buffer by default, which would hold every frame.
+    expect(res.headers["X-Accel-Buffering"]).toBe("no");
+    // A comment on open so a client can tell "connected and idle" from "never
+    // connected"; SSE parsers skip it.
+    expect(res.stream.startsWith(": connected")).toBe(true);
+    const [first] = frames(res);
+    expect(first).toMatchObject({ type: "hello" });
+    expect(typeof first!.coalesceMs).toBe("number");
+  });
+
+  it("writes one changed frame per state change", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const res = await openChannel(registered[0].handler);
+
+    fixture.route.notifyChanged("loop");
+
+    const changed = frames(res).filter((frame) => frame.type === "changed");
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toMatchObject({ type: "changed", reason: "loop" });
+    expect(typeof changed[0]!.at).toBe("number");
+  });
+
+  it("coalesces a burst into one immediate and one trailing frame", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const res = await openChannel(registered[0].handler);
+
+    // A graph settling fires many signals; the console needs to know THAT
+    // something moved, not how many times.
+    fixture.route.notifyChanged("file");
+    fixture.route.notifyChanged("file");
+    fixture.route.notifyChanged("graph");
+    fixture.route.notifyChanged("loop");
+    expect(frames(res).filter((frame) => frame.type === "changed")).toHaveLength(1);
+
+    await Bun.sleep(EVENT_COALESCE_MS + 80);
+    const changed = frames(res).filter((frame) => frame.type === "changed");
+    expect(changed).toHaveLength(2);
+    // The trailing frame carries the pending reason.
+    expect(changed[1]!.reason).toBe("loop");
+  });
+
+  it("drops a stream the peer closed, and stops signalling when none remain", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+    const res = await openChannel(registered[0].handler);
+    const before = res.chunks.length;
+
+    res.closeFromPeer();
+    fixture.route.notifyChanged("loop");
+
+    expect(res.chunks.length).toBe(before);
+  });
+
+  it("closes every open stream when the route is disposed", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    const dispose = fixture.route.register(webServer);
+    const res = await openChannel(registered[0].handler);
+
+    dispose();
+
+    // An SSE response is a live socket: leaving one behind would keep a client
+    // waiting on a route that no longer exists.
+    expect(res.destroyed || res.headersSent).toBe(true);
+    expect(registered).toHaveLength(0);
+  });
+
+  it("answers 405 for a non-GET on the channel", async () => {
+    const fixture = await createFixture();
+    const { webServer, registered } = createFakeWebServer();
+    fixture.route.register(webServer);
+
+    const res = await invoke(registered[0].handler, "POST", "/rolebox/events");
+
+    expect(res.status).toBe(405);
+    expect(json<{ ok: boolean }>(res).ok).toBe(false);
   });
 });
 
