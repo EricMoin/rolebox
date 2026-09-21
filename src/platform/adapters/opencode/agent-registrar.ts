@@ -3,7 +3,7 @@
  *
  * Writes agent definition files to `~/.claude/agents/` as markdown files
  * tagged with the rolebox marker comment. This is the same file-writing
- * behavior previously implemented directly in `syncAgentFiles()`.
+ * behavior the sync module previously implemented directly.
  *
  * Does NOT import from `@opencode-ai/plugin` or `@opencode-ai/sdk`.
  *

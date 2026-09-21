@@ -3,8 +3,6 @@ import { RoleMode } from "../constants.ts";
 import { createSubLogger, formatError } from "../logger.ts";
 import type { AgentDefinition } from "../platform/types.ts";
 import type { IAgentRegistrar } from "../platform/ports/agent-registrar.ts";
-import type { PiAgentRegistrar } from "../platform/adapters/pi/agent-registrar.ts";
-import { OpencodeAgentRegistrar } from "../platform/adapters/opencode/agent-registrar.ts";
 
 const log = createSubLogger("sync");
 
@@ -66,28 +64,4 @@ export async function syncAllAgents(
     log.warn("Failed to sync agents", { error: formatError(err) });
     return { added: [], removed: [], unchanged: [] };
   }
-}
-
-/**
- * Write agent definitions to ~/.claude/agents/ as fallback registration.
- *
- * @deprecated Use `syncAllAgents(resolvedRoles, new OpencodeAgentRegistrar())` instead.
- * Kept as a convenience alias for backward compatibility.
- */
-export function syncAgentFiles(resolvedRoles: ResolvedRole[]): void {
-  const registrar = new OpencodeAgentRegistrar();
-  void syncAllAgents(resolvedRoles, registrar);
-}
-
-/**
- * Sync resolved agent definitions into a PiAgentRegistrar (in-memory registry).
- *
- * @deprecated Use `syncAllAgents(resolvedRoles, registrar)` instead.
- * Kept as a convenience alias for backward compatibility.
- */
-export async function syncAgentFilesForPi(
-  resolvedRoles: ResolvedRole[],
-  registrar: PiAgentRegistrar,
-): Promise<void> {
-  await syncAllAgents(resolvedRoles, registrar);
 }
