@@ -3,19 +3,21 @@ import { z } from "zod";
 import type { DispatchManager } from "../core/manager.ts";
 import { formatDuration, formatAge } from "./format-utils.ts";
 import type { CanonicalToolDef } from "../../platform/types.ts";
+import type { DispatchTaskStatus } from "../types.ts";
 
 // ─── Status glyphs ──────────────────────────────────────────────────────────
 
-const STATUS_GLYPH: Record<string, string> = {
+const STATUS_GLYPH: Record<DispatchTaskStatus, string> = {
   running: "▸",
   pending: "●",
   completed: "✓",
+  awaiting_approval: "⏸",
   error: "✗",
   timeout: "◇",
   cancelled: "⊘",
 };
 
-function glyph(status: string): string {
+function glyph(status: DispatchTaskStatus): string {
   return STATUS_GLYPH[status] ?? "?";
 }
 
@@ -98,7 +100,7 @@ function getSessionSummary(manager: DispatchManager, sessionID: string): string 
 
   lines.push("");
   lines.push("### Legend");
-  lines.push(`- ▸ running   ● pending   ✓ completed   ✗ error   ◇ timeout   ⊘ cancelled`);
+  lines.push(`- ▸ running   ● pending   ✓ completed   ⏸ awaiting_approval   ✗ error   ◇ timeout   ⊘ cancelled`);
   lines.push(`- \`Last Activity\`: time since last progress update (from eventState)`);
   lines.push(
     `- \`Calls\`: total tool calls made by the sub-agent so far`,
