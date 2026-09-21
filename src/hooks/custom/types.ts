@@ -1,5 +1,6 @@
 import type { Logger, ILogObj } from "tslog";
 import type { RecoveryConfig } from "../../recovery/types.ts";
+import type { CanonicalEventType } from "../../platform/types.ts";
 
 /** The lifecycle events a custom hook can listen to. */
 export type HookEvent =
@@ -14,7 +15,7 @@ export interface HookFilter {
   /** Only fire for these tool names (tool.execute.before/after only) */
   tools?: string[];
   /** Only fire for these event subtypes (event hook only: session.idle, session.error, etc.) */
-  eventTypes?: string[];
+  eventTypes?: CanonicalEventType[];
 }
 
 /** A single custom hook declaration from role.yaml. */

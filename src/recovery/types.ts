@@ -12,6 +12,9 @@
  */
 
 import type { ISessionClient } from "../platform/ports/session-client.ts";
+import type { HookEvent } from "../hooks/custom/types.ts";
+import type { CanonicalEventType } from "../platform/types.ts";
+import type { BuiltinHookKey } from "./builtin/keys.ts";
 
 // ── Error Categories ────────────────────────────────────────────────────
 
@@ -279,9 +282,9 @@ export interface BuiltInHookDefinition {
   /** Unique hook name (matches the config key in hooks.builtin) */
   name: string;
   /** The config key used in hooks.builtin to enable/disable this hook */
-  configKey: string;
+  configKey: BuiltinHookKey;
   /** Lifecycle events this hook listens to */
-  events: string[];
+  events: HookEvent[];
   /** Whether it fires before or after built-in handlers */
   phase: "before" | "after";
   /** Execution priority (lower = earlier within its phase) */
@@ -299,6 +302,6 @@ export interface BuiltInHookDefinition {
     /** Only fire for these tool names */
     tools?: string[];
     /** Only fire for these event subtypes */
-    eventTypes?: string[];
+    eventTypes?: CanonicalEventType[];
   };
 }

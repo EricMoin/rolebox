@@ -101,7 +101,7 @@ export class CustomHookRegistry {
           // Event-type filter for event hook
           if (filter.eventTypes && event === "event") {
             const eventInput = input as { type?: string } | undefined;
-            if (eventInput?.type && !filter.eventTypes.includes(eventInput.type)) {
+            if (eventInput?.type && !filter.eventTypes.some((type) => type === eventInput.type)) {
               continue;
             }
           }

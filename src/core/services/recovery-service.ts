@@ -4,6 +4,11 @@ import { RecoveryEngine } from "../../recovery/engine.ts";
 import { RecoveryStateStore } from "../../recovery/state.ts";
 import { BuiltInHookRegistry } from "../../recovery/builtin/registry.ts";
 import { registerBuiltinHooks } from "../../recovery/builtin/index.ts";
+import {
+  ERROR_RECOVERY_HOOK_KEYS,
+  GUARD_HOOK_KEYS,
+  findUnknownBuiltinConfigKeys,
+} from "../../recovery/builtin/keys.ts";
 import { parseRecoveryConfig, mergeBuiltinFlags, DEFAULT_RECOVERY_CONFIG } from "../../recovery/config.ts";
 import { hookState } from "../../hooks/state.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -50,28 +55,22 @@ export class RecoveryService implements PluginService {
 
     const builtinConfig = mergeBuiltinFlags(builtinFlagsList);
 
-    // Tiered defaults: error recovery hooks default ON, guard hooks default OFF
-    const ERROR_RECOVERY_HOOKS = [
-      "session_error",
-      "edit_error",
-      "json_error",
-      "context_window",
-      "empty_response",
-    ];
-    const GUARD_HOOKS = [
-      "tool_pair_validation",
-      "write_existing_file_guard",
-      "bash_file_read_guard",
-      "webfetch_redirect_guard",
-    ];
+    // Unknown hooks.builtin keys have no effect on any built-in hook; warn so a
+    // typo is visible instead of silently leaving a hook at its default.
+    for (const key of findUnknownBuiltinConfigKeys(builtinConfig)) {
+      log.warn(
+        `Unknown hooks.builtin key "${key}" — no built-in hook uses it; this flag has no effect`,
+      );
+    }
 
+    // Tiered defaults: error recovery hooks default ON, guard hooks default OFF
     // Apply tiered defaults only when user hasn't explicitly set a value
-    for (const key of ERROR_RECOVERY_HOOKS) {
+    for (const key of ERROR_RECOVERY_HOOK_KEYS) {
       if (builtinConfig[key] === undefined) {
         builtinConfig[key] = true;
       }
     }
-    for (const key of GUARD_HOOKS) {
+    for (const key of GUARD_HOOK_KEYS) {
       if (builtinConfig[key] === undefined) {
         builtinConfig[key] = false;
       }

@@ -63,7 +63,7 @@ dispatch:
 # Custom Hooks (see [Custom Hooks](hooks.md))
 hooks:
   builtin:                          # Enable/disable built-in hooks
-    auto_activate: true
+    session_error: true
   custom:
     - name: string                  # Hook identifier
       description: string           # Human-readable description

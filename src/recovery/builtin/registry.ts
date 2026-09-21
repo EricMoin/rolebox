@@ -1,11 +1,11 @@
 import type { BuiltInHookDefinition } from "../types.ts";
-import type { HookContext } from "../../hooks/custom/types.ts";
+import type { HookContext, HookEvent } from "../../hooks/custom/types.ts";
 import { createSubLogger } from "../../logger.ts";
 
 const log = createSubLogger("recovery:builtin-registry");
 
 export class BuiltInHookRegistry {
-  private byEvent = new Map<string, BuiltInHookDefinition[]>();
+  private byEvent = new Map<HookEvent, BuiltInHookDefinition[]>();
 
   register(hook: BuiltInHookDefinition): void {
     for (const event of hook.events) {
@@ -17,7 +17,7 @@ export class BuiltInHookRegistry {
   }
 
   getHooks(
-    event: string,
+    event: HookEvent,
     phase: "before" | "after",
     builtinConfig: Record<string, boolean>,
   ): BuiltInHookDefinition[] {
@@ -35,7 +35,7 @@ export class BuiltInHookRegistry {
   }
 
   async runHooks(
-    event: string,
+    event: HookEvent,
     phase: "before" | "after",
     ctxFactory: () => HookContext,
     input: unknown,
@@ -52,7 +52,7 @@ export class BuiltInHookRegistry {
         }
         if (hook.filter.eventTypes && event === "event") {
           const eventInput = input as { type?: string } | undefined;
-          if (eventInput?.type && !hook.filter.eventTypes.includes(eventInput.type)) continue;
+          if (eventInput?.type && !hook.filter.eventTypes.some((type) => type === eventInput.type)) continue;
         }
       }
 
