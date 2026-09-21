@@ -106,6 +106,7 @@ import { buildAvailableFunctionsBlock } from "../prompt/builder.ts";
 import { ProcessFatalReporter } from "../core/process-fatal-reporter.ts";
 import { createGraphTools } from "../graph/tools/index.ts";
 import { createGraphToolSet, type GraphToolSet } from "../graph/tools/graph-tools.ts";
+import { registerLiveGraphToolSet } from "../graph/tools/live-state.ts";
 import { LoopCoordinator } from "../loop/coordinator.ts";
 import { LoopStore } from "../loop/loop-store.ts";
 import { createLoopTools } from "../loop/loop-tools.ts";
@@ -1183,6 +1184,12 @@ export async function apply(
     // length-1 chain and behave exactly as before.
     resolveSessionChain: (sid) => dshDispatch.resolveSessionChain(sid),
   });
+  // Monitor S10 (live-state): register the toolset as the process's live
+  // graph-registry source so the monitor's `readLiveEngineGraphs` projects
+  // running graphs from memory — the same in-memory feed the TUI reads. With no
+  // registration the /rolebox/status route falls back to a disk scan, so the
+  // web console must never see an empty engine list while graphs execute.
+  registerLiveGraphToolSet(graphToolSet);
   const graphTools = createGraphTools(undefined, {
     toolset: graphToolSet,
     getEffectiveAgent: (sessionID?: string) =>

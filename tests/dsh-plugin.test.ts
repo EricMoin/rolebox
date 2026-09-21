@@ -41,6 +41,10 @@ import { shortHash } from "../src/utils/state-paths.ts";
 import { ActiveRoleStore } from "../src/platform/adapters/dsh/active-role-store.ts";
 import { DshEventBridge, mapDshEventType } from "../src/platform/adapters/dsh/event-bridge.ts";
 import { apply, name, inject, Config, buildAgentPromptInjector } from "../src/entries/dsh.ts";
+import {
+  clearLiveGraphToolSet,
+  getLiveGraphToolSet,
+} from "../src/graph/tools/live-state.ts";
 import type {
   DshPluginContext,
   DshPluginDisposer,
@@ -501,6 +505,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Never let one boot's registered toolset leak into the next test.
+  clearLiveGraphToolSet();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -1067,6 +1073,46 @@ describe("dsh plugin apply()", () => {
     // The fiber disposer unmounts the route.
     disposer();
     expect(registered).toHaveLength(0);
+  });
+
+  it("publishes the booted graph toolset so /rolebox/status shows live engine graphs", async () => {
+    // A previous boot in this file registers its own toolset, so clear the
+    // slot FIRST: the assertion below must be satisfied by THIS boot's toolset.
+    clearLiveGraphToolSet();
+    writeRoleYaml("tester", SIMPLE_ROLE);
+    const registered: DshWebRouteLike[] = [];
+    const fakeWebServer: DshWebServerRouteRegistrar = {
+      register(route: DshWebRouteLike): () => void {
+        registered.push(route);
+        return () => {
+          const i = registered.indexOf(route);
+          if (i >= 0) registered.splice(i, 1);
+        };
+      },
+    };
+    const { ctx } = createFakeCtx({ webServer: fakeWebServer });
+
+    const disposer = await apply(ctx, { roleboxDir: tmpDir } as DshPluginConfig);
+    try {
+      const toolset = getLiveGraphToolSet();
+      expect(toolset).toBeDefined();
+
+      // Seeding through the registry does not dispatch the graph — the plain
+      // registry entry is exactly what the monitor's live source must surface.
+      const created = toolset!.graph_create({ name: "live-monitor-graph" });
+
+      const res = await invoke(registered[0].handler, "GET", "/rolebox/status");
+      expect(res.status).toBe(200);
+      const body = JSON.parse(res.text) as {
+        engineGraphs: Array<{ graphId: string }>;
+      };
+      // Live registry, not the disk fallback: this workspace has no
+      // engine-*.json files, so an unregistered toolset yields an empty list.
+      expect(body.engineGraphs.map((g) => g.graphId)).toContain(created.graph_id);
+    } finally {
+      clearLiveGraphToolSet();
+      disposer();
+    }
   });
 
   it("registers the /rolebox prefix exactly once when the host rejects duplicate prefixes", async () => {

@@ -38,7 +38,8 @@
  *       - `engineGraphs` — the live engine-graph snapshots, reusing the
  *                          monitor reader helper `readLiveEngineGraphs`
  *                          (`src/cli/commands/monitor/monitor-reader-engine.ts`)
- *                          against the configured `stateDir`.
+ *                          against the state directory derived from the
+ *                          workspace (`<workspaceDir>/.rolebox/state`).
  *       - `sessions`     — session count + most recent session id (from
  *                          `DshSessionStoreLike.list()`), plus the active
  *                          role id per session (from
@@ -69,6 +70,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createSubLogger, formatError } from "../../../logger.ts";
 import { readLiveEngineGraphs } from "../../../cli/commands/monitor/monitor-reader-engine.ts";
+import { stateDirFor } from "../../../utils/state-paths.ts";
 import type { EngineGraphSnapshot } from "../../../cli/commands/monitor/monitor-reader-types.ts";
 import { metrics } from "../../../dispatch/persistence/metrics.ts";
 import type { LoopCoordinator } from "../../../loop/coordinator.ts";
@@ -189,8 +191,9 @@ export interface DshRoleboxMonitorRouteOptions {
  * Route adapter exposing the rolebox runtime monitor on the host web server.
  *
  * Construct with the role switcher, the session store, the loop coordinator
- * and the engine-state directory, then `register(webServer)` to mount the
- * `/rolebox` prefix route; the returned disposer unmounts it. The handler is
+ * and the workspace directory (whose `.rolebox/state` holds the engine
+ * store), then `register(webServer)` to mount the `/rolebox` prefix route;
+ * the returned disposer unmounts it. The handler is
  * also exposed directly as {@link DshRoleboxMonitorWebRoute.handle} for tests
  * and non-HTTP callers. When constructed with the optional `delegate` (the
  * role-switch handler), this route is the single `/rolebox` registration
@@ -201,7 +204,7 @@ export class DshRoleboxMonitorWebRoute {
   private readonly switcher: DshRoleSwitcher;
   private readonly store: DshSessionStoreLike;
   private readonly loopCoordinator: LoopCoordinator;
-  private readonly stateDir: string;
+  private readonly workspaceDir: string;
   private readonly delegate: DshWebRouteLike["handler"] | undefined;
   private readonly _log;
   /**
@@ -227,23 +230,25 @@ export class DshRoleboxMonitorWebRoute {
    *                          census (`list()`).
    * @param loopCoordinator - The loop coordinator providing live loop states
    *                          (`getAllLoopStates()`).
-   * @param stateDir        - The engine-state directory handed to
-   *                          `readLiveEngineGraphs` for the engine-graph
-   *                          snapshot (the same `process.cwd()` the graph
-   *                          tools persist under).
+   * @param workspaceDir    - The workspace/project directory whose
+   *                          `.rolebox/state` engine store backs the
+   *                          engine-graph snapshot: the route resolves it
+   *                          with `stateDirFor` before handing it to
+   *                          `readLiveEngineGraphs` (the same directory the
+   *                          graph tools persist under).
    * @param options         - Optional tuning (logger name, delegate).
    */
   constructor(
     switcher: DshRoleSwitcher,
     store: DshSessionStoreLike,
     loopCoordinator: LoopCoordinator,
-    stateDir: string,
+    workspaceDir: string,
     options: DshRoleboxMonitorRouteOptions = {},
   ) {
     this.switcher = switcher;
     this.store = store;
     this.loopCoordinator = loopCoordinator;
-    this.stateDir = stateDir;
+    this.workspaceDir = workspaceDir;
     this.delegate = options.delegate;
     this._log = createSubLogger(
       options.loggerName ?? "dsh-rolebox-monitor-route",
@@ -451,7 +456,7 @@ export class DshRoleboxMonitorWebRoute {
         count: loopStates.size,
         states: [...loopStates.values()].map(toLoopSummary),
       },
-      engineGraphs: readLiveEngineGraphs(this.stateDir),
+      engineGraphs: readLiveEngineGraphs(stateDirFor(this.workspaceDir)),
       sessions: {
         count: sessions.length,
         mostRecentId: mostRecentSessionId(this.store) ?? null,

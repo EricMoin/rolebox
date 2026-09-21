@@ -28,7 +28,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RoleMode } from "../../src/constants.ts";
@@ -38,6 +38,7 @@ import {
   EVENT_COALESCE_MS,
   ROLEBOX_MONITOR_ROUTE_PREFIX,
 } from "../../src/platform/adapters/dsh/web-rolebox-monitor-route.ts";
+import { clearLiveGraphToolSet } from "../../src/graph/tools/live-state.ts";
 import type {
   DshWebRouteLike,
   DshWebServerRouteRegistrar,
@@ -342,7 +343,8 @@ function frames(res: SseRes): Array<Record<string, unknown>> {
 /**
  * Full fixture: primary roles `alpha`/`beta` in the catalog, sessions `s1`
  * (older) and `s2` (newer) in the store, one live loop, and a real switcher
- * + monitor route adapter over a fresh empty engine-state directory.
+ * + monitor route adapter over a fresh empty workspace directory whose
+ * `.rolebox/state` engine store holds no files.
  */
 async function createFixture() {
   const { ctx } = createFakeCtx();
@@ -631,6 +633,91 @@ describe("DshRoleboxMonitorWebRoute GET /rolebox/status", () => {
     expect(body.sessions.count).toBe(0);
     expect(body.sessions.mostRecentId).toBeNull();
     expect(body.sessions.activeRoles).toEqual({});
+  });
+
+  it("surfaces engine graphs persisted under the workspace .rolebox/state store", async () => {
+    // Force the disk path: the live registry wins over persisted files, so a
+    // toolset registered by another test would mask the fallback under test.
+    clearLiveGraphToolSet();
+    const fixture = await createFixture();
+    const workspaceDir = mkdtempSync(join(tmpdir(), "dsh-monitor-route-ws-"));
+    try {
+      const engineStateDir = join(workspaceDir, ".rolebox", "state");
+      mkdirSync(engineStateDir, { recursive: true });
+      const now = Date.now();
+      writeFileSync(
+        join(engineStateDir, "engine-persisted.json"),
+        JSON.stringify({
+          version: 2,
+          graphId: "persisted-graph",
+          // Persisted phase is idle — the RUNNING node below is what promotes
+          // the projected phase to `executing` (see projectEngineGraph).
+          phase: "idle",
+          graphDeclaration: {
+            version: 2,
+            name: "persisted-graph",
+            nodes: [],
+            edges: [],
+          },
+          nodes: {
+            A: {
+              nodeId: "A",
+              agent: "agent-a",
+              prompt: "pA",
+              needsApproval: false,
+              status: "running",
+              signalsObserved: {},
+              upstreamResults: {},
+              tokensConsumed: { inputTokens: 0, outputTokens: 0, cost: 0 },
+              joinStrategy: "all",
+              startedAt: now - 1_000,
+            },
+          },
+          loopGroups: {},
+          signalLedger: {},
+          frontier: [],
+          budget: {
+            sessionsSpawned: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            totalCost: 0,
+          },
+          startedAt: now - 2_000,
+          updatedAt: now,
+          advancingLock: false,
+          pendingCompletions: [],
+        }),
+        "utf-8",
+      );
+
+      const route = new DshRoleboxMonitorWebRoute(
+        fixture.switcher,
+        fixture.store,
+        makeLoopCoordinator([]),
+        workspaceDir,
+      );
+      const { webServer, registered } = createFakeWebServer();
+      route.register(webServer);
+      const handler = registered[0].handler;
+
+      const res = await invoke(handler, "GET", "/rolebox/status");
+      expect(res.status).toBe(200);
+      const body = json<{
+        engineGraphs: Array<{
+          graphId: string;
+          phase: string;
+          nodeStatusCounts: Record<string, number>;
+        }>;
+      }>(res);
+
+      const graph = body.engineGraphs.find((g) => g.graphId === "persisted-graph");
+      expect(graph).toBeDefined();
+      expect(graph!.phase).toBe("executing");
+      expect(graph!.nodeStatusCounts.running).toBe(1);
+    } finally {
+      clearLiveGraphToolSet();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
 
