@@ -537,12 +537,20 @@ describe("EngineRuntime.retryNode", () => {
     expect(beforeRun.phase).toBe(EnginePhase.Complete);
 
     const bDispatchesBefore = fake.calls.filter((c) => c.nodeId === "B").length;
+    const bTaskBefore = beforeRun.nodes.get("B")!.dispatchTaskId;
+    expect(bTaskBefore).toBeDefined();
     const report = await runtime.retryNode("B", { modifyPrompt: "retry harder" });
     // Synchronously after retryNode resolves, B is re-dispatched into `running`
     // (its error re-fire is scheduled async via setTimeout).
     const mid = runtime.status();
     expect(report.reDispatched).toBeGreaterThanOrEqual(1);
     expect(report.target).toBe("B");
+    // A2: the full report the graph_run projection consumes — B has no
+    // downstream, so the reset scope is B alone, and the escalated node still
+    // carried the dispatch task of its failed run (superseded by this retry).
+    expect(report.reset).toEqual(["B"]);
+    expect(report.ready).toEqual(["B"]);
+    expect(report.supersededTaskIds).toEqual([bTaskBefore!]);
     expect(fake.calls.filter((c) => c.nodeId === "B").length).toBe(bDispatchesBefore + 1);
     expect(mid.nodes.get("B")!.prompt).toBe("retry harder\n\npB");
     expect(mid.nodes.get("B")!.status).toBe(NodeStatus.Running);
@@ -585,10 +593,20 @@ describe("graph_run retry wiring", () => {
     expect(r2.retry).toBeDefined();
     expect(r2.retry!.node_id).toBe("A");
     expect(r2.retry!.re_dispatched).toBeGreaterThan(0);
+    // A2: the projection carries every RetryReport field. A had never been
+    // dispatched before this retry (run() only dispatched R), so no dispatch
+    // task was superseded and the target is the lone reset/ready node.
+    expect(r2.retry!.reset).toEqual(["A"]);
+    expect(r2.retry!.ready).toEqual(["A"]);
+    expect(r2.retry!.superseded_task_ids).toEqual([]);
     expect(fake.calls.filter((c) => c.nodeId === "A").length).toBe(before + 1);
-    // Let the retried A complete so the next retry sees a terminal target
+    // Let the retried A complete so the next retry sees a quiescent target
     // (M11 guard refuses retrying a still-running node).
     await settle();
+    // A completed and still carries the dispatch task of that run — the next
+    // retry supersedes exactly that task id.
+    const aTaskId = ts["getEntry"](g.graph_id).runtime.status().nodes.get("A")!.dispatchTaskId;
+    expect(aTaskId).toBeDefined();
 
     // modify_prompt alone also triggers the retry path and prepends the prompt.
     const r3 = await ts.graph_run({
@@ -599,6 +617,10 @@ describe("graph_run retry wiring", () => {
     expect(r3).not.toHaveProperty("retry_pending");
     expect(r3.retry!.node_id).toBe("A");
     expect(r3.retry!.re_dispatched).toBeGreaterThan(0);
+    // The superseded task id of the previous run reaches the caller verbatim
+    // (A2) — the same list the engine unregisters termination subscriptions for.
+    expect(r3.retry!.ready).toEqual(["A"]);
+    expect(r3.retry!.superseded_task_ids).toEqual([aTaskId!]);
     expect(fake.calls.at(-1)!.prompt.startsWith("redo")).toBe(true);
 
     // A plain run (no node_id) stays retry-free.

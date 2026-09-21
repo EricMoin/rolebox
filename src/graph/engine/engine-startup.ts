@@ -37,6 +37,14 @@
  *   3. `recover()` per-graph try/catch → a throwing graph is captured and the
  *      remaining graphs still recover.
  *
+ * Grades of success (B3): `recover()` answers a structured
+ * {@link RecoveryReport}. Only `recovered` (state adopted AND the reconcile
+ * pass completed) increments `recovered`; a `degraded` answer (the state was
+ * adopted but `reconcileEngine` threw, so some `running` nodes were left
+ * unreconciled while the graph stays runnable) is collected in `degraded[]`
+ * with its error text; a throw past `recover()`'s own containment still lands
+ * in `failed[]`.
+ *
  * Idempotency: this sweep is safe to call repeatedly, but it must not be run
  * CONCURRENTLY — two overlapping sweeps would recover the same graph twice.
  * `recover()` reconciles every persisted `running` node against the dispatch
@@ -84,8 +92,22 @@ import { createEngine } from "./index.ts";
 export interface RecoveryStartupReport {
   /** Total number of `engine-*.json` files found in the state store. */
   scanned: number;
-  /** Graphs successfully resumed via {@link createEngine} + `recover()`. */
+  /**
+   * Graphs successfully resumed via {@link createEngine} + `recover()` —
+   * `recover()` answered `recovered`, so the persisted state was adopted AND
+   * the reconcile pass completed. A degraded recovery is counted here NEVER
+   * (B3): a partially-reconciled graph is not a clean resume.
+   */
   recovered: number;
+  /**
+   * Graphs whose persisted state was adopted but whose reconcile pass threw
+   * (`recover()` answered `degraded`), each labelled with the
+   * `engine-*.json` filename, the graph id and the reconcile error text (B3).
+   * The graph is still runnable — recovery rebuilt the frontier and dispatched
+   * ready nodes — but some `running` nodes were left unreconciled, so the
+   * sweep must not report it as a clean `recovered`.
+   */
+  degraded: string[];
   /**
    * Files/graphs that could not be recovered, each labelled with the
    * underlying `engine-*.json` filename (and the graph id when extractable).
@@ -111,7 +133,7 @@ export interface RecoverInterruptedGraphsOptions {
 
   /**
    * Hard on/off switch for the sweep. When `false`, returns a no-op report
-   * (`{ scanned: 0, recovered: 0, failed: [] }`) without touching the store.
+   * (`{ scanned: 0, recovered: 0, degraded: [], failed: [] }`) without touching the store.
    * Defaults to `true`.
    */
   enabled?: boolean;
@@ -177,14 +199,14 @@ export interface RecoverInterruptedGraphsOptions {
  *
  * @param opts The sweep configuration (directory + manager are required).
  * @returns A {@link RecoveryStartupReport} describing what was scanned,
- *          recovered, and failed.
+ *          recovered, degraded, and failed.
  */
 export async function recoverInterruptedGraphs(
   opts: RecoverInterruptedGraphsOptions,
 ): Promise<RecoveryStartupReport> {
   // Hard disable — return a no-op report without touching the store.
   if (opts.enabled === false) {
-    return { scanned: 0, recovered: 0, failed: [] };
+    return { scanned: 0, recovered: 0, degraded: [], failed: [] };
   }
 
   const stateDir = join(opts.directory, ".rolebox", "state");
@@ -197,11 +219,12 @@ export async function recoverInterruptedGraphs(
     );
   } catch {
     // No `.rolebox/state` yet — first run. Clean no-op.
-    return { scanned: 0, recovered: 0, failed: [] };
+    return { scanned: 0, recovered: 0, degraded: [], failed: [] };
   }
 
   const scanned = files.length;
   const failed: string[] = [];
+  const degraded: string[] = [];
   let recovered = 0;
 
   // 2. Parse + recover each file in isolation.
@@ -245,8 +268,21 @@ export async function recoverInterruptedGraphs(
         onGraphTerminal: opts.onGraphTerminal,
         graphEvents: opts.graphEvents,
       });
-      await engine.recover();
-      recovered += 1;
+      // B3: only a full `recovered` status counts as a clean resume. A
+      // `degraded` reconcile is reported separately (the graph is still
+      // runnable, but some `running` nodes were left unreconciled), and
+      // `no_state` (the persisted file vanished between the parse and the
+      // engine's own load) is counted as neither.
+      const recovery = await engine.recover();
+      if (recovery.status === "recovered") {
+        recovered += 1;
+      } else if (recovery.status === "degraded") {
+        const detail = recovery.reconcileError ?? "reconcile failed";
+        logWarn(
+          `engine-startup: recovery degraded for graph ${loaded.graphId}: ${detail}`,
+        );
+        degraded.push(`${label} (graph ${loaded.graphId}: ${detail})`);
+      }
     } catch (err) {
       logWarn(
         `engine-startup: recovery failed for graph ${loaded.graphId}: ${errorText(err)}`,
@@ -257,6 +293,6 @@ export async function recoverInterruptedGraphs(
     }
   }
 
-  return { scanned, recovered, failed };
+  return { scanned, recovered, degraded, failed };
 }
 

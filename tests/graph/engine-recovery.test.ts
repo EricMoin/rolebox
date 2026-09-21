@@ -1052,7 +1052,9 @@ describe("engine.recover() integration", () => {
       graphId: "rec-vanish",
       dispatch: fakeB,
     });
-    await engineB.recover();
+    // B3: a completed reconcile answers the structured report.
+    const recovery = await engineB.recover();
+    expect(recovery).toEqual({ status: "recovered" });
 
     const snap = engineB.status();
     expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
@@ -1092,6 +1094,37 @@ describe("engine.recover() integration", () => {
     expect(snap.nodes.get("A")!.status).toBe(NodeStatus.Timeout);
     expect(snap.nodes.get("A")!.errorReason).toBe(ORPHAN_REASON);
     expect(snap.phase).toBe(EnginePhase.Complete);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("B3: answers degraded (and does not reject) when the reconcile pass throws", async () => {
+    const dir = makeTmpDir();
+    const graphId = "rec-degraded";
+    // Persisted `running` with NO dispatchTaskId → reconcile enters the
+    // crash-window orphan sweep, where this port's parent lookup throws.
+    const crashed = buildState(singleNodeGraph(), graphId);
+    crashed.nodes.get("A")!.status = NodeStatus.Running;
+    crashed.nodes.get("A")!.dispatchTaskId = undefined;
+    new EnginePersistence(dir).save(crashed);
+
+    class ThrowingParentSweepFake extends RecoveryFake {
+      getTasksByParent(): DispatchTask[] {
+        throw new Error("parent sweep exploded");
+      }
+    }
+    const engine = createEngine(singleNodeGraph(), {
+      stateDir: dir,
+      graphId,
+      dispatch: new ThrowingParentSweepFake(),
+    });
+
+    const report = await engine.recover();
+
+    expect(report.status).toBe("degraded");
+    expect(report.reconcileError).toContain("parent sweep exploded");
+    // The failure is contained: the node keeps its persisted status (it was
+    // never reconciled) and the engine did not reject.
+    expect(engine.status().nodes.get("A")!.status).toBe(NodeStatus.Running);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1184,7 +1217,8 @@ describe("engine.recover() integration", () => {
       graphId: "rec-never",
       dispatch: fake,
     });
-    await engine.recover();
+    // B3: a clean start is reported structurally, not as void.
+    await expect(engine.recover()).resolves.toEqual({ status: "no_state" });
     // Nothing was persisted → recovery adopted nothing; the engine stays idle.
     expect(engine.status().phase).toBe(EnginePhase.Idle);
     expect(fake.calls).toEqual([]);

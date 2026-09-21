@@ -64,9 +64,10 @@
  *    transition and persistence flush), and {@link EngineRuntime.cancelNodes}
  *    is the real node/loop-scoped primitive (a loop target expands to its full
  *    member set, and `cascade` walks the forward closure). Both branches
- *    report the engine's authoritative `CancelScopeReport` retired set — the
- *    tool layer never reverse-infers "what was cancelled" from `errorReason`
- *    text.
+ *    project the engine's FULL authoritative `CancelScopeReport` — retired
+ *    (`cancelled`), expanded (`target`), left-alone (`skipped`), unknown
+ *    (`unknown`) and the best-effort `cancelCalls` hand-offs — so the tool
+ *    layer never reverse-infers "what was cancelled" from `errorReason` text.
  * 6. **Observed & confirmed:** `engine-state.registerNode`
  *    (`src/graph/engine/engine-state.ts:222-225`) correctly calls
  *    `resolveJoinStrategy(config.join)` to propagate the node's declared join
@@ -99,6 +100,9 @@ import type {
 import {
   createEngine,
   type EngineRuntime,
+  type ApproveReport,
+  type RejectReport,
+  type CancelScopeReport,
   type CreateEngineOptions,
   type NodeDispatchPort,
   type NodeCompletionEvent,
@@ -538,17 +542,98 @@ export interface GraphRunResult {
   pending_nodes: string[];
   dry_run?: boolean;
   validation?: { valid: boolean; errors: string[]; warnings: string[] };
-  /** Present when a node retry was requested (`node_id` + `retry`/`modify_prompt`). */
+  /**
+   * Present when a node retry was requested (`node_id` + `retry`/`modify_prompt`).
+   *
+   * The engine's {@link RetryReport} projected field-for-field: `node_id` ←
+   * `target`, `re_dispatched` ← `reDispatched`, and `reset` / `ready` /
+   * `superseded_task_ids` ← `reset` / `ready` / `supersededTaskIds` verbatim
+   * (engine order preserved, not re-sorted). `reset` is the target plus its
+   * transitive downstream (all forced back to `pending`), `ready` is the node
+   * ids left in the frontier for immediate dispatch, and
+   * `superseded_task_ids` are the previous dispatch task ids the reset cleared
+   * — the engine unregisters their termination subscriptions; they are NOT
+   * cancellation requests. The old `retry_pending` flag is gone (the retry is
+   * always handled inline).
+   */
   retry?: {
     node_id: string;
     re_dispatched: number;
     reset: string[];
+    ready: string[];
+    superseded_task_ids: string[];
   };
 }
 
+/**
+ * Result of `graph_cancel` — the engine's {@link CancelScopeReport} (contract
+ * C7) projected for the tool surface.
+ *
+ * Every list is the engine's own answer for the teardown it performed, never
+ * re-derived from `errorReason` text or a status diff. `cancelled` keeps its
+ * established ascending sort; the other lists are sorted too, so the JSON answer
+ * is deterministic regardless of node-map iteration order.
+ */
 export interface GraphCancelResult {
-  cancelled: string[];
   graph_id: string;
+  /**
+   * Node ids actually retired to `cancelled → done` by this call
+   * ({@link CancelScopeReport.cancelled}). Sorted.
+   */
+  cancelled: string[];
+  /**
+   * The effective target set the engine expanded the request into
+   * ({@link CancelScopeReport.target}): the requested ids plus, for any target
+   * that is a loop-group member, that group's full member set. Sorted.
+   */
+  target: string[];
+  /**
+   * Ids inside the cancellation scope the engine hit but left untouched because
+   * they were not cancellable — already `completed`, `blocked`, or terminal
+   * (`escalate` / `timeout` / `cancelled` / `done`)
+   * ({@link CancelScopeReport.skipped}). Sorted.
+   */
+  skipped: string[];
+  /**
+   * Requested ids that name no node of the graph
+   * ({@link CancelScopeReport.unknown}). Always empty for a whole-graph cancel,
+   * whose target set is the live node map. Sorted.
+   */
+  unknown: string[];
+  /**
+   * Dispatch task ids handed to the cancel seam's `cancelTask`
+   * ({@link CancelScopeReport.cancelCalls}) — BEST-EFFORT hand-offs, not
+   * acknowledgements: the engine fires and forgets the cancellation, so a task
+   * id here means "teardown was requested", never "the task has stopped".
+   * Sorted.
+   */
+  cancelCalls: string[];
+}
+
+/**
+ * Project a {@link CancelScopeReport} into the sorted, JSON-facing
+ * {@link GraphCancelResult} lists. Every list is copied — the engine's report is
+ * never mutated.
+ *
+ * `unknown` (E4): the engine reports "requested id that names no node" in its
+ * own `CancelScopeReport.unknown` list — `skipped` now means only "exists, but
+ * not cancellable". The projection reads that field directly; the tool layer
+ * never re-derives it (an id absent from the node map is the engine's answer,
+ * not the tool's second opinion).
+ */
+function projectCancelReport(
+  report: CancelScopeReport,
+): Pick<
+  GraphCancelResult,
+  "cancelled" | "target" | "skipped" | "unknown" | "cancelCalls"
+> {
+  return {
+    cancelled: [...report.cancelled].sort(),
+    target: [...report.target].sort(),
+    skipped: [...report.skipped].sort(),
+    unknown: [...report.unknown].sort(),
+    cancelCalls: [...report.cancelCalls].sort(),
+  };
 }
 
 export type GraphApproveAction = "approve" | "reject";
@@ -590,12 +675,32 @@ export interface GraphApproveResult {
   /** The graph phase after the decision advanced. */
   phase: string;
   /**
-   * Whether the decision actually resolved the node — `true` only when the
-   * node was `blocked` at the moment the decision arrived. `false` marks an
-   * idempotent no-op (already-resolved / never-blocked node), so callers do
-   * not mistake the echoed live `node_status` for a decision that took effect.
+   * Whether the decision actually resolved the node, taken from the engine's
+   * own report ({@link ApproveReport.applied} / {@link RejectReport.kind}) —
+   * the authority on whether the transition happened, so the answer stays
+   * correct even if the node changes status between the call and the read.
+   * `true` only when the node was `blocked` and the decision was applied;
+   * `false` marks an idempotent no-op (already-resolved / never-blocked
+   * node), so callers do not mistake the echoed live `node_status` for a
+   * decision that took effect. For a sequential single decision this matches
+   * the status observed before the call.
    */
   applied: boolean;
+  /**
+   * Reject lane only — which lane the engine's RejectReport took: `escalate`
+   * (no loop group to re-open), `revise` (re-entered `ready` with the feedback
+   * merged into the prompt), or `already_resolved` (idempotent replay).
+   * Undefined on the approve lane, whose ApproveReport carries no lane
+   * discriminator; `applied` is derived from the SAME report
+   * (`kind !== "already_resolved"`), so the two can never disagree.
+   */
+  kind?: "escalate" | "revise" | "already_resolved";
+  /**
+   * Present only with `kind: "already_resolved"`: the status the node actually
+   * had when the no-op reject replay arrived (RejectReport.actualStatus).
+   * Undefined on every genuine rejection lane.
+   */
+  actual_status?: NodeStatus;
 }
 
 // ── graph_status JSON result shapes (Y27) ───────────────────────────────────
@@ -1629,10 +1734,15 @@ export class GraphToolSet {
       pending_nodes: pending,
       ...(retryReport
         ? {
+            // Full RetryReport projection (A2): every engine field reaches the
+            // caller verbatim, so the answer cannot silently drop `ready` (the
+            // frontier set) or the superseded dispatch task ids.
             retry: {
               node_id: retryReport.target,
               re_dispatched: retryReport.reDispatched,
               reset: retryReport.reset,
+              ready: retryReport.ready,
+              superseded_task_ids: retryReport.supersededTaskIds,
             },
           }
         : {}),
@@ -2266,7 +2376,7 @@ export class GraphToolSet {
     const entry = this.getEntry(args.graph_id);
 
     // No target → whole-graph cancel (existing behavior): every cancellable node
-    // is retired. The reported set is the engine's authoritative
+    // is retired. The reported report is the engine's authoritative
     // CancelScopeReport (contract C7) — never a post-hoc filter of the
     // `errorReason` text. The old filter (`status === Done &&
     // errorReason.startsWith("cancelled")`) double-counted a node that an
@@ -2274,15 +2384,20 @@ export class GraphToolSet {
     // if the engine ever reworded the reason (Y29).
     if (!args.node_id && !args.loop_id) {
       const report = await entry.runtime.cancel();
-      return { cancelled: [...report.cancelled].sort(), graph_id: args.graph_id };
+      return {
+        graph_id: args.graph_id,
+        ...projectCancelReport(report),
+      };
     }
 
     // Scoped target → the real scoped / cascade primitive. A loop target is
     // resolved to its member node ids first (an indivisible bounded cycle), then
     // handed to EngineRuntime.cancelNodes. Default cascade: true for a loop
     // target, false for a bare node_id — an explicit args.cascade always wins.
-    // The reported set is the ACTUAL cancelled set from the CancelScopeReport,
-    // never a post-hoc filter of a whole-graph teardown.
+    // The reported sets are the ACTUAL CancelScopeReport of this scoped call,
+    // never a post-hoc filter of a whole-graph teardown. Node ids are stable for
+    // the lifetime of an engine state (a cancel never removes a node), so this
+    // snapshot resolves the loop target before the cancel.
     const state = entry.runtime.status();
     const targetIds = args.loop_id
       ? loopNodeIds(state, args.loop_id)
@@ -2290,7 +2405,10 @@ export class GraphToolSet {
     const cascade = args.cascade ?? args.loop_id !== undefined;
     const report = entry.runtime.cancelNodes(targetIds, { cascade });
 
-    return { cancelled: report.cancelled.sort(), graph_id: args.graph_id };
+    return {
+      graph_id: args.graph_id,
+      ...projectCancelReport(report),
+    };
   }
 
   // ── graph_approve / graph_reject ───────────────────────────────────────────
@@ -2315,17 +2433,23 @@ export class GraphToolSet {
     const entry = await this.resolveApprovalEntry(args.graph_id, args.node_id);
     const runtime = entry.runtime;
 
-    // Capture the pre-decision status so a no-op decision (the node was NOT
-    // blocked — the engine's idempotent guard returns without mutating it) is
-    // reported honestly via `applied`, rather than echoing the unchanged live
-    // `node_status` as if the decision had taken effect.
-    const before = runtime.status().nodes.get(args.node_id);
-    const applied = before?.status === NodeStatus.Blocked;
-
+    // `applied` comes from the engine's own report — the primitive that
+    // performed (or refused) the transition is the authority, so a no-op
+    // decision is reported honestly instead of being inferred from a status
+    // snapshot taken before the call. The reject lane additionally projects
+    // the report's `kind` (escalate / revise / already_resolved) and, for an
+    // idempotent replay, the status the node actually had — the report carried
+    // them all along (A3).
+    let applied: boolean;
+    let kind: GraphApproveResult["kind"];
+    let actualStatus: NodeStatus | undefined;
     if (args.action === "approve") {
-      await runtime.approveNode(args.node_id, args.payload);
+      applied = (await runtime.approveNode(args.node_id, args.payload)).applied;
     } else {
-      await runtime.rejectNode(args.node_id, args.reason);
+      const report = await runtime.rejectNode(args.node_id, args.reason);
+      applied = report.kind !== "already_resolved";
+      kind = report.kind;
+      if (report.kind === "already_resolved") actualStatus = report.actualStatus;
     }
 
     // Read live state after the decision advanced the graph.
@@ -2338,6 +2462,10 @@ export class GraphToolSet {
       node_status: node ? node.status : "unknown",
       phase: state.phase,
       applied,
+      // Conditional spreads: the approve answer keeps exactly its previous
+      // keys, and `actual_status` accompanies `already_resolved` only.
+      ...(kind !== undefined ? { kind } : {}),
+      ...(actualStatus !== undefined ? { actual_status: actualStatus } : {}),
     };
   }
 

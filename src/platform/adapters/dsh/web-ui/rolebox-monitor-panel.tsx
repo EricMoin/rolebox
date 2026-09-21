@@ -211,6 +211,12 @@ export interface MonitorGraphNodeDto {
   completedAt?: string;
   /** Retries attempted so far. */
   retryCount?: number;
+  /**
+   * Failure reason recorded by the engine for a failing terminal node
+   * (`GraphNodeSnapshot.errorReason`, monitor-reader-types.ts). Rendered as the
+   * node row's `error` fact so the cause is visible, not just the status.
+   */
+  errorReason?: string;
   /** Loop group this node belongs to. */
   loopGroupId?: string;
   /** Dispatch task id spawned for this node. */
@@ -1742,6 +1748,11 @@ function renderNodeRow(node: MonitorGraphNodeDto, now: number, index: number) {
       : null,
     node.retryCount !== undefined && node.retryCount > 0
       ? { label: "retries", value: formatCount(node.retryCount), icon: "retry" }
+      : null,
+    // The reason a node died is the one reading a failing row must not lose;
+    // the label renders as a word (no dedicated glyph).
+    node.errorReason
+      ? { label: "error", value: node.errorReason, title: node.errorReason }
       : null,
     node.loopGroupId
       ? { label: "loop", value: node.loopGroupId, title: node.loopGroupId, icon: "loops" }

@@ -15,6 +15,7 @@ import {
 import { markEscalated, markReady } from "../../src/graph/engine/node-lifecycle.ts";
 import { SignalBridge } from "../../src/graph/engine/signal-bridge.ts";
 import { defaultConditionResolver } from "../../src/graph/engine/condition-resolver.ts";
+import { evaluateJoin } from "../../src/graph/engine/join-evaluator.ts";
 import {
   AdvanceEngine,
   type NodeDispatchPort,
@@ -1845,6 +1846,313 @@ describe("Y16: loop-lane retirements reach the completion seam", () => {
     expect(retirement).toBeDefined();
     expect(retirement!.signalType).toBe("escalate");
     expect(retirement!.payload).toBe("max_traversals exhausted");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// H4 — escalate-lane retirements reach the completion seam
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Regression (graph-signal F5 / H4). The loop-member branch of
+ * `_propagateEscalateSignal` returned the `executeLoopStep` report to nobody,
+ * so a join-failure escalation inside a loop member (`markEscalated`, with no
+ * signal of its own) never reached the completion seam, while every other
+ * escalate lane surfaced it. The same block pins the join cascade: an upstream
+ * retired by `cancelPendingUpstreams` must be observable exactly once (H4).
+ */
+describe("H4: escalate-lane retirements reach the completion seam", () => {
+  /** R → {A, B} → C (join:all); A/B/C are one loop group. */
+  function loopConvergeGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "loop-converge-notify",
+      nodes: [
+        { id: "R", agent: "a0", prompt: "root" },
+        { id: "A", agent: "a1", prompt: "a" },
+        { id: "B", agent: "a2", prompt: "b" },
+        { id: "C", agent: "a3", prompt: "c", join: { strategy: "all" } },
+      ],
+      edges: [
+        { from: "R", to: "A", type: "always" },
+        { from: "R", to: "B", type: "always" },
+        { from: "A", to: "C", type: "on_signal", signal_filter: ["answer"] },
+        { from: "B", to: "C", type: "on_signal", signal_filter: ["answer"] },
+      ],
+      loop_groups: [{ id: "lg", nodes: ["A", "B", "C"], max_traversals: 5 }],
+    };
+  }
+
+  /** R → {A, B} → J (join:all), no loop group. */
+  function cascadeJoinGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "cascade-notify",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+        { id: "J", agent: "a3", prompt: "p3", join: { strategy: "all" } },
+      ],
+      edges: [
+        { from: "A", to: "J", type: "always" },
+        { from: "B", to: "J", type: "always" },
+      ],
+    };
+  }
+
+  /**
+   * A → J, B → J (join:any), no loop group. Both sources are roots, so
+   * `dispatchReady()` launches them concurrently and the first answer
+   * satisfies J's join while its sibling is still running.
+   */
+  function satisfiedJoinGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "satisfied-join-notify",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+        { id: "J", agent: "a3", prompt: "p3", join: { strategy: "any" } },
+      ],
+      edges: [
+        { from: "A", to: "J", type: "always" },
+        { from: "B", to: "J", type: "always" },
+      ],
+    };
+  }
+
+  /**
+   * A → J, B → J (join:quorum 1), no loop group — the quorum-satisfied variant
+   * of {@link satisfiedJoinGraph}. `quorum: 1` is satisfied by the first answer
+   * exactly like `any`, but evaluates through the quorum branch.
+   */
+  function satisfiedQuorumJoinGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "satisfied-quorum-join-notify",
+      nodes: [
+        { id: "A", agent: "a1", prompt: "p1" },
+        { id: "B", agent: "a2", prompt: "p2" },
+        { id: "J", agent: "a3", prompt: "p3", join: { strategy: "quorum", quorum: 1 } },
+      ],
+      edges: [
+        { from: "A", to: "J", type: "always" },
+        { from: "B", to: "J", type: "always" },
+      ],
+    };
+  }
+
+  /**
+   * Shared-upstream protection fixture: X → C (join:any) and {S, Y} → D
+   * (join:all), with S ALSO feeding C. When X's answer satisfies C, the
+   * cascade at C examines S — but S is still needed by D, whose join is still
+   * `waiting` — so `hasUnsatisfiedDownstream` must keep S alive. Cancelling S
+   * here would starve D.
+   */
+  function sharedUpstreamGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "shared-upstream-protect",
+      nodes: [
+        { id: "X", agent: "a1", prompt: "p1" },
+        { id: "S", agent: "a2", prompt: "p2" },
+        { id: "Y", agent: "a3", prompt: "p3" },
+        { id: "C", agent: "a4", prompt: "p4", join: { strategy: "any" } },
+        { id: "D", agent: "a5", prompt: "p5", join: { strategy: "all" } },
+      ],
+      edges: [
+        { from: "X", to: "C", type: "always" },
+        { from: "S", to: "C", type: "always" },
+        { from: "S", to: "D", type: "always" },
+        { from: "Y", to: "D", type: "always" },
+      ],
+    };
+  }
+
+  /**
+   * Positive control for {@link sharedUpstreamGraph}: the same shape and the
+   * same trigger, minus the shared second downstream. X → C (join:any) and
+   * S → C only — S is still `running` when X answers, so the identical
+   * satisfied-join cascade runs, but no sibling convergence node protects it.
+   * S MUST be retired here; without this control the protection case above
+   * could pass because the cascade never ran rather than because the
+   * shared-upstream guard kept S alive.
+   */
+  function unsharedUpstreamGraph(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "unshared-upstream-control",
+      nodes: [
+        { id: "X", agent: "a1", prompt: "p1" },
+        { id: "S", agent: "a2", prompt: "p2" },
+        { id: "C", agent: "a4", prompt: "p4", join: { strategy: "any" } },
+      ],
+      edges: [
+        { from: "X", to: "C", type: "always" },
+        { from: "S", to: "C", type: "always" },
+      ],
+    };
+  }
+
+  function buildNotifyingEngine(
+    decl: GraphDeclaration,
+    fake = new FakeDispatch(),
+  ): {
+    state: EngineState;
+    engine: AdvanceEngine;
+    fake: FakeDispatch;
+    events: NodeCompletionEvent[];
+  } {
+    const events: NodeCompletionEvent[] = [];
+    const state = createEngineState(decl, "g-1");
+    provision(state);
+    const engine = new AdvanceEngine({
+      state,
+      signalBridge: new SignalBridge(),
+      dispatch: fake,
+      onNodeCompletion: (e) => { events.push(e); },
+    });
+    return { state, engine, fake, events };
+  }
+
+  it("surfaces a join-failure escalation in a loop member exactly once", async () => {
+    const { state, engine, events } = buildNotifyingEngine(loopConvergeGraph());
+    await engine.dispatchReady(); // R running
+    await engine.onNodeSignalEmitted("R", "answer", "seed"); // A, B running
+
+    await engine.onNodeSignalEmitted("A", "escalate", { reason: "boom" });
+
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Escalate); // join:all failed
+    const cEvents = events.filter(
+      (e) => e.nodeId === "C" && e.signalType === "escalate",
+    );
+    expect(cEvents).toHaveLength(1);
+    expect(cEvents[0].nodeStatus).toBe(NodeStatus.Escalate);
+    // The escalate lane carries no propagation-level reason, so the seam falls
+    // back to the payload of the source signal.
+    expect(cEvents[0].payload).toEqual({ reason: "boom" });
+
+    // The cascade owned by the loop step retired B (the failed join no longer
+    // needs it) — that retirement must be observable exactly once too.
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    const bEvents = events.filter(
+      (e) => e.nodeId === "B" && e.signalType === "cancelled",
+    );
+    expect(bEvents).toHaveLength(1);
+    expect(bEvents[0].nodeStatus).toBe(NodeStatus.Done);
+  });
+
+  it("surfaces an upstream retired by the non-loop join cascade exactly once", async () => {
+    const fake = new FakeDispatch();
+    const { state, engine, events } = buildNotifyingEngine(cascadeJoinGraph(), fake);
+    fake.fail("A");
+
+    await engine.dispatchReady(); // the A dispatch fails → escalate → J fails
+
+    expect(state.nodes.get("J")!.status).toBe(NodeStatus.Escalate);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done); // cascade-cancelled
+    const bEvents = events.filter(
+      (e) => e.nodeId === "B" && e.signalType === "cancelled",
+    );
+    expect(bEvents).toHaveLength(1);
+    expect(bEvents[0].nodeStatus).toBe(NodeStatus.Done);
+    expect(bEvents[0].payload).toContain("cancelled by join cascade");
+  });
+
+  it("surfaces a sibling retired by a satisfied join exactly once", async () => {
+    const { state, engine, events } = buildNotifyingEngine(satisfiedJoinGraph());
+
+    await engine.dispatchReady(); // A, B both launched
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+    // B is retired by the satisfied-join lane below, not by any earlier signal.
+    expect(events.filter((e) => e.nodeId === "B")).toHaveLength(0);
+
+    // A's answer satisfies J's `any` join → B is no longer needed.
+    await engine.onNodeSignalEmitted("A", "answer", "a-done");
+
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    const bEvents = events.filter(
+      (e) => e.nodeId === "B" && e.signalType === "cancelled",
+    );
+    expect(bEvents).toHaveLength(1);
+    expect(bEvents[0].nodeStatus).toBe(NodeStatus.Done);
+    // The reason string written by `cancelPendingUpstreams`
+    // (cascade-canceller.ts) at convergence node J.
+    expect(bEvents[0].payload).toBe(
+      'cancelled by join cascade at convergence node "J"',
+    );
+  });
+
+  it("surfaces a sibling retired by a satisfied quorum join exactly once", async () => {
+    const { state, engine, events } = buildNotifyingEngine(satisfiedQuorumJoinGraph());
+
+    await engine.dispatchReady(); // A, B both launched
+    expect(state.nodes.get("A")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Running);
+    // B is retired by the quorum-satisfied lane below, not by an earlier signal.
+    expect(events.filter((e) => e.nodeId === "B")).toHaveLength(0);
+
+    // A's answer satisfies J's `quorum: 1` join → B is no longer needed. Same
+    // satisfied-join forward-activation lane as the `any` case above, reached
+    // through the quorum evaluation branch.
+    await engine.onNodeSignalEmitted("A", "answer", "a-done");
+
+    expect(state.nodes.get("B")!.status).toBe(NodeStatus.Done);
+    const bEvents = events.filter(
+      (e) => e.nodeId === "B" && e.signalType === "cancelled",
+    );
+    expect(bEvents).toHaveLength(1);
+    expect(bEvents[0].nodeStatus).toBe(NodeStatus.Done);
+    expect(bEvents[0].payload).toBe(
+      'cancelled by join cascade at convergence node "J"',
+    );
+  });
+
+  it("keeps a shared upstream alive while a sibling convergence node still waits", async () => {
+    const { state, engine, events } = buildNotifyingEngine(sharedUpstreamGraph());
+
+    await engine.dispatchReady(); // X, S, Y launched; C and D pending
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("D")!.status).toBe(NodeStatus.Pending);
+    // Premise of the guard: D's `all` join is still unresolved.
+    expect(evaluateJoin(state, state.nodes.get("D")!).kind).toBe("waiting");
+    expect(events.filter((e) => e.nodeId === "S")).toHaveLength(0);
+
+    // X's answer satisfies C's `any` join. The cascade at C examines S, but S
+    // is still needed by D — `hasUnsatisfiedDownstream` keeps it alive.
+    await engine.onNodeSignalEmitted("X", "answer", "x-done");
+
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("D")!.status).toBe(NodeStatus.Pending);
+    // No retirement event for S, and no cancelled event anywhere on this pass.
+    expect(events.filter((e) => e.nodeId === "S")).toHaveLength(0);
+    expect(events.filter((e) => e.signalType === "cancelled")).toHaveLength(0);
+  });
+
+  it("retires the upstream when no sibling convergence node needs it (positive control)", async () => {
+    const { state, engine, events } = buildNotifyingEngine(unsharedUpstreamGraph());
+
+    await engine.dispatchReady(); // X, S launched; C pending
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Running);
+    expect(state.nodes.get("C")!.status).toBe(NodeStatus.Pending);
+
+    // Same trigger as the protection case above: X's answer satisfies C's
+    // `any` join while S is still running. With no sibling convergence node
+    // depending on S, the cascade DOES retire it — proving the protection
+    // case reaches this cascade instead of asserting on a lane that never runs.
+    await engine.onNodeSignalEmitted("X", "answer", "x-done");
+
+    expect(state.nodes.get("S")!.status).toBe(NodeStatus.Done);
+    const sEvents = events.filter(
+      (e) => e.nodeId === "S" && e.signalType === "cancelled",
+    );
+    expect(sEvents).toHaveLength(1);
+    expect(sEvents[0].nodeStatus).toBe(NodeStatus.Done);
+    expect(sEvents[0].payload).toBe(
+      'cancelled by join cascade at convergence node "C"',
+    );
   });
 });
 

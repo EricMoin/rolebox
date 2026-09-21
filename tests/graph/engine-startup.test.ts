@@ -170,7 +170,7 @@ describe("recoverInterruptedGraphs", () => {
       stateDir: dir,
     });
 
-    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
     // The resumed engine persisted its terminal phase — recovery actually did work.
     const persisted = new EnginePersistence(dir).load("g-exec");
     expect(persisted!.phase).toBe(EnginePhase.Complete);
@@ -192,7 +192,7 @@ describe("recoverInterruptedGraphs", () => {
     });
 
     // Scanned but neither recovered nor failed — a terminal graph is skipped.
-    expect(report).toEqual({ scanned: 1, recovered: 0, failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 0, degraded: [], failed: [] });
   });
 
   it("(c) a corrupt engine file does not abort recovery of a valid sibling", async () => {
@@ -305,6 +305,45 @@ describe("recoverInterruptedGraphs", () => {
     );
   });
 
+  it("(e) reports a reconcile failure as degraded, never as recovered (B3)", async () => {
+    const dir = makeTmpDir();
+    // A `running` node with NO dispatchTaskId sends reconcile into the
+    // crash-window orphan sweep (`getTasksByParent`). A dispatch store that
+    // throws there makes `reconcileEngine` throw — the failure `recover()`
+    // contains and answers as `degraded`.
+    class ThrowingParentSweep extends FakeManager {
+      getTasksByParent(): DispatchTask[] {
+        throw new Error("dispatch parent sweep exploded");
+      }
+    }
+    const fake = new ThrowingParentSweep();
+    persistState(dir, "g-degraded", singleNodeDecl("g-degraded"), {
+      phase: EnginePhase.Executing,
+      nodeStatus: NodeStatus.Running,
+    });
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: fake as unknown as DispatchManager,
+      stateDir: dir,
+    });
+
+    expect(report.scanned).toBe(1);
+    // B3: the state was adopted but reconciliation failed — NOT a clean resume.
+    expect(report.recovered).toBe(0);
+    expect(report.degraded).toHaveLength(1);
+    expect(report.degraded[0]).toContain("engine-g-degraded.json");
+    expect(report.degraded[0]).toContain("g-degraded");
+    expect(report.degraded[0]).toContain("dispatch parent sweep exploded");
+    // A contained reconcile failure is not a hard failure.
+    expect(report.failed).toEqual([]);
+    // The degraded path returns before the final persist, so the graph is NOT
+    // rewritten as complete — a later sweep can retry it.
+    expect(new EnginePersistence(dir).load("g-degraded")!.phase).toBe(
+      EnginePhase.Executing,
+    );
+  });
+
   it("(d) enabled:false returns a no-op report and never touches the store", async () => {
     const dir = makeTmpDir();
     const fake = new FakeManager();
@@ -321,7 +360,7 @@ describe("recoverInterruptedGraphs", () => {
       stateDir: dir,
     });
 
-    expect(report).toEqual({ scanned: 0, recovered: 0, failed: [] });
+    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], failed: [] });
     // The on-disk state was left untouched (still executing, not resumed).
     expect(new EnginePersistence(dir).load("g-exec")!.phase).toBe(
       EnginePhase.Executing,
@@ -364,7 +403,7 @@ describe("recoverInterruptedGraphs", () => {
       manager: fake as unknown as DispatchManager,
       stateDir: dir,
     });
-    expect(report).toEqual({ scanned: 0, recovered: 0, failed: [] });
+    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], failed: [] });
   });
 });
 
@@ -403,7 +442,7 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
     });
 
     // Report semantics unchanged by the observer wiring.
-    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
 
     // The recovered engine wrote the node's terminal transition into the log.
     const lines = readEventLines(dir, "g-exec");
@@ -451,7 +490,7 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
       },
     });
 
-    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
     // The recovered node's completion re-announced through the seam.
     expect(completions).toContainEqual({
       graphId: "g-exec",
@@ -481,7 +520,7 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
       // No onNodeCompletion / onGraphTerminal / graphEvents → old behavior.
     });
 
-    expect(report).toEqual({ scanned: 1, recovered: 1, failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
     // No event log is produced (the recorder is only constructed when wired).
     expect(existsSync(graphEventsPath(dir, "g-exec"))).toBe(false);
     // The engine state itself still recovered to terminal.

@@ -283,6 +283,29 @@ describe("readEngineGraphs", () => {
     expect(Object.keys(n2)).not.toContain("dispatchTaskId");
   });
 
+  // ── failure-reason projection (E6) ────────────────────────────────────
+
+  it("projects a node's errorReason onto GraphNodeSnapshot when present", () => {
+    mkdirSync(stateDir(), { recursive: true });
+    writeEngineFile(
+      "engine-failed-node.json",
+      JSON.stringify(
+        buildEngineFile({}, {
+          n1: { status: "timeout", errorReason: "dispatch task vanished during restart" },
+        }),
+      ),
+    );
+
+    const [g] = readEngineGraphs(stateDir());
+    const n1 = g.nodes.find((n) => n.nodeId === "n1")!;
+    expect(n1.errorReason).toBe("dispatch task vanished during restart");
+
+    // n2 recorded no failure — the key must be absent, exactly like the other
+    // optional projections.
+    const n2 = g.nodes.find((n) => n.nodeId === "n2")!;
+    expect(Object.keys(n2)).not.toContain("errorReason");
+  });
+
   it("omits dispatchSessionId / dispatchTaskId keys from an undispatched node", () => {
     mkdirSync(stateDir(), { recursive: true });
     // Default fixture: neither n1 nor n2 carry dispatch ids.

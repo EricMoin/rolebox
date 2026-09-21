@@ -116,6 +116,38 @@ import {
 // ── EngineRuntime ───────────────────────────────────────────────────────────
 
 /**
+ * Outcome of {@link EngineRuntime.recover()} — whether a persisted state was
+ * adopted, and whether the reconcile pass completed or degraded.
+ *
+ * The engine answers this structurally instead of only logging, because the
+ * startup sweep (`engine-startup.ts`) must not count a partially-reconciled
+ * graph as a clean recovery: `reconcileEngine` throwing is contained (a single
+ * bad node must not abort recovery) but it leaves `running` nodes unreconciled,
+ * so the sweep needs the distinction to report it.
+ */
+export interface RecoveryReport {
+  /**
+   * - `no_state` — nothing to recover: no persistence is configured, or the
+   *   persisted file is missing / corrupt / version-mismatched (clean start).
+   * - `recovered` — the persisted state was adopted and every `running` node
+   *   was reconciled against the dispatch system (or, on a port without
+   *   `getTask`, the state was adopted and the ready frontier re-dispatched).
+   * - `degraded` — the persisted state was adopted but the reconcile pass threw.
+   *   The engine still surfaced recovered timeouts, rebuilt the frontier and
+   *   dispatched ready nodes, so the graph is runnable, but some `running`
+   *   nodes may not have been reconciled. {@link reconcileError} carries the
+   *   error text.
+   */
+  status: "no_state" | "recovered" | "degraded";
+  /**
+   * Error text of the failed reconcile pass — present exactly when `status` is
+   * `degraded`. Read by the startup sweep, which reports it in
+   * `RecoveryStartupReport.degraded`.
+   */
+  reconcileError?: string;
+}
+
+/**
  * A bound engine instance for a single graph execution.
  *
  * One `EngineRuntime` owns one {@link EngineState} and one signal-driven
@@ -155,8 +187,14 @@ export interface EngineRuntime {
    * Rejects when the persisted state file exists but cannot be read (any
    * non-ENOENT read failure): an unreadable state file is an explicit error,
    * never a silent clean start (review 05-F6/L22).
+   *
+   * @returns a {@link RecoveryReport}: `no_state` (nothing adopted),
+   *   `recovered` (adopted + reconciled), or `degraded` (adopted, but the
+   *   reconcile pass threw — the error text is in `reconcileError`). A failed
+   *   reconcile never rejects: it is contained so the rest of recovery still
+   *   runs, and reported instead of only logged.
    */
-  recover(): Promise<void>;
+  recover(): Promise<RecoveryReport>;
 
   /**
    * Adopt a prior engine run's per-node progress into this (freshly built)
@@ -218,8 +256,10 @@ export interface EngineRuntime {
    * @returns a {@link CancelScopeReport} describing the teardown (contract C7):
    *   every node id as `target`, the ids actually retired to
    *   `cancelled → done` in `cancelled`, the ids left untouched
-   *   (`completed` / `blocked` / terminal) in `skipped`, and the dispatch task
-   *   ids handed to the cancel seam in `cancelCalls`. The report is the
+   *   (`completed` / `blocked` / terminal) in `skipped`, the requested ids that
+   *   name no node in `unknown` (always empty here — the whole-graph target set
+   *   IS the live node map), and the dispatch task ids handed to the cancel seam
+   *   in `cancelCalls`. The report is the
    *   authoritative "who was cancelled" answer — consumers no longer have to
    *   re-derive it by filtering `errorReason` text (Y29), a filter that both
    *   over-counted previously scoped cancels and silently broke if the reason
@@ -276,10 +316,14 @@ export interface EngineRuntime {
    * @param approved  Upstream node ids the human accepted.
    * @param rejected  Upstream node ids the human rejected (re-executed).
    * @param reason    Optional rejection feedback for the re-executed branches.
-   * @returns a {@link PruneReport} (contract C6) naming the dependents this
-   *          verdict cancelled and the ones that survive on their remaining
-   *          approved upstreams (empty when the gate was not `blocked`, i.e.
-   *          the verdict was a no-op).
+   * @returns a {@link PruneReport} (contract C6) — the gate-level `applied`
+   *          flag, the dependents this verdict cancelled, the ones that survive
+   *          on their remaining approved upstreams, the ones the prune hit but
+   *          the lifecycle guard refused to retire (`skipped`), and the
+   *          rejected upstream branches actually re-entered `ready`
+   *          (`reEntered`; a branch the guard refused is not claimed).
+   *          `applied: false` marks an idempotent no-op (the gate was not
+   *          `blocked` when the verdict arrived), and every list is then empty.
    * @throws when `nodeId` is not a node of this graph; the verdict is not
    *         applied in that case.
    */
@@ -323,12 +367,14 @@ export interface EngineRuntime {
    * member set. Reuses only the existing lifecycle machinery: cancellable
    * nodes (`pending | ready | running`) advance `→ cancelled → done` with their
    * dispatch tasks torn down fire-and-forget; `completed` / `blocked` /
-   * terminal nodes are reported as skipped and left untouched.
+   * terminal nodes are reported as skipped and left untouched; a requested id
+   * that names no node of this graph is reported in `unknown`, never conflated
+   * with a real node that merely could not be cancelled (E4).
    *
    * @param nodeIds  Node ids to cancel (loop targets expand to their members).
    * @param options  `{ cascade?: boolean }` — cascade to transitive downstream
    *                 dependents over the declaration's edges when true.
-   * @returns a {@link CancelScopeReport} of retired vs. skipped node ids.
+   * @returns a {@link CancelScopeReport} of retired / skipped / unknown node ids.
    */
   cancelNodes(
     nodeIds: string[],
@@ -779,8 +825,10 @@ function hasTaskLookup(
  * The advance engine answers those report types DIRECTLY: `approveNode`
  * projects `approveBlockedNode`'s return value, `rejectNode` forwards
  * `rejectBlockedNode`'s report, and `partialApprove` forwards
- * `pruneDownstreamSubgraph`'s report — so the runtime methods below are pure
- * pass-throughs and there is exactly ONE decision procedure: the primitive that
+ * `pruneDownstreamSubgraph`'s report with the rejected-upstream re-entry
+ * report (`reenterRejectedUpstreams` → `PruneReport.reEntered`) folded in — so
+ * the runtime methods below are pure pass-throughs and there is exactly ONE
+ * decision procedure: the primitive that
  * performs the mutation. The earlier state/snapshot derivation lived here and
  * has been removed (V1 §6.2): reading a node status before and after the awaited
  * call is a SECOND judgement over a window in which another critical section may
@@ -1174,8 +1222,9 @@ class EngineRuntimeImpl implements EngineRuntime {
    * resumed into `running` nodes whose tasks already exist in the dispatch
    * system, or be timed-out when the task vanished.
    */
-  async recover(): Promise<void> {
-    if (!this.persistence) return; // no persistence → nothing to recover
+  async recover(): Promise<RecoveryReport> {
+    // No persistence → nothing to recover.
+    if (!this.persistence) return { status: "no_state" };
     // `load()` returns `null` for a missing / corrupt / version-mismatched
     // file (clean start — first run) and rethrows any NON-ENOENT read failure
     // (an unreadable-but-present state file is an explicit error, never a
@@ -1185,7 +1234,8 @@ class EngineRuntimeImpl implements EngineRuntime {
     // re-executed (review 05-F6/L22). ENOENT / corrupt / version-mismatch
     // remain clean no-ops.
     const loaded = this.persistence.load(this.state.graphId);
-    if (!loaded) return; // clean start (first run / version mismatch)
+    // Clean start (first run / version mismatch).
+    if (!loaded) return { status: "no_state" };
 
     // Adopt the persisted state in place; clear the crashed process's stale
     // critical-section state (no section is actually running here).
@@ -1217,7 +1267,8 @@ class EngineRuntimeImpl implements EngineRuntime {
       this._notifyRecoveredTimeouts();
       rebuildFrontier(this.state);
       await this.advance.dispatchReady();
-      return;
+      // Adopted and re-dispatched: nothing failed, so this is a full recovery.
+      return { status: "recovered" };
     }
 
     // Live re-subscriptions route future terminations through signalBridge.record
@@ -1249,9 +1300,13 @@ class EngineRuntimeImpl implements EngineRuntime {
         },
       );
     } catch (err) {
-      // A single bad node must not abort recovery — adopt the rest.
+      // A single bad node must not abort recovery — adopt the rest. Report the
+      // degradation (B3) instead of only logging it: the startup sweep counts a
+      // graph as recovered only on `recovered` and surfaces `degraded` apart
+      // from a hard failure (`failed` is throw-only).
+      const reconcileError = errorText(err);
       logWarn(
-        `engine-recover: reconcile failed for graph "${this.state.graphId}": ${errorText(err)}`,
+        `engine-recover: reconcile failed for graph "${this.state.graphId}": ${reconcileError}`,
       );
       // Monitor (M6): reconcileEngine may have timed out some nodes before it
       // threw — surface every node now in the `timeout` status through the
@@ -1259,7 +1314,7 @@ class EngineRuntimeImpl implements EngineRuntime {
       this._notifyRecoveredTimeouts();
       rebuildFrontier(this.state);
       await this.advance.dispatchReady();
-      return;
+      return { status: "degraded", reconcileError };
     }
 
     // Subtask 1: surface recovery-side timeouts through the completion seam
@@ -1303,8 +1358,16 @@ class EngineRuntimeImpl implements EngineRuntime {
     // flush-on-terminate: the runtime was rebuilt from persisted state — drain
     // any pending debounced non-critical write so no churn is lost on replace.
     this.persistence?.flush();
+    return { status: "recovered" };
   }
 
+  /**
+   * Adoption details are reported through `logWarn` only — `adoptPrior` has no
+   * structured report and no named consumer of its internals (B3): the tool
+   * layer awaits it for its side effect (state adoption) and the already
+   * detached re-adopt call site carries its own `logWarn`. The signature is
+   * therefore deliberately `Promise<void>` (unlike {@link recover}).
+   */
   async adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void> {
     if (!this.provisioned) {
       this.provision();
@@ -1440,6 +1503,9 @@ class EngineRuntimeImpl implements EngineRuntime {
       target: [...this.state.nodes.keys()],
       cancelled: [],
       skipped: [],
+      // Whole-graph cancel: the target set is the live node map, so no requested
+      // id can be unknown (E4).
+      unknown: [],
       cancelCalls: [],
     };
     for (const node of this.state.nodes.values()) {

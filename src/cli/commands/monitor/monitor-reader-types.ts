@@ -173,6 +173,14 @@ export interface GraphNodeSnapshot {
   completedAt?: string;
   /** Number of retries attempted */
   retryCount?: number;
+  /**
+   * Failure reason recorded by the engine when the node landed in a failing
+   * terminal status (`timeout` / `escalate` / `done`), e.g. the orphan reason
+   * or `"max_traversals exhausted"`. Absent while no failure was recorded.
+   * Rendered by the monitor panel's node row (E6) — previously the reader
+   * dropped it, so a dead node's cause never reached the surface.
+   */
+  errorReason?: string;
   /** Loop group this node belongs to, if any */
   loopGroupId?: string;
   /** ID of the dispatch task spawned for this node (set when node enters running) */

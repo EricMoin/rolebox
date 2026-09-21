@@ -671,7 +671,9 @@ describe("Phase-3 stubs", () => {
   it("recover() and cancel() resolve (no-op stubs)", async () => {
     const engine = createEngine(singleNodeGraph());
     engine.provision();
-    await expect(engine.recover()).resolves.toBeUndefined();
+    // No persistence → nothing to recover. B3: the structured report says so
+    // instead of resolving void.
+    await expect(engine.recover()).resolves.toEqual({ status: "no_state" });
     // C7: cancel() resolves the authoritative teardown report. The provisioned
     // root is `ready` (never dispatched — run() was not called), so it is
     // retired and reported; with no cancel surface on the stub-friendly path
@@ -680,6 +682,7 @@ describe("Phase-3 stubs", () => {
       target: ["A"],
       cancelled: ["A"],
       skipped: [],
+      unknown: [],
       cancelCalls: [],
     });
   });
@@ -959,7 +962,7 @@ describe("engine.recover() surfaces non-ENOENT load failures", () => {
         dispatch: new FakeDispatch(),
         stateDir: dir,
       });
-      await expect(engine.recover()).resolves.toBeUndefined();
+      await expect(engine.recover()).resolves.toEqual({ status: "no_state" });
       expect(engine.status().phase).toBe(EnginePhase.Idle);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1162,10 +1165,13 @@ describe("C6: approve / reject / partial-approve reports", () => {
 
     // The gate has no upstreams, so the verdict approves/rejects nothing and
     // the prune cancels nothing — but the report is the engine's own decision,
-    // not a post-hoc status diff.
+    // not a post-hoc status diff. The gate IS blocked, so the verdict applied.
     expect(await engine.partialApprove("P", [], [])).toEqual({
+      applied: true,
       cancelled: [],
       surviving: [],
+      skipped: [],
+      reEntered: [],
     });
   });
 

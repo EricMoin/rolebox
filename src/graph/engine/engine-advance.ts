@@ -89,7 +89,10 @@ import {
   isReviseBackEdge,
 } from "./join-evaluator.ts";
 import { applyDataMapping } from "./data-mapping-transform.ts";
-import { cancelPendingUpstreams } from "./cascade-canceller.ts";
+import {
+  cancelPendingUpstreams,
+  type CancelLaneOptions,
+} from "./cascade-canceller.ts";
 import {
   propagateEscalate,
   propagateRevise,
@@ -1380,7 +1383,7 @@ export class AdvanceEngine {
               node,
               signalType,
               signalPayload,
-              this.dispatchPort,
+              this._cancelLaneOptions(),
             );
             this._notifyPropagatedEscalations(report, signalPayload);
           } else {
@@ -1434,7 +1437,13 @@ export class AdvanceEngine {
       let forwardActivate = true;
       if (loopMember) {
         if (migrated) {
-          const report = executeLoopStep(this.state, node, signalType, signalPayload, this.dispatchPort);
+          const report = executeLoopStep(
+            this.state,
+            node,
+            signalType,
+            signalPayload,
+            this._cancelLaneOptions(),
+          );
           forwardActivate = report.outcome === "converged";
           // Y16: a downgraded / stuck / exhausted answer retires the reviewer
           // inside the loop step (no signal drives that lifecycle transition) —
@@ -2574,14 +2583,34 @@ export class AdvanceEngine {
   private _propagateEscalateSignal(node: NodeRuntimeState, payload: unknown): void {
     const state = this.state;
     if (node.loopGroupId !== undefined) {
-      executeLoopStep(state, node, "escalate", payload, this.dispatchPort);
+      // The loop step owns its cascade (§3.3) and, exactly like the non-loop
+      // lane below, retires the join-failed node(s) with no signal of their
+      // own — so its LoopStepReport must be surfaced through the same seam.
+      const report = executeLoopStep(
+        state,
+        node,
+        "escalate",
+        payload,
+        this._cancelLaneOptions(),
+      );
+      this._notifyPropagatedEscalations(report, payload);
       return;
     }
     const report = this._propagateEscalate(node, payload);
     for (const escalatedId of report.escalated) {
       const target = state.nodes.get(escalatedId);
       if (!target || target.loopGroupId !== undefined) continue;
-      cancelPendingUpstreams(state, target, evaluateJoin(state, target), this.dispatchPort);
+      // The CascadeCancelReport is deliberately not surfaced here (B6): each
+      // retirement is already observable exactly once through the H4 hook in
+      // `_cancelLaneOptions()` → `notifyNodeTerminal`, which is the consumer a
+      // cancellation has; this lane has no caller waiting on the
+      // cancelled / alreadyResolved split.
+      cancelPendingUpstreams(
+        state,
+        target,
+        evaluateJoin(state, target),
+        this._cancelLaneOptions(),
+      );
     }
     // Monitor (M1b): escalate propagation escalated downstream convergence
     // node(s) inside signal-propagation.ts — those markEscalated calls are
@@ -2628,6 +2657,25 @@ export class AdvanceEngine {
       }
       this._notifyCompletion(node, "escalate", payload, node.status);
     }
+  }
+
+  /**
+   * The seams every cancellation lane this engine drives hands to
+   * {@link cancelPendingUpstreams} / {@link pruneDownstreamSubgraph}: the
+   * dispatch-teardown port plus the monitor H4 notification hook.
+   *
+   * A cancellation lane retires nodes OUTSIDE the signal-driven advancement, so
+   * without the hook the monitor would never see the per-node completion event
+   * or durable event log line — the hook routes each retirement through the
+   * same {@link notifyNodeTerminal} seam as a signal-driven transition.
+   */
+  private _cancelLaneOptions(): CancelLaneOptions {
+    return {
+      dispatchPort: this.dispatchPort,
+      onCancelled: (nodeId, reason) => {
+        this.notifyNodeTerminal(nodeId, "cancelled", reason, NodeStatus.Done);
+      },
+    };
   }
 
   /**
@@ -2827,10 +2875,13 @@ export class AdvanceEngine {
    * succeeds (see {@link _runControlOperation}); under contention the whole
    * partial approval defers rather than running unlocked.
    *
-   * @returns the {@link PruneReport} of THIS verdict (contract C6) — the
-   *   dependents cancelled and the ones surviving on their remaining approved
-   *   upstreams. When the gate was not `blocked` the verdict is an idempotent
-   *   no-op, answered as an empty report rather than re-derived from a
+   * @returns the {@link PruneReport} of THIS verdict (contract C6) — whether
+   *   the verdict was applied, the dependents cancelled, the ones surviving on
+   *   their remaining approved upstreams, the ones the prune could not retire,
+   *   and the rejected upstreams actually re-entered `ready` (`reEntered`; a
+   *   branch the lifecycle guard refused is not claimed). When the gate was not
+   *   `blocked` the verdict is an idempotent no-op, answered as
+   *   `applied: false` with every list empty rather than re-derived from a
    *   snapshot.
    */
   partialApprove(
@@ -2842,11 +2893,35 @@ export class AdvanceEngine {
     return this._runControlOperation(async () => {
       const node = getNode(this.state, nodeId);
       this._assertPartialApproveMembers(node, approved, rejected);
-      let report: PruneReport = { cancelled: [], surviving: [] };
+      let report: PruneReport = {
+        applied: false,
+        cancelled: [],
+        surviving: [],
+        skipped: [],
+        reEntered: [],
+      };
       if (node.status === NodeStatus.Blocked) {
-        report = pruneDownstreamSubgraph(this.state, rejected, nodeId, this.dispatchPort);
+        report = {
+          applied: true,
+          ...pruneDownstreamSubgraph(
+            this.state,
+            rejected,
+            nodeId,
+            this._cancelLaneOptions(),
+          ),
+          // Filled by the re-entry below (B1): the prune itself knows nothing
+          // about upstream re-entry, so it must not claim any.
+          reEntered: [],
+        };
         resetRejectedUpstreams(this.state, node, rejected);
-        reenterRejectedUpstreams(this.state, rejected, reason);
+        // B1: the re-entry report used to be discarded. Forward only the
+        // branches that ACTUALLY re-entered `ready` — a branch whose lifecycle
+        // guard refuses the transition stays out of the report.
+        report.reEntered = reenterRejectedUpstreams(
+          this.state,
+          rejected,
+          reason,
+        ).reEntered;
         if (
           node.joinSatisfied &&
           canTransitionNode(node.status, NodeStatus.Ready)
@@ -2894,7 +2969,8 @@ export class AdvanceEngine {
       }
       await this._dispatchReadyNodes();
       this._checkTermination();
-      // C6: report the prune performed by THIS verdict (empty for a no-op).
+      // C6: report the prune performed by THIS verdict — a non-blocked gate
+      // answers `applied: false` with empty lists (idempotent no-op).
       return report;
     });
   }
@@ -3158,11 +3234,15 @@ export class AdvanceEngine {
         // here would wrongly retire the still-needed back-edge source. Loop
         // cancellation is owned by executeLoopStep (§3.3, escalate path).
         if (target.loopGroupId === undefined) {
+          // Report intentionally not surfaced (B6): the H4 hook in
+          // `_cancelLaneOptions()` already routes every retirement through
+          // `notifyNodeTerminal`, and the forward-activation lane only needs
+          // the side effect.
           cancelPendingUpstreams(
             state,
             target,
             evaluateJoin(state, target),
-            this.dispatchPort,
+            this._cancelLaneOptions(),
           );
         }
         const isPendingActivation = target.status === NodeStatus.Pending;

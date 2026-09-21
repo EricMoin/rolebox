@@ -891,11 +891,18 @@ export default async function (pi: any): Promise<void> {
           }
         : {}),
     });
-    if (graphRecoveryReport.recovered > 0 || graphRecoveryReport.failed.length > 0) {
+    if (
+      graphRecoveryReport.recovered > 0 ||
+      graphRecoveryReport.degraded.length > 0 ||
+      graphRecoveryReport.failed.length > 0
+    ) {
       log.info("Interrupted graph engines recovered", {
         enabled: graphRecoveryEnabled,
         scanned: graphRecoveryReport.scanned,
         recovered: graphRecoveryReport.recovered,
+        // B3: a graph whose state was adopted but whose reconcile pass threw is
+        // reported here with its error text — never counted as recovered.
+        degraded: graphRecoveryReport.degraded,
         failed: graphRecoveryReport.failed.length,
       });
     }

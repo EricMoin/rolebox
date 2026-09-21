@@ -46,6 +46,10 @@ function projectEngineGraph(state: EngineState): EngineGraphSnapshot {
       startedAt: epochToIso(n.startedAt),
       completedAt: n.completedAt !== undefined ? epochToIso(n.completedAt) : undefined,
       retryCount: n.retryCount,
+      // E6: the engine's recorded failure cause must reach the monitor — a
+      // timed-out / escalated / exhausted node is otherwise indistinguishable
+      // from a cleanly finished one at this projection layer.
+      ...(n.errorReason ? { errorReason: n.errorReason } : {}),
       loopGroupId: n.loopGroupId,
       ...(n.dispatchTaskId ? { dispatchTaskId: n.dispatchTaskId } : {}),
       ...(n.dispatchSessionId ? { dispatchSessionId: n.dispatchSessionId } : {}),

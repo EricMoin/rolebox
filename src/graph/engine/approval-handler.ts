@@ -48,7 +48,7 @@ import {
   readQuorum,
 } from "./join-evaluator.ts";
 import { addToFrontier, removeFromFrontier } from "./engine-state.ts";
-import type { CancelDispatchPort } from "./cascade-canceller.ts";
+import type { CancelLaneOptions } from "./cascade-canceller.ts";
 import { retireCancelledNode } from "./cancellation.ts";
 import { recordSignalToLedger } from "./signal-bridge.ts";
 import { asRecord } from "./signal-payload.ts";
@@ -109,12 +109,49 @@ export type RejectReport =
       actualStatus: NodeStatus;
     };
 
-/** Result of {@link pruneDownstreamSubgraph}. */
+/**
+ * Result of {@link pruneDownstreamSubgraph} / `AdvanceEngine.partialApprove`.
+ *
+ * `cancelled` / `surviving` / `skipped` are disjoint and jointly cover every
+ * downstream node the prune examined: each lands in exactly one of them.
+ * `applied` is a gate-level flag, not a fourth list — it reports whether the
+ * gate was `blocked` when the verdict arrived, so those three lists are all
+ * empty on an idempotent no-op. `reEntered` covers a different axis — the
+ * REJECTED UPSTREAM branches re-marked `ready` for re-execution — and is empty
+ * for a pure prune or a no-op verdict.
+ */
 export interface PruneReport {
-  /** Nodes cancelled (transitively dependent on rejected results, cannot survive). */
+  /**
+   * The rejected upstream branches actually re-marked `ready` (and added to
+   * the frontier) to re-execute with the rejection feedback
+   * ({@link ReentryReport.reEntered}); a branch whose lifecycle guard refused
+   * the `→ ready` transition is NOT listed, so a caller can tell "re-queued"
+   * from "refused". Read by `partialApprove`'s callers (the tool layer has no
+   * partial-approve surface) and the engine tests.
+   */
+  reEntered: string[];
+  /**
+   * Whether the gate was actually `blocked` when the verdict arrived, so the
+   * verdict was applied. `false` marks an idempotent no-op (an
+   * already-resolved / never-blocked gate) — the caller learns that the echoed
+   * prune result reflects no decision without diffing snapshots.
+   */
+  applied: boolean;
+  /**
+   * Nodes actually retired to `cancelled → done` by this prune (and, when a
+   * cancel seam was present and the node carried a dispatch task, handed to
+   * `cancelTask`). Transitively dependent on rejected results.
+   */
   cancelled: string[];
   /** Downstream nodes that survive on their remaining approved upstream sources. */
   surviving: string[];
+  /**
+   * Nodes the prune targeted but could NOT retire — already `completed`,
+   * `blocked`, or terminal (`escalate` / `timeout` / `cancelled` /
+   * `done`). The lifecycle guard rejected the transition; they are left
+   * untouched.
+   */
+  skipped: string[];
 }
 
 /** Result of {@link reenterRejectedUpstreams}. */
@@ -531,16 +568,20 @@ export function rejectBlockedNode(
  *
  * @param rejectedNodeIds   Upstream branches the human rejected.
  * @param approvalNodeId    The `needs_approval` node issuing the partial verdict.
- * @param dispatchPort      Optional cancellation seam (task teardown).
+ * @param opts              Optional cancellation seams (dispatch teardown,
+ *                          monitor H4 notification).
+ * @returns The prune's own lists; `applied` and `reEntered` belong to the
+ *   caller — only `AdvanceEngine.partialApprove` knows whether the gate was
+ *   `blocked` and which rejected upstreams actually re-entered `ready`.
  */
 export function pruneDownstreamSubgraph(
   state: EngineState,
   rejectedNodeIds: string[],
   approvalNodeId: string,
-  dispatchPort?: CancelDispatchPort,
-): PruneReport {
+  opts: CancelLaneOptions = {},
+): Omit<PruneReport, "applied" | "reEntered"> {
   const rejected = new Set(rejectedNodeIds);
-  if (rejected.size === 0) return { cancelled: [], surviving: [] };
+  if (rejected.size === 0) return { cancelled: [], surviving: [], skipped: [] };
 
   // Precondition guard: pruning only makes sense when the approval node is
   // indeed a `needs_approval` gate. A non-gate node has no human-decision
@@ -548,7 +589,7 @@ export function pruneDownstreamSubgraph(
   // with an empty result to avoid corrupting the graph.
   const approvalNode = state.nodes.get(approvalNodeId);
   if (!approvalNode || !approvalNode.needsApproval) {
-    return { cancelled: [], surviving: [] };
+    return { cancelled: [], surviving: [], skipped: [] };
   }
 
   // ── Phase 1: transitive downstream of every rejected node ─────────────────
@@ -573,6 +614,7 @@ export function pruneDownstreamSubgraph(
   // ── Phase 2: cancel nodes that cannot survive on approved sources alone ────
   const cancelled: string[] = [];
   const surviving: string[] = [];
+  const skipped: string[] = [];
 
   for (const nodeId of downstream) {
     const node = state.nodes.get(nodeId);
@@ -585,14 +627,17 @@ export function pruneDownstreamSubgraph(
     const strategy = getJoinStrategy(state, node);
 
     if (shouldCancel(approvedCount, upstreamIds.length, strategy)) {
-      cancelNode(state, node, dispatchPort);
-      cancelled.push(nodeId);
+      // The topology verdict says "must go", but the lifecycle guard may still
+      // refuse an un-cancellable node (already completed / blocked / terminal).
+      // Report what actually happened instead of claiming the retirement.
+      if (cancelNode(state, node, opts)) cancelled.push(nodeId);
+      else skipped.push(nodeId);
     } else {
       surviving.push(nodeId);
     }
   }
 
-  return { cancelled, surviving };
+  return { cancelled, surviving, skipped };
 }
 
 /**
@@ -627,6 +672,10 @@ function shouldCancel(
  * they re-execute and re-answer, which re-satisfies the approval node's join.
  * Only nodes currently transitionable to `ready` are re-entered (completed →
  * ready; never a still-running or terminal node).
+ *
+ * `AdvanceEngine.partialApprove` folds the returned {@link ReentryReport} into
+ * {@link PruneReport.reEntered} — the report was previously discarded, so a
+ * caller could not tell a re-queued branch from a refused one.
  */
 export function reenterRejectedUpstreams(
   state: EngineState,
@@ -674,16 +723,23 @@ export function resetRejectedUpstreams(
  * `engine-recovery.ts:416` bails on the now-`done` node, so without this the
  * partial-approve prune lane would leak the slot — same rationale as
  * `cancelOne` in `cancellation.ts`).
+ *
+ * @returns `true` when the node was actually retired — the caller reports the
+ *   ones the lifecycle guard refused as `skipped`.
  */
 function cancelNode(
   state: EngineState,
   node: NodeRuntimeState,
-  dispatchPort?: CancelDispatchPort,
-): void {
-  retireCancelledNode(
+  opts: CancelLaneOptions,
+): boolean {
+  return retireCancelledNode(
     state,
     node,
     `cancelled by partial-approval pruning at "${state.graphId}"`,
-    { refund: true, dispatchPort },
+    {
+      refund: true,
+      dispatchPort: opts.dispatchPort,
+      onCancelled: opts.onCancelled,
+    },
   );
 }

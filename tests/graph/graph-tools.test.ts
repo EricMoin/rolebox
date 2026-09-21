@@ -656,6 +656,12 @@ describe("graph_cancel", () => {
     // All nodes transition cancelled→done; the tool picks up the done set.
     expect(r.cancelled).toHaveLength(4);
     expect(r.graph_id).toBe(graph_id);
+    // A1: the FULL engine report reaches the tool answer — the expanded
+    // target is every node, nothing was left alone, and no id was unknown.
+    expect(r.target).toEqual(["approval-gate", "implementer", "planner", "reviewer"]);
+    expect(r.skipped).toEqual([]);
+    expect(r.unknown).toEqual([]);
+    expect(r.cancelCalls).toEqual([]);
     const state = ts["getEntry"](graph_id).runtime.status();
     for (const node of state.nodes.values()) {
       expect(node.status).toBe("done");
@@ -681,6 +687,12 @@ describe("graph_cancel", () => {
     const r = await ts.graph_cancel({ graph_id, node_id: "planner" });
     // A bare node_id defaults to cascade=false: dependents stay pending.
     expect(r.cancelled).toEqual(["planner"]);
+    // A1: the engine's expansion / skip / unknown / hand-off lists are all
+    // projected, not just the retired set.
+    expect(r.target).toEqual(["planner"]);
+    expect(r.skipped).toEqual([]);
+    expect(r.unknown).toEqual([]);
+    expect(r.cancelCalls).toEqual([]);
     // Reported set matches real engine state — the old filter hack is gone.
     expect(r.cancelled).toEqual(liveCancelled(ts, graph_id));
     expect(
@@ -701,6 +713,11 @@ describe("graph_cancel", () => {
       "reviewer",
     ]);
     expect(r.cancelled.sort()).toEqual(liveCancelled(ts, graph_id));
+    // The expanded target stays the requested node; the closure lives in
+    // `cancelled` (A1).
+    expect(r.target).toEqual(["planner"]);
+    expect(r.skipped).toEqual([]);
+    expect(r.unknown).toEqual([]);
   });
 
   it("cancels a loop group plus its dependents (cascade=true default)", async () => {
@@ -715,6 +732,10 @@ describe("graph_cancel", () => {
       "reviewer",
     ]);
     expect(r.cancelled.sort()).toEqual(liveCancelled(ts, graph_id));
+    // The loop-group expansion is the engine's own target set (A1).
+    expect(r.target).toEqual(["implementer", "reviewer"]);
+    expect(r.skipped).toEqual([]);
+    expect(r.unknown).toEqual([]);
   });
 
   it("honors an explicit cascade=false on a loop target", async () => {
@@ -737,6 +758,142 @@ describe("graph_cancel", () => {
   it("throws for an unknown graph", () => {
     const ts = createGraphToolSet();
     expect(() => ts.graph_cancel({ graph_id: "nope" })).toThrow(/does not exist/);
+  });
+
+  /**
+   * Dispatch seam for the report tests: keeps every launch `running` (its task
+   * never fires termination) so a cancel has a live `dispatchTaskId` to report,
+   * and records the fire-and-forget `cancelTask` hand-offs. With
+   * `complete = true` every launch completes on the next macrotask instead, so
+   * a target can reach a non-cancellable terminal status through the real path.
+   */
+  class CancelProbeDispatch implements NodeDispatchPort {
+    readonly cancelled: string[] = [];
+    private readonly subs = new Map<string, TaskTerminatedCallback>();
+    private seq = 0;
+
+    constructor(private readonly complete: boolean = false) {}
+
+    executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
+      const id = `task-${node.nodeId}-${++this.seq}`;
+      const task = {
+        id,
+        sessionId: `sess-${id}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      } as DispatchTask;
+      if (this.complete) {
+        setTimeout(() => this.subs.get(id)?.(id, "completed"), 0);
+      }
+      return Promise.resolve(task);
+    }
+
+    onTaskTerminated(
+      taskId: string,
+      cb: TaskTerminatedCallback,
+    ): TaskTerminatedCallback {
+      this.subs.set(taskId, cb);
+      return cb;
+    }
+
+    cancelTask(taskId: string): Promise<boolean> {
+      this.cancelled.push(taskId);
+      return Promise.resolve(true);
+    }
+  }
+
+  /** Let setTimeout(0) completions settle through the engine. */
+  const settle = () => new Promise((r) => setTimeout(r, 25));
+
+  it("reports a requested id that names no node in a dedicated unknown list", async () => {
+    const ts = createGraphToolSet();
+    const { graph_id } = ts.graph_create({ name: "cancel-unknown" });
+    buildReviewTeamPlus(ts, graph_id);
+
+    const r = await ts.graph_cancel({ graph_id, node_id: "ghost" });
+
+    expect(r.cancelled).toEqual([]);
+    expect(r.target).toEqual(["ghost"]);
+    expect(r.unknown).toEqual(["ghost"]);
+    expect(r.cancelCalls).toEqual([]);
+    // E4: the engine's split is in place, so the miss must NOT also appear in
+    // `skipped` (whose meaning is "exists, but not cancellable").
+    expect(r.skipped).toEqual([]);
+  });
+
+  it("reports a target that is no longer cancellable in skipped, not cancelled", async () => {
+    const ts = new GraphToolSet({ dispatch: new CancelProbeDispatch(true) });
+    const { graph_id } = ts.graph_create({ name: "cancel-skipped" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id });
+    // A ends `completed` (not cancellable — only pending/ready/running are).
+    await settle();
+    expect(ts["getEntry"](graph_id).runtime.status().nodes.get("A")!.status).toBe("completed");
+
+    const r = await ts.graph_cancel({ graph_id, node_id: "A" });
+
+    expect(r.cancelled).toEqual([]);
+    expect(r.skipped).toEqual(["A"]);
+    expect(r.unknown).toEqual([]);
+    expect(r.target).toEqual(["A"]);
+    expect(r.cancelCalls).toEqual([]);
+  });
+
+  it("reports the best-effort cancelTask hand-offs for a running node", async () => {
+    const fake = new CancelProbeDispatch();
+    const ts = new GraphToolSet({ dispatch: fake });
+    const { graph_id } = ts.graph_create({ name: "cancel-calls" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id });
+    const running = ts["getEntry"](graph_id).runtime.status().nodes.get("A")!;
+    expect(running.status).toBe("running");
+    expect(running.dispatchTaskId).toBe("task-A-1");
+
+    const r = await ts.graph_cancel({ graph_id, node_id: "A" });
+
+    expect(r.cancelled).toEqual(["A"]);
+    // The task id is the running node's own dispatch task, handed to the seam
+    // fire-and-forget — a teardown request, not an acknowledgement.
+    expect(r.cancelCalls).toEqual(["task-A-1"]);
+    expect(fake.cancelled).toEqual(["task-A-1"]);
+    expect(r.target).toEqual(["A"]);
+    expect(r.skipped).toEqual([]);
+    expect(r.unknown).toEqual([]);
+  });
+
+  it("sorts every projected list so the answer is iteration-order independent", async () => {
+    const fake = new CancelProbeDispatch();
+    const ts = new GraphToolSet({ dispatch: fake });
+    const { graph_id } = ts.graph_create({ name: "cancel-sorted" });
+    // Declared in non-alphabetical order: both A and B end up running with a
+    // task, so both lists exercise the sort rather than declaration order.
+    ts.graph_add_node({ graph_id, id: "B", agent: "b", prompt: "pB" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    await ts.graph_run({ graph_id });
+    const before = ts["getEntry"](graph_id).runtime.status();
+    const taskA = before.nodes.get("A")!.dispatchTaskId;
+    const taskB = before.nodes.get("B")!.dispatchTaskId;
+    expect(taskA).toBeDefined();
+    expect(taskB).toBeDefined();
+
+    const r = await ts.graph_cancel({ graph_id });
+
+    // The engine walks its node map in declaration order (B, A), so an
+    // unsorted projection would answer ["B","A"]; every list is ascending.
+    expect(r.target).toEqual(["A", "B"]);
+    expect(r.cancelled).toEqual(["A", "B"]);
+    expect(r.cancelCalls).toEqual([taskA!, taskB!].sort());
+    expect(r.skipped).toEqual([]);
+    expect(r.unknown).toEqual([]);
   });
 });
 

@@ -24,6 +24,7 @@
 
 import { EnginePhase, NodeStatus } from "../../constants.ts";
 import { CONSECUTIVE_STALE_THRESHOLD } from "../../loop/constants.ts";
+import { errorText } from "../../utils/error-text.ts";
 import type { EdgeDeclaration, GraphDeclaration, NodeConfig } from "../../types.graph-v2.ts";
 import type {
   EngineState,
@@ -36,6 +37,7 @@ import type {
 import { resolveJoinStrategy, isReviseBackEdge } from "./join-evaluator.ts";
 import { markReady } from "./node-lifecycle.ts";
 import { markDirty, markNonCriticalDirty } from "./engine-persistence.ts";
+import { logWarn } from "./log-warn.ts";
 
 // ── Event sinks (write-side graph event log) ────────────────────────────────
 //
@@ -94,8 +96,12 @@ export function applyBudgetDelta(
   // wired on the state). Never lets a recorder failure corrupt the budget update.
   try {
     state.budgetEventSink?.(state.graphId, b);
-  } catch {
-    // observability — never breaks the budget mutation
+  } catch (err) {
+    // Observability failure is reported, never propagated: the budget mutation
+    // it accompanies has already been applied.
+    logWarn(
+      `engine-state: budget event sink failed for graph "${state.graphId}": ${errorText(err)}`,
+    );
   }
 }
 
@@ -135,8 +141,12 @@ export function transitionPhase(state: EngineState, to: EnginePhase): void {
   // wired on the state). Never lets a recorder failure corrupt the phase transition.
   try {
     state.phaseEventSink?.(state.graphId, from, to);
-  } catch {
-    // observability — never breaks the lifecycle transition
+  } catch (err) {
+    // Observability failure is reported, never propagated: the phase has
+    // already transitioned.
+    logWarn(
+      `engine-state: phase event sink failed for graph "${state.graphId}" (${from} → ${to}): ${errorText(err)}`,
+    );
   }
 }
 

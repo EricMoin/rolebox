@@ -25,6 +25,10 @@
  *      `already_resolved`-only `actualStatus`.
  *   3. `GraphStatusSnapshot` (Y27) — which `graph_status` JSON keys are required
  *      and which are conditionally spread (must stay optional).
+ *   4. The tool-layer report projections (A1/A2/A3) — `GraphCancelResult`
+ *      (every `CancelScopeReport` list), `GraphRunResult["retry"]` (every
+ *      `RetryReport` field) and the reject-only optional lane fields on
+ *      `GraphApproveResult`.
  *
  * The runtime `expect` calls keep each case visible in the test report; they
  * assert the same facts the types encode where a value happens to be available.
@@ -38,7 +42,13 @@ import type {
   PruneReport,
   RejectReport,
 } from "../../src/graph/engine/approval-handler.ts";
-import type { GraphStatusSnapshot } from "../../src/graph/tools/graph-tools.ts";
+import type {
+  GraphApproveResult,
+  GraphCancelResult,
+  GraphRunResult,
+  GraphStatusSnapshot,
+} from "../../src/graph/tools/graph-tools.ts";
+import type { CancelScopeReport } from "../../src/graph/engine/cancellation.ts";
 
 /**
  * Whether `K` may be omitted from `T` — the exact "optional" bit. A required
@@ -129,13 +139,105 @@ describe("type contract: approve/reject/prune reports (C6/B16)", () => {
     expect(true).toBe(true);
   });
 
-  it("pins PruneReport to the cancelled/surviving split", () => {
+  it("pins PruneReport to the applied/cancelled/surviving/skipped split", () => {
     expectTypeOf<PruneReport>().toEqualTypeOf<{
+      applied: boolean;
       cancelled: string[];
       surviving: string[];
+      skipped: string[];
+      reEntered: string[];
     }>();
-    const prune: PruneReport = { cancelled: ["b"], surviving: ["c"] };
+    const prune: PruneReport = {
+      applied: true,
+      cancelled: ["b"],
+      surviving: ["c"],
+      skipped: ["d"],
+      reEntered: ["a"],
+    };
     expect(prune.cancelled).toEqual(["b"]);
+    // B1: the rejected-upstream re-entry list is part of the report contract,
+    // not an optional extra a caller can forget to read.
+    expect(prune.reEntered).toEqual(["a"]);
+  });
+});
+
+describe("type contract: CancelScopeReport unknown split (B2/E4)", () => {
+  it("pins the five disjoint outcomes, unknown included", () => {
+    expectTypeOf<CancelScopeReport>().toEqualTypeOf<{
+      target: string[];
+      cancelled: string[];
+      skipped: string[];
+      unknown: string[];
+      cancelCalls: string[];
+    }>();
+    const report: CancelScopeReport = {
+      target: ["ghost"],
+      cancelled: [],
+      skipped: [],
+      // An id that names no node is its own outcome, not "skipped".
+      unknown: ["ghost"],
+      cancelCalls: [],
+    };
+    expect(report.unknown).toEqual(["ghost"]);
+    expect(report.skipped).toEqual([]);
+  });
+});
+
+describe("type contract: tool-layer report projections (A1/A2/A3)", () => {
+  it("pins GraphCancelResult to the full CancelScopeReport projection", () => {
+    expectTypeOf<GraphCancelResult>().toEqualTypeOf<{
+      graph_id: string;
+      cancelled: string[];
+      target: string[];
+      skipped: string[];
+      unknown: string[];
+      cancelCalls: string[];
+    }>();
+    const cancel: GraphCancelResult = {
+      graph_id: "g",
+      cancelled: ["a"],
+      target: ["a", "b"],
+      skipped: ["b"],
+      unknown: ["ghost"],
+      cancelCalls: ["task-a"],
+    };
+    expect(cancel.unknown).toEqual(["ghost"]);
+  });
+
+  it("pins the graph_run retry projection to every RetryReport field", () => {
+    expectTypeOf<NonNullable<GraphRunResult["retry"]>>().toEqualTypeOf<{
+      node_id: string;
+      re_dispatched: number;
+      reset: string[];
+      ready: string[];
+      superseded_task_ids: string[];
+    }>();
+  });
+
+  it("keeps the reject lane fields optional on GraphApproveResult", () => {
+    expectTypeOf<IsOptionalKey<GraphApproveResult, "kind">>().toEqualTypeOf<true>();
+    expectTypeOf<IsOptionalKey<GraphApproveResult, "actual_status">>().toEqualTypeOf<true>();
+    expectTypeOf<NonNullable<GraphApproveResult["kind"]>>().toEqualTypeOf<
+      "escalate" | "revise" | "already_resolved"
+    >();
+    const approve: GraphApproveResult = {
+      graph_id: "g",
+      node_id: "P",
+      action: "approve",
+      node_status: NodeStatus.Completed,
+      phase: "complete",
+      applied: true,
+    };
+    // The approve lane carries neither field (A3).
+    expect(approve.kind).toBeUndefined();
+    expect(approve.actual_status).toBeUndefined();
+    const reject: GraphApproveResult = {
+      ...approve,
+      action: "reject",
+      kind: "already_resolved",
+      actual_status: NodeStatus.Completed,
+    };
+    expect(reject.actual_status).toBe(NodeStatus.Completed);
   });
 });
 

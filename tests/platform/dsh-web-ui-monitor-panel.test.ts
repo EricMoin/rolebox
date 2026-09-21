@@ -697,6 +697,29 @@ describe("RoleboxMonitorPanel", () => {
       ]);
     });
 
+    it("renders a node's recorded failure reason beside its state", async () => {
+      cfg.status = {
+        ...STATUS_BODY,
+        engineGraphs: [
+          {
+            ...GRAPH,
+            nodes: GRAPH.nodes.map((n) =>
+              n.nodeId === "build-api"
+                ? { ...n, errorReason: "task vanished during restart" }
+                : n,
+            ),
+          },
+        ],
+      };
+      mountPanel();
+      await settle();
+
+      const graph = byClass("rolebox-monitor-graph")[0]!;
+      const node = within(graph, "rolebox-monitor-node-row")[0]!;
+      // E6: the reason is a labelled fact on the failing row, not just a status.
+      expect(factValue(node, "error")).toBe("task vanished during restart");
+    });
+
     it("renders loop rounds, mode, timing and the worker session", async () => {
       mountPanel();
       await settle();

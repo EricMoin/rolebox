@@ -61,7 +61,7 @@ import type {
 import type { SignalType } from "./signal-bridge.ts";
 import type { SignalPropagationReport } from "./signal-propagation.ts";
 import { propagateEscalate, propagateRevise } from "./signal-propagation.ts";
-import { cancelPendingUpstreams, type CancelDispatchPort } from "./cascade-canceller.ts";
+import { cancelPendingUpstreams, type CancelLaneOptions } from "./cascade-canceller.ts";
 import { evaluateJoin, isReviseBackEdge } from "./join-evaluator.ts";
 import {
   asRecord,
@@ -130,7 +130,14 @@ export interface LoopEscalatePayload {
 export interface LoopStepReport {
   /** The branch taken by this step (see {@link LoopOutcome}). */
   outcome: LoopOutcome;
-  /** Loop-group id the step ran against (absent when the node was not a member). */
+  /**
+   * Loop-group id the step ran against (absent when the node was not a member).
+   *
+   * diagnostic-only, no consumer (B6): neither `src` nor `tests` reads this
+   * field. Kept rather than deleted because `LoopStepReport` is exported from
+   * the engine barrel and `dist/` is a published artifact (B17), where removing
+   * an exported field is a breaking change.
+   */
   groupId?: string;
   /** The loop group's traversal counter after the step. */
   traversals: number;
@@ -153,11 +160,25 @@ export interface LoopStepReport {
    * `{ escalated, reason }` shape directly (Y16).
    */
   reason?: string;
-  /** The escalating node that was re-marked `ready` for an automatic retry. */
+  /**
+   * The escalating node that was re-marked `ready` for an automatic retry.
+   *
+   * diagnostic-only, no consumer (B6): the loop lane only assigns it (from
+   * `SignalPropagationReport.retried`, whose own field IS read by the
+   * signal-propagation tests); no `src` or test reader reads it off this
+   * report. Kept for the published-type reason documented on {@link groupId}.
+   */
   retried: string[];
   /** Pending upstream nodes retired to `cancelled → done` (cascade). */
   cancelled: string[];
-  /** Upstream nodes that already recorded a payload and were left untouched. */
+  /**
+   * Upstream nodes that already recorded a payload and were left untouched.
+   *
+   * diagnostic-only, no consumer (B6): only assigned from
+   * `CascadeCancelReport.alreadyResolved` (which the cascade-canceller tests do
+   * read); no reader reads it off this report. Kept for the published-type
+   * reason documented on {@link groupId}.
+   */
   alreadyResolved: string[];
   /**
    * The underlying signal-propagation report (revise or escalate), when the
@@ -268,9 +289,10 @@ function initReport(group: LoopGroupRuntimeState): LoopStepReport {
  * @param node        The loop-group member that emitted the terminating signal.
  * @param signalType  The terminating signal (`answer` | `revise_needed` | `escalate`).
  * @param payload     The signal payload (revision findings for `revise_needed`).
- * @param cancelPort  Optional cascade-canceller seam; when omitted, cancelled
- *                    nodes still reach `cancelled → done` but no dispatch task
- *                    is torn down.
+ * @param opts        Optional cascade-canceller seams (dispatch teardown,
+ *                    monitor H4 notification); when omitted, cancelled nodes
+ *                    still reach `cancelled → done` but no dispatch task is
+ *                    torn down and no completion event is surfaced.
  * @returns A {@link LoopStepReport} describing the branch taken.
  */
 export function executeLoopStep(
@@ -278,7 +300,7 @@ export function executeLoopStep(
   node: NodeRuntimeState,
   signalType: SignalType,
   payload: unknown,
-  cancelPort?: CancelDispatchPort,
+  opts: CancelLaneOptions = {},
 ): LoopStepReport {
   const groupId = node.loopGroupId;
   if (groupId && !state.loopGroups.has(groupId)) {
@@ -495,7 +517,10 @@ export function executeLoopStep(
     const target = state.nodes.get(escalatedId);
     if (!target) continue;
     const verdict = evaluateJoin(state, target);
-    const cc = cancelPendingUpstreams(state, target, verdict, cancelPort);
+    // The CascadeCancelReport is folded into this step's report. Per-node
+    // observability of the retirements is already covered by the H4 hook
+    // (`opts.onCancelled`), so the report needs no further wiring.
+    const cc = cancelPendingUpstreams(state, target, verdict, opts);
     report.cancelled.push(...cc.cancelled);
     report.alreadyResolved.push(...cc.alreadyResolved);
   }

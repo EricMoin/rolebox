@@ -34,18 +34,27 @@ import type { EngineState } from "../../src/types.engine-v2.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
+import type {
+  ApproveReport,
+  RejectReport,
+} from "../../src/graph/engine/approval-handler.ts";
 
 /**
- * Reach the live engine state behind a toolset's registry entry. Mirrors the
+ * The live engine runtime behind a toolset's registry entry, reduced to what
+ * these tests observe: the engine state, plus the two approval primitives a
+ * test may instrument to pin the report-based `applied` contract. Mirrors the
  * established `liveState` pattern in merge-equivalence.test.ts (TS `private` is
  * a compile-time convention; bracket access is the in-repo test idiom).
  */
-function liveRuntime(
-  ts: GraphToolSet,
-  graphId: string,
-): { state: EngineState } {
+interface LiveRuntime {
+  state: EngineState;
+  approveNode(nodeId: string, payload?: unknown): Promise<ApproveReport>;
+  rejectNode(nodeId: string, reason?: string): Promise<RejectReport>;
+}
+
+function liveRuntime(ts: GraphToolSet, graphId: string): LiveRuntime {
   const entry = (ts as unknown as { getEntry(id: string): { runtime: unknown } })["getEntry"](graphId);
-  return entry.runtime as unknown as { state: EngineState };
+  return entry.runtime as unknown as LiveRuntime;
 }
 
 /**
@@ -147,6 +156,9 @@ describe("graph_approve (approve action)", () => {
     expect(res.node_status).toBe(NodeStatus.Completed);
     // No active nodes remain after approval → the graph reaches complete.
     expect(res.phase).toBe("complete");
+    // A3: the lane fields are reject-only — an approval answer has neither.
+    expect(res.kind).toBeUndefined();
+    expect(res.actual_status).toBeUndefined();
   });
 
   it("passes the approval payload downstream and activates the answer edge", async () => {
@@ -232,6 +244,41 @@ describe("graph_approve (approve action)", () => {
     const res = await ts.graph_approve({ graph_id: graphId, node_id: "P", action: "approve" });
     expect(res.applied).toBe(true);
   });
+
+  it("takes applied from the engine's approve report, not a pre-call status snapshot", async () => {
+    // The report is the contract, but on a sequential single decision it agrees
+    // with a pre-call snapshot by construction — and a genuine status flip
+    // between snapshot and call cannot be interleaved deterministically. So the
+    // one primitive under measurement is instrumented with the engine's
+    // idempotent no-op report: `applied` must be false even though the gate is
+    // still `blocked`.
+    const ts = createGraphToolSet();
+    const graphId = singleGate(ts);
+    pauseNodeForApproval(ts, graphId, "P", "s");
+
+    const runtime = liveRuntime(ts, graphId);
+    const original = runtime.approveNode;
+    let calls = 0;
+    runtime.approveNode = async () => {
+      calls += 1;
+      return { applied: false };
+    };
+    try {
+      const res = await ts.graph_approve({
+        graph_id: graphId,
+        node_id: "P",
+        action: "approve",
+      });
+
+      expect(calls).toBe(1);
+      // The stub performed no transition, so the gate is still `blocked`:
+      // a snapshot-based `applied` would answer true here.
+      expect(res.applied).toBe(false);
+      expect(res.node_status).toBe(NodeStatus.Blocked);
+    } finally {
+      runtime.approveNode = original;
+    }
+  });
 });
 
 // ── Toolset routing: reject ────────────────────────────────────────────────
@@ -252,8 +299,126 @@ describe("graph_approve (reject action)", () => {
     expect(res.action).toBe("reject");
     // No loop group → the rejection escalates the node (safety-first).
     expect(res.node_status).toBe(NodeStatus.Escalate);
+    // A3: the engine's lane reaches the tool answer; a genuine rejection has
+    // no actual_status (only the already_resolved replay does).
+    expect(res.kind).toBe("escalate");
+    expect(res.applied).toBe(true);
+    expect(res.actual_status).toBeUndefined();
     const { state } = liveRuntime(ts, graphId);
     expect(state.nodes.get("P")!.signalsObserved["revise_needed"]).toBe("Output is incorrect");
+  });
+
+  it("re-enters a blocked loop-group node and reports the revise lane", async () => {
+    const ts = createGraphToolSet({ dispatch: fakeDispatchSeam() });
+    const graphId = ts.graph_create({ name: "gate-loop" }).graph_id;
+    ts.graph_add_node({
+      graph_id: graphId,
+      id: "P",
+      agent: "emperor--jinyiwei",
+      prompt: "Approve.",
+      needs_approval: true,
+    });
+    ts.graph_add_node({
+      graph_id: graphId,
+      id: "W",
+      agent: "emperor--validator",
+      prompt: "Work.",
+    });
+    // The declared loop group must actually induce a directed cycle.
+    // A needs_approval node may only carry on_signal / on_condition out-edges.
+    ts.graph_add_edge({
+      graph_id: graphId,
+      from: "P",
+      to: "W",
+      type: "on_signal",
+      signal_filter: ["answer"],
+    });
+    ts.graph_add_edge({ graph_id: graphId, from: "W", to: "P", type: "always" });
+    ts.graph_add_loop({
+      graph_id: graphId,
+      id: "revision",
+      nodes: ["P", "W"],
+      max_traversals: 3,
+    });
+    pauseNodeForApproval(ts, graphId, "P", "s");
+
+    const res = await ts.graph_approve({
+      graph_id: graphId,
+      node_id: "P",
+      action: "reject",
+      reason: "redo it",
+    });
+
+    // A loop-group member is re-entered `ready` (not escalated) and the
+    // re-dispatch runs immediately — the lane is `revise`.
+    expect(res.kind).toBe("revise");
+    expect(res.applied).toBe(true);
+    expect(res.actual_status).toBeUndefined();
+    expect(res.node_status).toBe(NodeStatus.Running);
+    const { state } = liveRuntime(ts, graphId);
+    expect(state.nodes.get("P")!.prompt).toContain("[Rejection feedback]:");
+  });
+
+  it("reports already_resolved with the node's actual status on a replay reject", async () => {
+    const ts = createGraphToolSet();
+    const graphId = singleGate(ts);
+    pauseNodeForApproval(ts, graphId, "P", "s");
+    await ts.graph_approve({ graph_id: graphId, node_id: "P", action: "approve" });
+    expect(liveRuntime(ts, graphId).state.nodes.get("P")!.status).toBe(
+      NodeStatus.Completed,
+    );
+
+    const res = await ts.graph_approve({
+      graph_id: graphId,
+      node_id: "P",
+      action: "reject",
+      reason: "too late",
+    });
+
+    // The engine's idempotent replay report reaches the tool answer: the lane
+    // and the status the node ACTUALLY had, not a re-derived snapshot.
+    expect(res.applied).toBe(false);
+    expect(res.kind).toBe("already_resolved");
+    expect(res.actual_status).toBe(NodeStatus.Completed);
+    expect(res.node_status).toBe(NodeStatus.Completed);
+  });
+
+  it("takes applied from the engine's reject report, not a pre-call status snapshot", async () => {
+    // Same pin as the approve lane: the engine's `already_resolved` report is
+    // the authority, and the stub leaves the gate `blocked` — so a snapshot
+    // taken before the call would answer true.
+    const ts = createGraphToolSet();
+    const graphId = singleGate(ts);
+    pauseNodeForApproval(ts, graphId, "P", "s");
+
+    const runtime = liveRuntime(ts, graphId);
+    const original = runtime.rejectNode;
+    let calls = 0;
+    runtime.rejectNode = async () => {
+      calls += 1;
+      return {
+        kind: "already_resolved",
+        actualStatus: runtime.state.nodes.get("P")!.status,
+      };
+    };
+    try {
+      const res = await ts.graph_approve({
+        graph_id: graphId,
+        node_id: "P",
+        action: "reject",
+        reason: "Output is incorrect",
+      });
+
+      expect(calls).toBe(1);
+      expect(res.applied).toBe(false);
+      expect(res.node_status).toBe(NodeStatus.Blocked);
+      // The stub's RejectReport is projected as-is: the no-op lane and the
+      // status the REPORT claims (Blocked), not the live snapshot.
+      expect(res.kind).toBe("already_resolved");
+      expect(res.actual_status).toBe(NodeStatus.Blocked);
+    } finally {
+      runtime.rejectNode = original;
+    }
   });
 
   it("rejects an unknown graph with a descriptive error", async () => {

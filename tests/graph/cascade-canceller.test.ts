@@ -114,7 +114,7 @@ describe("cancelPendingUpstreams — satisfied verdict", () => {
     const verdict = evaluateJoin(state, sink);
     expect(verdict.kind).toBe("satisfied");
 
-    const report = cancelPendingUpstreams(state, sink, verdict, port);
+    const report = cancelPendingUpstreams(state, sink, verdict, { dispatchPort: port });
 
     expect(report.cancelled).toEqual(["c"]);
     expect(report.alreadyResolved).toEqual(["b"]);
@@ -135,7 +135,7 @@ describe("cancelPendingUpstreams — satisfied verdict", () => {
 
     expect(evaluateJoin(state, sink).kind).toBe("satisfied");
 
-    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
+    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), { dispatchPort: port });
 
     expect(report.cancelled).toEqual(["c"]);
     expect(state.nodes.get("c")!.status).toBe(NodeStatus.Done);
@@ -147,7 +147,7 @@ describe("cancelPendingUpstreams — satisfied verdict", () => {
     collectUpstreamResults(state, sink, payload("b"));
     collectUpstreamResults(state, sink, payload("c"));
 
-    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
+    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), { dispatchPort: port });
 
     expect(report.cancelled).toEqual([]);
     expect(report.alreadyResolved).toEqual(["b", "c"]);
@@ -180,7 +180,7 @@ describe("cancelPendingUpstreams — failed verdict", () => {
     const verdict = evaluateJoin(state, sink);
     expect(verdict.kind).toBe("failed");
 
-    const report = cancelPendingUpstreams(state, sink, verdict, port);
+    const report = cancelPendingUpstreams(state, sink, verdict, { dispatchPort: port });
 
     expect(report.cancelled).toEqual(["c"]);
     expect(state.nodes.get("c")!.status).toBe(NodeStatus.Done);
@@ -196,7 +196,7 @@ describe("cancelPendingUpstreams — failed verdict", () => {
     const verdict = evaluateJoin(state, sink);
     expect(verdict.kind).toBe("failed");
 
-    const report = cancelPendingUpstreams(state, sink, verdict, port);
+    const report = cancelPendingUpstreams(state, sink, verdict, { dispatchPort: port });
 
     // The still-pending upstream (b) is retired; the failed one (c) is retained.
     expect(report.cancelled).toEqual(["b"]);
@@ -214,7 +214,7 @@ describe("cancelPendingUpstreams — waiting verdict", () => {
     const { state, sink, port } = buildRig(diamondGraph()); // all: nothing answered
     expect(evaluateJoin(state, sink).kind).toBe("waiting");
 
-    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
+    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), { dispatchPort: port });
 
     expect(report).toEqual({ cancelled: [], alreadyResolved: [] });
     expect(port.calls).toEqual([]);
@@ -230,7 +230,7 @@ describe("cancelPendingUpstreams — waiting verdict", () => {
 
     expect(evaluateJoin(state, sink).kind).toBe("waiting");
 
-    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
+    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), { dispatchPort: port });
 
     expect(report.cancelled).toEqual([]);
     expect(port.calls).toEqual([]);
@@ -248,7 +248,7 @@ describe("partial-failure retention", () => {
     collectUpstreamResults(state, sink, payload("c"));
 
     const before = sink.upstreamResults.size;
-    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
+    const report = cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), { dispatchPort: port });
 
     // The cancelled cascade must not drop recorded partial-failure signals.
     expect(sink.upstreamResults.size).toBe(before);
@@ -269,7 +269,7 @@ describe("cancelPendingUpstreams — contract", () => {
   it("retires cancelled nodes through the cancelled → done lifecycle", () => {
     const { state, sink, port } = buildRig(diamondWithJoin({ strategy: "any" }));
     collectUpstreamResults(state, sink, payload("b"));
-    cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), port);
+    cancelPendingUpstreams(state, sink, evaluateJoin(state, sink), { dispatchPort: port });
 
     // The lifecycle is exercised: the node passed through `cancelled` and
     // landed on the terminal `done` state (design §3.3 step 2).
@@ -285,7 +285,7 @@ describe("cancelPendingUpstreams — contract", () => {
     collectUpstreamResults(state, sink, payload("c", "revise_needed"));
 
     const verdict = evaluateJoin(state, sink); // satisfied (b answered)
-    const report = cancelPendingUpstreams(state, sink, verdict, port);
+    const report = cancelPendingUpstreams(state, sink, verdict, { dispatchPort: port });
 
     expect(report.cancelled).toEqual([]);
     expect(report.alreadyResolved).toEqual(["b", "c"]);
@@ -299,7 +299,7 @@ describe("cancelPendingUpstreams — contract", () => {
     // The root has no upstream edges → immediately satisfied, nothing to cancel.
     const root = state.nodes.get("root")!;
     const verdict: JoinVerdict = { kind: "satisfied", reasons: ["no upstream"] };
-    const report = cancelPendingUpstreams(state, root, verdict, port);
+    const report = cancelPendingUpstreams(state, root, verdict, { dispatchPort: port });
     expect(report).toEqual({ cancelled: [], alreadyResolved: [] });
     expect(port.calls).toEqual([]);
   });
@@ -361,7 +361,7 @@ describe("cancelPendingUpstreams — shared-upstream guard", () => {
     collectUpstreamResults(state, c, payload("X"));
     expect(evaluateJoin(state, c).kind).toBe("satisfied");
 
-    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), port);
+    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), { dispatchPort: port });
 
     // S must NOT be cancelled — D (fed only by S) still needs it.
     expect(report.cancelled).toEqual([]);
@@ -375,7 +375,7 @@ describe("cancelPendingUpstreams — shared-upstream guard", () => {
     collectUpstreamResults(state, c, payload("X", "escalate"));
     expect(evaluateJoin(state, c).kind).toBe("failed");
 
-    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), port);
+    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), { dispatchPort: port });
 
     // S must NOT be cancelled — D (fed only by S) still needs it.
     expect(report.cancelled).toEqual([]);
@@ -389,7 +389,7 @@ describe("cancelPendingUpstreams — shared-upstream guard", () => {
     state.nodes.get("D")!.status = NodeStatus.Completed;
     collectUpstreamResults(state, c, payload("X")); // any-join satisfied
 
-    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), port);
+    const report = cancelPendingUpstreams(state, c, evaluateJoin(state, c), { dispatchPort: port });
 
     expect(report.cancelled).toEqual(["S"]);
     expect(state.nodes.get("S")!.status).toBe(NodeStatus.Done);
@@ -471,6 +471,37 @@ describe("cancelNodes — scoped (cascade=false)", () => {
 
     expect(report.cancelled).toEqual(["A"]);
     expect(state.frontier).not.toContain("A");
+  });
+});
+
+// ── unknown ids (E4) ────────────────────────────────────────────────────────
+
+describe("cancelNodes — unknown ids (E4)", () => {
+  it("reports an id that names no node in unknown, never in skipped", () => {
+    const { state, port } = chainRig();
+    runAllChain(state);
+
+    const report = cancelNodes(state, ["ghost"], {}, port);
+
+    // The engine still echoes the requested id in `target`…
+    expect(report.target).toEqual(["ghost"]);
+    // …but reports the miss in its own list: `skipped` means "exists, not
+    // cancellable", which is a different operator response.
+    expect(report.unknown).toEqual(["ghost"]);
+    expect(report.skipped).toEqual([]);
+    expect(report.cancelled).toEqual([]);
+  });
+
+  it("keeps unknown and skipped disjoint for a mixed scope", () => {
+    const { state, port } = chainRig();
+    // B exists but is terminal → not cancellable (skipped); ghost names no node.
+    state.nodes.get("B")!.status = NodeStatus.Completed;
+
+    const report = cancelNodes(state, ["ghost", "B"], {}, port);
+
+    expect(report.unknown).toEqual(["ghost"]);
+    expect(report.skipped).toEqual(["B"]);
+    expect(report.cancelled).toEqual([]);
   });
 });
 

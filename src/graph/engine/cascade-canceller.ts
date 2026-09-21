@@ -42,7 +42,7 @@
 import { NodeStatus } from "../../constants.ts";
 import type { EngineState, NodeRuntimeState } from "../../types.engine-v2.ts";
 import { evaluateJoin, getUpstreamNodeIds, type JoinVerdict } from "./join-evaluator.ts";
-import { retireCancelledNode } from "./cancellation.ts";
+import { retireCancelledNode, type CancelNodeNotifier } from "./cancellation.ts";
 
 // ── Ports ──────────────────────────────────────────────────────────────────
 
@@ -56,6 +56,30 @@ import { retireCancelledNode } from "./cancellation.ts";
 export interface CancelDispatchPort {
   /** Best-effort cancellation of a running dispatch task. Never awaited. */
   cancelTask?(taskId: string): Promise<boolean>;
+}
+
+/**
+ * Optional seams for the cancellation lanes that retire nodes through
+ * {@link retireCancelledNode} (the join cascade here and the partial-approve
+ * prune in `approval-handler.ts`). Replaces the bare positional
+ * `dispatchPort` so the monitor H4 notification hook reaches every lane
+ * without another positional parameter.
+ */
+export interface CancelLaneOptions {
+  /**
+   * Cancellation seam; when omitted, the nodes still reach
+   * `cancelled → done` but no dispatch task is torn down.
+   */
+  dispatchPort?: CancelDispatchPort;
+  /**
+   * Per-node notification hook (monitor H4) forwarded to
+   * {@link retireCancelledNode}: invoked with `(nodeId, reason)` AFTER a
+   * node's lifecycle advanced to `cancelled → done`. A cancellation lane
+   * retires nodes OUTSIDE the signal-driven advancement, so without this hook
+   * the monitor would never see the per-node completion event or durable event
+   * log line.
+   */
+  onCancelled?: CancelNodeNotifier;
 }
 
 // ── Report ─────────────────────────────────────────────────────────────────
@@ -112,15 +136,16 @@ export interface CascadeCancelReport {
  * @param state         Engine state (source of per-node runtime state).
  * @param node          The convergence node whose upstreams are being retired.
  * @param joinVerdict   The join verdict to act on (satisfied / failed / waiting).
- * @param dispatchPort  Optional cancellation seam; when omitted, only the node
- *                      lifecycle is advanced (no dispatch task teardown).
+ * @param opts          Optional cancellation seams (dispatch teardown, monitor
+ *                      H4 notification); when omitted, only the node lifecycle
+ *                      is advanced.
  * @returns A {@link CascadeCancelReport} describing cancelled vs. resolved nodes.
  */
 export function cancelPendingUpstreams(
   state: EngineState,
   node: NodeRuntimeState,
   joinVerdict: JoinVerdict,
-  dispatchPort?: CancelDispatchPort,
+  opts: CancelLaneOptions = {},
 ): CascadeCancelReport {
   // A still-undecided join must not retire anything — upstreams may yet answer.
   if (joinVerdict.kind === "waiting") {
@@ -163,7 +188,11 @@ export function cancelPendingUpstreams(
       state,
       upstream,
       `cancelled by join cascade at convergence node "${node.nodeId}"`,
-      { refund: false, dispatchPort },
+      {
+        refund: false,
+        dispatchPort: opts.dispatchPort,
+        onCancelled: opts.onCancelled,
+      },
     );
     cancelled.push(sourceId);
   }

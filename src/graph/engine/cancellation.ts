@@ -91,10 +91,19 @@ export interface CancelScopeReport {
   cancelled: string[];
   /**
    * Node ids encountered (effective targets and, under `cascade`, downstream
-   * dependents) that were NOT cancellable — already `completed`, `blocked`, or
-   * terminal (`escalate` / `timeout` / `cancelled` / `done`). Left untouched.
+   * dependents) that EXIST in the graph but were NOT cancellable — already
+   * `completed`, `blocked`, or terminal (`escalate` / `timeout` /
+   * `cancelled` / `done`). Left untouched.
    */
   skipped: string[];
+  /**
+   * Requested ids that name no node of this graph (E4). Split out of
+   * {@link skipped}, whose documented meaning is "hit, but not cancellable" —
+   * conflating a typo'd / stale id with a real node that survived made the two
+   * unactionable-by-the-same-means cases indistinguishable. Reported rather
+   * than silently dropped.
+   */
+  unknown: string[];
   /** Dispatch task ids handed to `cancelTask` fire-and-forget (best-effort). */
   cancelCalls: string[];
 }
@@ -245,15 +254,20 @@ export interface RetireCancelledNodeOptions {
  *      is present, the task id is recorded into it.
  *   6. Optional `onCancelled` hook — surfaces the retirement to the caller
  *      (monitor H4) identically to signal-driven transitions.
+ *
+ * @returns `true` when this call performed the retirement, `false` when the
+ *   guard rejected it (the node was not in a cancellable status). Callers whose
+ *   report distinguishes "retired" from "hit but left untouched" read it;
+ *   callers that only need the side effect ignore it.
  */
 export function retireCancelledNode(
   state: EngineState,
   node: NodeRuntimeState,
   reason: string,
   opts: RetireCancelledNodeOptions = {},
-): void {
+): boolean {
   // Double guard: transition-table legality + the Cancellable rule.
-  if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return;
+  if (!canTransitionNode(node.status, NodeStatus.Cancelled)) return false;
   // M10 session-slot refund — BEFORE the transition (ordering is load-bearing).
   // `pending`/`ready` nodes have no dispatched session and never consume a slot.
   if (opts.refund !== false && node.status === NodeStatus.Running && node.dispatchTaskId) {
@@ -276,6 +290,7 @@ export function retireCancelledNode(
   // `advance.notifyNodeTerminal`) so the monitor sees the per-node completion
   // event + durable event log line, identical to signal-driven transitions.
   opts.onCancelled?.(node.nodeId, reason);
+  return true;
 }
 
 /**
@@ -311,7 +326,9 @@ function cancelOne(
  *
  * Policy:
  * - Each requested id is expanded to its effective member set (loop-group
- *   targets pull in their full member set). Unknown ids are ignored (skipped).
+ *   targets pull in their full member set). An id that names no node of the
+ *   graph is ignored and reported in `unknown` — never conflated with a real
+ *   node that merely could not be cancelled (`skipped`).
  * - Every effective-target node in `pending | ready | running` is retired to
  *   `cancelled → done` via {@link markCancelled} / {@link markDone}, removed
  *   from the frontier, and — when a cancel seam is present and it carries a
@@ -335,7 +352,8 @@ function cancelOne(
  * @param onCancelled   Optional per-node notification hook (monitor H4) invoked
  *                      with `(nodeId, reason)` for every node actually retired;
  *                      wired by the engine runtime to `notifyNodeTerminal`.
- * @returns A {@link CancelScopeReport} describing what was retired and skipped.
+ * @returns A {@link CancelScopeReport} describing what was retired, skipped
+ *   (exists but not cancellable) and unknown (names no node).
  */
 export function cancelNodes(
   state: EngineState,
@@ -351,6 +369,7 @@ export function cancelNodes(
 
   const cancelled: string[] = [];
   const skipped: string[] = [];
+  const unknown: string[] = [];
   const cancelCalls: string[] = [];
   const reason = cascade
     ? `cancelled by scoped cascade from target "${target.join(",")}" in graph "${state.graphId}"`
@@ -359,7 +378,9 @@ export function cancelNodes(
   for (const id of scope) {
     const node = state.nodes.get(id);
     if (!node) {
-      skipped.push(id); // unknown id — reported, not silently dropped
+      // E4: an id that names no node is a DIFFERENT condition from a real node
+      // that is not cancellable — report it in its own list, never in `skipped`.
+      unknown.push(id);
       continue;
     }
     if (!isCancellable(node)) {
@@ -370,5 +391,5 @@ export function cancelNodes(
     cancelled.push(id);
   }
 
-  return { target, cancelled, skipped, cancelCalls };
+  return { target, cancelled, skipped, unknown, cancelCalls };
 }

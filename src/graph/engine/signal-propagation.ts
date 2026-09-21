@@ -118,7 +118,17 @@ const REVISE_REENTRY_STATUSES: ReadonlySet<NodeStatus> = new Set([
  * had zero consumers, so it was removed rather than repurposed.
  */
 export interface SignalPropagationReport {
-  /** Which propagation lane ran: `revise` or `escalate`. */
+  /**
+   * Which propagation lane ran: `revise` or `escalate`.
+   *
+   * diagnostic-only, no consumer (B6): both producers set it, but neither
+   * `src` nor `tests` reads it back (the lane is already known from the call
+   * site and from {@link reason}); the audit's `retried` / `absorbed` guesses
+   * are NOT this case — those have test readers. Kept rather than deleted
+   * because `SignalPropagationReport` is reachable through exported engine
+   * types and `dist/` is a published artifact (B17), where removing an exported
+   * field is a breaking change.
+   */
   kind: "revise" | "escalate";
   /** (revise) Upstream nodes re-marked `ready` and added to the frontier. */
   revisedUpstream: string[];
