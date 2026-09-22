@@ -60,6 +60,12 @@ import {
   type PersistedCompiledPlan,
 } from "../../src/graph/compiler/plan.ts";
 import {
+  completionPolicyRefOf,
+  createCompletionPolicyRegistry,
+  type CompletionPolicyBody,
+  type CompletionPolicyRegistry,
+} from "../../src/graph/policy/completion-policy.ts";
+import {
   buildDeclaredOutcomeGraph,
   persistDeclaredGraph,
 } from "../../src/graph/tools/declare-graph.ts";
@@ -3120,6 +3126,32 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
   const CONTRACTS = createContractRegistry({
     contracts: [REVIEW_SNAPSHOT, APPLY_SNAPSHOT],
   });
+  // D6: the fixture's natural node is AUTHORIZED by a host-installed policy, so
+  // the plan it produces is executable and the completion-policy content,
+  // identity and authorization join the record the round trip must preserve.
+  const COMPLETION_POLICY_ID = "test.persistence.completion";
+  const COMPLETION_POLICY_REVISION = "1";
+  const COMPLETION_POLICY_BODY: CompletionPolicyBody = {
+    version: 1,
+    default: "ungranted",
+    rules: [
+      {
+        graphId: "graph-plan",
+        nodeId: "review",
+        outcome: "accepted",
+        decision: "allow",
+      },
+    ],
+  };
+  const COMPLETION_POLICY_REF = completionPolicyRefOf({
+    id: COMPLETION_POLICY_ID,
+    revision: COMPLETION_POLICY_REVISION,
+    body: COMPLETION_POLICY_BODY,
+  });
+  const COMPLETION_POLICIES: CompletionPolicyRegistry =
+    createCompletionPolicyRegistry({
+      policies: [{ ref: COMPLETION_POLICY_REF, body: COMPLETION_POLICY_BODY }],
+    });
 
   /** A two-node v3 declaration: review --accepted--> apply, both contracted. */
   function planDeclaration(): GraphDeclarationV3 {
@@ -3144,12 +3176,19 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         },
       ],
       edges: [{ from: "review", to: "apply", outcome: "accepted" }],
+      completion_policy: {
+        id: COMPLETION_POLICY_ID,
+        revision: COMPLETION_POLICY_REVISION,
+      },
     };
   }
 
   /** Compile the fixture declaration — the plan record source. */
   function compiledPlan(): CompiledPlan {
-    const result = compileGraph(planDeclaration(), { contracts: CONTRACTS });
+    const result = compileGraph(planDeclaration(), {
+      contracts: CONTRACTS,
+      completionPolicies: COMPLETION_POLICIES,
+    });
     if (!result.ok) {
       throw new Error(
         "the plan fixture must compile: " +
@@ -3205,6 +3244,11 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
     loopGroups: Record<string, unknown>[];
     contractSnapshots: Record<string, unknown>;
     contractIdentities: Record<string, Record<string, unknown>>;
+    // D6: the completion-policy content, its identity index and the pinned
+    // authorizations are body fields too.
+    completionPolicySnapshots: Record<string, unknown>;
+    completionPolicyIdentities: Record<string, Record<string, unknown>>;
+    completionAuthorizations: Record<string, unknown>[];
     // B9: the explicit terminal list and the executability marker are body
     // fields a tamper case moves with the topology it changes.
     terminalOutcomes: { nodeId: string; outcome: string }[];
@@ -3242,6 +3286,11 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
       contractSnapshots: record.contractSnapshots,
       // B8: the identity index is part of the plan body the revision addresses.
       contractIdentities: record.contractIdentities,
+      // D6: so are the completion-policy content, its identity index and the
+      // pinned authorizations.
+      completionPolicySnapshots: record.completionPolicySnapshots,
+      completionPolicyIdentities: record.completionPolicyIdentities,
+      completionAuthorizations: record.completionAuthorizations,
       // B9: so are the explicit terminal list and the executability marker.
       terminalOutcomes: record.terminalOutcomes,
       executability: record.executability,
@@ -3268,6 +3317,9 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         loopGroups: plan.loopGroups,
         contractSnapshots: plan.contractSnapshots,
         contractIdentities: plan.contractIdentities,
+        completionPolicySnapshots: plan.completionPolicySnapshots,
+        completionPolicyIdentities: plan.completionPolicyIdentities,
+        completionAuthorizations: plan.completionAuthorizations,
         terminalOutcomes: plan.terminalOutcomes,
         executability: plan.executability,
       }),
@@ -3285,6 +3337,20 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
     expect(record.nodeBindings).toEqual({
       review: REVIEW_SNAPSHOT.ref,
       apply: APPLY_SNAPSHOT.ref,
+    });
+    // D6: the completion authorization, the policy body it resolved through and
+    // that body's identity are all part of the record, and the load returns the
+    // record deep-equal (asserted below).
+    expect(record.completionAuthorizations).toEqual([
+      { nodeId: "review", outcome: "accepted", policy: COMPLETION_POLICY_REF },
+    ]);
+    expect(
+      record.completionPolicySnapshots[COMPLETION_POLICY_REF.digest],
+    ).toEqual(COMPLETION_POLICY_BODY);
+    expect(record.completionPolicyIdentities).toEqual({
+      [COMPLETION_POLICY_ID]: {
+        [COMPLETION_POLICY_REVISION]: COMPLETION_POLICY_REF.digest,
+      },
     });
 
     const raw = planRaw();
@@ -3565,8 +3631,17 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         raw: tamperedPlanRaw((file) => {
           file.compiledPlan.nodes[1].id = "ghost";
           file.compiledPlan.edges = [];
-          // Keep the body's other plan-level invariants satisfied (B9) so the
-          // rule under test — the state/topology node check — is what fails.
+          // Keep the body's other plan-level invariants satisfied (B9, D6) so
+          // the rule under test — the state/topology node check — is what
+          // fails: the renamed node still declares natural completion to
+          // "accepted", so its pinned authorization moves with it.
+          file.compiledPlan.completionAuthorizations = [
+            {
+              nodeId: "ghost",
+              outcome: "accepted",
+              policy: COMPLETION_POLICY_REF,
+            },
+          ];
           file.compiledPlan.terminalOutcomes = [
             { nodeId: "apply", outcome: "done" },
             { nodeId: "ghost", outcome: "accepted" },

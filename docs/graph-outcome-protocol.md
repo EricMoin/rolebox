@@ -38,6 +38,9 @@ An authorized orchestrator may draft an inline contract. A policy authority
 outside the worker fixes required acceptance gates, available validators, and
 allowed completion policies. A worker cannot weaken these requirements or edit
 its active contract. Immutability alone does not make a contract trustworthy.
+The completion-policy authority is implemented (D6 below): a natural-completion
+mapping is authorized only by a repository-versioned policy revision the HOST
+installed by content, never by the declaration that requests it.
 
 Compilation resolves and persists the effective contract, its content digest,
 policy revision, and validator versions. An identifier alone is insufficient:
@@ -1454,6 +1457,134 @@ adapters/schema compatibility, the typed-predicate vocabulary, and any
 one-implementation set rather than a plugin surface: `revision-token` is the
 comparison this build implements and any other declared identity is refused,
 never silently approximated.
+
+D6 MAKES NATURAL COMPLETION AUTHORIZED DATA: REPOSITORY-VERSIONED POLICIES,
+HOST-INSTALLED BY CONTENT, PINNED IN THE PLAN, AND A RUN PRECONDITION.
+
+The defect this closes is an authority gap rather than a crash: the v3 grammar
+and the compiler already carried a node's `completion: { mode: "natural",
+outcome }` request into the plan, but nothing separated "the author asked" from
+"a trust boundary granted it". Any declaration could therefore produce a plan
+whose natural completion no policy had authorized, and the plan looked exactly
+like one whose completion an operator had approved.
+
+WHERE THE DECLARATIONS LIVE. `src/graph/policy/declarations.ts` is this
+repository's own catalog: reviewed source, one immutable `revision` per
+declaration, versioned by git. A declaration's digest is the ONE canonical
+`contractDigest` over its body — there is no second digest — so an
+authorization names exact CONTENT rather than a mutable file, and a body edited
+after review stops matching the digest that was authorized. The declarations are
+deliberately NOT policy files in the workspace: the working tree is writable by
+the very workers a graph runs, so a policy document dropped next to a graph
+would let it authorize itself. "A file is committed in the repository" is not
+authority either, for the same reason.
+
+THE DECLARATION SHAPE AND THE DECISION TABLE. A body is
+`{ version: 1, default: "deny" | "ungranted", rules: [{ graphId, nodeId,
+outcome, decision: "allow" | "deny" }] }`. Matching is EXACT on all three of
+graph, node and outcome — no wildcard, no prefix, no case folding — and the
+reader refuses a declaration that decides one mapping twice, so the answer never
+depends on rule order. A mapping no rule lists answers the body's declared
+`default`: `"deny"` means the policy explicitly forbids what it does not
+list, while `"ungranted"` means it is SILENT — not granted, and not forbidden.
+The repository ships the same policy id at two revisions that differ exactly
+there: `@1` grants nothing and forbids nothing, `@2` denies every natural
+mapping.
+
+THE HOST DECIDES; THE DIGEST PROVES. `loadCompletionPolicies({ catalog,
+authorized })` takes the host's trusted list of exact `{ id, revision, digest
+}` refs plus a catalog, and admits a declaration only when the host authorized
+that identity AND the catalog body hashes to the authorized digest; a body that
+is malformed, missing, tampered, or authorized twice with conflicting digests
+installs nothing and is reported. A catalog entry the host did not authorize is
+reported `not-authorized` and is NOT installed. The compiler and the runtime
+receive only the resulting registry through `CompileOptions.completionPolicies`
+and the runtime's `completionPolicies` option (recovery, the startup sweep, the
+toolset's `graph_submit_outcome`, and `graph_declare`'s HOST dependency);
+neither reads a file, and the declaration itself can only REQUEST a revision —
+the grammar has no field for rules, a request that carries extra keys is refused
+as `unknown-key`, and rules inlined into a raw declaration are never read.
+
+THE FOUR OUTCOMES OF THE DRAFT RULE TABLE, EACH WITH ITS OWN CODE.
+A natural mapping (a node whose `completion` is natural, naming a declared
+outcome) is resolved against the graph's `completion_policy` request:
+
+- the request is absent, or the compilation has no installed capability → a
+  NON-EXECUTABLE DRAFT whose `unauthorizedCompletions` names the mapping and
+  `completion-policy-unavailable`; an unknown policy id is
+  `completion-policy-unknown`, an uninstalled exact revision is
+  `completion-policy-unknown-revision`, and a resolved policy that is silent
+  about the mapping is `completion-policy-ungranted`. The node's declared
+  policy is NOT rewritten to `explicit`: "keep explicit" means "do not enable
+  unauthorized natural completion", never "silently change what the author
+  declared";
+- the resolved policy EXPLICITLY denies the mapping (by rule, or by its
+  declared deny-by-default) → the compile is REFUSED with
+  `completion-policy-denied` at `nodes.<id>.completion`. Silence is never
+  reported as a denial: "not authorized (yet)" and "forbidden" are different
+  answers with different next steps;
+- the resolved policy GRANTS the mapping and the required acceptance capability
+  is complete → an EXECUTABLE plan that PINS the authorization: the plan body
+  carries `completionAuthorizations` (node, outcome and the exact policy ref),
+  `completionPolicySnapshots` (the declaration body, keyed by digest) and
+  `completionPolicyIdentities` (`id → revision → digest`), all covered by
+  `planRevision`. The load gate recomputes the body digest over those fields
+  too, so the writer's own output stays loadable;
+- a PERSISTED executable plan is resumed in a process that does not hold the
+  policy it pins → recovery is BLOCKED with the state preserved. The runtime
+  corroborates every pinned ref against the installed capability BEFORE it
+  reads or writes anything: no capability is
+  `completion-policy-unavailable` (naming the pinned policies), an
+  uninstalled id or revision is reported by name, and a revision installed with
+  different content is `completion-policy-digest-mismatch` — the plan's pinned
+  digest is the authority and is never re-bound to a republished body.
+
+THE INSPECTOR OWNS THE PLAN-LEVEL RULE. `inspectCompiledTopology` gained the
+completion bundle: an EXECUTABLE plan must pin exactly one authorization per
+natural mapping (`missing-completion-authorization`), every pinned
+authorization must name a mapping the topology really declares as that node's
+natural completion (`unknown-completion-authorization`), and every pinned ref
+must be corroborated by the snapshot and identity the body carries
+(`inconsistent-completion-policy`). A draft is not held to completeness — its
+unauthorized mappings are exactly why it is a draft — but its draft reasons must
+come from the closed vocabulary, so a persisted reason this build does not
+define is refused rather than read with an invented meaning.
+
+NATURAL COMPLETION AND EXPLICIT SUBMISSION SHARE ONE TRUSTED ATTEMPT AND ONE
+ATOMIC BOUNDARY. The authorization is plan-level and therefore covered by
+`planRevision`, which is exactly what the D2 attempt credential binds
+(`graphId + nodeId + attemptId + planRevision`): an attempt that may settle a
+node is bound to the exact policy revision its plan pinned, republishing the
+policy produces a different plan revision and so a different attempt identity,
+and there is no second channel in which an old attempt could meet new
+authorization semantics. The capability check is a precondition of the ONE run
+path: `start`, `resume` and `submit` all consult it before any state is
+read, so a plan this process cannot support does not advance one step under
+weaker semantics — the blocked recovery writes nothing, including no effect
+transition (the D4 atomic boundary) — and a natural mapping never acquires a
+settlement channel of its own. The natural-completion SETTLEMENT path itself
+(the dispatch completion bridge) remains deferred: what D6 fixes is that a plan
+whose completion authorization is missing, denied or unsupported can never run,
+reach a receipt, or pass a stop boundary at all.
+
+ENFORCED BY TESTS. The four rows each have a case (the codes under a missing
+capability and each unresolvable request; a denial by rule and by default; an
+authorized executable plan with the policy snapshot, digest and authorization
+pinned and read back through the durable record; a blocked recovery whose state
+row and effects are byte-identical before and after, and which resumes once the
+capability is injected). The authority rules are covered too: a repository
+revision is not installed merely because it exists, an edited body fails the
+authorized digest, rules cannot be smuggled through the request, a repository
+`@1` request is an ungranted draft while `@2` is refused, and
+`graph_declare` refuses the draft by name without the host capability and
+persists with it.
+
+DEFERRED by this slice, and not implied by it: the protocol-aware dispatch
+completion bridge that would settle a naturally completed node (and therefore
+the runtime's own use of the pinned authorization), effect EXECUTION beyond the
+dispatch seam, storage format 3 with its `2 -> 3` migrator, the
+`src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
+typed-predicate vocabulary, and any `src/dispatch/**` change.
 
 ### Definitions, locations, and comparison owners
 

@@ -48,6 +48,7 @@ import { errorText } from "../../utils/error-text.ts";
 import {
   isGraphDeclarationV3,
   type AcceptanceRequirementV3,
+  type CompletionPolicyRequestV3,
   type CompletionPolicyV3,
   type EdgeDeclarationV3,
   type GraphDeclarationV3,
@@ -182,7 +183,14 @@ export function parseGraphDeclarationV3(
  * outside its level's list is `unknown-key`, so a misspelled field is a
  * refusal instead of a silently ignored one.
  */
-const ROOT_KEYS = ["version", "name", "nodes", "edges", "loop_groups"] as const;
+const ROOT_KEYS = [
+  "version",
+  "name",
+  "nodes",
+  "edges",
+  "loop_groups",
+  "completion_policy",
+] as const;
 const NODE_KEYS = [
   "id",
   "agent",
@@ -212,6 +220,7 @@ const PROGRESS_KEYS = [
   "max_unchanged",
 ] as const;
 const CONTRACT_REF_KEYS = ["id", "revision", "digest"] as const;
+const COMPLETION_POLICY_REQUEST_KEYS = ["id", "revision"] as const;
 const JOIN_KEYS = ["strategy", "quorum"] as const;
 const BUDGET_KEYS = [
   "max_input_tokens",
@@ -263,12 +272,19 @@ function readRoot(value: unknown, log: IssueLog): GraphDeclarationV3 | undefined
           (entry, path) => readLoopGroup(entry, path, log),
         );
 
+  const completionPolicy = readCompletionPolicyRequest(
+    record.completion_policy,
+    "$.completion_policy",
+    log,
+  );
+
   if (
     version === undefined ||
     name === undefined ||
     nodes === undefined ||
     edges === undefined ||
-    (record.loop_groups !== undefined && loopGroups === undefined)
+    (record.loop_groups !== undefined && loopGroups === undefined) ||
+    (record.completion_policy !== undefined && completionPolicy === undefined)
   ) {
     return undefined;
   }
@@ -279,7 +295,36 @@ function readRoot(value: unknown, log: IssueLog): GraphDeclarationV3 | undefined
     nodes,
     edges,
     ...(loopGroups === undefined ? {} : { loop_groups: loopGroups }),
+    ...(completionPolicy === undefined
+      ? {}
+      : { completion_policy: completionPolicy }),
   };
+}
+
+/**
+ * Read the OPTIONAL completion-policy request: `{ id, revision }` of
+ * non-empty strings.
+ *
+ * A request names a policy revision; it cannot carry rules or a digest, so a
+ * declaration can ask for an authorization but never supply one. The grammar
+ * is closed here like everywhere else — an extra key is `unknown-key`, so a
+ * document that tries to smuggle rules past this front-end is refused rather
+ * than silently narrowed to its id and revision.
+ */
+function readCompletionPolicyRequest(
+  value: unknown,
+  path: string,
+  log: IssueLog,
+): CompletionPolicyRequestV3 | undefined {
+  if (value === undefined) return undefined;
+  const record = readRecord(value, path, log);
+  if (record === undefined) return undefined;
+  rejectUnknownKeys(record, COMPLETION_POLICY_REQUEST_KEYS, path, log);
+
+  const id = readNonEmptyString(record.id, `${path}.id`, log);
+  const revision = readNonEmptyString(record.revision, `${path}.revision`, log);
+  if (id === undefined || revision === undefined) return undefined;
+  return { id, revision };
 }
 
 /** Read the authoring-grammar tag: present, the number 3, and nothing else. */

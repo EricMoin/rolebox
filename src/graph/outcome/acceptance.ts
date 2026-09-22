@@ -72,6 +72,7 @@ import {
   type CompiledNode,
   type CompiledOutcome,
   type CompiledPlan,
+  type CompiledUnauthorizedCompletion,
   type CompiledUnresolvedRequirement,
 } from "../compiler/plan.ts";
 import type {
@@ -418,17 +419,21 @@ function planRefusals(request: AcceptanceRequest): SubmissionRefusal[] {
   const executability = readPlanExecutability(request.plan.executability);
   if (executability.kind === "draft") {
     // The reading classifies; the BODY carries what is unresolved, so the
-    // refusal can name every requirement the draft left open.
-    const unresolved =
+    // refusal can name every reason the draft left open — acceptance gates
+    // (B9) and unauthorized natural-completion mappings (D6) alike.
+    const draft =
       request.plan.executability.kind === "draft"
-        ? request.plan.executability.unresolved
-        : [];
+        ? request.plan.executability
+        : undefined;
+    const unresolved = draft?.unresolved ?? [];
+    const unauthorized = draft?.unauthorizedCompletions ?? [];
     refusals.push({
       code: "non-executable-plan",
       path: "$.plan.executability",
       message:
         `plan revision ${request.plan.planRevision} is a NON-EXECUTABLE DRAFT: ` +
-        `${unresolved.length} acceptance requirement(s) did not resolve to an exact validator version (${describeUnresolved(unresolved)}) — a draft is refused outright and nothing was written`,
+        `${unresolved.length} acceptance requirement(s) did not resolve to an exact validator version (${describeUnresolved(unresolved)}), and ` +
+        `${unauthorized.length} natural-completion mapping(s) are not authorized (${describeUnauthorizedCompletions(unauthorized)}) — a draft is refused outright and nothing was written`,
     });
   } else if (executability.kind === "malformed") {
     refusals.push({
@@ -868,6 +873,22 @@ function describeUnresolved(
       (entry) =>
         `${entry.nodeId}.${entry.outcomeId}:${entry.validator}` +
         (entry.version === undefined ? "" : `@${entry.version}`),
+    )
+    .join(", ");
+}
+
+/** Describe a draft's unauthorized completions without ever throwing. */
+function describeUnauthorizedCompletions(
+  unauthorized: readonly CompiledUnauthorizedCompletion[],
+): string {
+  if (unauthorized.length === 0) return "none";
+  return unauthorized
+    .map(
+      (entry) =>
+        `${entry.nodeId}.${entry.outcome}:${entry.code}` +
+        (entry.request === undefined
+          ? ""
+          : `@${entry.request.id}@${entry.request.revision}`),
     )
     .join(", ");
 }

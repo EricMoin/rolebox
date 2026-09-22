@@ -47,6 +47,21 @@
  * an explicitly NON-EXECUTABLE DRAFT whose `executability` records what is
  * unresolved.
  *
+ * NATURAL COMPLETION IS AUTHORIZED, NEVER ASSUMED (D6). A node's `completion`
+ * policy is a REQUEST; the graph's `completion_policy` names the exact policy
+ * revision it asks to be judged by, and only the registry the HOST installed
+ * (`CompileOptions.completionPolicies`, built from content-pinned
+ * authorizations) can resolve it. The compiler never reads a policy file, so a
+ * declaration the repository ships, or a file some worker just wrote, is not an
+ * authorization. An explicitly denied mapping is `completion-policy-denied`;
+ * a mapping that is merely not authorized compiles to a NON-EXECUTABLE DRAFT
+ * carrying `unauthorizedCompletions` with a stable code — it is NEVER
+ * downgraded to `explicit`, which would hide the missing authorization and
+ * change what the author declared. An authorized mapping is PINNED: the plan
+ * body carries the policy snapshot, its identity index and the authorization
+ * itself, all covered by `planRevision`, and the inspector requires every
+ * natural mapping of an executable plan to be pinned.
+ *
  * THE PLAN IS INSPECTED BEFORE IT IS RETURNED. The body the compiler assembles
  * goes through `plan.ts`'s `inspectCompiledTopology` — the SAME plan-level
  * inspector and the SAME codes the load gate uses — and a rejection is returned
@@ -76,15 +91,27 @@ import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
 import {
   isGraphDeclarationV3,
   type AcceptanceRequirementV3,
+  type CompletionPolicyRequestV3,
   type GraphDeclarationV3,
   type LoopGroupDeclarationV3,
   type NodeDeclarationV3,
 } from "./declaration-v3.ts";
 import {
+  decideCompletion,
+  describeCompletionPolicy,
+  resolveCompletionPolicy,
+  type CompletionAuthorizationIssueCode,
+  type CompletionPolicyBody,
+  type CompletionPolicyIdentityIndex,
+  type CompletionPolicyRegistry,
+  type CompletionPolicySnapshot,
+} from "../policy/completion-policy.ts";
+import {
   createCompiledPlan,
   inspectCompiledTopology,
   readCompiledProgressPolicy,
   terminalOutcomesOf,
+  type CompiledCompletionAuthorization,
   type CompiledCompletionPolicy,
   type CompiledEdge,
   type CompiledLoopGroup,
@@ -95,6 +122,7 @@ import {
   type CompiledPlanBody,
   type CompiledProgressPolicy,
   type CompiledTopologyIssueCode,
+  type CompiledUnauthorizedCompletion,
   type CompiledUnresolvedRequirement,
 } from "./plan.ts";
 
@@ -120,7 +148,8 @@ export type CompileErrorCode =
   | "loop-continuation-outside-group"
   | "unresolved-contract"
   | "contract-digest-mismatch"
-  | "unsupported-validator";
+  | "unsupported-validator"
+  | "completion-policy-denied";
 
 /**
  * Stable non-blocking warning codes.
@@ -188,6 +217,22 @@ export interface CompileOptions {
    * carrying what is unresolved. It is never silently treated as executable.
    */
   readonly supportedValidators?: readonly SupportedValidatorV3[];
+  /**
+   * The HOST-INSTALLED completion-policy capability: the exact policy revisions
+   * this process may authorize natural completion against (D6).
+   *
+   * The compiler never reads a policy file — it resolves a declaration's
+   * `completion_policy` REQUEST against this registry, which the host built
+   * from content-pinned authorizations (`loadCompletionPolicies`), so a
+   * declaration that merely names a policy present in the repository (or in a
+   * file a worker wrote) resolves to nothing.
+   *
+   * OMITTED: no request can be resolved, so every natural mapping compiles to a
+   * NON-EXECUTABLE DRAFT naming `completion-policy-unavailable`, never to an
+   * executable plan and never to a silent `explicit` downgrade. A declaration
+   * with no natural completion is unaffected: nothing needed authorizing.
+   */
+  readonly completionPolicies?: CompletionPolicyRegistry;
 }
 
 /**
@@ -198,7 +243,9 @@ export interface CompileOptions {
  * discriminator, and only `"executable"` licenses persisting or running the
  * plan. A draft carries `unresolved` — the same frozen list the plan body
  * records — so a caller never has to infer executability from the presence of a
- * version somewhere.
+ * version somewhere; it carries `unauthorizedCompletions` beside it (D6) for
+ * the natural-completion mappings that could not be authorized, so a caller
+ * never has to infer an authorization from the absence of a record either.
  */
 export type CompileResult =
   | {
@@ -212,6 +259,7 @@ export type CompileResult =
       readonly kind: "draft";
       readonly plan: CompiledPlan;
       readonly unresolved: readonly CompiledUnresolvedRequirement[];
+      readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
       readonly warnings: readonly CompileIssue[];
     }
   | {
@@ -258,6 +306,11 @@ export type CompileResult =
  * - `unpinned-validator-version` — an acceptance requirement covered only by an
  *   unversioned capability, so no exact version can be pinned (only when
  *   `supportedValidators` is provided);
+ * - `completion-policy-denied` — the requested policy resolved and its rules
+ *   (or its declared default) EXPLICITLY deny the node's natural mapping. A
+ *   policy that is merely absent, unknown, or silent about the mapping is NOT
+ *   this error: those compile to a draft naming the missing authorization, so
+ *   "not authorized (yet)" is never reported as "forbidden";
  *
  * and the PLAN-LEVEL rules of `plan.ts`'s `inspectCompiledTopology`, applied to
  * the body the compiler just built and reported with the SAME codes the load
@@ -357,9 +410,21 @@ function compileDeclaration(
   // supplied. A non-empty list makes the result a DRAFT, never executable.
   const unresolved: CompiledUnresolvedRequirement[] = [];
 
+  // The graph's completion-policy REQUEST is read once and resolved once: every
+  // natural mapping of every node is judged against the same installed
+  // revision, and the context accumulates the authorizations the plan pins and
+  // the mappings it could not authorize.
+  const completion = createCompletionContext(
+    declaration.name,
+    declaration,
+    options,
+    log,
+  );
   const nodes: CompiledNode[] = [];
   for (const node of nodesById.values()) {
-    nodes.push(compileNode(node, options, log, snapshots, identities, unresolved));
+    nodes.push(
+      compileNode(node, options, log, snapshots, identities, unresolved, completion),
+    );
   }
   const compiledEdges = compileEdges(edges, nodesById, declaredOutcomes, log);
   const loopGroups = compileLoopGroups(
@@ -382,13 +447,31 @@ function compileDeclaration(
     loopGroups,
     contractSnapshots: snapshotIndex(snapshots),
     contractIdentities: identityIndex(identities),
+    // The completion-policy CONTENT and IDENTITY this plan pins, then the
+    // authorizations that resolve through them (D6). Only policies an
+    // authorization actually names are pinned.
+    completionPolicySnapshots: completionPolicySnapshotIndex(completion.usedPolicies),
+    completionPolicyIdentities: completionPolicyIdentityIndex(completion.usedPolicies),
+    completionAuthorizations: Object.freeze(
+      [...completion.authorizations].sort((a, b) => compareText(a.nodeId, b.nodeId)),
+    ),
     // The explicit terminal is DERIVED from the body the compiler built, with
     // the same helper the inspector checks the list with.
     terminalOutcomes: terminalOutcomesOf(nodes, compiledEdges),
     executability:
-      unresolved.length === 0
+      unresolved.length === 0 && completion.unauthorized.length === 0
         ? { kind: "executable" }
-        : { kind: "draft", unresolved },
+        : {
+            kind: "draft",
+            unresolved,
+            unauthorizedCompletions: Object.freeze(
+              [...completion.unauthorized].sort(
+                (a, b) =>
+                  compareText(a.nodeId, b.nodeId) ||
+                  compareText(a.outcome, b.outcome),
+              ),
+            ),
+          },
   };
 
   // THE WRITER SATISFIES ITS OWN READER: the body the compiler just assembled
@@ -402,6 +485,11 @@ function compileDeclaration(
     body.loopGroups,
     body.terminalOutcomes,
     body.executability,
+    {
+      authorizations: body.completionAuthorizations,
+      snapshots: body.completionPolicySnapshots,
+      identities: body.completionPolicyIdentities,
+    },
   );
   if (inspection.issues.length > 0) {
     return failed(
@@ -464,6 +552,7 @@ function compileNode(
   snapshots: Map<string, ContractContentSnapshot>,
   identities: Map<string, Map<string, string>>,
   unresolved: CompiledUnresolvedRequirement[],
+  policyContext: CompletionPolicyContext,
 ): CompiledNode {
   const base = nodePath(node.id);
   const outcomes = compileOutcomes(node, options, log, unresolved);
@@ -507,6 +596,12 @@ function compileNode(
         `${base}.completion`,
       ),
     );
+  } else if (completion.kind === "natural") {
+    // The mapping is well-formed, so it is authorized (or not) against the
+    // installed capability. An unauthorized mapping is a DRAFT reason, never a
+    // rewrite of the declared policy: the plan carries the request and the
+    // caller is told exactly what is missing.
+    authorizeCompletion(node.id, completion.outcome, base, policyContext, log);
   }
 
   const contractRef = bindContract(node, options, log, snapshots, identities);
@@ -839,6 +934,255 @@ function toPlanCompletion(
     default:
       return undefined;
   }
+}
+
+// ── Completion authorization (D6) ───────────────────────────────────────────
+
+/** What the graph-level `completion_policy` REQUEST resolved to, if anything. */
+type GraphCompletionPolicyReading =
+  /** The declaration requests no policy revision. */
+  | { readonly kind: "absent" }
+  /** A policy was requested, but this compilation has no installed capability. */
+  | { readonly kind: "unavailable" }
+  /** The requested policy id is not installed. */
+  | { readonly kind: "unknown" }
+  /** The id is installed, but not at the requested exact revision. */
+  | { readonly kind: "unknown-revision" }
+  | {
+      readonly kind: "resolved";
+      readonly snapshot: CompletionPolicySnapshot;
+    };
+
+/**
+ * The per-compilation authorization state: the resolved policy reading, the
+ * graph's request, and the two accumulators the plan body and its executability
+ * marker are built from.
+ *
+ * The accumulators are MUTABLE during one compilation pass on purpose (the
+ * compiler assembles a fresh body per compilation); the values pushed into them
+ * are individually frozen, and the plan builder freezes the arrays it puts in
+ * the body.
+ */
+interface CompletionPolicyContext {
+  /** The graph identity the policy rules are matched against. */
+  readonly graphId: string;
+  /** The revision the declaration requested, when it requested one. */
+  readonly request: CompletionPolicyRequestV3 | undefined;
+  /** What that request resolved to. */
+  readonly reading: GraphCompletionPolicyReading;
+  /** Every mapping that WAS authorized, in node compilation (id) order. */
+  readonly authorizations: CompiledCompletionAuthorization[];
+  /** Every mapping that was NOT authorized, with its stable reason. */
+  readonly unauthorized: CompiledUnauthorizedCompletion[];
+  /** The exact policy content the authorizations pin, by digest. */
+  readonly usedPolicies: Map<string, CompletionPolicySnapshot>;
+}
+
+/**
+ * Read the graph's completion-policy request and resolve it ONCE against the
+ * installed capability.
+ *
+ * The compiler never reads a policy file and never trusts a document because it
+ * exists: the request is an identity, and only the registry the HOST installed
+ * can resolve it. Every failure mode short of an explicit denial is carried as
+ * a reading (never an error), so a node that asks for natural completion can
+ * report it as a draft reason at its own path.
+ */
+function createCompletionContext(
+  graphId: string,
+  declaration: GraphDeclarationV3,
+  options: CompileOptions | undefined,
+  log: IssueLog,
+): CompletionPolicyContext {
+  const request = readGraphCompletionPolicyRequest(declaration, log);
+  let reading: GraphCompletionPolicyReading = { kind: "absent" };
+  if (request !== undefined) {
+    const registry = options?.completionPolicies;
+    if (registry === undefined) {
+      reading = { kind: "unavailable" };
+    } else {
+      const resolved = resolveCompletionPolicy(request, registry);
+      switch (resolved.kind) {
+        case "resolved":
+          reading = { kind: "resolved", snapshot: resolved.snapshot };
+          break;
+        case "unknown-policy":
+          reading = { kind: "unknown" };
+          break;
+        case "unknown-revision":
+          reading = { kind: "unknown-revision" };
+          break;
+      }
+    }
+  }
+  return {
+    graphId,
+    request,
+    reading,
+    authorizations: [],
+    unauthorized: [],
+    usedPolicies: new Map(),
+  };
+}
+
+/**
+ * Read the root `completion_policy` request, or `null` when the field is
+ * present and is not one.
+ *
+ * The typed grammar already requires `{ id, revision }`; this reader is the
+ * compiler's own boundary for a raw declaration that reached it through the
+ * shallow guard, so a malformed value is `malformed-declaration` at its own
+ * path rather than a silently ignored field.
+ */
+function readGraphCompletionPolicyRequest(
+  declaration: GraphDeclarationV3,
+  log: IssueLog,
+): CompletionPolicyRequestV3 | undefined {
+  const raw: unknown = declaration.completion_policy;
+  if (raw === undefined) return undefined;
+  const path = "completion_policy";
+  if (
+    !isRecord(raw) ||
+    !isNonEmptyString(raw.id) ||
+    !isNonEmptyString(raw.revision)
+  ) {
+    log.errors.push(
+      issue(
+        "malformed-declaration",
+        "completion_policy is not { id, revision } of non-empty strings — a completion-policy request names an exact policy revision and carries no rules of its own",
+        path,
+      ),
+    );
+    return undefined;
+  }
+  return { id: raw.id, revision: raw.revision };
+}
+
+/**
+ * Authorize one well-formed natural mapping.
+ *
+ * Exactly one of three things happens, and each is a distinct outcome:
+ * - the mapping is GRANTED: the authorization is recorded and the policy body
+ *   it resolved through is pinned for the plan;
+ * - the mapping is explicitly DENIED (by a rule, or by a policy whose declared
+ *   default is `"deny"`): a compile error, because the policy says no;
+ * - the mapping is NOT AUTHORIZED (no request, no installed capability, an
+ *   unknown id or revision, or a policy that is silent about it): a DRAFT
+ *   reason, because "not granted (yet)" is not "forbidden", and the plan must
+ *   never look executable without the authorization.
+ */
+function authorizeCompletion(
+  nodeId: string,
+  outcome: string,
+  base: string,
+  context: CompletionPolicyContext,
+  log: IssueLog,
+): void {
+  const path = `${base}.completion`;
+  const unauthorized = (code: CompletionAuthorizationIssueCode): void => {
+    context.unauthorized.push(
+      Object.freeze({
+        nodeId,
+        outcome,
+        code,
+        ...(context.request === undefined
+          ? {}
+          : {
+              request: {
+                id: context.request.id,
+                revision: context.request.revision,
+              },
+            }),
+      }),
+    );
+  };
+  const reading = context.reading;
+  switch (reading.kind) {
+    case "absent":
+    case "unavailable":
+      unauthorized("completion-policy-unavailable");
+      return;
+    case "unknown":
+      unauthorized("completion-policy-unknown");
+      return;
+    case "unknown-revision":
+      unauthorized("completion-policy-unknown-revision");
+      return;
+    case "resolved":
+      break;
+  }
+  const verdict = decideCompletion(reading.snapshot.body, {
+    graphId: context.graphId,
+    nodeId,
+    outcome,
+  });
+  switch (verdict.kind) {
+    case "allowed":
+      context.authorizations.push(
+        Object.freeze({ nodeId, outcome, policy: reading.snapshot.ref }),
+      );
+      context.usedPolicies.set(reading.snapshot.ref.digest, reading.snapshot);
+      return;
+    case "denied": {
+      const policy = reading.snapshot.ref;
+      const how =
+        verdict.rule === undefined
+          ? "its declared default denies every mapping it does not list"
+          : `its rule for node ${JSON.stringify(nodeId)} / outcome ${JSON.stringify(outcome)} denies the mapping`;
+      log.errors.push(
+        issue(
+          "completion-policy-denied",
+          `natural completion of node ${JSON.stringify(nodeId)} maps to outcome ${JSON.stringify(outcome)}, but completion policy ${describeCompletionPolicy(policy)} (digest ${policy.digest}) explicitly forbids it: ${how}`,
+          path,
+        ),
+      );
+      return;
+    }
+    case "undecided":
+      unauthorized("completion-policy-ungranted");
+      return;
+  }
+}
+
+/**
+ * Build the plan's completion-policy CONTENT index, keyed by digest in digest
+ * order — the same discipline the contract content index follows, so two
+ * authorizations that resolved through one body share one entry.
+ */
+function completionPolicySnapshotIndex(
+  policies: ReadonlyMap<string, CompletionPolicySnapshot>,
+): Readonly<Record<string, CompletionPolicyBody>> {
+  const index: Record<string, CompletionPolicyBody> = {};
+  for (const digest of [...policies.keys()].sort(compareText)) {
+    const snapshot = policies.get(digest);
+    if (snapshot !== undefined) index[digest] = snapshot.body;
+  }
+  return index;
+}
+
+/**
+ * Build the plan's completion-policy IDENTITY index: `id` → `revision` →
+ * digest. Inserted in authorization order (nodes are compiled in id order), so
+ * the index is deterministic; the order is not load-bearing because
+ * `contractDigest` sorts object keys.
+ */
+function completionPolicyIdentityIndex(
+  policies: ReadonlyMap<string, CompletionPolicySnapshot>,
+): CompletionPolicyIdentityIndex {
+  const identities = new Map<string, Map<string, string>>();
+  for (const snapshot of policies.values()) {
+    const revisions = identities.get(snapshot.ref.id) ?? new Map<string, string>();
+    revisions.set(snapshot.ref.revision, snapshot.ref.digest);
+    identities.set(snapshot.ref.id, revisions);
+  }
+  return Object.fromEntries(
+    [...identities].map(
+      ([id, revisions]): [string, Readonly<Record<string, string>>] => [
+        id,
+        Object.fromEntries(revisions),
+      ],
+    ),
+  );
 }
 
 // ── Join and budget ─────────────────────────────────────────────────────────
@@ -1358,8 +1702,8 @@ function identityIndex(
  *
  * The two success shapes are built HERE and nowhere else, so an executable plan
  * and a draft can never be confused for one another at the source: the draft
- * variant carries the plan body's OWN frozen unresolved list (the same array
- * instance), and neither shape has the other's discriminant.
+ * variant carries the plan body's OWN frozen reason lists (the same array
+ * instances), and neither shape has the other's discriminant.
  */
 function succeeded(
   plan: CompiledPlan,
@@ -1373,6 +1717,7 @@ function succeeded(
       kind: "draft" as const,
       plan,
       unresolved: executability.unresolved,
+      unauthorizedCompletions: executability.unauthorizedCompletions,
       warnings: frozenWarnings,
     });
   }

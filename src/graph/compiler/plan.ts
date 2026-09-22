@@ -40,10 +40,20 @@
  *   `planRevision` covers it), and the inspector requires it to be non-empty
  *   and to agree with the edges (B9).
  * - `executability` separates an EXECUTABLE plan from a DRAFT: an executable
- *   plan pins every acceptance requirement to an exact validator version, a
- *   draft records which requirements are still unresolved. The load gate
- *   refuses a persisted draft; this module's inspector accepts both as
- *   well-formed plans (B9).
+ *   plan pins every acceptance requirement to an exact validator version AND
+ *   every natural completion to an authorized policy revision, a draft records
+ *   which requirements are unresolved and which natural mappings are
+ *   unauthorized. The load gate refuses a persisted draft; this module's
+ *   inspector accepts both as well-formed plans (B9, extended by D6).
+ * - `completionAuthorizations` PINS natural completion (D6): a mapping the
+ *   compiler authorized names the exact policy revision whose rule granted it,
+ *   and `completionPolicySnapshots` / `completionPolicyIdentities` carry that
+ *   revision's CONTENT and IDENTITY inside the plan body — the same
+ *   content/identity split the contracts use — so the authorization travels
+ *   with the plan and can be verified from the plan alone. The inspector
+ *   requires every natural mapping of an executable plan to be pinned, and
+ *   every pinned policy to be corroborated by the content and identity the body
+ *   carries.
  *
  * Canonicalization is the COMPILER's responsibility (`compile.ts` sorts nodes,
  * edges, loop groups and outcome ids before calling the builder); the builder
@@ -82,6 +92,15 @@ import {
   type ContractRef,
 } from "../contracts/contract-definition.ts";
 import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
+import {
+  isCompletionPolicyRef,
+  readCompletionAuthorizationIssueCode,
+  readCompletionPolicyBody,
+  type CompletionAuthorizationIssueCode,
+  type CompletionPolicyBody,
+  type CompletionPolicyIdentityIndex,
+  type CompletionPolicyRef,
+} from "../policy/completion-policy.ts";
 import {
   isCyclicComponent,
   stronglyConnectedComponents,
@@ -285,21 +304,66 @@ export interface CompiledUnresolvedRequirement {
 }
 
 /**
+ * One natural-completion mapping the compiler AUTHORIZED, pinned to the exact
+ * policy revision that granted it (D6).
+ *
+ * The mapping is the node's own declared one — graph, node and outcome are all
+ * exact, and the outcome is the one the node's `completion` policy names.
+ * `policy` is content-addressed: the body it names is in
+ * {@link CompiledPlanBody.completionPolicySnapshots} under `policy.digest` and
+ * its `(id, revision)` entry is in
+ * {@link CompiledPlanBody.completionPolicyIdentities}, so the authorization is
+ * verifiable from the plan alone.
+ */
+export interface CompiledCompletionAuthorization {
+  /** The node whose natural completion was authorized. */
+  readonly nodeId: string;
+  /** The exact outcome that node's natural completion maps to. */
+  readonly outcome: string;
+  /** The exact policy revision whose rule granted the mapping. */
+  readonly policy: CompletionPolicyRef;
+}
+
+/**
+ * One natural-completion mapping compilation could NOT authorize (D6).
+ *
+ * Only a DRAFT carries these. The mapping is NOT rewritten to `explicit`: the
+ * author asked for natural completion and the protocol answers that the
+ * authorization is missing or not granted, rather than silently changing what
+ * the graph declares. {@link CompiledUnauthorizedCompletion.code} is the
+ * stable reason, so a caller never has to parse a message.
+ */
+export interface CompiledUnauthorizedCompletion {
+  /** Node requesting the unauthorized mapping. */
+  readonly nodeId: string;
+  /** The outcome its natural completion would map to. */
+  readonly outcome: string;
+  /** The stable reason the mapping is not authorized. */
+  readonly code: CompletionAuthorizationIssueCode;
+  /** The exact policy revision the declaration requested, when it named one. */
+  readonly request?: { readonly id: string; readonly revision: string };
+}
+
+/**
  * Whether a compiled plan may be executed.
  *
  * `executable` means every acceptance requirement resolved to an EXACT
- * installed validator version, recorded in the requirement itself. `draft`
- * means at least one requirement could not be resolved (no capability set was
- * supplied) — the plan is structurally complete but NON-EXECUTABLE and carries
- * what is unresolved. The distinction lives in the plan body, so
- * `planRevision` covers it, and the load gate refuses a persisted draft
- * instead of treating it as executable (B9).
+ * installed validator version, recorded in the requirement itself, AND every
+ * natural-completion mapping is pinned to an authorized policy revision (D6).
+ * `draft` means at least one requirement could not be resolved (no capability
+ * set was supplied) or at least one natural mapping is unauthorized — the plan
+ * is structurally complete but NON-EXECUTABLE and carries what is missing:
+ * `unresolved` for acceptance, `unauthorizedCompletions` for natural
+ * completion. The distinction lives in the plan body, so `planRevision`
+ * covers it, and the load gate refuses a persisted draft instead of treating
+ * it as executable (B9).
  */
 export type CompiledPlanExecutability =
   | { readonly kind: "executable" }
   | {
       readonly kind: "draft";
       readonly unresolved: readonly CompiledUnresolvedRequirement[];
+      readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
     };
 
 /**
@@ -337,6 +401,29 @@ export interface CompiledPlanBody {
    * body hashes to that digest. Two identities may share one digest.
    */
   readonly contractIdentities: ContractIdentityIndex;
+  /**
+   * The completion-policy CONTENT this plan pins (D6), keyed by the canonical
+   * digest of the declaration body. Only policies an authorization actually
+   * names appear, and each distinct body appears once; the identity side is
+   * {@link CompiledPlanBody.completionPolicyIdentities}. Storing the body in
+   * the plan is what makes an authorization checkable WITHOUT the registry that
+   * compiled it — a load re-hashes the body instead of trusting a ref.
+   */
+  readonly completionPolicySnapshots: Readonly<Record<string, CompletionPolicyBody>>;
+  /**
+   * The completion-policy IDENTITY index this plan pins (D6):
+   * `id` → `revision` → the digest of the body the authorization resolved to.
+   * One identity has one revision entry (a republished revision is a different
+   * digest, and the inspector refuses a disagreement rather than re-binding).
+   */
+  readonly completionPolicyIdentities: CompletionPolicyIdentityIndex;
+  /**
+   * Every natural-completion mapping this plan PINNED (D6), in node-id order.
+   * An executable plan has one entry per natural mapping and no others; a draft
+   * carries only the mappings that were authorized, and names the rest in
+   * {@link CompiledPlanExecutability}.
+   */
+  readonly completionAuthorizations: readonly CompiledCompletionAuthorization[];
   /**
    * The plan's explicit terminal exits (B9): every (node, outcome) pair whose
    * declaring node carries no outbound edge for it, in canonical order. The
@@ -497,6 +584,17 @@ export function nodeBindingsOf(
  * - `unpinned-validator-version` — an EXECUTABLE plan pins every acceptance
  *   requirement to an exact validator version. A draft is not held to this
  *   rule; the load gate refuses a draft outright instead.
+ * - `missing-completion-authorization` — an EXECUTABLE plan pins every natural
+ *   completion mapping to an authorization. A draft is not held to this rule;
+ *   its unauthorized mappings are named by its own executability marker.
+ * - `unknown-completion-authorization` — a pinned authorization names a
+ *   mapping (node + outcome) the topology does not declare as that node's
+ *   natural completion, so the plan claims authority it was never granted.
+ * - `inconsistent-completion-policy` — a pinned authorization's policy content
+ *   does not match the ref it carries: the body under `policy.digest` is
+ *   missing or unreadable, does not hash to that digest, or the identity index
+ *   maps the `(id, revision)` elsewhere. A ref is a claim the plan body must
+ *   prove, never a label to be trusted.
  *
  * Two codes are defensive for the compiler's own output and are normally
  * reached only from the load side: `malformed-topology` and
@@ -525,7 +623,10 @@ export type CompiledTopologyIssueCode =
   | "cycle-not-in-loop-group"
   | "missing-terminal-outcome"
   | "terminal-outcomes-inconsistent"
-  | "unpinned-validator-version";
+  | "unpinned-validator-version"
+  | "missing-completion-authorization"
+  | "unknown-completion-authorization"
+  | "inconsistent-completion-policy";
 
 /** One plan-topology rule violation. */
 export interface CompiledTopologyIssue {
@@ -538,7 +639,8 @@ export interface CompiledTopologyIssue {
 export interface CompiledTopologyInspection {
   /**
    * Violations in stable order — nodes, then edges, then loop groups, then
-   * uncontained cycles, then terminals, then acceptance pinning.
+   * uncontained cycles, then terminals, then acceptance pinning, then
+   * completion authorization.
    */
   readonly issues: readonly CompiledTopologyIssue[];
   /**
@@ -546,6 +648,27 @@ export interface CompiledTopologyInspection {
    * a repeated id is an issue and contributes no second entry.
    */
   readonly nodeIds: readonly string[];
+}
+
+/**
+ * The completion-authorization side of a plan body, as the inspector reads it.
+ *
+ * A SEPARATE input rather than fields read from `nodes`: the authorization is
+ * an index BESIDE the topology (like the contract content/identity indexes),
+ * not a property of one node, and keeping it explicit is what lets the caller
+ * state truthfully whether the body carries one. OMITTED means "no
+ * authorization is present in this body", which is the right default for a
+ * caller that passes only a topology: an executable plan with a natural
+ * mapping then reports `missing-completion-authorization` rather than passing
+ * on an unchecked claim, and a body with no natural mapping is unaffected.
+ */
+export interface CompiledCompletionTopology {
+  /** The plan body's `completionAuthorizations`, as persisted. */
+  readonly authorizations: unknown;
+  /** The plan body's `completionPolicySnapshots`, as persisted. */
+  readonly snapshots: unknown;
+  /** The plan body's `completionPolicyIdentities`, as persisted. */
+  readonly identities: unknown;
 }
 
 /**
@@ -574,6 +697,7 @@ export function inspectCompiledTopology(
   loopGroups: readonly unknown[],
   terminalOutcomes: unknown,
   executability: unknown,
+  completion?: CompiledCompletionTopology,
 ): CompiledTopologyInspection {
   const issues: CompiledTopologyIssue[] = [];
   const nodeIds: string[] = [];
@@ -846,6 +970,121 @@ export function inspectCompiledTopology(
     }
   }
 
+  // COMPLETION AUTHORIZATION (D6) — an executable plan's every natural mapping
+  // is pinned to an exact policy revision whose CONTENT the plan body carries.
+  // A pinned authorization is checked whatever the executability is (authority
+  // the body cannot prove is a defect in a draft too), while completeness is
+  // required only of an executable plan: a draft exists precisely because some
+  // mapping could not be authorized.
+  const naturalOutcomes = new Map<string, string>();
+  for (const raw of nodes) {
+    if (!isPlanRecord(raw) || !isText(raw.id)) continue;
+    const completion = raw.completion;
+    if (!isPlanRecord(completion) || completion.mode !== "natural") continue;
+    if (!isText(completion.outcome)) continue;
+    naturalOutcomes.set(raw.id, completion.outcome);
+  }
+  const rawAuthorizations = completion?.authorizations ?? [];
+  if (!Array.isArray(rawAuthorizations)) {
+    malformed(
+      "completionAuthorizations is not an array of { nodeId, outcome, policy } records",
+    );
+  } else {
+    const rawSnapshots = completion?.snapshots ?? {};
+    const rawIdentities = completion?.identities ?? {};
+    if (!isPlanRecord(rawSnapshots)) {
+      malformed("completionPolicySnapshots is not a digest-keyed record");
+    }
+    if (!isPlanRecord(rawIdentities)) {
+      malformed(
+        "completionPolicyIdentities is not a policy id → revision → digest record",
+      );
+    }
+    const authorizedPairs = new Set<string>();
+    for (const raw of rawAuthorizations) {
+      if (
+        !isPlanRecord(raw) ||
+        !isText(raw.nodeId) ||
+        !isText(raw.outcome)
+      ) {
+        malformed(
+          "a completion authorization is not { nodeId, outcome, policy } of non-empty strings",
+        );
+        continue;
+      }
+      const nodeId = raw.nodeId;
+      const outcome = raw.outcome;
+      const policy = raw.policy;
+      if (!isCompletionPolicyRef(policy)) {
+        malformed(
+          `completion authorization of node ${JSON.stringify(nodeId)} is not pinned to a policy ref { id, revision, digest } of non-empty strings`,
+        );
+        continue;
+      }
+      const pair = terminalPairKey(nodeId, outcome);
+      if (authorizedPairs.has(pair)) {
+        malformed(
+          `completion authorization for outcome ${JSON.stringify(outcome)} of node ${JSON.stringify(nodeId)} appears more than once — one mapping has one pinned authorization`,
+        );
+        continue;
+      }
+      authorizedPairs.add(pair);
+      if (naturalOutcomes.get(nodeId) !== outcome) {
+        issues.push({
+          code: "unknown-completion-authorization",
+          message: `plan pins an authorization for outcome ${JSON.stringify(outcome)} of node ${JSON.stringify(nodeId)}, which the topology does not declare as that node's natural completion`,
+        });
+      }
+      const snapshot =
+        isPlanRecord(rawSnapshots)
+          ? ownValue(rawSnapshots, policy.digest)
+          : undefined;
+      const body = readCompletionPolicyBody(snapshot);
+      if (body === undefined) {
+        issues.push({
+          code: "inconsistent-completion-policy",
+          message: `completion authorization of node ${JSON.stringify(nodeId)} pins policy ${describeCompletionPolicyRef(policy)} at digest ${policy.digest}, but completionPolicySnapshots carries no readable declaration body under that digest`,
+        });
+      } else {
+        let actual: string | undefined;
+        try {
+          actual = contractDigest(body);
+        } catch {
+          actual = undefined;
+        }
+        if (actual !== policy.digest) {
+          issues.push({
+            code: "inconsistent-completion-policy",
+            message: `completion policy ${describeCompletionPolicyRef(policy)} is pinned at digest ${policy.digest}, but the body in completionPolicySnapshots hashes to ${String(actual)}`,
+          });
+        }
+      }
+      const revisions = isPlanRecord(rawIdentities)
+        ? ownValue(rawIdentities, policy.id)
+        : undefined;
+      const identityDigest = isPlanRecord(revisions)
+        ? ownValue(revisions, policy.revision)
+        : undefined;
+      if (identityDigest !== policy.digest) {
+        issues.push({
+          code: "inconsistent-completion-policy",
+          message: `completion policy ${describeCompletionPolicyRef(policy)} is pinned at digest ${policy.digest}, but completionPolicyIdentities maps it to ${String(identityDigest)}`,
+        });
+      }
+    }
+    if (executabilityReading.kind === "executable") {
+      for (const [nodeId, outcome] of [...naturalOutcomes].sort(([a], [b]) =>
+        compareText(a, b),
+      )) {
+        if (authorizedPairs.has(terminalPairKey(nodeId, outcome))) continue;
+        issues.push({
+          code: "missing-completion-authorization",
+          message: `executable plan node ${JSON.stringify(nodeId)} maps natural completion to outcome ${JSON.stringify(outcome)}, but the plan pins no authorized completion policy for that mapping`,
+        });
+      }
+    }
+  }
+
   return { issues, nodeIds };
 }
 
@@ -992,9 +1231,14 @@ export type PlanExecutabilityReading =
  *
  * ONE reader for the inspector and the load gate: the inspector turns
  * `malformed` into `malformed-topology` and holds an executable plan to the
- * pinning rule, while the load gate refuses anything that is not
+ * pinning rules, while the load gate refuses anything that is not
  * `executable` — a draft by `NON_EXECUTABLE_PLAN_CODE`, a malformed value as a
- * malformed record.
+ * malformed record. The draft arm is read in full: both reason lists must be
+ * present, at least one must be non-empty, every acceptance entry is shape-
+ * checked as before, and every unauthorized completion is shape-checked AND
+ * must carry one of the closed authorization issue codes, so a persisted
+ * reason this build does not define is refused instead of read with an
+ * invented meaning.
  */
 export function readPlanExecutability(
   raw: unknown,
@@ -1004,7 +1248,14 @@ export function readPlanExecutability(
   if (kind === "executable") return { kind: "executable" };
   if (kind !== "draft") return { kind: "malformed" };
   const unresolved = raw.unresolved;
-  if (!Array.isArray(unresolved) || unresolved.length === 0) {
+  const unauthorizedCompletions = raw.unauthorizedCompletions;
+  if (!Array.isArray(unresolved) || !Array.isArray(unauthorizedCompletions)) {
+    return { kind: "malformed" };
+  }
+  // A draft names at least one reason. A draft with BOTH lists empty would
+  // claim non-executability without saying why, which no compiler produces and
+  // no reader can act on.
+  if (unresolved.length === 0 && unauthorizedCompletions.length === 0) {
     return { kind: "malformed" };
   }
   for (const entry of unresolved) {
@@ -1021,7 +1272,46 @@ export function readPlanExecutability(
       return { kind: "malformed" };
     }
   }
+  for (const entry of unauthorizedCompletions) {
+    if (!isPlanRecord(entry) || !isText(entry.nodeId) || !isText(entry.outcome)) {
+      return { kind: "malformed" };
+    }
+    // The reason vocabulary is CLOSED, exactly as the stop and progress
+    // vocabularies are: a persisted reason this build does not define is
+    // refused rather than read with a meaning its writer never had.
+    if (readCompletionAuthorizationIssueCode(entry.code) === undefined) {
+      return { kind: "malformed" };
+    }
+    const request = entry.request;
+    if (request !== undefined) {
+      if (
+        !isPlanRecord(request) ||
+        !isText(request.id) ||
+        !isText(request.revision)
+      ) {
+        return { kind: "malformed" };
+      }
+    }
+  }
   return { kind: "draft" };
+}
+
+/** A pinned policy ref as a diagnostic token: `"id"@"revision"`. */
+function describeCompletionPolicyRef(ref: CompletionPolicyRef): string {
+  return JSON.stringify(ref.id) + "@" + JSON.stringify(ref.revision);
+}
+
+/**
+ * Read one own data property of a record, or `undefined`.
+ *
+ * OWN properties only: a digest or identity key such as `__proto__` must name
+ * a missing entry rather than an inherited one, so a persisted index can never
+ * corroborate a ref through the prototype chain.
+ */
+function ownValue(record: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(record, key)
+    ? record[key]
+    : undefined;
 }
 
 /** UTF-16 code-unit order: locale-independent, so ids sort the same everywhere. */

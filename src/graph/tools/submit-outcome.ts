@@ -54,6 +54,7 @@
 import { readFileSync } from "node:fs";
 
 import type { CompiledPlan } from "../compiler/plan.ts";
+import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import {
   DEFAULT_STORAGE_FORMAT_REGISTRY,
   engineStateDir,
@@ -406,6 +407,14 @@ export interface SubmitOutcomeDeps {
   readonly dispatch?: OutcomeDispatchSeam;
   /** The installed validator implementations the plan's gates resolve against. */
   readonly validators?: ValidatorRegistry;
+  /**
+   * The HOST-INSTALLED completion-policy capability (D6). A persisted plan
+   * that pins a natural-completion authorization is corroborated against it
+   * before the submission is judged; without it such a plan is refused with
+   * `completion-policy-unavailable` and nothing is written. A plan that pins
+   * none does not need it.
+   */
+  readonly completionPolicies?: CompletionPolicyRegistry;
   /** Root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock, in epoch milliseconds; omitted → the runtime reads `Date.now()`. */
@@ -442,6 +451,9 @@ export async function submitDeclaredOutcome(
       dispatch: deps.dispatch ?? NOOP_OUTCOME_DISPATCH,
       validators: deps.validators ?? EMPTY_VALIDATORS,
       artifactRoot: deps.artifactRoot,
+      ...(deps.completionPolicies === undefined
+        ? {}
+        : { completionPolicies: deps.completionPolicies }),
     });
     const proposal = {
       nodeId: args.node_id,

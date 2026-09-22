@@ -64,9 +64,11 @@ import type { GraphDeclarationV3 } from "../compiler/declaration-v3.ts";
 import {
   createPersistedCompiledPlan,
   type CompiledPlan,
+  type CompiledUnauthorizedCompletion,
   type CompiledUnresolvedRequirement,
   type PersistedCompiledPlan,
 } from "../compiler/plan.ts";
+import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import {
   LEGACY_SIGNAL_PROTOCOL,
   OUTCOME_PROTOCOL,
@@ -100,6 +102,10 @@ export interface GraphDeclareArgs {
    * refused here.
    */
   supported_validators?: SupportedValidatorV3[];
+  // NOTE (D6): there is deliberately NO completion-policy argument here. A
+  // caller-supplied capability would let the same call that REQUESTS a policy
+  // revision also authorize it; the installed completion-policy capability is
+  // a host dependency (GraphToolSetDeps), never a tool argument.
 }
 
 /** What a successful `graph_declare` reports. */
@@ -185,18 +191,21 @@ export class GraphDeclareRefusedError extends Error {
   readonly reason: DeclareRefusalReason;
   readonly diagnostics: readonly DeclareDiagnostic[];
   readonly unresolved: readonly CompiledUnresolvedRequirement[];
+  readonly unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[];
 
   constructor(
     reason: DeclareRefusalReason,
     message: string,
     diagnostics: readonly DeclareDiagnostic[] = [],
     unresolved: readonly CompiledUnresolvedRequirement[] = [],
+    unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[] = [],
   ) {
     super(message);
     this.name = "GraphDeclareRefusedError";
     this.reason = reason;
     this.diagnostics = Object.freeze([...diagnostics]);
     this.unresolved = Object.freeze([...unresolved]);
+    this.unauthorizedCompletions = Object.freeze([...unauthorizedCompletions]);
   }
 }
 
@@ -280,27 +289,57 @@ function refuseCompileErrors(
   );
 }
 
-/** Refuse a DRAFT: name every unresolved acceptance entry, then the next step. */
+/**
+ * Refuse a DRAFT: name every unresolved ACCEPTANCE entry and every
+ * UNAUTHORIZED natural-completion mapping, then the next step for each.
+ *
+ * The two reason lists are different problems with different owners (a
+ * caller-supplied validator capability versus a HOST-installed policy), so the
+ * refusal renders them apart and only gives the guidance that applies.
+ */
 function refuseDraftPlan(
   graphId: string,
   unresolved: readonly CompiledUnresolvedRequirement[],
+  unauthorizedCompletions: readonly CompiledUnauthorizedCompletion[],
 ): GraphDeclareRefusedError {
-  const lines = unresolved.map((entry) => {
-    const version = entry.version === undefined ? "any version" : `version ${entry.version}`;
-    return (
-      `  - nodes.${entry.nodeId}: outcome "${entry.outcomeId}" requires validator ` +
-      `"${entry.validator}" (${version}), which no declared capability resolves to an exact installed version`
-    );
-  });
+  const lines = [
+    ...unresolved.map((entry) => {
+      const version =
+        entry.version === undefined ? "any version" : `version ${entry.version}`;
+      return (
+        `  - nodes.${entry.nodeId}: outcome "${entry.outcomeId}" requires validator ` +
+        `"${entry.validator}" (${version}), which no declared capability resolves to an exact installed version`
+      );
+    }),
+    ...unauthorizedCompletions.map((entry) => {
+      const requested =
+        entry.request === undefined
+          ? "the declaration requests no policy revision at all"
+          : `the declaration requests policy "${entry.request.id}"@"${entry.request.revision}"`;
+      return (
+        `  - nodes.${entry.nodeId}: outcome "${entry.outcome}" asks for natural completion, but ` +
+        `${requested} and the mapping is not authorized (${entry.code})`
+      );
+    }),
+  ];
+  const guidance = [
+    unresolved.length === 0
+      ? undefined
+      : "Supply supported_validators covering each requirement at its exact version (or remove the requirement)",
+    unauthorizedCompletions.length === 0
+      ? undefined
+      : "have the HOST install the exact completion-policy revision each mapping requests (a declaration may REQUEST a policy; it can never authorize one)",
+  ].filter((part): part is string => part !== undefined);
   return new GraphDeclareRefusedError(
     "draft-plan",
     `graph_declare refused: "${graphId}" compiled to a NON-EXECUTABLE DRAFT — ` +
-      `${unresolved.length} acceptance requirement(s) could not be resolved, so no plan was persisted:` +
+      `${unresolved.length} acceptance requirement(s) and ${unauthorizedCompletions.length} natural-completion mapping(s) are unresolved, so no plan was persisted:` +
       `\n${lines.join("\n")}\n` +
-      "Supply supported_validators covering each requirement at its exact version " +
-      "(or remove the requirement) and declare again. A draft is never persisted as executable.",
+      guidance.join(", and ") +
+      ". A draft is never persisted as executable.",
     [],
     unresolved,
+    unauthorizedCompletions,
   );
 }
 
@@ -323,6 +362,13 @@ export interface BuildDeclaredOutcomeGraphInput {
   readonly supportedValidators?: readonly SupportedValidatorV3[];
   /** The installed contract capability to resolve node `contractRef`s against. */
   readonly contracts?: ContractRegistry;
+  /**
+   * The HOST-INSTALLED completion-policy capability (D6). Deliberately an INPUT
+   * to this builder and NEVER a `graph_declare` argument: a declaration may
+   * request a policy revision, but only the host may install one, so the
+   * capability can never be supplied by the same call that asks for it.
+   */
+  readonly completionPolicies?: CompletionPolicyRegistry;
 }
 
 /**
@@ -374,10 +420,17 @@ export function buildDeclaredOutcomeGraph(
     ...(input.supportedValidators === undefined
       ? {}
       : { supportedValidators: input.supportedValidators }),
+    ...(input.completionPolicies === undefined
+      ? {}
+      : { completionPolicies: input.completionPolicies }),
   });
   if (!compiled.ok) throw refuseCompileErrors(compiled.errors);
   if (compiled.kind === "draft") {
-    throw refuseDraftPlan(declaration.name, compiled.unresolved);
+    throw refuseDraftPlan(
+      declaration.name,
+      compiled.unresolved,
+      compiled.unauthorizedCompletions,
+    );
   }
 
   const plan = compiled.plan;

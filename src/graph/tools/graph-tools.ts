@@ -142,6 +142,7 @@ import {
 import type { OutcomeDispatchSeam } from "../outcome/runtime.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
+import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { enqueueNotify } from "../../dispatch/notification.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -375,6 +376,17 @@ export interface GraphToolSetDeps {
    * `unresolved-contract` rather than bound to something unverified.
    */
   contracts?: ContractRegistry;
+  /**
+   * Optional HOST-INSTALLED completion-policy capability (D6).
+   *
+   * `graph_declare` resolves a declaration's `completion_policy` REQUEST
+   * against it (a natural mapping is denied, authorized or reported as a draft
+   * reason), and `graph_submit_outcome` corroborates the policy a persisted
+   * plan pinned before it settles anything. It is a TOOLSET dependency and
+   * deliberately never a tool argument: the same call that requests a policy
+   * revision must not be able to authorize it.
+   */
+  completionPolicies?: CompletionPolicyRegistry;
   /**
    * Optional dispatch seam the OUTCOME run path launches a node through
    * (`graph_submit_outcome`). Executing the node's agent is the deferred
@@ -1658,6 +1670,9 @@ export class GraphToolSet {
       ...(this.deps.contracts === undefined
         ? {}
         : { contracts: this.deps.contracts }),
+      ...(this.deps.completionPolicies === undefined
+        ? {}
+        : { completionPolicies: this.deps.completionPolicies }),
     });
 
     // A graph id belongs to exactly ONE execution protocol. A legacy graph is
@@ -1789,6 +1804,9 @@ export class GraphToolSet {
         ...(this.deps.outcomeValidators === undefined
           ? {}
           : { validators: this.deps.outcomeValidators }),
+        ...(this.deps.completionPolicies === undefined
+          ? {}
+          : { completionPolicies: this.deps.completionPolicies }),
         artifactRoot: this.deps.outcomeArtifactRoot ?? this.deps.directory ?? ".",
         ...(this.deps.outcomeNow === undefined
           ? {}

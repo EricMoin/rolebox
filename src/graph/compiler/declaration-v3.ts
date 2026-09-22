@@ -20,7 +20,10 @@
  *   cannot be compiled into a decision. Typed predicates are a LATER addition
  *   and have no field here yet.
  * - A node may map natural (runtime) completion to exactly one of its outcomes
- *   and attach acceptance requirements to each outcome.
+ *   and attach acceptance requirements to each outcome. A graph REQUESTS a
+ *   versioned completion-policy revision for those mappings; the request is
+ *   never an authorization, because the installed policy — not the declaring
+ *   worker — decides whether a mapping is granted.
  * - A loop group declares its continuation and exit outcomes instead of relying
  *   on an inferred marker, and may declare a progress POLICY — the comparison
  *   semantics, the comparison object and an explicit stagnation threshold.
@@ -115,6 +118,26 @@ export interface OutcomeDeclarationV3 {
 export type CompletionPolicyV3 =
   | { mode: "explicit" }
   | { mode: "natural"; outcome: string };
+
+/**
+ * The completion-policy revision a graph REQUESTS for its natural completion
+ * mappings.
+ *
+ * A request is not an authorization: it names a policy identity, and the
+ * installed capability — a host-authorized, content-pinned selection
+ * (`src/graph/policy/completion-policy.ts`) — decides whether that revision
+ * exists and whether its rules grant each mapping. A declaration can therefore
+ * ask for a revision that is merely present, unknown, or forbidden, and the
+ * compiler answers a draft or a refusal rather than a grant it invented.
+ * Naming a `digest` here would not add authority either (a declaration
+ * cannot attest content), which is why the grammar has no such field.
+ */
+export interface CompletionPolicyRequestV3 {
+  /** The policy declaration's id. */
+  readonly id: string;
+  /** The exact revision requested; an opaque immutable identifier. */
+  readonly revision: string;
+}
 
 // ── Nodes ───────────────────────────────────────────────────────────────────
 
@@ -253,6 +276,18 @@ export interface GraphDeclarationV3 {
   edges: EdgeDeclarationV3[];
   /** Bounded-cycle loop groups (optional). */
   loop_groups?: LoopGroupDeclarationV3[];
+  /**
+   * The completion-policy revision this graph requests for its natural
+   * completion mappings.
+   *
+   * OPTIONAL, because a graph whose nodes all complete explicitly needs no
+   * authorization. A node that maps natural completion to an outcome WITHOUT
+   * this request cannot be authorized — there is nothing to resolve — so it
+   * compiles to a NON-EXECUTABLE DRAFT naming that mapping; it is never
+   * silently downgraded to `explicit`, which would change what the author
+   * asked for and hide the missing authorization.
+   */
+  completion_policy?: CompletionPolicyRequestV3;
 }
 
 // ── Structural guard ────────────────────────────────────────────────────────
@@ -301,6 +336,15 @@ export function isGraphDeclarationV3(
     value.loop_groups !== undefined &&
     (!Array.isArray(value.loop_groups) ||
       !value.loop_groups.every(isLoopGroupDeclarationV3))
+  ) {
+    return false;
+  }
+  // Shape level only, like every other optional root field: a non-object can
+  // never be a policy request, while a record with wrong fields is the
+  // compiler's own diagnostic at its own path.
+  if (
+    value.completion_policy !== undefined &&
+    !isObjectContainer(value.completion_policy)
   ) {
     return false;
   }

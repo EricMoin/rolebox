@@ -37,6 +37,12 @@ import {
   type CompiledPlan,
 } from "../../src/graph/compiler/plan.ts";
 import {
+  completionPolicyRefOf,
+  createCompletionPolicyRegistry,
+  type CompletionPolicyBody,
+  type CompletionPolicyRegistry,
+} from "../../src/graph/policy/completion-policy.ts";
+import {
   parseGraphDeclarationV3,
   type DeclarationV3Issue,
 } from "../../src/graph/compiler/parse-declaration-v3.ts";
@@ -90,12 +96,89 @@ function rawDeclaration(
 }
 
 /**
+ * The completion policy the canonical fixture REQUESTS, and the host-installed
+ * capability that authorizes it (D6).
+ *
+ * The declaration names the revision; the registry is the host's grant. Every
+ * fixture that asks for natural completion is compiled through
+ * {@link compileFixture}, so the canonical plan is EXECUTABLE — a natural
+ * mapping with no authorization is a draft, which is the rule the dedicated
+ * completion-policy suite covers from both sides.
+ */
+const FIXTURE_POLICY_ID = "test.completion";
+const FIXTURE_POLICY_REVISION = "1";
+const FIXTURE_POLICY_BODY: CompletionPolicyBody = {
+  version: 1,
+  default: "ungranted",
+  rules: [
+    {
+      graphId: "graph.test",
+      nodeId: "ship",
+      outcome: "shipped",
+      decision: "allow",
+    },
+  ],
+};
+const FIXTURE_POLICY_REF = completionPolicyRefOf({
+  id: FIXTURE_POLICY_ID,
+  revision: FIXTURE_POLICY_REVISION,
+  body: FIXTURE_POLICY_BODY,
+});
+const AUTHORIZED_COMPLETION_POLICIES: CompletionPolicyRegistry =
+  createCompletionPolicyRegistry({
+    policies: [{ ref: FIXTURE_POLICY_REF, body: FIXTURE_POLICY_BODY }],
+  });
+
+/** A policy that explicitly DENIES every natural mapping it does not list. */
+const DENYING_POLICY_REVISION = "deny";
+const DENYING_POLICY_BODY: CompletionPolicyBody = {
+  version: 1,
+  default: "deny",
+  rules: [],
+};
+const DENYING_COMPLETION_POLICIES: CompletionPolicyRegistry =
+  createCompletionPolicyRegistry({
+    policies: [
+      {
+        ref: completionPolicyRefOf({
+          id: FIXTURE_POLICY_ID,
+          revision: DENYING_POLICY_REVISION,
+          body: DENYING_POLICY_BODY,
+        }),
+        body: DENYING_POLICY_BODY,
+      },
+    ],
+  });
+
+/**
+ * Compile a fixture with the authorized completion-policy capability installed.
+ *
+ * A test that needs a DIFFERENT policy state overrides `completionPolicies`
+ * through `options` (the spread below lets it), and the dedicated
+ * completion-policy suite calls `compileGraph` directly for the states where
+ * no capability is installed at all.
+ */
+function compileFixture(
+  declaration: unknown,
+  options?: CompileOptions,
+): CompileResult {
+  return compileGraph(declaration, {
+    completionPolicies: AUTHORIZED_COMPLETION_POLICIES,
+    ...options,
+  });
+}
+
+/**
  * The canonical fixture: a four-node graph with one bounded revision loop.
  * Every outcome is either bound by an edge or the natural-completion outcome of
  * the terminal node, so a clean compile has zero errors AND zero warnings.
  */
 function loopGraph(): GraphDeclarationV3 {
-  return declaration(
+  // The canonical graph REQUESTS the completion-policy revision the fixtures
+  // install. A request is not authority: a test that compiles this declaration
+  // WITHOUT the capability (calling `compileGraph` directly) sees a draft, and
+  // the dedicated completion-policy suite covers that state from both sides.
+  const graph = declaration(
     [
       node("plan", ["planned"]),
       node("build", ["revise", "finished"]),
@@ -125,6 +208,13 @@ function loopGraph(): GraphDeclarationV3 {
       },
     ],
   );
+  return {
+    ...graph,
+    completion_policy: {
+      id: FIXTURE_POLICY_ID,
+      revision: FIXTURE_POLICY_REVISION,
+    },
+  };
 }
 
 /** The plan of a result that must have compiled, with a useful failure. */
@@ -185,7 +275,7 @@ function immutabilityViolations(
 
 describe("compileGraph — a valid declaration", () => {
   it("compiles a multi-node graph with a loop group into a canonical plan", () => {
-    const result = compileGraph(loopGraph());
+    const result = compileFixture(loopGraph());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.warnings).toEqual([]);
@@ -243,6 +333,21 @@ describe("compileGraph — a valid declaration", () => {
     expect(plan.contractSnapshots).toEqual({});
     expect(plan.contractIdentities).toEqual({});
 
+    // D6: the natural mapping is PINNED — the authorization, the policy content
+    // it resolved through and that content's identity all live in the plan body,
+    // so the plan alone corroborates the grant.
+    expect(plan.completionAuthorizations).toEqual([
+      { nodeId: "ship", outcome: "shipped", policy: FIXTURE_POLICY_REF },
+    ]);
+    expect(plan.completionPolicySnapshots[FIXTURE_POLICY_REF.digest]).toEqual(
+      FIXTURE_POLICY_BODY,
+    );
+    expect(plan.completionPolicyIdentities).toEqual({
+      [FIXTURE_POLICY_ID]: {
+        [FIXTURE_POLICY_REVISION]: FIXTURE_POLICY_REF.digest,
+      },
+    });
+
     // B9: the ONE outcome no edge binds is the plan's explicit terminal, and a
     // plan with no acceptance requirements is executable without a capability
     // set.
@@ -253,7 +358,7 @@ describe("compileGraph — a valid declaration", () => {
   });
 
   it("deeply freezes the plan and holds no Map", () => {
-    const plan = expectPlan(compileGraph(loopGraph()));
+    const plan = expectPlan(compileFixture(loopGraph()));
     expect(Object.isFrozen(plan)).toBe(true);
     expect(immutabilityViolations(plan, "plan", new Set())).toEqual([]);
     // Reflect reports the frozen write as refused instead of mutating it.
@@ -262,7 +367,7 @@ describe("compileGraph — a valid declaration", () => {
   });
 
   it("addresses the plan with the ONE contractDigest over the plan body", () => {
-    const plan = expectPlan(compileGraph(loopGraph()));
+    const plan = expectPlan(compileFixture(loopGraph()));
     const { planRevision, ...body } = plan;
     expect(planRevision).toBe(contractDigest(body));
     expect(planRevision).toMatch(/^[0-9a-f]{64}$/);
@@ -272,7 +377,7 @@ describe("compileGraph — a valid declaration", () => {
     // The loader re-checks a PERSISTED plan with these rules; a plan the
     // compiler produced must satisfy them by construction, so the compiler and
     // the load gate cannot drift into disagreeing about what a plan is.
-    const plan = expectPlan(compileGraph(loopGraph()));
+    const plan = expectPlan(compileFixture(loopGraph()));
     expect(
       inspectCompiledTopology(
         plan.nodes,
@@ -280,6 +385,11 @@ describe("compileGraph — a valid declaration", () => {
         plan.loopGroups,
         plan.terminalOutcomes,
         plan.executability,
+        {
+          authorizations: plan.completionAuthorizations,
+          snapshots: plan.completionPolicySnapshots,
+          identities: plan.completionPolicyIdentities,
+        },
       ),
     ).toEqual({
       issues: [],
@@ -312,14 +422,14 @@ describe("planRevision — content addressing", () => {
       })),
     };
 
-    const first = expectPlan(compileGraph(forward));
-    const second = expectPlan(compileGraph(reversed));
+    const first = expectPlan(compileFixture(forward));
+    const second = expectPlan(compileFixture(reversed));
     expect(second.planRevision).toBe(first.planRevision);
     expect(second).toEqual(first);
   });
 
   it("moves the revision for a content change anywhere in the body", () => {
-    const base = expectPlan(compileGraph(loopGraph())).planRevision;
+    const base = expectPlan(compileFixture(loopGraph())).planRevision;
     const graph = loopGraph();
 
     const variants: GraphDeclarationV3[] = [
@@ -417,7 +527,7 @@ describe("planRevision — content addressing", () => {
     ];
 
     for (const variant of variants) {
-      const revision = expectPlan(compileGraph(variant)).planRevision;
+      const revision = expectPlan(compileFixture(variant)).planRevision;
       expect(revision).not.toBe(base);
     }
   });
@@ -449,7 +559,7 @@ describe("compileGraph — contract bindings", () => {
   }
 
   it("resolves a binding into contractSnapshots (content) and contractIdentities (identity)", () => {
-    const result = compileGraph(boundGraph(snapshot.ref), {
+    const result = compileFixture(boundGraph(snapshot.ref), {
       contracts: registry,
     });
     const plan = expectPlan(result);
@@ -481,7 +591,7 @@ describe("compileGraph — contract bindings", () => {
           : item,
       ),
     };
-    const plan = expectPlan(compileGraph(twoBindings, { contracts: registry }));
+    const plan = expectPlan(compileFixture(twoBindings, { contracts: registry }));
     expect(Object.keys(plan.contractSnapshots)).toHaveLength(1);
     expect(plan.contractSnapshots[snapshot.ref.digest]).toEqual({
       body: snapshot.body,
@@ -513,7 +623,7 @@ describe("compileGraph — contract bindings", () => {
             : item,
       ),
     };
-    const plan = expectPlan(compileGraph(aliased, { contracts: aliasRegistry }));
+    const plan = expectPlan(compileFixture(aliased, { contracts: aliasRegistry }));
     expect(Object.keys(plan.contractSnapshots)).toEqual([
       snapshot.ref.digest,
     ]);
@@ -536,7 +646,7 @@ describe("compileGraph — contract bindings", () => {
       digest: contractDigest(body),
     };
     const errors = expectErrors(
-      compileGraph(boundGraph(ref), { contracts: registry }),
+      compileFixture(boundGraph(ref), { contracts: registry }),
     );
     expect(errors.map((error) => error.code)).toEqual(["unresolved-contract"]);
     expect(errors[0].path).toBe("nodes.review.contractRef");
@@ -545,7 +655,7 @@ describe("compileGraph — contract bindings", () => {
   it("fails an unknown revision as unresolved-contract, never a fallback", () => {
     const ref: ContractRef = { ...snapshot.ref, revision: "2" };
     const errors = expectErrors(
-      compileGraph(boundGraph(ref), { contracts: registry }),
+      compileFixture(boundGraph(ref), { contracts: registry }),
     );
     expect(errors.map((error) => error.code)).toEqual(["unresolved-contract"]);
   });
@@ -553,7 +663,7 @@ describe("compileGraph — contract bindings", () => {
   it("fails a digest mismatch as contract-digest-mismatch with the actual digest", () => {
     const ref: ContractRef = { ...snapshot.ref, digest: "f".repeat(64) };
     const errors = expectErrors(
-      compileGraph(boundGraph(ref), { contracts: registry }),
+      compileFixture(boundGraph(ref), { contracts: registry }),
     );
     expect(errors.map((error) => error.code)).toEqual([
       "contract-digest-mismatch",
@@ -563,12 +673,12 @@ describe("compileGraph — contract bindings", () => {
   });
 
   it("fails a declared ref with no registry supplied as unresolved-contract", () => {
-    const errors = expectErrors(compileGraph(boundGraph(snapshot.ref)));
+    const errors = expectErrors(compileFixture(boundGraph(snapshot.ref)));
     expect(errors.map((error) => error.code)).toEqual(["unresolved-contract"]);
   });
 
   it("compiles a node without a contractRef — legal in this slice", () => {
-    expect(expectPlan(compileGraph(loopGraph())).nodes).toHaveLength(4);
+    expect(expectPlan(compileFixture(loopGraph())).nodes).toHaveLength(4);
   });
 });
 
@@ -602,7 +712,7 @@ describe("compileGraph — validator capability", () => {
   }
 
   it("answers a NON-EXECUTABLE DRAFT when supportedValidators is absent", () => {
-    const result = compileGraph(validatorGraph());
+    const result = compileFixture(validatorGraph());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     // B9: no capability set means the requirements cannot be resolved, so the
@@ -628,7 +738,7 @@ describe("compileGraph — validator capability", () => {
   });
 
   it("stays executable without a capability set when nothing needs resolving", () => {
-    const result = compileGraph(loopGraph());
+    const result = compileFixture(loopGraph());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.kind).toBe("executable");
@@ -637,7 +747,7 @@ describe("compileGraph — validator capability", () => {
   });
 
   it("fails every requirement no declared capability covers", () => {
-    const result = compileGraph(validatorGraph(), { supportedValidators: [] });
+    const result = compileFixture(validatorGraph(), { supportedValidators: [] });
     const errors = expectErrors(result);
     expect(errors.map((error) => error.code)).toEqual([
       "unsupported-validator",
@@ -651,7 +761,7 @@ describe("compileGraph — validator capability", () => {
     // The exact defect this rule exists for: an UNVERSIONED capability must not
     // satisfy a versioned requirement, and the reason is distinct from
     // "nothing covers it".
-    const result = compileGraph(validatorGraph(), {
+    const result = compileFixture(validatorGraph(), {
       supportedValidators: [
         { validator: "schema.answer" },
         { validator: "artifact.exists" },
@@ -665,7 +775,7 @@ describe("compileGraph — validator capability", () => {
   });
 
   it("resolves every requirement to an exact version and writes it into the plan", () => {
-    const result = compileGraph(validatorGraph(), {
+    const result = compileFixture(validatorGraph(), {
       supportedValidators: [
         { validator: "schema.answer", version: 9 },
         { validator: "artifact.exists", version: 3 },
@@ -705,7 +815,7 @@ describe("compileGraph — validator capability", () => {
       graph.edges,
       graph.loop_groups,
     );
-    const result = compileGraph(bare, {
+    const result = compileFixture(bare, {
       supportedValidators: [
         { validator: "schema.answer", version: 8 },
         { validator: "schema.answer", version: 4 },
@@ -722,7 +832,7 @@ describe("compileGraph — validator capability", () => {
   });
 
   it("is identity, not ordering: version 8 does not cover a requirement for 9", () => {
-    const result = compileGraph(validatorGraph(), {
+    const result = compileFixture(validatorGraph(), {
       supportedValidators: [
         { validator: "schema.answer", version: 8 },
         { validator: "artifact.exists", version: 3 },
@@ -1033,6 +1143,26 @@ describe("compileGraph — error codes", () => {
       path: "nodes.a.outcomes[0].acceptance[0]",
     },
     {
+      code: "completion-policy-denied",
+      input: {
+        ...declaration(
+          [
+            {
+              ...node("a", ["done"]),
+              completion: { mode: "natural", outcome: "done" },
+            },
+          ],
+          [],
+        ),
+        completion_policy: {
+          id: FIXTURE_POLICY_ID,
+          revision: DENYING_POLICY_REVISION,
+        },
+      },
+      options: { completionPolicies: DENYING_COMPLETION_POLICIES },
+      path: "nodes.a.completion",
+    },
+    {
       code: "loop-continuation-without-edge",
       input: declaration(
         [node("a", ["again", "done"])],
@@ -1078,7 +1208,7 @@ describe("compileGraph — error codes", () => {
 
   for (const testCase of cases) {
     it("reports exactly " + testCase.code, () => {
-      const result = compileGraph(testCase.input, testCase.options);
+      const result = compileFixture(testCase.input, testCase.options);
       const errors = expectErrors(result);
       expect(errors.map((error) => error.code)).toEqual([testCase.code]);
       expect(errors[0].code).toBe(testCase.code);
@@ -1114,6 +1244,7 @@ describe("compileGraph — error codes", () => {
       "contract-digest-mismatch",
       "unsupported-validator",
       "unpinned-validator-version",
+      "completion-policy-denied",
     ];
     const covered = new Set(cases.map((testCase) => testCase.code));
     // `malformed-topology` and `terminal-outcomes-inconsistent` are the two
@@ -1142,7 +1273,7 @@ describe("compileGraph — warnings (unused-outcome RETIRED)", () => {
       ],
       [edge("a", "b", "used")],
     );
-    const result = compileGraph(graph);
+    const result = compileFixture(graph);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     // B9: the old unused-outcome warning described exactly this case. It is
@@ -1155,7 +1286,7 @@ describe("compileGraph — warnings (unused-outcome RETIRED)", () => {
   });
 
   it("has no warning at all for a fully bound graph", () => {
-    const result = compileGraph(loopGraph());
+    const result = compileFixture(loopGraph());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.warnings).toEqual([]);
@@ -1186,7 +1317,7 @@ describe("compileGraph — totality", () => {
 
   it("answers malformed-declaration for every non-v3 input and never throws", () => {
     for (const input of malformed) {
-      const result = compileGraph(input);
+      const result = compileFixture(input);
       const errors = expectErrors(result);
       expect(errors).toHaveLength(1);
       expect(errors[0].code).toBe("malformed-declaration");
@@ -1199,7 +1330,7 @@ describe("compileGraph — totality", () => {
         throw new Error("hostile getter");
       },
     };
-    const errors = expectErrors(compileGraph(hostile));
+    const errors = expectErrors(compileFixture(hostile));
     expect(errors[0].code).toBe("malformed-declaration");
     expect(errors[0].message).toContain("hostile getter");
   });
@@ -1228,7 +1359,7 @@ describe("compileGraph — totality", () => {
           throw thrown;
         },
       };
-      const errors = expectErrors(compileGraph(input));
+      const errors = expectErrors(compileFixture(input));
       expect(errors).toHaveLength(1);
       expect(errors[0].code).toBe("malformed-declaration");
       expect(errors[0].path).toBe("$");
@@ -1244,7 +1375,7 @@ describe("compileGraph — totality", () => {
       ],
       edges: [],
     };
-    const errors = expectErrors(compileGraph(malformedOutcome));
+    const errors = expectErrors(compileFixture(malformedOutcome));
     expect(errors.map((error) => error.code)).toEqual([
       "malformed-declaration",
     ]);
@@ -1264,7 +1395,7 @@ describe("compileGraph — totality", () => {
       ],
       edges: [],
     };
-    const refErrors = expectErrors(compileGraph(malformedRef));
+    const refErrors = expectErrors(compileFixture(malformedRef));
     expect(refErrors.map((error) => error.code)).toEqual([
       "malformed-declaration",
     ]);
@@ -1328,8 +1459,8 @@ describe("compileGraph — determinism", () => {
   }
 
   it("produces the same issue sequence for the same declaration", () => {
-    const first = compileGraph(brokenGraph());
-    const second = compileGraph(brokenGraph());
+    const first = compileFixture(brokenGraph());
+    const second = compileFixture(brokenGraph());
     const firstErrors = expectErrors(first);
     const secondErrors = expectErrors(second);
     expect(secondErrors).toEqual(firstErrors);
@@ -1345,8 +1476,8 @@ describe("compileGraph — determinism", () => {
       edges: [...forward.edges].reverse(),
       loop_groups: [...forward.loop_groups].reverse(),
     };
-    const first = expectErrors(compileGraph(forward));
-    const second = expectErrors(compileGraph(reordered));
+    const first = expectErrors(compileFixture(forward));
+    const second = expectErrors(compileFixture(reordered));
     // The CODE sequence is canonical. Paths name the declaration slot a
     // diagnostic points at (edges[2] before edges[0] in canonical validation
     // order), so they are allowed to move with the declaration — the ordering
@@ -1361,7 +1492,7 @@ describe("compileGraph — determinism", () => {
       [node("b", ["bSpare"]), node("a", ["aSpare"])],
       [],
     );
-    const result = compileGraph(graph);
+    const result = compileFixture(graph);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.plan.terminalOutcomes).toEqual([
@@ -1396,7 +1527,7 @@ describe("compileGraph — the plan-level inspector owns the rules (B9)", () => 
       ),
     ];
     for (const input of inputs) {
-      const result = compileGraph(input);
+      const result = compileFixture(input);
       if (!result.ok) {
         throw new Error(
           "fixture must compile: " +
@@ -1411,13 +1542,18 @@ describe("compileGraph — the plan-level inspector owns the rules (B9)", () => 
           plan.loopGroups,
           plan.terminalOutcomes,
           plan.executability,
+          {
+            authorizations: plan.completionAuthorizations,
+            snapshots: plan.completionPolicySnapshots,
+            identities: plan.completionPolicyIdentities,
+          },
         ).issues,
       ).toEqual([]);
     }
   });
 
   it("reports the inspector's own code for a cycle with no loop group", () => {
-    const result = compileGraph(
+    const result = compileFixture(
       declaration(
         [node("a", ["x"]), node("b", ["y"]), node("c", ["z"])],
         [edge("a", "b", "x"), edge("b", "a", "y")],
@@ -1448,7 +1584,7 @@ describe("compileGraph — the plan-level inspector owns the rules (B9)", () => 
   });
 
   it("accepts a cycle that IS contained in a declared loop group", () => {
-    const result = compileGraph(
+    const result = compileFixture(
       declaration(
         [node("a", ["again", "done"])],
         [edge("a", "a", "again")],
@@ -2134,7 +2270,7 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
 
   it("produces a declaration the compiler accepts (front-end / compiler agreement)", () => {
     const declaration = parseOk(authoredValue());
-    const result = compileGraph(declaration);
+    const result = compileFixture(declaration);
     if (!result.ok) {
       throw new Error(
         "the parsed declaration must compile: " +
@@ -2210,7 +2346,7 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
       subject: "revision",
       max_unchanged: 2,
     });
-    const plan = expectPlan(compileGraph(declaration));
+    const plan = expectPlan(compileFixture(declaration));
     expect(plan.loopGroups[0]?.progress).toEqual({
       evaluator: "revision-token",
       version: 1,
@@ -2220,7 +2356,7 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
     // The policy is PART OF THE PLAN BODY, so the content address covers it: an
     // edited threshold cannot keep the revision of the plan it replaces.
     const other = expectPlan(
-      compileGraph({
+      compileFixture({
         ...declaration,
         loop_groups: [
           {

@@ -89,6 +89,19 @@
  * `src/graph/tools/submit-outcome.ts`, which is the model-facing ingress into
  * this same `submit`).
  *
+ * THE PLAN'S COMPLETION AUTHORIZATION IS A RUN PRECONDITION (D6). A plan body
+ * that pins natural-completion authorizations was compiled against exact policy
+ * revisions; `start`, `resume` and `submit` all corroborate every pinned ref
+ * against the HOST-INSTALLED completion-policy capability BEFORE they read or
+ * write anything. A missing capability is `completion-policy-unavailable`, a
+ * missing id or revision is reported by name, and a revision installed with
+ * different content is `completion-policy-digest-mismatch` — the plan's pinned
+ * digest is the authority and is never re-bound. A plan that pins no
+ * authorization needs no capability, so this gate changes nothing for it. The
+ * natural-completion SETTLEMENT path itself is still deferred (the dispatch
+ * completion bridge); what this slice fixes is that a plan whose authorization
+ * this process cannot support never runs at all.
+ *
  * SCOPE, STATED PLAINLY. C3c delivers `resume` here, the model-facing
  * `graph_submit_outcome` ingress (`src/graph/tools/submit-outcome.ts`), and the
  * startup sweep's route onto this runtime. Still DEFERRED: the protocol-aware
@@ -151,6 +164,10 @@ import {
   mintAttemptCredential,
   type AttemptCredentialSource,
 } from "./attempt-credential.ts";
+import {
+  verifyCompletionPolicy,
+  type CompletionPolicyRegistry,
+} from "../policy/completion-policy.ts";
 import { proposalDigest, readOutcomeProposal } from "./proposal.ts";
 import type { ExecutionIdentity, ValidatorRegistry } from "./validators.ts";
 
@@ -297,7 +314,29 @@ export type OutcomeRuntimeRefusalCode =
    * The plan declares a comparison semantics this build does not implement.
    * Refused by name instead of running the comparison under different semantics.
    */
-  | "progress-evaluator-unavailable";
+  | "progress-evaluator-unavailable"
+  /**
+   * The plan pins at least one natural-completion authorization (D6), but this
+   * runtime was given no completion-policy capability at all, so it cannot
+   * corroborate an authorization the plan depends on. Nothing is started,
+   * resumed or settled, and no state is written.
+   */
+  | "completion-policy-unavailable"
+  /**
+   * The policy id a plan's authorization pins is not installed in this
+   * process. Reported by name instead of running under another policy: the
+   * authorization the plan was compiled with is part of its semantics.
+   */
+  | "completion-policy-unknown"
+  /** The pinned policy id is installed, but not at the pinned exact revision. */
+  | "completion-policy-unknown-revision"
+  /**
+   * The pinned revision is installed with DIFFERENT content than the plan
+   * authorized — a republished declaration, or a host that authorized
+   * something else. The plan's pinned digest is the authority, so this is
+   * refused rather than re-bound to the installed body.
+   */
+  | "completion-policy-digest-mismatch";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -470,6 +509,17 @@ export interface OutcomeGraphRuntimeOptions {
    * CSPRNG); a test injects a deterministic source.
    */
   readonly mintCredential?: AttemptCredentialSource;
+  /**
+   * The HOST-INSTALLED completion-policy capability (D6).
+   *
+   * A plan whose body pins natural-completion authorizations depends on the
+   * policy revisions it authorized; this runtime corroborates each pinned ref
+   * against this registry before it starts, resumes or settles anything.
+   * OMITTED is legal only for a plan that pins none: a plan that pins one is
+   * refused with `completion-policy-unavailable`, because the authorization is
+   * part of the run's declared semantics and this process cannot check it.
+   */
+  readonly completionPolicies?: CompletionPolicyRegistry;
 }
 
 /**
@@ -495,6 +545,7 @@ export class OutcomeGraphRuntime {
   private readonly clock: () => number;
   private readonly protocols: ExecutionProtocolRegistry | undefined;
   private readonly mintCredential: AttemptCredentialSource;
+  private readonly completionPolicies: CompletionPolicyRegistry | undefined;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -508,6 +559,7 @@ export class OutcomeGraphRuntime {
     this.protocols = options.protocols;
     this.mintCredential =
       options.mintCredential ?? RUNTIME_ATTEMPT_CREDENTIAL_SOURCE;
+    this.completionPolicies = options.completionPolicies;
   }
 
   /**
@@ -522,6 +574,13 @@ export class OutcomeGraphRuntime {
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
+    // The plan's completion authorization is checked before ANY state is read
+    // or written (D6), so a run this process cannot support is blocked with the
+    // state preserved rather than started under weaker semantics.
+    const unsupportedCompletion = this.completionCapabilityRefusal();
+    if (unsupportedCompletion !== undefined) {
+      return refused([unsupportedCompletion]);
+    }
 
     let existing: OutcomeGraphState | undefined;
     try {
@@ -644,6 +703,13 @@ export class OutcomeGraphRuntime {
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
+    // The plan's completion authorization is checked before ANY state is read
+    // or written (D6), so a run this process cannot support is blocked with the
+    // state preserved rather than started under weaker semantics.
+    const unsupportedCompletion = this.completionCapabilityRefusal();
+    if (unsupportedCompletion !== undefined) {
+      return refused([unsupportedCompletion]);
+    }
 
     let record: GraphStateRecord | undefined;
     try {
@@ -818,6 +884,13 @@ export class OutcomeGraphRuntime {
     if (typeof at !== "number") return refused([at]);
     const unavailable = this.protocolRefusal();
     if (unavailable !== undefined) return refused([unavailable]);
+    // The plan's completion authorization is checked before ANY state is read
+    // or written (D6), so a run this process cannot support is blocked with the
+    // state preserved rather than started under weaker semantics.
+    const unsupportedCompletion = this.completionCapabilityRefusal();
+    if (unsupportedCompletion !== undefined) {
+      return refused([unsupportedCompletion]);
+    }
 
     let record: GraphStateRecord | undefined;
     try {
@@ -960,6 +1033,92 @@ export class OutcomeGraphRuntime {
       };
     }
     return at;
+  }
+
+  /**
+   * Check that this runtime can corroborate every completion authorization the
+   * plan pins (D6).
+   *
+   * THE PLAN'S AUTHORIZATION IS PART OF THE RUN'S SEMANTICS. A plan whose body
+   * pins natural-completion authorizations was compiled against exact,
+   * content-addressed policy revisions; this runtime only runs it when the
+   * HOST-INSTALLED capability still resolves each pinned ref to the SAME
+   * content. The pinned digest is the authority — an installed revision with
+   * different content is `completion-policy-digest-mismatch`, never a silent
+   * re-binding — and a plan that pins none needs no capability at all.
+   *
+   * Refusing HERE, before any state is read or written, is what makes a
+   * revocation or a missing policy an explicit BLOCK with the state preserved:
+   * `start`, `resume` and `submit` all consult this first, so a run this
+   * process cannot support does not advance one step under weaker semantics.
+   */
+  private completionCapabilityRefusal(): OutcomeRuntimeRefusal | undefined {
+    const authorizations = this.plan.completionAuthorizations ?? [];
+    if (authorizations.length === 0) return undefined;
+    const registry = this.completionPolicies;
+    if (registry === undefined) {
+      return {
+        code: "completion-policy-unavailable",
+        path: "$.completionAuthorizations",
+        message:
+          "outcome-runtime: plan revision " +
+          this.planRevision +
+          " pins " +
+          authorizations.length +
+          " natural-completion authorization(s) (" +
+          describeAuthorizations(authorizations) +
+          "), but this runtime was given no completion-policy capability — the " +
+          "authorization a plan was compiled with is part of its semantics, so nothing " +
+          "was started, resumed or settled",
+      };
+    }
+    for (const authorization of authorizations) {
+      const verified = verifyCompletionPolicy(authorization.policy, registry);
+      switch (verified.kind) {
+        case "resolved":
+          continue;
+        case "unknown-policy":
+          return {
+            code: "completion-policy-unknown",
+            path: "$.completionAuthorizations",
+            message:
+              "outcome-runtime: node " +
+              JSON.stringify(authorization.nodeId) +
+              " pins completion policy " +
+              describePolicyRef(authorization.policy) +
+              ", whose id is not installed in this process — the pinned revision is a " +
+              "missing capability, never a hint to run under another policy",
+          };
+        case "unknown-revision":
+          return {
+            code: "completion-policy-unknown-revision",
+            path: "$.completionAuthorizations",
+            message:
+              "outcome-runtime: node " +
+              JSON.stringify(authorization.nodeId) +
+              " pins completion policy " +
+              describePolicyRef(authorization.policy) +
+              ", whose exact revision is not installed in this process",
+          };
+        case "digest-mismatch":
+          return {
+            code: "completion-policy-digest-mismatch",
+            path: "$.completionAuthorizations",
+            message:
+              "outcome-runtime: node " +
+              JSON.stringify(authorization.nodeId) +
+              " pins completion policy " +
+              describePolicyRef(authorization.policy) +
+              " at digest " +
+              authorization.policy.digest +
+              ", but the installed declaration hashes to " +
+              verified.actual +
+              " — the plan's pinned content is the authority and it is never re-bound " +
+              "to a republished revision",
+          };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -1767,6 +1926,34 @@ function toRuntimeRefusal(refusal: SubmissionRefusal): OutcomeRuntimeRefusal {
     message: refusal.message,
     ...(refusal.path === undefined ? {} : { path: refusal.path }),
   };
+}
+
+/** A pinned completion-policy ref as a diagnostic token: `"id"@"revision"`. */
+function describePolicyRef(ref: {
+  readonly id: string;
+  readonly revision: string;
+}): string {
+  return JSON.stringify(ref.id) + "@" + JSON.stringify(ref.revision);
+}
+
+/** The pinned authorizations of a plan, for a diagnostic that must not throw. */
+function describeAuthorizations(
+  authorizations: readonly {
+    readonly nodeId: string;
+    readonly outcome: string;
+    readonly policy: { readonly id: string; readonly revision: string };
+  }[],
+): string {
+  return authorizations
+    .map(
+      (entry) =>
+        entry.nodeId +
+        "->" +
+        entry.outcome +
+        " by " +
+        describePolicyRef(entry.policy),
+    )
+    .join(", ");
 }
 
 /** Describe a rejected value for a diagnostic without ever throwing. */

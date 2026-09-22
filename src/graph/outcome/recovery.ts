@@ -20,6 +20,15 @@
  * accepts a state, and never starts from scratch, under a plan the binding does
  * not corroborate.
  *
+ * RECOVERY ALSO NEEDS THE POLICY THE PLAN PINNED (D6). A persisted executable
+ * plan whose body pins natural-completion authorizations is only resumable in a
+ * process that still holds the exact policy revisions it authorized: the
+ * runtime corroborates every pinned ref against the injected capability before
+ * it reads state or launches anything, and a missing/different policy is a
+ * structured refusal that writes NOTHING. Recovery is therefore the boundary
+ * where a revoked policy blocks the run explicitly, with the persisted state
+ * preserved for a process that does have the capability.
+ *
  * WHO OPENS THE LEDGER. The caller (the startup sweep, or a test) owns the
  * `AcceptanceLedger` handle and its lifetime; this module only reads through
  * it. That keeps the substrate injectable and keeps this module a composition
@@ -42,6 +51,7 @@ import {
   type OutcomeResumeResult,
   type OutcomeRuntimeRefusal,
 } from "./runtime.ts";
+import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type { ValidatorRegistry } from "./validators.ts";
 
 // ── The saved plan and its binding ──────────────────────────────────────────
@@ -182,6 +192,14 @@ export interface ResumePersistedOutcomeGraphOptions {
   readonly dispatch: OutcomeDispatchSeam;
   /** The installed validator implementations the plan's gates resolve against. */
   readonly validators: ValidatorRegistry;
+  /**
+   * The HOST-INSTALLED completion-policy capability (D6). A persisted plan
+   * that pins a natural-completion authorization is corroborated against it
+   * before anything is resumed; WITHOUT it, such a plan is refused
+   * (`completion-policy-unavailable`) and its state is left exactly as it is.
+   * A plan that pins none does not need it.
+   */
+  readonly completionPolicies?: CompletionPolicyRegistry;
   /** The root every evidence reference must resolve inside. */
   readonly artifactRoot: string;
   /** The clock input, in epoch milliseconds; omitted → `Date.now()`. */
@@ -214,6 +232,9 @@ export function resumePersistedOutcomeGraph(
     validators: options.validators,
     artifactRoot: options.artifactRoot,
     ...(options.protocols === undefined ? {} : { protocols: options.protocols }),
+    ...(options.completionPolicies === undefined
+      ? {}
+      : { completionPolicies: options.completionPolicies }),
   });
   return runtime.resume(options.now);
 }

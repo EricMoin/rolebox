@@ -1381,10 +1381,11 @@ const COMPILED_DECLARATION_VERSION = 3;
  *     every edge endpoint declared, every edge outcome declared by its source,
  *     loop membership and routes, a positive traversal cap, a continuation
  *     outcome carried by an edge inside its group, cycle containment, the
- *     explicit non-empty and edge-consistent `terminalOutcomes` list, and a
- *     pinned acceptance version on every requirement of an executable plan —
- *     and every node id the topology declares must be one the persisted state
- *     declares;
+ *     explicit non-empty and edge-consistent `terminalOutcomes` list, a
+ *     pinned acceptance version on every requirement of an executable plan, and
+ *     a pinned, self-corroborating completion authorization for every natural
+ *     mapping of an executable plan (D6) — and every node id the topology
+ *     declares must be one the persisted state declares;
  * (b2) index — `nodeBindings` is the projection of the plan nodes it claims to
  *     be: a node that declares a `contractRef` must appear with the same ref, a
  *     node that declares none must not appear, and every key must be a topology
@@ -1394,10 +1395,12 @@ const COMPILED_DECLARATION_VERSION = 3;
  *     node-binding rules for the record;
  * (d) identity — `planRevision` is `contractDigest` over the record's own plan
  *     body (`graphId`, `declarationVersion`, `nodes`, `edges`, `loopGroups`,
- *     `contractSnapshots`, `contractIdentities`, `terminalOutcomes`,
- *     `executability`), recomputed here from the persisted values, so a tampered
- *     body or a revision copied from another plan is refused. `nodeBindings` is
- *     deliberately NOT part of that body: it is the projection checked in (b2).
+ *     `contractSnapshots`, `contractIdentities`, `completionPolicySnapshots`,
+ *     `completionPolicyIdentities`, `completionAuthorizations`,
+ *     `terminalOutcomes`, `executability`), recomputed here from the persisted
+ *     values, so a tampered body or a revision copied from another plan is
+ *     refused. `nodeBindings` is deliberately NOT part of that body: it is the
+ *     projection checked in (b2).
  *
  * NOT proven here: the field-level schema of node and edge internals beyond
  * the ids, outcomes, contract refs and topology the rules read (a node agent,
@@ -1464,8 +1467,21 @@ export function verifyPersistedCompiledPlan(
     const executability = readPlanExecutability(value.executability);
     if (executability.kind !== "executable") {
       if (executability.kind === "draft") {
+        // Name what the draft left open: acceptance gates, natural-completion
+        // authorizations, or both. The reading already proved both lists are
+        // present and at least one is non-empty; the counts are read
+        // defensively so this diagnostic can never throw on its own input.
+        const draft = value.executability;
+        const unresolvedCount =
+          isPlainObject(draft) && Array.isArray(draft.unresolved)
+            ? draft.unresolved.length
+            : 0;
+        const completionCount =
+          isPlainObject(draft) && Array.isArray(draft.unauthorizedCompletions)
+            ? draft.unauthorizedCompletions.length
+            : 0;
         return contractCorrupt(
-          `compiled plan is not executable (${NON_EXECUTABLE_PLAN_CODE}): it is a DRAFT whose acceptance requirements were never resolved — a draft must not be loaded as an executable plan`,
+          `compiled plan is not executable (${NON_EXECUTABLE_PLAN_CODE}): it is a DRAFT that leaves ${unresolvedCount} acceptance requirement(s) and ${completionCount} natural-completion mapping(s) unresolved — a draft must not be loaded as an executable plan`,
         );
       }
       return contractCorrupt(
@@ -1473,13 +1489,21 @@ export function verifyPersistedCompiledPlan(
       );
     }
 
-    // (b) TOPOLOGY — every plan-level rule, owned next to the plan shape.
+    // (b) TOPOLOGY — every plan-level rule, owned next to the plan shape. The
+    // completion-authorization bundle is passed explicitly: a persisted plan
+    // whose executable marker claims a natural mapping must PROVE the
+    // authorization from its own content/identity indexes (D6).
     const topology = inspectCompiledTopology(
       nodes,
       edges,
       loopGroups,
       value.terminalOutcomes,
       value.executability,
+      {
+        authorizations: value.completionAuthorizations,
+        snapshots: value.completionPolicySnapshots,
+        identities: value.completionPolicyIdentities,
+      },
     );
     if (topology.issues.length > 0) {
       const issue = topology.issues[0];
@@ -1559,6 +1583,9 @@ export function verifyPersistedCompiledPlan(
         loopGroups,
         contractSnapshots: value.contractSnapshots,
         contractIdentities: value.contractIdentities,
+        completionPolicySnapshots: value.completionPolicySnapshots,
+        completionPolicyIdentities: value.completionPolicyIdentities,
+        completionAuthorizations: value.completionAuthorizations,
         terminalOutcomes: value.terminalOutcomes,
         executability: value.executability,
       });

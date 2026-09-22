@@ -105,6 +105,7 @@ import {
   createValidatorRegistry,
   type ValidatorRegistry,
 } from "../outcome/validators.ts";
+import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type {
   OutcomeDispatchSeam,
   OutcomeResumeResult,
@@ -326,6 +327,15 @@ export interface RecoverInterruptedGraphsOptions {
    * have must not read as accepted).
    */
   outcomeValidators?: ValidatorRegistry;
+
+  /**
+   * Optional HOST-INSTALLED completion-policy capability (D6). A persisted
+   * plan that pins natural-completion authorizations is corroborated against
+   * it before the sweep resumes anything; WITHOUT it such a graph is reported
+   * as refused (`completion-policy-unavailable`) and its state is left exactly
+   * as it is. A graph whose plan pins none is unaffected.
+   */
+  outcomeCompletionPolicies?: CompletionPolicyRegistry;
 
   /**
    * Root every outcome evidence reference must resolve inside (C3c). Defaults
@@ -596,6 +606,9 @@ export async function recoverInterruptedGraphs(
             validators: opts.outcomeValidators ?? NO_OUTCOME_VALIDATORS,
             artifactRoot: opts.outcomeArtifactRoot ?? opts.directory,
             ...(opts.outcomeNow === undefined ? {} : { now: opts.outcomeNow }),
+            ...(opts.outcomeCompletionPolicies === undefined
+              ? {}
+              : { completionPolicies: opts.outcomeCompletionPolicies }),
           }),
         );
       } catch (err) {
