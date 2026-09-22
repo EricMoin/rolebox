@@ -1501,6 +1501,70 @@ function progressLoopDeclaration(options: {
   };
 }
 
+/**
+ * The same loop declared as TWO groups that BOTH take "revise" as their
+ * continuation and BOTH declare a progress policy: one comparison is a fact
+ * about the accepted outcome for every governing group, so both counters
+ * advance, and the first group in plan order that reaches its threshold stops
+ * the run. The other may stand ON its own threshold in the same committed body,
+ * which the reader accepts because the body IS stopped by the progress policy.
+ */
+function twoPolicyProgressDeclaration(
+  maxUnchangedFirst: number,
+  maxUnchangedSecond: number,
+): GraphDeclarationV3 {
+  return {
+    version: 3,
+    name: "graph.progress-two-policies",
+    nodes: [
+      {
+        id: "work",
+        agent: "agent.work",
+        prompt: "Do the work.",
+        outcomes: [{ id: "done" }],
+      },
+      {
+        id: "review",
+        agent: "agent.review",
+        prompt: "Review the work.",
+        outcomes: [{ id: "revise" }, { id: "approve" }],
+      },
+    ],
+    edges: [
+      { from: "work", to: "review", outcome: "done" },
+      { from: "review", to: "work", outcome: "revise" },
+    ],
+    loop_groups: [
+      {
+        id: "a-first",
+        nodes: ["work", "review"],
+        max_traversals: 20,
+        continuation_outcome: "revise",
+        exit_outcome: "approve",
+        progress: {
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          max_unchanged: maxUnchangedFirst,
+        },
+      },
+      {
+        id: "b-second",
+        nodes: ["work", "review"],
+        max_traversals: 20,
+        continuation_outcome: "revise",
+        exit_outcome: "approve",
+        progress: {
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          max_unchanged: maxUnchangedSecond,
+        },
+      },
+    ],
+  };
+}
+
 /** The same loop with a side branch, so the stop scope is observable. */
 function progressSideBranchDeclaration(maxUnchanged: number): GraphDeclarationV3 {
   const base = sideBranchLoopDeclaration(20);
@@ -2206,6 +2270,131 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
           evaluatorVersion: 1,
           baseline: "r1",
         });
+      },
+    );
+  });
+
+  it("compares every policy group that governs one continuation, and stops on the first", async () => {
+    await withHarness(
+      twoPolicyProgressDeclaration(1, 1),
+      async ({ runtime, plan, ledger, requests, dir }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+        // ONE comparison is a fact about the accepted outcome for EVERY group
+        // that declares it as its continuation: both baselines are established
+        // and persisted by the same commit.
+        expect(
+          first.progress?.map((report) => [report.loopGroupId, report.verdict, report.baseline]),
+        ).toEqual([
+          ["a-first", "progressed", "r1"],
+          ["b-second", "progressed", "r1"],
+        ]);
+        expect(progressEntry(first.state, "a-first").unchanged).toBe(0);
+        expect(progressEntry(first.state, "b-second").unchanged).toBe(0);
+
+        const stopping = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(stopping.kind).toBe("accepted");
+        if (stopping.kind !== "accepted") return;
+        // Both groups stand ON their own threshold; the stop names the FIRST in
+        // plan order, and the second counter is persisted beside it.
+        expect(
+          stopping.progress?.map((report) => [
+            report.loopGroupId,
+            report.verdict,
+            report.unchanged,
+            report.stalled,
+          ]),
+        ).toEqual([
+          ["a-first", "unchanged", 1, true],
+          ["b-second", "unchanged", 1, true],
+        ]);
+        expect(stopping.stop).toMatchObject({
+          reason: "progress-stalled",
+          loopGroupId: "a-first",
+          unchanged: 1,
+          maxUnchanged: 1,
+        });
+
+        // A NEW runtime over the SAME ledger must READ that body back: a second
+        // group standing on its threshold is legal precisely because the body IS
+        // stopped by the policy. The stop is reported, nothing is armed, and the
+        // stopping submission's own credential still replays its receipt.
+        const stoppingCredential = credentialOf(requests, "review#4");
+        const restarted = new OutcomeGraphRuntime({
+          plan,
+          ledger,
+          dispatch: (request) => {
+            requests.push(request);
+          },
+          validators: EMPTY_VALIDATORS,
+          artifactRoot: dir,
+          clock: () => NOW,
+          mintCredential: TEST_CREDENTIAL_SOURCE,
+        });
+        const resumed = restarted.resume(NOW + 5);
+        expect(resumed.kind).toBe("resumed");
+        if (resumed.kind !== "resumed") return;
+        expect(resumed.stop).toMatchObject({
+          reason: "progress-stalled",
+          loopGroupId: "a-first",
+        });
+        expect(progressEntry(resumed.state, "b-second")).toEqual({
+          loopGroupId: "b-second",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 1,
+          baseline: "r1",
+        });
+        expect(resumed.armed).toEqual([]);
+
+        const replay = restarted.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: stoppingCredential,
+            data: { revision: "r1" },
+          },
+          NOW + 6,
+        );
+        expect(replay.kind).toBe("accepted");
+        if (replay.kind !== "accepted") return;
+        expect(replay.replayed).toBe(true);
+        // The replay is not counted a second time.
+        expect(progressEntry(replay.state, "a-first").unchanged).toBe(1);
+        expect(restarted.resume(NOW + 7)).toMatchObject({ kind: "resumed" });
+      },
+    );
+  });
+
+  it("stops on the only group that reached its threshold when the two policies differ", async () => {
+    await withHarness(
+      twoPolicyProgressDeclaration(2, 1),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+        reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        const stopping = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(stopping.kind).toBe("accepted");
+        if (stopping.kind !== "accepted") return;
+        expect(
+          stopping.progress?.map((report) => [
+            report.loopGroupId,
+            report.unchanged,
+            report.stalled,
+          ]),
+        ).toEqual([
+          ["a-first", 1, false],
+          ["b-second", 1, true],
+        ]);
+        expect(stopping.stop).toMatchObject({
+          reason: "progress-stalled",
+          loopGroupId: "b-second",
+          maxUnchanged: 1,
+        });
+        // The group below its threshold keeps its own counter.
+        expect(progressEntry(stopping.state, "a-first").unchanged).toBe(1);
       },
     );
   });
