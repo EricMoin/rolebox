@@ -11,13 +11,22 @@
  * unchanged.
  *
  * WHAT THE CALLER MAY SAY, AND NOTHING MORE. The args are exactly what a worker
- * legitimately knows: which graph, which node, which declared outcome, an
- * optional payload, optional evidence references. Attempt id, submission id and
- * plan revision are NOT args and are never read from anywhere a caller can
- * reach: the plan supplies the graph identity and the plan revision, the STATE
- * supplies the attempt, and the canonical proposal digest supplies the
- * submission id. `src/graph/outcome/runtime.ts` derives all three, and the
- * test for this tool forges every one of them and shows they cannot move.
+ * legitimately knows: which graph, which node, which declared outcome, the
+ * ATTEMPT CREDENTIAL it was handed when it was dispatched, an optional payload
+ * and optional evidence references. Attempt id, submission id and plan revision
+ * are NOT args and are never read from anywhere a caller can reach: the plan
+ * supplies the graph identity and the plan revision, the STATE resolves the
+ * attempt from the credential's persisted binding, and the canonical proposal
+ * digest supplies the submission id. `src/graph/outcome/runtime.ts` derives all
+ * three, and the test for this tool forges every one of them and shows they
+ * cannot move.
+ *
+ * THE CREDENTIAL IS A BEARER CAPABILITY, NOT A SELECTOR. It names no execution a
+ * caller chooses: the runtime looks it up in the state it issued it into and
+ * refuses a missing, unknown, tampered, superseded or other node's credential.
+ * The ingress never echoes it back — the result carries the submission id (a
+ * digest of the canonical proposal, which includes the credential) but not the
+ * credential itself, so a tool transcript does not become a second copy of it.
  *
  * THE PLAN IS THE PERSISTED ONE. This module never recompiles a declaration and
  * never accepts a declaration argument: it loads the graph's persisted record,
@@ -88,6 +97,15 @@ export interface GraphSubmitOutcomeArgs {
   readonly node_id: string;
   /** The outcome id that node declares. */
   readonly outcome_id: string;
+  /**
+   * The attempt credential the outcome runtime issued to this worker in its
+   * dispatch request, passed back verbatim.
+   *
+   * Optional here so a missing one is a STRUCTURED refusal
+   * (`credential-missing`, path `$.credential`) rather than a schema error;
+   * it is never defaulted, derived or accepted from anywhere else.
+   */
+  readonly credential?: string;
   /** Optional outcome payload; opaque to this boundary. */
   readonly data?: unknown;
   /** Optional artifact references the outcome's gates may require. */
@@ -378,6 +396,7 @@ export async function submitDeclaredOutcome(
     const proposal = {
       nodeId: args.node_id,
       outcomeId: args.outcome_id,
+      ...(args.credential === undefined ? {} : { credential: args.credential }),
       ...(args.data === undefined ? {} : { data: args.data }),
       ...(args.evidence_refs === undefined
         ? {}

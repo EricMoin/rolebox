@@ -39,6 +39,18 @@
  * execution identity and replays the persisted decision instead of settling a
  * second time.
  *
+ * EVERY ATTEMPT IS ISSUED A CREDENTIAL, AND IT LIVES IN THE STATE ENTRY. The
+ * nonce comes from the injected {@link AttemptCredentialSource} (the runtime
+ * injects the platform CSPRNG; a test injects a deterministic source) and is
+ * written into the attempt's own persisted entry, so the binding tuple —
+ * `graphId` and `planRevision` from the body, `nodeId`, `attemptId` and the
+ * nonce from the entry — is reconstructed from the STATE, never from a
+ * submission. A settled node KEEPS the credential of the attempt that settled
+ * it (exactly as it keeps the attempt id), which is what lets a repeated
+ * submission resolve to the SAME attempt and replay its receipt. Reducer
+ * purity is therefore "pure given its inputs": the minting source is one
+ * explicit input, so a given source reproduces a given advance.
+ *
  * READING IS STRICT, VERSIONED AND TOTAL. Every persisted body declares the
  * state-body version it was written in, and `readOutcomeGraphState` accepts
  * exactly the shape that version defines — the plan's node set in plan order,
@@ -52,6 +64,15 @@
  * reset to a clean start — the same "unknown is not fresh" discipline the
  * storage and protocol gates apply.
  *
+ * VERSION 2 ADDS THE ATTEMPT CREDENTIAL, AND VERSION 1 STAYS READABLE. A
+ * version-1 body records no credential, so this module can still READ it (a
+ * completed graph reports cleanly), but an ATTEMPT it records can never be
+ * settled: the run path refuses a submission for a credential-less attempt and
+ * recovery refuses to launch one, rather than granting an attempt a credential
+ * it was never issued. There is deliberately no migrator: an attempt's
+ * credential is issued once, at dispatch, and inventing one on read would
+ * fabricate the very binding the credential exists to prove.
+ *
  * Dependency leaf on the outcome side: the compiler's plan TYPES, the ledger's
  * record TYPE and the acceptance core's decision type, all type-only, so the
  * reducer can be tested without a ledger and the runtime can own the wiring.
@@ -60,6 +81,11 @@
 import type { CompiledNode, CompiledPlan } from "../compiler/plan.ts";
 import type { GraphStateRecord } from "../ledger/types.ts";
 import type { AcceptanceDecision } from "./acceptance.ts";
+import {
+  attemptCredentialBinding,
+  mintAttemptCredential,
+  type AttemptCredentialSource,
+} from "./attempt-credential.ts";
 
 // ── The state model ─────────────────────────────────────────────────────────
 
@@ -89,6 +115,19 @@ export interface OutcomeNodeState {
   readonly attemptId?: string;
   /** The graph-wide sequence number that minted {@link attemptId}. */
   readonly attemptSeq?: number;
+  /**
+   * The bearer credential the runtime issued to this attempt's worker, present
+   * exactly when the attempt was dispatched by a build that issues one (body
+   * version 2 and later).
+   *
+   * A settled node keeps the credential of the attempt that settled it, so a
+   * repeated submission resolves back to that same attempt. A body version
+   * that does not define this field records attempts with NO credential; the
+   * run path refuses to settle or relaunch such an attempt instead of deriving
+   * or inventing a value (see `attempt-credential.ts` for what a bearer
+   * credential does and does not prove).
+   */
+  readonly attemptCredential?: string;
   /** The accepted outcome that settled this node; present only when settled. */
   readonly outcomeId?: string;
   /** Epoch milliseconds this attempt was dispatched at. */
@@ -142,7 +181,20 @@ export interface OutcomeGraphState {
 export const OUTCOME_STATE_BODY_V1 = 1 as const;
 
 /**
- * The state-body format this build writes — and, today, the only one it reads.
+ * The second versioned state-body layout: every `dispatched` and `settled`
+ * node entry carries the runtime-issued `attemptCredential` the attempt's
+ * worker must present when it submits an outcome.
+ *
+ * This is the layout this build writes. Version 1 stays readable (a reader is
+ * installed for it) but its attempts carry no credential and therefore cannot
+ * be settled by this build; no migrator exists, because a credential is issued
+ * at dispatch and a value invented on read would not be the one the worker
+ * holds.
+ */
+export const OUTCOME_STATE_BODY_V2 = 2 as const;
+
+/**
+ * The state-body format this build writes.
  *
  * The body version is its OWN axis, separate from the storage format
  * (`ENGINE_PERSISTENCE_VERSION`), the execution-protocol identity and the
@@ -150,7 +202,7 @@ export const OUTCOME_STATE_BODY_V1 = 1 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V1;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V2;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -377,31 +429,82 @@ function readOptionalEpoch(
   return value;
 }
 
+/**
+ * One state-body layout's node shape: the fields the version defines per
+ * status, and whether it requires the attempt credential the run path checks a
+ * submission against.
+ */
+interface OutcomeNodeLayout {
+  /** The exact body version this layout belongs to, for diagnostics. */
+  readonly version: number;
+  /** The fields the version defines, exactly, per status. */
+  readonly keys: Readonly<Record<OutcomeNodeStatus, readonly string[]>>;
+  /**
+   * `required` — every dispatched/settled entry must carry
+   * `attemptCredential`; `forbidden` — the version does not define the field.
+   */
+  readonly credential: "required" | "forbidden";
+}
+
 /** The node fields body version 1 defines, exactly, per status. */
-const OUTCOME_NODE_STATE_V1_KEYS: Readonly<
-  Record<OutcomeNodeStatus, readonly string[]>
-> = Object.freeze({
-  pending: Object.freeze(["nodeId", "status"]),
-  dispatched: Object.freeze([
-    "nodeId",
-    "status",
-    "attemptId",
-    "attemptSeq",
-    "dispatchedAt",
-  ]),
-  settled: Object.freeze([
-    "nodeId",
-    "status",
-    "attemptId",
-    "attemptSeq",
-    "outcomeId",
-    "dispatchedAt",
-    "settledAt",
-  ]),
+const OUTCOME_NODE_LAYOUT_V1: OutcomeNodeLayout = Object.freeze({
+  version: OUTCOME_STATE_BODY_V1,
+  credential: "forbidden" as const,
+  keys: Object.freeze({
+    pending: Object.freeze(["nodeId", "status"]),
+    dispatched: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "dispatchedAt",
+    ]),
+    settled: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "outcomeId",
+      "dispatchedAt",
+      "settledAt",
+    ]),
+  }),
 });
 
 /**
- * Refuse every node field body version 1 does not define for this status.
+ * The node fields body version 2 defines: version 1's fields plus the
+ * runtime-issued `attemptCredential`, which a dispatched or settled entry
+ * MUST carry and a pending entry must not.
+ */
+const OUTCOME_NODE_LAYOUT_V2: OutcomeNodeLayout = Object.freeze({
+  version: OUTCOME_STATE_BODY_V2,
+  credential: "required" as const,
+  keys: Object.freeze({
+    pending: Object.freeze(["nodeId", "status"]),
+    dispatched: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "dispatchedAt",
+    ]),
+    settled: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "outcomeId",
+      "dispatchedAt",
+      "settledAt",
+    ]),
+  }),
+});
+
+/**
+ * Refuse every node field the declared body version does not define for this
+ * status.
  *
  * An unknown field is a shape this build cannot read, not something to skip: a
  * reader that ignored it would drop it from the state it writes back. Adding a
@@ -411,24 +514,34 @@ function rejectUnknownNodeFields(
   raw: Record<string, unknown>,
   status: OutcomeNodeStatus,
   where: string,
+  layout: OutcomeNodeLayout,
 ): void {
-  const defined = OUTCOME_NODE_STATE_V1_KEYS[status];
+  const defined = layout.keys[status];
   for (const key of Object.keys(raw)) {
     if (!defined.includes(key)) {
       throw malformedState(
         where + " carries field " + JSON.stringify(key) + ", which body version " +
-          OUTCOME_STATE_BODY_V1 + " does not define for a " + status + " node — " +
+          layout.version + " does not define for a " + status + " node — " +
           "an unknown field is refused rather than dropped",
       );
     }
   }
 }
 
-/** Read one node's persisted progress against its plan declaration. */
+/**
+ * Read one node's persisted progress against its plan declaration, in the
+ * layout of the body version that declared it.
+ *
+ * The attempt credential is read exactly where the layout requires it: a
+ * version-2 dispatched/settled entry without one is MALFORMED (the writer of
+ * that version always writes it), while a version-1 entry that carries one is
+ * malformed too (the version does not define the field).
+ */
 function readNodeState(
   raw: unknown,
   expected: CompiledNode,
   index: number,
+  layout: OutcomeNodeLayout,
 ): OutcomeNodeState {
   const where = "nodes[" + index + "]";
   if (!isRecord(raw)) {
@@ -447,9 +560,10 @@ function readNodeState(
       where + ".status is " + describeValue(status) + ", not pending, dispatched or settled",
     );
   }
-  rejectUnknownNodeFields(raw, status, where);
+  rejectUnknownNodeFields(raw, status, where, layout);
   const attemptId = raw.attemptId;
   const attemptSeq = raw.attemptSeq;
+  const attemptCredential = raw.attemptCredential;
   const outcomeId = raw.outcomeId;
   const dispatchedAt = readOptionalEpoch(raw, "dispatchedAt", where);
   const settledAt = readOptionalEpoch(raw, "settledAt", where);
@@ -457,13 +571,14 @@ function readNodeState(
     if (
       attemptId !== undefined ||
       attemptSeq !== undefined ||
+      attemptCredential !== undefined ||
       outcomeId !== undefined ||
       dispatchedAt !== undefined ||
       settledAt !== undefined
     ) {
       throw malformedState(
-        where + " is pending but carries attempt, outcome or timestamp fields — a node that " +
-          "was never dispatched has no attempt identity",
+        where + " is pending but carries attempt, credential, outcome or timestamp fields — a " +
+          "node that was never dispatched has no attempt identity",
       );
     }
     return Object.freeze({ nodeId: expected.id, status: "pending" as const });
@@ -480,6 +595,24 @@ function readNodeState(
   ) {
     throw malformedState(
       where + ".attemptSeq is " + describeValue(attemptSeq) + ", not a positive safe integer",
+    );
+  }
+  let credential: string | undefined;
+  if (layout.credential === "required") {
+    if (typeof attemptCredential !== "string" || attemptCredential.length === 0) {
+      throw malformedState(
+        where + ".attemptCredential is " + describeValue(attemptCredential) +
+          ", not the non-empty attempt credential body version " + layout.version +
+          " requires on a " + status + " node",
+      );
+    }
+    credential = attemptCredential;
+  } else if (attemptCredential !== undefined) {
+    // Unreachable through rejectUnknownNodeFields; kept so the rule does not
+    // depend on the key set alone.
+    throw malformedState(
+      where + " carries an attempt credential, which body version " + layout.version +
+        " does not define",
     );
   }
   if (dispatchedAt === undefined) {
@@ -500,6 +633,7 @@ function readNodeState(
       status: "settled" as const,
       attemptId,
       attemptSeq,
+      ...(credential === undefined ? {} : { attemptCredential: credential }),
       outcomeId,
       dispatchedAt,
       settledAt,
@@ -515,6 +649,7 @@ function readNodeState(
     status: "dispatched" as const,
     attemptId,
     attemptSeq,
+    ...(credential === undefined ? {} : { attemptCredential: credential }),
     dispatchedAt,
   });
 }
@@ -548,7 +683,11 @@ function readLoopTraversals(
   return Object.freeze(counters);
 }
 
-/** The body fields body version 1 defines, exactly — what its writer produces. */
+/**
+ * The BODY-level fields every registered layout defines, exactly — what the
+ * writer produces. Version 2 adds a NODE-level field only, so both layouts
+ * share this list.
+ */
 const OUTCOME_STATE_BODY_V1_KEYS: readonly string[] = Object.freeze([
   "bodyVersion",
   "graphId",
@@ -560,37 +699,41 @@ const OUTCOME_STATE_BODY_V1_KEYS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Refuse every body field body version 1 does not define.
+ * Refuse every body field the layouts this build reads do not define.
  *
  * An unknown field is a shape this build cannot read, not something to skip: a
  * reader that ignored it would drop it from the state it writes back. Adding a
  * field is declaring a new body version, and a version this build does not read
- * is refused before any field is examined.
+ * is refused before any field is examined. Every layout this build registers
+ * defines the same BODY-level fields (version 2 adds a node-level field), so
+ * this check is deliberately version-independent.
  */
 function rejectUnknownBodyFields(body: Record<string, unknown>): void {
   for (const key of Object.keys(body)) {
     if (!OUTCOME_STATE_BODY_V1_KEYS.includes(key)) {
       throw malformedState(
-        "the body carries field " + JSON.stringify(key) + ", which body version " +
-          OUTCOME_STATE_BODY_V1 + " does not define — an unknown field is refused rather " +
-          "than dropped; adding a field is a new body version",
+        "the body carries field " + JSON.stringify(key) + ", which the registered state-body " +
+          "layouts do not define — an unknown field is refused rather than dropped; adding a " +
+          "field is a new body version",
       );
     }
   }
 }
 
 /**
- * Read one body as body version 1 — the shape this module's writer produces.
+ * Read one body in the node layout its declared version owns — the shape that
+ * version's writer produces.
  *
- * STRICT: every field must be the value the version-1 writer would have
+ * STRICT: every field must be the value that version's writer would have
  * written, at the body and the node level, and the plan's node list must match
  * position by position. Anything else throws an {@link OutcomeStateError} with
  * problem `malformed-state`. The total capability the registry installs turns
  * that throw into a reading, so this function is the RAW shape check.
  */
-function readV1StateBody(
+function readStateBody(
   body: Record<string, unknown>,
   plan: CompiledPlan,
+  layout: OutcomeNodeLayout,
 ): OutcomeGraphState {
   rejectUnknownBodyFields(body);
   // The body carries the record's identity redundantly. A body that disagrees
@@ -633,9 +776,11 @@ function readV1StateBody(
         " node(s) — the state carries one entry per compiled node",
     );
   }
-  const nodes = plan.nodes.map((node, index) => readNodeState(rawNodes[index], node, index));
+  const nodes = plan.nodes.map((node, index) =>
+    readNodeState(rawNodes[index], node, index, layout),
+  );
   return Object.freeze({
-    bodyVersion: OUTCOME_STATE_BODY_V1,
+    bodyVersion: layout.version,
     graphId: plan.graphId,
     planRevision: plan.planRevision,
     phase,
@@ -646,35 +791,47 @@ function readV1StateBody(
 }
 
 /**
- * The version-1 read capability: one exact version and one TOTAL reader.
+ * One read capability per registered layout: one exact version and one TOTAL
+ * reader.
  *
  * The shape check raises its own {@link OutcomeStateError}; this wrapper turns
  * that refusal into the reading the registry contract promises, so a body the
  * reader rejects is reported as data. Anything that is not an
  * OutcomeStateError is a programming error and still propagates.
  */
-const OUTCOME_STATE_BODY_V1_READER: OutcomeStateBodyReader = Object.freeze({
-  format: OUTCOME_STATE_BODY_V1,
-  read(
-    body: Record<string, unknown>,
-    plan: CompiledPlan,
-  ): OutcomeStateBodyReading {
-    try {
-      return { kind: "ok", state: readV1StateBody(body, plan) };
-    } catch (error) {
-      if (error instanceof OutcomeStateError) {
-        return { kind: "invalid", error };
+function stateBodyReader(
+  layout: OutcomeNodeLayout,
+): OutcomeStateBodyReader {
+  return Object.freeze({
+    format: layout.version,
+    read(
+      body: Record<string, unknown>,
+      plan: CompiledPlan,
+    ): OutcomeStateBodyReading {
+      try {
+        return { kind: "ok", state: readStateBody(body, plan, layout) };
+      } catch (error) {
+        if (error instanceof OutcomeStateError) {
+          return { kind: "invalid", error };
+        }
+        throw error;
       }
-      throw error;
-    }
-  },
-});
+    },
+  });
+}
 
-/** The state-body capabilities this build installs: exactly version 1 today. */
+const OUTCOME_STATE_BODY_V1_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V1);
+const OUTCOME_STATE_BODY_V2_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V2);
+
+/**
+ * The state-body capabilities this build installs: version 2 (what it writes)
+ * and version 1 (readable, credential-less — its attempts are refused by the
+ * run path, never migrated).
+ */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
     current: CURRENT_OUTCOME_STATE_BODY,
-    formats: [OUTCOME_STATE_BODY_V1_READER],
+    formats: [OUTCOME_STATE_BODY_V1_READER, OUTCOME_STATE_BODY_V2_READER],
   });
 
 /**
@@ -806,7 +963,14 @@ export type OutcomeAdvanceRefusalCode =
    * for it. Thrown by the run path's join, not by {@link advanceOutcomeGraph}:
    * it is the one disagreement the reducer cannot see on its own.
    */
-  | "state-ledger-disagreement";
+  | "state-ledger-disagreement"
+  /**
+   * The state was written in a body layout that cannot carry the attempt
+   * credential this build issues for every attempt. The advance is refused
+   * rather than converting the state into a newer layout: a version-1 attempt
+   * has no credential, so nothing may settle it or re-arm over it.
+   */
+  | "unsupported-state-version";
 
 /**
  * An accepted outcome that must NOT advance the state.
@@ -831,6 +995,8 @@ export interface OutcomeDispatchIntent {
   readonly attemptId: string;
   readonly agent: string;
   readonly prompt: string;
+  /** The credential minted for this fresh attempt (see {@link OutcomeAdvanceInput}). */
+  readonly credential: string;
 }
 
 /** What one accepted outcome produced: the next state and what to dispatch. */
@@ -847,6 +1013,13 @@ export interface OutcomeAdvanceInput {
   readonly decision: AcceptanceDecision;
   /** The clock, in epoch milliseconds. */
   readonly now: number;
+  /**
+   * Mints the attempt credential for every attempt this advance arms. It is an
+   * explicit input because minting is not derivable from the plan or the state:
+   * the runtime injects its CSPRNG-backed source, a test injects a deterministic
+   * one, and an advance is reproducible for a given source.
+   */
+  readonly mintCredential: AttemptCredentialSource;
 }
 
 /**
@@ -893,11 +1066,17 @@ function continuationGroups(
 /**
  * Apply one ACCEPTED outcome to the state.
  *
- * PURE: it reads the plan, the state and the decision, and returns the next
- * state plus the successors to arm. It never writes, never reads a clock of its
- * own and never re-validates the outcome (the acceptance core owns that).
+ * PURE GIVEN ITS INPUTS: it reads the plan, the state, the decision and the
+ * injected credential source, and returns the next state plus the successors to
+ * arm. It never writes, never reads a clock of its own and never re-validates
+ * the outcome (the acceptance core owns that). Reproducibility is stated
+ * against the source: the same inputs and the same source produce the same
+ * advance.
  *
  * The rules, in order:
+ * 0. the state must be written in the CURRENT body layout — a version that
+ *    cannot carry attempt credentials is refused instead of being advanced and
+ *    rewritten in a newer one;
  * 1. the decision's node must be a plan node, currently dispatched, on the
  *    attempt the decision names — otherwise the acceptance does not describe
  *    the state in hand and the advance is refused;
@@ -907,11 +1086,21 @@ function continuationGroups(
  * 4. a declared loop continuation advances that group's counter and refuses
  *    when the hard cap would be exceeded — one round past the cap is never run;
  * 5. every successor is armed with a FRESH attempt minted from the graph-wide
- *    counter; a settled successor is re-armed only when source and target share
- *    a declared loop group.
+ *    counter AND a fresh credential from the injected source; a settled
+ *    successor is re-armed only when source and target share a declared loop
+ *    group.
  */
 export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance {
   const { plan, state, decision, now } = input;
+  if (state.bodyVersion !== CURRENT_OUTCOME_STATE_BODY) {
+    throw new OutcomeAdvanceRefusedError(
+      "unsupported-state-version",
+      "outcome-advance: the state was written in body version " + state.bodyVersion +
+        ", which cannot carry the attempt credential this build issues for every attempt — " +
+        "the state is refused rather than advanced and rewritten in body version " +
+        CURRENT_OUTCOME_STATE_BODY,
+    );
+  }
   const position = plan.nodes.findIndex((node) => node.id === decision.nodeId);
   if (position < 0) {
     throw new OutcomeAdvanceRefusedError(
@@ -960,6 +1149,12 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     status: "settled" as const,
     ...(current.attemptId === undefined ? {} : { attemptId: current.attemptId }),
     ...(current.attemptSeq === undefined ? {} : { attemptSeq: current.attemptSeq }),
+    // The credential of the attempt that SETTLED the node is kept, exactly as
+    // its attempt id is: a repeated submission must resolve back to this same
+    // attempt (and its receipt), never to a newer one.
+    ...(current.attemptCredential === undefined
+      ? {}
+      : { attemptCredential: current.attemptCredential }),
     outcomeId: decision.outcomeId,
     ...(current.dispatchedAt === undefined ? {} : { dispatchedAt: current.dispatchedAt }),
     settledAt: now,
@@ -1036,11 +1231,24 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       attemptSeq += 1;
       const attemptId = edge.to + "#" + attemptSeq;
       const targetNode = plan.nodes[targetIndex];
+      // The credential is issued WITH the attempt and persisted on its entry,
+      // so the binding a submission is checked against comes from the state —
+      // never from the submission, and never re-derived from the attempt id.
+      const credential = mintAttemptCredential(
+        input.mintCredential,
+        attemptCredentialBinding({
+          graphId: plan.graphId,
+          nodeId: targetNode.id,
+          attemptId,
+          planRevision: plan.planRevision,
+        }),
+      );
       nodes[targetIndex] = Object.freeze({
         nodeId: targetNode.id,
         status: "dispatched" as const,
         attemptId,
         attemptSeq,
+        attemptCredential: credential,
         dispatchedAt: now,
       });
       dispatches.push(
@@ -1049,6 +1257,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
           attemptId,
           agent: targetNode.agent,
           prompt: targetNode.prompt,
+          credential,
         }),
       );
     }
@@ -1063,7 +1272,9 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       : "ready";
   return Object.freeze({
     state: Object.freeze({
-      bodyVersion: state.bodyVersion,
+      // The guard above admitted only the current layout, so the advanced state
+      // is written in it (a new attempt always carries a credential).
+      bodyVersion: CURRENT_OUTCOME_STATE_BODY,
       graphId: state.graphId,
       planRevision: state.planRevision,
       phase,

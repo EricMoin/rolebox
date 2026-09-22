@@ -814,6 +814,53 @@ describe("proposal canonical form", () => {
       "malformed",
     );
   });
+
+  it("carries the attempt credential in the canonical form and the digest", () => {
+    const base = { nodeId: NODE, outcomeId: "done", credential: "credential-a" };
+    // The same content is the same submission...
+    expect(proposalDigest(base)).toBe(proposalDigest({ ...base }));
+    // ...and a different credential is a DIFFERENT submission, so an old
+    // credential can never collide with the receipt committed without it.
+    expect(proposalDigest(base)).not.toBe(
+      proposalDigest({ nodeId: NODE, outcomeId: "done", credential: "credential-b" }),
+    );
+    expect(proposalDigest(base)).not.toBe(
+      proposalDigest({ nodeId: NODE, outcomeId: "done" }),
+    );
+    const normalized = normalizeProposal(base);
+    expect(normalized.credential).toBe("credential-a");
+    expect(Object.isFrozen(normalized)).toBe(true);
+  });
+
+  it("reads the credential as an opaque non-empty string, or refuses it", () => {
+    const ok = readOutcomeProposal({
+      nodeId: NODE,
+      outcomeId: "done",
+      credential: "c-1",
+    });
+    expect(ok.kind).toBe("ok");
+    if (ok.kind !== "ok") return;
+    expect(ok.proposal.credential).toBe("c-1");
+
+    // ABSENT is legal at this boundary: whether a submission may proceed
+    // without one is the RUN PATH's question (it answers `credential-missing`),
+    // not the shape gate's.
+    const absent = readOutcomeProposal({ nodeId: NODE, outcomeId: "done" });
+    expect(absent.kind).toBe("ok");
+    if (absent.kind !== "ok") return;
+    expect(absent.proposal.credential).toBeUndefined();
+
+    for (const bad of ["", 7, null, { value: "x" }]) {
+      const reading = readOutcomeProposal({
+        nodeId: NODE,
+        outcomeId: "done",
+        credential: bad,
+      });
+      expect(reading.kind).toBe("malformed");
+      if (reading.kind !== "malformed") continue;
+      expect(reading.issues.map((issue) => issue.path)).toContain("$.credential");
+    }
+  });
 });
 
 // ── The artifact validator's containment rule ───────────────────────────────

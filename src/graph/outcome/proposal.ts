@@ -10,14 +10,26 @@
  * thing a graph worker supplies when it claims an outcome.
  *
  * PROVENANCE IS NOT IN THE PROPOSAL. `OutcomeProposal` carries an outcome
- * reference and the worker's own data — no graph id, no attempt id, no
- * submission id and no plan revision. The runtime binds those from the
- * AUTHENTICATED tool context, so a worker cannot name (or overwrite) the
- * execution its claim belongs to: impersonating another graph, attempt or
- * submission is impossible BY CONSTRUCTION rather than by a validation rule a
- * future caller could forget. The same rule keeps a proposal from pinning a
- * plan revision — an agent-supplied revision could only ever be a claim, and
- * the plan's own content address is the authority.
+ * reference, the ATTEMPT CREDENTIAL the runtime issued to this worker, and the
+ * worker's own data — no graph id, no attempt id, no submission id and no plan
+ * revision. The runtime binds those from the AUTHENTICATED tool context, so a
+ * worker cannot name (or overwrite) the execution its claim belongs to:
+ * impersonating another graph, attempt or submission is impossible BY
+ * CONSTRUCTION rather than by a validation rule a future caller could forget.
+ * The same rule keeps a proposal from pinning a plan revision — an
+ * agent-supplied revision could only ever be a claim, and the plan's own
+ * content address is the authority.
+ *
+ * THE CREDENTIAL IS A BEARER CAPABILITY, NOT PROVENANCE. It is an opaque nonce
+ * the runtime minted for one attempt (see `attempt-credential.ts`); a proposal
+ * can carry it but cannot name the execution it belongs to. The RUN PATH
+ * resolves the attempt from the credential's persisted binding and refuses a
+ * credential that names no recorded attempt, so the field is never a way to
+ * choose an attempt, only to prove possession of one that was already chosen
+ * for this worker. It is part of the canonical form below, so two submissions
+ * that differ only in their credential are different submissions: reusing an
+ * old credential against a different attempt cannot collide with the original
+ * submission's receipt.
  *
  * - `readOutcomeProposal` — the total shape gate at the external boundary. A
  *   proposal is a CLOSED record: an unknown key is refused rather than dropped
@@ -63,6 +75,15 @@ export interface OutcomeProposal {
   readonly nodeId: string;
   /** The outcome being claimed; it must be declared by that node. */
   readonly outcomeId: string;
+  /**
+   * The attempt credential the runtime issued to this worker when it was
+   * dispatched. OPTIONAL at this boundary because a missing one is a
+   * repairable submission refusal (`credential-missing` with
+   * `$.credential`), not a shape this module can judge: whether a credential
+   * is well-formed for the attempt it claims is the run path's question, and it
+   * is answered against the persisted binding, never against the proposal.
+   */
+  readonly credential?: string;
   /** The outcome's payload, opaque here and checked by the outcome's gates. */
   readonly data?: unknown;
   /**
@@ -80,6 +101,8 @@ export interface OutcomeProposal {
 export interface NormalizedOutcomeProposal {
   readonly nodeId: string;
   readonly outcomeId: string;
+  /** Present exactly when the proposal carried one. */
+  readonly credential?: string;
   readonly data?: unknown;
   readonly evidenceRefs: readonly string[];
 }
@@ -88,6 +111,7 @@ export interface NormalizedOutcomeProposal {
 const PROPOSAL_KEYS: readonly string[] = [
   "nodeId",
   "outcomeId",
+  "credential",
   "data",
   "evidenceRefs",
 ];
@@ -116,6 +140,8 @@ export type OutcomeProposalReading =
  * exception here would be a bug in the boundary itself.
  *
  * The shape is CLOSED. `nodeId` and `outcomeId` must be non-empty strings,
+ * `credential` — when supplied — must be a non-empty string (its VALUE is
+ * opaque here; the run path decides whether it names a recorded attempt),
  * `evidenceRefs` must be an array of non-empty strings, and `data` is
  * deliberately unconstrained: representability is the digest's question, not
  * the shape gate's, so a payload JSON cannot carry is refused by
@@ -134,7 +160,7 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
           {
             code: "malformed-proposal",
             path: "$",
-            message: `a proposal is a record of { nodeId, outcomeId, data?, evidenceRefs? }, received ${describeValue(value)}`,
+            message: `a proposal is a record of { nodeId, outcomeId, credential?, data?, evidenceRefs? }, received ${describeValue(value)}`,
           },
         ],
       };
@@ -144,7 +170,7 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
       if (!PROPOSAL_KEYS.includes(key)) {
         malformed(
           `$.${key}`,
-          `unknown key ${JSON.stringify(key)} — a proposal carries only nodeId, outcomeId, data and evidenceRefs, and an unrecognized field is refused rather than dropped`,
+          `unknown key ${JSON.stringify(key)} — a proposal carries only nodeId, outcomeId, credential, data and evidenceRefs, and an unrecognized field is refused rather than dropped`,
         );
       }
     }
@@ -164,6 +190,17 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
         "$.outcomeId",
         `outcomeId is ${describeValue(record.outcomeId)}, not a non-empty outcome id`,
       );
+    }
+    let credential: string | undefined;
+    if (record.credential !== undefined) {
+      if (isNonEmptyString(record.credential)) {
+        credential = record.credential;
+      } else {
+        malformed(
+          "$.credential",
+          `credential is ${describeValue(record.credential)}, not the non-empty attempt credential the runtime issued`,
+        );
+      }
     }
     const rawRefs = record.evidenceRefs;
     const evidenceRefs: string[] = [];
@@ -199,6 +236,7 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
       proposal: {
         nodeId,
         outcomeId,
+        ...(credential === undefined ? {} : { credential }),
         ...(data === undefined ? {} : { data }),
         ...(rawRefs === undefined ? {} : { evidenceRefs }),
       },
@@ -220,9 +258,10 @@ export function readOutcomeProposal(value: unknown): OutcomeProposalReading {
 // ── Canonical form and digest ───────────────────────────────────────────────
 
 /**
- * Canonicalize a proposal: a fresh envelope with a fixed key order, a copy of
- * `data` by reference, and `evidenceRefs` as a sorted, de-duplicated frozen
- * list — then freeze the whole result, including the `data` tree, in place.
+ * Canonicalize a proposal: a fresh envelope with a fixed key order, the
+ * `credential` present exactly when the proposal carried one, a copy of `data`
+ * by reference, and `evidenceRefs` as a sorted, de-duplicated frozen list —
+ * then freeze the whole result, including the `data` tree, in place.
  *
  * IDEMPOTENT: normalizing the canonical form returns an equal canonical form,
  * so a caller may normalize before or after handing a proposal on.
@@ -236,15 +275,15 @@ export function normalizeProposal(
     proposal.evidenceRefs === undefined
       ? []
       : [...new Set(proposal.evidenceRefs)].sort(compareText);
-  const normalized: NormalizedOutcomeProposal =
-    proposal.data === undefined
-      ? { nodeId: proposal.nodeId, outcomeId: proposal.outcomeId, evidenceRefs }
-      : {
-          nodeId: proposal.nodeId,
-          outcomeId: proposal.outcomeId,
-          data: proposal.data,
-          evidenceRefs,
-        };
+  const normalized: NormalizedOutcomeProposal = {
+    nodeId: proposal.nodeId,
+    outcomeId: proposal.outcomeId,
+    ...(proposal.credential === undefined
+      ? {}
+      : { credential: proposal.credential }),
+    ...(proposal.data === undefined ? {} : { data: proposal.data }),
+    evidenceRefs,
+  };
   freezeDeep(normalized, new Set());
   return normalized;
 }
@@ -266,6 +305,11 @@ export function proposalDigest(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** The shape rule of an optional string field: absent, or a non-empty string. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
 
 /** UTF-16 code-unit order: locale-independent, so refs sort the same everywhere. */
 function compareText(a: string, b: string): number {

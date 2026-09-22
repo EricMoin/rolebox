@@ -21,12 +21,26 @@
  * path and its file persistence are untouched.
  *
  * EXECUTION IDENTITY IS DERIVED HERE, NEVER SUPPLIED. The graph id is the
- * compiled plan's own `graphId`; the attempt id is the one the STATE minted for
- * the node's current attempt; the submission id is content-addressed from the
- * proposal's canonical digest. A worker that puts `graphId`, `attemptId`,
- * `submissionId` or a plan revision in its proposal is refused by the shape
- * gate as an unknown key, and nothing it supplies can name — or overwrite — the
- * execution its claim belongs to.
+ * compiled plan's own `graphId`; the attempt id is resolved from the ATTEMPT
+ * CREDENTIAL the runtime issued when that attempt was dispatched, matched
+ * against the binding the persisted state records; the submission id is
+ * content-addressed from the proposal's canonical digest. A worker that puts
+ * `graphId`, `attemptId`, `submissionId` or a plan revision in its proposal
+ * is refused by the shape gate as an unknown key, and nothing it supplies can
+ * name — or overwrite — the execution its claim belongs to.
+ *
+ * AN ATTEMPT IS NAMED BY ITS CREDENTIAL, NEVER BY ITS NODE. Every attempt is
+ * issued a high-entropy nonce at dispatch (`attempt-credential.ts`) and that
+ * nonce is persisted on the attempt's own state entry together with its
+ * binding. `submit` resolves the attempt FROM the credential before it looks
+ * at any execution state: an unknown, tampered, superseded or other node's
+ * credential is refused without ever consulting "the node's current attempt".
+ * A late submission that still carries the credential of an attempt a loop
+ * round has since superseded therefore cannot be re-bound to the newer attempt
+ * — which is exactly the defect this rule exists to remove — and a repeated
+ * submission of a still-recorded (settled) attempt keeps resolving to that
+ * attempt, so the ledger replays its original receipt instead of settling a
+ * second time.
  *
  * A DUPLICATE SUBMISSION IS A REPLAY, NOT A SECOND ADVANCE. The content-derived
  * submission id makes repeating the same proposal for the same attempt the SAME
@@ -100,25 +114,54 @@ import {
   type OutcomeGraphState,
   type OutcomeNodeState,
 } from "./graph-state.ts";
+import {
+  RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
+  attemptCredentialBinding,
+  mintAttemptCredential,
+  type AttemptCredentialSource,
+} from "./attempt-credential.ts";
 import { proposalDigest, readOutcomeProposal } from "./proposal.ts";
 import type { ExecutionIdentity, ValidatorRegistry } from "./validators.ts";
 
 // ── The dispatch seam ───────────────────────────────────────────────────────
 
 /**
- * One node the runtime asks a dispatcher to run.
+ * The provenance of one dispatch, WITHOUT the attempt credential.
  *
  * Every field is runtime provenance: the graph and plan revision the node
  * belongs to, the attempt id the STATE minted, and the plan's own agent/prompt.
- * Nothing here comes from a worker.
+ * Nothing here comes from a worker. This is also the shape the ledger persists
+ * as a dispatch effect's payload — deliberately credential-free, so the
+ * credential lives in exactly one durable place (the attempt's state entry) and
+ * is re-bound from there at launch.
  */
-export interface OutcomeDispatchRequest {
+export interface OutcomeDispatchTarget {
   readonly graphId: string;
   readonly planRevision: string;
   readonly nodeId: string;
   readonly attemptId: string;
   readonly agent: string;
   readonly prompt: string;
+}
+
+/**
+ * One node the runtime asks a dispatcher to run: the target plus the attempt
+ * credential this worker must present when it submits.
+ *
+ * THE CREDENTIAL TRAVELS ONLY OVER THIS CHANNEL. It is handed to the dispatch
+ * seam (and to nobody else): it is not in `graph_status`, not in the shared
+ * `<graph_state>` block, not in the startup sweep's report, not in a receipt,
+ * an accepted event or a dispatch-effect payload, and not in any log line this
+ * module writes. The worker receives it here and passes it back through the
+ * submission ingress; the store it is checked against is the runtime's own.
+ */
+export interface OutcomeDispatchRequest extends OutcomeDispatchTarget {
+  /**
+   * The bearer credential issued for this attempt. A capability, not an
+   * identity: possession proves the holder was handed this attempt's
+   * credential (or copied it); it does not prove the original worker is asking.
+   */
+  readonly credential: string;
 }
 
 /**
@@ -164,6 +207,23 @@ export type OutcomeRuntimeRefusalCode =
   | "unknown-node"
   /** The node has no attempt in flight, so no outcome can settle one. */
   | "node-not-dispatched"
+  /**
+   * The submission carries no attempt credential. The runtime never derives
+   * one: without the credential there is no attempt this submission may settle.
+   */
+  | "credential-missing"
+  /**
+   * The credential names no attempt the persisted state records — it was never
+   * issued here (a guess or a tampered value), or the attempt it was issued for
+   * has since been superseded and its entry replaced. Refused WITHOUT falling
+   * back to the node's current attempt.
+   */
+  | "credential-unknown"
+  /**
+   * The credential was issued for another node's recorded attempt. A credential
+   * is bound to one node, so this is never re-aimed at the node it names.
+   */
+  | "credential-node-mismatch"
   /** The accepted outcome belongs to a different attempt than the state's. */
   | "attempt-mismatch"
   /** No edge routes a non-terminal outcome. */
@@ -237,7 +297,14 @@ export type OutcomeSubmissionResult =
       readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
     };
 
-/** One node the persisted state records as in flight, awaiting an outcome. */
+/**
+ * One node the persisted state records as in flight, awaiting an outcome.
+ *
+ * Deliberately CREDENTIAL-FREE: this is a report, not a dispatch channel. The
+ * credential reaches the worker through {@link OutcomeDispatchRequest} (at
+ * launch) and nowhere else, so a resumed-but-not-relaunched attempt does not
+ * hand its capability to whoever reads the recovery report.
+ */
 export interface OutcomeArmedNode {
   readonly nodeId: string;
   /** The attempt a submission for this node must settle (runtime-minted). */
@@ -253,10 +320,13 @@ export interface OutcomeArmedNode {
  * - `dispatched` — the dispatch requests this call actually launched (every
  *   one a formerly `pending` effect, whose node the state already records as
  *   in flight). A `started` effect is NEVER re-launched.
- * - `armed` — every node the state records as dispatched, with its attempt, so
- *   a caller can see what is awaiting a submission even when nothing was
- *   launched (an entry dispatch recorded by `start()`, or work a dead process
- *   began).
+ * - `armed` — every node the state records as dispatched ON AN ATTEMPT THAT
+ *   CARRIES A CREDENTIAL, with its attempt, so a caller can see what is awaiting
+ *   a submission even when nothing was launched (an entry dispatch recorded by
+ *   `start()`, or work a dead process began). An in-flight attempt whose
+ *   persisted entry carries no credential cannot be settled by any submission,
+ *   so it is reported in `refusals` instead of being offered as armed. The
+ *   credential itself is never part of this report.
  * - `unsettledEffects` — every effect still `pending` or `started` after this
  *   call, read from the ledger. Nothing in this set is dropped or silently
  *   rewound; a `started` row from a dead process is reported here.
@@ -312,6 +382,12 @@ export interface OutcomeGraphRuntimeOptions {
   readonly clock?: () => number;
   /** The installed execution-protocol handlers; defaults to the shipped set. */
   readonly protocols?: ExecutionProtocolRegistry;
+  /**
+   * Mints the attempt credential every attempt this runtime dispatches is
+   * issued. Defaults to {@link RUNTIME_ATTEMPT_CREDENTIAL_SOURCE} (the platform
+   * CSPRNG); a test injects a deterministic source.
+   */
+  readonly mintCredential?: AttemptCredentialSource;
 }
 
 /**
@@ -336,6 +412,7 @@ export class OutcomeGraphRuntime {
   private readonly artifactRoot: string;
   private readonly clock: () => number;
   private readonly protocols: ExecutionProtocolRegistry | undefined;
+  private readonly mintCredential: AttemptCredentialSource;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -347,6 +424,8 @@ export class OutcomeGraphRuntime {
     this.artifactRoot = options.artifactRoot;
     this.clock = options.clock ?? (() => Date.now());
     this.protocols = options.protocols;
+    this.mintCredential =
+      options.mintCredential ?? RUNTIME_ATTEMPT_CREDENTIAL_SOURCE;
   }
 
   /**
@@ -395,17 +474,30 @@ export class OutcomeGraphRuntime {
       }
       attemptSeq += 1;
       const attemptId = node.id + "#" + attemptSeq;
+      // The credential is minted WITH the attempt and persisted on its entry in
+      // the same transaction that records the dispatch: the binding a later
+      // submission is checked against is the state's, not the submission's.
+      const credential = mintAttemptCredential(
+        this.mintCredential,
+        attemptCredentialBinding({
+          graphId: this.graphId,
+          nodeId: node.id,
+          attemptId,
+          planRevision: this.planRevision,
+        }),
+      );
       nodes.push(
         Object.freeze({
           nodeId: node.id,
           status: "dispatched" as const,
           attemptId,
           attemptSeq,
+          attemptCredential: credential,
           dispatchedAt: at,
         }),
       );
       dispatched.push(
-        this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt),
+        this.dispatchRequestOf(node.id, attemptId, node.agent, node.prompt, credential),
       );
     }
     const state: OutcomeGraphState = Object.freeze({
@@ -605,13 +697,14 @@ export class OutcomeGraphRuntime {
       if (started.kind === "started") {
         const effects = this.unsettledEffectReading();
         if ("code" in effects) return refused([effects]);
+        const reading = armedReading(started.state);
         return {
           kind: "started",
           state: started.state,
           dispatched: started.dispatched,
-          armed: armedNodesOf(started.state),
+          armed: reading.armed,
           unsettledEffects: effects,
-          refusals: Object.freeze([]),
+          refusals: reading.refusals,
         };
       }
       try {
@@ -662,13 +755,16 @@ export class OutcomeGraphRuntime {
     if ("refusal" in launched) return refused([launched.refusal]);
     const effects = this.unsettledEffectReading();
     if ("code" in effects) return refused([effects]);
+    // The armed report is credential-free by construction; an in-flight attempt
+    // the state cannot corroborate with a credential is reported as refused.
+    const readable = armedReading(state);
     return {
       kind: "resumed",
       state,
       dispatched: Object.freeze(launched.launched),
-      armed: armedNodesOf(state),
+      armed: readable.armed,
       unsettledEffects: effects,
-      refusals: Object.freeze(launched.refusals),
+      refusals: Object.freeze([...launched.refusals, ...readable.refusals]),
     };
   }
 
@@ -809,8 +905,9 @@ export class OutcomeGraphRuntime {
         });
         continue;
       }
-      const armed = armedNodeOf(state, reading.request.nodeId);
-      if (armed === undefined || armed.attemptId !== reading.request.attemptId) {
+      const target = reading.target;
+      const armed = dispatchedNodeOf(state, target.nodeId);
+      if (armed === undefined || armed.attemptId !== target.attemptId) {
         refusals.push({
           code: "state-ledger-disagreement",
           path: "$.attemptId",
@@ -818,11 +915,35 @@ export class OutcomeGraphRuntime {
             "outcome-runtime: dispatch effect " +
             JSON.stringify(effect.effectId) +
             " names node " +
-            JSON.stringify(reading.request.nodeId) +
+            JSON.stringify(target.nodeId) +
             " on attempt " +
-            JSON.stringify(reading.request.attemptId) +
+            JSON.stringify(target.attemptId) +
             ", but the persisted state does not record that attempt as in flight — " +
             "the effect was not launched and stays unsettled",
+        });
+        continue;
+      }
+      // THE BINDING IS READ FROM THE PERSISTED STATE, NOT FROM THE EFFECT. The
+      // payload is credential-free on purpose, so the credential a recovered
+      // worker receives is the one the attempt's own state entry records — and
+      // an attempt whose entry carries none (a body version that predates
+      // credentials) is REFUSED rather than launched without one or granted a
+      // fresh credential for a new execution.
+      const credential = armed.attemptCredential;
+      if (credential === undefined) {
+        refusals.push({
+          code: "credential-missing",
+          path: "$.attemptCredential",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effect.effectId) +
+            " targets node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            ", but the persisted state entry for that attempt carries no attempt credential — " +
+            "an attempt the runtime cannot hand a credential to is never launched, and it " +
+            "stays unsettled",
         });
         continue;
       }
@@ -841,7 +962,13 @@ export class OutcomeGraphRuntime {
         continue;
       }
       try {
-        this.dispatch(reading.request);
+        this.dispatch(this.dispatchRequestOf(
+          target.nodeId,
+          target.attemptId,
+          target.agent,
+          target.prompt,
+          credential,
+        ));
       } catch (error) {
         refusals.push({
           code: "dispatch-failed",
@@ -856,7 +983,15 @@ export class OutcomeGraphRuntime {
         });
         continue;
       }
-      launched.push(reading.request);
+      launched.push(
+        this.dispatchRequestOf(
+          target.nodeId,
+          target.attemptId,
+          target.agent,
+          target.prompt,
+          credential,
+        ),
+      );
     }
     return {
       launched: Object.freeze(launched),
@@ -884,9 +1019,16 @@ export class OutcomeGraphRuntime {
   /**
    * Derive the trusted execution identity of one submission.
    *
-   * A well-formed proposal is bound to the attempt the STATE holds for its node;
-   * a malformed one carries a placeholder identity so the acceptance core — the
-   * owner of the proposal shape gate — refuses it with its own diagnostics.
+   * THE ORDER IS THE RULE: the credential is resolved against the persisted
+   * state FIRST, and only the attempt it names is then handed to the acceptance
+   * core. The node's CURRENT attempt is never consulted as a fallback — a
+   * credential that names nothing, or names another node's attempt, is refused
+   * outright, so a late submission cannot be re-bound to a newer attempt and a
+   * crafted credential cannot select one. A well-formed proposal whose
+   * credential resolves is bound to that recorded attempt (dispatched or
+   * settled — a settled one is the replay path); a malformed one carries a
+   * placeholder identity so the acceptance core — the owner of the proposal
+   * shape gate — refuses it with its own diagnostics.
    */
   private identityFor(
     proposal: unknown,
@@ -917,30 +1059,72 @@ export class OutcomeGraphRuntime {
         },
       };
     }
-    const nodeState = state.nodes[index];
-    if (nodeState.status === "pending") {
+    const credential = reading.proposal.credential;
+    if (credential === undefined) {
       return {
         refusal: {
-          code: "node-not-dispatched",
-          path: "$.nodeId",
+          code: "credential-missing",
+          path: "$.credential",
           message:
             "outcome-runtime: node " +
             JSON.stringify(reading.proposal.nodeId) +
-            " has no attempt in flight, so no outcome can settle one — nothing was written",
+            " was submitted without the attempt credential it was dispatched with — an outcome " +
+            "is settled BY the attempt that holds the credential, and this runtime never " +
+            "derives one from the node id; nothing was written",
         },
       };
     }
-    const attemptId = nodeState.attemptId;
+    // Resolve the attempt the credential was ISSUED for. The scan is over the
+    // persisted binding (the nonce written on one attempt's entry); it is never
+    // an index into the node the proposal happens to name.
+    let holder: OutcomeNodeState | undefined;
+    for (const node of state.nodes) {
+      if (node.attemptCredential === credential) {
+        holder = node;
+        break;
+      }
+    }
+    if (holder === undefined) {
+      return {
+        refusal: {
+          code: "credential-unknown",
+          path: "$.credential",
+          message:
+            "outcome-runtime: the credential on this submission is not recorded by any attempt " +
+            "of graph " +
+            JSON.stringify(this.graphId) +
+            " — it was never issued here, or the attempt it was issued for has since been " +
+            "superseded (a body version that predates attempt credentials records none at " +
+            "all); the node's CURRENT attempt is never substituted for it, so nothing was written",
+        },
+      };
+    }
+    if (holder.nodeId !== reading.proposal.nodeId) {
+      return {
+        refusal: {
+          code: "credential-node-mismatch",
+          path: "$.credential",
+          message:
+            "outcome-runtime: the credential was issued for node " +
+            JSON.stringify(holder.nodeId) +
+            ", but this submission claims node " +
+            JSON.stringify(reading.proposal.nodeId) +
+            " — a credential is bound to one node, and it is never re-aimed at another",
+        },
+      };
+    }
+    const attemptId = holder.attemptId;
     if (attemptId === undefined) {
       return {
         refusal: {
           code: "unreadable-state",
+          path: "$.nodes[" + index + "].attemptId",
           message:
             "outcome-runtime: node " +
             JSON.stringify(reading.proposal.nodeId) +
-            " is " +
-            nodeState.status +
-            " but carries no attempt id",
+            " records a credential on a " +
+            holder.status +
+            " entry but carries no attempt id — the binding cannot be resolved",
         },
       };
     }
@@ -1008,11 +1192,15 @@ export class OutcomeGraphRuntime {
       state: current,
       decision,
       now,
+      mintCredential: this.mintCredential,
     });
     const effects = advance.dispatches.map((intent) => ({
       effectId: "dispatch:" + intent.attemptId,
       kind: "dispatch",
-      payload: this.requestOf(intent),
+      // CREDENTIAL-FREE payload: the durable effect names the dispatch target
+      // and nothing else, so the credential stays in exactly one durable place
+      // (the attempt's state entry) and is re-bound from there at launch.
+      payload: this.dispatchPayloadOf(intent),
     }));
     return {
       result: {
@@ -1025,22 +1213,41 @@ export class OutcomeGraphRuntime {
     };
   }
 
-  /** The dispatch request one reducer intent becomes, with runtime provenance. */
+  /**
+   * The dispatch request one reducer intent becomes: runtime provenance plus the
+   * credential the reducer minted for this attempt.
+   */
   private requestOf(intent: OutcomeDispatchIntent): OutcomeDispatchRequest {
     return this.dispatchRequestOf(
       intent.nodeId,
       intent.attemptId,
       intent.agent,
       intent.prompt,
+      intent.credential,
     );
   }
 
-  /** Build one dispatch request from the plan and the minted attempt. */
+  /** The credential-free payload one reducer intent is persisted as. */
+  private dispatchPayloadOf(
+    intent: OutcomeDispatchIntent,
+  ): OutcomeDispatchTarget {
+    return Object.freeze({
+      graphId: this.graphId,
+      planRevision: this.planRevision,
+      nodeId: intent.nodeId,
+      attemptId: intent.attemptId,
+      agent: intent.agent,
+      prompt: intent.prompt,
+    });
+  }
+
+  /** Build one dispatch target/request from the plan and the minted attempt. */
   private dispatchRequestOf(
     nodeId: string,
     attemptId: string,
     agent: string,
     prompt: string,
+    credential: string,
   ): OutcomeDispatchRequest {
     return Object.freeze({
       graphId: this.graphId,
@@ -1049,6 +1256,7 @@ export class OutcomeGraphRuntime {
       attemptId,
       agent,
       prompt,
+      credential,
     });
   }
 
@@ -1098,42 +1306,77 @@ export class OutcomeGraphRuntime {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Every node the state records as in flight, with the attempt that must settle it. */
-function armedNodesOf(state: OutcomeGraphState): readonly OutcomeArmedNode[] {
+/**
+ * Every in-flight attempt a submission can actually settle, plus a per-attempt
+ * refusal for each in-flight attempt it cannot.
+ *
+ * An attempt whose persisted entry carries no credential (a body version that
+ * predates credentials) is NOT reported as armed: recovery must refuse it, not
+ * offer it as a node awaiting an outcome, because no submission can ever settle
+ * it. It is reported in `refusals` instead, with the field that is missing.
+ *
+ * The credential ITSELF is never part of either report — the armed entry names
+ * the node and attempt only, so a recovery report never becomes a second
+ * distribution channel for the capability.
+ */
+function armedReading(state: OutcomeGraphState): {
+  readonly armed: readonly OutcomeArmedNode[];
+  readonly refusals: readonly OutcomeRuntimeRefusal[];
+} {
   const armed: OutcomeArmedNode[] = [];
-  for (const node of state.nodes) {
-    if (node.status !== "dispatched" || node.attemptId === undefined) continue;
+  const refusals: OutcomeRuntimeRefusal[] = [];
+  state.nodes.forEach((node, index) => {
+    if (node.status !== "dispatched" || node.attemptId === undefined) return;
+    if (node.attemptCredential === undefined) {
+      refusals.push({
+        code: "credential-missing",
+        path: "$.nodes[" + index + "].attemptCredential",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(node.nodeId) +
+          " is recorded as in flight on attempt " +
+          JSON.stringify(node.attemptId) +
+          " but its persisted state entry carries no attempt credential — the attempt was " +
+          "dispatched by a body version that issues none, so no submission can settle it and " +
+          "it is reported as refused rather than armed",
+      });
+      return;
+    }
     armed.push(Object.freeze({ nodeId: node.nodeId, attemptId: node.attemptId }));
-  }
-  return Object.freeze(armed);
+  });
+  return {
+    armed: Object.freeze(armed),
+    refusals: Object.freeze(refusals),
+  };
 }
 
 /** The state's progress for one node, when that node is currently in flight. */
-function armedNodeOf(
+function dispatchedNodeOf(
   state: OutcomeGraphState,
   nodeId: string,
-): OutcomeArmedNode | undefined {
+): OutcomeNodeState | undefined {
   for (const node of state.nodes) {
     if (node.nodeId !== nodeId) continue;
-    if (node.status !== "dispatched" || node.attemptId === undefined) return undefined;
-    return Object.freeze({ nodeId: node.nodeId, attemptId: node.attemptId });
+    return node.status === "dispatched" ? node : undefined;
   }
   return undefined;
 }
 
 /** What reading a persisted dispatch-effect payload produced. */
 type DispatchPayloadReading =
-  | { readonly kind: "ok"; readonly request: OutcomeDispatchRequest }
+  | { readonly kind: "ok"; readonly target: OutcomeDispatchTarget }
   | { readonly kind: "malformed"; readonly message: string };
 
 /**
- * Read one dispatch effect's persisted payload as a dispatch request.
+ * Read one dispatch effect's persisted payload as a dispatch TARGET.
  *
  * The payload is JSON the ledger stored verbatim, so it is UNTRUSTED here
  * even though this runtime wrote it: the graph and plan revision it names must
  * be this runtime's own, every field must be a non-empty string, and anything
  * else is a malformed effect that is REPORTED rather than launched at a
- * guessed target.
+ * guessed target. A payload that carries a `credential` key is malformed too:
+ * the credential is never persisted on an effect, so one there means the row
+ * was written by something that is not this runtime.
  */
 function readDispatchRequest(
   payload: unknown,
@@ -1171,6 +1414,14 @@ function readDispatchRequest(
         JSON.stringify(planRevision),
     };
   }
+  if (payload.credential !== undefined) {
+    return {
+      kind: "malformed",
+      message:
+        "a dispatch effect payload carries a credential — this runtime never persists one on an " +
+        "effect, so the row was not written by this runtime and is not launched",
+    };
+  }
   const nodeId = nonEmptyString(payload.nodeId);
   const attemptId = nonEmptyString(payload.attemptId);
   const agent = nonEmptyString(payload.agent);
@@ -1190,7 +1441,7 @@ function readDispatchRequest(
   }
   return {
     kind: "ok",
-    request: Object.freeze({
+    target: Object.freeze({
       graphId,
       planRevision,
       nodeId,

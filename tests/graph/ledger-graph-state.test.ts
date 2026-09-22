@@ -13,7 +13,12 @@
  * round-trips through the store with zero field loss, while an unknown body
  * field, an unknown node field, a body version this build has no reader for and
  * a missing version discriminator are each REFUSED — never read partially and
- * never rewritten with the unknown fields dropped.
+ * never rewritten with the unknown fields dropped. Version 2 adds the
+ * runtime-issued attempt credential at the NODE level: it is required on a
+ * dispatched/settled entry, forbidden on a pending one and forbidden in a
+ * version-1 body, and version 1 stays READABLE (its attempts simply carry no
+ * credential) while the reducer refuses to advance a body that cannot carry
+ * one.
  *
  * Every case runs in its own mkdtemp directory and removes it in a finally
  * block; nothing here writes outside a temp dir.
@@ -48,7 +53,11 @@ import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3
 import {
   CURRENT_OUTCOME_STATE_BODY,
   DEFAULT_OUTCOME_STATE_BODY_REGISTRY,
+  OUTCOME_STATE_BODY_V1,
+  OUTCOME_STATE_BODY_V2,
+  OutcomeAdvanceRefusedError,
   OutcomeStateError,
+  advanceOutcomeGraph,
   classifyOutcomeStateBody,
   createOutcomeStateBodyRegistry,
   readOutcomeGraphState,
@@ -56,6 +65,8 @@ import {
   type OutcomeGraphState,
   type OutcomeStateBodyReading,
 } from "../../src/graph/outcome/graph-state.ts";
+import type { AcceptanceDecision } from "../../src/graph/outcome/acceptance.ts";
+import { RUNTIME_ATTEMPT_CREDENTIAL_SOURCE } from "../../src/graph/outcome/attempt-credential.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -493,7 +504,13 @@ const STATE_BODY_PLAN = buildDeclaredOutcomeGraph({
   declaration: STATE_BODY_DECLARATION,
 }).plan;
 
-/** The state the version-1 writer produces, in plan order. */
+/** The credential the version-2 fixture records on the dispatched attempt. */
+const FIXTURE_CREDENTIAL = "fixture-credential:work#1";
+
+/**
+ * The state the CURRENT writer produces, in plan order: one dispatched attempt
+ * carrying the credential the runtime issued, one pending node with none.
+ */
 function stateBodyFixture(): OutcomeGraphState {
   const nodes = STATE_BODY_PLAN.nodes.map((node, index) =>
     index === 0
@@ -502,6 +519,7 @@ function stateBodyFixture(): OutcomeGraphState {
           status: "dispatched" as const,
           attemptId: node.id + "#1",
           attemptSeq: 1,
+          attemptCredential: FIXTURE_CREDENTIAL,
           dispatchedAt: NOW,
         })
       : Object.freeze({ nodeId: node.id, status: "pending" as const }),
@@ -515,6 +533,22 @@ function stateBodyFixture(): OutcomeGraphState {
     loopTraversals: Object.freeze({}),
     attemptSeq: 1,
   });
+}
+
+/** A version-1 body: the fixture with every credential stripped. */
+function stateBodyFixtureV1(): Record<string, unknown> {
+  const body = bodyOf(stateBodyFixture());
+  const rawNodes = body.nodes;
+  if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  return {
+    ...body,
+    bodyVersion: OUTCOME_STATE_BODY_V1,
+    nodes: rawNodes.map((node) => {
+      if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
+      const { attemptCredential: _dropped, ...rest } = node;
+      return rest;
+    }),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -614,6 +648,116 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     );
     expect(error.problem).toBe("malformed-state");
     expect(error.message).toContain("baselineDigest");
+  });
+
+  it("still READS a version-1 body, whose attempts simply carry no credential", () => {
+    const state = readOutcomeGraphState(recordOf(stateBodyFixtureV1()), STATE_BODY_PLAN);
+    expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V1);
+    // Readable — a completed graph reports cleanly — but the attempt has no
+    // credential, which is exactly what the run path refuses to settle.
+    expect(state.nodes[0]?.attemptCredential).toBeUndefined();
+    expect(state.nodes[0]?.attemptId).toBe(STATE_BODY_PLAN.nodes[0]?.id + "#1");
+  });
+
+  it("refuses a version-2 dispatched node without the required credential", () => {
+    const body = bodyOf(stateBodyFixture());
+    const rawNodes = body.nodes;
+    if (!Array.isArray(rawNodes) || !isRecord(rawNodes[0])) {
+      throw new Error("fixture: the state body carries no first node");
+    }
+    const { attemptCredential: _dropped, ...withoutCredential } = rawNodes[0];
+    const error = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf({ ...body, nodes: [withoutCredential, ...rawNodes.slice(1)] }),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("attemptCredential");
+  });
+
+  it("refuses a credential on a node that was never dispatched", () => {
+    const body = bodyOf(stateBodyFixture());
+    const rawNodes = body.nodes;
+    if (!Array.isArray(rawNodes) || !isRecord(rawNodes[1])) {
+      throw new Error("fixture: the state body carries no second node");
+    }
+    const error = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf({
+          ...body,
+          nodes: [rawNodes[0], { ...rawNodes[1], attemptCredential: "forged" }],
+        }),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("pending");
+  });
+
+  it("refuses a credential inside a version-1 body, which does not define it", () => {
+    const body = stateBodyFixtureV1();
+    const rawNodes = body.nodes;
+    if (!Array.isArray(rawNodes) || !isRecord(rawNodes[0])) {
+      throw new Error("fixture: the version-1 body carries no first node");
+    }
+    const error = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf({
+          ...body,
+          nodes: [{ ...rawNodes[0], attemptCredential: "smuggled" }, ...rawNodes.slice(1)],
+        }),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("attemptCredential");
+  });
+
+  it("installs a reader for version 1 AND version 2, and writes version 2", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V2);
+    expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
+      OUTCOME_STATE_BODY_V1,
+      OUTCOME_STATE_BODY_V2,
+    ]);
+    for (const version of [OUTCOME_STATE_BODY_V1, OUTCOME_STATE_BODY_V2]) {
+      const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
+      expect(verdict.kind).toBe("supported");
+      if (verdict.kind === "supported") {
+        expect(verdict.reader.format).toBe(version);
+      }
+    }
+  });
+
+  it("refuses to advance a body version that cannot carry a credential", () => {
+    const nodeId = STATE_BODY_PLAN.nodes[0]?.id ?? "";
+    const decision: AcceptanceDecision = {
+      kind: "accepted",
+      identity: { graphId: STATE_BODY_PLAN.graphId, attemptId: nodeId + "#1", submissionId: "submission-1" },
+      planRevision: STATE_BODY_PLAN.planRevision,
+      proposalDigest: "digest-a",
+      nodeId,
+      outcomeId: "done",
+      requirements: [],
+    };
+    const v1 = readOutcomeGraphState(recordOf(stateBodyFixtureV1()), STATE_BODY_PLAN);
+    let caught: unknown;
+    try {
+      advanceOutcomeGraph({
+        plan: STATE_BODY_PLAN,
+        state: v1,
+        decision,
+        now: NOW + 1,
+        mintCredential: RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(OutcomeAdvanceRefusedError);
+    if (caught instanceof OutcomeAdvanceRefusedError) {
+      expect(caught.code).toBe("unsupported-state-version");
+      expect(caught.message).toContain("attempt credential");
+    }
   });
 
   it("refuses a body version this build has no reader for", () => {

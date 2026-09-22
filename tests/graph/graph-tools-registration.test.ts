@@ -122,17 +122,21 @@ describe("createGraphTools", () => {
   it("graph_submit_outcome exposes exactly the minimum model-facing args", () => {
     const { graph_submit_outcome } = createGraphTools(undefined, { directory: "/tmp" });
     expect(Object.keys(graph_submit_outcome.args).sort()).toEqual([
+      "credential",
       "data",
       "evidence_refs",
       "graph_id",
       "node_id",
       "outcome_id",
     ]);
-    // Identity and the plan revision are runtime provenance, not args.
+    // Identity and the plan revision are runtime provenance, not args: the
+    // attempt is resolved from the CREDENTIAL the dispatch request handed the
+    // worker, never named by the caller.
     expect(graph_submit_outcome.args.attempt_id).toBeUndefined();
     expect(graph_submit_outcome.args.submission_id).toBeUndefined();
     expect(graph_submit_outcome.args.plan_revision).toBeUndefined();
     expect(graph_submit_outcome.args.graphId).toBeUndefined();
+    expect(graph_submit_outcome.args.credential).toBeInstanceOf(z.ZodOptional);
   });
 
   it("executes graph_declare end-to-end: parses, compiles, persists and reports the run path", async () => {

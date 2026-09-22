@@ -7,7 +7,11 @@
  * the graph to its terminal state — with the state snapshot, the receipt, the
  * accepted event and the pending effects visible in the ledger afterwards. Also
  * covered: execution identity derived from the runtime's own context (a worker
- * cannot supply one), a duplicate submission replaying without a second advance,
+ * cannot supply one), the attempt CREDENTIAL the runtime issues at dispatch and
+ * resolves submissions against (a missing, tampered, superseded or other node's
+ * credential is refused, and the credential never reaches a receipt, an effect
+ * payload or a report), a duplicate submission replaying without a second
+ * advance,
  * a rejected gate and a refused proposal leaving the graph where it was, a
  * distinct submission for a settled attempt never being committed, a forced
  * mid-transaction failure leaving nothing, loop continuation and its hard cap,
@@ -28,6 +32,7 @@ import {
   type DatabaseDriver,
 } from "../../src/memory/db-driver.ts";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
+import type { CompiledPlan } from "../../src/graph/compiler/plan.ts";
 import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.ts";
 import {
   SqliteAcceptanceLedger,
@@ -42,6 +47,7 @@ import {
   OutcomeStateError,
   type OutcomeGraphState,
 } from "../../src/graph/outcome/graph-state.ts";
+import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
 import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
 import {
   createValidatorRegistry,
@@ -263,12 +269,23 @@ function gatedRegistry(outcome: ValidationOutcome): ValidatorRegistry {
 
 interface Harness {
   readonly runtime: OutcomeGraphRuntime;
+  readonly plan: CompiledPlan;
   readonly ledger: SqliteAcceptanceLedger;
   /** Every request the scripted dispatch seam received, in order. */
   readonly requests: OutcomeDispatchRequest[];
   readonly graphId: string;
   readonly dir: string;
+  /** The credential the given attempt was dispatched with. */
+  credentialOf(attemptId: string): string;
 }
+
+/**
+ * A deterministic credential source for the harness: one credential per
+ * attempt, derived from the BINDING the runtime hands the source (not read back
+ * out of the state), so a test can name the attempt it is submitting for.
+ */
+const TEST_CREDENTIAL_SOURCE: AttemptCredentialSource = (binding) =>
+  "test-credential:" + binding.nodeId + "#" + binding.attemptId;
 
 async function withHarness<T>(
   declaration: GraphDeclarationV3,
@@ -280,6 +297,7 @@ async function withHarness<T>(
       readonly version?: number;
     }[];
     readonly protocols?: ExecutionProtocolRegistry;
+    readonly mintCredential?: AttemptCredentialSource;
   } = {},
 ): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "outcome-runtime-"));
@@ -302,14 +320,17 @@ async function withHarness<T>(
       validators: options.validators ?? EMPTY_VALIDATORS,
       artifactRoot: dir,
       clock: () => NOW,
+      mintCredential: options.mintCredential ?? TEST_CREDENTIAL_SOURCE,
       ...(options.protocols === undefined ? {} : { protocols: options.protocols }),
     });
     return await fn({
       runtime,
+      plan: declared.plan,
       ledger,
       requests,
       graphId: declared.graphId,
       dir,
+      credentialOf: (attemptId) => credentialOf(requests, attemptId),
     });
   } finally {
     if (ledger !== undefined) ledger.close();
@@ -327,6 +348,41 @@ function nodeOf(state: OutcomeGraphState, nodeId: string) {
 /** Attempt ids in dispatch order, for compact assertions. */
 function attemptIds(requests: readonly OutcomeDispatchRequest[]): string[] {
   return requests.map((request) => request.attemptId);
+}
+
+/**
+ * A CREDENTIAL-FREE projection of one state, for the probes' self-check output:
+ * status and attempt identity per node, whether a credential is recorded, and
+ * nothing that would print the capability itself.
+ */
+function stateSummary(state: OutcomeGraphState | undefined): string {
+  return JSON.stringify({
+    phase: state?.phase,
+    nodes: state?.nodes.map((node) => ({
+      nodeId: node.nodeId,
+      status: node.status,
+      attemptId: node.attemptId,
+      hasCredential: node.attemptCredential !== undefined,
+    })),
+  });
+}
+
+/** The credential one dispatched attempt carried, failing when it never ran. */
+function credentialOf(
+  requests: readonly OutcomeDispatchRequest[],
+  attemptId: string,
+): string {
+  const found = requests.find((request) => request.attemptId === attemptId);
+  if (found === undefined) {
+    throw new Error(
+      "fixture: no dispatch request for attempt " +
+        attemptId +
+        " (dispatched: " +
+        attemptIds(requests).join(", ") +
+        ")",
+    );
+  }
+  return found.credential;
 }
 
 /** Read one field of an unknown record value, for payload assertions. */
@@ -379,7 +435,10 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
       expect(started.dispatched[0]?.agent).toBe("agent.work");
       expect(started.dispatched[0]?.prompt).toBe("Do the work.");
 
-      const first = runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 1);
+      const first = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+        NOW + 1,
+      );
       expect(first.kind).toBe("accepted");
       if (first.kind !== "accepted") return;
       expect(first.replayed).toBe(false);
@@ -427,7 +486,7 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
 
       // The terminal outcome settles the graph.
       const last = runtime.submit(
-        { nodeId: "ship", outcomeId: "delivered" },
+        { nodeId: "ship", outcomeId: "delivered", credential: credentialOf(requests, "ship#2") },
         NOW + 2,
       );
       expect(last.kind).toBe("accepted");
@@ -493,7 +552,11 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
   it("replays a duplicate submission without advancing the state twice", async () => {
     await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);
-      const proposal = { nodeId: "work", outcomeId: "done" };
+      const proposal = {
+        nodeId: "work",
+        outcomeId: "done",
+        credential: credentialOf(requests, "work#1"),
+      };
       const first = runtime.submit(proposal, NOW + 1);
       expect(first.kind).toBe("accepted");
       if (first.kind !== "accepted") return;
@@ -522,7 +585,12 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
     await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);
       const first = runtime.submit(
-        { nodeId: "work", outcomeId: "done", data: { round: 1 } },
+        {
+          nodeId: "work",
+          outcomeId: "done",
+          credential: credentialOf(requests, "work#1"),
+          data: { round: 1 },
+        },
         NOW + 1,
       );
       expect(first.kind).toBe("accepted");
@@ -531,7 +599,12 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
       const dispatchesBefore = attemptIds(requests);
 
       const distinct = runtime.submit(
-        { nodeId: "work", outcomeId: "done", data: { round: 2 } },
+        {
+          nodeId: "work",
+          outcomeId: "done",
+          credential: credentialOf(requests, "work#1"),
+          data: { round: 2 },
+        },
         NOW + 2,
       );
       expect(distinct.kind).toBe("not-committed");
@@ -550,19 +623,36 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
 // ── Refusals and rollback ───────────────────────────────────────────────────
 
 describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was", () => {
-  it("refuses a proposal for a node with no attempt in flight", async () => {
-    await withHarness(LINEAR, async ({ runtime, ledger, graphId, dir }) => {
+  it("refuses a credential aimed at a node with no attempt in flight", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);
-      // ship is declared by the plan but has never been dispatched.
+      // ship is declared by the plan but has never been dispatched, so the only
+      // credential in hand belongs to work — and it is never re-aimed.
       const result = runtime.submit(
-        { nodeId: "ship", outcomeId: "delivered" },
+        {
+          nodeId: "ship",
+          outcomeId: "delivered",
+          credential: credentialOf(requests, "work#1"),
+        },
         NOW + 1,
       );
       expect(result.kind).toBe("refused");
       if (result.kind !== "refused") return;
-      expect(result.refusals.map((refusal) => refusal.code)).toContain(
-        "node-not-dispatched",
+      expect(result.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-node-mismatch",
+      ]);
+      expect(result.refusals[0]?.path).toBe("$.credential");
+      // A credential that names nothing is refused too — the node's current
+      // attempt is never substituted for it.
+      const forged = runtime.submit(
+        { nodeId: "ship", outcomeId: "delivered", credential: "never-issued" },
+        NOW + 2,
       );
+      expect(forged.kind).toBe("refused");
+      if (forged.kind !== "refused") return;
+      expect(forged.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-unknown",
+      ]);
       expect(ledger.acceptedEvents(graphId)).toHaveLength(0);
       expect(await countTable(dir, "ledger_receipts")).toBe(0);
     });
@@ -591,7 +681,7 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
         runtime.start(NOW);
         const before = runtime.state();
         const result = runtime.submit(
-          { nodeId: "work", outcomeId: "done" },
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
           NOW + 1,
         );
         expect(result.kind).toBe("rejected");
@@ -611,7 +701,7 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
         expect(await countTable(dir, "ledger_receipts")).toBe(1);
         // The same content submitted again replays the rejected receipt.
         const again = runtime.submit(
-          { nodeId: "work", outcomeId: "done" },
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
           NOW + 2,
         );
         expect(again.kind).toBe("rejected");
@@ -629,10 +719,10 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
   it("accepts when the gate passes, so the rejection above is the gate's doing", async () => {
     await withHarness(
       GATED,
-      async ({ runtime, ledger, graphId }) => {
+      async ({ runtime, ledger, requests, graphId }) => {
         runtime.start(NOW);
         const result = runtime.submit(
-          { nodeId: "work", outcomeId: "done" },
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
           NOW + 1,
         );
         expect(result.kind).toBe("accepted");
@@ -648,10 +738,10 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
   });
 
   it("rolls the acceptance back when the state and the ledger disagree", async () => {
-    await withHarness(LINEAR, async ({ runtime, ledger, graphId, dir }) => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);
       const first = runtime.submit(
-        { nodeId: "work", outcomeId: "done" },
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
         NOW + 1,
       );
       expect(first.kind).toBe("accepted");
@@ -664,7 +754,12 @@ describe("OutcomeGraphRuntime — refusals leave the graph exactly where it was"
       // completely — nothing from this submission survives.
       await stripAcceptanceRows(dir);
       const result = runtime.submit(
-        { nodeId: "work", outcomeId: "done", data: { retry: true } },
+        {
+          nodeId: "work",
+          outcomeId: "done",
+          credential: credentialOf(requests, "work#1"),
+          data: { retry: true },
+        },
         NOW + 2,
       );
       expect(result.kind).toBe("refused");
@@ -712,7 +807,7 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       expect(attemptIds(requests)).toEqual(["work#1"]);
 
       const worked = runtime.submit(
-        { nodeId: "work", outcomeId: "done" },
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
         NOW + 1,
       );
       expect(worked.kind).toBe("accepted");
@@ -720,7 +815,7 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       expect(attemptIds(worked.dispatched)).toEqual(["review#2"]);
 
       const revised = runtime.submit(
-        { nodeId: "review", outcomeId: "revise" },
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
         NOW + 2,
       );
       expect(revised.kind).toBe("accepted");
@@ -735,7 +830,7 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       expect(revised.state.loopTraversals["revise-loop"]).toBe(1);
 
       const workedAgain = runtime.submit(
-        { nodeId: "work", outcomeId: "done" },
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
         NOW + 3,
       );
       expect(workedAgain.kind).toBe("accepted");
@@ -743,7 +838,7 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       expect(attemptIds(workedAgain.dispatched)).toEqual(["review#4"]);
 
       const approved = runtime.submit(
-        { nodeId: "review", outcomeId: "approve" },
+        { nodeId: "review", outcomeId: "approve", credential: credentialOf(requests, "review#4") },
         NOW + 4,
       );
       expect(approved.kind).toBe("accepted");
@@ -761,22 +856,28 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
   });
 
   it("refuses the continuation that would exceed the hard cap, writing nothing", async () => {
-    await withHarness(loopDeclaration(1), async ({ runtime, ledger, graphId, dir }) => {
+    await withHarness(loopDeclaration(1), async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);
-      runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 1);
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+        NOW + 1,
+      );
       const firstRevision = runtime.submit(
-        { nodeId: "review", outcomeId: "revise" },
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
         NOW + 2,
       );
       expect(firstRevision.kind).toBe("accepted");
       if (firstRevision.kind !== "accepted") return;
       expect(firstRevision.state.loopTraversals["revise-loop"]).toBe(1);
-      runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 3);
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
+        NOW + 3,
+      );
       const before = runtime.state();
       const receiptsBefore = await countTable(dir, "ledger_receipts");
 
       const overCap = runtime.submit(
-        { nodeId: "review", outcomeId: "revise" },
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
         NOW + 4,
       );
       expect(overCap.kind).toBe("refused");
@@ -810,10 +911,13 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       overlappingLoopDeclaration(1),
       async ({ runtime, ledger, requests, graphId, dir }) => {
         runtime.start(NOW);
-        runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 1);
+        runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+          NOW + 1,
+        );
 
         const firstRevision = runtime.submit(
-          { nodeId: "review", outcomeId: "revise" },
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
           NOW + 2,
         );
         expect(firstRevision.kind).toBe("accepted");
@@ -823,14 +927,17 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         expect(firstRevision.state.loopTraversals["a-outer"]).toBeUndefined();
         expect(attemptIds(firstRevision.dispatched)).toEqual(["work#3"]);
 
-        runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 3);
+        runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
+          NOW + 3,
+        );
         const before = runtime.state();
         const receiptsBefore = await countTable(dir, "ledger_receipts");
         const eventsBefore = ledger.acceptedEvents(graphId).length;
         const dispatchesBefore = attemptIds(requests);
 
         const overCap = runtime.submit(
-          { nodeId: "review", outcomeId: "revise" },
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
           NOW + 4,
         );
         expect(overCap.kind).toBe("refused");
@@ -850,11 +957,14 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
   it("advances every group that declares the continuation and binds the tightest cap", async () => {
     await withHarness(
       sharedContinuationDeclaration(1),
-      async ({ runtime, ledger, graphId, dir }) => {
+      async ({ runtime, ledger, requests, graphId, dir }) => {
         runtime.start(NOW);
-        runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 1);
+        runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+          NOW + 1,
+        );
         const firstRevision = runtime.submit(
-          { nodeId: "review", outcomeId: "revise" },
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
           NOW + 2,
         );
         expect(firstRevision.kind).toBe("accepted");
@@ -865,12 +975,15 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
           "b-loose": 1,
         });
 
-        runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 3);
+        runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
+          NOW + 3,
+        );
         const before = runtime.state();
         const receiptsBefore = await countTable(dir, "ledger_receipts");
         const eventsBefore = ledger.acceptedEvents(graphId).length;
         const overCap = runtime.submit(
-          { nodeId: "review", outcomeId: "revise" },
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
           NOW + 4,
         );
         expect(overCap.kind).toBe("refused");
@@ -884,6 +997,387 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore);
       },
     );
+  });
+});
+
+// ── Attempt credentials ─────────────────────────────────────────────────────
+
+describe("OutcomeGraphRuntime — an attempt is named by the credential it was issued", () => {
+  it("persists the credential on the attempt entry and keeps it off every other record", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId }) => {
+      const started = runtime.start(NOW);
+      expect(started.kind).toBe("started");
+      if (started.kind !== "started") return;
+      const request = requests[0];
+      if (request === undefined) throw new Error("fixture: work was not dispatched");
+      // Issued by the runtime: the dispatch request carries it, and the
+      // attempt's own persisted entry records the same value.
+      expect(request.credential).toBe(credentialOf(requests, "work#1"));
+      expect(nodeOf(started.state, "work").attemptCredential).toBe(request.credential);
+
+      const accepted = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: request.credential },
+        NOW + 1,
+      );
+      expect(accepted.kind).toBe("accepted");
+      if (accepted.kind !== "accepted") return;
+      // The SETTLED entry keeps the settling attempt's credential, which is what
+      // lets a repeat resolve to the same attempt and replay its receipt.
+      expect(nodeOf(accepted.state, "work").attemptCredential).toBe(request.credential);
+      expect(nodeOf(accepted.state, "ship").attemptCredential).toBe(
+        credentialOf(requests, "ship#2"),
+      );
+
+      // The credential lives in the state row and travels over the dispatch
+      // seam; it is in no receipt, no accepted event and no effect payload.
+      const effects = ledger.pendingEffects(graphId);
+      expect(effects).toHaveLength(1);
+      expect(fieldOf(effects[0]?.payload, "credential")).toBeUndefined();
+      expect(JSON.stringify(effects[0]?.payload)).not.toContain(request.credential);
+      const receipt = ledger.lookupReceipt({
+        graphId,
+        attemptId: "work#1",
+        submissionId: accepted.receipt.submissionId,
+      });
+      expect(JSON.stringify(receipt)).not.toContain(request.credential);
+      expect(JSON.stringify(ledger.acceptedEvents(graphId))).not.toContain(
+        request.credential,
+      );
+      expect(JSON.stringify(ledger.readGraphState(graphId)?.body)).toContain(
+        request.credential,
+      );
+
+      // A recovery report names the armed attempt but never its capability.
+      const resumed = runtime.resume(NOW + 2);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+      expect(resumed.armed.map((node) => node.attemptId)).toEqual(["ship#2"]);
+      expect(JSON.stringify(resumed.armed)).not.toContain(request.credential);
+      expect(JSON.stringify(resumed.refusals)).not.toContain(request.credential);
+    });
+  });
+
+  it("refuses a late submission for a superseded attempt instead of re-binding it", async () => {
+    await withHarness(loopDeclaration(3), async ({ runtime, ledger, requests, graphId, dir }) => {
+      runtime.start(NOW);
+      const firstCredential = credentialOf(requests, "work#1");
+      const accepted = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: firstCredential },
+        NOW + 1,
+      );
+      expect(accepted.kind).toBe("accepted");
+      if (accepted.kind !== "accepted") return;
+      const revised = runtime.submit(
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
+        NOW + 2,
+      );
+      expect(revised.kind).toBe("accepted");
+      if (revised.kind !== "accepted") return;
+      // The loop re-armed work on a NEW attempt with a NEW credential.
+      expect(nodeOf(revised.state, "work")).toMatchObject({
+        status: "dispatched",
+        attemptId: "work#3",
+      });
+      const current = nodeOf(revised.state, "work").attemptCredential;
+      expect(current).toBeDefined();
+      expect(current).not.toBe(firstCredential);
+
+      const before = runtime.state();
+      const receiptsBefore = await countTable(dir, "ledger_receipts");
+      const eventsBefore = ledger.acceptedEvents(graphId).length;
+
+      // THE DEFECT: the same late message that was accepted for work#1 (same
+      // node, same outcome, same content) arrives after the loop re-armed work.
+      const late = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: firstCredential },
+        NOW + 3,
+      );
+      expect(late.kind).toBe("refused");
+      if (late.kind !== "refused") return;
+      expect(late.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-unknown",
+      ]);
+      expect(late.refusals[0]?.path).toBe("$.credential");
+
+      // Nothing moved: work#3 is still the attempt in flight and unsettled, no
+      // new receipt exists, and work#1's own settlement was not rewound either.
+      expect(runtime.state()).toEqual(before);
+      const after = runtime.state();
+      if (after === undefined) throw new Error("fixture: the state row is missing");
+      expect(nodeOf(after, "work")).toMatchObject({
+        status: "dispatched",
+        attemptId: "work#3",
+      });
+      expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
+      expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore);
+      expect(
+        ledger
+          .acceptedEvents(graphId)
+          .map((event) => event.attemptId)
+          .sort(),
+      ).toEqual(["review#2", "work#1"]);
+
+      // SELF-CHECK EVIDENCE: the final state and ledger rows the refusal left
+      // behind (no credential value is printed).
+      console.log(
+        "[probe:late-credential] state=" +
+          stateSummary(runtime.state()) +
+          " receipts=" +
+          (await countTable(dir, "ledger_receipts")) +
+          " events=[" +
+          ledger
+            .acceptedEvents(graphId)
+            .map((event) => event.attemptId)
+            .sort()
+            .join(", ") +
+          "]",
+      );
+    });
+  });
+
+  it("refuses a missing, tampered or otherwise node's credential without writing", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId, dir }) => {
+      runtime.start(NOW);
+      const workCredential = credentialOf(requests, "work#1");
+      const before = runtime.state();
+      const receiptsBefore = await countTable(dir, "ledger_receipts");
+
+      // (a) no credential at all: the refusal names the missing field, and the
+      // runtime never derives one from the node id.
+      const missing = runtime.submit({ nodeId: "work", outcomeId: "done" }, NOW + 1);
+      expect(missing.kind).toBe("refused");
+      if (missing.kind !== "refused") return;
+      expect(missing.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-missing",
+      ]);
+      expect(missing.refusals[0]?.path).toBe("$.credential");
+
+      // (b) a tampered credential names no recorded attempt.
+      const last = workCredential.slice(-1);
+      const tampered =
+        workCredential.slice(0, -1) + (last === "a" ? "b" : "a");
+      const bad = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: tampered },
+        NOW + 2,
+      );
+      expect(bad.kind).toBe("refused");
+      if (bad.kind !== "refused") return;
+      expect(bad.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-unknown",
+      ]);
+
+      // (c) another node's credential is never re-aimed at this one.
+      const crossNode = runtime.submit(
+        { nodeId: "ship", outcomeId: "delivered", credential: workCredential },
+        NOW + 3,
+      );
+      expect(crossNode.kind).toBe("refused");
+      if (crossNode.kind !== "refused") return;
+      expect(crossNode.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-node-mismatch",
+      ]);
+      expect(crossNode.refusals[0]?.path).toBe("$.credential");
+
+      expect(runtime.state()).toEqual(before);
+      expect(ledger.acceptedEvents(graphId)).toHaveLength(0);
+      expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
+
+      // SELF-CHECK EVIDENCE: all three probes above left the state and the
+      // ledger exactly as they found them.
+      console.log(
+        "[probe:missing-tampered-cross-node] state=" +
+          stateSummary(runtime.state()) +
+          " receipts=" +
+          (await countTable(dir, "ledger_receipts")) +
+          " events=" +
+          ledger.acceptedEvents(graphId).length,
+      );
+    });
+  });
+
+  it("still refuses an attempt id the caller supplies beside a valid credential", async () => {
+    await withHarness(LINEAR, async ({ runtime, requests }) => {
+      runtime.start(NOW);
+      // The credential is accepted as a field; the attempt it belongs to is
+      // still resolved by the runtime, so naming one is an unknown key.
+      const named = runtime.submit(
+        {
+          nodeId: "work",
+          outcomeId: "done",
+          credential: credentialOf(requests, "work#1"),
+          attemptId: "work#3",
+        },
+        NOW + 1,
+      );
+      expect(named.kind).toBe("refused");
+      if (named.kind !== "refused") return;
+      expect(named.refusals.map((refusal) => refusal.code)).toContain(
+        "malformed-proposal",
+      );
+      expect(
+        named.refusals.some((refusal) => refusal.path === "$.attemptId"),
+      ).toBe(true);
+    });
+  });
+
+  it("mints an opaque high-entropy credential per attempt with the default source", async () => {
+    // NO injected source: this is the runtime's own platform-CSPRNG minting.
+    const dir = mkdtempSync(join(tmpdir(), "outcome-runtime-credential-"));
+    let ledger: SqliteAcceptanceLedger | undefined;
+    try {
+      ledger = await SqliteAcceptanceLedger.create(dir);
+      const declared = buildDeclaredOutcomeGraph({ declaration: loopDeclaration(3) });
+      const requests: OutcomeDispatchRequest[] = [];
+      const runtime = new OutcomeGraphRuntime({
+        plan: declared.plan,
+        ledger,
+        dispatch: (request) => {
+          requests.push(request);
+        },
+        validators: EMPTY_VALIDATORS,
+        artifactRoot: dir,
+        clock: () => NOW,
+      });
+      runtime.start(NOW);
+      const first = credentialOf(requests, "work#1");
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: first },
+        NOW + 1,
+      );
+      runtime.submit(
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
+        NOW + 2,
+      );
+      const second = credentialOf(requests, "work#3");
+      // 32 random bytes, hex-encoded: not derivable from the attempt id (the
+      // value is opaque), and two attempts never share one.
+      expect(first).toMatch(/^[0-9a-f]{64}$/);
+      expect(second).toMatch(/^[0-9a-f]{64}$/);
+      expect(first).not.toBe(second);
+    } finally {
+      ledger?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replays a duplicate submission after a restart and never re-binds the credential", async () => {
+    await withHarness(LINEAR, async ({ runtime, plan, ledger, requests, graphId, dir }) => {
+      runtime.start(NOW);
+      const credential = credentialOf(requests, "work#1");
+      const accepted = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential },
+        NOW + 1,
+      );
+      expect(accepted.kind).toBe("accepted");
+      if (accepted.kind !== "accepted") return;
+
+      // RESTART: a fresh runtime over the same durable rows — exactly what a
+      // new process constructs. Nothing about the attempt is re-minted or
+      // re-bound; the credential comes from the persisted state.
+      const restarted = new OutcomeGraphRuntime({
+        plan,
+        ledger,
+        dispatch: () => undefined,
+        validators: EMPTY_VALIDATORS,
+        artifactRoot: dir,
+        clock: () => NOW,
+      });
+      const resumed = restarted.resume(NOW + 2);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+      expect(resumed.armed.map((node) => node.attemptId)).toEqual(["ship#2"]);
+      expect(JSON.stringify(resumed.armed)).not.toContain(credential);
+      expect(nodeOf(resumed.state, "work")).toMatchObject({
+        status: "settled",
+        attemptId: "work#1",
+      });
+
+      const replay = restarted.submit(
+        { nodeId: "work", outcomeId: "done", credential },
+        NOW + 3,
+      );
+      expect(replay.kind).toBe("accepted");
+      if (replay.kind !== "accepted") return;
+      expect(replay.replayed).toBe(true);
+      expect(replay.receipt).toEqual(accepted.receipt);
+      // One settlement, on the original attempt: the duplicate wrote no second
+      // receipt and settled no new attempt.
+      expect(ledger.acceptedEvents(graphId)).toHaveLength(1);
+      expect(ledger.acceptedEvents(graphId)[0]?.attemptId).toBe("work#1");
+
+      // SELF-CHECK EVIDENCE: the restart path's final state and ledger rows.
+      console.log(
+        "[probe:restart-replay] state=" +
+          stateSummary(restarted.state()) +
+          " receipts=" +
+          (await countTable(dir, "ledger_receipts")) +
+          " events=[" +
+          ledger
+            .acceptedEvents(graphId)
+            .map((event) => event.attemptId + ":" + event.outcomeId)
+            .join(", ") +
+          "]",
+      );
+    });
+  });
+
+  it("refuses a version-1 body's in-flight attempt on resume and on submit", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId }) => {
+      runtime.start(NOW);
+      const record = ledger.readGraphState(graphId);
+      if (record === undefined) throw new Error("fixture: the state row is missing");
+      const body = record.body;
+      if (typeof body !== "object" || body === null || Array.isArray(body)) {
+        throw new Error("fixture: the state body is not a record");
+      }
+      const rawNodes = (body as Record<string, unknown>).nodes;
+      if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+      // A body exactly as the build BEFORE credentials wrote it: version 1, no
+      // credential on any attempt.
+      const v1Nodes = rawNodes.map((node) => {
+        if (typeof node !== "object" || node === null) {
+          throw new Error("fixture: a node entry is not a record");
+        }
+        const { attemptCredential: _dropped, ...rest } = node as Record<string, unknown>;
+        return rest;
+      });
+      ledger.writeGraphState({
+        ...record,
+        body: { ...(body as Record<string, unknown>), bodyVersion: 1, nodes: v1Nodes },
+        updatedAt: NOW + 1,
+      });
+      const before = ledger.readGraphState(graphId);
+
+      // RECOVERY refuses the attempt: it is not armed and not launched, because
+      // no submission could ever settle it and recovery never grants a
+      // credential the attempt was not issued.
+      const resumed = runtime.resume(NOW + 2);
+      expect(resumed.kind).toBe("resumed");
+      if (resumed.kind !== "resumed") return;
+      expect(resumed.armed).toEqual([]);
+      expect(resumed.dispatched).toEqual([]);
+      expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-missing",
+      ]);
+      expect(resumed.refusals[0]?.path).toMatch(
+        /^\$\.nodes\[\d+\]\.attemptCredential$/,
+      );
+
+      // SUBMISSION: the credential the worker holds names no recorded attempt,
+      // and the credential-less attempt is never settled in its place.
+      const submitted = runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+        NOW + 3,
+      );
+      expect(submitted.kind).toBe("refused");
+      if (submitted.kind !== "refused") return;
+      expect(submitted.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-unknown",
+      ]);
+
+      // The version-1 row was neither rewritten nor downgraded nor advanced.
+      expect(ledger.readGraphState(graphId)).toEqual(before);
+    });
   });
 });
 

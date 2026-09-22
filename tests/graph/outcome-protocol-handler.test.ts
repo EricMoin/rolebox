@@ -207,25 +207,36 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
         throw new Error("expected OutcomeProtocolUnavailableError, got " + String(caught));
       }
 
-      // 3. RUNS its plan through the outcome run path instead.
+      // 3. RUNS its plan through the outcome run path instead. Each dispatch
+      // hands the worker the attempt credential it must present back.
       const requests: string[] = [];
+      const credentials = new Map<string, string>();
       const runtime = new OutcomeGraphRuntime({
         plan: graph.plan,
         ledger,
         dispatch: (request) => {
           requests.push(request.nodeId + ":" + request.attemptId);
+          credentials.set(request.attemptId, request.credential);
         },
         validators: createValidatorRegistry([]),
         artifactRoot: dir,
         clock: () => NOW,
       });
+      /** The credential one dispatched attempt was handed, for the submission. */
+      const credentialOf = (attemptId: string): string => {
+        const found = credentials.get(attemptId);
+        if (found === undefined) {
+          throw new Error("fixture: no dispatch request for attempt " + attemptId);
+        }
+        return found;
+      };
       const started = runtime.start(NOW);
       expect(started.kind).toBe("started");
       if (started.kind !== "started") return;
       expect(requests).toEqual(["plan:plan#1"]);
 
       const advanced = runtime.submit(
-        { nodeId: "plan", outcomeId: "planned" },
+        { nodeId: "plan", outcomeId: "planned", credential: credentialOf("plan#1") },
         NOW + 1,
       );
       expect(advanced.kind).toBe("accepted");
@@ -233,7 +244,7 @@ describe("a declared graph loads, refuses legacy entry points, and runs its plan
       expect(requests).toEqual(["plan:plan#1", "ship:ship#2"]);
 
       const done = runtime.submit(
-        { nodeId: "ship", outcomeId: "shipped" },
+        { nodeId: "ship", outcomeId: "shipped", credential: credentialOf("ship#2") },
         NOW + 2,
       );
       expect(done.kind).toBe("accepted");

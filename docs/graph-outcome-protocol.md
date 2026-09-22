@@ -792,7 +792,10 @@ C3a DELIVERS THE SUBMISSION AND ACCEPTANCE CORE — proposal, validators and the
 decision/commit path — and NOTHING IS WIRED TO DISPATCH.
 
 `src/graph/outcome/proposal.ts` owns the ONLY shape a worker may supply:
-`{ nodeId, outcomeId, data?, evidenceRefs? }`. It carries no graph, attempt or
+`{ nodeId, outcomeId, data?, evidenceRefs? }` (SUPERSEDED IN PART BY D2, below:
+the shape also carries the runtime-issued `credential`, which is a bearer
+capability the runtime looks up in its own state and NOT an identity a worker
+can choose). It carries no graph, attempt or
 submission identity and no plan revision, so provenance comes from the trusted
 runtime context and impersonating another execution is impossible BY
 CONSTRUCTION rather than by a check a later caller could forget — the shape is
@@ -1014,6 +1017,88 @@ migrator and the `src/graph/persistence/load.ts` module move also remain
 deferred. Legacy v2 graphs keep their file persistence and their run and
 recovery paths unchanged: nothing in C3c alters them.
 
+D2 MAKES ATTEMPT IDENTITY A RUNTIME-ISSUED, ATTEMPT-SCOPED BEARER
+CREDENTIAL — AND RESOLVES A SUBMISSION BY IT, NEVER BY THE NODE.
+
+The defect this closes was reproduced end to end: in a loop graph a late
+submission for `work#1` was accepted, `work` was re-armed as `work#3`, and the
+SAME late message was accepted AGAIN against `work#3`, because identity was
+derived from the node's CURRENT attempt (`state.nodes[i].attemptId`) and the
+submission carried nothing that named an attempt.
+
+`src/graph/outcome/attempt-credential.ts` owns the credential: a high-entropy
+nonce (32 bytes from the platform CSPRNG, hex) minted by the runtime AT ATTEMPT
+CREATION and bound to `graphId + nodeId + attemptId + planRevision +
+permission` (`submit-outcome` is the one permission this protocol issues). The
+nonce is written into that attempt's own state entry — the body carries
+`graphId`/`planRevision`, the entry carries `nodeId`, `attemptId` and the nonce
+— so the binding is reconstructed from the STATE and never from a submission.
+`OutcomeGraphRuntime` injects the runtime source; a test injects a deterministic
+one, and `advanceOutcomeGraph` takes the source as an explicit input (its purity
+is "pure given its inputs").
+
+THE CREDENTIAL TRAVELS ONLY OVER THE DISPATCH CHANNEL. It is a field of
+`OutcomeDispatchRequest` and of nothing else: the dispatch effect PAYLOAD is
+credential-free (a payload that carries one is refused as malformed, because
+this runtime never writes one), a receipt, an accepted event, the armed report
+and the graph state block carry none, the startup sweep reports attempt ids
+only, and no log line in the run path prints it. On resume the credential is
+re-bound FROM THE STATE ENTRY of the attempt the effect names — never from the
+effect, which does not carry it — and a launch that cannot find one is refused
+(`credential-missing`) rather than handed a fresh credential for a new
+execution.
+
+THE RESOLUTION ORDER IS THE RULE. `submit` resolves the credential against the
+persisted state FIRST and only then consults the execution state. A known
+credential binds the submission to exactly the attempt it was issued for; an
+unknown, tampered or superseded one is `credential-unknown` and another node's
+is `credential-node-mismatch` — both with `$.credential` — and the node's
+CURRENT attempt is never substituted. A credential whose attempt is still the
+node's recorded (settled) attempt keeps resolving to it, so a repeated
+submission still replays the persisted receipt; a credential whose attempt a
+loop round has superseded is refused, never accepted against the newer attempt.
+`attemptId`/`submissionId`/`planRevision` remain unknown keys: the credential
+proves possession of an attempt, it does not let a caller name one.
+
+THE PROPOSAL CARRIES THE CREDENTIAL, SO THE DIGEST COVERS IT.
+`OutcomeProposal` gains an OPTIONAL `credential` (closed shape, non-empty
+string, `$.credential`); normalization and `proposalDigest` include it when
+present, so two submissions that differ only in their credential are different
+submissions and an old credential cannot collide with the receipt committed
+without it. Absent is legal at the shape gate because whether a submission may
+proceed without one is the RUN PATH's refusal (`credential-missing`), not a
+shape question. The acceptance core neither reads nor needs it: the runtime
+hands it the attempt it resolved.
+
+BODY VERSION 2 ADDS THE FIELD, AND VERSION 1 STAYS READABLE.
+`attemptCredential` is required on a `dispatched`/`settled` node entry of body
+version 2 and forbidden on a `pending` one; version 1 (the previous layout) is
+still installed as a reader because its bodies are well-formed snapshots — but
+an ATTEMPT a version-1 body records carries no credential, so recovery refuses
+to launch it and reports it as refused instead of armed, a submission for it is
+`credential-unknown`, and the reducer refuses to advance a state that cannot
+carry a credential (`unsupported-state-version`). There is no migrator: a
+credential is issued once, at dispatch, and one invented on read would be a
+capability the worker does not hold.
+
+WHAT A BEARER CREDENTIAL PROVES — STATED HONESTLY. It proves POSSESSION of the
+nonce: guessing it is infeasible, and it cannot be re-aimed at another attempt
+because the binding is checked against the runtime's own state. It does NOT
+prove that the presenter is the original worker: whoever can read the dispatch
+channel holds the same bearer token and is indistinguishable. Issuance and
+storage sit inside the runtime boundary the dispatched worker cannot rewrite
+(the worker receives the nonce; it holds no handle to the state row that binds
+it). A trusted host invocation context (session, agent) can only ADD a
+constraint — this build records none on an attempt and therefore claims none;
+the core depends on no host.
+
+ENFORCED BY TESTS. A late credential across a loop round is refused (the
+reproduced defect), a cross-node credential is refused, a tampered credential is
+refused, a duplicate after a restart replays its original receipt and settles no
+new attempt, a version-1 attempt is refused on recovery and on submission, and
+the credential is shown present in the state row and absent from the effect
+payload, the receipt, the accepted event and the recovery report.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |
@@ -1070,6 +1155,7 @@ CompiledPlan[graphId, planRevision]
 Attempt[graphId, attemptId]
   planRevision
   nodeId
+  attemptCredential (runtime-issued nonce, scope-bound to this attempt)
 
 Receipt[graphId, attemptId, submissionId]
   planRevision

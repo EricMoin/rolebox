@@ -24,6 +24,7 @@ import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { engineStateDir } from "../../src/graph/engine/engine-persistence.ts";
+import { buildEngineGraphStateBlock } from "../../src/graph/engine/graph-state-block.ts";
 import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
 import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { proposalDigest } from "../../src/graph/outcome/proposal.ts";
@@ -122,6 +123,24 @@ function recorder(into: OutcomeDispatchRequest[]) {
   };
 }
 
+/** The credential one dispatched attempt carried, failing when it never ran. */
+function credentialOf(
+  requests: readonly OutcomeDispatchRequest[],
+  attemptId: string,
+): string {
+  const found = requests.find((request) => request.attemptId === attemptId);
+  if (found === undefined) {
+    throw new Error(
+      "fixture: no dispatch request for attempt " +
+        attemptId +
+        " (dispatched: " +
+        requests.map((request) => request.attemptId).join(", ") +
+        ")",
+    );
+  }
+  return found.credential;
+}
+
 /** Run the startup sweep against one temp workspace. */
 function sweep(
   dir: string,
@@ -183,11 +202,14 @@ describe("graph_submit_outcome — the vertical path", () => {
     expect(first.outcomeProtocol?.dispatched).toEqual([graphId + ":work#1"]);
     expect(startRequests.map((request) => request.attemptId)).toEqual(["work#1"]);
 
-    // The worker reports its outcome through the model-facing ingress.
+    // The worker reports its outcome through the model-facing ingress, carrying
+    // back the credential its dispatch request handed it.
+    const workCredential = credentialOf(startRequests, "work#1");
     const accepted: GraphSubmitOutcomeResult = await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
     });
     expect(accepted.decision).toBe("accepted");
     expect(accepted.verdict).toBe("committed");
@@ -196,8 +218,25 @@ describe("graph_submit_outcome — the vertical path", () => {
     // Runtime provenance: the submission id is the canonical digest, and the
     // successor was launched in-process through the toolset's seam.
     expect(accepted.submission_id).toBe(
-      "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+      "submission:" +
+        proposalDigest({ nodeId: "work", outcomeId: "done", credential: workCredential }),
     );
+    // The result does not echo the capability back into the transcript.
+    expect(JSON.stringify(accepted)).not.toContain(workCredential);
+
+    // The SHARED context block renders legacy engine state only — a declared
+    // (outcome) graph has no legacy runtime — and graph_status refuses it
+    // outright, so neither surface can carry the credential.
+    const liveStates = ts.liveEngineStates();
+    expect(liveStates).toEqual([]);
+    expect(buildEngineGraphStateBlock(liveStates)).not.toContain(workCredential);
+    let statusError: unknown;
+    try {
+      ts.graph_status({ graph_id: graphId });
+    } catch (error) {
+      statusError = error;
+    }
+    expect(statusError).toBeInstanceOf(OutcomeProtocolUnavailableError);
     expect(accepted.settled_nodes).toEqual(["work"]);
     expect(accepted.phase).toBe("executing");
     expect(accepted.refusals).toEqual([]);
@@ -208,6 +247,7 @@ describe("graph_submit_outcome — the vertical path", () => {
       graph_id: graphId,
       node_id: "ship",
       outcome_id: "delivered",
+      credential: credentialOf(toolRequests, "ship#2"),
     });
     expect(last.decision).toBe("accepted");
     expect(last.phase).toBe("complete");
@@ -240,15 +280,19 @@ describe("graph_submit_outcome — the vertical path", () => {
     const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
 
     // A caller CAN put these keys on the object it passes (the toolset method
-    // reads only graph_id / node_id / outcome_id / data / evidence_refs). Every
-    // forged value is wrong on purpose.
+    // reads only graph_id / node_id / outcome_id / credential / data /
+    // evidence_refs). Every forged value is wrong on purpose; the credential is
+    // the one it genuinely holds, and it still cannot name the attempt.
+    const workCredential = credentialOf(startRequests, "work#1");
     const forged = {
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
       attempt_id: "forged-attempt",
       submission_id: "forged-submission",
       plan_revision: "forged-revision",
@@ -258,7 +302,8 @@ describe("graph_submit_outcome — the vertical path", () => {
     expect(first.plan_revision).toBe(declared.plan_revision);
     expect(first.attempt_id).toBe("work#1");
     expect(first.submission_id).toBe(
-      "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+      "submission:" +
+        proposalDigest({ nodeId: "work", outcomeId: "done", credential: workCredential }),
     );
 
     // The receipt is stored under the DERIVED key, and the state is bound to the
@@ -269,7 +314,8 @@ describe("graph_submit_outcome — the vertical path", () => {
         graphId,
         attemptId: "work#1",
         submissionId:
-          "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+          "submission:" +
+          proposalDigest({ nodeId: "work", outcomeId: "done", credential: workCredential }),
       });
       expect(receipt?.attemptId).toBe("work#1");
       expect(receipt?.planRevision).toBe(declared.plan_revision);
@@ -302,24 +348,30 @@ describe("graph_submit_outcome — the vertical path", () => {
     const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
+    const workCredential = credentialOf(startRequests, "work#1");
 
-    // "ship" has no attempt in flight yet: the runtime refuses rather than
-    // settling an execution that does not exist.
+    // "ship" has no attempt in flight, and work's credential is never re-aimed
+    // at it.
     const refused = await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "ship",
       outcome_id: "delivered",
+      credential: workCredential,
     });
     expect(refused.decision).toBeUndefined();
-    expect(refused.refusals.map((entry) => entry.code)).toContain("node-not-dispatched");
-    expect(refused.refusals[0]?.message).toContain("ship");
+    expect(refused.refusals.map((entry) => entry.code)).toEqual([
+      "credential-node-mismatch",
+    ]);
+    expect(refused.refusals[0]?.path).toBe("$.credential");
 
     // An outcome the node does not declare is refused with its own code.
     const undeclared = await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "ghost",
+      credential: workCredential,
     });
     expect(undeclared.refusals.map((entry) => entry.code)).toContain(
       "undeclared-outcome",
@@ -330,12 +382,39 @@ describe("graph_submit_outcome — the vertical path", () => {
       graph_id: graphId,
       node_id: "",
       outcome_id: "done",
+      credential: workCredential,
     });
     expect(malformed.refusals.map((entry) => entry.code)).toContain(
       "malformed-proposal",
     );
 
-    // Nothing was written by any of the three refusals.
+    // A missing credential is a repairable refusal that names the field.
+    const credentialless = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+    });
+    expect(credentialless.refusals.map((entry) => entry.code)).toEqual([
+      "credential-missing",
+    ]);
+    expect(credentialless.refusals[0]?.path).toBe("$.credential");
+
+    // A tampered credential (same shape, one character changed) names no
+    // recorded attempt.
+    const tamperedValue =
+      workCredential.slice(0, -1) + (workCredential.endsWith("0") ? "1" : "0");
+    expect(tamperedValue).not.toBe(workCredential);
+    const tampered = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+      credential: tamperedValue,
+    });
+    expect(tampered.refusals.map((entry) => entry.code)).toEqual([
+      "credential-unknown",
+    ]);
+
+    // Nothing was written by any of the refusals.
     const ledger = await openLedger(dir);
     try {
       expect(ledger.acceptedEvents(graphId)).toEqual([]);
@@ -360,12 +439,15 @@ describe("graph_submit_outcome — the vertical path", () => {
       supported_validators: [{ validator: GATE_ID, version: GATE_VERSION }],
     });
     const graphId = declared.graph_id;
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
+    const workCredential = credentialOf(startRequests, "work#1");
 
     const rejected = await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
     });
     expect(rejected.decision).toBe("rejected");
     expect(rejected.verdict).toBe("committed");
@@ -393,6 +475,7 @@ describe("graph_submit_outcome — the vertical path", () => {
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
       data: { repaired: true },
     });
     expect(accepted.decision).toBe("accepted");
@@ -490,6 +573,7 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     expect(def).toBeDefined();
     if (def === undefined) return;
     expect(Object.keys(def.args).sort()).toEqual([
+      "credential",
       "data",
       "evidence_refs",
       "graph_id",
@@ -501,22 +585,39 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     expect(def.args.submission_id).toBeUndefined();
     expect(def.args.plan_revision).toBeUndefined();
     expect(def.args.graphId).toBeUndefined();
+    expect(def.args.credential).toBeDefined();
   });
 
   it("executes through the registered tool and renders a legacy refusal as a clear failure", async () => {
     const dir = makeTmpDir("submit-outcome-registered-");
     const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
     const declared = ts.graph_declare({ declaration: LINEAR });
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
     const tools = createGraphTools(undefined, { toolset: ts });
     const def = tools.graph_submit_outcome;
     if (def === undefined) throw new Error("graph_submit_outcome is not registered");
     const out = await def.execute(
-      { graph_id: declared.graph_id, node_id: "work", outcome_id: "done" },
+      {
+        graph_id: declared.graph_id,
+        node_id: "work",
+        outcome_id: "done",
+        credential: credentialOf(startRequests, "work#1"),
+      },
       makeContext(),
     );
     const parsed: unknown = JSON.parse(String(out));
     expect(parsed).toMatchObject({ decision: "accepted", attempt_id: "work#1" });
+
+    // The credential is OPTIONAL at the registered boundary: a call without one
+    // is the structured `credential-missing` refusal, not a schema error.
+    const credentialless = await def.execute(
+      { graph_id: declared.graph_id, node_id: "work", outcome_id: "done" },
+      makeContext(),
+    );
+    expect(JSON.parse(String(credentialless))).toMatchObject({
+      refusals: [{ code: "credential-missing", path: "$.credential" }],
+    });
 
     const legacy = ts.graph_create({ name: "legacy.registered" });
     const failed = await def.execute(
@@ -537,7 +638,8 @@ describe("graph_submit_outcome — registration and completion authority", () =>
     });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
 
     // Every legacy operation refuses the declared graph before touching a node.
     const refusals: unknown[] = [];
@@ -565,6 +667,7 @@ describe("graph_submit_outcome — registration and completion authority", () =>
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: credentialOf(startRequests, "work#1"),
     });
     expect(accepted.decision).toBe("accepted");
     const ledger = await openLedger(dir);

@@ -547,7 +547,9 @@ function createGraphDeclareTool(
  * derives the execution identity, judges the plan's pinned gates and commits
  * the decision atomically with the graph state. The args are the minimum a
  * worker may supply — attempt id, submission id and plan revision are not
- * accepted and cannot be supplied.
+ * accepted and cannot be supplied — plus the attempt credential it was handed
+ * in its dispatch request, which the runtime resolves against the persisted
+ * binding instead of trusting the node id.
  */
 function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
   return defineTool({
@@ -559,9 +561,13 @@ function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
       "identity (graph, attempt, submission) from its own state and the proposal " +
       "digest, runs every acceptance requirement the plan pins, and commits the " +
       "decision together with the graph state. Supply graph_id, node_id, " +
-      "outcome_id and — only if the outcome declares them — data and " +
-      "evidence_refs. Attempt/submission identity and the plan revision are " +
-      "runtime provenance and are not accepted here. A refusal returns structured " +
+      "outcome_id, the attempt credential your dispatch request carried, and — " +
+      "only if the outcome declares them — data and evidence_refs. The " +
+      "credential names the one attempt this submission may settle: the runtime " +
+      "refuses a missing, unknown, tampered or other node's credential instead " +
+      "of falling back to the node's current attempt. Attempt/submission " +
+      "identity and the plan revision are runtime provenance and are not " +
+      "accepted here. A refusal returns structured " +
       "repair diagnostics (refusals) and writes nothing; a rejection returns the " +
       "per-requirement outcomes that failed and leaves the attempt open. A LEGACY " +
       "v2 graph is refused by name — it completes through the legacy signal " +
@@ -579,6 +585,18 @@ function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
         .string()
         .min(1)
         .describe("The outcome id that node declares in the compiled plan."),
+      credential: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "The attempt credential the outcome runtime issued to you in your " +
+            "dispatch request for this node's in-flight attempt. Pass back exactly " +
+            "the value that request carried: it is a bearer capability bound to " +
+            "one attempt, it is never derived from the node id, and a missing, " +
+            "unknown, tampered or other node's credential is refused rather than " +
+            "re-bound to the node's current attempt.",
+        ),
       data: z
         .json()
         .optional()

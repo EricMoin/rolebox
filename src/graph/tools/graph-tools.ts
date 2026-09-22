@@ -1753,13 +1753,14 @@ export class GraphToolSet {
    * ({@link refuseDeclaredGraph}), and no severity-ranked signal is read, merged
    * or synthesized into an answer here.
    *
-   * The caller supplies the minimum a worker knows: graph, node, outcome,
-   * optional data, optional evidence references. Attempt id, submission id and
-   * plan revision are NOT accepted; {@link submitDeclaredOutcome} resolves the
-   * node's contract from the graph's PERSISTED compiled plan and the outcome
-   * runtime derives the execution identity from its own state and the
-   * proposal's canonical digest. An extra key on the caller's object is never
-   * read.
+   * The caller supplies the minimum a worker knows: graph, node, outcome, the
+   * attempt credential its dispatch request carried, optional data, optional
+   * evidence references. Attempt id, submission id and plan revision are NOT
+   * accepted; {@link submitDeclaredOutcome} resolves the node's contract from
+   * the graph's PERSISTED compiled plan and the outcome runtime resolves the
+   * attempt from the credential's persisted binding and derives the submission
+   * id from the proposal's canonical digest. An extra key on the caller's
+   * object is never read.
    *
    * Refusals that must be repaired and retried are RETURNED in the result
    * (`refusals`), together with a rejected decision's per-requirement outcomes.

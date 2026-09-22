@@ -133,6 +133,24 @@ function openLedger(dir: string): Promise<SqliteAcceptanceLedger> {
   return SqliteAcceptanceLedger.create(engineStateDir(dir));
 }
 
+/** The credential one dispatched attempt carried, failing when it never ran. */
+function credentialOf(
+  requests: readonly OutcomeDispatchRequest[],
+  attemptId: string,
+): string {
+  const found = requests.find((request) => request.attemptId === attemptId);
+  if (found === undefined) {
+    throw new Error(
+      "fixture: no dispatch request for attempt " +
+        attemptId +
+        " (dispatched: " +
+        requests.map((request) => request.attemptId).join(", ") +
+        ")",
+    );
+  }
+  return found.credential;
+}
+
 // ── The saved plan is the authority ─────────────────────────────────────────
 
 describe("readPersistedOutcomePlan — the saved plan and its binding", () => {
@@ -198,11 +216,15 @@ describe("outcome-protocol restart recovery", () => {
     expect(startRequests.map((request) => request.attemptId)).toEqual(["work#1"]);
 
     // A worker reports its outcome; the accepted successor is armed with a
-    // durable PENDING dispatch effect.
+    // durable PENDING dispatch effect. The credential is the one the dispatch
+    // request handed it, and the startup report never echoes it.
+    const workCredential = credentialOf(startRequests, "work#1");
+    expect(JSON.stringify(first)).not.toContain(workCredential);
     const accepted = await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
     });
     expect(accepted.decision).toBe("accepted");
 
@@ -252,6 +274,21 @@ describe("outcome-protocol restart recovery", () => {
     } finally {
       after.close();
     }
+
+    // The recovered worker's credential is the one the attempt's STATE ENTRY
+    // records — the launch payload never carried it — so the submission it was
+    // handed settles exactly that attempt and nothing else.
+    const shipCredential = credentialOf(restartRequests, "ship#2");
+    expect(shipCredential.length).toBeGreaterThan(0);
+    expect(shipCredential).not.toBe(workCredential);
+    const settled = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "ship",
+      outcome_id: "delivered",
+      credential: shipCredential,
+    });
+    expect(settled.decision).toBe("accepted");
+    expect(settled.attempt_id).toBe("ship#2");
   });
 
   it("reports a started effect a dead process left behind instead of re-launching it", async () => {
@@ -259,11 +296,13 @@ describe("outcome-protocol restart recovery", () => {
     const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
     await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: credentialOf(startRequests, "work#1"),
     });
 
     // A process began the successor dispatch and died before settling it.
@@ -351,33 +390,40 @@ describe("outcome-protocol restart recovery", () => {
     const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
     const declared = ts.graph_declare({ declaration: LINEAR });
     const graphId = declared.graph_id;
-    await sweep(dir, []);
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
+    const workCredential = credentialOf(startRequests, "work#1");
     const first = await ts.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
     });
     expect(first.verdict).toBe("committed");
 
     // Restart: a new sweep and a NEW toolset with no in-memory declared entry.
-    await sweep(dir, []);
+    const restartRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, restartRequests);
     const restarted = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
     const replay = await restarted.graph_submit_outcome({
       graph_id: graphId,
       node_id: "work",
       outcome_id: "done",
+      credential: workCredential,
     });
     expect(replay.decision).toBe("accepted");
     expect(replay.verdict).toBe("replayed");
     expect(replay.attempt_id).toBe("work#1");
     expect(replay.submission_id).toBe(
-      "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+      "submission:" +
+        proposalDigest({ nodeId: "work", outcomeId: "done", credential: workCredential }),
     );
 
     // One receipt, one accepted event: the replay returned the PERSISTED one
     // instead of writing a second row.
     const submissionId =
-      "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" });
+      "submission:" +
+      proposalDigest({ nodeId: "work", outcomeId: "done", credential: workCredential });
     const ledger = await openLedger(dir);
     try {
       expect(ledger.acceptedEvents(graphId)).toHaveLength(1);
@@ -457,6 +503,60 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
       // The same-version round trip loses nothing: the recovery read and write
       // nothing, and the state row still carries every field it carried.
       expect(storedRecord(after, graphId)).toEqual(started);
+    } finally {
+      after.close();
+    }
+  });
+
+  it("refuses a version-1 body's in-flight attempt instead of arming it", async () => {
+    const dir = makeTmpDir("outcome-recovery-body-v1-");
+    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    const graphId = declared.graph_id;
+    const startRequests: OutcomeDispatchRequest[] = [];
+    await sweep(dir, startRequests);
+
+    // A body exactly as the build BEFORE credentials wrote it: version 1, no
+    // credential on the in-flight attempt.
+    const writer = await openLedger(dir);
+    let rewritten: GraphStateRecord;
+    try {
+      const current = storedRecord(writer, graphId);
+      const body = bodyOf(current);
+      const rawNodes = body.nodes;
+      if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+      const v1Nodes = rawNodes.map((node) => {
+        if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
+        const { attemptCredential: _dropped, ...rest } = node;
+        return rest;
+      });
+      rewritten = {
+        ...current,
+        body: { ...body, bodyVersion: 1, nodes: v1Nodes },
+        updatedAt: NOW + 1,
+      };
+      writer.writeGraphState(rewritten);
+    } finally {
+      writer.close();
+    }
+
+    const requests: OutcomeDispatchRequest[] = [];
+    const report = await sweep(dir, requests);
+    // The attempt is REFUSED by name — not armed, not launched — because no
+    // submission could ever settle it and recovery never grants a credential
+    // the attempt was not issued.
+    expect(report.outcomeProtocol?.resumed).toHaveLength(1);
+    expect(report.outcomeProtocol?.armed).toEqual([]);
+    expect(report.outcomeProtocol?.dispatched).toEqual([]);
+    expect(report.outcomeProtocol?.refused).toHaveLength(1);
+    expect(report.outcomeProtocol?.refused[0]).toContain("[credential-missing]");
+    expect(report.outcomeProtocol?.refused[0]).toContain("no attempt credential");
+    expect(requests).toEqual([]);
+
+    // The version-1 row was neither rewritten nor downgraded nor advanced.
+    const after = await openLedger(dir);
+    try {
+      expect(storedRecord(after, graphId)).toEqual(rewritten);
     } finally {
       after.close();
     }
