@@ -26,12 +26,16 @@
  *    store (`EnginePersistence`, the same version-2 layout and the same loader
  *    gates).
  *
- * THE BOUNDARY, STATED PLAINLY: this build has NO registered handler for the
- * outcome protocol, so a declared graph is NOT runnable. The plan is persisted
- * so the later execution and restart-recovery slices consume THIS record; until
- * then, any attempt to run (or extend) the graph refuses with
- * {@link OutcomeProtocolUnavailableError} instead of falling back to the legacy
- * signal protocol. Nothing here dispatches, reduces, or accepts anything.
+ * THE BOUNDARY, STATED PLAINLY (C3b): the outcome protocol now HAS a registered
+ * handler, and a declared graph runs through the outcome run path
+ * (`src/graph/outcome/runtime.ts`) — entry nodes dispatched from THIS plan,
+ * submissions accepted through the graph-scoped ingress, and the graph state
+ * committed with the acceptance. The plan is persisted so that run path (and the
+ * deferred restart-recovery slice) consumes THIS record. Every LEGACY entry
+ * point still refuses the graph with {@link OutcomeProtocolUnavailableError}
+ * instead of falling back to the legacy signal protocol, and restart recovery
+ * for the outcome protocol is deferred. Nothing HERE dispatches, reduces or
+ * accepts anything: this module only authors, compiles and persists.
  *
  * The state's `graphDeclaration` is a deliberately EMPTY legacy carrier: the
  * v3 declaration is not a v2 declaration, so none is fabricated. The compiled
@@ -124,10 +128,19 @@ export interface GraphDeclareResult {
    * (the B8 "unchanged declaration preserves it" rule).
    */
   preserved: boolean;
-  /** Always false in this build: the outcome protocol has no handler yet. */
-  runnable: false;
-  /** Why it is not runnable — the missing-handler boundary, verbatim. */
-  not_runnable_reason: string;
+  /**
+   * Whether a run path exists for this graph. True since C3b: the outcome
+   * protocol has a registered handler and the graph runs through the
+   * graph-scoped outcome submission ingress — NOT through the legacy signal
+   * entry points, which still refuse it.
+   */
+  runnable: boolean;
+  /**
+   * How the graph runs, verbatim. Names the outcome run path and the boundary
+   * the legacy entry points keep: a caller must never interpret this graph with
+   * severity-ranked signals.
+   */
+  run_path: string;
 }
 
 // ── Refusals ────────────────────────────────────────────────────────────────
@@ -188,9 +201,12 @@ export class GraphDeclareRefusedError extends Error {
 }
 
 /**
- * The one reason a declared graph cannot run yet: this build has no registered
- * handler for the outcome protocol. Phrased here, once, so `graph_declare`'s
- * result and the run refusal cannot drift apart.
+ * Why the outcome protocol is unavailable to a LEGACY entry point.
+ *
+ * Phrased here, once, so `graph_declare`'s result and the legacy refusal cannot
+ * drift apart. Since C3b the graph IS runnable — through the outcome run path —
+ * so this text states the two halves a caller must not confuse: the outcome
+ * path exists, and the legacy signal path stays unreachable for this graph.
  */
 export function outcomeProtocolUnavailableReason(
   graphId: string,
@@ -198,20 +214,25 @@ export function outcomeProtocolUnavailableReason(
 ): string {
   return (
     `graph "${graphId}" is declared under the outcome protocol ` +
-    `(executionProtocolVersion ${OUTCOME_PROTOCOL}) and is NOT runnable: this build has ` +
-    `no registered execution-protocol handler for protocol ${OUTCOME_PROTOCOL} — the ` +
-    `outcome protocol's submission ingress, acceptance reducer and receipt store are ` +
-    `not implemented. Nothing was dispatched. The compiled plan (revision ${planRevision}) ` +
-    `and its binding are persisted for the execution slice that will consume them; this ` +
-    `graph must not fall back to the legacy signal protocol.`
+    `(executionProtocolVersion ${OUTCOME_PROTOCOL}): it runs through the OUTCOME run ` +
+    `path, whose ONLY completion source is the graph-scoped outcome submission that ` +
+    `commits its state with the acceptance. This LEGACY entry point (run, dry-run, ` +
+    `construction, cancel, approve or targeted status) cannot run it: the legacy signal ` +
+    `protocol would interpret completions from severity-ranked signals, which is exactly ` +
+    `what the outcome protocol forbids. Nothing was dispatched. The compiled plan ` +
+    `(revision ${planRevision}) and its binding are the graph's topology authority, and ` +
+    `this graph must never fall back to the legacy signal protocol.`
   );
 }
 
 /**
- * Refusal raised when an operation (run / construct / cancel / status) targets a
- * graph that was DECLARED under the outcome protocol. It names the missing
- * handler and the persisted plan revision, and it is thrown BEFORE any node is
- * touched, so a declared graph can never be dispatched under legacy rules.
+ * Refusal raised when a LEGACY operation (run / construct / cancel / status)
+ * targets a graph DECLARED under the outcome protocol.
+ *
+ * It names the outcome run path that does own the graph and the persisted plan
+ * revision, and it is thrown BEFORE any node is touched, so a declared graph can
+ * never be dispatched under legacy rules. The name says what the caller tried to
+ * use: the outcome protocol is unavailable to THIS entry point.
  */
 export class OutcomeProtocolUnavailableError extends Error {
   readonly graphId: string;
@@ -584,8 +605,8 @@ export function declaredGraphResult(
     contract_bindings: Object.keys(graph.record.nodeBindings).length,
     persisted: options.persisted,
     preserved: options.preserved,
-    runnable: false,
-    not_runnable_reason: outcomeProtocolUnavailableReason(
+    runnable: true,
+    run_path: outcomeProtocolUnavailableReason(
       graph.graphId,
       graph.plan.planRevision,
     ),

@@ -477,11 +477,14 @@ function createGraphDeclareTool(
     description:
       "Declare a graph from a full v3 declaration (JSON text or an already-parsed " +
       "value): parse, compile, and persist the compiled plan with its contract " +
-      "binding and the outcome-protocol identity. NOT RUNNABLE yet — this build has " +
-      "no registered outcome-protocol handler, so graph_run (and every legacy " +
-      "construction/status/cancel call) on a declared graph fails with the " +
-      "missing-handler error and dispatches nothing; the graph never falls back to " +
-      "the legacy signal protocol. A declaration that compiles only as a DRAFT " +
+      "binding and the outcome-protocol identity. The graph runs under the OUTCOME " +
+      "protocol — its declared entry nodes are dispatched from the compiled plan and " +
+      "its outcomes are accepted through the graph-scoped outcome submission, which " +
+      "commits the graph state with the acceptance. It is NOT runnable through the " +
+      "LEGACY entry points: graph_run (and every legacy construction/status/cancel " +
+      "call) on a declared graph fails with the outcome-protocol refusal and " +
+      "dispatches nothing; the graph never falls back to the legacy signal protocol. " +
+      "A declaration that compiles only as a DRAFT " +
       "(acceptance requirements with no resolved validator capability) is refused " +
       "with every unresolved entry named and nothing is persisted; pass " +
       "supported_validators to resolve them. Unknown keys, wrong types and bad loop " +

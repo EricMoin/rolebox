@@ -670,16 +670,18 @@ describe("recoverInterruptedGraphs — storage-format buckets (B stage)", () => 
   });
 });
 
-// ── Execution-protocol bucket (B3): an unregistered protocol is never resumed ─
+// ── Execution-protocol bucket (B3, C3b) ─────────────────────────────────────
 //
 // The sweep reports every non-valid load result by its DIMENSION, so a protocol
 // this build has no handler for lands in failed[] as `unsupported execution`.
-// That is neither a clean resume nor a storage mismatch: the load is refused at
-// the boundary and the file is left exactly as it was, never run under legacy
-// rules and never rewritten to a legacy identity.
+// Since C3b the OUTCOME protocol IS registered, so a declared graph loads as
+// valid — and the sweep still must not resume it: restart recovery for the
+// outcome protocol is a later slice, and the legacy engine must never adopt such
+// a state. It is reported as not resumed, and the file is left exactly as it
+// was: never run under legacy rules and never rewritten to a legacy identity.
 
-describe("recoverInterruptedGraphs — execution-protocol bucket (B3)", () => {
-  it("an unregistered protocol is reported as unsupported execution and never resumed", async () => {
+describe("recoverInterruptedGraphs — execution-protocol bucket (B3, C3b)", () => {
+  it("a registered outcome-protocol state is reported as deferred and never resumed", async () => {
     const dir = makeTmpDir();
     const state = createEngineState(singleNodeDecl("g-proto2"), "g-proto2");
     provision(state);
@@ -705,8 +707,11 @@ describe("recoverInterruptedGraphs — execution-protocol bucket (B3)", () => {
     expect(report.migrationRequired).toEqual([]);
     expect(report.failed).toHaveLength(1);
     expect(report.failed[0]).toContain("engine-proto2.json");
-    // The axis is named, so this cannot read as a storage mismatch.
-    expect(report.failed[0]).toContain("unsupported execution: 2");
+    // C3b: the protocol IS registered, so the bucket names the deferred
+    // recovery rather than a missing handler — and this cannot read as a
+    // storage mismatch.
+    expect(report.failed[0]).toContain("outcome protocol: restart recovery is deferred");
+    expect(report.failed[0]).toContain("not resumed under legacy rules");
     // Refused, not downgraded: the snapshot keeps its protocol identity and
     // was neither hydrated nor rewritten.
     const after: Record<string, unknown> = JSON.parse(readFileSync(path, "utf-8"));

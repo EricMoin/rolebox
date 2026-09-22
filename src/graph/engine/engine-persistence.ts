@@ -88,7 +88,7 @@ import {
 } from "../persistence/storage-format.ts";
 import {
   classifyExecutionProtocol,
-  LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+  DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
   LEGACY_SIGNAL_PROTOCOL,
   type ExecutionProtocolRegistry,
   type ExecutionProtocolVerdict,
@@ -737,9 +737,13 @@ export type EngineLoadDimension =
  *
  * - `valid` — every gate passed; `storageFormat` is the classified format the
  *   state was hydrated from (today always `STORAGE_FORMAT_V2`) and
- *   `executionProtocol` is the bound protocol identity (today always
- *   `LEGACY_SIGNAL_PROTOCOL` — the only registered handler). The hydrated
- *   state carries the same identity explicitly.
+ *   `executionProtocol` is the bound protocol identity. Since C3b the shipped
+ *   registry holds BOTH protocols, so a valid load may be
+ *   `LEGACY_SIGNAL_PROTOCOL` (the legacy run path) or `OUTCOME_PROTOCOL` (the
+ *   outcome run path): the protocol identity is what tells a caller WHICH run
+ *   path may resume the state, and a caller that only knows the legacy one must
+ *   refuse a protocol-2 state rather than adopt it. The hydrated state carries
+ *   the same identity explicitly.
  * - `absent` — no state file exists (ENOENT only). Creation of a graph is a
  *   separate explicit action, never implied by a load.
  * - `corrupt` — a recognized representation violates its schema, required
@@ -2049,7 +2053,7 @@ export function loadEngineStateForResume(
   raw: string,
   _sourceLabel?: string,
   registry: StorageFormatRegistry = DEFAULT_STORAGE_FORMAT_REGISTRY,
-  protocolRegistry: ExecutionProtocolRegistry = LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+  protocolRegistry: ExecutionProtocolRegistry = DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
 ): EngineLoadResult {
   let parsed: unknown;
   try {
@@ -2132,7 +2136,8 @@ export function loadEngineStateForResume(
     if (protocol.kind === "unsupported") {
       // A legal protocol identity with no registered handler: the file is
       // intact but this build has no decision rules for it — refuse, never
-      // substitute the legacy handler.
+      // substitute the legacy handler. (Since C3b the shipped registry holds
+      // both protocols; this arm is what refuses an unregistered future one.)
       return {
         kind: "unsupported",
         dimension: "execution",

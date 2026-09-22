@@ -74,6 +74,7 @@ import {
   clonePersistedCompiledPlan,
   clonePlanBinding,
 } from "./engine-persistence.ts";
+import { LEGACY_SIGNAL_PROTOCOL } from "../protocol/execution-protocol.ts";
 import type { GraphEventRecorder } from "./graph-events.ts";
 import {
   executeLoopStep,
@@ -141,14 +142,29 @@ export interface RecoveryReport {
    *   dispatched ready nodes, so the graph is runnable, but some `running`
    *   nodes may not have been reconciled. {@link reconcileError} carries the
    *   error text.
+   * - `protocol_refused` — a valid persisted record exists, but it is bound to
+   *   an execution protocol this LEGACY recovery path does not own
+   *   ({@link executionProtocol} names it). Since C3b the shipped loader BINDS
+   *   the outcome protocol through a registered handler, so such a record loads
+   *   as `valid`; adopting it here would run a declared graph under legacy
+   *   signal rules, and restart recovery for the outcome protocol is a later
+   *   slice. Nothing is adopted, dispatched or written — the record is
+   *   preserved exactly as it is.
    */
-  status: "no_state" | "recovered" | "degraded";
+  status: "no_state" | "recovered" | "degraded" | "protocol_refused";
   /**
    * Error text of the failed reconcile pass — present exactly when `status` is
    * `degraded`. Read by the startup sweep, which reports it in
    * `RecoveryStartupReport.degraded`.
    */
   reconcileError?: string;
+  /**
+   * The execution protocol the persisted record is bound to — present exactly
+   * when `status` is `protocol_refused`. The identity is what tells a caller
+   * WHICH run path owns the record; this legacy path owns
+   * {@link LEGACY_SIGNAL_PROTOCOL} alone.
+   */
+  executionProtocol?: number;
 }
 
 /**
@@ -188,15 +204,21 @@ export interface EngineRuntime {
    * Rebuilds the frontier and drains the deferred completions. A no-op when no
    * persisted state exists (first run) or no persistence is configured.
    *
+   * A persisted record bound to an execution protocol this LEGACY recovery path
+   * does not own (since C3b: the outcome protocol) is REFUSED, never adopted:
+   * the report answers `protocol_refused` and nothing is adopted, dispatched or
+   * written (see {@link RecoveryReport}).
+   *
    * Rejects when the persisted state file exists but cannot be read (any
    * non-ENOENT read failure): an unreadable state file is an explicit error,
    * never a silent clean start (review 05-F6/L22).
    *
    * @returns a {@link RecoveryReport}: `no_state` (nothing adopted),
-   *   `recovered` (adopted + reconciled), or `degraded` (adopted, but the
-   *   reconcile pass threw — the error text is in `reconcileError`). A failed
-   *   reconcile never rejects: it is contained so the rest of recovery still
-   *   runs, and reported instead of only logged.
+   *   `recovered` (adopted + reconciled), `degraded` (adopted, but the
+   *   reconcile pass threw — the error text is in `reconcileError`), or
+   *   `protocol_refused` (the record belongs to another execution protocol).
+   *   A failed reconcile never rejects: it is contained so the rest of recovery
+   *   still runs, and reported instead of only logged.
    */
   recover(): Promise<RecoveryReport>;
 
@@ -1228,11 +1250,14 @@ class EngineRuntimeImpl implements EngineRuntime {
    * Resume an interrupted graph instance (engine-state-machine.md §5.1 /
    * failure-resilience.md §5.1-§5.6):
    *
-   * 1. Load the persisted state — a missing/corrupt/version-mismatched file
-   *    returns `null` and recovery is a clean no-op (first run). A non-ENOENT
-   *    read failure (unreadable-but-present file) propagates out of `recover()`
-   *    — recovery fails explicitly instead of silently re-provisioning a graph
-   *    whose completed nodes would be re-executed (review 05-F6/L22).
+   * 1. Load the persisted state — a missing/corrupt/version-mismatched file is
+   *    a clean no-op (first run), and a VALID record bound to a protocol this
+   *    legacy path does not own (since C3b: the outcome protocol) is REFUSED as
+   *    `protocol_refused` without adopting or writing anything (see
+   *    {@link RecoveryReport}). A non-ENOENT read failure (unreadable-but-
+   *    present file) propagates out of `recover()` — recovery fails explicitly
+   *    instead of silently re-provisioning a graph whose completed nodes would
+   *    be re-executed (review 05-F6/L22).
    * 2. Adopt the loaded state in place (the advance engine keeps referencing
    *    this object), clear the stale critical-section state the crashed
    *    process left behind (a stuck `advancingLock`, orphaned deferred
@@ -1253,21 +1278,43 @@ class EngineRuntimeImpl implements EngineRuntime {
   async recover(): Promise<RecoveryReport> {
     // No persistence → nothing to recover.
     if (!this.persistence) return { status: "no_state" };
-    // `load()` returns `null` for a missing / corrupt / version-mismatched
-    // file (clean start — first run) and rethrows any NON-ENOENT read failure
-    // (an unreadable-but-present state file is an explicit error, never a
-    // silent clean start — engine-persistence.ts:571-576). Let that error
-    // propagate: recovery fails explicitly so the caller surfaces it instead
-    // of silently re-provisioning a graph whose completed nodes would be
-    // re-executed (review 05-F6/L22). ENOENT / corrupt / version-mismatch
-    // remain clean no-ops.
-    const loaded = this.persistence.load(this.state.graphId);
+    // `loadForResume()` answers `absent` / `corrupt` / `unsupported` /
+    // `migration-required` for a file that is missing, corrupt or from a
+    // format this build cannot execute (clean start — first run), and rethrows
+    // any NON-ENOENT read failure (an unreadable-but-present state file is an
+    // explicit error, never a silent clean start — engine-persistence.ts:571-576).
+    // Let that error propagate: recovery fails explicitly so the caller
+    // surfaces it instead of silently re-provisioning a graph whose completed
+    // nodes would be re-executed (review 05-F6/L22). Every non-valid kind
+    // remains the same clean no-op `load()` used to project onto `null`.
+    const loaded = this.persistence.loadForResume(this.state.graphId);
     // Clean start (first run / version mismatch).
-    if (!loaded) return { status: "no_state" };
+    if (loaded.kind !== "valid") return { status: "no_state" };
+
+    // C3b: the shipped registry registers the OUTCOME protocol too, so a
+    // DECLARED graph's record loads as `valid`. This LEGACY recovery path owns
+    // protocol 1 alone: adopting that state would re-enter a declared graph
+    // under legacy signal rules — reconciling, re-dispatching and ultimately
+    // REWRITING its persisted body through the legacy writer — and restart
+    // recovery for the outcome protocol is a LATER slice. Refuse the protocol
+    // BEFORE anything is adopted, dispatched or written; the record is
+    // preserved exactly as the declaration wrote it.
+    if (loaded.executionProtocol !== LEGACY_SIGNAL_PROTOCOL) {
+      logWarn(
+        `engine-recover: refused the state of graph "${this.state.graphId}": it is bound to ` +
+          `execution protocol ${loaded.executionProtocol}, which this legacy recovery path does ` +
+          "not own — restart recovery for the outcome protocol is not implemented in this build, " +
+          "and the record was neither adopted nor rewritten",
+      );
+      return {
+        status: "protocol_refused",
+        executionProtocol: loaded.executionProtocol,
+      };
+    }
 
     // Adopt the persisted state in place; clear the crashed process's stale
     // critical-section state (no section is actually running here).
-    hydrateEngineState(this.state, loaded);
+    hydrateEngineState(this.state, loaded.state);
     this.provisioned = true;
     clearStaleCriticalSection(this.state);
 

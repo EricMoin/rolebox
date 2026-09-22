@@ -40,7 +40,10 @@
  *    commit RECHECKS inside the transaction that the proposal digest, the plan
  *    revision and the execution identity still are the ones validation recorded,
  *    and refuses a superseded validation instead of settling a newer execution
- *    with stale evidence.
+ *    with stale evidence. A caller may JOIN that transaction with the graph
+ *    state it reduces from the accepted decision ({@link AcceptanceJoin}): the
+ *    state write commits with the batch, and it is skipped for a replay,
+ *    conflict or settlement so no state advances twice.
  * 6. Return the decision AND the ledger verdict (`committed` / `replayed` /
  *    `conflict` / `settled`), so a repeated identical submission answers with
  *    the SAME persisted decision rather than a second row. Effects may be
@@ -56,9 +59,12 @@
  * what lets the commit refuse a stale validation instead of trusting it.
  *
  * NO EFFECT RUNS HERE. This module records effects; executing them belongs to
- * the effect executor a later slice delivers. Nothing under `src/graph/engine`,
- * `src/graph/tools` or `src/dispatch` imports this module yet: there is no
- * dispatch wiring, no reducer and no engine state in the transaction.
+ * the effect executor a later slice delivers, and the outcome run path
+ * (`src/graph/outcome/runtime.ts`) is the only consumer that reads them back
+ * today. Nothing under `src/graph/engine`, `src/graph/tools` or
+ * `src/dispatch` imports this module: the outcome protocol has its OWN run
+ * path, and the legacy engine keeps deciding completions from severity-ranked
+ * signals exactly as before.
  */
 
 import {
@@ -71,6 +77,7 @@ import {
 import type {
   AcceptanceBatch,
   AcceptanceLedger,
+  AcceptanceLedgerTx,
   CommitResult,
   PendingEffectRecord,
   ReceiptRecord,
@@ -285,6 +292,47 @@ export type SubmissionResult =
       readonly decision: AcceptanceDecision;
       readonly verdict: CommitResult;
     };
+
+// ── Joining the acceptance transaction ──────────────────────────────────────
+
+/**
+ * What an accepted decision produces BESIDES the batch itself.
+ *
+ * Both halves are computed inside the caller's acceptance transaction, against
+ * the state and ledger rows that transaction can see, so the graph state joins
+ * the acceptance instead of landing in a second write a crash could separate.
+ */
+export interface AcceptanceJoinResult {
+  /**
+   * Extra pending effects this acceptance produces (a successor dispatch, for
+   * example). They are stamped with the trusted identity and the clock exactly
+   * like the request's own effects and written into the SAME batch.
+   */
+  readonly effects?: readonly PendingEffectInput[];
+  /**
+   * The extra write that commits with the batch — the graph state. It is
+   * invoked ONLY when the batch actually committed: a `replayed`,
+   * `conflict` or `settled` verdict writes no state, so a repeated submission
+   * cannot advance the state twice. A throw here rolls the whole transaction
+   * back, including the batch the commit just wrote.
+   */
+  readonly settle?: (tx: AcceptanceLedgerTx) => void;
+}
+
+/**
+ * A caller's join into the acceptance transaction.
+ *
+ * Runs INSIDE the transaction, after the live-binding recheck and BEFORE the
+ * batch is written, and ONLY for an ACCEPTED decision — a rejected decision
+ * writes its receipt and changes no state. A throw (a rule violation, a state
+ * that cannot be stored) propagates out of `runInTransaction` with the whole
+ * transaction rolled back, so the caller's refusal and the acceptance can never
+ * disagree about what was written.
+ */
+export type AcceptanceJoin = (
+  tx: AcceptanceLedgerTx,
+  decision: AcceptanceDecision,
+) => AcceptanceJoinResult;
 
 // ── Step 1: the refusal gates ───────────────────────────────────────────────
 
@@ -592,9 +640,15 @@ type CommitAttempt =
  *
  * Accepted: receipt + accepted event + every pending effect in one batch.
  * Rejected: the receipt ONLY — no event, so the attempt stays open.
+ *
+ * The optional `join` runs inside that same transaction, after the recheck and
+ * before the batch is written, and is where a caller's graph state joins the
+ * acceptance: its effects are written into the batch, and its `settle` write
+ * runs only after the batch actually committed. See {@link AcceptanceJoin}.
  */
 export function commitSubmission(
   request: CommitSubmissionRequest,
+  join?: AcceptanceJoin,
 ): SubmissionResult {
   const validation = request.validation;
   if (validation.kind === "refused") {
@@ -624,6 +678,14 @@ export function commitSubmission(
       decision: decision.kind,
       committedAt: now,
     });
+    // The join is computed INSIDE the transaction, before the batch exists, so
+    // the state it reduces is the state the committing transaction sees and a
+    // rule violation rolls back before anything is written. It is skipped for a
+    // rejected decision: a receipt-only commit changes no graph state.
+    const joined =
+      decision.kind === "accepted" && join !== undefined
+        ? join(tx, decision)
+        : undefined;
     const batch: AcceptanceBatch =
       decision.kind === "accepted"
         ? {
@@ -636,10 +698,16 @@ export function commitSubmission(
               outcomeId: decision.outcomeId,
               acceptedAt: now,
             }),
-            effects,
+            effects: [...effects, ...pendingEffectsOf(joined?.effects, identity, now)],
           }
         : { receipt };
-    return { kind: "committed", verdict: tx.commitAccepted(batch) };
+    const verdict = tx.commitAccepted(batch);
+    // The state joins only a batch that actually COMMITTED: a replay, conflict
+    // or settlement must not advance the state a second time.
+    if (verdict.kind === "committed" && joined?.settle !== undefined) {
+      joined.settle(tx);
+    }
+    return { kind: "committed", verdict };
   });
 
   if (attempt.kind === "stale") {
@@ -657,7 +725,10 @@ export function commitSubmission(
  * The same request object is handed to both phases, so the commit's recheck
  * passes by construction for a caller that changes nothing between them.
  */
-export function submitOutcome(request: SubmissionRequest): SubmissionResult {
+export function submitOutcome(
+  request: SubmissionRequest,
+  join?: AcceptanceJoin,
+): SubmissionResult {
   const validation = validateSubmission({
     plan: request.plan,
     submittedPlanRevision: request.submittedPlanRevision,
@@ -668,7 +739,7 @@ export function submitOutcome(request: SubmissionRequest): SubmissionResult {
     effects: request.effects,
     now: request.now,
   });
-  return commitSubmission({ ...request, validation });
+  return commitSubmission({ ...request, validation }, join);
 }
 
 // ── Commit helpers ──────────────────────────────────────────────────────────

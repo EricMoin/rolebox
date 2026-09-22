@@ -1698,11 +1698,12 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     expect(result.contract_bindings).toBe(0);
     expect(result.persisted).toBe(true);
     expect(result.preserved).toBe(false);
-    // The boundary is REPORTED, not merely enforced elsewhere.
-    expect(result.runnable).toBe(false);
-    expect(result.not_runnable_reason).toMatch(
-      /no registered execution-protocol handler/,
-    );
+    // The boundary is REPORTED, not merely enforced elsewhere: the graph IS
+    // runnable through the outcome run path, and the legacy entry points stay
+    // refused for it.
+    expect(result.runnable).toBe(true);
+    expect(result.run_path).toMatch(/OUTCOME run path/);
+    expect(result.run_path).toMatch(/LEGACY entry point/);
 
     // The REGISTERED runtime state carries the plan, binding and protocol...
     const registered = ts["declaredGraphs"].get("declared-graph");
@@ -2125,7 +2126,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     expect(state?.planBinding?.nodeBindings["plan"]).toEqual(ref);
   });
 
-  it("refuses to run a declared graph: the missing-handler error, nothing dispatched", async () => {
+  it("refuses to run a declared graph through the legacy entry points, dispatching nothing", async () => {
     const dispatch = new CountingDispatch();
     const ts = new GraphToolSet({ dispatch });
     const declared = ts.graph_declare({ declaration: v3Declaration() });
@@ -2141,7 +2142,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     }
     expect(caught.graphId).toBe("declared-graph");
     expect(caught.planRevision).toBe(declared.plan_revision);
-    expect(caught.message).toMatch(/no registered execution-protocol handler/);
+    expect(caught.message).toMatch(/runs through the OUTCOME run path/);
     expect(caught.message).toMatch(/executionProtocolVersion 2/);
     // NO node was dispatched, and the legacy protocol was never substituted.
     expect(dispatch.calls).toBe(0);
@@ -2149,15 +2150,15 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     // dry_run refuses too (there is nothing this build can validate/run).
     await expect(
       ts.graph_run({ graph_id: "declared-graph", dry_run: true }),
-    ).rejects.toThrow(/no registered execution-protocol handler/);
+    ).rejects.toThrow(/runs through the OUTCOME run path/);
     expect(dispatch.calls).toBe(0);
 
     // The construction / observability surface refuses the same way.
     expect(() =>
       ts.graph_add_node({ graph_id: "declared-graph", id: "x", agent: "a", prompt: "p" }),
-    ).toThrow(/no registered execution-protocol handler/);
+    ).toThrow(/runs through the OUTCOME run path/);
     expect(() => ts.graph_status({ graph_id: "declared-graph" })).toThrow(
-      /no registered execution-protocol handler/,
+      /runs through the OUTCOME run path/,
     );
     await expect(
       ts.graph_approve({
@@ -2165,7 +2166,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
         node_id: "plan",
         action: "approve",
       }),
-    ).rejects.toThrow(/no registered execution-protocol handler/);
+    ).rejects.toThrow(/runs through the OUTCOME run path/);
     expect(dispatch.calls).toBe(0);
   });
 
@@ -2177,7 +2178,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     // A declared graph exists in the SAME toolset, and refuses to run.
     const declared = ts.graph_declare({ declaration: v3Declaration() });
     await expect(ts.graph_run({ graph_id: "declared-graph" })).rejects.toThrow(
-      /no registered execution-protocol handler/,
+      /runs through the OUTCOME run path/,
     );
 
     // The legacy graph runs exactly as before: the node dispatches and completes.
@@ -2187,7 +2188,8 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     expect(state.phase).toBe("complete");
     expect(state.nodes.get("A")?.status).toBe("completed");
 
-    // The declared graph is registered but still NOT runnable.
+    // The declared graph is registered and runnable through the OUTCOME run
+    // path; only the legacy entry points above refuse it.
     expect(ts["declaredGraphs"].get("declared-graph")?.graph.plan.planRevision).toBe(
       declared.plan_revision,
     );
@@ -2274,7 +2276,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
     expect(existsSync(engineStatePath(stateDir, "a b-2"))).toBe(true);
   });
 
-  it("names the missing handler when a persisted declared graph is run after a restart", async () => {
+  it("names the outcome run path when a persisted declared graph is run after a restart", async () => {
     const stateDir = tempDir("graph-declare-restart-run-");
     const first = createGraphToolSet({ stateDir });
     const declared = first.graph_declare({ declaration: v3Declaration() });
@@ -2293,7 +2295,7 @@ describe("graph_declare — v3 declaration ingress (C1)", () => {
       );
     }
     expect(caught.planRevision).toBe(declared.plan_revision);
-    expect(caught.message).toMatch(/no registered execution-protocol handler/);
+    expect(caught.message).toMatch(/runs through the OUTCOME run path/);
     // The legacy signal protocol was never substituted: nothing dispatched.
     expect(dispatch.calls).toBe(0);
   });

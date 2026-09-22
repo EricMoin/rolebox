@@ -695,6 +695,12 @@ as `"a/b"` and `"a b"` sharing one state file) is treated as reserved too. A
 legacy record this build can resume is deliberately NOT a reservation, so
 same-id legacy resume is unchanged.
 
+(SUPERSEDED BY C3b, below. The paragraph that follows describes the C1
+boundary; C3b registers the outcome handler, so a declared graph LOADS as valid
+and RUNS through the outcome run path. The part that still holds exactly as
+written is the legacy entry-point refusal — and restart recovery remains
+deferred.)
+
 A DECLARED GRAPH IS DELIBERATELY NOT RUNNABLE. This build registers exactly one
 execution-protocol handler (protocol 1), so the loader refuses a persisted
 protocol-2 state as `unsupported(execution)` before hydration: the declaration
@@ -710,7 +716,10 @@ protocol. `graph_declare` also returns the plan revision with
 `runnable: false` and the same reason, so the boundary is visible to the
 caller, not only enforced.
 
-DEFERRED by this slice, and not implied by it: the entire outcome EXECUTION
+DEFERRED by this slice, and not implied by it (the execution path's CORE — the
+run path, the reducer and the state's place in the acceptance transaction — is
+delivered by C3b below; the model-facing `submit_outcome` tool, effect
+execution and restart recovery stay deferred): the entire outcome EXECUTION
 path — the graph-scoped `submit_outcome` ingress, protocol/contract validation,
 evidence validators, the deterministic reducer, the atomic acceptance/receipt
 store with its idempotency keys, effect execution, and restart recovery
@@ -763,9 +772,10 @@ are BOOKKEEPING ONLY and are never executed here: a restart is a read, and
 EXTENSION POINT for the single atomic boundary the protocol requires —
 acceptance receipt + accepted event + engine state change + pending effects in
 ONE transaction — and it exposes the same read/write surface inside the
-caller's transaction. THE ENGINE STATE DOES NOT YET JOIN IT: the callback's
+caller's transaction. THE ENGINE STATE DOES NOT YET JOIN IT (SUPERSEDED BY C3b:
+`writeGraphState` now joins the acceptance transaction): the callback's
 transaction and its rollback are real, but only the ledger's own tables are
-written through it today.
+written through it in C2.
 
 DEFERRED by this slice, and not implied by it: the entire outcome EXECUTION
 path — the graph-scoped `submit_outcome` ingress, protocol/contract validation,
@@ -836,16 +846,95 @@ execution — and deliberately not the validator registry, the artifact root or
 the clock, which are caller-supplied infrastructure rather than part of what the
 submission IS.
 
-DEFERRED by this slice, and not implied by it: dispatch wiring, the deterministic
+DEFERRED by this slice, and not implied by it (the deterministic reducer and the
+engine state's place in the acceptance transaction are DELIVERED BY C3b, below;
+the rest stays deferred): dispatch wiring, the deterministic
 reducer and the engine state's place in the acceptance transaction, the
 model-facing `submit_outcome` tool and its generated schema, effect execution,
 restart recovery switched onto the persisted plan and its ledger, the
 protocol-aware dispatch completion bridge, storage format 3 with its `2 -> 3`
-migrator, and the schema, command-check and approval validators. Nothing under
-`src/graph/engine`, `src/graph/tools` or `src/dispatch` imports the new modules,
-and the outcome protocol still has no registered handler: a declared graph
-remains un-runnable and the acceptance core is a decision no runtime consumes
-yet.
+migrator, and the schema, command-check and approval validators. In the C3a
+build nothing under `src/graph/engine`, `src/graph/tools` or `src/dispatch`
+imported the new modules, the outcome protocol had no registered handler, a
+declared graph was un-runnable and the acceptance core was a decision no runtime
+consumed. (C3b, below, supplies the run path and the handler; the model-facing
+tool and restart recovery stay deferred.)
+
+C3b MAKES OUTCOME-PROTOCOL GRAPHS RUN, WITH THEIR STATE IN THE ACCEPTANCE
+TRANSACTION.
+
+`src/graph/ledger/types.ts` and `sqlite-ledger.ts` add the GRAPH-STATE seam.
+`GraphStateRecord` — graph id, plan revision, the state body, updated-at — is
+readable and writable on BOTH the port and the transaction surface
+(`readGraphState` / `writeGraphState`), so a caller's `runInTransaction` writes
+the state snapshot together with the receipt, the accepted event and the pending
+effects instead of beside them. One row per graph; a second write replaces the
+snapshot. The strict format gate is extended to the new table exactly as the
+other tables are guarded — a store missing `ledger_graph_state`, or carrying it
+reshaped, is refused and never recreated — and a state body that cannot be
+stored (unrepresentable as JSON, or beyond `GRAPH_STATE_MAX_BYTES` of encoded
+text) fails the WHOLE transaction: the batch the same transaction already wrote
+rolls back with it, so a half-committed acceptance cannot exist.
+
+`src/graph/outcome/graph-state.ts` owns the state MODEL (`phase`, per-node
+status and attempt, loop traversal counters, the attempt counter), the STRICT
+reader of a persisted record, and the pure reducer. A terminal outcome settles
+its node; any other outcome arms its successors; a declared loop continuation
+advances the counter of EVERY declared group that takes that outcome as its
+continuation and contains the emitting node — a node may belong to several
+groups, so the groups a continuation advances are selected by DECLARATION, never
+by position, and the round is refused when ANY of their hard caps would be
+exceeded; re-entering a settled node is legal only when source and target share
+a declared loop group. Attempt ids are minted from a graph-wide counter the state
+carries — never supplied by a worker — and a settled node keeps the attempt that
+settled it, which is what lets a repeated submission derive the SAME execution
+identity. A state this build cannot read is refused, never reset to a clean
+start.
+
+`src/graph/outcome/runtime.ts` is the RUN PATH of a declared graph.
+`start()` derives the entry nodes from the compiled plan (excluding loop
+continuations, so a two-node loop whose back edge points at its entry is still
+startable), writes the starting snapshot in ONE transaction and then calls the
+dispatch seam. `submit(proposal)` derives the execution identity from its own
+context — graph from the plan, attempt from the state, submission from the
+proposal's canonical digest — and runs the acceptance core with a JOIN into its
+transaction: the accepted decision's successor effects are written into the same
+batch, and its state write runs only after that batch actually committed. A
+duplicate submission therefore derives the same key, replays the persisted
+receipt and advances nothing; a refused proposal and a rejected gate leave the
+graph exactly where it was; a distinct submission for a settled attempt is never
+committed. The core's refusals are returned verbatim as structured repair
+diagnostics.
+
+`src/graph/protocol/execution-protocol.ts` registers the handler LAST.
+`OUTCOME_PROTOCOL_HANDLER` declares what it owns — the accepted-outcome
+submission as the ONLY completion source, the graph-scoped ingress, and legacy
+completion as unreachable — and the shipped
+`DEFAULT_EXECUTION_PROTOCOL_REGISTRY` (now the loader's default) carries it
+beside the legacy marker, so a persisted protocol-2 state loads as valid and
+nothing has to compare a number against a latest-version constant. The runtime
+reads those capabilities BEFORE dispatching and refuses a handler registered
+under 2 that does not declare them. The legacy path stays unreachable for such a
+graph: the toolset's legacy entry points keep refusing, the startup sweep
+reports a protocol-2 state as NOT resumed, and the legacy runtime's OWN resume
+entry — `EngineRuntime.recover()` — refuses a valid record bound to any protocol
+but the legacy one (`status: "protocol_refused"`, carrying the bound identity)
+BEFORE it adopts, dispatches or writes anything. A declared state is therefore
+never re-entered under legacy rules, and the legacy writer never rewrites its
+persisted body. `LEGACY_EXECUTION_PROTOCOL_REGISTRY` remains a legacy-only
+construction, so a caller that must refuse protocol 2 still can.
+
+DEFERRED by this slice, and not implied by it: the model-facing
+`submit_outcome` tool and its generated contract schema (the run path's
+`submit` is a plain programmatic seam), the protocol-aware dispatch COMPLETION
+BRIDGE selection rule (this runtime drives a scripted synchronous dispatch seam
+and performs no completion-bridge selection), effect execution beyond calling
+that seam, restart recovery switched onto the persisted state and its ledger,
+storage format 3 with its `2 -> 3` migrator, the
+`src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
+typed-predicate vocabulary, progress evaluators, and the schema, command-check
+and approval validators. Legacy v2 graphs keep their file persistence and their
+run path unchanged: nothing here imports or alters them.
 
 ### Definitions, locations, and comparison owners
 

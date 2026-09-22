@@ -10,12 +10,15 @@
  * instead of comparing a persisted number with a latest-version constant
  * (docs/graph-outcome-protocol.md § "Version ownership and load contract").
  *
- * Scope of this delivery (B stage, third slice):
+ * Scope of this delivery (B stage, third slice; C3b registers the outcome
+ * handler):
  * - `LEGACY_SIGNAL_PROTOCOL` / `OUTCOME_PROTOCOL` — the two protocol
- *   identities. Only the legacy protocol has a handler: `OUTCOME_PROTOCOL` is
- *   a RESERVED identity, and naming it anywhere does not make outcome
- *   semantics runnable — no compiled outcome plan, submission ingress,
- *   reducer or receipt store exists yet.
+ *   identities. Both have handlers in the shipped
+ *   {@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY}: the legacy marker and the real
+ *   outcome handler (`OUTCOME_PROTOCOL_HANDLER`, whose completion source is the
+ *   accepted-outcome submission and whose legacy completion is unreachable).
+ *   Naming an identity still grants it nothing — registry MEMBERSHIP does, and
+ *   `LEGACY_EXECUTION_PROTOCOL_REGISTRY` remains a legacy-only construction.
  * - `ExecutionProtocolHandler` — the protocol's own capability surface. For the
  *   legacy protocol this is a MARKER identity, not a dispatch seam: the legacy
  *   engine keeps deciding completions from severity-ranked signals exactly as
@@ -51,16 +54,15 @@
 export const LEGACY_SIGNAL_PROTOCOL = 1 as const;
 
 /**
- * The outcome protocol of docs/graph-outcome-protocol.md — RESERVED, with NO
- * registered handler in this build.
+ * The outcome protocol of docs/graph-outcome-protocol.md.
  *
- * The constant exists so the identity is named in one place, not so it can
- * run: with the shipped registry
- * ({@link LEGACY_EXECUTION_PROTOCOL_REGISTRY}) a persisted 2 classifies as
- * `unsupported` and the load is refused. Registering a marker handler under
- * this version (as a registry test does) still implements no outcome
- * semantics — there is no compiled plan, submission ingress, reducer or
- * receipt store behind it.
+ * C3b registers a REAL handler for it ({@link OUTCOME_PROTOCOL_HANDLER}, part of
+ * {@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY}): the run path
+ * (`src/graph/outcome/runtime.ts`) dispatches the compiled plan's entry nodes,
+ * accepts submissions through the graph-scoped outcome ingress and commits the
+ * graph state with the acceptance. {@link LEGACY_EXECUTION_PROTOCOL_REGISTRY}
+ * deliberately still holds protocol 1 alone — it is a legacy-only construction,
+ * and naming this constant does not register anything.
  */
 export const OUTCOME_PROTOCOL = 2 as const;
 
@@ -80,6 +82,67 @@ export interface ExecutionProtocolHandler {
   /** The exact execution protocol this handler owns. */
   readonly version: number;
 }
+
+/**
+ * The registered handler for the OUTCOME protocol — a real capability surface,
+ * not a marker.
+ *
+ * What it OWNS, stated so the runtime can read it rather than assume it:
+ * - `completion` — the accepted-outcome submission is the ONLY completion
+ *   source for a graph bound to this handler. No severity-ranked signal, no
+ *   free-form payload field and no synthesized second answer settles a node.
+ * - `submissionIngress` — submissions arrive at the GRAPH-SCOPED outcome
+ *   ingress, whose execution identity is derived by the runtime and whose
+ *   proposal carries none.
+ * - `legacyCompletion: "unreachable"` — the legacy signal completion path can
+ *   never decide such a graph's nodes; making it reachable is a different
+ *   protocol handler, not a configuration of this one.
+ *
+ * The outcome run path checks exactly these fields before dispatching anything
+ * ({@link isOutcomeProtocolHandler}), so the declaration is enforced where it is
+ * used, and the dispatch completion BRIDGE selection rule remains deferred:
+ * this handler makes the outcome path runnable, it does not reroute dispatch.
+ */
+export interface OutcomeProtocolHandler extends ExecutionProtocolHandler {
+  /** The exact execution protocol this handler owns. */
+  readonly version: typeof OUTCOME_PROTOCOL;
+  /** The one authoritative completion source of this protocol. */
+  readonly completion: "accepted-outcome-submission";
+  /** The ingress an accepted-outcome submission arrives through. */
+  readonly submissionIngress: "graph-scoped-outcome-submission";
+  /** Whether a legacy signal completion may settle a node of this protocol. */
+  readonly legacyCompletion: "unreachable";
+}
+
+/**
+ * Whether a registered handler declares the OUTCOME protocol's semantics.
+ *
+ * A type guard, because the runtime must dispatch on the CAPABILITY and never on
+ * the bare version number: a handler registered under 2 that does not declare
+ * the accepted-outcome submission as its completion source is refused, not
+ * trusted.
+ */
+export function isOutcomeProtocolHandler(
+  handler: ExecutionProtocolHandler,
+): handler is OutcomeProtocolHandler {
+  return (
+    handler.version === OUTCOME_PROTOCOL &&
+    "completion" in handler &&
+    handler.completion === "accepted-outcome-submission" &&
+    "submissionIngress" in handler &&
+    handler.submissionIngress === "graph-scoped-outcome-submission" &&
+    "legacyCompletion" in handler &&
+    handler.legacyCompletion === "unreachable"
+  );
+}
+
+/** The outcome-protocol handler this build registers. */
+export const OUTCOME_PROTOCOL_HANDLER: OutcomeProtocolHandler = Object.freeze({
+  version: OUTCOME_PROTOCOL,
+  completion: "accepted-outcome-submission",
+  submissionIngress: "graph-scoped-outcome-submission",
+  legacyCompletion: "unreachable",
+});
 
 /**
  * Installable execution-protocol support: the exact protocol HANDLERS this
@@ -156,18 +219,31 @@ export function createExecutionProtocolRegistry(
 }
 
 /**
- * The registry this build ships: exactly one handler, for
+ * A LEGACY-ONLY registry: exactly one handler, for
  * {@link LEGACY_SIGNAL_PROTOCOL}.
  *
- * Assembled here rather than next to a decoder because it needs no
- * format-specific hydration — the legacy handler is a marker identity.
- * {@link OUTCOME_PROTOCOL} is deliberately absent: it is a reserved identity,
- * and an unregistered protocol is refused at load, never run under legacy
- * rules.
+ * Kept because legacy-only selection is a real capability (a caller that must
+ * refuse protocol 2 uses it), and because it pins the B3 compatibility posture
+ * in one construction. It is NOT the registry the loader defaults to since
+ * C3b — see {@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY}.
  */
 export const LEGACY_EXECUTION_PROTOCOL_REGISTRY: ExecutionProtocolRegistry =
   createExecutionProtocolRegistry({
     handlers: [{ version: LEGACY_SIGNAL_PROTOCOL }],
+  });
+
+/**
+ * The registry this build SHIPS and its loader defaults to: the legacy handler
+ * and the real outcome handler.
+ *
+ * Membership is capability: protocol 2 is supported only because
+ * {@link OUTCOME_PROTOCOL_HANDLER} declares the outcome protocol's completion
+ * source, ingress and unreachable legacy path — not because the number 2 is
+ * named anywhere.
+ */
+export const DEFAULT_EXECUTION_PROTOCOL_REGISTRY: ExecutionProtocolRegistry =
+  createExecutionProtocolRegistry({
+    handlers: [{ version: LEGACY_SIGNAL_PROTOCOL }, OUTCOME_PROTOCOL_HANDLER],
   });
 
 // ── Classification ──────────────────────────────────────────────────────────

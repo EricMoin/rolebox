@@ -118,7 +118,7 @@ describe("createGraphTools", () => {
     expect(declaration.safeParse(undefined).success).toBe(false);
   });
 
-  it("executes graph_declare end-to-end: parses, compiles, persists and reports not-runnable", async () => {
+  it("executes graph_declare end-to-end: parses, compiles, persists and reports the run path", async () => {
     const { graph_declare } = createGraphTools(undefined, { directory: "/tmp" });
     const out = await graph_declare.execute(
       {
@@ -137,7 +137,10 @@ describe("createGraphTools", () => {
     const parsed = JSON.parse(out as string);
     expect(parsed.graph_id).toBe("reg-declare");
     expect(parsed.executability).toBe("executable");
-    expect(parsed.runnable).toBe(false);
+    // C3b: the outcome protocol has a registered handler, so the graph IS
+    // runnable — through the outcome run path, not the legacy one.
+    expect(parsed.runnable).toBe(true);
+    expect(parsed.run_path).toContain("OUTCOME run path");
     // No stateDir is configured for this tool set → the plan is registered in
     // memory only, reported honestly.
     expect(parsed.persisted).toBe(false);

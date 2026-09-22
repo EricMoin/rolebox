@@ -34,11 +34,14 @@
  * `started` — that listing IS the resume path. Effects are bookkeeping only:
  * nothing here executes, dispatches or reconciles one.
  *
- * SCOPE: a standalone substrate. Nothing under `src/graph/engine`,
- * `src/graph/tools` or `src/dispatch` imports this module; there is no
- * reducer, no submission ingress, and no engine state in the transaction — the
- * engine state joins through `AcceptanceLedger.runInTransaction` when the
- * reducer lands.
+ * SCOPE: the durable substrate of the OUTCOME protocol. The legacy v2 run path
+ * keeps its file persistence untouched and imports none of this module.
+ * `ledger_graph_state` carries the outcome runtime's state (C3b), and
+ * `writeGraphState` joins a caller's ACCEPTANCE transaction: the state snapshot
+ * commits with the receipt, the accepted event and the pending effects instead
+ * of landing beside them in a second write that a crash could separate. Nothing
+ * under `src/graph/engine`, `src/graph/tools` or `src/dispatch` imports this
+ * module; the run path that does is `src/graph/outcome/runtime.ts`.
  */
 
 import { mkdirSync } from "node:fs";
@@ -50,6 +53,7 @@ import {
   type DatabaseDriver,
 } from "../../memory/db-driver.ts";
 import {
+  GRAPH_STATE_MAX_BYTES,
   LEDGER_FORMAT_VERSION,
   type AcceptanceBatch,
   type AcceptanceLedger,
@@ -58,6 +62,7 @@ import {
   type CommitResult,
   type EffectStatus,
   type EffectTransition,
+  type GraphStateRecord,
   type PendingEffectRecord,
   type ReceiptRecord,
   type SubmissionKey,
@@ -92,6 +97,7 @@ export const LEDGER_TABLES = Object.freeze({
   receipts: "ledger_receipts",
   acceptedEvents: "ledger_accepted_events",
   pendingEffects: "ledger_pending_effects",
+  graphState: "ledger_graph_state",
 });
 
 /**
@@ -136,6 +142,13 @@ const SCHEMA_STATEMENTS: readonly string[] = [
      created_at INTEGER NOT NULL,
      status TEXT NOT NULL CHECK (status IN ('pending', 'started', 'done', 'failed')),
      PRIMARY KEY (graph_id, effect_id)
+   )`,
+  `CREATE TABLE ${LEDGER_TABLES.graphState} (
+     graph_id TEXT NOT NULL,
+     plan_revision TEXT NOT NULL,
+     body TEXT NOT NULL,
+     updated_at INTEGER NOT NULL,
+     PRIMARY KEY (graph_id)
    )`,
 ];
 
@@ -203,6 +216,12 @@ const LEDGER_COLUMNS: Readonly<
     { name: "created_at", affinity: "integer", primaryKey: 0, notNull: true },
     { name: "status", affinity: "text", primaryKey: 0, notNull: true },
   ],
+  graphState: [
+    { name: "graph_id", affinity: "text", primaryKey: 1, notNull: true },
+    { name: "plan_revision", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "body", affinity: "text", primaryKey: 0, notNull: true },
+    { name: "updated_at", affinity: "integer", primaryKey: 0, notNull: true },
+  ],
 });
 
 // ── Refusals ────────────────────────────────────────────────────────────────
@@ -268,6 +287,19 @@ export type LedgerWriteProblem =
   | "invalid-batch"
   /** A payload JSON cannot represent — nothing from the batch was committed. */
   | "unrepresentable-payload"
+  /** A graph-state record violates the record model. */
+  | "invalid-graph-state"
+  /**
+   * A graph-state body JSON cannot represent — the transaction that would have
+   * committed it rolled back, so no receipt, event or effect survives either.
+   */
+  | "unrepresentable-state"
+  /**
+   * A graph-state body is larger than {@link GRAPH_STATE_MAX_BYTES} — refused
+   * BEFORE a row is written, so the acceptance transaction as a whole rolls
+   * back rather than storing a truncated state.
+   */
+  | "oversized-state"
   /** The store rejected a row (a uniqueness violation, a broken file). */
   | "write-rejected"
   /** A nested `runInTransaction` — the boundary is one transaction. */
@@ -438,19 +470,29 @@ function readStatus(row: Record<string, unknown>, path: string): EffectStatus {
   );
 }
 
-/** Read the payload column and parse its JSON text. */
-function readPayload(row: Record<string, unknown>, path: string): unknown {
-  const text = readText(row, "payload", path, LEDGER_TABLES.pendingEffects);
+/** Read one JSON body column and parse its TEXT value. */
+function readJsonBody(
+  row: Record<string, unknown>,
+  column: string,
+  path: string,
+  table: string,
+): unknown {
+  const text = readText(row, column, path, table);
   try {
     const parsed: unknown = JSON.parse(text);
     return parsed;
   } catch (error) {
     throw malformedRow(
       path,
-      LEDGER_TABLES.pendingEffects,
-      `payload is not readable JSON (${errorText(error)})`,
+      table,
+      `${column} is not readable JSON (${errorText(error)})`,
     );
   }
+}
+
+/** Read the effect payload column. */
+function readPayload(row: Record<string, unknown>, path: string): unknown {
+  return readJsonBody(row, "payload", path, LEDGER_TABLES.pendingEffects);
 }
 
 function toReceipt(
@@ -484,6 +526,19 @@ function toAcceptedEvent(
   };
 }
 
+function toGraphState(
+  row: Record<string, unknown>,
+  path: string,
+): GraphStateRecord {
+  const table = LEDGER_TABLES.graphState;
+  return {
+    graphId: readText(row, "graph_id", path, table),
+    planRevision: readText(row, "plan_revision", path, table),
+    body: readJsonBody(row, "body", path, table),
+    updatedAt: readEpoch(row, "updated_at", path, table),
+  };
+}
+
 function toPendingEffect(
   row: Record<string, unknown>,
   path: string,
@@ -502,24 +557,62 @@ function toPendingEffect(
 
 // ── Batch validation and payload encoding ───────────────────────────────────
 
-/** Refuse a batch field that is not a non-empty identifier. */
-function requireIdentifier(value: unknown, field: string): void {
+/** Refuse a field that is not a non-empty identifier. */
+function requireIdentifier(
+  value: unknown,
+  field: string,
+  problem: LedgerWriteProblem = "invalid-batch",
+  consequence = "the batch was not written",
+): void {
   if (typeof value !== "string" || value.length === 0) {
     throw new LedgerWriteError(
-      "invalid-batch",
-      `acceptance-ledger: ${field} is ${describeValue(value)}, not a non-empty identifier — the batch was not written`,
+      problem,
+      `acceptance-ledger: ${field} is ${describeValue(value)}, not a non-empty identifier — ${consequence}`,
     );
   }
 }
 
-/** Refuse a batch timestamp that is not epoch milliseconds. */
-function requireEpoch(value: unknown, field: string): void {
+/** Refuse a timestamp that is not epoch milliseconds. */
+function requireEpoch(
+  value: unknown,
+  field: string,
+  problem: LedgerWriteProblem = "invalid-batch",
+  consequence = "the batch was not written",
+): void {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
     throw new LedgerWriteError(
-      "invalid-batch",
-      `acceptance-ledger: ${field} is ${describeValue(value)}, not epoch milliseconds (a safe integer) — the batch was not written`,
+      problem,
+      `acceptance-ledger: ${field} is ${describeValue(value)}, not epoch milliseconds (a safe integer) — ${consequence}`,
     );
   }
+}
+
+/**
+ * Validate one graph-state record against the record model BEFORE it is stored.
+ *
+ * A malformed record is refused with its own code, so it can never be confused
+ * with a batch violation; the body itself is the encoder's question, not this
+ * gate's.
+ */
+function assertGraphStateShape(record: GraphStateRecord): void {
+  requireIdentifier(
+    record.graphId,
+    "graphState.graphId",
+    "invalid-graph-state",
+    "the state was not written",
+  );
+  requireIdentifier(
+    record.planRevision,
+    "graphState.planRevision",
+    "invalid-graph-state",
+    "the state was not written",
+  );
+  requireEpoch(
+    record.updatedAt,
+    "graphState.updatedAt",
+    "invalid-graph-state",
+    "the state was not written",
+  );
 }
 
 /** Refuse a batch field that disagrees with the receipt it must describe. */
@@ -607,50 +700,90 @@ function assertBatchShape(batch: AcceptanceBatch): void {
 }
 
 /**
- * Encode one effect payload for its TEXT column.
+ * Encode one JSON body for its TEXT column.
  *
- * The stored value is the payload's JSON text, which is exactly what the port
- * round-trips (`payload: unknown`), and a value JSON has NO representation for
- * — `undefined`, a function, a symbol, a BigInt, a non-finite number, a
- * reference cycle — throws BEFORE the row is inserted, so a hostile payload
- * rolls the whole batch back instead of storing a silently truncated one.
+ * The stored value is the body's JSON text, which is exactly what the port
+ * round-trips (`payload: unknown`, `body: unknown`), and a value JSON has NO
+ * representation for — `undefined`, a function, a symbol, a BigInt, a
+ * non-finite number, a reference cycle — throws BEFORE the row is inserted, so a
+ * hostile body rolls the whole transaction back instead of storing a silently
+ * truncated one. Effects and graph state share this ONE representability rule,
+ * parameterized by `subject` (what the body belongs to, for the diagnostic) and
+ * `problem` (the code its caller reports).
  */
-function encodePayload(payload: unknown, effectId: string): string {
+function encodeJsonBody(
+  value: unknown,
+  subject: string,
+  problem: LedgerWriteProblem,
+): string {
   let text: string | undefined;
   try {
-    text = JSON.stringify(payload, (_key: string, value: unknown) => {
+    text = JSON.stringify(value, (_key: string, entry: unknown) => {
       if (
-        value === undefined ||
-        typeof value === "function" ||
-        typeof value === "symbol" ||
-        typeof value === "bigint"
+        entry === undefined ||
+        typeof entry === "function" ||
+        typeof entry === "symbol" ||
+        typeof entry === "bigint"
       ) {
         throw new LedgerWriteError(
-          "unrepresentable-payload",
-          `acceptance-ledger: the payload of effect ${effectId} contains ${
-            value === undefined ? "an undefined value" : `a ${typeof value} value`
-          }, which JSON cannot represent — nothing from this batch was committed`,
+          problem,
+          `acceptance-ledger: ${subject} contains ${
+            entry === undefined ? "an undefined value" : `a ${typeof entry} value`
+          }, which JSON cannot represent — nothing from this transaction was committed`,
         );
       }
-      if (typeof value === "number" && !Number.isFinite(value)) {
+      if (typeof entry === "number" && !Number.isFinite(entry)) {
         throw new LedgerWriteError(
-          "unrepresentable-payload",
-          `acceptance-ledger: the payload of effect ${effectId} contains ${String(value)}, which JSON cannot represent — nothing from this batch was committed`,
+          problem,
+          `acceptance-ledger: ${subject} contains ${String(entry)}, which JSON cannot represent — nothing from this transaction was committed`,
         );
       }
-      return value;
+      return entry;
     });
   } catch (error) {
     if (error instanceof LedgerWriteError) throw error;
     throw new LedgerWriteError(
-      "unrepresentable-payload",
-      `acceptance-ledger: the payload of effect ${effectId} cannot be serialized as JSON (${errorText(error)}) — nothing from this batch was committed`,
+      problem,
+      `acceptance-ledger: ${subject} cannot be serialized as JSON (${errorText(error)}) — nothing from this transaction was committed`,
     );
   }
   if (typeof text !== "string") {
     throw new LedgerWriteError(
-      "unrepresentable-payload",
-      `acceptance-ledger: the payload of effect ${effectId} has no JSON text — nothing from this batch was committed`,
+      problem,
+      `acceptance-ledger: ${subject} has no JSON text — nothing from this transaction was committed`,
+    );
+  }
+  return text;
+}
+
+/** Encode one effect payload for its TEXT column. */
+function encodePayload(payload: unknown, effectId: string): string {
+  return encodeJsonBody(
+    payload,
+    `the payload of effect ${effectId}`,
+    "unrepresentable-payload",
+  );
+}
+
+/**
+ * Encode one graph-state body for its TEXT column, enforcing the size bound.
+ *
+ * The byte length of the ENCODED text is what `GRAPH_STATE_MAX_BYTES` limits,
+ * so the check measures exactly what would be stored; an oversized body is
+ * refused before the row is written, and the caller's transaction rolls back
+ * with it.
+ */
+function encodeStateBody(body: unknown, graphId: string): string {
+  const text = encodeJsonBody(
+    body,
+    `the state body of graph ${graphId}`,
+    "unrepresentable-state",
+  );
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > GRAPH_STATE_MAX_BYTES) {
+    throw new LedgerWriteError(
+      "oversized-state",
+      `acceptance-ledger: the state body of graph ${graphId} is ${bytes} bytes, beyond the ${GRAPH_STATE_MAX_BYTES}-byte limit this ledger stores — nothing from this transaction was committed`,
     );
   }
   return text;
@@ -714,6 +847,7 @@ function requireLedgerTables(
     LEDGER_TABLES.receipts,
     LEDGER_TABLES.acceptedEvents,
     LEDGER_TABLES.pendingEffects,
+    LEDGER_TABLES.graphState,
   ].filter((table) => !tables.includes(table));
   if (missing.length > 0) {
     throw new LedgerFormatError(
@@ -978,6 +1112,7 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
       requireTableShape(db, "receipts", filePath);
       requireTableShape(db, "acceptedEvents", filePath);
       requireTableShape(db, "pendingEffects", filePath);
+      requireTableShape(db, "graphState", filePath);
       return new SqliteAcceptanceLedger(db, filePath);
     } catch (error) {
       closeQuietly(db);
@@ -1095,6 +1230,58 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
       throw new LedgerWriteError(
         "write-rejected",
         `acceptance-ledger: the store rejected a row of the batch for graph ${batch.receipt.graphId} (${errorText(error)}) — the transaction rolled back, so nothing from this batch was committed`,
+      );
+    }
+  }
+
+  // ── Graph state ───────────────────────────────────────────────────────────
+
+  /**
+   * The persisted state snapshot of one graph, or `undefined`.
+   *
+   * Inside a caller's transaction this reads the transaction's own uncommitted
+   * snapshot, which is what lets a reducer derive the next state from the state
+   * the acceptance is actually committing against.
+   */
+  readGraphState(graphId: string): GraphStateRecord | undefined {
+    this.assertOpen("readGraphState");
+    return this.selectGraphState(graphId);
+  }
+
+  /**
+   * Write (or replace) one graph's state snapshot.
+   *
+   * The record is validated, the body is encoded, its encoded size is checked
+   * against {@link GRAPH_STATE_MAX_BYTES}, and only then is the row written —
+   * all inside whatever transaction the caller has open, so a body that cannot
+   * be stored rolls back the receipt, the accepted event and the pending effects
+   * that were written before it. A store-level rejection becomes the typed
+   * error the caller sees and, because the throw crosses the driver's
+   * transaction boundary, the rollback that makes "never a half-committed
+   * batch" true rather than intended.
+   */
+  writeGraphState(record: GraphStateRecord): void {
+    this.assertOpen("writeGraphState");
+    assertGraphStateShape(record);
+    try {
+      this.db.run(
+        `INSERT INTO ${LEDGER_TABLES.graphState}
+           (graph_id, plan_revision, body, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(graph_id) DO UPDATE SET
+           plan_revision = excluded.plan_revision,
+           body = excluded.body,
+           updated_at = excluded.updated_at`,
+        record.graphId,
+        record.planRevision,
+        encodeStateBody(record.body, record.graphId),
+        record.updatedAt,
+      );
+    } catch (error) {
+      if (error instanceof LedgerWriteError) throw error;
+      throw new LedgerWriteError(
+        "write-rejected",
+        `acceptance-ledger: the store rejected the state snapshot of graph ${record.graphId} (${errorText(error)}) — the transaction rolled back, so nothing from it was committed`,
       );
     }
   }
@@ -1251,6 +1438,10 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
     return Object.freeze({
       commitAccepted: (batch: AcceptanceBatch): CommitResult =>
         this.commitAccepted(batch),
+      readGraphState: (graphId: string): GraphStateRecord | undefined =>
+        this.readGraphState(graphId),
+      writeGraphState: (record: GraphStateRecord): void =>
+        this.writeGraphState(record),
       lookupReceipt: (key: SubmissionKey): ReceiptRecord | undefined =>
         this.lookupReceipt(key),
       acceptedEvents: (graphId: string): readonly AcceptedEventRecord[] =>
@@ -1278,6 +1469,21 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
       .get(key.graphId, key.attemptId, key.submissionId);
     if (isNoRow(row)) return undefined;
     return toReceipt(asRow(row, this.filePath, LEDGER_TABLES.receipts), this.filePath);
+  }
+
+  private selectGraphState(graphId: string): GraphStateRecord | undefined {
+    const row = this.db
+      .query(
+        `SELECT graph_id, plan_revision, body, updated_at
+         FROM ${LEDGER_TABLES.graphState}
+         WHERE graph_id = ?`,
+      )
+      .get(graphId);
+    if (isNoRow(row)) return undefined;
+    return toGraphState(
+      asRow(row, this.filePath, LEDGER_TABLES.graphState),
+      this.filePath,
+    );
   }
 
   private selectAcceptedEvent(

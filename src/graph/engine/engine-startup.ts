@@ -82,6 +82,7 @@ import {
   loadEngineStateForResume,
   type EngineLoadResult,
 } from "./engine-persistence.ts";
+import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import { logWarn } from "./log-warn.ts";
 import type {
   NodeCompletionEvent,
@@ -343,6 +344,21 @@ export async function recoverInterruptedGraphs(
       );
       migrationRequired.push(
         `${label} (migration-required storage: ${loaded.from} -> ${loaded.to})`,
+      );
+      continue;
+    }
+
+    // 2a-v. C3b: the outcome protocol now HAS a registered handler, so a
+    //       declared graph loads as `valid` — but its restart recovery is a
+    //       LATER slice, and this legacy sweep must never resume it under
+    //       legacy rules. The record is reported and preserved exactly as it
+    //       was; the outcome run path is the only thing that may start it.
+    if (loaded.executionProtocol === OUTCOME_PROTOCOL) {
+      logWarn(
+        `engine-startup: skipped outcome-protocol state file ${label}: restart recovery for the outcome protocol is not implemented in this build`,
+      );
+      failed.push(
+        `${label} (outcome protocol: restart recovery is deferred in this build; the record was preserved and not resumed under legacy rules)`,
       );
       continue;
     }

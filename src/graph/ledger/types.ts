@@ -31,9 +31,14 @@
  * documented EXTENSION POINT for the ONE atomic boundary the protocol requires
  * — acceptance receipt + accepted event + engine state change + pending effects
  * committed together — and it exposes the same write surface inside the
- * caller's transaction so the state write can join it when the reducer lands.
- * THE ENGINE STATE DOES NOT YET JOIN IT: no reducer exists, nothing routes into
- * this port, and the store writes only its own tables today.
+ * caller's transaction: {@link GraphStateRecord} IS that engine state for an
+ * outcome-protocol graph, so `writeGraphState` joins the acceptance batch
+ * instead of landing beside it (C3b).
+ *
+ * THE GRAPH STATE IS THE ONLY ENGINE STATE THIS PORT CARRIES. A LEGACY v2 graph
+ * keeps its file persistence exactly as before; nothing here reads or writes a
+ * legacy snapshot, and this ledger remains a substrate the legacy run path does
+ * not import.
  *
  * Timestamps are EPOCH MILLISECONDS supplied by the CALLER. Time is an explicit
  * input to the protocol (docs § "State, storage, and effects"), so the store
@@ -129,6 +134,49 @@ export interface PendingEffectRecord {
   readonly status: EffectStatus;
 }
 
+// ── Graph state ─────────────────────────────────────────────────────────────
+
+/**
+ * The largest graph-state body this ledger stores, in UTF-8 bytes.
+ *
+ * A state snapshot that cannot be stored must fail the transaction that would
+ * have committed it rather than be truncated into a smaller, dishonest one. The
+ * bound is checked BEFORE a row is written, so an oversized body rolls the
+ * whole acceptance transaction back — receipt, accepted event and pending
+ * effects included — and never leaves a half-committed batch.
+ */
+export const GRAPH_STATE_MAX_BYTES = 4_194_304;
+
+/**
+ * The persisted state snapshot of one outcome-protocol graph.
+ *
+ * This is the state half of the protocol's single atomic boundary
+ * (docs/graph-outcome-protocol.md § "State, storage, and effects"): the runtime
+ * holds a state, hands it here, and the caller's acceptance transaction writes
+ * it together with the receipt, the accepted event and the pending effects.
+ * There is deliberately no separate JSON file for such a graph — a state that
+ * commits beside its acceptance instead of with it is exactly the failure mode
+ * this record exists to remove.
+ *
+ * `body` is the state as the runtime holds it and the store persists its JSON
+ * text; `planRevision` pins the snapshot to the compiled plan it belongs to, so
+ * a state can never be read as the state of another revision. `updatedAt` is
+ * epoch milliseconds supplied by the CALLER — time is an explicit input, so the
+ * store never reads a clock.
+ *
+ * ONE row per graph: writing a snapshot REPLACES the previous one (the current
+ * state is a value, not a log), and the replacement is as atomic as the insert.
+ */
+export interface GraphStateRecord {
+  readonly graphId: string;
+  /** The compiled-plan revision this snapshot belongs to. */
+  readonly planRevision: string;
+  /** The state body; the store persists its JSON text verbatim. */
+  readonly body: unknown;
+  /** Epoch milliseconds, supplied by the caller. */
+  readonly updatedAt: number;
+}
+
 // ── Commit surface ──────────────────────────────────────────────────────────
 
 /** The idempotency key of one logical submission. */
@@ -210,6 +258,23 @@ export type EffectTransition =
 export interface AcceptanceLedgerTx {
   /** Commit one batch atomically; see {@link CommitResult}. */
   commitAccepted(batch: AcceptanceBatch): CommitResult;
+  /**
+   * The persisted state snapshot of one graph, or `undefined` when the graph
+   * has never written one. Inside a transaction this reads the transaction's own
+   * uncommitted snapshot, which is what makes a reducer's transition a function
+   * of the state the acceptance is actually committing against.
+   */
+  readGraphState(graphId: string): GraphStateRecord | undefined;
+  /**
+   * Write (or replace) one graph's state snapshot.
+   *
+   * Called INSIDE the caller's transaction so the state and the acceptance share
+   * one boundary. A body that cannot be stored — unrepresentable as JSON, or
+   * beyond {@link GRAPH_STATE_MAX_BYTES} — throws and fails the WHOLE
+   * transaction: the batch that already wrote its receipt and event rolls back
+   * with it, and no half-committed batch survives.
+   */
+  writeGraphState(record: GraphStateRecord): void;
   /** The persisted receipt for a submission key, or `undefined`. */
   lookupReceipt(key: SubmissionKey): ReceiptRecord | undefined;
   /** Every accepted event of one graph, in accepted order. */
@@ -247,16 +312,16 @@ export interface AcceptanceLedger extends AcceptanceLedgerTx {
    * Run `fn` inside ONE transaction and return its result after COMMIT.
    *
    * This is the protocol's single atomic boundary: the receipt, the accepted
-   * event, the engine state change and the pending effects are meant to commit
-   * together, and the callback receives the same write surface so the state
-   * write can join. The callback MUST be synchronous — a callback that returns
-   * a promise would run its writes outside the transaction — and a nested call
-   * is refused rather than silently becoming a savepoint.
+   * event, the graph state change and the pending effects commit together, and
+   * the callback receives the same write surface so `writeGraphState` joins the
+   * acceptance batch rather than landing beside it. The callback MUST be
+   * synchronous — a callback that returns a promise would run its writes outside
+   * the transaction — and a nested call is refused rather than silently becoming
+   * a savepoint.
    *
-   * THE ENGINE STATE DOES NOT YET JOIN THIS TRANSACTION. No reducer exists and
-   * nothing routes into the ledger yet; today only the ledger's own tables are
-   * written here. The seam is delivered so the reducer slice cannot inherit a
-   * narrower boundary.
+   * A rejection inside the callback rolls EVERYTHING back, including a batch the
+   * callback already committed, so a state that cannot be stored can never leave
+   * a receipt, an event or an effect behind.
    */
   runInTransaction<R>(fn: (tx: AcceptanceLedgerTx) => R): R;
   /** Close the substrate. Idempotent; a closed ledger refuses further use. */

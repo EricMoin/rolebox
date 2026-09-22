@@ -284,6 +284,7 @@ function ledgerSchema(): string[] {
     LEDGER_TABLES.receipts,
     LEDGER_TABLES.acceptedEvents,
     LEDGER_TABLES.pendingEffects,
+    LEDGER_TABLES.graphState,
   ].sort();
 }
 

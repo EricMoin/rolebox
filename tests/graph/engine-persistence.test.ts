@@ -40,6 +40,7 @@ import {
 import {
   classifyExecutionProtocol,
   createExecutionProtocolRegistry,
+  DEFAULT_EXECUTION_PROTOCOL_REGISTRY,
   LEGACY_EXECUTION_PROTOCOL_REGISTRY,
   LEGACY_SIGNAL_PROTOCOL,
   OUTCOME_PROTOCOL,
@@ -2220,26 +2221,44 @@ describe("loadEngineStateForResume — execution-protocol identity (B3)", () => 
     ).toEqual(loadEngineStateFromJson(validRaw()));
   });
 
-  it("unregistered protocol: protocol 2 is refused at load, never run under legacy rules", () => {
+  it("registered protocol: protocol 2 hydrates under the shipped registry, and a legacy-only registry still refuses it", () => {
     const raw = rawWithProtocol(OUTCOME_PROTOCOL);
+    // C3b registers a REAL outcome handler in the shipped registry, so the
+    // record hydrates and the identity is durable state, not a decoration.
     const result = loadEngineStateForResume(raw);
-    expect(result.kind).toBe("unsupported");
-    if (result.kind === "unsupported") {
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.executionProtocol).toBe(OUTCOME_PROTOCOL);
+      expect(result.state.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    }
+    expect(loadEngineStateFromJson(raw)).not.toBeNull();
+    // Support is registry MEMBERSHIP, never the number: the legacy-only
+    // registry (protocol 1 alone) still refuses protocol 2 as unsupported
+    // execution, and naming the identity installs nothing.
+    const legacyOnly = loadEngineStateForResume(
+      raw,
+      undefined,
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+    );
+    expect(legacyOnly.kind).toBe("unsupported");
+    if (legacyOnly.kind === "unsupported") {
       // The first reachable use of the EXECUTION dimension: the storage
       // dimension stays what it is.
-      expect(result.dimension).toBe("execution");
-      expect(result.detail).toBe(String(OUTCOME_PROTOCOL));
+      expect(legacyOnly.dimension).toBe("execution");
+      expect(legacyOnly.detail).toBe(String(OUTCOME_PROTOCOL));
     }
-    // Nothing hydrates and the shell refuses: the LOAD boundary is the gate.
-    expect(loadEngineStateFromJson(raw)).toBeNull();
-    // Naming the identity does not make it runnable: no handler is registered
-    // for it, and the verdict carries a number, not a capability.
     expect(
       classifyExecutionProtocol(OUTCOME_PROTOCOL, LEGACY_EXECUTION_PROTOCOL_REGISTRY),
     ).toEqual({ kind: "unsupported", version: OUTCOME_PROTOCOL });
     expect(
       LEGACY_EXECUTION_PROTOCOL_REGISTRY.handlers.map((h) => h.version),
     ).toEqual([LEGACY_SIGNAL_PROTOCOL]);
+    // ...while the shipped registry binds it through the handler capability.
+    expect(
+      classifyExecutionProtocol(OUTCOME_PROTOCOL, DEFAULT_EXECUTION_PROTOCOL_REGISTRY)
+        .kind,
+    ).toBe("bound");
   });
 
   it("illegal identities are corrupt(execution) with distinct reasons, shell null", () => {
@@ -2504,26 +2523,37 @@ describe("EnginePersistence.loadForResume — protocol identity through the stor
     expect(store.load("graph-1")).not.toBeNull();
   });
 
-  it("a persisted protocol-2 file is refused at the store boundary and not run", () => {
+  it("a persisted protocol-2 file loads valid through the shipped registry and keeps its identity", () => {
     store.save(buildRichState());
     const path = engineStatePath(dir, "graph-1");
     const dto: Record<string, unknown> = JSON.parse(readFileSync(path, "utf-8"));
     dto.executionProtocolVersion = OUTCOME_PROTOCOL;
     writeFileSync(path, JSON.stringify(dto), "utf-8");
 
+    // C3b registers the outcome protocol, so the store boundary accepts the
+    // record and reports WHICH run path owns it.
     const result = store.loadForResume("graph-1");
-    expect(result.kind).toBe("unsupported");
-    if (result.kind === "unsupported") {
-      expect(result.dimension).toBe("execution");
-      expect(result.detail).toBe("2");
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.executionProtocol).toBe(OUTCOME_PROTOCOL);
+      expect(result.state.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
     }
-    // Nothing hydrates and nothing is rewritten: the snapshot keeps its
-    // identity instead of being silently downgraded to legacy.
-    expect(store.load("graph-1")).toBeNull();
+    expect(store.load("graph-1")).not.toBeNull();
+    // The snapshot keeps its identity on disk: hydration never rewrites the
+    // protocol it read, and a legacy-only caller must check the identity.
     expect(
       (JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>)
         .executionProtocolVersion,
     ).toBe(OUTCOME_PROTOCOL);
+    // A legacy-only registry still refuses it at the same boundary.
+    expect(
+      loadEngineStateForResume(
+        readFileSync(path, "utf-8"),
+        path,
+        DEFAULT_STORAGE_FORMAT_REGISTRY,
+        LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+      ).kind,
+    ).toBe("unsupported");
   });
 });
 
@@ -4131,11 +4161,11 @@ describe("C1 — a declared graph's state round-trips through the loader", () =>
   };
 
   /**
-   * The ONLY registry under which a protocol-2 file can classify as valid: the
-   * shipped build registers protocol 1 only, so a protocol-2 declaration is
-   * refused at load by design (asserted below). Registering a MARKER handler
-   * here proves the record itself survives every other gate — it implements no
-   * outcome semantics.
+   * A registry with both protocol identities, built explicitly. C3b ships the
+   * same membership by default ({@link DEFAULT_EXECUTION_PROTOCOL_REGISTRY});
+   * this helper keeps the round-trip test independent of the shipped default,
+   * and the explicit legacy-only registry below proves a protocol-2 record is
+   * refused when the outcome handler is absent.
    */
   function outcomeCapableRegistry(): ExecutionProtocolRegistry {
     return createExecutionProtocolRegistry({
@@ -4197,25 +4227,40 @@ describe("C1 — a declared graph's state round-trips through the loader", () =>
     expect([...result.state.nodes.keys()].sort()).toEqual(["plan", "ship"]);
   });
 
-  it("is REFUSED at the store boundary by the shipped registry: unsupported(execution)", () => {
+  it("is ACCEPTED at the store boundary by the shipped registry: valid, protocol 2", () => {
     const graph = declared();
     const store = new EnginePersistence(dir);
     expect(store.save(graph.state)).toBe(true);
 
+    // C3b: the declared graph loads as VALID and the loader names the protocol
+    // that owns it, so a caller can pick the outcome run path.
     const result = store.loadForResume("declared.graph");
-    expect(result.kind).toBe("unsupported");
-    if (result.kind === "unsupported") {
-      expect(result.dimension).toBe("execution");
-      expect(result.detail).toBe(String(OUTCOME_PROTOCOL));
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.executionProtocol).toBe(OUTCOME_PROTOCOL);
+      expect(result.state.compiledPlan?.planRevision).toBe(graph.plan.planRevision);
+      expect(result.state.planBinding?.planRevision).toBe(graph.plan.planRevision);
     }
-    // Nothing hydrates, and the snapshot KEEPS its identity on disk.
-    expect(store.load("declared.graph")).toBeNull();
+    // The snapshot KEEPS its identity, plan and binding on disk.
     const dto = JSON.parse(
       readFileSync(engineStatePath(dir, "declared.graph"), "utf-8"),
     ) as Record<string, unknown>;
     expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
     expect(dto.compiledPlan !== undefined).toBe(true);
     expect(dto.planBinding !== undefined).toBe(true);
+    // A LEGACY-ONLY registry refuses the very same file: the boundary is the
+    // registry's membership, not a number comparison.
+    const legacyOnly = loadEngineStateForResume(
+      readFileSync(engineStatePath(dir, "declared.graph"), "utf-8"),
+      engineStatePath(dir, "declared.graph"),
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+    );
+    expect(legacyOnly.kind).toBe("unsupported");
+    if (legacyOnly.kind === "unsupported") {
+      expect(legacyOnly.dimension).toBe("execution");
+      expect(legacyOnly.detail).toBe(String(OUTCOME_PROTOCOL));
+    }
   });
 
   it("refuses a tampered plan body as corrupt(contract), even at protocol 2", () => {
