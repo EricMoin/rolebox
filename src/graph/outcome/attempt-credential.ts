@@ -25,14 +25,27 @@
  * record. This build records no host context on an attempt, so it makes no such
  * claim, and the core below depends on no host and works without one.
  *
- * WHERE ISSUANCE AND STORAGE LIVE. Minting happens in the runtime and the bound
- * nonce lives in the graph-state row that only the acceptance transaction
- * writes — a boundary the dispatched worker cannot rewrite (it receives the
- * credential over the dispatch channel; it never holds a handle to the ledger
- * it would have to alter). The credential is NOT a proposal field a caller can
- * move: the run path resolves the attempt FROM the persisted binding, refuses a
- * credential that names no recorded attempt, and never falls back to "the
- * node's current attempt".
+ * WHERE ISSUANCE AND STORAGE LIVE — A REQUIREMENT ON THE HOST, NOT A PROPERTY
+ * OF THIS BUILD. Minting happens in the runtime process, and the bound nonce
+ * lives in the graph-state row of the acceptance ledger under the configured
+ * store root (`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`),
+ * which only an acceptance transaction writes. The bearer guarantee above
+ * PRESUPPOSES that this row is out of the dispatched worker's write scope: a
+ * process that can write those bytes can read the nonce, rebind it to another
+ * attempt and be accepted, and the protocol has nothing left to refuse it
+ * with. The host must therefore keep the ledger where the worker cannot write
+ * (a separate account, a read-only mount, or a worker with no file access to
+ * it) and inject that root as the toolset's `stateDir`. THIS REPOSITORY'S
+ * DEFAULT DOES NOT MEET THE REQUIREMENT: `stateDir` defaults to the
+ * workspace, so the ledger sits under `<workspace>/.rolebox/state` inside the
+ * tree a worker with ordinary file tools can read and rewrite. Nothing in this
+ * module checks the boundary, so the credential's resistance to guessing and
+ * to re-aiming is real but contingent on that deployment requirement.
+ *
+ * THE CREDENTIAL NAMES NOTHING. The run path resolves the attempt FROM the
+ * persisted binding, refuses a credential that names no recorded attempt, and
+ * never falls back to "the node's current attempt" — a caller may present a
+ * credential, but cannot move it to another execution.
  *
  * Dependency leaf: the only import is `node:crypto`, so the state reader, the
  * run path and a test harness may depend on it without a cycle.

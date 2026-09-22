@@ -1088,10 +1088,19 @@ WHAT A BEARER CREDENTIAL PROVES — STATED HONESTLY. It proves POSSESSION of the
 nonce: guessing it is infeasible, and it cannot be re-aimed at another attempt
 because the binding is checked against the runtime's own state. It does NOT
 prove that the presenter is the original worker: whoever can read the dispatch
-channel holds the same bearer token and is indistinguishable. Issuance and
-storage sit inside the runtime boundary the dispatched worker cannot rewrite
-(the worker receives the nonce; it holds no handle to the state row that binds
-it). A trusted host invocation context (session, agent) can only ADD a
+channel holds the same bearer token and is indistinguishable. The store
+boundary is a REQUIREMENT ON THE HOST, not a property of this build. The
+binding lives in the acceptance ledger under the configured store root
+(`<stateDir>/.rolebox/state/graph-acceptance-ledger.sqlite`), and the
+guarantee above holds only while the dispatched worker cannot write those
+bytes: a process that can write them can read the nonce, rebind it to another
+attempt and be accepted, and the protocol cannot tell the difference. THIS
+REPOSITORY'S DEFAULT DOES NOT MEET THE REQUIREMENT: `stateDir` defaults to the
+workspace, so the ledger sits inside the tree a worker with ordinary file tools
+can read and rewrite. A host must keep the ledger outside the worker's write
+scope (a separate account, a read-only mount, or a worker with no file access
+to it) and inject that root as `stateDir`; nothing in the protocol verifies
+the boundary. A trusted host invocation context (session, agent) can only ADD a
 constraint — this build records none on an attempt and therefore claims none;
 the core depends on no host.
 
