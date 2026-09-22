@@ -48,6 +48,16 @@
  * sees the node already settled, contributes no effects and no state write, and
  * the graph stays where the first acceptance put it.
  *
+ * A SUCCESSOR IS ARMED BY ITS JOIN, ONCE. The reducer applies the plan's
+ * declared fan-in before it dispatches anything: a convergence node is armed
+ * only when every feeder its strategy requires has arrived (the arrivals are
+ * persisted on the target's entry in the same transaction, so a restart decides
+ * the join from the state), an unsatisfied join arms nothing at all, and a node
+ * already in flight is never armed a second time — two feeders completing out
+ * of order can no longer overwrite the attempt that is running. A feeder that
+ * has been re-armed stops counting, so a later round cannot be satisfied by an
+ * earlier round's arrival.
+ *
  * RESTART RECOVERY IS `resume()` (C3c). It reads the graph state from the
  * LEDGER, refuses a state bound to another plan revision, and continues the
  * graph from that state: every UNSETTLED dispatch effect is launched through
@@ -469,7 +479,16 @@ export class OutcomeGraphRuntime {
     let attemptSeq = 0;
     for (const node of this.plan.nodes) {
       if (!entryIds.has(node.id)) {
-        nodes.push(Object.freeze({ nodeId: node.id, status: "pending" as const }));
+        // No node has settled yet, so every arrival list is empty — which is
+        // exactly the canonical materialization of a state where nothing has
+        // arrived, and what the reader verifies against.
+        nodes.push(
+          Object.freeze({
+            nodeId: node.id,
+            status: "pending" as const,
+            arrivals: Object.freeze([]),
+          }),
+        );
         continue;
       }
       attemptSeq += 1;
@@ -494,6 +513,7 @@ export class OutcomeGraphRuntime {
           attemptSeq,
           attemptCredential: credential,
           dispatchedAt: at,
+          arrivals: Object.freeze([]),
         }),
       );
       dispatched.push(

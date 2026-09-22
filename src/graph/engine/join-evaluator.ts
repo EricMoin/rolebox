@@ -23,7 +23,7 @@
  */
 
 import { JoinStrategy } from "../../constants.ts";
-import type { EdgeDeclaration, JoinConfig } from "../../types.graph-v2.ts";
+import type { EdgeDeclaration } from "../../types.graph-v2.ts";
 import type {
   EngineState,
   NodeRuntimeState,
@@ -31,67 +31,16 @@ import type {
 } from "../../types.engine-v2.ts";
 import type { EdgePayload } from "../../types.engine-v2.ts";
 import { markDirty } from "./engine-persistence.ts";
+import { readQuorum, resolveJoinStrategy } from "../join-strategy.ts";
 
-// The runtime join-strategy type lives beside the field it types in
-// types.engine-v2.ts (C1). It is re-exported here so existing importers of
-// this module keep resolving `ResolvedJoinStrategy` from the evaluator.
+// The strategy RESOLUTION lives in the dependency-leaf module
+// `src/graph/join-strategy.ts`, shared with the outcome-protocol reducer (which
+// must not import this module: the `markDirty` import above pulls file
+// persistence in). Re-exported here so every existing importer of the evaluator
+// keeps resolving the resolver, the quorum reader and `ResolvedJoinStrategy`
+// from this module, unchanged.
 export type { ResolvedJoinStrategy };
-
-// ── Join strategy resolution ────────────────────────────────────────────────
-
-/**
- * Pure resolver that projects a node's declared {@link JoinConfig} into the
- * runtime join-strategy shape. Absent `join` (or `strategy: all`) resolves to
- * "all".
- *
- * `any` resolves to the `JoinStrategy.Any` string value; `quorum:N` resolves to
- * `{ quorum: N }` (the required count lives on the {@link JoinConfig}, not the
- * strategy string). The default quorum is `1`.
- *
- * This is THE single source of truth for the join-strategy shape: it is used
- * both to populate the runtime field in {@link registerNode} and, via
- * {@link getJoinStrategy}, to drive {@link evaluateJoin} / {@link joinSatisfied}
- * — so evaluation and the runtime field can never diverge.
- */
-export function resolveJoinStrategy(join?: JoinConfig): ResolvedJoinStrategy {
-  if (!join || join.strategy === JoinStrategy.All) {
-    return JoinStrategy.All;
-  }
-  // `any` resolves to the strategy string value; evaluation decides when the
-  // single-answer threshold is met.
-  if (join.strategy === JoinStrategy.Any) {
-    return JoinStrategy.Any;
-  }
-  // quorum:N — the quorum count lives on the JoinConfig, not the strategy string.
-  // The declared discriminated union (C1) guarantees the count is present on
-  // this branch; the widening below covers inputs the compiler cannot see
-  // (hand-written JS callers, pre-normalization persisted state), where a
-  // missing count still degrades to the documented default of 1. The
-  // DECLARATION side may not lean on that default: validator-v2 rule 9
-  // rejects `{ strategy: "quorum" }` without a count and parser-v2 refuses to
-  // build one.
-  //
-  // Defensive clamp: a non-positive quorum would make `evaluateJoin` treat the
-  // join as satisfied with ZERO upstream answers (a DAG-order violation).
-  // Clamp to 1 so a broken input degrades to "any"-like semantics instead of
-  // an early dispatch.
-  const declaredQuorum: number | undefined = join.quorum;
-  const quorum = declaredQuorum ?? 1;
-  return { quorum: quorum >= 1 ? quorum : 1 };
-}
-
-/**
- * The required answer count of a resolved join strategy, or `undefined` for
- * the strategies that carry no count (`"all"` / `"any"`).
- *
- * Single reader for the quorum branch (C1): {@link evaluateJoin} and the
- * approval cancellation gate (`approval-handler.ts` `shouldCancel`) both read
- * the count through this function, so the two consumers cannot interpret the
- * same `{ quorum: N }` value differently.
- */
-export function readQuorum(strategy: ResolvedJoinStrategy): number | undefined {
-  return typeof strategy === "object" ? strategy.quorum : undefined;
-}
+export { readQuorum, resolveJoinStrategy };
 
 /**
  * The declared join strategy for a node, read from its {@link JoinConfig} in

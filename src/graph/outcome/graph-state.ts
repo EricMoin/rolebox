@@ -51,6 +51,29 @@
  * purity is therefore "pure given its inputs": the minting source is one
  * explicit input, so a given source reproduces a given advance.
  *
+ * THE JOIN GATE. An accepted non-terminal outcome arms the successors its edge
+ * routes to — but only those whose declared JOIN is satisfied. A node's feeders
+ * are the distinct sources of its incoming edges (the plan's own topology), and
+ * an arrival is a feeder that has SETTLED on its current attempt with an outcome
+ * some declared edge routes from it to the target. The arrival set is
+ * materialized on the target's entry and persisted with the very acceptance that
+ * produced it, so a restart decides the join from the state instead of
+ * re-deriving it. Until the join is satisfied NOTHING is armed: the acceptance
+ * commits (the outcome is a real, accepted result) and the only write is the
+ * arrival record itself — no attempt id, no dispatched status, no effect. When
+ * it is satisfied the node is armed EXACTLY ONCE, on a fresh attempt; an
+ * already-dispatched target is never re-armed, so two feeders completing out of
+ * order cannot overwrite the attempt that is in flight.
+ *
+ * ROUNDS DO NOT MIX. A feeder that has been re-armed is no longer settled, so
+ * its earlier answer stops counting the moment its new attempt starts: the join
+ * of round N+1 cannot be satisfied by round N's arrival from a feeder that is
+ * running again. An arm set is computed for the WHOLE advance at once — a node
+ * this advance arms is treated as in flight and is therefore not evidence for
+ * another node armed in the same advance — so a convergence node cannot be
+ * armed on the previous round's answer of a feeder that is being re-armed right
+ * beside it.
+ *
  * READING IS STRICT, VERSIONED AND TOTAL. Every persisted body declares the
  * state-body version it was written in, and `readOutcomeGraphState` accepts
  * exactly the shape that version defines — the plan's node set in plan order,
@@ -78,7 +101,13 @@
  * reducer can be tested without a ledger and the runtime can own the wiring.
  */
 
-import type { CompiledNode, CompiledPlan } from "../compiler/plan.ts";
+import { JoinStrategy } from "../../constants.ts";
+import type {
+  CompiledEdge,
+  CompiledNode,
+  CompiledPlan,
+} from "../compiler/plan.ts";
+import { readQuorum, resolveJoinStrategy } from "../join-strategy.ts";
 import type { GraphStateRecord } from "../ledger/types.ts";
 import type { AcceptanceDecision } from "./acceptance.ts";
 import {
@@ -134,6 +163,37 @@ export interface OutcomeNodeState {
   readonly dispatchedAt?: number;
   /** Epoch milliseconds the accepted outcome settled this node at. */
   readonly settledAt?: number;
+  /**
+   * The predecessors that have ARRIVED at this node's join, in plan node order
+   * — the durable inbox the join is decided from (body version 3 and later).
+   *
+   * A version that does not define this field records nothing about arrivals,
+   * which is why the reducer refuses to advance such a body instead of guessing
+   * who had arrived (see {@link OutcomeAdvanceRefusedError}). The value is the
+   * canonical materialization of the node entries: one arrival per feeder that
+   * is SETTLED on its current attempt with an outcome a declared edge routes to
+   * this node. A reader refuses a body whose list disagrees with its own node
+   * entries, so the two representations cannot drift.
+   */
+  readonly arrivals?: readonly OutcomeArrival[];
+}
+
+/**
+ * One predecessor arrival at a convergence node's join.
+ *
+ * The arrival is recorded on the TARGET's entry and names the feeder, the
+ * outcome it settled with and the attempt that produced it. The attempt id is
+ * what gives the arrival a ROUND: a feeder that has been re-armed is no longer
+ * "the attempt that arrived", so its earlier answer stops counting and a new
+ * round cannot be satisfied by the previous round's evidence.
+ */
+export interface OutcomeArrival {
+  /** The predecessor node that arrived. */
+  readonly from: string;
+  /** The outcome it settled with — a declared edge routes it to this node. */
+  readonly outcome: string;
+  /** The attempt of {@link from} that produced the arrival. */
+  readonly attemptId: string;
 }
 
 /**
@@ -194,6 +254,24 @@ export const OUTCOME_STATE_BODY_V1 = 1 as const;
 export const OUTCOME_STATE_BODY_V2 = 2 as const;
 
 /**
+ * The third versioned state-body layout: every node entry carries the
+ * `arrivals` list its join is decided from — the predecessors that have settled
+ * on their current attempt with an outcome a declared edge routes to this node.
+ *
+ * JOIN INFORMATION IS LAYOUT, NOT AN EXTRA. Version 2 records no arrivals, so
+ * this build cannot tell which feeders had arrived when it reads one; the
+ * reducer therefore refuses to advance a version-2 body rather than arm a
+ * successor on an unknown join state (exactly as it refuses version 1, whose
+ * attempts carry no credential). Version 1 and version 2 stay READABLE — a
+ * completed graph reports cleanly and recovery reports what it can and cannot
+ * arm — but neither is advanced, and there is no migrator: a credential is
+ * issued once at dispatch, and an arrival is a fact about an attempt that
+ * already settled, so inventing either on read would fabricate a binding the
+ * run never made.
+ */
+export const OUTCOME_STATE_BODY_V3 = 3 as const;
+
+/**
  * The state-body format this build writes.
  *
  * The body version is its OWN axis, separate from the storage format
@@ -202,7 +280,7 @@ export const OUTCOME_STATE_BODY_V2 = 2 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V2;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V3;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -444,12 +522,20 @@ interface OutcomeNodeLayout {
    * `attemptCredential`; `forbidden` — the version does not define the field.
    */
   readonly credential: "required" | "forbidden";
+  /**
+   * `required` — every entry must carry the `arrivals` list (version 3);
+   * `forbidden` — the version does not define the field, so an entry that
+   * carries one is refused rather than read with a field this version never
+   * wrote.
+   */
+  readonly arrivals: "required" | "forbidden";
 }
 
 /** The node fields body version 1 defines, exactly, per status. */
 const OUTCOME_NODE_LAYOUT_V1: OutcomeNodeLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V1,
   credential: "forbidden" as const,
+  arrivals: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status"]),
     dispatched: Object.freeze([
@@ -479,6 +565,7 @@ const OUTCOME_NODE_LAYOUT_V1: OutcomeNodeLayout = Object.freeze({
 const OUTCOME_NODE_LAYOUT_V2: OutcomeNodeLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V2,
   credential: "required" as const,
+  arrivals: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status"]),
     dispatched: Object.freeze([
@@ -498,6 +585,42 @@ const OUTCOME_NODE_LAYOUT_V2: OutcomeNodeLayout = Object.freeze({
       "outcomeId",
       "dispatchedAt",
       "settledAt",
+    ]),
+  }),
+});
+
+/**
+ * The node fields body version 3 defines: version 2's fields plus the
+ * `arrivals` list its join is decided from. Every status carries the list —
+ * a never-dispatched node can already have arrivals waiting for its join, and a
+ * dispatched or settled one keeps the arrivals that armed it, because they are
+ * the record of what the join saw.
+ */
+const OUTCOME_NODE_LAYOUT_V3: OutcomeNodeLayout = Object.freeze({
+  version: OUTCOME_STATE_BODY_V3,
+  credential: "required" as const,
+  arrivals: "required" as const,
+  keys: Object.freeze({
+    pending: Object.freeze(["nodeId", "status", "arrivals"]),
+    dispatched: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "dispatchedAt",
+      "arrivals",
+    ]),
+    settled: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "outcomeId",
+      "dispatchedAt",
+      "settledAt",
+      "arrivals",
     ]),
   }),
 });
@@ -542,6 +665,7 @@ function readNodeState(
   expected: CompiledNode,
   index: number,
   layout: OutcomeNodeLayout,
+  plan: CompiledPlan,
 ): OutcomeNodeState {
   const where = "nodes[" + index + "]";
   if (!isRecord(raw)) {
@@ -567,6 +691,17 @@ function readNodeState(
   const outcomeId = raw.outcomeId;
   const dispatchedAt = readOptionalEpoch(raw, "dispatchedAt", where);
   const settledAt = readOptionalEpoch(raw, "settledAt", where);
+  let recordedArrivals: readonly OutcomeArrival[] | undefined;
+  if (layout.arrivals === "required") {
+    recordedArrivals = readArrivals(raw.arrivals, expected, where, plan);
+  } else if (raw.arrivals !== undefined) {
+    // Unreachable through rejectUnknownNodeFields; kept so the rule does not
+    // depend on the key set alone.
+    throw malformedState(
+      where + " carries an arrivals list, which body version " + layout.version +
+        " does not define — the list is refused rather than dropped",
+    );
+  }
   if (status === "pending") {
     if (
       attemptId !== undefined ||
@@ -581,7 +716,11 @@ function readNodeState(
           "node that was never dispatched has no attempt identity",
       );
     }
-    return Object.freeze({ nodeId: expected.id, status: "pending" as const });
+    return Object.freeze({
+      nodeId: expected.id,
+      status: "pending" as const,
+      ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
+    });
   }
   if (typeof attemptId !== "string" || attemptId.length === 0) {
     throw malformedState(
@@ -637,6 +776,7 @@ function readNodeState(
       outcomeId,
       dispatchedAt,
       settledAt,
+      ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
     });
   }
   if (outcomeId !== undefined || settledAt !== undefined) {
@@ -651,7 +791,97 @@ function readNodeState(
     attemptSeq,
     ...(credential === undefined ? {} : { attemptCredential: credential }),
     dispatchedAt,
+    ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
   });
+}
+
+/** The fields one {@link OutcomeArrival} defines, exactly. */
+const OUTCOME_ARRIVAL_KEYS: readonly string[] = Object.freeze([
+  "from",
+  "outcome",
+  "attemptId",
+]);
+
+/**
+ * Read one node's persisted arrival list against the plan's edges.
+ *
+ * STRUCTURE ONLY here: the list must be an array of `{ from, outcome,
+ * attemptId }` records with non-empty string fields, no feeder twice, and every
+ * arrival must be one a declared edge routes from `from` to this node — an
+ * arrival no edge produces is refused rather than counted. Whether the list is
+ * COMPLETE (and current) is checked once all node entries are read, against the
+ * canonical materialization, so a body whose list disagrees with its own entries
+ * is refused instead of being trusted or silently corrected.
+ */
+function readArrivals(
+  raw: unknown,
+  expected: CompiledNode,
+  where: string,
+  plan: CompiledPlan,
+): readonly OutcomeArrival[] {
+  if (!Array.isArray(raw)) {
+    throw malformedState(
+      where + ".arrivals is " + describeValue(raw) +
+        ", not the predecessor arrival list body version " + OUTCOME_STATE_BODY_V3 +
+        " defines for every node",
+    );
+  }
+  const arrivals: OutcomeArrival[] = [];
+  const seen = new Set<string>();
+  raw.forEach((entry, index) => {
+    const at = where + ".arrivals[" + index + "]";
+    if (!isRecord(entry)) {
+      throw malformedState(at + " is " + describeValue(entry) + ", not an arrival record");
+    }
+    for (const key of Object.keys(entry)) {
+      if (!OUTCOME_ARRIVAL_KEYS.includes(key)) {
+        throw malformedState(
+          at + " carries field " + JSON.stringify(key) +
+            ", which an arrival does not define — an unknown field is refused rather than dropped",
+        );
+      }
+    }
+    const from = entry.from;
+    const outcome = entry.outcome;
+    const attemptId = entry.attemptId;
+    if (typeof from !== "string" || from.length === 0) {
+      throw malformedState(
+        at + ".from is " + describeValue(from) + ", not a non-empty predecessor node id",
+      );
+    }
+    if (typeof outcome !== "string" || outcome.length === 0) {
+      throw malformedState(
+        at + ".outcome is " + describeValue(outcome) + ", not a non-empty outcome id",
+      );
+    }
+    if (typeof attemptId !== "string" || attemptId.length === 0) {
+      throw malformedState(
+        at + ".attemptId is " + describeValue(attemptId) +
+          ", not the non-empty attempt that produced the arrival",
+      );
+    }
+    if (seen.has(from)) {
+      throw malformedState(
+        at + " names predecessor " + JSON.stringify(from) +
+          " a second time — a feeder holds at most one arrival at a join",
+      );
+    }
+    seen.add(from);
+    if (
+      !plan.edges.some(
+        (edge) => edge.from === from && edge.to === expected.id && edge.outcome === outcome,
+      )
+    ) {
+      throw malformedState(
+        at + " records outcome " + JSON.stringify(outcome) + " of node " + JSON.stringify(from) +
+          " arriving at " + JSON.stringify(expected.id) + ", but plan revision " +
+          plan.planRevision +
+          " declares no such edge — an arrival no edge routes is refused rather than counted",
+      );
+    }
+    arrivals.push(Object.freeze({ from, outcome, attemptId }));
+  });
+  return Object.freeze(arrivals);
 }
 
 /** Read the loop traversal counters, refusing an undeclared group or a bad value. */
@@ -777,8 +1007,13 @@ function readStateBody(
     );
   }
   const nodes = plan.nodes.map((node, index) =>
-    readNodeState(rawNodes[index], node, index, layout),
+    readNodeState(rawNodes[index], node, index, layout, plan),
   );
+  // The arrival list is verified against the entries it was materialized from,
+  // once every entry is readable: a list that omits an arrival its own entries
+  // corroborate (a stalled join) or invents one they do not (an unearned arm)
+  // is refused rather than trusted or silently corrected.
+  if (layout.arrivals === "required") verifyArrivals(plan, nodes);
   return Object.freeze({
     bodyVersion: layout.version,
     graphId: plan.graphId,
@@ -822,16 +1057,22 @@ function stateBodyReader(
 
 const OUTCOME_STATE_BODY_V1_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V1);
 const OUTCOME_STATE_BODY_V2_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V2);
+const OUTCOME_STATE_BODY_V3_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V3);
 
 /**
- * The state-body capabilities this build installs: version 2 (what it writes)
- * and version 1 (readable, credential-less — its attempts are refused by the
- * run path, never migrated).
+ * The state-body capabilities this build installs: version 3 (what it writes,
+ * with attempt credentials AND join arrivals), and versions 2 and 1 as readable
+ * older layouts whose attempts the run path refuses to advance — version 2
+ * records no arrivals and version 1 no credential, and neither is migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
     current: CURRENT_OUTCOME_STATE_BODY,
-    formats: [OUTCOME_STATE_BODY_V1_READER, OUTCOME_STATE_BODY_V2_READER],
+    formats: [
+      OUTCOME_STATE_BODY_V1_READER,
+      OUTCOME_STATE_BODY_V2_READER,
+      OUTCOME_STATE_BODY_V3_READER,
+    ],
   });
 
 /**
@@ -942,6 +1183,257 @@ export function entryNodesOf(plan: CompiledPlan): readonly CompiledNode[] {
   return Object.freeze(plan.nodes.filter((node) => !targeted.has(node.id)));
 }
 
+// ── Join arrivals ───────────────────────────────────────────────────────────
+
+/**
+ * The distinct predecessors a plan routes into one node, over ALL of its
+ * incoming edges.
+ *
+ * This is the plan's own topology — the same fact the legacy evaluator's
+ * `getUpstreamNodeIds` reads from a v2 declaration — restated for the compiled
+ * plan. The order follows the edge list (deduplicated), which is stable for a
+ * plan revision.
+ */
+function feederSourcesOf(plan: CompiledPlan, targetId: string): readonly string[] {
+  const sources: string[] = [];
+  const seen = new Set<string>();
+  for (const edge of plan.edges) {
+    if (edge.to !== targetId || seen.has(edge.from)) continue;
+    seen.add(edge.from);
+    sources.push(edge.from);
+  }
+  return sources;
+}
+
+/**
+ * The arrival set the node ENTRIES imply, in plan node order.
+ *
+ * A feeder has arrived at a target exactly when it is SETTLED on its current
+ * attempt and settles with an outcome a declared edge routes from it to the
+ * target. That single rule is what makes the join round-aware: a feeder that
+ * has been re-armed is no longer settled, so the answer it gave before its new
+ * attempt began stops counting the moment the new attempt starts.
+ *
+ * `suppressed` names nodes to treat as if they were already in flight. The
+ * reducer uses it to compute an arm set for a whole advance at once: a node the
+ * same advance arms must not be evidence for another node armed beside it.
+ *
+ * The result is a frozen list per plan node, so the state this module writes is
+ * canonical by construction and the reader can verify it field by field.
+ */
+function materializeArrivals(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+  suppressed?: ReadonlySet<string>,
+): ReadonlyMap<string, readonly OutcomeArrival[]> {
+  const entries = new Map<string, OutcomeNodeState>();
+  for (const entry of nodes) entries.set(entry.nodeId, entry);
+  const outgoing = new Map<string, CompiledEdge[]>();
+  for (const edge of plan.edges) {
+    const list = outgoing.get(edge.from);
+    if (list === undefined) outgoing.set(edge.from, [edge]);
+    else list.push(edge);
+  }
+  const arrivals = new Map<string, OutcomeArrival[]>();
+  for (const node of plan.nodes) arrivals.set(node.id, []);
+  // Sources are visited in PLAN order, so each target's list is in plan order
+  // too — the canonical order the reader compares against.
+  for (const source of plan.nodes) {
+    if (suppressed?.has(source.id)) continue;
+    const entry = entries.get(source.id);
+    if (entry === undefined || entry.status !== "settled") continue;
+    const outcomeId = entry.outcomeId;
+    const attemptId = entry.attemptId;
+    if (outcomeId === undefined || attemptId === undefined) continue;
+    const arrival: OutcomeArrival = Object.freeze({
+      from: source.id,
+      outcome: outcomeId,
+      attemptId,
+    });
+    for (const edge of outgoing.get(source.id) ?? []) {
+      if (edge.outcome !== outcomeId) continue;
+      const list = arrivals.get(edge.to);
+      if (list === undefined) continue;
+      // One source's edges are contiguous here, so a repeated declaration of
+      // the same edge collapses to one arrival instead of two.
+      if (list.length > 0 && list[list.length - 1]?.from === source.id) continue;
+      list.push(arrival);
+    }
+  }
+  const frozen = new Map<string, readonly OutcomeArrival[]>();
+  for (const [nodeId, list] of arrivals) frozen.set(nodeId, Object.freeze(list));
+  return frozen;
+}
+
+/**
+ * Whether one node's declared join is satisfied by its arrivals.
+ *
+ * The strategy is resolved by the SAME resolver the legacy signal engine uses
+ * (`src/graph/join-strategy.ts`), so a declaration cannot mean one thing to one
+ * runtime and another to the other. The satisfaction rule is the outcome
+ * protocol's reading of that strategy:
+ *
+ * - a node with no feeders is a graph root — satisfied immediately (it is armed
+ *   by `start()`, not by this gate);
+ * - `all` — every distinct feeder has arrived;
+ * - `any` — at least one feeder has arrived;
+ * - `quorum:N` — at least N distinct feeders have arrived.
+ *
+ * DIFFERENCE FROM THE LEGACY EVALUATOR, stated so the two cannot be confused:
+ * the legacy evaluator counts per-source SIGNALS and can return `failed`
+ * (a non-answer terminating signal aborts an `all`/`any` join). The outcome
+ * protocol has no severity-ranked signal at all — an outcome either routes along
+ * a declared edge or terminates its node — so there is no failure vocabulary to
+ * mirror, and an unsatisfied join simply WAITS. A feeder that terminates without
+ * routing to the target never arrives; it does not fail the join.
+ */
+function joinSatisfiedFor(
+  plan: CompiledPlan,
+  target: CompiledNode,
+  arrivals: readonly OutcomeArrival[],
+): boolean {
+  const feeders = feederSourcesOf(plan, target.id);
+  if (feeders.length === 0) return true;
+  const arrived = new Set(arrivals.map((arrival) => arrival.from));
+  let count = 0;
+  for (const feeder of feeders) {
+    if (arrived.has(feeder)) count += 1;
+  }
+  const strategy = resolveJoinStrategy(target.join);
+  if (typeof strategy === "object") {
+    // A resolved strategy always carries its count; an impossible value waits
+    // (the legacy evaluator's own fail-safe) rather than arming on zero answers.
+    const quorum = readQuorum(strategy);
+    return quorum !== undefined && count >= quorum;
+  }
+  if (strategy === JoinStrategy.Any) return count >= 1;
+  // `JoinStrategy.All` is the resolved default, so every remaining member of
+  // the string union means "every feeder".
+  return count === feeders.length;
+}
+
+/**
+ * The successors one accepted outcome arms: the nodes whose join is satisfied
+ * ONCE the advance is viewed as a whole.
+ *
+ * A single accepted outcome can route into several convergence nodes at once,
+ * and those nodes can feed each other. Arming one of them starts a NEW attempt,
+ * which supersedes the answer it gave in an earlier round — so it must not be
+ * evidence for another node armed in the SAME advance, or a convergence node
+ * would be armed on the previous round's answer of a feeder that is being
+ * re-armed right beside it.
+ *
+ * The arm set is therefore the greatest SELF-CONSISTENT set: a candidate is
+ * armed exactly when its join is satisfied while every OTHER armed candidate is
+ * treated as already in flight. It is computed by the monotone companion of that
+ * equation — start from "nothing is armed", recompute the candidates that FAIL
+ * with the current arm set suppressed, and repeat. The not-armed set only grows,
+ * so it reaches its fixpoint in at most one step per candidate, and the result
+ * does not depend on the order the candidates are examined in.
+ */
+function resolveArmSet(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+  armable: readonly CompiledNode[],
+): ReadonlySet<string> {
+  const entries = new Map<string, OutcomeNodeState>();
+  for (const entry of nodes) entries.set(entry.nodeId, entry);
+  let notArmed = new Set<string>();
+  for (let round = 0; round <= armable.length; round += 1) {
+    const suppressed = new Set<string>();
+    for (const node of armable) {
+      if (!notArmed.has(node.id)) suppressed.add(node.id);
+    }
+    const arrivals = materializeArrivals(plan, nodes, suppressed);
+    const next = new Set<string>();
+    for (const node of armable) {
+      const entry = entries.get(node.id);
+      const arrived = arrivals.get(node.id) ?? [];
+      // A candidate the state does not carry cannot be armed; refusing to arm
+      // it is the safe reading of an unreadable entry.
+      if (entry === undefined || !joinSatisfiedFor(plan, node, arrived)) {
+        next.add(node.id);
+      }
+    }
+    if (sameIdSet(next, notArmed)) break;
+    notArmed = next;
+  }
+  const armed = new Set<string>();
+  for (const node of armable) {
+    if (!notArmed.has(node.id)) armed.add(node.id);
+  }
+  return armed;
+}
+
+/** Whether two id sets hold exactly the same members. */
+function sameIdSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
+  }
+  return true;
+}
+
+/** Whether two arrival lists are field-for-field identical, in order. */
+function sameArrivals(
+  a: readonly OutcomeArrival[],
+  b: readonly OutcomeArrival[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((arrival, index) => {
+    const other = b[index];
+    return (
+      other !== undefined &&
+      arrival.from === other.from &&
+      arrival.outcome === other.outcome &&
+      arrival.attemptId === other.attemptId
+    );
+  });
+}
+
+/** Render an arrival list for a diagnostic, without inventing fields. */
+function describeArrivals(arrivals: readonly OutcomeArrival[]): string {
+  return (
+    "[" +
+    arrivals
+      .map(
+        (arrival) =>
+          JSON.stringify(arrival.from + ":" + arrival.outcome + "@" + arrival.attemptId),
+      )
+      .join(", ") +
+    "]"
+  );
+}
+
+/**
+ * Verify that every node's recorded arrivals are exactly what its own entry and
+ * the plan's edges corroborate.
+ *
+ * This is the anti-drift rule: the list is a materialization of the entries, so
+ * a snapshot where the two disagree is not a state this writer could have
+ * produced, and it is refused rather than trusted (an invented arrival would arm
+ * a join on evidence that does not exist) or silently corrected (an omitted one
+ * would stall a join the state itself already satisfies).
+ */
+function verifyArrivals(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+): void {
+  const canonical = materializeArrivals(plan, nodes);
+  nodes.forEach((entry, index) => {
+    const expected = canonical.get(entry.nodeId) ?? [];
+    const recorded = entry.arrivals ?? [];
+    if (!sameArrivals(recorded, expected)) {
+      throw malformedState(
+        "nodes[" + index + "].arrivals is " + describeArrivals(recorded) +
+          ", but the node entries and the plan's edges corroborate " +
+          describeArrivals(expected) +
+          " — the arrival list is refused rather than trusted or silently corrected",
+      );
+    }
+  });
+}
+
 // ── The reducer ─────────────────────────────────────────────────────────────
 
 /** Why an accepted outcome could not be applied to the state. */
@@ -965,10 +1457,12 @@ export type OutcomeAdvanceRefusalCode =
    */
   | "state-ledger-disagreement"
   /**
-   * The state was written in a body layout that cannot carry the attempt
-   * credential this build issues for every attempt. The advance is refused
-   * rather than converting the state into a newer layout: a version-1 attempt
-   * has no credential, so nothing may settle it or re-arm over it.
+   * The state was written in a body layout that cannot carry what this build
+   * writes on every attempt: version 1 records no attempt credential and
+   * version 2 records no join arrivals. The advance is refused rather than
+   * converting the state into a newer layout — an attempt with no credential
+   * can never be settled, and a body with no arrivals cannot say which feeders
+   * had reached a join, so arming on it would guess.
    */
   | "unsupported-state-version";
 
@@ -1075,8 +1569,8 @@ function continuationGroups(
  *
  * The rules, in order:
  * 0. the state must be written in the CURRENT body layout — a version that
- *    cannot carry attempt credentials is refused instead of being advanced and
- *    rewritten in a newer one;
+ *    cannot carry attempt credentials and join arrivals is refused instead of
+ *    being advanced and rewritten in a newer one;
  * 1. the decision's node must be a plan node, currently dispatched, on the
  *    attempt the decision names — otherwise the acceptance does not describe
  *    the state in hand and the advance is refused;
@@ -1085,10 +1579,18 @@ function continuationGroups(
  *    complement of its edges, so a non-terminal with no edge is a defect);
  * 4. a declared loop continuation advances that group's counter and refuses
  *    when the hard cap would be exceeded — one round past the cap is never run;
- * 5. every successor is armed with a FRESH attempt minted from the graph-wide
- *    counter AND a fresh credential from the injected source; a settled
- *    successor is re-armed only when source and target share a declared loop
- *    group.
+ * 5. a successor is armed only when its declared JOIN is satisfied by the
+ *    arrivals its feeders have produced, and only when it is not already in
+ *    flight: an unsatisfied join arms NOTHING (it waits — see
+ *    {@link joinSatisfiedFor} for why waiting, not refusal, is the outcome
+ *    protocol's answer), and a satisfied one arms EXACTLY ONCE, so two feeders
+ *    completing out of order cannot overwrite the attempt in flight;
+ * 6. an armed successor gets a FRESH attempt minted from the graph-wide counter
+ *    AND a fresh credential from the injected source; a settled successor is
+ *    re-armed only when source and target share a declared loop group;
+ * 7. the arrival list is re-materialized for every node once the advance is
+ *    applied, so the state carries the durable, canonical record of who has
+ *    arrived at every join.
  */
 export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance {
   const { plan, state, decision, now } = input;
@@ -1096,9 +1598,9 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     throw new OutcomeAdvanceRefusedError(
       "unsupported-state-version",
       "outcome-advance: the state was written in body version " + state.bodyVersion +
-        ", which cannot carry the attempt credential this build issues for every attempt — " +
-        "the state is refused rather than advanced and rewritten in body version " +
-        CURRENT_OUTCOME_STATE_BODY,
+        ", which cannot carry the attempt credentials and join arrivals this build writes on " +
+        "every attempt — the state is refused rather than advanced and rewritten in body " +
+        "version " + CURRENT_OUTCOME_STATE_BODY,
     );
   }
   const position = plan.nodes.findIndex((node) => node.id === decision.nodeId);
@@ -1204,33 +1706,61 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       }
       loopTraversals = Object.freeze(next);
     }
-    const armed = new Set<string>();
-    for (const edge of successors) {
-      if (armed.has(edge.to)) continue;
-      armed.add(edge.to);
-      const targetIndex = plan.nodes.findIndex((entry) => entry.id === edge.to);
-      if (targetIndex < 0) {
+    // The candidates this outcome routes to, as PLAN nodes in plan order. The
+    // order is the state's own node order, so the same advance always mints the
+    // same attempt ids; a target the plan does not declare is refused with the
+    // vocabulary the single-successor rule used.
+    const candidateIds = new Set(successors.map((edge) => edge.to));
+    for (const targetId of candidateIds) {
+      if (!plan.nodes.some((entry) => entry.id === targetId)) {
         throw new OutcomeAdvanceRefusedError(
           "no-route",
           "outcome-advance: edge " + JSON.stringify(decision.nodeId) + " -> " +
-            JSON.stringify(edge.to) + " names a node the plan does not declare",
+            JSON.stringify(targetId) + " names a node the plan does not declare",
         );
       }
-      const target = nodes[targetIndex];
-      if (target.status === "settled") {
-        const shared = sharedLoopGroup(plan, decision.nodeId, edge.to);
-        if (shared === undefined) {
-          throw new OutcomeAdvanceRefusedError(
-            "reentry-outside-loop",
-            "outcome-advance: edge " + JSON.stringify(decision.nodeId) + " -> " +
-              JSON.stringify(edge.to) + " re-enters a settled node, but the two do not share a " +
-              "declared loop group — re-entry outside a declared loop is refused",
-          );
-        }
+    }
+    const candidates = plan.nodes
+      .map((entry, index) => ({ node: entry, index }))
+      .filter((candidate) => candidateIds.has(candidate.node.id));
+
+    // Re-entry legality, checked once per candidate BEFORE anything is applied:
+    // a settled target the emitting node shares no declared loop group with is
+    // refused for the whole acceptance, exactly as it was when one outcome could
+    // arm only one successor.
+    for (const candidate of candidates) {
+      if (nodes[candidate.index].status !== "settled") continue;
+      const shared = sharedLoopGroup(plan, decision.nodeId, candidate.node.id);
+      if (shared === undefined) {
+        throw new OutcomeAdvanceRefusedError(
+          "reentry-outside-loop",
+          "outcome-advance: edge " + JSON.stringify(decision.nodeId) + " -> " +
+            JSON.stringify(candidate.node.id) + " re-enters a settled node, but the two do not " +
+            "share a declared loop group — re-entry outside a declared loop is refused",
+        );
       }
+    }
+
+    // THE JOIN GATE. A node is armed only when its declared join is satisfied,
+    // and a node already in flight is never armed a second time — the two rules
+    // together make an attempt exactly-once per satisfaction. A candidate whose
+    // join is NOT satisfied is left exactly where it was (pending or settled)
+    // apart from its arrival record, which is the durable evidence this
+    // acceptance contributed; no attempt id, no dispatched status and no effect
+    // are written for it.
+    const armable = candidates.filter(
+      (candidate) => nodes[candidate.index].status !== "dispatched",
+    );
+    const armSet = resolveArmSet(
+      plan,
+      nodes,
+      armable.map((candidate) => candidate.node),
+    );
+    for (const candidate of candidates) {
+      if (!armSet.has(candidate.node.id)) continue;
       attemptSeq += 1;
-      const attemptId = edge.to + "#" + attemptSeq;
-      const targetNode = plan.nodes[targetIndex];
+      const attemptId = candidate.node.id + "#" + attemptSeq;
+      const targetNode = candidate.node;
       // The credential is issued WITH the attempt and persisted on its entry,
       // so the binding a submission is checked against comes from the state —
       // never from the submission, and never re-derived from the attempt id.
@@ -1243,13 +1773,16 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
           planRevision: plan.planRevision,
         }),
       );
-      nodes[targetIndex] = Object.freeze({
+      nodes[candidate.index] = Object.freeze({
         nodeId: targetNode.id,
         status: "dispatched" as const,
         attemptId,
         attemptSeq,
         attemptCredential: credential,
         dispatchedAt: now,
+        // The canonical arrival list is materialized once the whole advance is
+        // applied (below); an armed node's list is the arrivals that armed it.
+        arrivals: Object.freeze([]),
       });
       dispatches.push(
         Object.freeze({
@@ -1261,6 +1794,22 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         }),
       );
     }
+  }
+
+  // THE ARRIVAL RECORD IS MATERIALIZED LAST, once every entry this advance
+  // changed is final (the settled node and every node it armed). It is ONE
+  // function of the entries, so the persisted list is canonical by construction
+  // and the reader's cross-check cannot disagree with the writer. A node the run
+  // never reached keeps its empty list; a node waiting at an unsatisfied join
+  // keeps the arrivals that are its reason to wait.
+  const canonicalArrivals = materializeArrivals(plan, nodes);
+  for (let index = 0; index < nodes.length; index += 1) {
+    const entry = nodes[index];
+    if (entry === undefined) continue;
+    nodes[index] = Object.freeze({
+      ...entry,
+      arrivals: canonicalArrivals.get(entry.nodeId) ?? Object.freeze([]),
+    });
   }
 
   const dispatched = nodes.some((entry) => entry.status === "dispatched");

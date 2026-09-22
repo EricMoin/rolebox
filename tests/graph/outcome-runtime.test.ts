@@ -230,6 +230,91 @@ function sharedContinuationDeclaration(outerCap: number): GraphDeclarationV3 {
   };
 }
 
+/**
+ * arb splits into brc and crb, which both converge on djoin. The convergence
+ * node declares join:all, so its attempt may be minted ONLY once both branches
+ * have arrived — the reproduced defect was djoin being armed twice, on #4 and
+ * then #5, with the attempt in flight overwritten by the second arm.
+ */
+const DIAMOND_ALL: GraphDeclarationV3 = {
+  version: 3,
+  name: "graph.diamond-all",
+  nodes: [
+    { id: "arb", agent: "agent.arb", prompt: "Split.", outcomes: [{ id: "split" }] },
+    { id: "brc", agent: "agent.brc", prompt: "Branch B.", outcomes: [{ id: "done" }] },
+    { id: "crb", agent: "agent.crb", prompt: "Branch C.", outcomes: [{ id: "done" }] },
+    {
+      id: "djoin",
+      agent: "agent.djoin",
+      prompt: "Join.",
+      outcomes: [{ id: "merged" }],
+      join: { strategy: "all" },
+    },
+  ],
+  edges: [
+    { from: "arb", to: "brc", outcome: "split" },
+    { from: "arb", to: "crb", outcome: "split" },
+    { from: "brc", to: "djoin", outcome: "done" },
+    { from: "crb", to: "djoin", outcome: "done" },
+  ],
+};
+
+/**
+ * The same diamond with join:any: the FIRST branch arms djoin, and the second
+ * branch then arrives while djoin is already in flight — the exact shape in
+ * which the old reducer overwrote the running attempt with a new one.
+ */
+const DIAMOND_ANY: GraphDeclarationV3 = {
+  ...DIAMOND_ALL,
+  name: "graph.diamond-any",
+  nodes: DIAMOND_ALL.nodes.map((node) =>
+    node.id === "djoin"
+      ? { ...node, join: { strategy: "any" as const } }
+      : node,
+  ),
+};
+
+/**
+ * A loop whose convergence node is a real join: the splitter s fans out to a
+ * and b, which converge on j with join:all, and j's continuation re-enters the
+ * loop at s. Every round therefore has to wait for BOTH a and b again — a
+ * previous round's arrival must not satisfy the new round's join.
+ */
+function loopJoinDeclaration(maxTraversals: number): GraphDeclarationV3 {
+  return {
+    version: 3,
+    name: "graph.loop-join",
+    nodes: [
+      { id: "s", agent: "agent.s", prompt: "Open a round.", outcomes: [{ id: "next" }] },
+      { id: "a", agent: "agent.a", prompt: "Branch A.", outcomes: [{ id: "done" }] },
+      { id: "b", agent: "agent.b", prompt: "Branch B.", outcomes: [{ id: "done" }] },
+      {
+        id: "j",
+        agent: "agent.j",
+        prompt: "Join.",
+        outcomes: [{ id: "again" }, { id: "exit" }],
+        join: { strategy: "all" },
+      },
+    ],
+    edges: [
+      { from: "s", to: "a", outcome: "next" },
+      { from: "s", to: "b", outcome: "next" },
+      { from: "a", to: "j", outcome: "done" },
+      { from: "b", to: "j", outcome: "done" },
+      { from: "j", to: "s", outcome: "again" },
+    ],
+    loop_groups: [
+      {
+        id: "rounds",
+        nodes: ["s", "a", "b", "j"],
+        max_traversals: maxTraversals,
+        continuation_outcome: "again",
+        exit_outcome: "exit",
+      },
+    ],
+  };
+}
+
 /** work's only outcome is gated by a validator the tests implement. */
 const GATED: GraphDeclarationV3 = {
   version: 3,
@@ -1000,6 +1085,255 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
   });
 });
 
+// ── The join gate ───────────────────────────────────────────────────────────
+
+describe("OutcomeGraphRuntime — a convergence node is armed by its join", () => {
+  it("arms a join:all node exactly once, when the LAST feeder arrives", async () => {
+    await withHarness(DIAMOND_ALL, async ({ runtime, requests, ledger, graphId }) => {
+      runtime.start(NOW);
+      const split = runtime.submit(
+        { nodeId: "arb", outcomeId: "split", credential: credentialOf(requests, "arb#1") },
+        NOW + 1,
+      );
+      expect(split.kind).toBe("accepted");
+      if (split.kind !== "accepted") return;
+      expect(attemptIds(split.dispatched)).toEqual(["brc#2", "crb#3"]);
+
+      // THE DEFECT: the first branch completing used to arm djoin on its own.
+      const first = runtime.submit(
+        { nodeId: "brc", outcomeId: "done", credential: credentialOf(requests, "brc#2") },
+        NOW + 2,
+      );
+      expect(first.kind).toBe("accepted");
+      if (first.kind !== "accepted") return;
+      expect(first.dispatched).toEqual([]);
+      // Waiting writes NO attempt state: no attempt id, no credential, no
+      // effect — only the durable arrival record of the branch that did answer.
+      expect(nodeOf(first.state, "djoin")).toMatchObject({ status: "pending" });
+      expect(nodeOf(first.state, "djoin").attemptId).toBeUndefined();
+      expect(nodeOf(first.state, "djoin").attemptCredential).toBeUndefined();
+      expect(nodeOf(first.state, "djoin").arrivals).toEqual([
+        { from: "brc", outcome: "done", attemptId: "brc#2" },
+      ]);
+
+      const second = runtime.submit(
+        { nodeId: "crb", outcomeId: "done", credential: credentialOf(requests, "crb#3") },
+        NOW + 3,
+      );
+      expect(second.kind).toBe("accepted");
+      if (second.kind !== "accepted") return;
+      // Exactly ONE arm, on a fresh attempt, and the in-flight attempt can no
+      // longer be overwritten by a later arrival.
+      expect(attemptIds(second.dispatched)).toEqual(["djoin#4"]);
+      expect(nodeOf(second.state, "djoin")).toMatchObject({
+        status: "dispatched",
+        attemptId: "djoin#4",
+      });
+      expect(nodeOf(second.state, "djoin").arrivals).toEqual([
+        { from: "brc", outcome: "done", attemptId: "brc#2" },
+        { from: "crb", outcome: "done", attemptId: "crb#3" },
+      ]);
+
+      // SELF-CHECK EVIDENCE: the deterministic dispatch sequence and the final
+      // node state (no credential value is printed).
+      expect(attemptIds(requests)).toEqual(["arb#1", "brc#2", "crb#3", "djoin#4"]);
+      expect(second.state.attemptSeq).toBe(4);
+      console.log(
+        "[probe:diamond-join] dispatches=" +
+          JSON.stringify(attemptIds(requests)) +
+          " state=" +
+          stateSummary(runtime.state()),
+      );
+      expect(
+        ledger.acceptedEvents(graphId).map((event) => event.attemptId),
+      ).toEqual(["arb#1", "brc#2", "crb#3"]);
+    });
+  });
+
+  it("never overwrites an attempt in flight: a second arrival at join:any leaves it alone", async () => {
+    await withHarness(DIAMOND_ANY, async ({ runtime, requests }) => {
+      runtime.start(NOW);
+      runtime.submit(
+        { nodeId: "arb", outcomeId: "split", credential: credentialOf(requests, "arb#1") },
+        NOW + 1,
+      );
+      const armed = runtime.submit(
+        { nodeId: "brc", outcomeId: "done", credential: credentialOf(requests, "brc#2") },
+        NOW + 2,
+      );
+      expect(armed.kind).toBe("accepted");
+      if (armed.kind !== "accepted") return;
+      // join:any — the first branch arms the convergence node.
+      expect(attemptIds(armed.dispatched)).toEqual(["djoin#4"]);
+
+      const late = runtime.submit(
+        { nodeId: "crb", outcomeId: "done", credential: credentialOf(requests, "crb#3") },
+        NOW + 3,
+      );
+      expect(late.kind).toBe("accepted");
+      if (late.kind !== "accepted") return;
+      // The arrival is accepted and recorded, but djoin is already running:
+      // no second dispatch, and its attempt id is UNCHANGED (the old reducer
+      // minted djoin#5 here and overwrote djoin#4).
+      expect(late.dispatched).toEqual([]);
+      expect(nodeOf(late.state, "djoin")).toMatchObject({
+        status: "dispatched",
+        attemptId: "djoin#4",
+      });
+      expect(late.state.attemptSeq).toBe(4);
+      expect(nodeOf(late.state, "djoin").arrivals).toEqual([
+        { from: "brc", outcome: "done", attemptId: "brc#2" },
+        { from: "crb", outcome: "done", attemptId: "crb#3" },
+      ]);
+      expect(attemptIds(requests)).toEqual(["arb#1", "brc#2", "crb#3", "djoin#4"]);
+    });
+  });
+
+  it("decides the join from the persisted arrivals after a restart", async () => {
+    await withHarness(
+      DIAMOND_ALL,
+      async ({ runtime, plan, ledger, requests, dir }) => {
+        runtime.start(NOW);
+        runtime.submit(
+          { nodeId: "arb", outcomeId: "split", credential: credentialOf(requests, "arb#1") },
+          NOW + 1,
+        );
+        const first = runtime.submit(
+          { nodeId: "brc", outcomeId: "done", credential: credentialOf(requests, "brc#2") },
+          NOW + 2,
+        );
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+
+        // A NEW runtime over the SAME ledger: the arrival is not in memory,
+        // only in the persisted state the acceptance transaction wrote.
+        const restarted = new OutcomeGraphRuntime({
+          plan,
+          ledger,
+          dispatch: (request) => {
+            requests.push(request);
+          },
+          validators: EMPTY_VALIDATORS,
+          artifactRoot: dir,
+          clock: () => NOW,
+          mintCredential: TEST_CREDENTIAL_SOURCE,
+        });
+        const resumed = restarted.resume(NOW + 3);
+        expect(resumed.kind).toBe("resumed");
+        if (resumed.kind !== "resumed") return;
+        // The half-arrived join is NOT armed (only the branch that is still
+        // running is), and the arrival it is waiting on is still there.
+        expect(resumed.armed.map((node) => node.nodeId)).toEqual(["crb"]);
+        expect(nodeOf(resumed.state, "djoin")).toMatchObject({ status: "pending" });
+        expect(nodeOf(resumed.state, "djoin").arrivals).toEqual([
+          { from: "brc", outcome: "done", attemptId: "brc#2" },
+        ]);
+
+        const second = restarted.submit(
+          { nodeId: "crb", outcomeId: "done", credential: credentialOf(requests, "crb#3") },
+          NOW + 4,
+        );
+        expect(second.kind).toBe("accepted");
+        if (second.kind !== "accepted") return;
+        expect(attemptIds(second.dispatched)).toEqual(["djoin#4"]);
+      },
+    );
+  });
+});
+
+describe("OutcomeGraphRuntime — a loop join is decided per round", () => {
+  it("does not satisfy a new round's join with the previous round's arrival", async () => {
+    await withHarness(loopJoinDeclaration(3), async ({ runtime, requests }) => {
+      runtime.start(NOW);
+      runtime.submit(
+        { nodeId: "s", outcomeId: "next", credential: credentialOf(requests, "s#1") },
+        NOW + 1,
+      );
+      // ROUND 1 — the join waits for both branches.
+      const a1 = runtime.submit(
+        { nodeId: "a", outcomeId: "done", credential: credentialOf(requests, "a#2") },
+        NOW + 2,
+      );
+      expect(a1.kind).toBe("accepted");
+      if (a1.kind !== "accepted") return;
+      expect(a1.dispatched).toEqual([]);
+      const b1 = runtime.submit(
+        { nodeId: "b", outcomeId: "done", credential: credentialOf(requests, "b#3") },
+        NOW + 3,
+      );
+      expect(b1.kind).toBe("accepted");
+      if (b1.kind !== "accepted") return;
+      expect(attemptIds(b1.dispatched)).toEqual(["j#4"]);
+
+      // The continuation re-enters the loop at s, which re-runs BOTH branches.
+      const again = runtime.submit(
+        { nodeId: "j", outcomeId: "again", credential: credentialOf(requests, "j#4") },
+        NOW + 4,
+      );
+      expect(again.kind).toBe("accepted");
+      if (again.kind !== "accepted") return;
+      expect(attemptIds(again.dispatched)).toEqual(["s#5"]);
+      expect(again.state.loopTraversals["rounds"]).toBe(1);
+      const round2 = runtime.submit(
+        { nodeId: "s", outcomeId: "next", credential: credentialOf(requests, "s#5") },
+        NOW + 5,
+      );
+      expect(round2.kind).toBe("accepted");
+      if (round2.kind !== "accepted") return;
+      expect(attemptIds(round2.dispatched)).toEqual(["a#6", "b#7"]);
+
+      // ROUND 2 — a#6 settling alone must NOT satisfy the join: the branch's
+      // round-1 arrival is superseded by its new attempt, so j keeps waiting on
+      // the attempt that settled it instead of being re-armed.
+      const a2 = runtime.submit(
+        { nodeId: "a", outcomeId: "done", credential: credentialOf(requests, "a#6") },
+        NOW + 6,
+      );
+      expect(a2.kind).toBe("accepted");
+      if (a2.kind !== "accepted") return;
+      expect(a2.dispatched).toEqual([]);
+      expect(nodeOf(a2.state, "j")).toMatchObject({
+        status: "settled",
+        attemptId: "j#4",
+      });
+      expect(nodeOf(a2.state, "j").arrivals).toEqual([
+        { from: "a", outcome: "done", attemptId: "a#6" },
+      ]);
+
+      // Both round-2 arrivals are in: exactly ONE re-arm.
+      const b2 = runtime.submit(
+        { nodeId: "b", outcomeId: "done", credential: credentialOf(requests, "b#7") },
+        NOW + 7,
+      );
+      expect(b2.kind).toBe("accepted");
+      if (b2.kind !== "accepted") return;
+      expect(attemptIds(b2.dispatched)).toEqual(["j#8"]);
+      expect(nodeOf(b2.state, "j")).toMatchObject({
+        status: "dispatched",
+        attemptId: "j#8",
+      });
+      expect(b2.state.loopTraversals["rounds"]).toBe(1);
+      // One arm per round, and no arm between them.
+      expect(attemptIds(requests)).toEqual([
+        "s#1",
+        "a#2",
+        "b#3",
+        "j#4",
+        "s#5",
+        "a#6",
+        "b#7",
+        "j#8",
+      ]);
+      console.log(
+        "[probe:loop-join] dispatches=" +
+          JSON.stringify(attemptIds(requests)) +
+          " state=" +
+          stateSummary(runtime.state()),
+      );
+    });
+  });
+});
+
 // ── Attempt credentials ─────────────────────────────────────────────────────
 
 describe("OutcomeGraphRuntime — an attempt is named by the credential it was issued", () => {
@@ -1333,12 +1667,17 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       const rawNodes = (body as Record<string, unknown>).nodes;
       if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
       // A body exactly as the build BEFORE credentials wrote it: version 1, no
-      // credential on any attempt.
+      // credential on any attempt and no arrival list (version 1 defines
+      // neither).
       const v1Nodes = rawNodes.map((node) => {
         if (typeof node !== "object" || node === null) {
           throw new Error("fixture: a node entry is not a record");
         }
-        const { attemptCredential: _dropped, ...rest } = node as Record<string, unknown>;
+        const {
+          attemptCredential: _credential,
+          arrivals: _arrivals,
+          ...rest
+        } = node as Record<string, unknown>;
         return rest;
       });
       ledger.writeGraphState({

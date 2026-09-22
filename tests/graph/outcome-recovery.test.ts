@@ -517,7 +517,7 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
     await sweep(dir, startRequests);
 
     // A body exactly as the build BEFORE credentials wrote it: version 1, no
-    // credential on the in-flight attempt.
+    // credential on the in-flight attempt and no arrival list either.
     const writer = await openLedger(dir);
     let rewritten: GraphStateRecord;
     try {
@@ -527,7 +527,7 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
       if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
       const v1Nodes = rawNodes.map((node) => {
         if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
-        const { attemptCredential: _dropped, ...rest } = node;
+        const { attemptCredential: _credential, arrivals: _arrivals, ...rest } = node;
         return rest;
       });
       rewritten = {

@@ -55,6 +55,7 @@ import {
   DEFAULT_OUTCOME_STATE_BODY_REGISTRY,
   OUTCOME_STATE_BODY_V1,
   OUTCOME_STATE_BODY_V2,
+  OUTCOME_STATE_BODY_V3,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -521,8 +522,15 @@ function stateBodyFixture(): OutcomeGraphState {
           attemptSeq: 1,
           attemptCredential: FIXTURE_CREDENTIAL,
           dispatchedAt: NOW,
+          // No node has settled, so every join inbox is empty: exactly what the
+          // entry materialization corroborates.
+          arrivals: Object.freeze([]),
         })
-      : Object.freeze({ nodeId: node.id, status: "pending" as const }),
+      : Object.freeze({
+          nodeId: node.id,
+          status: "pending" as const,
+          arrivals: Object.freeze([]),
+        }),
   );
   return Object.freeze({
     bodyVersion: CURRENT_OUTCOME_STATE_BODY,
@@ -535,7 +543,7 @@ function stateBodyFixture(): OutcomeGraphState {
   });
 }
 
-/** A version-1 body: the fixture with every credential stripped. */
+/** A version-1 body: the fixture with credential and arrivals stripped. */
 function stateBodyFixtureV1(): Record<string, unknown> {
   const body = bodyOf(stateBodyFixture());
   const rawNodes = body.nodes;
@@ -545,8 +553,105 @@ function stateBodyFixtureV1(): Record<string, unknown> {
     bodyVersion: OUTCOME_STATE_BODY_V1,
     nodes: rawNodes.map((node) => {
       if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
-      const { attemptCredential: _dropped, ...rest } = node;
+      const { attemptCredential: _credential, arrivals: _arrivals, ...rest } = node;
       return rest;
+    }),
+  };
+}
+
+/**
+ * A version-2 body: the fixture's credentials kept, its arrival lists stripped
+ * — the layout this build's predecessor wrote, which records no arrivals.
+ */
+function stateBodyFixtureV2(): Record<string, unknown> {
+  const body = bodyOf(stateBodyFixture());
+  const rawNodes = body.nodes;
+  if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  return {
+    ...body,
+    bodyVersion: OUTCOME_STATE_BODY_V2,
+    nodes: rawNodes.map((node) => {
+      if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
+      const { arrivals: _arrivals, ...rest } = node;
+      return rest;
+    }),
+  };
+}
+
+/**
+ * A version-3 body for the LINEAR plan with ONE non-empty join inbox: "work"
+ * has SETTLED with the routing outcome "done", so its arrival reached "ship"
+ * over the declared edge (work -> ship, done) and "ship" is running on a second
+ * attempt.
+ *
+ * Addressed by node ID, never by position: the compiled plan orders nodes by id.
+ */
+function settledArrivalBody(): Record<string, unknown> {
+  const body = bodyOf(stateBodyFixture());
+  const rawNodes = body.nodes;
+  if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  return {
+    ...body,
+    nodes: STATE_BODY_PLAN.nodes.map((node, index) => {
+      const entry = rawNodes[index];
+      if (!isRecord(entry)) throw new Error("fixture: a node entry is not a record");
+      if (node.id === "work") {
+        return {
+          nodeId: node.id,
+          status: "settled",
+          attemptId: "work#1",
+          attemptSeq: 1,
+          attemptCredential: FIXTURE_CREDENTIAL,
+          outcomeId: "done",
+          dispatchedAt: NOW,
+          settledAt: NOW,
+          arrivals: [],
+        };
+      }
+      return {
+        nodeId: node.id,
+        status: "dispatched",
+        attemptId: node.id + "#2",
+        attemptSeq: 2,
+        attemptCredential: "fixture-credential:" + node.id + "#2",
+        dispatchedAt: NOW,
+        arrivals: [{ from: "work", outcome: "done", attemptId: "work#1" }],
+      };
+    }),
+  };
+}
+
+/** The raw record body the current writer produces for the LINEAR plan. */
+function stateBodyFixtureRecord(): Record<string, unknown> {
+  return bodyOf(stateBodyFixture());
+}
+
+/** One node entry of a raw body, addressed by node ID (plan order is by id). */
+function nodeEntry(
+  body: Record<string, unknown>,
+  nodeId: string,
+): Record<string, unknown> {
+  const rawNodes = body.nodes;
+  if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  const index = STATE_BODY_PLAN.nodes.findIndex((node) => node.id === nodeId);
+  const entry = rawNodes[index];
+  if (!isRecord(entry)) throw new Error("fixture: no node entry for " + nodeId);
+  return entry;
+}
+
+/** Replace one node entry of a raw body, addressed by node ID. */
+function withNodeEntry(
+  body: Record<string, unknown>,
+  nodeId: string,
+  change: (entry: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown> {
+  const rawNodes = body.nodes;
+  if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  return {
+    ...body,
+    nodes: rawNodes.map((entry, index) => {
+      if (!isRecord(entry)) throw new Error("fixture: a node entry is not a record");
+      return STATE_BODY_PLAN.nodes[index]?.id === nodeId ? change(entry) : entry;
     }),
   };
 }
@@ -659,7 +764,37 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(state.nodes[0]?.attemptId).toBe(STATE_BODY_PLAN.nodes[0]?.id + "#1");
   });
 
-  it("refuses a version-2 dispatched node without the required credential", () => {
+  it("still READS a version-2 body, whose attempts carry a credential but no arrivals", () => {
+    const state = readOutcomeGraphState(recordOf(stateBodyFixtureV2()), STATE_BODY_PLAN);
+    expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V2);
+    // Readable, and honest about what the layout does not record: the attempt
+    // keeps its credential, and no arrival list exists at all.
+    expect(state.nodes[0]?.attemptCredential).toBe(FIXTURE_CREDENTIAL);
+    expect(state.nodes[0]?.arrivals).toBeUndefined();
+    expect(state.nodes[1]?.arrivals).toBeUndefined();
+  });
+
+  it("refuses a version-2 body that carries the arrival list version 3 defines", () => {
+    const body = stateBodyFixtureV2();
+    const rawNodes = body.nodes;
+    if (!Array.isArray(rawNodes) || !isRecord(rawNodes[0])) {
+      throw new Error("fixture: the version-2 body carries no first node");
+    }
+    const error = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf({
+          ...body,
+          nodes: [{ ...rawNodes[0], arrivals: [] }, ...rawNodes.slice(1)],
+        }),
+        STATE_BODY_PLAN,
+      ),
+    );
+    // The older reader refuses the newer field instead of dropping it.
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("arrivals");
+  });
+
+  it("refuses a current-version dispatched node without the required credential", () => {
     const body = bodyOf(stateBodyFixture());
     const rawNodes = body.nodes;
     if (!Array.isArray(rawNodes) || !isRecord(rawNodes[0])) {
@@ -714,13 +849,103 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(error.message).toContain("attemptCredential");
   });
 
-  it("installs a reader for version 1 AND version 2, and writes version 2", () => {
-    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V2);
+  it("round-trips a version-3 body whose join inbox holds a corroborated arrival", async () => {
+    await withLedger(async (ledger) => {
+      const body = settledArrivalBody();
+      ledger.writeGraphState({ ...recordOf(body), body });
+      const stored = ledger.readGraphState(STATE_BODY_PLAN.graphId);
+      if (stored === undefined) throw new Error("fixture: the state row is missing");
+      const reread = readOutcomeGraphState(stored, STATE_BODY_PLAN);
+      // The arrival names its feeder, the outcome it settled with and the
+      // attempt that produced it — the round token a later join decision reads.
+      const ship = reread.nodes.find((node) => node.nodeId === "ship");
+      expect(ship?.arrivals).toEqual([
+        { from: "work", outcome: "done", attemptId: "work#1" },
+      ]);
+      // write -> read -> write loses nothing, field by field.
+      expect(fieldLines(stateRecordOf(reread, NOW + 1).body)).toEqual(
+        fieldLines(stored.body),
+      );
+    });
+  });
+
+  it("refuses an arrival list that omits a corroborated arrival", () => {
+    // The entries say "work" settled with a routing outcome, but the target
+    // claims nobody arrived: a stalled join the state itself contradicts.
+    const body = withNodeEntry(settledArrivalBody(), "ship", (entry) => ({
+      ...entry,
+      arrivals: [],
+    }));
+    const error = refusalOf(() => readOutcomeGraphState(recordOf(body), STATE_BODY_PLAN));
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("arrivals");
+  });
+
+  it("refuses an arrival list that invents an arrival the entries do not corroborate", () => {
+    // "work" is DISPATCHED, never settled, so no arrival from it exists; a list
+    // claiming one would arm the join on evidence the state does not hold.
+    const body = withNodeEntry(stateBodyFixtureRecord(), "ship", (entry) => ({
+      ...entry,
+      arrivals: [{ from: "work", outcome: "done", attemptId: "work#1" }],
+    }));
+    const error = refusalOf(() => readOutcomeGraphState(recordOf(body), STATE_BODY_PLAN));
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("arrivals");
+  });
+
+  it("refuses an arrival whose outcome no declared edge routes to the node", () => {
+    const body = withNodeEntry(settledArrivalBody(), "ship", (entry) => ({
+      ...entry,
+      arrivals: [{ from: "work", outcome: "elsewhere", attemptId: "work#1" }],
+    }));
+    const error = refusalOf(() => readOutcomeGraphState(recordOf(body), STATE_BODY_PLAN));
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("no such edge");
+  });
+
+  it("refuses a feeder recorded twice at one join, and an unknown arrival field", () => {
+    const arrival = { from: "work", outcome: "done", attemptId: "work#1" };
+    const duplicated = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf(
+          withNodeEntry(settledArrivalBody(), "ship", (entry) => ({
+            ...entry,
+            arrivals: [arrival, arrival],
+          })),
+        ),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(duplicated.problem).toBe("malformed-state");
+    expect(duplicated.message).toContain("a second time");
+
+    const extended = refusalOf(() =>
+      readOutcomeGraphState(
+        recordOf(
+          withNodeEntry(settledArrivalBody(), "ship", (entry) => ({
+            ...entry,
+            arrivals: [{ ...arrival, round: 2 }],
+          })),
+        ),
+        STATE_BODY_PLAN,
+      ),
+    );
+    expect(extended.problem).toBe("malformed-state");
+    expect(extended.message).toContain("round");
+  });
+
+  it("installs a reader for versions 1, 2 AND 3, and writes version 3", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V3);
     expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
+      OUTCOME_STATE_BODY_V3,
     ]);
-    for (const version of [OUTCOME_STATE_BODY_V1, OUTCOME_STATE_BODY_V2]) {
+    for (const version of [
+      OUTCOME_STATE_BODY_V1,
+      OUTCOME_STATE_BODY_V2,
+      OUTCOME_STATE_BODY_V3,
+    ]) {
       const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
       expect(verdict.kind).toBe("supported");
       if (verdict.kind === "supported") {
@@ -729,7 +954,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     }
   });
 
-  it("refuses to advance a body version that cannot carry a credential", () => {
+  it("refuses to advance a body version that cannot carry a credential or arrivals", () => {
     const nodeId = STATE_BODY_PLAN.nodes[0]?.id ?? "";
     const decision: AcceptanceDecision = {
       kind: "accepted",
@@ -740,23 +965,28 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       outcomeId: "done",
       requirements: [],
     };
-    const v1 = readOutcomeGraphState(recordOf(stateBodyFixtureV1()), STATE_BODY_PLAN);
-    let caught: unknown;
-    try {
-      advanceOutcomeGraph({
-        plan: STATE_BODY_PLAN,
-        state: v1,
-        decision,
-        now: NOW + 1,
-        mintCredential: RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
-      });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(OutcomeAdvanceRefusedError);
-    if (caught instanceof OutcomeAdvanceRefusedError) {
-      expect(caught.code).toBe("unsupported-state-version");
-      expect(caught.message).toContain("attempt credential");
+    // Version 1 cannot carry a credential, version 2 cannot carry an arrival
+    // list: neither may be advanced and silently rewritten in version 3.
+    for (const body of [stateBodyFixtureV1(), stateBodyFixtureV2()]) {
+      const state = readOutcomeGraphState(recordOf(body), STATE_BODY_PLAN);
+      let caught: unknown;
+      try {
+        advanceOutcomeGraph({
+          plan: STATE_BODY_PLAN,
+          state,
+          decision,
+          now: NOW + 1,
+          mintCredential: RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(OutcomeAdvanceRefusedError);
+      if (caught instanceof OutcomeAdvanceRefusedError) {
+        expect(caught.code).toBe("unsupported-state-version");
+        expect(caught.message).toContain("attempt credential");
+        expect(caught.message).toContain("join arrivals");
+      }
     }
   });
 

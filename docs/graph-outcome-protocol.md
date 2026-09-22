@@ -1099,6 +1099,99 @@ new attempt, a version-1 attempt is refused on recovery and on submission, and
 the credential is shown present in the state row and absent from the effect
 payload, the receipt, the accepted event and the recovery report.
 
+D3 MAKES A CONVERGENCE NODE ARM BY ITS DECLARED JOIN, EXACTLY ONCE, AND PERSISTS
+WHO HAS ARRIVED.
+
+The defect this closes was reproduced end to end: in the diamond
+`arb -> {brc, crb} -> djoin` with `join: { strategy: "all" }`, the dispatches
+were `["arb#1","brc#2","crb#3","djoin#4","djoin#5"]` — `brc` completing armed
+`djoin`, `crb` completing armed it AGAIN, and the persisted state ended on
+`djoin#5` with the attempt in flight overwritten. The compiled plan carried the
+join configuration all along; the successor-arming loop never read it and armed
+every edge target unconditionally.
+
+THE ARRIVAL SET IS THE JOIN'S INPUT, AND IT IS PERSISTED. Each node entry of
+state-body version 3 carries `arrivals`: one `{ from, outcome, attemptId }`
+record per feeder that has arrived, in plan node order. A feeder has arrived
+exactly when it is SETTLED on its current attempt with an outcome a declared
+edge routes from it to the target — the same "latest accepted result per
+predecessor" fact the legacy evaluator reads from `upstreamResults` — and the
+list is the CANONICAL MATERIALIZATION of that fact, recomputed by one function
+after every advance and written inside the acceptance transaction that produced
+it. The reader verifies the list against the plan's edges AND the node entries,
+so a snapshot that omits an arrival its own entries corroborate (a stalled join)
+or invents one they do not (an unearned arm) is `malformed-state` rather than
+trusted or silently corrected. A restart therefore decides the join from the
+state, not from a re-derivation a caller might perform differently.
+
+THE ARM RULES. A successor is armed only when its declared join is satisfied;
+until then NOTHING is armed — the acceptance still commits (the outcome is a
+real, accepted result) and the only write is the arrival record itself: no
+attempt id, no `dispatched` status and no dispatch effect exist for a node
+whose join is unsatisfied. When the join IS satisfied the node is armed exactly
+once, on a fresh attempt with a fresh credential, and a node already
+`dispatched` is never armed again — which is what makes two feeders completing
+out of order unable to overwrite the running attempt. A candidate the advance
+arms can be re-entered only through the existing re-entry rule (a settled target
+the emitting node shares a declared loop group with); that check still runs once
+per candidate, before anything is applied, and its refusal rolls back the whole
+acceptance.
+
+THE STRATEGY IS RESOLVED, NOT REIMPLEMENTED. `resolveJoinStrategy` and
+`readQuorum` moved to the dependency-leaf module `src/graph/join-strategy.ts`
+and are re-exported unchanged from `src/graph/engine/join-evaluator.ts`, so the
+legacy signal engine and the outcome reducer read one `join` declaration
+through ONE resolver instead of two that could drift. What the reducer does NOT
+reuse is the evaluator itself: `evaluateJoin` is defined over
+`EngineState`/`NodeRuntimeState` and per-source `EdgePayload` signals, and
+importing its module would drag `src/graph/engine/engine-persistence.ts` (file
+I/O) into the outcome run path, which is deliberately free of
+`src/graph/engine/**`. The outcome rule is therefore the equivalent
+satisfaction predicate over arrivals: `all` requires every distinct feeder,
+`any` at least one, `quorum:N` at least N. The ONE semantic difference is
+stated where it lives: the legacy evaluator counts severity-ranked signals and
+can return `failed` (a non-answer terminating signal aborts an `all`/`any`
+join). The outcome protocol has no severity ranking — an outcome either routes
+along a declared edge or terminates its node — so there is no failure
+vocabulary to mirror, and an unsatisfied join WAITS. Waiting is chosen over
+refusing the acceptance because a refusal would leave the emitting attempt
+unsettled forever (its outcome was legitimately accepted) and would strand a
+join that a later arrival is supposed to satisfy; a join that can never be
+satisfied stays visibly pending instead of being silently failed or completed.
+A feeder that terminates without routing to the target never arrives; it does
+not fail the join.
+
+ROUNDS DO NOT MIX. An arrival is scoped to the attempt that produced it, so a
+feeder that has been re-armed is no longer settled and its earlier answer stops
+counting the moment its new attempt starts. The arm set for one advance is
+computed as a whole: a candidate this advance arms is treated as already in
+flight and is therefore not evidence for another candidate armed beside it, and
+the self-consistent set is found by a monotone fixpoint that does not depend on
+the order candidates are examined in. A loop's convergence node therefore cannot
+be armed on the previous round's arrival of a branch that is being re-armed in
+the same breath, and round N+1's join cannot be satisfied by round N's evidence.
+
+BODY VERSION 3 ADDS THE FIELD, AND VERSIONS 1 AND 2 STAY READABLE. `arrivals`
+is required on every node entry of body version 3 — the layout this build writes
+— and forbidden on versions 1 and 2, whose readers refuse it rather than
+dropping it (a version-2 body carrying an `arrivals` list is
+`malformed-state`). Neither older version can be advanced: version 1 records no
+credential and version 2 no arrivals, and the reducer refuses them with
+`unsupported-state-version` instead of guessing which feeders had arrived. As
+with the credential, there is no migrator: an arrival is a fact about an attempt
+that already settled.
+
+ENFORCED BY TESTS. The diamond arms `djoin#4` exactly once, and only when the
+last feeder answers — the first feeder's completion dispatches nothing and
+leaves no attempt on the join node; with `join:any` a second arrival while the
+node is in flight leaves its attempt id unchanged (the reproduced overwrite); a
+restart decides the half-arrived join from the persisted arrivals and arms it
+once when the second feeder finally answers; and in a loop the two-branch join
+is re-armed once per round only after BOTH branches have answered in that round,
+so a single round-2 arrival cannot re-arm it. No existing assertion encoded the
+old overwrite; the reducer, reader and version tests were extended rather than
+rewritten.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |
