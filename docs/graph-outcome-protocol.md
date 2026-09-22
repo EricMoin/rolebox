@@ -1622,9 +1622,11 @@ THE VERDICT IS NOT A COUNT. Every entry is classified three ways: `terminal`
 or `stopped`, with the exact phase and the stop reported so "cut short" is
 never read as "finished"); `in-flight` (readable and still owed work — a
 non-`complete` legacy phase, an outcome phase `ready`/`executing`, or a
-declared outcome graph with NO ledger state row yet, whose first execution is
-still owed); or `blocked`. A readable entry names the WORK, not just the
-phase: a legacy entry carries its per-status node counts and the ids of the
+declared outcome graph whose ledger holds no state row yet — a ledger STORE
+that does not exist at all counts, since nothing has ever been committed to
+it — whose first execution is still owed); or `blocked`. A readable entry
+names the WORK, not just the phase: a legacy entry carries its per-status node
+counts and the ids of the
 nodes the engine has not settled, an outcome entry carries every node the
 persisted state records in flight (with its attempt, never its credential) and
 every effect still `pending` or `started`. `drained` requires ALL THREE of:
@@ -1650,7 +1652,11 @@ through `SqliteAcceptanceLedger.openReadOnly` — an open that does not create
 the directory or the file, never initializes a schema, and holds a connection
 whose writes SQLite itself refuses (`createDatabase` gained the read-only open
 option for it). A store that does not exist answers `absent`, which is a
-reading and never a licence to initialize one. The regression test snapshots
+reading and never a licence to initialize one; for a protocol-2 record that
+absent store is reported as an in-flight first execution (`hasState: false`),
+not as a blocker, because the run path — never the audit — creates it and
+calling the record unreadable would stall the drain on a graph that only needs
+its first execution. The regression test snapshots
 every file under the audited workspace (SHA-256, size, mtime) before and after
 a full audit over a mixed legacy/outcome store INCLUDING the SQLite ledger and
 fails on any new, changed or touched file.

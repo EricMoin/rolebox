@@ -523,6 +523,45 @@ describe("drain audit — the acceptance ledger", () => {
     expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
   });
 
+  it("reports a declared outcome graph with no ledger store as in flight, never as a blocker", async () => {
+    const dir = makeTmpDir("drain-audit-ledger-missing-");
+    const built = buildDeclaredOutcomeGraph({
+      declaration: linearDeclaration("audit.outcome.unstarted"),
+    });
+    persistDeclaredGraph(built, dir);
+    expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
+
+    const report = await auditGraphStore({ directory: dir });
+
+    // The store is ABSENT, not unreadable: nothing has ever been committed, so
+    // the first execution is still owed — the run path creates the ledger and
+    // starts the graph from the saved plan. A blocker here would invent an
+    // unreadable record and stall the drain on work that is merely not started.
+    expect(report.ledger).toBe("absent");
+    expect(report.blockers).toEqual([]);
+    const entry = entryOf(report, "engine-audit.outcome.unstarted.json");
+    expect(entry.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(entry.protocol).toBe("outcome");
+    expect(entry.classification).toBe("in-flight");
+    expect(entry.hasState).toBe(false);
+    expect(entry.armed).toEqual([]);
+    expect(entry.unsettledEffects).toEqual([]);
+    expect(entry.blockerCodes).toEqual([]);
+    expect(report.totals).toMatchObject({
+      files: 1,
+      terminal: 0,
+      inFlight: 1,
+      blocked: 0,
+      legacyInFlight: 0,
+      outcomeInFlight: 1,
+      unsettledEffects: 0,
+    });
+    expect(report.verdict).toBe("in-flight");
+    expect(report.drained).toBe(false);
+    // The audit read the store; it did not initialize one.
+    expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
+  });
+
   it("lists a refused ledger as a store blocker and blocks the outcome graph that depends on it", async () => {
     const dir = makeTmpDir("drain-audit-ledger-refused-");
     const fixture = await startOutcomeGraph(dir, "audit.outcome.running");

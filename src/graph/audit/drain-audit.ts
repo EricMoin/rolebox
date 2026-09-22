@@ -29,7 +29,10 @@
  * — an open that does not create the directory, does not create the file, never
  * initializes a schema, and holds a connection on which SQLite itself refuses
  * every write. A store that does not exist is `absent`, which is a reading and
- * never a licence to initialize one. `tests/graph/drain-audit.test.ts` proves
+ * never a licence to initialize one — and for a protocol-2 record it is not a
+ * blocker either: nothing was ever committed, so the graph's first execution is
+ * still owed and the run path (not the audit) is what creates the store.
+ * `tests/graph/drain-audit.test.ts` proves
  * the zero-write property the hard way: every file under the audited workspace
  * is hashed and mtime-compared before and after a full audit over mixed
  * records, including the SQLite ledger.
@@ -59,8 +62,10 @@
  * IN-FLIGHT IS MORE THAN "NOT TERMINAL". A readable entry is in flight when it
  * is not quiescent: a legacy record in `idle`/`executing` (the legacy engine
  * could advance it), an outcome record in `ready`/`executing`, or a declared
- * outcome graph with NO ledger state row yet (its first execution is still
- * owed — the sweep would start it from the saved plan). The entry names the
+ * outcome graph whose ledger holds no state row yet — including a ledger STORE
+ * that does not exist at all, which nothing has ever committed to. Its first
+ * execution is still owed: the sweep would create the store and start the graph
+ * from the saved plan. The entry names the
  * WORK, not just the phase: a legacy entry carries its per-status node counts
  * and the ids of nodes the engine has not settled; an outcome entry carries
  * every node the persisted state records as in flight, with its attempt, and
@@ -525,14 +530,33 @@ function classifyOutcome(
     };
   }
   if (ledger === undefined) {
-    // The store-level ledger reading already failed; this record's run state
-    // lives in that store, so the entry inherits the blocker.
+    // An ABSENT ledger file is not an unreadable one: `openReadOnly` answers
+    // `absent` without creating it, and only a refusal or a failed open carries
+    // a store-level blocker. Nothing was ever committed here, so the graph's
+    // first execution is still owed — the same shape as "no state row yet", and
+    // the run path (never the audit) is what creates the store and starts it.
+    // Reporting a blocker here would invent an unreadable record that does not
+    // exist and stall the drain on a graph that only needs its first execution.
+    if (ledgerBlocker === undefined) {
+      return {
+        graphId: state.graphId,
+        protocol: "outcome",
+        classification: "in-flight",
+        planRevision: plan.planRevision,
+        hasState: false,
+        armed: Object.freeze([]),
+        unsettledEffects: Object.freeze([]),
+        blockerCodes: [],
+      };
+    }
+    // The store EXISTS but is not one this build may read; this record's run
+    // state lives in it, so the entry inherits the store-level blocker.
     return {
       graphId: state.graphId,
       protocol: "outcome",
       classification: "blocked",
       planRevision: plan.planRevision,
-      blockerCodes: [ledgerBlocker ?? "ledger-unreadable"],
+      blockerCodes: [ledgerBlocker],
     };
   }
 
