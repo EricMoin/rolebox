@@ -196,7 +196,41 @@ export interface CompiledEdge {
 }
 
 /**
- * One compiled loop group, with its hard cap and its two declared routes.
+ * One loop group's declared PROGRESS policy: what a loop compares across
+ * completed rounds, and when a run that keeps repeating itself must stop.
+ *
+ * Every part is DECLARED, never inferred from the worker's payload:
+ * - `evaluator` — the comparison SEMANTICS (which evaluator owns the meaning of
+ *   "changed"). The run path refuses an identity this build does not implement
+ *   rather than comparing under semantics the plan did not declare;
+ * - `version` — the EXACT version of that evaluator. A comparison whose
+ *   persisted baseline was recorded under another version is `unknown`, never
+ *   `unchanged` or `progressed`: the meaning may itself have changed;
+ * - `subject` — the comparison OBJECT: the outcome-data field whose value is
+ *   read (once, outside the acceptance transaction) and compared as a token;
+ * - `maxUnchanged` — the EXPLICIT stagnation threshold: the number of
+ *   consecutive `unchanged` comparisons at which the run stops with
+ *   `progress-stalled`. It is a declared stopping policy, not a proof that the
+ *   underlying task is impossible, and the group's hard `maxTraversals` cap
+ *   still applies.
+ *
+ * The policy lives in the plan body, so `planRevision` covers it and an edited
+ * declaration cannot silently change the semantics of an in-flight run.
+ */
+export interface CompiledProgressPolicy {
+  /** The comparison semantics identity. */
+  readonly evaluator: string;
+  /** The exact evaluator version. */
+  readonly version: number;
+  /** The comparison object: the outcome-data field compared across rounds. */
+  readonly subject: string;
+  /** Consecutive `unchanged` comparisons that stop the run. */
+  readonly maxUnchanged: number;
+}
+
+/**
+ * One compiled loop group, with its hard cap, its two declared routes and its
+ * optional progress policy.
  *
  * `nodes` is the member SET in id order (membership, not declaration order, is
  * what the group declares). `continuationOutcome` re-enters the loop and
@@ -213,6 +247,12 @@ export interface CompiledLoopGroup {
   readonly continuationOutcome: string;
   /** The member outcome that leaves the loop. */
   readonly exitOutcome: string;
+  /**
+   * The group's optional progress policy; absent means the loop declares no
+   * comparison at all, so its continuations are never measured and the run is
+   * bounded by the hard cap alone.
+   */
+  readonly progress?: CompiledProgressPolicy;
 }
 
 /**
@@ -444,7 +484,7 @@ export function nodeBindingsOf(
  * - `unknown-loop-member` / `unknown-loop-continuation-outcome` /
  *   `unknown-loop-exit-outcome` / `loop-group-missing-limits` — loop
  *   membership and both declared routes are real, with a positive traversal
- *   cap;
+ *   cap, and a declared progress policy is the record the comparison reads;
  * - `loop-continuation-without-edge` — a declared continuation outcome is
  *   carried by at least one edge that stays INSIDE the group, otherwise the
  *   loop can never continue;
@@ -480,6 +520,7 @@ export type CompiledTopologyIssueCode =
   | "unknown-loop-continuation-outcome"
   | "unknown-loop-exit-outcome"
   | "loop-group-missing-limits"
+  | "malformed-progress-policy"
   | "loop-continuation-without-edge"
   | "cycle-not-in-loop-group"
   | "missing-terminal-outcome"
@@ -657,6 +698,12 @@ export function inspectCompiledTopology(
         message: `loop group ${JSON.stringify(groupId)} needs maxTraversals as a positive safe integer, received ${describeTopologyValue(raw.maxTraversals)}`,
       });
     }
+    if (raw.progress !== undefined && readCompiledProgressPolicy(raw.progress) === undefined) {
+      issues.push({
+        code: "malformed-progress-policy",
+        message: `loop group ${JSON.stringify(groupId)} declares a progress policy that is not { evaluator, version, subject, maxUnchanged } with non-empty ids, an exact version and a positive threshold`,
+      });
+    }
     const memberIds: string[] = [];
     const memberSet = new Set<string>();
     raw.nodes.forEach((member, memberIndex) => {
@@ -800,6 +847,30 @@ export function inspectCompiledTopology(
   }
 
   return { issues, nodeIds };
+}
+
+/**
+ * Read one progress policy as the plan defines it, or `undefined` when the
+ * value is not one.
+ *
+ * ONE reader for the inspector and for any boundary that has to compare a
+ * persisted value against the declaration: a policy is a record of
+ * `{ evaluator, version, subject, maxUnchanged }` whose ids are non-empty
+ * strings, whose version is a positive safe integer and whose threshold is a
+ * positive safe integer. Extra keys are ignored, exactly as the rest of the
+ * plan-level rules ignore fields they do not read (the plan's content address
+ * covers them).
+ */
+export function readCompiledProgressPolicy(
+  raw: unknown,
+): CompiledProgressPolicy | undefined {
+  if (!isPlanRecord(raw)) return undefined;
+  const { evaluator, version, subject, maxUnchanged } = raw;
+  if (!isText(evaluator)) return undefined;
+  if (!isPositiveSafeInteger(version)) return undefined;
+  if (!isText(subject)) return undefined;
+  if (!isPositiveSafeInteger(maxUnchanged)) return undefined;
+  return Object.freeze({ evaluator, version, subject, maxUnchanged });
 }
 
 /**

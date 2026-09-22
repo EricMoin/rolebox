@@ -59,6 +59,7 @@ import {
   OUTCOME_STATE_BODY_V2,
   OUTCOME_STATE_BODY_V3,
   OUTCOME_STATE_BODY_V4,
+  OUTCOME_STATE_BODY_V5,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -546,16 +547,21 @@ function stateBodyFixture(): OutcomeGraphState {
     nodes: Object.freeze(nodes),
     loopTraversals: Object.freeze({}),
     attemptSeq: 1,
+    // The plan declares no progress policy, so the current layout's progress
+    // record is present and EMPTY: exactly what a writer materializes, and what
+    // a version that defines the field must carry.
+    loopProgress: Object.freeze({}),
   });
 }
 
-/** A version-1 body: the fixture with credential and arrivals stripped. */
+/** A version-1 body: the fixture with credential, arrivals and progress stripped. */
 function stateBodyFixtureV1(): Record<string, unknown> {
   const body = bodyOf(stateBodyFixture());
   const rawNodes = body.nodes;
   if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  const { loopProgress: _progress, ...withoutProgress } = body;
   return {
-    ...body,
+    ...withoutProgress,
     bodyVersion: OUTCOME_STATE_BODY_V1,
     nodes: rawNodes.map((node) => {
       if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
@@ -566,6 +572,15 @@ function stateBodyFixtureV1(): Record<string, unknown> {
 }
 
 /**
+ * A version-4 body: the current fixture with the progress record stripped — the
+ * layout this build's predecessor wrote, which records no comparison baseline.
+ */
+function stateBodyFixtureV4(): Record<string, unknown> {
+  const { loopProgress: _progress, ...body } = bodyOf(stateBodyFixture());
+  return { ...body, bodyVersion: OUTCOME_STATE_BODY_V4 };
+}
+
+/**
  * A version-2 body: the fixture's credentials kept, its arrival lists stripped
  * — the layout this build's predecessor wrote, which records no arrivals.
  */
@@ -573,8 +588,9 @@ function stateBodyFixtureV2(): Record<string, unknown> {
   const body = bodyOf(stateBodyFixture());
   const rawNodes = body.nodes;
   if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+  const { loopProgress: _progress, ...withoutProgress } = body;
   return {
-    ...body,
+    ...withoutProgress,
     bodyVersion: OUTCOME_STATE_BODY_V2,
     nodes: rawNodes.map((node) => {
       if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
@@ -791,6 +807,10 @@ function stoppedBodyFixture(): Record<string, unknown> {
       maxTraversals: 1,
       stoppedAt: NOW + 4,
     },
+    // The stopped plan declares no progress policy either, so its record is an
+    // empty object — the same materialization the writer produces, in the same
+    // key order (the stop, then the progress record).
+    loopProgress: {},
   };
 }
 
@@ -1044,19 +1064,21 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(extended.message).toContain("round");
   });
 
-  it("installs a reader for versions 1 to 4, and writes version 4", () => {
-    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V4);
+  it("installs a reader for versions 1 to 5, and writes version 5", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V5);
     expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
       OUTCOME_STATE_BODY_V3,
       OUTCOME_STATE_BODY_V4,
+      OUTCOME_STATE_BODY_V5,
     ]);
     for (const version of [
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
       OUTCOME_STATE_BODY_V3,
       OUTCOME_STATE_BODY_V4,
+      OUTCOME_STATE_BODY_V5,
     ]) {
       const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
       expect(verdict.kind).toBe("supported");
@@ -1066,7 +1088,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     }
   });
 
-  it("refuses to advance a body version that cannot carry a credential or arrivals", () => {
+  it("refuses to advance a body version that cannot carry a credential, arrivals or progress", () => {
     const nodeId = STATE_BODY_PLAN.nodes[0]?.id ?? "";
     const decision: AcceptanceDecision = {
       kind: "accepted",
@@ -1078,8 +1100,14 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       requirements: [],
     };
     // Version 1 cannot carry a credential, version 2 cannot carry an arrival
-    // list: neither may be advanced and silently rewritten in version 3.
-    for (const body of [stateBodyFixtureV1(), stateBodyFixtureV2()]) {
+    // list and version 4 cannot carry a progress baseline: none may be advanced
+    // and silently rewritten in a newer layout (a body whose baselines were
+    // dropped would restart the comparison).
+    for (const body of [
+      stateBodyFixtureV1(),
+      stateBodyFixtureV2(),
+      stateBodyFixtureV4(),
+    ]) {
       const state = readOutcomeGraphState(recordOf(body), STATE_BODY_PLAN);
       let caught: unknown;
       try {
@@ -1098,6 +1126,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
         expect(caught.code).toBe("unsupported-state-version");
         expect(caught.message).toContain("attempt credential");
         expect(caught.message).toContain("join arrivals");
+        expect(caught.message).toContain("progress baselines");
       }
     }
   });
@@ -1227,7 +1256,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
   });
 
   it("keeps the stop vocabulary closed", () => {
-    expect(OUTCOME_STOP_REASONS).toEqual(["loop-exhausted"]);
+    expect(OUTCOME_STOP_REASONS).toEqual(["loop-exhausted", "progress-stalled"]);
     const error = refusalOf(() =>
       readOutcomeGraphState(
         stopRecord(
@@ -1263,10 +1292,13 @@ describe("outcome state body — versioned capability, no silent trimming", () =
   });
 
   it("refuses a stop on a body version that does not define one, and its stopped phase", () => {
-    // Version 3 cannot represent a stop at all: the FIELD is refused...
+    // Version 3 cannot represent a stop at all: the FIELD is refused. The
+    // progress record it also cannot carry is stripped, so this case is about
+    // the stop (the version gate refuses whichever field it meets first).
+    const { loopProgress: _progressV3, ...v3Body } = stoppedBodyFixture();
     const withField = refusalOf(() =>
       readOutcomeGraphState(
-        stopRecord({ ...stoppedBodyFixture(), bodyVersion: OUTCOME_STATE_BODY_V3 }),
+        stopRecord({ ...v3Body, bodyVersion: OUTCOME_STATE_BODY_V3 }),
         STOP_BODY_PLAN,
       ),
     );
@@ -1275,7 +1307,7 @@ describe("outcome state body — versioned capability, no silent trimming", () =
 
     // ...and so is the phase that only the stop’s own version defines, even with
     // the record removed: a version that cannot end this way never wrote it.
-    const { stop: _dropped, ...body } = stoppedBodyFixture();
+    const { stop: _dropped, loopProgress: _progress, ...body } = stoppedBodyFixture();
     const withPhase = refusalOf(() =>
       readOutcomeGraphState(
         stopRecord({ ...body, bodyVersion: OUTCOME_STATE_BODY_V2 }),
@@ -1363,6 +1395,399 @@ describe("outcome state body — versioned capability, no silent trimming", () =
       readOutcomeGraphState(recordOf({ bodyVersion: 2 }), STATE_BODY_PLAN, registry),
     );
     expect(error.message).toBe("stub reader reached for version 2");
+  });
+});
+
+// ── A version-5 body with a DECLARED progress policy ────────────────────────
+
+/** work -> review -> (revise) -> work, with a declared progress policy. */
+const PROGRESS_BODY_DECLARATION: GraphDeclarationV3 = {
+  version: 3,
+  name: "graph.state-progress",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "review",
+      agent: "agent.review",
+      prompt: "Review the work.",
+      outcomes: [{ id: "revise" }, { id: "approve" }],
+    },
+  ],
+  edges: [
+    { from: "work", to: "review", outcome: "done" },
+    { from: "review", to: "work", outcome: "revise" },
+  ],
+  loop_groups: [
+    {
+      id: "revise-loop",
+      nodes: ["work", "review"],
+      max_traversals: 4,
+      continuation_outcome: "revise",
+      exit_outcome: "approve",
+      progress: {
+        evaluator: "revision-token",
+        version: 1,
+        subject: "revision",
+        max_unchanged: 2,
+      },
+    },
+  ],
+};
+
+const PROGRESS_BODY_PLAN = buildDeclaredOutcomeGraph({
+  declaration: PROGRESS_BODY_DECLARATION,
+}).plan;
+
+/**
+ * The body a run STOPPED by its progress policy leaves: both loop nodes settled
+ * with their routing outcomes, the declared threshold reached, and the stop
+ * naming exactly the comparison the record corroborates.
+ *
+ * Node entries are in PLAN order, which the compiled plan sorts by id.
+ */
+function progressBodyFixture(): Record<string, unknown> {
+  return {
+    bodyVersion: CURRENT_OUTCOME_STATE_BODY,
+    graphId: PROGRESS_BODY_PLAN.graphId,
+    planRevision: PROGRESS_BODY_PLAN.planRevision,
+    phase: "stopped",
+    nodes: [
+      {
+        nodeId: "review",
+        status: "settled",
+        attemptId: "review#2",
+        attemptSeq: 2,
+        attemptCredential: "fixture-credential:review#2",
+        outcomeId: "revise",
+        dispatchedAt: NOW,
+        settledAt: NOW + 2,
+        arrivals: [{ from: "work", outcome: "done", attemptId: "work#1" }],
+      },
+      {
+        nodeId: "work",
+        status: "settled",
+        attemptId: "work#1",
+        attemptSeq: 1,
+        attemptCredential: "fixture-credential:work#1",
+        outcomeId: "done",
+        dispatchedAt: NOW,
+        settledAt: NOW + 1,
+        arrivals: [{ from: "review", outcome: "revise", attemptId: "review#2" }],
+      },
+    ],
+    loopTraversals: { "revise-loop": 1 },
+    attemptSeq: 2,
+    stop: {
+      reason: "progress-stalled",
+      loopGroupId: "revise-loop",
+      nodeId: "review",
+      outcomeId: "revise",
+      attemptId: "review#2",
+      unchanged: 2,
+      maxUnchanged: 2,
+      evaluator: "revision-token",
+      evaluatorVersion: 1,
+      subject: "revision",
+      baseline: "r1",
+      stoppedAt: NOW + 2,
+    },
+    loopProgress: {
+      "revise-loop": {
+        loopGroupId: "revise-loop",
+        evaluator: "revision-token",
+        version: 1,
+        subject: "revision",
+        unchanged: 2,
+        baseline: "r1",
+      },
+    },
+  };
+}
+
+/** The record an outside writer would store for one PROGRESS_BODY_PLAN body. */
+function progressRecord(body: unknown): GraphStateRecord {
+  return {
+    graphId: PROGRESS_BODY_PLAN.graphId,
+    planRevision: PROGRESS_BODY_PLAN.planRevision,
+    body,
+    updatedAt: NOW,
+  };
+}
+
+/** One mutation of the progress fixture, for the refusal cases. */
+function withProgressBody(
+  change: (body: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown> {
+  return change(progressBodyFixture());
+}
+
+/** Replace the one progress entry of a raw body. */
+function withProgressEntry(
+  body: Record<string, unknown>,
+  change: (entry: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown> {
+  const progress = recordOrThrow(body.loopProgress, "loopProgress");
+  const entry = recordOrThrow(progress["revise-loop"], "the progress entry");
+  return {
+    ...body,
+    loopProgress: { ...progress, "revise-loop": change(entry) },
+  };
+}
+
+/** Replace the stop record of a raw body. */
+function withProgressStop(
+  body: Record<string, unknown>,
+  change: (stop: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...body, stop: change(recordOrThrow(body.stop, "the stop")) };
+}
+
+/** Read one unknown value as a record, or fail the fixture. */
+function recordOrThrow(value: unknown, what: string): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("fixture: " + what + " is not a record");
+  return value;
+}
+
+describe("outcome state body — the progress record is a declared comparison", () => {
+  it("round-trips a stalled progress body with zero field loss", async () => {
+    await withLedger(async (ledger) => {
+      const body = progressBodyFixture();
+      ledger.writeGraphState(progressRecord(body));
+      const stored = ledger.readGraphState(PROGRESS_BODY_PLAN.graphId);
+      if (stored === undefined) throw new Error("fixture: the state row is missing");
+      const state = readOutcomeGraphState(stored, PROGRESS_BODY_PLAN);
+      expect(state.bodyVersion).toBe(OUTCOME_STATE_BODY_V5);
+      expect(state.phase).toBe("stopped");
+      expect(state.loopProgress?.["revise-loop"]).toEqual({
+        loopGroupId: "revise-loop",
+        evaluator: "revision-token",
+        version: 1,
+        subject: "revision",
+        unchanged: 2,
+        baseline: "r1",
+      });
+      expect(state.stop).toEqual({
+        reason: "progress-stalled",
+        loopGroupId: "revise-loop",
+        nodeId: "review",
+        outcomeId: "revise",
+        attemptId: "review#2",
+        unchanged: 2,
+        maxUnchanged: 2,
+        evaluator: "revision-token",
+        evaluatorVersion: 1,
+        subject: "revision",
+        baseline: "r1",
+        stoppedAt: NOW + 2,
+      });
+      // write -> read -> write loses nothing, field by field.
+      expect(fieldLines(stateRecordOf(state, NOW + 3).body)).toEqual(fieldLines(stored.body));
+    });
+  });
+
+  it("reads a baseline recorded under another evaluator VERSION (the comparison judges it)", () => {
+    // A RUNNING body whose baseline was recorded under version 7 while the plan
+    // declares version 1. The record is READ: the version is the compatibility
+    // fact the comparison answers "unknown" for, never a shape the reader may
+    // refuse a whole body over (the stop, when there is one, is corroborated
+    // against the record OWN version, so it cannot disagree with it).
+    const { stop: _stop, ...running } = withProgressBody((fixture) =>
+      withProgressEntry(
+        { ...fixture, phase: "executing" },
+        (entry) => ({ ...entry, version: 7, unchanged: 0 }),
+      ),
+    );
+    const state = readOutcomeGraphState(progressRecord(running), PROGRESS_BODY_PLAN);
+    expect(state.phase).toBe("executing");
+    expect(state.loopProgress?.["revise-loop"]?.version).toBe(7);
+
+    // The same record with a stop that agrees with it (version 7): legal too,
+    // because the stop is verified against the record, not against the plan's
+    // version.
+    const stopped = withProgressBody((fixture) =>
+      withProgressStop(
+        withProgressEntry(fixture, (entry) => ({ ...entry, version: 7 })),
+        (stop) => ({ ...stop, evaluatorVersion: 7 }),
+      ),
+    );
+    expect(
+      readOutcomeGraphState(progressRecord(stopped), PROGRESS_BODY_PLAN).stop,
+    ).toMatchObject({ reason: "progress-stalled", evaluatorVersion: 7 });
+  });
+
+  it("refuses a progress record the plan does not authorize", () => {
+    const cases: readonly {
+      readonly name: string;
+      readonly body: Record<string, unknown>;
+      readonly contains: string;
+    }[] = [
+      {
+        name: "an entry for a group the plan does not declare",
+        body: withProgressBody((fixture) => ({
+          ...fixture,
+          loopProgress: {
+            "revise-loop": recordOrThrow(
+              recordOrThrow(fixture.loopProgress, "loopProgress")["revise-loop"],
+              "the progress entry",
+            ),
+            "no-such-loop": {
+              loopGroupId: "no-such-loop",
+              evaluator: "revision-token",
+              version: 1,
+              subject: "revision",
+              unchanged: 0,
+            },
+          },
+        })),
+        contains: "does not declare",
+      },
+      {
+        name: "no entry for a group whose plan declares a policy",
+        body: withProgressBody((fixture) => ({ ...fixture, loopProgress: {} })),
+        contains: "carries no entry",
+      },
+      {
+        name: "an unknown field in the entry",
+        body: withProgressBody((fixture) =>
+          withProgressEntry(fixture, (entry) => ({ ...entry, round: 2 })),
+        ),
+        contains: "round",
+      },
+      {
+        name: "an evaluator the plan does not declare",
+        body: withProgressBody((fixture) =>
+          withProgressEntry(fixture, (entry) => ({ ...entry, evaluator: "levenshtein" })),
+        ),
+        contains: "comparison semantics",
+      },
+      {
+        name: "a subject the plan does not declare",
+        body: withProgressBody((fixture) =>
+          withProgressEntry(fixture, (entry) => ({ ...entry, subject: "digest" })),
+        ),
+        contains: "comparison object",
+      },
+      {
+        name: "a baseline beyond the projection bound",
+        body: withProgressBody((fixture) =>
+          withProgressEntry(fixture, (entry) => ({ ...entry, baseline: "x".repeat(257) })),
+        ),
+        contains: "revision token",
+      },
+    ];
+    for (const entry of cases) {
+      const error = refusalOf(() =>
+        readOutcomeGraphState(progressRecord(entry.body), PROGRESS_BODY_PLAN),
+      );
+      expect(error.problem).toBe("malformed-state");
+      expect(error.message).toContain(entry.contains);
+    }
+  });
+
+  it("refuses a counter above the threshold, and one standing on it without the stop", () => {
+    // Both cases are RUNNING bodies (a stopped one is corroborated against its
+    // stop first), so the counter rule is the only one that can answer.
+    const runningBody = (unchanged: number): Record<string, unknown> => {
+      const { stop: _stop, ...running } = withProgressBody((fixture) =>
+        withProgressEntry(
+          { ...fixture, phase: "executing" },
+          (entry) => ({ ...entry, unchanged }),
+        ),
+      );
+      return running;
+    };
+
+    const above = refusalOf(() =>
+      readOutcomeGraphState(progressRecord(runningBody(3)), PROGRESS_BODY_PLAN),
+    );
+    expect(above.problem).toBe("malformed-state");
+    expect(above.message).toContain("above the declared stagnation threshold");
+
+    // The counter ON the threshold, on a body that did NOT stop: reaching the
+    // threshold stops the run, so a running body standing on it was never
+    // written.
+    const noStop = refusalOf(() =>
+      readOutcomeGraphState(progressRecord(runningBody(2)), PROGRESS_BODY_PLAN),
+    );
+    expect(noStop.problem).toBe("malformed-state");
+    expect(noStop.message).toContain("progress-stalled");
+  });
+
+  it("refuses a progress-stalled stop its own record does not corroborate", () => {
+    const cases: readonly {
+      readonly name: string;
+      readonly body: Record<string, unknown>;
+      readonly contains: string;
+    }[] = [
+      {
+        name: "a threshold the plan does not declare",
+        body: withProgressBody((fixture) =>
+          withProgressStop(fixture, (stop) => ({ ...stop, maxUnchanged: 9 })),
+        ),
+        contains: "plan declares",
+      },
+      {
+        name: "a count that disagrees with the record",
+        body: withProgressBody((fixture) =>
+          withProgressStop(fixture, (stop) => ({ ...stop, unchanged: 1 })),
+        ),
+        contains: "but loopProgress records",
+      },
+      {
+        name: "a baseline that disagrees with the record",
+        body: withProgressBody((fixture) =>
+          withProgressStop(fixture, (stop) => ({ ...stop, baseline: "r2" })),
+        ),
+        contains: "but loopProgress records",
+      },
+      {
+        name: "an evaluator version that disagrees with the record",
+        body: withProgressBody((fixture) =>
+          withProgressStop(fixture, (stop) => ({ ...stop, evaluatorVersion: 2 })),
+        ),
+        contains: "version",
+      },
+      {
+        name: "a stop whose count is below its own threshold",
+        body: withProgressBody((fixture) =>
+          withProgressStop(fixture, (stop) => ({ ...stop, unchanged: 3 })),
+        ),
+        contains: "but loopProgress records",
+      },
+    ];
+    for (const entry of cases) {
+      const error = refusalOf(() =>
+        readOutcomeGraphState(progressRecord(entry.body), PROGRESS_BODY_PLAN),
+      );
+      expect(error.problem).toBe("malformed-state");
+      expect(error.message).toContain(entry.contains);
+    }
+  });
+
+  it("refuses a progress-stalled stop on a group with no declared policy", () => {
+    const body = {
+      ...stoppedBodyFixture(),
+      loopProgress: {},
+      stop: {
+        reason: "progress-stalled",
+        loopGroupId: "revise-loop",
+        nodeId: "review",
+        outcomeId: "revise",
+        attemptId: "review#4",
+        unchanged: 1,
+        maxUnchanged: 1,
+        evaluator: "revision-token",
+        evaluatorVersion: 1,
+        subject: "revision",
+        baseline: "r1",
+        stoppedAt: NOW + 4,
+      },
+    };
+    const error = refusalOf(() =>
+      readOutcomeGraphState(stopRecord(body), STOP_BODY_PLAN),
+    );
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("no progress policy");
   });
 });
 

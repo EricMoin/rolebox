@@ -855,6 +855,29 @@ describe("compileGraph — error codes", () => {
       path: "loop_groups.L",
     },
     {
+      code: "malformed-progress-policy",
+      input: rawDeclaration(
+        [node("a", ["x"])],
+        [],
+        [
+          {
+            id: "L",
+            nodes: ["a"],
+            max_traversals: 2,
+            continuation_outcome: "x",
+            exit_outcome: "x",
+            progress: {
+              evaluator: "revision-token",
+              version: 0,
+              subject: "revision",
+              max_unchanged: 2,
+            },
+          },
+        ],
+      ),
+      path: "loop_groups.L.progress",
+    },
+    {
       code: "unknown-loop-member",
       input: declaration(
         [node("a", ["x"]), node("b", ["y"])],
@@ -2141,6 +2164,122 @@ describe("parseGraphDeclarationV3 — the strict v3 front-end (C1)", () => {
       ],
     });
     expect(declaration.nodes[0]?.contractRef).toEqual(ref);
+  });
+
+  it("reads a loop progress policy, preserves it, and carries it into the plan", () => {
+    const authored = {
+      version: 3,
+      name: "graph.progress",
+      nodes: [
+        { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+        {
+          id: "review",
+          agent: "agent.review",
+          prompt: "Review the work.",
+          outcomes: [{ id: "revise" }, { id: "approve" }],
+        },
+      ],
+      edges: [
+        { from: "work", to: "review", outcome: "done" },
+        { from: "review", to: "work", outcome: "revise" },
+      ],
+      loop_groups: [
+        {
+          id: "revise-loop",
+          nodes: ["work", "review"],
+          max_traversals: 3,
+          continuation_outcome: "revise",
+          exit_outcome: "approve",
+          progress: {
+            evaluator: "revision-token",
+            version: 1,
+            subject: "revision",
+            max_unchanged: 2,
+          },
+        },
+      ],
+    };
+    const declaration = parseOk(authored);
+    // The declared policy is CARRIED, never resolved here: the comparison
+    // semantics, the comparison object and the threshold are the plan own
+    // fields, and whether this build implements the evaluator is a run-path
+    // refusal, not a structural question.
+    expect(declaration.loop_groups?.[0]?.progress).toEqual({
+      evaluator: "revision-token",
+      version: 1,
+      subject: "revision",
+      max_unchanged: 2,
+    });
+    const plan = expectPlan(compileGraph(declaration));
+    expect(plan.loopGroups[0]?.progress).toEqual({
+      evaluator: "revision-token",
+      version: 1,
+      subject: "revision",
+      maxUnchanged: 2,
+    });
+    // The policy is PART OF THE PLAN BODY, so the content address covers it: an
+    // edited threshold cannot keep the revision of the plan it replaces.
+    const other = expectPlan(
+      compileGraph({
+        ...declaration,
+        loop_groups: [
+          {
+            ...(declaration.loop_groups ?? [])[0],
+            progress: {
+              evaluator: "revision-token",
+              version: 1,
+              subject: "revision",
+              max_unchanged: 3,
+            },
+          },
+        ],
+      }),
+    );
+    expect(other.planRevision).not.toBe(plan.planRevision);
+  });
+
+  it("refuses a malformed progress policy at its own path", () => {
+    const group = (progress: unknown): unknown => ({
+      version: 3,
+      name: "graph.test",
+      nodes: [node("a", ["x"])],
+      edges: [],
+      loop_groups: [
+        {
+          id: "L",
+          nodes: ["a"],
+          max_traversals: 2,
+          continuation_outcome: "x",
+          exit_outcome: "x",
+          progress,
+        },
+      ],
+    });
+    const cases: readonly { readonly progress: unknown; readonly path: string }[] = [
+      { progress: 5, path: "$.loop_groups[0].progress" },
+      { progress: { version: 1, subject: "r", max_unchanged: 2 }, path: "$.loop_groups[0].progress.evaluator" },
+      {
+        progress: { evaluator: "revision-token", version: 0, subject: "r", max_unchanged: 2 },
+        path: "$.loop_groups[0].progress.version",
+      },
+      {
+        progress: { evaluator: "revision-token", version: 1, subject: "", max_unchanged: 2 },
+        path: "$.loop_groups[0].progress.subject",
+      },
+      {
+        progress: { evaluator: "revision-token", version: 1, subject: "r", max_unchanged: 0 },
+        path: "$.loop_groups[0].progress.max_unchanged",
+      },
+      {
+        progress: { evaluator: "revision-token", version: 1, subject: "r", max_unchanged: 2, extra: 1 },
+        path: "$.loop_groups[0].progress.extra",
+      },
+    ];
+    for (const entry of cases) {
+      expect(expectParseErrors(group(entry.progress)).map((issue) => issue.path)).toContain(
+        entry.path,
+      );
+    }
   });
 });
 

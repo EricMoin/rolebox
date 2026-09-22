@@ -22,7 +22,8 @@
  * - A node may map natural (runtime) completion to exactly one of its outcomes
  *   and attach acceptance requirements to each outcome.
  * - A loop group declares its continuation and exit outcomes instead of relying
- *   on an inferred marker.
+ *   on an inferred marker, and may declare a progress POLICY — the comparison
+ *   semantics, the comparison object and an explicit stagnation threshold.
  *
  * Compiling this grammar validates STRUCTURE only. A YAML/JSON authoring
  * front-end for it, plan persistence, binding compiled refs into runtime state,
@@ -169,6 +170,30 @@ export interface EdgeDeclarationV3 {
 // ── Loop groups ─────────────────────────────────────────────────────────────
 
 /**
+ * One loop group's optional PROGRESS policy: the comparison SEMANTICS, the
+ * comparison OBJECT and an explicit stagnation threshold.
+ *
+ * Every part is declared, never inferred from a worker payload: the plan names
+ * which evaluator owns the meaning of "changed" (and at which exact version),
+ * which outcome-data field is compared across rounds, and how many consecutive
+ * `unchanged` comparisons stop the run. Whether this build implements the
+ * declared evaluator is a run-path refusal, not an authoring question.
+ */
+export interface ProgressPolicyV3 {
+  /** The comparison semantics identity (e.g. `revision-token`). */
+  evaluator: string;
+  /** The exact version of that evaluator (positive safe integer). */
+  version: number;
+  /** The comparison object: the outcome-data field compared across rounds. */
+  subject: string;
+  /**
+   * Consecutive `unchanged` comparisons that stop the run (positive safe
+   * integer): the EXPLICIT stopping policy, never inferred from the payload.
+   */
+  max_unchanged: number;
+}
+
+/**
  * A bounded loop over a declared member set.
  *
  * `continuation_outcome` is the outcome that re-enters the loop, and an edge
@@ -191,6 +216,14 @@ export interface LoopGroupDeclarationV3 {
   continuation_outcome: string;
   /** The outcome declared by a member that leaves the loop. */
   exit_outcome: string;
+  /**
+   * Optional progress policy: what the loop compares across completed rounds
+   * and when repetition stops it. Absent means the loop declares no comparison,
+   * so its continuations are bounded by `max_traversals` alone. The declared
+   * subject is REQUIRED on every continuation submission once a policy is
+   * declared — a submission without it is refused for repair.
+   */
+  progress?: ProgressPolicyV3;
 }
 
 // ── Declaration ─────────────────────────────────────────────────────────────

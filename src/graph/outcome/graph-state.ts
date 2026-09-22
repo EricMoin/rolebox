@@ -133,6 +133,7 @@ import type {
   CompiledEdge,
   CompiledNode,
   CompiledPlan,
+  CompiledProgressPolicy,
 } from "../compiler/plan.ts";
 import { readQuorum, resolveJoinStrategy } from "../join-strategy.ts";
 import type { GraphStateRecord } from "../ledger/types.ts";
@@ -142,6 +143,13 @@ import {
   mintAttemptCredential,
   type AttemptCredentialSource,
 } from "./attempt-credential.ts";
+import {
+  PROGRESS_VALUE_MAX_LENGTH,
+  compareProgress,
+  type OutcomeLoopProgress,
+  type ProgressProjection,
+  type ProgressReport,
+} from "./progress.ts";
 
 // ── The state model ─────────────────────────────────────────────────────────
 
@@ -250,21 +258,25 @@ export type OutcomeGraphPhase =
  *
  * Every member names a condition the runtime decided from the plan and the
  * persisted state alone — `loop-exhausted` is "a declared loop group's hard
- * `max_traversals` cap refused the next continuation". No member is a judgement
- * about the work ("review passed", "failed") and no member is derived from a
- * worker's prose: a stop reasons about a DECLARED limit, never about a result.
+ * `max_traversals` cap refused the next continuation", and `progress-stalled`
+ * is "the loop's declared progress policy observed its declared threshold of
+ * consecutive unchanged revisions". No member is a judgement about the work
+ * ("review passed", "failed") and no member is derived from a worker's prose: a
+ * stop reasons about a DECLARED limit or a DECLARED stopping policy, never
+ * about a result.
  *
  * The set is closed PER BUILD — {@link OUTCOME_STOP_REASONS} is the one source a
  * reader and a writer share, and a body carrying a reason this build does not
  * define is refused rather than read with an unknown reason. A further stopping
- * policy (a progress evaluator, say) adds a member to the union, its shape and
- * a case in the reader's switch — it never widens a reason in place.
+ * policy adds a member to the union, its shape and a case in the reader's switch
+ * — it never widens a reason in place.
  */
-export type OutcomeStopReason = "loop-exhausted";
+export type OutcomeStopReason = "loop-exhausted" | "progress-stalled";
 
 /** The stop reasons this build defines, in canonical order. */
 export const OUTCOME_STOP_REASONS: readonly OutcomeStopReason[] = Object.freeze([
   "loop-exhausted",
+  "progress-stalled",
 ]);
 
 /**
@@ -297,10 +309,54 @@ export interface OutcomeLoopExhaustedStop {
 }
 
 /**
- * The persisted record of a stopped run: a closed union discriminated by
- * {@link OutcomeStopReason}. This build defines exactly one member.
+ * The stop a declared PROGRESS policy produces.
+ *
+ * It records the DECISION, not a narrative: which group's declared threshold was
+ * reached, which accepted outcome carried the last unchanged comparison, how
+ * many consecutive `unchanged` comparisons were observed, and the comparison
+ * the run stood still on — the evaluator identity and version, the subject and
+ * the baseline token itself (already persisted in the group's progress record,
+ * never the worker's payload).
+ *
+ * `unchanged` equals `maxUnchanged` precisely because the comparison that
+ * reached the threshold WAS made — the round it asked for is the one that is not
+ * taken, exactly as a hard cap refuses the round that would have exceeded it. A
+ * reader refuses a stop whose numbers disagree with the progress record it is
+ * stored beside.
  */
-export type OutcomeStop = OutcomeLoopExhaustedStop;
+export interface OutcomeProgressStalledStop {
+  readonly reason: "progress-stalled";
+  /** The declared loop group whose progress policy bound this run. */
+  readonly loopGroupId: string;
+  /** The node whose accepted outcome carried the last unchanged comparison. */
+  readonly nodeId: string;
+  /** The continuation outcome that asked for the refused round. */
+  readonly outcomeId: string;
+  /** The attempt of {@link nodeId} that was settled by that outcome. */
+  readonly attemptId: string;
+  /** Consecutive `unchanged` comparisons: equal to {@link maxUnchanged}. */
+  readonly unchanged: number;
+  /** The declared stagnation threshold the refused round would have exceeded. */
+  readonly maxUnchanged: number;
+  /** The evaluator identity the baseline was recorded under. */
+  readonly evaluator: string;
+  /** The exact evaluator version the baseline was recorded under. */
+  readonly evaluatorVersion: number;
+  /** The comparison object the baseline token was read from. */
+  readonly subject: string;
+  /** The baseline token the run stood still on. */
+  readonly baseline: string;
+  /** Epoch milliseconds the stop was committed at. */
+  readonly stoppedAt: number;
+}
+
+/**
+ * The persisted record of a stopped run: a closed union discriminated by
+ * {@link OutcomeStopReason}. This build defines two members — a declared hard
+ * cap and a declared progress threshold — and each has its own shape and reader
+ * case.
+ */
+export type OutcomeStop = OutcomeLoopExhaustedStop | OutcomeProgressStalledStop;
 
 /**
  * The persisted state of one outcome-protocol graph.
@@ -337,6 +393,20 @@ export interface OutcomeGraphState {
    * two representations over the other.
    */
   readonly stop?: OutcomeStop;
+  /**
+   * Each loop group's persisted PROGRESS, keyed by declared loop group id, with
+   * exactly one entry per group whose plan declares a progress policy (body
+   * version 5 and later).
+   *
+   * PROGRESS IS LAYOUT, NOT AN EXTRA. Version 4 records nothing about the
+   * baselines a loop compared, so this build cannot continue a declared
+   * stopping policy from one — advancing it would silently restart the counters
+   * and re-baseline the comparison, which is exactly the accidental reset the
+   * protocol forbids. The list is therefore verified against the plan (which
+   * declares the policies) and against the stop, and a version that does not
+   * define the field refuses one rather than dropping it.
+   */
+  readonly loopProgress?: Readonly<Record<string, OutcomeLoopProgress>>;
 }
 
 // ── The state-body format ───────────────────────────────────────────────────
@@ -399,6 +469,27 @@ export const OUTCOME_STATE_BODY_V3 = 3 as const;
 export const OUTCOME_STATE_BODY_V4 = 4 as const;
 
 /**
+ * The fifth versioned state-body layout: the body carries one PROGRESS record
+ * per loop group whose plan declares a progress policy — the comparison
+ * baseline (a bounded revision token), the evaluator identity and version it was
+ * recorded under, and the consecutive-unchanged counter — and `phase` gains the
+ * `progress-stalled` stop (see {@link OutcomeProgressStalledStop}).
+ *
+ * WHY PROGRESS IS LAYOUT AND NOT AN EXTRA. Version 4 has no field for a
+ * baseline, so this build cannot tell "the loop has not been compared yet" from
+ * "the comparison was dropped": advancing such a body would restart the counters
+ * and re-baseline the comparison, an accidental reset of the decision semantics
+ * that recovery must not perform. Versions 1 to 4 stay READABLE (their completed
+ * graphs report cleanly and their in-flight attempts are still recoverable), are
+ * never advanced, and are not migrated: a baseline is a fact about comparisons
+ * the run actually made, and inventing one on read would decide stagnation from
+ * data the run never observed.
+ *
+ * This is the layout this build writes.
+ */
+export const OUTCOME_STATE_BODY_V5 = 5 as const;
+
+/**
  * The state-body format this build writes.
  *
  * The body version is its OWN axis, separate from the storage format
@@ -407,7 +498,7 @@ export const OUTCOME_STATE_BODY_V4 = 4 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V4;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V5;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -667,6 +758,14 @@ interface OutcomeStateLayout {
    * is refused rather than read with a field this version never wrote.
    */
   readonly stop: "defined" | "forbidden";
+  /**
+   * `required` — the version defines the body-level `loopProgress` record
+   * (version 5 and later), which its writer writes EXACTLY one entry per loop
+   * group whose plan declares a progress policy; `forbidden` — the version does
+   * not define it, so a body that carries one is refused rather than read with a
+   * field this version never wrote.
+   */
+  readonly loopProgress: "required" | "forbidden";
 }
 
 /**
@@ -704,6 +803,7 @@ const OUTCOME_STATE_LAYOUT_V1: OutcomeStateLayout = Object.freeze({
   credential: "forbidden" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
+  loopProgress: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status"]),
     dispatched: Object.freeze([
@@ -737,6 +837,7 @@ const OUTCOME_STATE_LAYOUT_V2: OutcomeStateLayout = Object.freeze({
   credential: "required" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
+  loopProgress: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status"]),
     dispatched: Object.freeze([
@@ -774,6 +875,7 @@ const OUTCOME_STATE_LAYOUT_V3: OutcomeStateLayout = Object.freeze({
   credential: "required" as const,
   arrivals: "required" as const,
   stop: "forbidden" as const,
+  loopProgress: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status", "arrivals"]),
     dispatched: Object.freeze([
@@ -814,6 +916,50 @@ const OUTCOME_STATE_LAYOUT_V4: OutcomeStateLayout = Object.freeze({
   credential: "required" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
+  loopProgress: "forbidden" as const,
+  keys: Object.freeze({
+    pending: Object.freeze(["nodeId", "status", "arrivals"]),
+    dispatched: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "dispatchedAt",
+      "arrivals",
+    ]),
+    settled: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "outcomeId",
+      "dispatchedAt",
+      "settledAt",
+      "arrivals",
+    ]),
+  }),
+});
+
+/**
+ * The node fields body version 5 defines: version 4's fields, unchanged. The new
+ * axis is again at the BODY level — the per-group `loopProgress` record a
+ * declared progress policy is compared against — so an entry of this version is
+ * exactly an entry of version 4.
+ */
+const OUTCOME_STATE_LAYOUT_V5: OutcomeStateLayout = Object.freeze({
+  version: OUTCOME_STATE_BODY_V5,
+  bodyKeys: Object.freeze([
+    ...OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
+    "stop",
+    "loopProgress",
+  ]),
+  phases: OUTCOME_STATE_PHASES_V4,
+  credential: "required" as const,
+  arrivals: "required" as const,
+  stop: "defined" as const,
+  loopProgress: "required" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status", "arrivals"]),
     dispatched: Object.freeze([
@@ -1127,6 +1273,160 @@ function readLoopTraversals(
   return Object.freeze(counters);
 }
 
+/** The fields one {@link OutcomeLoopProgress} defines, exactly. */
+const OUTCOME_LOOP_PROGRESS_KEYS: readonly string[] = Object.freeze([
+  "loopGroupId",
+  "evaluator",
+  "version",
+  "subject",
+  "unchanged",
+  "baseline",
+]);
+
+/**
+ * Read every loop group persisted progress, against the policies the plan
+ * declares.
+ *
+ * The record is a MATERIALIZATION of the plan declarations plus the comparisons
+ * the run actually made: exactly one entry per group whose plan declares a
+ * progress policy, and no entry for a group that declares none — an entry no
+ * declaration asks for is refused rather than read (it would be a baseline for a
+ * comparison the plan never authorized), and a missing entry is refused too (the
+ * writer materializes one per declared policy at start, so its absence cannot be
+ * told from a lost baseline).
+ *
+ * The EVALUATOR VERSION is deliberately NOT compared with the plan here. A
+ * version identifies the comparison SEMANTICS the baseline was recorded under,
+ * and a difference is the compatibility fact the COMPARISON must judge: it
+ * answers unknown and leaves the baseline alone, rather than the reader refusing
+ * a whole body over a number, or a comparison silently re-baselining under
+ * semantics the persisted data was never measured with. The evaluator IDENTITY
+ * and the SUBJECT ARE compared, because those are what the plan declares the
+ * comparison to be; a body recording different ones is a shape this writer could
+ * not have produced.
+ */
+function readLoopProgress(
+  raw: unknown,
+  plan: CompiledPlan,
+): Readonly<Record<string, OutcomeLoopProgress>> {
+  if (!isRecord(raw)) {
+    throw malformedState(
+      "loopProgress is " + describeValue(raw) +
+        ", not a record of per-loop-group progress (body version " +
+        OUTCOME_STATE_BODY_V5 + " defines one entry per declared progress policy)",
+    );
+  }
+  const policies = new Map<string, CompiledProgressPolicy>();
+  for (const group of plan.loopGroups) {
+    if (group.progress !== undefined) policies.set(group.id, group.progress);
+  }
+  const entries: Record<string, OutcomeLoopProgress> = {};
+  for (const key of Object.keys(raw)) {
+    const policy = policies.get(key);
+    if (policy === undefined) {
+      const declared = plan.loopGroups.some((group) => group.id === key);
+      throw malformedState(
+        "loopProgress names loop group " + JSON.stringify(key) +
+          (declared
+            ? ", which plan revision " + plan.planRevision +
+              " declares WITHOUT a progress policy — a baseline no declaration asks for is " +
+              "refused rather than read"
+            : ", which plan revision " + plan.planRevision + " does not declare"),
+      );
+    }
+    entries[key] = readLoopProgressEntry(raw[key], key, policy);
+  }
+  for (const group of plan.loopGroups) {
+    if (group.progress === undefined) continue;
+    if (Object.prototype.hasOwnProperty.call(entries, group.id)) continue;
+    throw malformedState(
+      "loopProgress carries no entry for loop group " + JSON.stringify(group.id) +
+        ", whose plan declares a progress policy — the writer records one progress entry per " +
+        "declared policy, so a missing one cannot be told from a lost baseline",
+    );
+  }
+  return Object.freeze(entries);
+}
+
+/** Read one loop group progress entry against its declared policy. */
+function readLoopProgressEntry(
+  raw: unknown,
+  groupId: string,
+  policy: CompiledProgressPolicy,
+): OutcomeLoopProgress {
+  const where = "loopProgress[" + JSON.stringify(groupId) + "]";
+  if (!isRecord(raw)) {
+    throw malformedState(where + " is " + describeValue(raw) + ", not a progress record");
+  }
+  for (const key of Object.keys(raw)) {
+    if (!OUTCOME_LOOP_PROGRESS_KEYS.includes(key)) {
+      throw malformedState(
+        where + " carries field " + JSON.stringify(key) +
+          ", which a progress record does not define — an unknown field is refused rather than " +
+          "dropped",
+      );
+    }
+  }
+  if (raw.loopGroupId !== groupId) {
+    throw malformedState(
+      where + ".loopGroupId is " + describeValue(raw.loopGroupId) +
+        ", but the entry is keyed by " + JSON.stringify(groupId),
+    );
+  }
+  const evaluator = readNonEmptyId(raw.evaluator, where, "evaluator");
+  if (evaluator !== policy.evaluator) {
+    throw malformedState(
+      where + ".evaluator is " + JSON.stringify(evaluator) +
+        ", but loop group " + JSON.stringify(groupId) + " declares the comparison semantics " +
+        JSON.stringify(policy.evaluator) +
+        " — a baseline recorded under another evaluator is refused rather than compared",
+    );
+  }
+  const subject = readNonEmptyId(raw.subject, where, "subject");
+  if (subject !== policy.subject) {
+    throw malformedState(
+      where + ".subject is " + JSON.stringify(subject) +
+        ", but loop group " + JSON.stringify(groupId) + " declares " +
+        JSON.stringify(policy.subject) + " as its comparison object",
+    );
+  }
+  const version = readPositiveCount(raw.version, where, "version");
+  const unchanged = raw.unchanged;
+  if (typeof unchanged !== "number" || !Number.isSafeInteger(unchanged) || unchanged < 0) {
+    throw malformedState(
+      where + ".unchanged is " + describeValue(unchanged) + ", not a non-negative safe integer",
+    );
+  }
+  const baseline = raw.baseline;
+  if (baseline !== undefined) {
+    if (
+      typeof baseline !== "string" ||
+      baseline.length === 0 ||
+      baseline.length > PROGRESS_VALUE_MAX_LENGTH
+    ) {
+      throw malformedState(
+        where + ".baseline is " +
+          (typeof baseline === "string"
+            ? baseline.length === 0
+              ? "an empty string"
+              : "a " + baseline.length + "-character string"
+            : describeValue(baseline)) +
+          ", not a revision token of 1 to " + PROGRESS_VALUE_MAX_LENGTH +
+          " characters — a projection never records more than the bound, and prefixes are never " +
+          "compared",
+      );
+    }
+  }
+  return Object.freeze({
+    loopGroupId: groupId,
+    evaluator,
+    version,
+    subject,
+    unchanged,
+    ...(baseline === undefined ? {} : { baseline }),
+  });
+}
+
 /**
  * Refuse every body field the DECLARED body version does not define.
  *
@@ -1202,6 +1502,8 @@ function readStop(
   switch (reason) {
     case "loop-exhausted":
       return readLoopExhaustedStop(raw, where);
+    case "progress-stalled":
+      return readProgressStalledStop(raw, where);
     default: {
       // Unreachable while the vocabulary is what `readStopReason` admits; kept
       // so a member added to the union without a reader is a COMPILE error here
@@ -1281,6 +1583,77 @@ function readLoopExhaustedStop(
   });
 }
 
+/** The fields one {@link OutcomeProgressStalledStop} defines, exactly. */
+const OUTCOME_PROGRESS_STALLED_STOP_KEYS: readonly string[] = Object.freeze([
+  "reason",
+  "loopGroupId",
+  "nodeId",
+  "outcomeId",
+  "attemptId",
+  "unchanged",
+  "maxUnchanged",
+  "evaluator",
+  "evaluatorVersion",
+  "subject",
+  "baseline",
+  "stoppedAt",
+]);
+
+/** Read the progress-stalled stop this build decides, field by field. */
+function readProgressStalledStop(
+  raw: Record<string, unknown>,
+  where: string,
+): OutcomeProgressStalledStop {
+  const at = where + ".stop";
+  for (const key of Object.keys(raw)) {
+    if (!OUTCOME_PROGRESS_STALLED_STOP_KEYS.includes(key)) {
+      throw malformedState(
+        at + " carries field " + JSON.stringify(key) +
+          ", which a progress-stalled stop does not define — an unknown field is refused " +
+          "rather than dropped",
+      );
+    }
+  }
+  const loopGroupId = readNonEmptyId(raw.loopGroupId, at, "loopGroupId");
+  const nodeId = readNonEmptyId(raw.nodeId, at, "nodeId");
+  const outcomeId = readNonEmptyId(raw.outcomeId, at, "outcomeId");
+  const attemptId = readNonEmptyId(raw.attemptId, at, "attemptId");
+  const unchanged = readPositiveCount(raw.unchanged, at, "unchanged");
+  const maxUnchanged = readPositiveCount(raw.maxUnchanged, at, "maxUnchanged");
+  const evaluator = readNonEmptyId(raw.evaluator, at, "evaluator");
+  const evaluatorVersion = readPositiveCount(raw.evaluatorVersion, at, "evaluatorVersion");
+  const subject = readNonEmptyId(raw.subject, at, "subject");
+  const baseline = raw.baseline;
+  if (
+    typeof baseline !== "string" ||
+    baseline.length === 0 ||
+    baseline.length > PROGRESS_VALUE_MAX_LENGTH
+  ) {
+    throw malformedState(
+      at + ".baseline is " + describeValue(baseline) +
+        ", not the non-empty revision token the run stood still on",
+    );
+  }
+  const stoppedAt = readOptionalEpoch(raw, "stoppedAt", at);
+  if (stoppedAt === undefined) {
+    throw malformedState(at + " carries no stoppedAt timestamp");
+  }
+  return Object.freeze({
+    reason: "progress-stalled" as const,
+    loopGroupId,
+    nodeId,
+    outcomeId,
+    attemptId,
+    unchanged,
+    maxUnchanged,
+    evaluator,
+    evaluatorVersion,
+    subject,
+    baseline,
+    stoppedAt,
+  });
+}
+
 /** Read one required non-empty identifier field, or refuse it. */
 function readNonEmptyId(value: unknown, where: string, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
@@ -1305,20 +1678,50 @@ function readPositiveCount(value: unknown, where: string, field: string): number
  * Verify one stop against the plan and the entries it is stored beside.
  *
  * The stop is a MATERIALIZATION of a decision the run took, exactly as the
- * arrival list is: the named group must be declared, its cap must be the cap the
- * plan declares, the named node must be a member of it, the outcome must be that
- * group's declared continuation, the node's own entry must be SETTLED by that
- * outcome on that attempt, and the round must be the counter the state records.
- * That counter EQUALS the cap, because the round that would have exceeded it was
- * never taken — a stop whose numbers say otherwise is a body this writer could
- * not have produced, so it is refused rather than trusted (an invented stop
- * would end a run that never hit a limit) or silently corrected.
+ * arrival list is. The rules that hold for EVERY reason are checked here — the
+ * named group must be declared, the named node must be a member of it, the
+ * outcome must be that group's declared continuation, and the node's own entry
+ * must be SETTLED by that outcome on that attempt — and each reason then adds
+ * its own numbers, because a stop whose numbers say otherwise is a body this
+ * writer could not have produced: an invented stop would end a run that never
+ * hit a limit, and it is refused rather than trusted or silently corrected.
  */
 function verifyStop(
   plan: CompiledPlan,
   nodes: readonly OutcomeNodeState[],
   loopTraversals: Readonly<Record<string, number>>,
+  loopProgress: Readonly<Record<string, OutcomeLoopProgress>>,
   stop: OutcomeStop,
+): void {
+  switch (stop.reason) {
+    case "loop-exhausted":
+      verifyLoopExhaustedStop(plan, nodes, loopTraversals, stop);
+      return;
+    case "progress-stalled":
+      verifyProgressStalledStop(plan, nodes, loopProgress, stop);
+      return;
+    default: {
+      // Unreachable while the vocabulary is what the reader admits; kept so a
+      // member added to the union without a verifier is a COMPILE error here.
+      const unread: never = stop;
+      throw malformedState(
+        "the stop reason " + describeValue(unread) + " has no verifier",
+      );
+    }
+  }
+}
+
+/**
+ * Verify a hard-cap stop: its cap, the round it stood on and the counter.
+ *
+ * The counter EQUALS the cap, because the round that would have exceeded it was
+ * never taken.
+ */
+function verifyLoopExhaustedStop(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+  loopTraversals: Readonly<Record<string, number>>,
+  stop: OutcomeLoopExhaustedStop,
 ): void {
   const group = plan.loopGroups.find((entry) => entry.id === stop.loopGroupId);
   if (group === undefined) {
@@ -1374,6 +1777,209 @@ function verifyStop(
         " — a cap refused the round that would have EXCEEDED it, so the counter it stopped on " +
         "is the cap itself",
     );
+  }
+}
+
+/**
+ * Verify a progress-stalled stop: the declared policy, the observation and the
+ * persisted baseline.
+ *
+ * A stalled stop is a materialization too. The group must declare a progress
+ * policy, the numbers must be that policy numbers, and the group progress
+ * record must corroborate every fact the stop claims: the same evaluator
+ * identity and version, the same subject, the same unchanged count and the very
+ * baseline token the run stood still on. The count EQUALS the declared
+ * threshold, because the comparison that reached it WAS made and the round it
+ * asked for is the one that is not taken. A stop no progress record
+ * corroborates is refused rather than trusted: it would end a run on stagnation
+ * nobody observed.
+ */
+function verifyProgressStalledStop(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+  loopProgress: Readonly<Record<string, OutcomeLoopProgress>>,
+  stop: OutcomeProgressStalledStop,
+): void {
+  const group = plan.loopGroups.find((entry) => entry.id === stop.loopGroupId);
+  if (group === undefined) {
+    throw malformedState(
+      "the stop names loop group " + JSON.stringify(stop.loopGroupId) +
+        ", which plan revision " + plan.planRevision + " does not declare",
+    );
+  }
+  const policy = group.progress;
+  if (policy === undefined) {
+    throw malformedState(
+      "the stop is a progress-stalled stop on loop group " +
+        JSON.stringify(stop.loopGroupId) +
+        ", but the plan declares no progress policy for that group — a stop no declared " +
+        "stopping policy can produce is refused rather than trusted",
+    );
+  }
+  if (policy.maxUnchanged !== stop.maxUnchanged) {
+    throw malformedState(
+      "the stop records a stagnation threshold of " + stop.maxUnchanged + " for loop group " +
+        JSON.stringify(stop.loopGroupId) + ", but the plan declares " + policy.maxUnchanged,
+    );
+  }
+  if (policy.evaluator !== stop.evaluator) {
+    throw malformedState(
+      "the stop names evaluator " + JSON.stringify(stop.evaluator) +
+        ", but loop group " + JSON.stringify(stop.loopGroupId) + " declares " +
+        JSON.stringify(policy.evaluator),
+    );
+  }
+  if (policy.subject !== stop.subject) {
+    throw malformedState(
+      "the stop names comparison subject " + JSON.stringify(stop.subject) +
+        ", but loop group " + JSON.stringify(stop.loopGroupId) + " declares " +
+        JSON.stringify(policy.subject),
+    );
+  }
+  if (!group.nodes.includes(stop.nodeId)) {
+    throw malformedState(
+      "the stop names node " + JSON.stringify(stop.nodeId) + ", which is not a member of loop " +
+        "group " + JSON.stringify(stop.loopGroupId),
+    );
+  }
+  if (group.continuationOutcome !== stop.outcomeId) {
+    throw malformedState(
+      "the stop names outcome " + JSON.stringify(stop.outcomeId) + ", but loop group " +
+        JSON.stringify(stop.loopGroupId) + " declares " +
+        JSON.stringify(group.continuationOutcome) + " as its continuation",
+    );
+  }
+  const entry = nodes.find((node) => node.nodeId === stop.nodeId);
+  if (
+    entry === undefined ||
+    entry.status !== "settled" ||
+    entry.outcomeId !== stop.outcomeId ||
+    entry.attemptId !== stop.attemptId
+  ) {
+    throw malformedState(
+      "the stop records attempt " + JSON.stringify(stop.attemptId) + " of node " +
+        JSON.stringify(stop.nodeId) + " settling with outcome " +
+        JSON.stringify(stop.outcomeId) + ", but the node entries do not " +
+        "(entry: " + describeNodeEntry(entry) +
+        ") — a stop no accepted outcome corroborates is refused rather than trusted",
+    );
+  }
+  const progress = loopProgress[stop.loopGroupId];
+  if (progress === undefined) {
+    throw malformedState(
+      "the stop names loop group " + JSON.stringify(stop.loopGroupId) +
+        ", but loopProgress records no progress for it",
+    );
+  }
+  if (
+    progress.evaluator !== stop.evaluator ||
+    progress.version !== stop.evaluatorVersion ||
+    progress.subject !== stop.subject
+  ) {
+    throw malformedState(
+      "the stop records the comparison under evaluator " + JSON.stringify(stop.evaluator) +
+        " version " + stop.evaluatorVersion + " on subject " + JSON.stringify(stop.subject) +
+        ", but loopProgress records " + JSON.stringify(progress.evaluator) + " version " +
+        progress.version + " on subject " + JSON.stringify(progress.subject),
+    );
+  }
+  if (progress.unchanged !== stop.unchanged) {
+    throw malformedState(
+      "the stop records " + stop.unchanged + " consecutive unchanged comparison(s) of loop " +
+        "group " + JSON.stringify(stop.loopGroupId) + ", but loopProgress records " +
+        progress.unchanged,
+    );
+  }
+  if (progress.baseline !== stop.baseline) {
+    throw malformedState(
+      "the stop records the baseline " + JSON.stringify(stop.baseline) + " of loop group " +
+        JSON.stringify(stop.loopGroupId) + ", but loopProgress records " +
+        (progress.baseline === undefined ? "none" : JSON.stringify(progress.baseline)),
+    );
+  }
+  if (stop.unchanged !== stop.maxUnchanged) {
+    throw malformedState(
+      "the stop records " + stop.unchanged + " unchanged comparison(s) of a threshold of " +
+        stop.maxUnchanged +
+        " — the declared policy stops the run AT the threshold, so the counter it stopped on " +
+        "is the threshold itself",
+    );
+  }
+}
+
+/**
+ * Verify every progress counter against the declared policy and the stop.
+ *
+ * Two rules, both about what a WRITER could have left behind: a counter never
+ * exceeds its declared threshold, and a body that is NOT stopped by the progress
+ * policy cannot carry one AT the threshold — reaching it stops the run, so a
+ * running body that stands on it is a state this writer never produced. When the
+ * body IS stopped that way, an entry may stand on the threshold (more than one
+ * group can measure the same unchanged outcome; the stop names the first in plan
+ * order).
+ */
+function verifyProgress(
+  plan: CompiledPlan,
+  loopProgress: Readonly<Record<string, OutcomeLoopProgress>>,
+  stop: OutcomeStop | undefined,
+): void {
+  const stalledBody = stop !== undefined && stop.reason === "progress-stalled";
+  for (const group of plan.loopGroups) {
+    const policy = group.progress;
+    if (policy === undefined) continue;
+    const entry = loopProgress[group.id];
+    if (entry === undefined) {
+      throw malformedState(
+        "loopProgress carries no entry for loop group " + JSON.stringify(group.id) +
+          ", whose plan declares a progress policy",
+      );
+    }
+    if (entry.unchanged > policy.maxUnchanged) {
+      throw malformedState(
+        "loopProgress[" + JSON.stringify(group.id) + "].unchanged is " + entry.unchanged +
+          ", above the declared stagnation threshold " + policy.maxUnchanged +
+          " — the policy stops the run at the threshold, so no writer records more",
+      );
+    }
+    if (!stalledBody && entry.unchanged === policy.maxUnchanged) {
+      throw malformedState(
+        "loopProgress[" + JSON.stringify(group.id) + "].unchanged stands on the declared " +
+          "stagnation threshold " + policy.maxUnchanged +
+          ", but the body carries no progress-stalled stop — a run that reached the threshold " +
+          "stops there",
+      );
+    }
+  }
+}
+
+/**
+ * Describe one persisted stop in a sentence, for a report or a refusal message.
+ *
+ * ONE formatter for every consumer (the run path and the startup sweep), so a new
+ * stop reason is described in one place and no caller has to narrow the union on
+ * its own. Wording is not part of the contract; the numbers are the stop's own.
+ */
+export function describeOutcomeStop(stop: OutcomeStop): string {
+  switch (stop.reason) {
+    case "loop-exhausted":
+      return (
+        "loop group " + JSON.stringify(stop.loopGroupId) +
+        " reached its hard cap (round " + stop.traversals + "/" + stop.maxTraversals +
+        ") at attempt " + JSON.stringify(stop.attemptId)
+      );
+    case "progress-stalled":
+      return (
+        "loop group " + JSON.stringify(stop.loopGroupId) +
+        " observed " + stop.unchanged + " consecutive unchanged revision(s) (threshold " +
+        stop.maxUnchanged + ", evaluator " + JSON.stringify(stop.evaluator) + " version " +
+        stop.evaluatorVersion + ", subject " + JSON.stringify(stop.subject) +
+        ", baseline " + JSON.stringify(stop.baseline) + ") at attempt " +
+        JSON.stringify(stop.attemptId)
+      );
+    default: {
+      const unread: never = stop;
+      return "unrecognized stop " + describeValue(unread);
+    }
   }
 }
 
@@ -1457,9 +2063,25 @@ function readStateBody(
   // is refused rather than trusted or silently corrected.
   if (layout.arrivals === "required") verifyArrivals(plan, nodes);
   const loopTraversals = readLoopTraversals(body.loopTraversals, plan);
+  // The per-group progress record is layout: a version that defines it must
+  // carry it, and a version that does not refuses one rather than dropping the
+  // baselines it cannot represent.
+  let loopProgress: Readonly<Record<string, OutcomeLoopProgress>> | undefined;
+  if (layout.loopProgress === "required") {
+    loopProgress = readLoopProgress(body.loopProgress, plan);
+  } else if (body.loopProgress !== undefined) {
+    throw malformedState(
+      "the body carries a loopProgress record, which body version " + layout.version +
+        " does not define — the record is refused rather than dropped",
+    );
+  }
   // The stop is a materialization of the decision it records, so it is checked
-  // against the plan and the very entries it is stored beside.
-  if (stop !== undefined) verifyStop(plan, nodes, loopTraversals, stop);
+  // against the plan and the very entries it is stored beside — the progress
+  // record included, which is what corroborates a progress-stalled stop.
+  if (stop !== undefined) {
+    verifyStop(plan, nodes, loopTraversals, loopProgress ?? Object.freeze({}), stop);
+  }
+  if (loopProgress !== undefined) verifyProgress(plan, loopProgress, stop);
   return Object.freeze({
     bodyVersion: layout.version,
     graphId: plan.graphId,
@@ -1469,6 +2091,7 @@ function readStateBody(
     loopTraversals,
     attemptSeq,
     ...(stop === undefined ? {} : { stop }),
+    ...(loopProgress === undefined ? {} : { loopProgress }),
   });
 }
 
@@ -1506,13 +2129,16 @@ const OUTCOME_STATE_BODY_V1_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V1);
 const OUTCOME_STATE_BODY_V2_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V2);
 const OUTCOME_STATE_BODY_V3_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V3);
 const OUTCOME_STATE_BODY_V4_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V4);
+const OUTCOME_STATE_BODY_V5_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V5);
 
 /**
- * The state-body capabilities this build installs: version 4 (what it writes,
- * with attempt credentials, join arrivals AND the stop a capped run ends on),
- * and versions 3, 2 and 1 as readable older layouts whose attempts the run path
- * refuses to advance — version 3 cannot record a stop, version 2 records no
- * arrivals and version 1 no credential, and none is migrated.
+ * The state-body capabilities this build installs: version 5 (what it writes,
+ * with attempt credentials, join arrivals, the stop a capped run ends on AND the
+ * per-group progress record a declared policy is compared against), and versions
+ * 4, 3, 2 and 1 as readable older layouts whose attempts the run path refuses to
+ * advance — version 4 records no progress baseline, version 3 cannot record a
+ * stop, version 2 records no arrivals and version 1 no credential, and none is
+ * migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
@@ -1522,6 +2148,7 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
       OUTCOME_STATE_BODY_V2_READER,
       OUTCOME_STATE_BODY_V3_READER,
       OUTCOME_STATE_BODY_V4_READER,
+      OUTCOME_STATE_BODY_V5_READER,
     ],
   });
 
@@ -1903,13 +2530,21 @@ export type OutcomeAdvanceRefusalCode =
    */
   | "reentry-outside-loop"
   /**
-   * The run is STOPPED: a declared hard limit already ended it, so no further
-   * outcome advances this state — not on the node that hit the limit (which is
-   * settled and replays its receipt instead) and not on any branch that is
-   * still recorded in flight. A stopped run is never quietly resumed by a
-   * submission; the stop is reported and left exactly as it is.
+   * The run is STOPPED: a declared hard limit or progress policy already ended
+   * it, so no further outcome advances this state — not on the node that hit the
+   * limit (which is settled and replays its receipt instead) and not on any
+   * branch that is still recorded in flight. A stopped run is never quietly
+   * resumed by a submission; the stop is reported and left exactly as it is.
    */
   | "graph-stopped"
+  /**
+   * The advance reached a loop group whose plan declares a progress policy, but
+   * the projection this submission was measured into is missing, or it is bound
+   * to another proposal, attempt or plan revision. A declared comparison is
+   * never skipped silently: skipping it would decide the run's stopping policy
+   * from data it never measured, so the whole acceptance is refused.
+   */
+  | "progress-unbound"
   /**
    * The state says an attempt settled and the ledger holds no accepted event
    * for it. Thrown by the run path's join, not by {@link advanceOutcomeGraph}:
@@ -1918,11 +2553,13 @@ export type OutcomeAdvanceRefusalCode =
   | "state-ledger-disagreement"
   /**
    * The state was written in a body layout that cannot carry what this build
-   * writes on every attempt: version 1 records no attempt credential and
-   * version 2 records no join arrivals. The advance is refused rather than
-   * converting the state into a newer layout — an attempt with no credential
-   * can never be settled, and a body with no arrivals cannot say which feeders
-   * had reached a join, so arming on it would guess.
+   * writes on every attempt: version 1 records no attempt credential, version 2
+   * records no join arrivals and version 4 records no progress baseline. The
+   * advance is refused rather than converting the state into a newer layout —
+   * an attempt with no credential can never be settled, a body with no arrivals
+   * cannot say which feeders had reached a join, and a body with no baseline
+   * cannot say what the loop already compared, so advancing on one would guess
+   * (and would silently reset the progress counters).
    */
   | "unsupported-state-version";
 
@@ -1961,6 +2598,12 @@ export interface OutcomeDispatchIntent {
 export interface OutcomeAdvance {
   readonly state: OutcomeGraphState;
   readonly dispatches: readonly OutcomeDispatchIntent[];
+  /**
+   * Every progress comparison this advance made, in plan loop-group order. Empty
+   * when the outcome is not a loop continuation or its group declares no policy
+   * — a successful outcome never enters this path.
+   */
+  readonly progress: readonly ProgressReport[];
 }
 
 /** Inputs to {@link advanceOutcomeGraph}. */
@@ -1978,6 +2621,14 @@ export interface OutcomeAdvanceInput {
    * one, and an advance is reproducible for a given source.
    */
   readonly mintCredential: AttemptCredentialSource;
+  /**
+   * The progress projections this submission was measured into, produced OUTSIDE
+   * the acceptance transaction and bound to this proposal, attempt and plan
+   * revision (see `progress.ts`). One per loop group whose declared policy
+   * governs the submitted continuation; a group with a declared policy and no
+   * projection is REFUSED (`progress-unbound`) rather than skipped.
+   */
+  readonly progress?: readonly ProgressProjection[];
 }
 
 /**
@@ -2018,6 +2669,147 @@ function continuationGroups(
   return plan.loopGroups.filter(
     (group) =>
       group.continuationOutcome === outcomeId && group.nodes.includes(nodeId),
+  );
+}
+
+/**
+ * Compare every declared progress policy this continuation is measured by.
+ *
+ * Runs INSIDE the acceptance transaction, against the state that transaction is
+ * committing: the entries it returns are written in the same batch that carries
+ * the receipt, the accepted event and the stop, so a crash cannot commit an
+ * acceptance without the progress it implied (or the progress without it).
+ *
+ * Every group with a declared policy is compared — the comparison is a fact
+ * about the accepted outcome, so a group that ran the comparison records it even
+ * when ANOTHER group is the one that stops the run. A group whose projection is
+ * missing, or is bound to another proposal, attempt or plan revision, is refused
+ * (`progress-unbound`) instead of being skipped: skipping it would silently
+ * disable the declared stopping policy.
+ *
+ * The stop is the FIRST group, in plan id order, that reaches its threshold —
+ * deterministic, exactly as the binding hard cap is the first over-cap group.
+ */
+function measureProgress(
+  plan: CompiledPlan,
+  groups: readonly CompiledPlan["loopGroups"][number][],
+  state: OutcomeGraphState,
+  decision: AcceptanceDecision,
+  projections: readonly ProgressProjection[] | undefined,
+  now: number,
+): {
+  readonly entries: Readonly<Record<string, OutcomeLoopProgress>>;
+  readonly reports: readonly ProgressReport[];
+  readonly stop?: OutcomeProgressStalledStop;
+} {
+  const recorded: Readonly<Record<string, OutcomeLoopProgress>> =
+    state.loopProgress ?? Object.freeze({});
+  const entries: Record<string, OutcomeLoopProgress> = { ...recorded };
+  const reports: ProgressReport[] = [];
+  let stop: OutcomeProgressStalledStop | undefined;
+  for (const group of groups) {
+    const policy = group.progress;
+    if (policy === undefined) continue;
+    const entry = recorded[group.id];
+    const projection = projections?.find((candidate) => candidate.loopGroupId === group.id);
+    if (entry === undefined) {
+      throw new OutcomeAdvanceRefusedError(
+        "progress-unbound",
+        "outcome-advance: loop group " + JSON.stringify(group.id) +
+          " declares a progress policy, but the persisted state carries no progress record " +
+          "for it — the declared comparison is refused rather than skipped",
+      );
+    }
+    if (projection === undefined) {
+      throw new OutcomeAdvanceRefusedError(
+        "progress-unbound",
+        "outcome-advance: loop group " + JSON.stringify(group.id) +
+          " declares a progress policy, but this submission was measured into no projection " +
+          "for it — a declared comparison is never skipped",
+      );
+    }
+    if (!projectionMatchesDecision(plan, decision, projection)) {
+      throw new OutcomeAdvanceRefusedError(
+        "progress-unbound",
+        "outcome-advance: the progress projection of loop group " + JSON.stringify(group.id) +
+          " is bound to " + describeProjectionBinding(projection) +
+          ", not to this submission (attempt " +
+          JSON.stringify(decision.identity.attemptId) + " of plan revision " +
+          JSON.stringify(plan.planRevision) + ", proposal " +
+          JSON.stringify(decision.proposalDigest) +
+          ") — a projection measures exactly the proposal it was produced for, so it is " +
+          "refused rather than compared",
+      );
+    }
+    const comparison = compareProgress({ policy, entry, projection });
+    entries[group.id] = comparison.entry;
+    reports.push(comparison.report);
+    if (!comparison.report.stalled || stop !== undefined) continue;
+    const baseline = comparison.entry.baseline;
+    if (baseline === undefined) {
+      // Unreachable: a stall is only reported by the token branch, which always
+      // records the token it stalled on. Kept so the stop cannot be built from a
+      // baseline this build never wrote.
+      throw new OutcomeAdvanceRefusedError(
+        "progress-unbound",
+        "outcome-advance: loop group " + JSON.stringify(group.id) +
+          " reported a stall without a recorded baseline — this build produces no such " +
+          "comparison, so the stop is refused rather than invented",
+      );
+    }
+    stop = Object.freeze({
+      reason: "progress-stalled" as const,
+      loopGroupId: group.id,
+      nodeId: decision.nodeId,
+      outcomeId: decision.outcomeId,
+      attemptId: decision.identity.attemptId,
+      unchanged: comparison.entry.unchanged,
+      maxUnchanged: policy.maxUnchanged,
+      evaluator: comparison.entry.evaluator,
+      evaluatorVersion: comparison.entry.version,
+      subject: comparison.entry.subject,
+      baseline,
+      stoppedAt: now,
+    });
+  }
+  return {
+    entries: Object.freeze(entries),
+    reports: Object.freeze(reports),
+    ...(stop === undefined ? {} : { stop }),
+  };
+}
+
+/**
+ * Whether one projection measures exactly the decision being committed.
+ *
+ * The binding is the acceptance core own validation binding, so the check is the
+ * same one the commit applies to its validation: this proposal (digest), this
+ * attempt, this plan revision and this graph. A projection that fails it was
+ * produced for something else and must not decide this run.
+ */
+function projectionMatchesDecision(
+  plan: CompiledPlan,
+  decision: AcceptanceDecision,
+  projection: ProgressProjection,
+): boolean {
+  const binding = projection.binding;
+  return (
+    binding.graphId === plan.graphId &&
+    binding.planRevision === plan.planRevision &&
+    binding.attemptId === decision.identity.attemptId &&
+    binding.submissionId === decision.identity.submissionId &&
+    binding.proposalDigest === decision.proposalDigest
+  );
+}
+
+/** Describe a projection binding for a diagnostic, without inventing fields. */
+function describeProjectionBinding(projection: ProgressProjection): string {
+  const binding = projection.binding;
+  return (
+    "graph " + JSON.stringify(binding.graphId) +
+    ", plan revision " + JSON.stringify(binding.planRevision) +
+    ", attempt " + JSON.stringify(binding.attemptId) +
+    ", proposal " + JSON.stringify(binding.proposalDigest)
   );
 }
 
@@ -2069,9 +2861,18 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     throw new OutcomeAdvanceRefusedError(
       "unsupported-state-version",
       "outcome-advance: the state was written in body version " + state.bodyVersion +
-        ", which cannot carry the attempt credentials and join arrivals this build writes on " +
-        "every attempt — the state is refused rather than advanced and rewritten in body " +
-        "version " + CURRENT_OUTCOME_STATE_BODY,
+        ", which cannot carry the attempt credentials, join arrivals and progress baselines " +
+        "this build writes on every attempt — the state is refused rather than advanced and " +
+        "rewritten in body version " + CURRENT_OUTCOME_STATE_BODY,
+    );
+  }
+  if (state.loopProgress === undefined) {
+    throw new OutcomeAdvanceRefusedError(
+      "unsupported-state-version",
+      "outcome-advance: the state declares body version " + state.bodyVersion +
+        " but carries no loopProgress record — a body of this version records one progress " +
+        "entry per declared policy, so the state is refused rather than advanced into a shape " +
+        "this build could not read back",
     );
   }
   // A STOPPED RUN TAKES NO FURTHER STEP. The stop is a decision the run already
@@ -2084,9 +2885,8 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     throw new OutcomeAdvanceRefusedError(
       "graph-stopped",
       "outcome-advance: graph " + JSON.stringify(plan.graphId) + " STOPPED (" +
-        state.stop.reason + ": loop group " + JSON.stringify(state.stop.loopGroupId) +
-        " reached its hard cap of " + state.stop.maxTraversals + " traversals at attempt " +
-        JSON.stringify(state.stop.attemptId) + ") — a stopped run advances no further, so this " +
+        state.stop.reason + ": " + describeOutcomeStop(state.stop) +
+        ") — a stopped run advances no further, so this " +
         "outcome was not applied and the stop is left exactly as it is",
     );
   }
@@ -2150,8 +2950,11 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
   });
 
   let loopTraversals = state.loopTraversals;
+  let loopProgress: Readonly<Record<string, OutcomeLoopProgress>> = state.loopProgress;
   let attemptSeq = state.attemptSeq;
   const dispatches: OutcomeDispatchIntent[] = [];
+  /** Every comparison this advance made, in plan loop-group order. */
+  const progressReports: ProgressReport[] = [];
   /**
    * The stop this advance produces, if it hits a declared hard cap. Set BEFORE
    * any successor is armed, and the successor block below is skipped entirely
@@ -2220,14 +3023,35 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         });
       }
     }
-    // A STOPPED ADVANCE ROUTES NOTHING. When the hard cap above bound, this
-    // outcome arms NO successor — not even one whose join its arrival would
-    // satisfy — because a stop is the whole run's ending and a partially routed
-    // outcome is a state the model cannot describe. The candidate set is
-    // therefore empty, so no re-entry check, no join gate and no arm runs and no
-    // effect is written; the emitting node's arrival record is still
-    // materialized below, because it IS settled and an arrival is a fact about
-    // the entries, not about the arming.
+    // THE PROGRESS GATE, and only when the round is actually taken. A hard cap
+    // that already bound leaves the run ended, so nothing is compared: the
+    // comparisons record what the loop OBSERVED, and a run that cannot continue
+    // has no stopping policy left to decide. Otherwise every declared policy
+    // whose continuation this outcome is compares its projection against the
+    // persisted baseline — in the acceptance transaction, against the record the
+    // same commit writes — and the FIRST group (plan id order) to reach its
+    // declared threshold stops the run exactly as the hard cap does.
+    if (stop === undefined) {
+      const measured = measureProgress(
+        plan,
+        groups,
+        state,
+        decision,
+        input.progress,
+        now,
+      );
+      loopProgress = measured.entries;
+      for (const report of measured.reports) progressReports.push(report);
+      stop = measured.stop;
+    }
+    // A STOPPED ADVANCE ROUTES NOTHING. When the hard cap or the progress
+    // threshold above bound, this outcome arms NO successor — not even one whose
+    // join its arrival would satisfy — because a stop is the whole run's ending
+    // and a partially routed outcome is a state the model cannot describe. The
+    // candidate set is therefore empty, so no re-entry check, no join gate and
+    // no arm runs and no effect is written; the emitting node's arrival record
+    // is still materialized below, because it IS settled and an arrival is a
+    // fact about the entries, not about the arming.
     const routed = stop === undefined ? successors : [];
     // The candidates this outcome routes to, as PLAN nodes in plan order. The
     // order is the state's own node order, so the same advance always mints the
@@ -2361,8 +3185,10 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       loopTraversals,
       attemptSeq,
       ...(stop === undefined ? {} : { stop }),
+      loopProgress,
     }),
     dispatches: Object.freeze(dispatches),
+    progress: Object.freeze(progressReports),
   });
 }
 

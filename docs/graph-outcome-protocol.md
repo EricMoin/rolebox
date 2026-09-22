@@ -1300,6 +1300,161 @@ bridge, storage format 3 with its `2 -> 3` migrator, the
 `src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
 typed-predicate vocabulary, and any `src/dispatch/**` change.
 
+D5 DELIVERS THE PROGRESS PROTOCOL: A PROJECTION BUILT OUTSIDE THE ACCEPTANCE
+TRANSACTION, A THREE-WAY COMPARISON INSIDE IT, AND A PERSISTED STOP THE DECLARED
+THRESHOLD PRODUCES.
+
+A COMPILED LOOP GROUP MAY DECLARE A PROGRESS POLICY.
+`CompiledLoopGroup.progress` is `{ evaluator, version, subject, maxUnchanged }`,
+declared in the v3 grammar as `progress: { evaluator, version, subject,
+max_unchanged }` on a loop group and covered by `planRevision` like every other
+plan field. `evaluator` is the comparison SEMANTICS and `subject` the comparison
+OBJECT (one field of the continuation outcome data); `version` is the EXACT
+evaluator version and `maxUnchanged` the EXPLICIT stagnation threshold. Absent
+means the loop declares no comparison at all: its continuations are never
+measured and the hard cap alone bounds the run. The grammar is closed as
+everywhere else (`unknown-key`, `wrong-type`, `invalid-value`), and the compiler
+and the plan inspector share ONE reader and ONE code
+(`malformed-progress-policy`), so a declaration boundary and a load boundary
+cannot disagree about what a policy is. Whether this build IMPLEMENTS the
+declared evaluator is deliberately NOT a structural question — it is a run-path
+refusal (`progress-evaluator-unavailable`), because capability resolution is not
+a property of the declaration.
+
+THE PROJECTION IS PRODUCED OUTSIDE THE TRANSACTION, AND IT IS BOUNDED AND BOUND.
+`src/graph/outcome/progress.ts` owns `projectProgress`, a pure and total
+function that runs in the run path BEFORE the acceptance transaction opens. It
+reads the declared subject ONCE (own-property lookup, so `__proto__` names a
+missing field rather than an inherited object), reduces it to a revision token
+of at most `PROGRESS_VALUE_MAX_LENGTH` (256) UTF-16 code units, and binds the
+result to the proposal digest, the attempt, the plan revision and the graph —
+the acceptance core own validation binding — plus the evaluator identity and
+version. What travels into the transaction is that bounded value, never the raw
+payload and never a digest computed there: reading the payload, truncating it
+and binding it all happen outside, which is exactly why a large or
+unrepresentable payload cannot make the serialized commit do file or hashing
+work. NOTHING OF THE PROJECTION IS PERSISTED as such; what is persisted is the
+BASELINE (the last comparable token, at most the bound) and the counters.
+
+A REQUIRED SUBJECT IS REFUSED, NOT ANSWERED "UNKNOWN". When a declared policy
+governs the submitted outcome, the declared subject is required: absent, or
+present as an explicit `undefined`, is `progress-subject-missing` at
+`$.data.<subject>` with nothing written, so the worker repairs the submission and
+the same attempt settles on the repaired one. A value that is PRESENT but not a
+non-empty string (a number, a boolean, `null`, an object, an array, an empty
+string) is legal payload that this evaluator cannot compare: it is UNKNOWN, and
+it is never coerced into a token, because coercion would let two different JSON
+values look equal and turn an incomparable submission into an invented
+"unchanged". A value longer than the bound is `truncated` and compared as
+unknown too: a prefix comparison is not a comparison.
+
+THE COMPARISON HAS THREE ANSWERS, AND THE TRANSACTION DOES ONLY FOUR THINGS.
+Inside the acceptance transaction the reducer reads the persisted entry, compares
+it with the projection it was handed, updates the counter and writes the result
+in the SAME batch as the receipt, the accepted event and the pending effects:
+
+- `progressed` — the token differs from the baseline, whether a baseline existed
+  or not. A FIRST comparable observation ESTABLISHES the baseline and answers
+  `progressed`: there was no earlier value to stand still against, so the run
+  has not been observed to repeat itself. The baseline is replaced and the
+  counter resets to zero;
+- `unchanged` — the token equals the baseline. Only this answer increments the
+  counter, and the counter is persisted with the baseline;
+- `unknown` — the comparison could not be made: the persisted entry was recorded
+  under another evaluator identity, version or subject
+  (`evaluator-identity-mismatch`), or the observation is truncated or
+  incomparable. The entry is returned EXACTLY as it was — the counter is not
+  incremented, the streak is not cleared and the baseline is not replaced — and
+  an unknown never reaches the threshold, so it never triggers the soft stop.
+  The declared HARD limits still apply to the run.
+
+A MODEL-SUPPLIED REVISION IS NOT PROGRESS BY ITSELF. The comparison object, the
+comparison semantics and the evaluator version are DECLARED by the plan and
+PERSISTED with the baseline; a payload that merely contains something
+revision-shaped is never consulted for what to compare or how. The evaluator
+VERSION in particular is a compatibility fact: a persisted baseline recorded
+under another version yields `unknown` rather than `unchanged` or `progressed`,
+because the meaning of "changed" may itself have changed. The reader deliberately
+ACCEPTS such a record (it verifies the evaluator identity and the subject against
+the plan, but not the version), so the comparison — not the shape check — decides
+compatibility, and no whole body is refused over a number.
+
+SUCCESSFUL OUTCOMES NEVER ENTER THIS PATH. A projection is produced only for an
+outcome a declared policy governs: the group must declare the submitted outcome
+as its `continuationOutcome` and the submitting node as a member. The outcome
+that leaves the loop, terminates its node, or routes anywhere else is not
+measured, requires no subject and cannot be refused for one — the
+revision-staleness question belongs to continuing a loop, never to a result the
+loop accepted as finished.
+
+A DECLARED THRESHOLD ENDS THE RUN IN THE SAME PERSISTED STOP AS A HARD CAP.
+`OUTCOME_STOP_REASONS` gains `progress-stalled` and `OutcomeStop` its second
+member, `OutcomeProgressStalledStop`: the group, the node, the outcome and the
+attempt that carried the last unchanged comparison, the count (EQUAL to the
+declared threshold, because the comparison that reached it was made and the round
+it asked for is the one not taken), the threshold, the evaluator identity and
+version, the subject and the baseline token the run stood still on. The outcome
+itself stays ACCEPTED, its node settles, no successor of it is armed — not even a
+branch beside a stopping one — and `phase` becomes `stopped`, so a stalled run is
+never reported as one that finished. The stop travels out of the reducer inside
+the state the same acceptance transaction writes, so the crash window cannot
+separate the acceptance from the ending; `resume` reports the stop, launches and
+arms nothing, and a submission from a branch still recorded in flight is refused
+with `graph-stopped`, naming the reason. `describeOutcomeStop` is ONE formatter
+for the run path and the startup sweep, so a new reason is described once.
+
+REPLAYS DO NOT DOUBLE COUNT. A repeated submission of the same attempt replays
+its receipt, the join contributes no state write and no comparison runs at all
+(an already-settled node returns before the reducer), so the counter keeps the
+value the first acceptance wrote. An advance that reaches a declared policy with
+NO projection bound to this submission, or with one bound to another attempt,
+plan revision or proposal, is refused (`progress-unbound`) rather than skipping
+the declared comparison: skipping it would decide the stopping policy from data
+the run never measured.
+
+STATE-BODY VERSION 5 ADDS THE RECORD, AND VERSIONS 1 TO 4 STAY READABLE. The body
+carries `loopProgress`, one entry per loop group whose plan declares a policy
+(`{ loopGroupId, evaluator, version, subject, unchanged, baseline? }`),
+materialized at `start()` so a body that never compared anything still says so;
+a version that does not define the field refuses one rather than dropping it, and
+a missing entry for a declared policy is refused rather than read as "no
+baseline yet". The reader verifies the entry against the plan (identity and
+subject) and against the stop (count, baseline, version) and refuses a counter
+above its threshold or standing ON it without the stop. There is NO MIGRATOR, as
+with the credential, the arrivals and the stop: a baseline is a fact about
+comparisons the run actually made, and one invented on read would decide
+stagnation from data the run never observed. The reducer refuses to advance a
+version-4 body with `unsupported-state-version`, because advancing it would
+silently restart the counters and re-baseline the comparison — the accidental
+reset recovery must not perform.
+
+ENFORCED BY TESTS. The three answers each have a case (a first token establishes
+the baseline and answers progressed, a repeated token is unchanged, a truncated
+or non-token value is unknown); a truncated value that STARTS WITH the baseline
+is still unknown, never a prefix match; unknown neither increments nor clears the
+streak and does not stop the run while a later comparable unchanged token does; a
+baseline recorded under another evaluator version answers unknown and is left
+exactly as it was; a continuation without the declared subject is refused with
+`progress-subject-missing` and the repaired submission settles the same attempt;
+a plan declaring an unimplemented evaluator is refused by name; a replayed
+continuation does not move the counter, so a threshold of three is not reached by
+a duplicate; the exit outcome of the loop is measured by nothing and requires no
+subject; the stopping submission is accepted with a durable `progress-stalled`
+stop, commits one receipt and one accepted event with the stopped state, leaves a
+beside branch in flight and refuses its outcome with `graph-stopped`; and a NEW
+PROCESS resuming the same store continues the same comparison — same baseline,
+same evaluator version, counter continued — which is also what the two-process
+self-verification probe shows.
+
+DEFERRED by this slice, and not implied by it: effect EXECUTION beyond the
+dispatch seam, the protocol-aware dispatch completion bridge, storage format 3
+with its `2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
+adapters/schema compatibility, the typed-predicate vocabulary, and any
+`src/dispatch/**` change. The evaluator registry is deliberately a closed
+one-implementation set rather than a plugin surface: `revision-token` is the
+comparison this build implements and any other declared identity is refused,
+never silently approximated.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |

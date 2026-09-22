@@ -55,6 +55,7 @@ import {
   type NodeDeclarationV3,
   type OutcomeDataV3,
   type OutcomeDeclarationV3,
+  type ProgressPolicyV3,
 } from "./declaration-v3.ts";
 import type { ContractRef } from "../contracts/contract-definition.ts";
 import type { JoinConfig, NodeBudgetSpec } from "../../types.graph-v2.ts";
@@ -202,6 +203,13 @@ const LOOP_GROUP_KEYS = [
   "max_traversals",
   "continuation_outcome",
   "exit_outcome",
+  "progress",
+] as const;
+const PROGRESS_KEYS = [
+  "evaluator",
+  "version",
+  "subject",
+  "max_unchanged",
 ] as const;
 const CONTRACT_REF_KEYS = ["id", "revision", "digest"] as const;
 const JOIN_KEYS = ["strategy", "quorum"] as const;
@@ -657,12 +665,18 @@ function readLoopGroup(
     log,
   );
 
+  const progress =
+    record.progress === undefined
+      ? undefined
+      : readProgressPolicy(record.progress, `${path}.progress`, log);
+
   if (
     id === undefined ||
     nodes === undefined ||
     maxTraversals === undefined ||
     continuation === undefined ||
-    exit === undefined
+    exit === undefined ||
+    (record.progress !== undefined && progress === undefined)
   ) {
     return undefined;
   }
@@ -672,6 +686,50 @@ function readLoopGroup(
     max_traversals: maxTraversals,
     continuation_outcome: continuation,
     exit_outcome: exit,
+    ...(progress === undefined ? {} : { progress }),
+  };
+}
+
+/**
+ * Read one loop group's optional progress policy.
+ *
+ * The same strictness as every other level: a closed key set, a required field
+ * of the declared JSON type, and a positive safe integer wherever the grammar
+ * says "exact version" or "threshold". The comparison SEMANTICS and the
+ * comparison OBJECT are declared here and persisted in the plan; whether this
+ * build implements the declared evaluator is a RUN-PATH refusal, not a parse
+ * question.
+ */
+function readProgressPolicy(
+  value: unknown,
+  path: string,
+  log: IssueLog,
+): ProgressPolicyV3 | undefined {
+  const record = readRecord(value, path, log);
+  if (record === undefined) return undefined;
+  rejectUnknownKeys(record, PROGRESS_KEYS, path, log);
+
+  const evaluator = readNonEmptyString(record.evaluator, `${path}.evaluator`, log);
+  const version = readPositiveSafeInteger(record.version, `${path}.version`, log);
+  const subject = readNonEmptyString(record.subject, `${path}.subject`, log);
+  const maxUnchanged = readPositiveSafeInteger(
+    record.max_unchanged,
+    `${path}.max_unchanged`,
+    log,
+  );
+  if (
+    evaluator === undefined ||
+    version === undefined ||
+    subject === undefined ||
+    maxUnchanged === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    evaluator,
+    version,
+    subject,
+    max_unchanged: maxUnchanged,
   };
 }
 

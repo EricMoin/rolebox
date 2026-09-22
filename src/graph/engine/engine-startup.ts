@@ -100,6 +100,7 @@ import {
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
 import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
 import { resumePersistedOutcomeGraph } from "../outcome/recovery.ts";
+import { describeOutcomeStop } from "../outcome/graph-state.ts";
 import {
   createValidatorRegistry,
   type ValidatorRegistry,
@@ -404,18 +405,15 @@ function recordOutcomeRecovery(
     `phase ${result.state.phase}` +
     (stop === undefined
       ? ""
-      : `, STOPPED by ${stop.reason} (loop ${stop.loopGroupId}, ` +
-        `round ${stop.traversals}/${stop.maxTraversals}, ` +
-        `attempt ${stop.attemptId})`) +
+      : `, STOPPED by ${stop.reason} (${describeOutcomeStop(stop)})`) +
     (armed.length === 0 ? "" : `, armed [${armed}]`) +
     ")";
   if (result.kind === "started") bucket.started.push(line);
   else bucket.resumed.push(line);
   if (stop !== undefined) {
     bucket.stopped.push(
-      `${label} (graph ${graphId}: [${stop.reason}] loop ${stop.loopGroupId}, ` +
-        `round ${stop.traversals}/${stop.maxTraversals}, node ${stop.nodeId}, ` +
-        `outcome ${stop.outcomeId}, attempt ${stop.attemptId})`,
+      `${label} (graph ${graphId}: [${stop.reason}] ${describeOutcomeStop(stop)}, ` +
+        `node ${stop.nodeId}, outcome ${stop.outcomeId})`,
     );
   }
   for (const request of result.dispatched) {

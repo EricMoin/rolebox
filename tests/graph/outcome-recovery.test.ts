@@ -699,9 +699,12 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
         const { attemptCredential: _credential, arrivals: _arrivals, ...rest } = node;
         return rest;
       });
+      // Version 1 defines no progress record either, so it is stripped with the
+      // credential and the arrival list.
+      const { loopProgress: _progress, ...v1Body } = body;
       rewritten = {
         ...current,
-        body: { ...body, bodyVersion: 1, nodes: v1Nodes },
+        body: { ...v1Body, bodyVersion: 1, nodes: v1Nodes },
         updatedAt: NOW + 1,
       };
       writer.writeGraphState(rewritten);

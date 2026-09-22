@@ -44,7 +44,12 @@ import {
 import {
   OutcomeGraphRuntime,
   type OutcomeDispatchRequest,
+  type OutcomeSubmissionResult,
 } from "../../src/graph/outcome/runtime.ts";
+import type {
+  OutcomeLoopProgress,
+  ProgressReport,
+} from "../../src/graph/outcome/progress.ts";
 import {
   CURRENT_OUTCOME_STATE_BODY,
   OutcomeStateError,
@@ -1104,8 +1109,13 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         if (overCap.kind !== "accepted") return;
         expect(overCap.stop?.loopGroupId).toBe("b-inner");
         expect(overCap.stop?.reason).toBe("loop-exhausted");
-        expect(overCap.stop?.traversals).toBe(1);
-        expect(overCap.stop?.maxTraversals).toBe(1);
+        // The stop union is discriminated by reason: narrow before reading the
+        // fields a hard-cap stop alone defines.
+        if (overCap.stop?.reason !== "loop-exhausted") {
+          throw new Error("fixture: expected a loop-exhausted stop");
+        }
+        expect(overCap.stop.traversals).toBe(1);
+        expect(overCap.stop.maxTraversals).toBe(1);
         expect(overCap.state.loopTraversals["b-inner"]).toBe(1);
         expect(overCap.state.loopTraversals["a-outer"]).toBeUndefined();
         // CHANGED: the state DID move — it now carries the stop and the settled
@@ -1162,7 +1172,10 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
         expect(overCap.kind).toBe("accepted");
         if (overCap.kind !== "accepted") return;
         expect(overCap.stop?.loopGroupId).toBe("a-tight");
-        expect(overCap.stop?.maxTraversals).toBe(1);
+        if (overCap.stop?.reason !== "loop-exhausted") {
+          throw new Error("fixture: expected a loop-exhausted stop");
+        }
+        expect(overCap.stop.maxTraversals).toBe(1);
         expect(overCap.state.loopTraversals).toEqual({
           "a-tight": 1,
           "b-loose": 1,
@@ -1356,6 +1369,768 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
 });
 
 // ── The join gate ───────────────────────────────────────────────────────────
+
+// ── Loop progress: the declared comparison and its stopping policy (D5) ─────
+
+/**
+ * work -> review -> (revise) -> work with a DECLARED PROGRESS POLICY: the
+ * continuation must carry the declared `revision` token (the comparison
+ * object), and `max_unchanged` consecutive unchanged tokens stop the run.
+ */
+function progressLoopDeclaration(options: {
+  readonly maxTraversals: number;
+  readonly maxUnchanged: number;
+  readonly version?: number;
+  readonly evaluator?: string;
+}): GraphDeclarationV3 {
+  return {
+    version: 3,
+    name: "graph.progress",
+    nodes: [
+      {
+        id: "work",
+        agent: "agent.work",
+        prompt: "Do the work.",
+        outcomes: [{ id: "done" }],
+      },
+      {
+        id: "review",
+        agent: "agent.review",
+        prompt: "Review the work.",
+        outcomes: [{ id: "revise" }, { id: "approve" }],
+      },
+    ],
+    edges: [
+      { from: "work", to: "review", outcome: "done" },
+      { from: "review", to: "work", outcome: "revise" },
+    ],
+    loop_groups: [
+      {
+        id: "revise-loop",
+        nodes: ["work", "review"],
+        max_traversals: options.maxTraversals,
+        continuation_outcome: "revise",
+        exit_outcome: "approve",
+        progress: {
+          evaluator: options.evaluator ?? "revision-token",
+          version: options.version ?? 1,
+          subject: "revision",
+          max_unchanged: options.maxUnchanged,
+        },
+      },
+    ],
+  };
+}
+
+/** The same loop with a side branch, so the stop scope is observable. */
+function progressSideBranchDeclaration(maxUnchanged: number): GraphDeclarationV3 {
+  const base = sideBranchLoopDeclaration(20);
+  const group = (base.loop_groups ?? [])[0];
+  if (group === undefined) throw new Error("fixture: the loop declares no group");
+  return {
+    ...base,
+    name: "graph.progress-side",
+    loop_groups: [
+      {
+        ...group,
+        progress: {
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          max_unchanged: maxUnchanged,
+        },
+      },
+    ],
+  };
+}
+
+/** Drive the loop's work half: work answers done, arming the review attempt. */
+function workStep(
+  runtime: OutcomeGraphRuntime,
+  requests: readonly OutcomeDispatchRequest[],
+  workAttempt: string,
+  at: number,
+): OutcomeSubmissionResult {
+  const worked = runtime.submit(
+    { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, workAttempt) },
+    at,
+  );
+  expect(worked.kind).toBe("accepted");
+  return worked;
+}
+
+/** Drive one loop round: work answers done, review answers revise with a token. */
+function reviseRound(
+  runtime: OutcomeGraphRuntime,
+  requests: readonly OutcomeDispatchRequest[],
+  workAttempt: string,
+  reviewAttempt: string,
+  revision: unknown,
+  at: number,
+): OutcomeSubmissionResult {
+  const worked = runtime.submit(
+    { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, workAttempt) },
+    at,
+  );
+  expect(worked.kind).toBe("accepted");
+  return runtime.submit(
+    {
+      nodeId: "review",
+      outcomeId: "revise",
+      credential: credentialOf(requests, reviewAttempt),
+      data: { revision },
+    },
+    at + 1,
+  );
+}
+
+/** The ONE progress report of an accepted continuation. */
+function onlyProgress(reports: readonly ProgressReport[] | undefined): ProgressReport {
+  expect(reports).toHaveLength(1);
+  const report = (reports ?? [])[0];
+  if (report === undefined) throw new Error("fixture: no progress report");
+  return report;
+}
+
+/** One loop group persisted progress, failing when the state carries none. */
+function progressEntry(state: OutcomeGraphState, groupId: string): OutcomeLoopProgress {
+  const entry = state.loopProgress?.[groupId];
+  if (entry === undefined) throw new Error("fixture: no progress entry for " + groupId);
+  return entry;
+}
+
+/** Read one field of an unknown value as a record, or fail the fixture. */
+function recordOf(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("fixture: " + what + " is not a record");
+  }
+  return value as Record<string, unknown>;
+}
+
+describe("OutcomeGraphRuntime — loop progress is compared across rounds", () => {
+  it("answers progressed, unchanged and unknown for the declared comparison object", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 3 }),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+
+        // A FIRST comparable token establishes the baseline: there was no
+        // earlier value to stand still against, so the run has not been
+        // observed to repeat itself.
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+        expect(onlyProgress(first.progress)).toEqual({
+          loopGroupId: "revise-loop",
+          verdict: "progressed",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 0,
+          baseline: "r1",
+          stalled: false,
+        });
+        // The baseline is PERSISTED in the same acceptance that produced it.
+        expect(progressEntry(first.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 0,
+          baseline: "r1",
+        });
+
+        const same = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(same.kind).toBe("accepted");
+        if (same.kind !== "accepted") return;
+        expect(onlyProgress(same.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 1,
+          baseline: "r1",
+          stalled: false,
+        });
+
+        const moved = reviseRound(runtime, requests, "work#5", "review#6", "r2", NOW + 5);
+        expect(moved.kind).toBe("accepted");
+        if (moved.kind !== "accepted") return;
+        expect(onlyProgress(moved.progress)).toMatchObject({
+          verdict: "progressed",
+          unchanged: 0,
+          baseline: "r2",
+        });
+
+        // A value longer than the bound is TRUNCATED and never compared by
+        // prefix: this one starts with the baseline it would otherwise match.
+        const truncated = reviseRound(
+          runtime,
+          requests,
+          "work#7",
+          "review#8",
+          "r2" + "x".repeat(300),
+          NOW + 7,
+        );
+        expect(truncated.kind).toBe("accepted");
+        if (truncated.kind !== "accepted") return;
+        expect(onlyProgress(truncated.progress)).toEqual({
+          loopGroupId: "revise-loop",
+          verdict: "unknown",
+          unknownReason: "truncated-value",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 0,
+          baseline: "r2",
+          stalled: false,
+        });
+        expect(progressEntry(truncated.state, "revise-loop").baseline).toBe("r2");
+
+        // A present but non-token value is legal payload this evaluator cannot
+        // compare: unknown, never an invented "unchanged".
+        const incomparable = reviseRound(
+          runtime,
+          requests,
+          "work#9",
+          "review#10",
+          { nested: true },
+          NOW + 9,
+        );
+        expect(incomparable.kind).toBe("accepted");
+        if (incomparable.kind !== "accepted") return;
+        expect(onlyProgress(incomparable.progress)).toMatchObject({
+          verdict: "unknown",
+          unknownReason: "incomparable-value",
+          unchanged: 0,
+          baseline: "r2",
+        });
+        expect(progressEntry(incomparable.state, "revise-loop").unchanged).toBe(0);
+        // The run is still executing: an unknown never reaches the threshold.
+        expect(incomparable.state.phase).toBe("executing");
+      },
+    );
+  });
+
+  it("does not let unknown accumulate, break the streak, or trigger the stop", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
+      async ({ runtime, ledger, requests, graphId, dir }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        const same = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(same.kind).toBe("accepted");
+        if (same.kind !== "accepted") return;
+        expect(onlyProgress(same.progress)).toMatchObject({ verdict: "unchanged", unchanged: 1 });
+
+        // UNKNOWN: the counter is left EXACTLY as it was — it neither counts
+        // the unknown nor clears the streak it cannot judge.
+        const unknown = reviseRound(
+          runtime,
+          requests,
+          "work#5",
+          "review#6",
+          ["not", "a", "token"],
+          NOW + 5,
+        );
+        expect(unknown.kind).toBe("accepted");
+        if (unknown.kind !== "accepted") return;
+        expect(onlyProgress(unknown.progress)).toMatchObject({
+          verdict: "unknown",
+          unknownReason: "incomparable-value",
+          unchanged: 1,
+          baseline: "r1",
+          stalled: false,
+        });
+        expect(unknown.state.phase).toBe("executing");
+        expect(unknown.stop).toBeUndefined();
+        expect(progressEntry(unknown.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 1,
+          baseline: "r1",
+        });
+
+        // The next COMPARABLE unchanged token reaches the declared threshold:
+        // the outcome is still accepted, the refused round is not taken, and the
+        // run ends on the closed stop vocabulary.
+        const workedAgain = workStep(runtime, requests, "work#7", NOW + 7);
+        expect(workedAgain.kind).toBe("accepted");
+        const receiptsBefore = await countTable(dir, "ledger_receipts");
+        const eventsBefore = ledger.acceptedEvents(graphId).length;
+        // The ONE submission below commits exactly one receipt, one accepted
+        // event and the stopped state, in the same transaction.
+        const stalled = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#8"),
+            data: { revision: "r1" },
+          },
+          NOW + 8,
+        );
+        expect(stalled.kind).toBe("accepted");
+        if (stalled.kind !== "accepted") return;
+        expect(onlyProgress(stalled.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 2,
+          baseline: "r1",
+          stalled: true,
+        });
+        expect(stalled.state.phase).toBe("stopped");
+        expect(stalled.dispatched).toEqual([]);
+        expect(stalled.stop).toEqual({
+          reason: "progress-stalled",
+          loopGroupId: "revise-loop",
+          nodeId: "review",
+          outcomeId: "revise",
+          attemptId: "review#8",
+          unchanged: 2,
+          maxUnchanged: 2,
+          evaluator: "revision-token",
+          evaluatorVersion: 1,
+          subject: "revision",
+          baseline: "r1",
+          stoppedAt: NOW + 8,
+        });
+        // The accepted outcome settled its own node and nothing else, and the
+        // receipt/event/state committed together as for any other acceptance.
+        expect(nodeOf(stalled.state, "review")).toMatchObject({
+          status: "settled",
+          outcomeId: "revise",
+          attemptId: "review#8",
+        });
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
+        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore + 1);
+        // The committed state IS the state a reader gets back.
+        const reread = runtime.state();
+        expect(reread).toEqual(stalled.state);
+        expect(reread?.stop?.reason).toBe("progress-stalled");
+
+        // A restart REPORTS the stop and continues nothing.
+        const resumed = runtime.resume(NOW + 100);
+        expect(resumed.kind).toBe("resumed");
+        if (resumed.kind !== "resumed") return;
+        expect(resumed.stop).toEqual(stalled.stop);
+        expect(resumed.dispatched).toEqual([]);
+        expect(resumed.armed).toEqual([]);
+      },
+    );
+  });
+
+  it("stops the whole run in the persisted path and refuses a branch still in flight", async () => {
+    await withHarness(
+      progressSideBranchDeclaration(1),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+        const worked = runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+          NOW + 1,
+        );
+        expect(worked.kind).toBe("accepted");
+        if (worked.kind !== "accepted") return;
+        expect(attemptIds(worked.dispatched)).toEqual(["review#2", "side#3"]);
+        const first = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#2"),
+            data: { revision: "r1" },
+          },
+          NOW + 2,
+        );
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+        expect(onlyProgress(first.progress).verdict).toBe("progressed");
+        const workedAgain = runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#4") },
+          NOW + 3,
+        );
+        expect(workedAgain.kind).toBe("accepted");
+        if (workedAgain.kind !== "accepted") return;
+        expect(attemptIds(workedAgain.dispatched)).toEqual(["review#5"]);
+
+        const stopped = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#5"),
+            data: { revision: "r1" },
+          },
+          NOW + 4,
+        );
+        expect(stopped.kind).toBe("accepted");
+        if (stopped.kind !== "accepted") return;
+        expect(stopped.state.phase).toBe("stopped");
+        expect(stopped.stop?.reason).toBe("progress-stalled");
+        expect(stopped.stop?.attemptId).toBe("review#5");
+        // The independent branch is exactly where it was: in flight on the
+        // attempt it was dispatched with, never settled by an outcome nobody
+        // submitted.
+        expect(nodeOf(stopped.state, "side")).toMatchObject({
+          status: "dispatched",
+          attemptId: "side#3",
+        });
+        expect(stopped.dispatched).toEqual([]);
+
+        // Its worker outcome is refused BY NAME: a stopped run takes no further
+        // step, and the refusal names the reason the run ended.
+        const late = runtime.submit(
+          { nodeId: "side", outcomeId: "finish", credential: credentialOf(requests, "side#3") },
+          NOW + 5,
+        );
+        expect(late.kind).toBe("refused");
+        if (late.kind !== "refused") return;
+        expect(late.refusals.map((refusal) => refusal.code)).toEqual(["graph-stopped"]);
+        expect(late.refusals[0]?.message).toContain("progress-stalled");
+        expect(runtime.state()).toEqual(stopped.state);
+      },
+    );
+  });
+
+  it("refuses a continuation that omits the declared comparison object, writing nothing", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
+      async ({ runtime, ledger, requests, graphId, dir }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        // The next round has to be armed before its continuation can be claimed.
+        const worked = workStep(runtime, requests, "work#3", NOW + 3);
+        expect(worked.kind).toBe("accepted");
+        const before = runtime.state();
+        const receiptsBefore = await countTable(dir, "ledger_receipts");
+        const eventsBefore = ledger.acceptedEvents(graphId).length;
+
+        // The declared subject is REQUIRED: a submission without it is refused
+        // for repair, with nothing written and the attempt left open.
+        const missing = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#4"),
+          },
+          NOW + 4,
+        );
+        expect(missing.kind).toBe("refused");
+        if (missing.kind !== "refused") return;
+        expect(missing.refusals.map((refusal) => refusal.code)).toEqual([
+          "progress-subject-missing",
+        ]);
+        expect(missing.refusals[0]?.path).toBe("$.data.revision");
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
+        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore);
+        expect(runtime.state()).toEqual(before);
+
+        // The same attempt then settles on a repaired submission.
+        const repaired = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#4"),
+            data: { revision: "r1" },
+          },
+          NOW + 5,
+        );
+        expect(repaired.kind).toBe("accepted");
+      },
+    );
+  });
+
+  it("refuses a plan whose declared comparison semantics this build does not implement", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2, evaluator: "cosine-similarity" }),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+        const worked = runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+          NOW + 1,
+        );
+        expect(worked.kind).toBe("accepted");
+        const claimed = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#2"),
+            data: { revision: "r1" },
+          },
+          NOW + 2,
+        );
+        expect(claimed.kind).toBe("refused");
+        if (claimed.kind !== "refused") return;
+        expect(claimed.refusals.map((refusal) => refusal.code)).toEqual([
+          "progress-evaluator-unavailable",
+        ]);
+        expect(claimed.refusals[0]?.message).toContain("cosine-similarity");
+      },
+    );
+  });
+
+  it("answers unknown when the persisted baseline was recorded under another evaluator version", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
+      async ({ runtime, ledger, requests, graphId }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        const same = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(same.kind).toBe("accepted");
+        if (same.kind !== "accepted") return;
+        expect(onlyProgress(same.progress).unchanged).toBe(1);
+
+        // ANOTHER BUILD recorded the baseline under evaluator version 2. The
+        // reader accepts the record — a version is the compatibility FACT the
+        // comparison judges, not a shape it can refuse — so the comparison is
+        // what answers.
+        const stored = ledger.readGraphState(graphId);
+        if (stored === undefined) throw new Error("fixture: the state row is missing");
+        const body = recordOf(stored.body, "the state body");
+        const entries = recordOf(body.loopProgress, "loopProgress");
+        const entry = recordOf(entries["revise-loop"], "the progress entry");
+        ledger.writeGraphState({
+          ...stored,
+          body: {
+            ...body,
+            loopProgress: {
+              ...entries,
+              "revise-loop": { ...entry, version: 2 },
+            },
+          },
+          updatedAt: NOW + 10,
+        });
+        const seeded = runtime.state();
+        expect(progressEntry(seeded ?? same.state, "revise-loop").version).toBe(2);
+
+        // The same revision as the baseline, under different comparison
+        // semantics: unknown, never "unchanged" (nor "progressed"), and the
+        // persisted record is left exactly as it was.
+        const changed = reviseRound(runtime, requests, "work#5", "review#6", "r1", NOW + 11);
+        expect(changed.kind).toBe("accepted");
+        if (changed.kind !== "accepted") return;
+        expect(onlyProgress(changed.progress)).toMatchObject({
+          verdict: "unknown",
+          unknownReason: "evaluator-identity-mismatch",
+          version: 2,
+          unchanged: 1,
+          baseline: "r1",
+          stalled: false,
+        });
+        expect(progressEntry(changed.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 2,
+          subject: "revision",
+          unchanged: 1,
+          baseline: "r1",
+        });
+        expect(changed.state.phase).toBe("executing");
+      },
+    );
+  });
+
+  it("replays a continuation without counting it twice", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 3 }),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        const same = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(same.kind).toBe("accepted");
+        if (same.kind !== "accepted") return;
+        expect(progressEntry(same.state, "revise-loop").unchanged).toBe(1);
+
+        // The SAME logical submission again: the ledger replays its receipt, the
+        // join contributes no state write, and the counter does not move.
+        const replay = runtime.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#4"),
+            data: { revision: "r1" },
+          },
+          NOW + 5,
+        );
+        expect(replay.kind).toBe("accepted");
+        if (replay.kind !== "accepted") return;
+        expect(replay.replayed).toBe(true);
+        expect(replay.progress).toBeUndefined();
+        expect(progressEntry(replay.state, "revise-loop").unchanged).toBe(1);
+
+        // One more comparable unchanged round counts ONCE: with the threshold at
+        // three, a double-counted replay would have stopped the run here.
+        const next = reviseRound(runtime, requests, "work#5", "review#6", "r1", NOW + 6);
+        expect(next.kind).toBe("accepted");
+        if (next.kind !== "accepted") return;
+        expect(onlyProgress(next.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 2,
+          stalled: false,
+        });
+        expect(next.state.phase).toBe("executing");
+        expect(next.stop).toBeUndefined();
+      },
+    );
+  });
+
+  it("keeps the hard cap binding while every comparison is unknown", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 1, maxUnchanged: 3 }),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+        // The first continuation is INCOMPARABLE: unknown, so it neither
+        // establishes a baseline nor reaches a threshold — and the round is
+        // still taken, because the soft stop is the only answer unknown can
+        // never produce.
+        const unknown = reviseRound(runtime, requests, "work#1", "review#2", [], NOW + 1);
+        expect(unknown.kind).toBe("accepted");
+        if (unknown.kind !== "accepted") return;
+        expect(onlyProgress(unknown.progress)).toMatchObject({
+          verdict: "unknown",
+          unknownReason: "incomparable-value",
+        });
+        expect(unknown.state.loopTraversals["revise-loop"]).toBe(1);
+        expect(progressEntry(unknown.state, "revise-loop").baseline).toBeUndefined();
+        expect(progressEntry(unknown.state, "revise-loop").unchanged).toBe(0);
+
+        // The next one exceeds the declared HARD cap: unknown progress remains
+        // subject to hard limits, and the hard limit is the outer bound — the
+        // run stops with loop-exhausted, and no comparison is recorded for a
+        // round that is not taken.
+        const capped = reviseRound(runtime, requests, "work#3", "review#4", [], NOW + 3);
+        expect(capped.kind).toBe("accepted");
+        if (capped.kind !== "accepted") return;
+        expect(capped.state.phase).toBe("stopped");
+        expect(capped.stop?.reason).toBe("loop-exhausted");
+        expect(capped.progress).toBeUndefined();
+        expect(progressEntry(capped.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 0,
+        });
+      },
+    );
+  });
+
+  it("never measures the outcome that leaves the loop", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 1 }),
+      async ({ runtime, requests }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        if (first.kind !== "accepted") return;
+        const worked = runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
+          NOW + 3,
+        );
+        expect(worked.kind).toBe("accepted");
+
+        // The EXIT outcome carries NO data at all. It is not a continuation, so
+        // no comparison is made and no declared subject is required: a run that
+        // finishes does not enter the revision-staleness path.
+        const approved = runtime.submit(
+          { nodeId: "review", outcomeId: "approve", credential: credentialOf(requests, "review#4") },
+          NOW + 4,
+        );
+        expect(approved.kind).toBe("accepted");
+        if (approved.kind !== "accepted") return;
+        expect(approved.progress).toBeUndefined();
+        expect(approved.state.phase).toBe("complete");
+        // The loop progress it does not compare is left exactly as it was.
+        expect(progressEntry(approved.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 0,
+          baseline: "r1",
+        });
+      },
+    );
+  });
+
+  it("continues the same comparison after a restart: same baseline, same version", async () => {
+    await withHarness(
+      progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
+      async ({ runtime, plan, ledger, requests, dir }) => {
+        runtime.start(NOW);
+        const first = reviseRound(runtime, requests, "work#1", "review#2", "r1", NOW + 1);
+        expect(first.kind).toBe("accepted");
+        const same = reviseRound(runtime, requests, "work#3", "review#4", "r1", NOW + 3);
+        expect(same.kind).toBe("accepted");
+        if (same.kind !== "accepted") return;
+        expect(progressEntry(same.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 1,
+          baseline: "r1",
+        });
+
+        // A NEW runtime over the SAME ledger: the baseline exists only in the
+        // store, so recovery has to continue the comparison from it rather than
+        // restart the counters.
+        const restarted = new OutcomeGraphRuntime({
+          plan,
+          ledger,
+          dispatch: (request) => {
+            requests.push(request);
+          },
+          validators: EMPTY_VALIDATORS,
+          artifactRoot: dir,
+          clock: () => NOW,
+          mintCredential: TEST_CREDENTIAL_SOURCE,
+        });
+        const resumed = restarted.resume(NOW + 5);
+        expect(resumed.kind).toBe("resumed");
+        if (resumed.kind !== "resumed") return;
+        expect(resumed.armed.map((node) => node.nodeId)).toEqual(["work"]);
+        expect(progressEntry(resumed.state, "revise-loop")).toEqual({
+          loopGroupId: "revise-loop",
+          evaluator: "revision-token",
+          version: 1,
+          subject: "revision",
+          unchanged: 1,
+          baseline: "r1",
+        });
+
+        // The next round compares against that same baseline under that same
+        // evaluator version, so the declared threshold is reached exactly once.
+        const workedAgain = workStep(restarted, requests, "work#5", NOW + 6);
+        expect(workedAgain.kind).toBe("accepted");
+        const stalled = restarted.submit(
+          {
+            nodeId: "review",
+            outcomeId: "revise",
+            credential: credentialOf(requests, "review#6"),
+            data: { revision: "r1" },
+          },
+          NOW + 7,
+        );
+        expect(stalled.kind).toBe("accepted");
+        if (stalled.kind !== "accepted") return;
+        expect(onlyProgress(stalled.progress)).toMatchObject({
+          verdict: "unchanged",
+          unchanged: 2,
+          baseline: "r1",
+          stalled: true,
+        });
+        expect(stalled.stop).toMatchObject({
+          reason: "progress-stalled",
+          attemptId: "review#6",
+          unchanged: 2,
+          maxUnchanged: 2,
+          evaluatorVersion: 1,
+          baseline: "r1",
+        });
+      },
+    );
+  });
+});
 
 describe("OutcomeGraphRuntime — a convergence node is armed by its join", () => {
   it("arms a join:all node exactly once, when the LAST feeder arrives", async () => {
@@ -1950,9 +2725,13 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
         } = node as Record<string, unknown>;
         return rest;
       });
+      // Version 1 defines neither the credential, the arrival list NOR the
+      // progress record, so all three are stripped: a body carrying a field its
+      // version does not define is a shape this writer never produced.
+      const { loopProgress: _progress, ...v1Body } = body as Record<string, unknown>;
       ledger.writeGraphState({
         ...record,
-        body: { ...(body as Record<string, unknown>), bodyVersion: 1, nodes: v1Nodes },
+        body: { ...v1Body, bodyVersion: 1, nodes: v1Nodes },
         updatedAt: NOW + 1,
       });
       const before = ledger.readGraphState(graphId);

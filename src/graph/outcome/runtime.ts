@@ -114,7 +114,9 @@ import {
   type ExecutionProtocolRegistry,
 } from "../protocol/execution-protocol.ts";
 import {
-  submitOutcome,
+  bindingOf,
+  commitSubmission,
+  validateSubmission,
   type AcceptanceDecision,
   type AcceptanceJoin,
   type AcceptanceJoinResult,
@@ -127,6 +129,7 @@ import {
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
+  describeOutcomeStop,
   entryNodesOf,
   readOutcomeGraphState,
   stateRecordOf,
@@ -136,6 +139,12 @@ import {
   type OutcomeNodeState,
   type OutcomeStop,
 } from "./graph-state.ts";
+import {
+  projectProgress,
+  type OutcomeLoopProgress,
+  type ProgressProjection,
+  type ProgressReport,
+} from "./progress.ts";
 import {
   RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
   attemptCredentialBinding,
@@ -268,7 +277,27 @@ export type OutcomeRuntimeRefusalCode =
    */
   | "missing-persisted-plan"
   /** A dispatch seam threw while launching an unsettled effect (C3c resume). */
-  | "dispatch-failed";
+  | "dispatch-failed"
+  /**
+   * The advance reached a loop group whose plan declares a progress policy, but
+   * the projection bound to this submission was missing or belonged to another
+   * proposal, attempt or plan revision. A declared comparison is never skipped,
+   * so the acceptance is refused and nothing is written.
+   */
+  | "progress-unbound"
+  /**
+   * A declared progress policy governs this outcome and the submission did not
+   * carry the declared comparison object. The field is REQUIRED, so the
+   * submission is refused for repair (nothing is written) rather than measured
+   * as "unknown": a missing field is the worker's to fix, while an incomparable
+   * value is the data's own answer.
+   */
+  | "progress-subject-missing"
+  /**
+   * The plan declares a comparison semantics this build does not implement.
+   * Refused by name instead of running the comparison under different semantics.
+   */
+  | "progress-evaluator-unavailable";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -312,12 +341,21 @@ export type OutcomeSubmissionResult =
       readonly replayed: boolean;
       /**
        * Present exactly when this acceptance STOPPED the run: a declared hard
-       * limit refused the continuation the outcome asked for, so no successor
-       * was armed and `state.phase` is `stopped`. The outcome itself is a real,
-       * accepted result — the stop is the run's ending, not a fabricated
-       * settlement — and a repeated submission of it still replays this receipt.
+       * limit or progress policy refused the continuation the outcome asked for,
+       * so no successor was armed and `state.phase` is `stopped`. The outcome
+       * itself is a real, accepted result — the stop is the run's ending, not a
+       * fabricated settlement — and a repeated submission of it still replays
+       * this receipt.
        */
       readonly stop?: OutcomeStop;
+      /**
+       * Every progress comparison THIS call made, in plan loop-group order.
+       * Present only on a committed first settlement: a replay re-runs no
+       * comparison and writes nothing, so it reports none. The report is
+       * evidence (which group was compared, against what, and what it answered),
+       * never a second source of truth — the persisted state is.
+       */
+      readonly progress?: readonly ProgressReport[];
     }
   /** A gate failed: the receipt records the rejection, the attempt stays open. */
   | {
@@ -507,6 +545,23 @@ export class OutcomeGraphRuntime {
       ]);
     }
 
+    // One progress entry per loop group whose plan declares a policy, so the
+    // state's own record is complete from the first snapshot: a body that
+    // carried entries only after the first continuation could not be told from
+    // one whose baseline was lost. A group without a policy gets no entry.
+    const loopProgress: Record<string, OutcomeLoopProgress> = {};
+    for (const group of this.plan.loopGroups) {
+      const policy = group.progress;
+      if (policy === undefined) continue;
+      loopProgress[group.id] = Object.freeze({
+        loopGroupId: group.id,
+        evaluator: policy.evaluator,
+        version: policy.version,
+        subject: policy.subject,
+        unchanged: 0,
+      });
+    }
+
     const entryIds = new Set(entries.map((node) => node.id));
     const nodes: OutcomeNodeState[] = [];
     const dispatched: OutcomeDispatchRequest[] = [];
@@ -562,6 +617,7 @@ export class OutcomeGraphRuntime {
       nodes: Object.freeze(nodes),
       loopTraversals: Object.freeze({}),
       attemptSeq,
+      loopProgress: Object.freeze(loopProgress),
     });
     // ONE transaction for the starting snapshot. There is no acceptance to join
     // yet, and the entry dispatches are recorded in the state (attempt ids), so
@@ -618,29 +674,44 @@ export class OutcomeGraphRuntime {
     const identity = this.identityFor(proposal, state);
     if ("refusal" in identity) return refused([identity.refusal]);
 
+    const submission = {
+      plan: this.plan,
+      ledger: this.ledger,
+      submittedPlanRevision: this.planRevision,
+      identity,
+      proposal,
+      validators: this.validators,
+      artifactRoot: this.artifactRoot,
+      effects: [],
+      now: at,
+    };
+
+    // VALIDATION RUNS OUTSIDE THE TRANSACTION, and so does the progress
+    // PROJECTION. The gates and the payload read happen here, before the
+    // serialized commit opens; what the transaction does is recheck the binding,
+    // compare the projection against the baseline it can see, and write the
+    // counters with the acceptance. A rejected decision is reported as the
+    // gate's own rejection: the projection gate applies to an accepted outcome,
+    // so a worker repairs the failing gate first and is told about the declared
+    // comparison object on the submission that would otherwise settle.
+    const validation = validateSubmission(submission);
+    let projections: readonly ProgressProjection[] = Object.freeze([]);
+    if (validation.kind === "validated" && validation.decision.kind === "accepted") {
+      const projected = this.progressProjections(proposal, identity);
+      if ("refusal" in projected) return refused([projected.refusal]);
+      projections = projected;
+    }
+
     let planned: OutcomeAdvance | undefined;
     const join: AcceptanceJoin = (tx, decision) => {
-      const joined = this.reduceInTransaction(tx, decision, at);
+      const joined = this.reduceInTransaction(tx, decision, at, projections);
       planned = joined.advance;
       return joined.result;
     };
 
     let result: SubmissionResult;
     try {
-      result = submitOutcome(
-        {
-          plan: this.plan,
-          ledger: this.ledger,
-          submittedPlanRevision: this.planRevision,
-          identity,
-          proposal,
-          validators: this.validators,
-          artifactRoot: this.artifactRoot,
-          effects: [],
-          now: at,
-        },
-        join,
-      );
+      result = commitSubmission({ ...submission, validation }, join);
     } catch (error) {
       // A reducer rule violation rolls the transaction back and is reported as
       // the structured refusal it is. A storage failure is NOT swallowed: the
@@ -686,6 +757,10 @@ export class OutcomeGraphRuntime {
       }
     }
     for (const request of dispatched) this.dispatch(request);
+    // The comparisons THIS call made. A replay re-runs none (the join is skipped
+    // for an already-settled node) and writes nothing, so it reports none: the
+    // persisted state is the authority, and a replay has already been reported.
+    const progress = committed && planned !== undefined ? planned.progress : [];
     return {
       kind: "accepted",
       decision,
@@ -697,6 +772,7 @@ export class OutcomeGraphRuntime {
       // for a replay, from the state it replayed against), never from a second
       // derivation: `state.stop` IS the durable stop.
       ...(persisted.stop === undefined ? {} : { stop: persisted.stop }),
+      ...(progress.length === 0 ? {} : { progress }),
     };
   }
 
@@ -1233,6 +1309,7 @@ export class OutcomeGraphRuntime {
     tx: AcceptanceLedgerTx,
     decision: AcceptanceDecision,
     now: number,
+    progress: readonly ProgressProjection[],
   ): JoinedReduction {
     const record = tx.readGraphState(this.graphId);
     if (record === undefined) {
@@ -1278,6 +1355,7 @@ export class OutcomeGraphRuntime {
       decision,
       now,
       mintCredential: this.mintCredential,
+      progress,
     });
     const effects = advance.dispatches.map((intent) => ({
       effectId: "dispatch:" + intent.attemptId,
@@ -1296,6 +1374,75 @@ export class OutcomeGraphRuntime {
       },
       advance,
     };
+  }
+
+  /**
+   * Measure one submission against every declared progress policy that governs
+   * it — OUTSIDE the acceptance transaction.
+   *
+   * The projection reads the worker payload exactly ONCE and reduces the declared
+   * comparison object to a bounded token (or to a bounded marker saying why it
+   * cannot be compared), bound to this proposal digest, attempt, plan revision and
+   * the validation the submission is about to be judged by. The raw payload never
+   * travels further: the transaction compares a token, and what it persists is the
+   * baseline and the counters.
+   *
+   * A group is projected only when the DECLARED POLICY governs this submission —
+   * the group declares this outcome as its continuation and this node as a member.
+   * An outcome that exits the loop, or terminates its node, is never measured and
+   * never refused for a missing subject. A projection refusal is returned as the
+   * runtime refusal it is (nothing is written), and an unreadable or
+   * unrepresentable proposal yields no projections because the acceptance core
+   * refuses those by name.
+   */
+  private progressProjections(
+    proposal: unknown,
+    identity: ExecutionIdentity,
+  ): readonly ProgressProjection[] | { readonly refusal: OutcomeRuntimeRefusal } {
+    const reading = readOutcomeProposal(proposal);
+    if (reading.kind !== "ok") return Object.freeze([]);
+    const { nodeId, outcomeId, data } = reading.proposal;
+    const groups = this.plan.loopGroups.filter(
+      (group) =>
+        group.progress !== undefined &&
+        group.continuationOutcome === outcomeId &&
+        group.nodes.includes(nodeId),
+    );
+    if (groups.length === 0) return Object.freeze([]);
+    let digest: string;
+    try {
+      digest = proposalDigest(reading.proposal);
+    } catch {
+      // Unrepresentable payloads have no content address, so there is no binding
+      // to measure against; the acceptance core refuses that submission by name.
+      return Object.freeze([]);
+    }
+    const binding = bindingOf(identity, this.planRevision, digest);
+    const projections: ProgressProjection[] = [];
+    for (const group of groups) {
+      const policy = group.progress;
+      if (policy === undefined) continue;
+      const projected = projectProgress({
+        binding,
+        loopGroupId: group.id,
+        nodeId,
+        outcomeId,
+        policy,
+        data,
+      });
+      if (projected.kind === "refused") {
+        const first = projected.refusals[0];
+        return {
+          refusal: {
+            code: first.code,
+            message: first.message,
+            ...(first.path === undefined ? {} : { path: first.path }),
+          },
+        };
+      }
+      projections.push(projected.projection);
+    }
+    return Object.freeze(projections);
   }
 
   /**
@@ -1465,13 +1612,9 @@ function stoppedInFlightRefusals(
           ", but graph " +
           JSON.stringify(state.graphId) +
           " STOPPED (" +
-          stop.reason +
-          ": loop group " +
-          JSON.stringify(stop.loopGroupId) +
-          " reached its hard cap of " +
-          stop.maxTraversals +
-          " traversals) — a stopped run dispatches nothing and no submission can settle " +
-          "this attempt, so it is reported as refused rather than armed",
+          stop.reason + ": " + describeOutcomeStop(stop) +
+          ") — a stopped run dispatches nothing and no submission can settle this attempt, " +
+          "so it is reported as refused rather than armed",
       }),
     );
   });

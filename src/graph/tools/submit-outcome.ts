@@ -182,11 +182,13 @@ export interface GraphSubmitOutcomeResult {
  *
  * `reason` comes from the closed vocabulary `graph-state.ts` owns
  * (`OUTCOME_STOP_REASONS`) — a condition decided from the plan and the state,
- * never a judgement about the work.
+ * never a judgement about the work. The fields a reason does not define are
+ * ABSENT rather than reported as zero: a hard cap stop has no baseline, and a
+ * progress stop has no traversal count, so neither invents the other numbers.
  */
 export interface SubmitOutcomeStop {
   readonly reason: string;
-  /** The declared loop group whose hard cap binds. */
+  /** The declared loop group whose cap or progress policy binds. */
   readonly loop_group_id: string;
   /** The node whose accepted outcome could not continue. */
   readonly node_id: string;
@@ -194,10 +196,22 @@ export interface SubmitOutcomeStop {
   readonly outcome_id: string;
   /** The attempt of `node_id` that the outcome settled. */
   readonly attempt_id: string;
-  /** Continuations the group took: equal to `max_traversals`. */
-  readonly traversals: number;
-  /** The declared hard cap the refused continuation would have exceeded. */
-  readonly max_traversals: number;
+  /** `loop-exhausted` only: continuations the group took, equal to the cap. */
+  readonly traversals?: number;
+  /** `loop-exhausted` only: the declared hard cap the round would have exceeded. */
+  readonly max_traversals?: number;
+  /** `progress-stalled` only: consecutive unchanged comparisons, equal to the threshold. */
+  readonly unchanged?: number;
+  /** `progress-stalled` only: the declared stagnation threshold. */
+  readonly max_unchanged?: number;
+  /** `progress-stalled` only: the comparison semantics the baseline was recorded under. */
+  readonly evaluator?: string;
+  /** `progress-stalled` only: the exact version of that evaluator. */
+  readonly evaluator_version?: number;
+  /** `progress-stalled` only: the comparison object (an outcome-data field). */
+  readonly subject?: string;
+  /** `progress-stalled` only: the bounded revision token the run stood still on. */
+  readonly baseline?: string;
   /** Epoch milliseconds the stop was committed at. */
   readonly stopped_at: number;
 }
@@ -531,17 +545,32 @@ function renderResult(
   };
 }
 
-/** Project one persisted stop into the model-facing shape. */
+/** Project one persisted stop into the model-facing shape, per reason. */
 function stopOf(stop: OutcomeStop): SubmitOutcomeStop {
-  return Object.freeze({
-    reason: stop.reason,
+  const base = {
     loop_group_id: stop.loopGroupId,
     node_id: stop.nodeId,
     outcome_id: stop.outcomeId,
     attempt_id: stop.attemptId,
-    traversals: stop.traversals,
-    max_traversals: stop.maxTraversals,
     stopped_at: stop.stoppedAt,
+  };
+  if (stop.reason === "loop-exhausted") {
+    return Object.freeze({
+      ...base,
+      reason: stop.reason,
+      traversals: stop.traversals,
+      max_traversals: stop.maxTraversals,
+    });
+  }
+  return Object.freeze({
+    ...base,
+    reason: stop.reason,
+    unchanged: stop.unchanged,
+    max_unchanged: stop.maxUnchanged,
+    evaluator: stop.evaluator,
+    evaluator_version: stop.evaluatorVersion,
+    subject: stop.subject,
+    baseline: stop.baseline,
   });
 }
 

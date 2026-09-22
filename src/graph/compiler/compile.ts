@@ -83,6 +83,7 @@ import {
 import {
   createCompiledPlan,
   inspectCompiledTopology,
+  readCompiledProgressPolicy,
   terminalOutcomesOf,
   type CompiledCompletionPolicy,
   type CompiledEdge,
@@ -92,6 +93,7 @@ import {
   type CompiledOutcomeData,
   type CompiledPlan,
   type CompiledPlanBody,
+  type CompiledProgressPolicy,
   type CompiledTopologyIssueCode,
   type CompiledUnresolvedRequirement,
 } from "./plan.ts";
@@ -1184,6 +1186,7 @@ function compileLoopGroup(
     "exit",
     log,
   );
+  const progress = compileProgressPolicy(group.progress, `${path}.progress`, log);
 
   if (
     continuation !== null &&
@@ -1233,7 +1236,48 @@ function compileLoopGroup(
     maxTraversals: hasLimits ? group.max_traversals : 0,
     continuationOutcome: continuation ?? "",
     exitOutcome: exit ?? "",
+    ...(progress === undefined ? {} : { progress }),
   };
+}
+
+/**
+ * Compile one loop group's declared progress policy.
+ *
+ * The policy is compiled through the SAME reader the plan inspector uses
+ * ({@link readCompiledProgressPolicy}), so the declaration boundary and the load
+ * boundary cannot disagree about what a policy is, and a malformed one is
+ * reported with the inspector's own code. The declared comparison semantics and
+ * comparison object are CARRIED, never resolved: whether this build implements
+ * the declared evaluator is a run-path refusal, because capability resolution is
+ * not a structural property of the declaration.
+ */
+function compileProgressPolicy(
+  raw: unknown,
+  path: string,
+  log: IssueLog,
+): CompiledProgressPolicy | undefined {
+  if (raw === undefined) return undefined;
+  const record = isRecord(raw) ? raw : undefined;
+  const policy =
+    record === undefined
+      ? undefined
+      : readCompiledProgressPolicy({
+          evaluator: record.evaluator,
+          version: record.version,
+          subject: record.subject,
+          maxUnchanged: record.max_unchanged,
+        });
+  if (policy === undefined) {
+    log.errors.push(
+      issue(
+        "malformed-progress-policy",
+        `progress policy at ${path} is not { evaluator, version, subject, max_unchanged } with a non-empty evaluator and subject, a positive safe integer version and a positive safe integer max_unchanged`,
+        path,
+      ),
+    );
+    return undefined;
+  }
+  return policy;
 }
 
 /** Read one required loop route outcome, or `null` when it is not one. */
