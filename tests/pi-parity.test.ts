@@ -99,6 +99,7 @@ const OPENCODE_SURFACE: readonly string[] = [
   "graph_add_loop",
   "graph_declare",
   "graph_submit_outcome",
+  "graph_audit",
   "graph_run",
   "graph_status",
   "graph_cancel",
@@ -262,7 +263,7 @@ async function initPiStack(): Promise<{ registeredNames: string[]; count: number
     undefined, // loopTools (disabled — graph_add_loop replaces loop_*)
     buildTaskTools(), // taskTools (task_retry withheld)
     buildPiExtraTools(), // extraTools (shared extras + Pi-only load_role_skill + lsp_*)
-    makeDispatchManager(), // dispatchManager — gates the eight graph_* tools
+    makeDispatchManager(), // dispatchManager — gates the graph_* tools
     undefined, // graphNotifyClient (defaults to the Pi session adapter)
     process.cwd(), // stateDir (engine-state persistence)
   );

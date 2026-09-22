@@ -3,8 +3,8 @@
  *
  * Verifies the graph-tool wiring through PiLightweightServiceStack.init():
  *   1. With a DispatchManager provided (7th ctor arg), init() registers
- *      exactly the eight `graph_*` tools via pi.registerTool — the merge is
- *      additive on top of the legacy 19-tool surface (17 required + 2
+ *      exactly the `graph_*` tools via pi.registerTool — the merge is
+ *      additive on top of the legacy 20-tool surface (18 required + 2
  *      optional, see tests/pi-service-stack.test.ts).
  *   2. Without a DispatchManager, NO `graph_*` key is registered
  *      (backward-compat pin — the graph tools must not leak into the legacy
@@ -55,7 +55,8 @@ function makeDispatchManager(): DispatchManager {
 
 /**
  * The imperative `graph_*` keys produced by createGraphTools (C1 adds declare,
- * C3c adds the outcome-protocol submission ingress).
+ * C3c adds the outcome-protocol submission ingress, E0 adds the read-only
+ * audit entry).
  */
 const GRAPH_KEYS = [
   "graph_create",
@@ -64,6 +65,7 @@ const GRAPH_KEYS = [
   "graph_add_loop",
   "graph_declare",
   "graph_submit_outcome",
+  "graph_audit",
   "graph_run",
   "graph_status",
   "graph_cancel",
@@ -144,7 +146,7 @@ describe("PiLightweightServiceStack graph_* wiring", () => {
   it("registers exactly the graph_* tools when a dispatchManager is provided", async () => {
     const { registeredNames, count } = await initStack(makeDispatchManager());
 
-    // Graph merge is additive: legacy 19 + the graph_* surface.
+    // Graph merge is additive: legacy 20 + the graph_* surface.
     expect(count).toBe(BASE_TOOL_COUNT + GRAPH_KEYS.length);
 
     const graphKeys = registeredNames.filter((name) => name.startsWith("graph_"));
