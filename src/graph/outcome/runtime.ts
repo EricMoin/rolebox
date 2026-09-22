@@ -88,6 +88,7 @@ import {
   type SubmissionResult,
 } from "./acceptance.ts";
 import {
+  CURRENT_OUTCOME_STATE_BODY,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -152,6 +153,13 @@ export type OutcomeRuntimeRefusalCode =
   | "graph-not-started"
   /** A persisted state exists but is not this build's state for this plan. */
   | "unreadable-state"
+  /**
+   * The persisted state declares a state-body version this build has no reader
+   * for. Reported separately from `unreadable-state`: the body is a legal,
+   * well-formed snapshot of a LAYOUT this build does not know, so recovery is
+   * blocked and the body is left exactly as it is.
+   */
+  | "unsupported-state-version"
   /** The proposal names a node the plan does not declare. */
   | "unknown-node"
   /** The node has no attempt in flight, so no outcome can settle one. */
@@ -401,6 +409,7 @@ export class OutcomeGraphRuntime {
       );
     }
     const state: OutcomeGraphState = Object.freeze({
+      bodyVersion: CURRENT_OUTCOME_STATE_BODY,
       graphId: this.graphId,
       planRevision: this.planRevision,
       phase: "executing" as const,
@@ -1054,9 +1063,13 @@ export class OutcomeGraphRuntime {
    */
   private stateRefusal(error: unknown): OutcomeRuntimeRefusal {
     if (error instanceof OutcomeStateError) {
-      return error.problem === "state-plan-mismatch"
-        ? { code: "plan-revision-mismatch", message: error.message }
-        : { code: "unreadable-state", message: error.message };
+      if (error.problem === "state-plan-mismatch") {
+        return { code: "plan-revision-mismatch", message: error.message };
+      }
+      if (error.problem === "unsupported-state-version") {
+        return { code: "unsupported-state-version", message: error.message };
+      }
+      return { code: "unreadable-state", message: error.message };
     }
     return {
       code: "unreadable-state",

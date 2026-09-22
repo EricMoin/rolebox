@@ -37,7 +37,12 @@ import {
   OutcomeGraphRuntime,
   type OutcomeDispatchRequest,
 } from "../../src/graph/outcome/runtime.ts";
-import type { OutcomeGraphState } from "../../src/graph/outcome/graph-state.ts";
+import {
+  CURRENT_OUTCOME_STATE_BODY,
+  OutcomeStateError,
+  type OutcomeGraphState,
+} from "../../src/graph/outcome/graph-state.ts";
+import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
 import {
   createValidatorRegistry,
   type ValidationOutcome,
@@ -926,6 +931,141 @@ class CompletingDispatch implements NodeDispatchPort {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+
+// ── A state body this build cannot read blocks the run ──────────────────────
+
+describe("OutcomeGraphRuntime — the state body is gated by its declared version", () => {
+  /** The stored record, as an outside writer left it. */
+  function storedState(
+    ledger: SqliteAcceptanceLedger,
+    graphId: string,
+  ): GraphStateRecord {
+    const record = ledger.readGraphState(graphId);
+    if (record === undefined) throw new Error("fixture: the state row is missing");
+    return record;
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function bodyOf(record: GraphStateRecord): Record<string, unknown> {
+    if (!isRecord(record.body)) {
+      throw new Error("fixture: the state body is not a record");
+    }
+    return record.body;
+  }
+
+  it("reports a newer body version as its own refusal and rewrites nothing", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId }) => {
+      runtime.start(NOW);
+      const started = storedState(ledger, graphId);
+
+      // A different process writes a body in a LAYOUT this build has no reader
+      // for — the same fields plus a strictly newer body version.
+      const future = CURRENT_OUTCOME_STATE_BODY + 1;
+      ledger.writeGraphState({
+        ...started,
+        body: { ...bodyOf(started), bodyVersion: future, progressBaselines: { work: 1 } },
+        updatedAt: NOW + 1,
+      });
+      const before = storedState(ledger, graphId);
+
+      // Every run-path entry point refuses, and the direct read reports the
+      // capability gap rather than a generic malformed body.
+      let direct: unknown;
+      try {
+        runtime.state();
+      } catch (error) {
+        direct = error;
+      }
+      expect(direct).toBeInstanceOf(OutcomeStateError);
+      if (direct instanceof OutcomeStateError) {
+        expect(direct.problem).toBe("unsupported-state-version");
+      }
+
+      const resumed = runtime.resume(NOW + 2);
+      expect(resumed.kind).toBe("refused");
+      if (resumed.kind === "refused") {
+        expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+          "unsupported-state-version",
+        ]);
+        expect(resumed.refusals[0]?.message).toContain(String(future));
+      }
+      const restarted = runtime.start(NOW + 3);
+      expect(restarted.kind).toBe("refused");
+      if (restarted.kind === "refused") {
+        expect(restarted.refusals.map((refusal) => refusal.code)).toContain(
+          "unsupported-state-version",
+        );
+      }
+      const submitted = runtime.submit(
+        { nodeId: "work", outcomeId: "done" },
+        NOW + 4,
+      );
+      expect(submitted.kind).toBe("refused");
+      if (submitted.kind === "refused") {
+        expect(submitted.refusals.map((refusal) => refusal.code)).toContain(
+          "unsupported-state-version",
+        );
+      }
+
+      // The row the refusing process was handed is UNCHANGED — no field was
+      // trimmed, no version was downgraded — and nothing was dispatched.
+      expect(storedState(ledger, graphId)).toEqual(before);
+      expect(attemptIds(requests)).toEqual(["work#1"]);
+    });
+  });
+
+  it("reports an unknown body field as unreadable and rewrites nothing", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId }) => {
+      runtime.start(NOW);
+      const started = storedState(ledger, graphId);
+      ledger.writeGraphState({
+        ...started,
+        body: {
+          ...bodyOf(started),
+          progressBaselines: { work: { digest: "abc", round: 2 } },
+        },
+        updatedAt: NOW + 1,
+      });
+      const before = storedState(ledger, graphId);
+
+      const resumed = runtime.resume(NOW + 2);
+      expect(resumed.kind).toBe("refused");
+      if (resumed.kind === "refused") {
+        expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+          "unreadable-state",
+        ]);
+        expect(resumed.refusals[0]?.message).toContain("progressBaselines");
+      }
+      const after = storedState(ledger, graphId);
+      expect(after).toEqual(before);
+      expect("progressBaselines" in bodyOf(after)).toBe(true);
+      expect(attemptIds(requests)).toEqual(["work#1"]);
+    });
+  });
+
+  it("keeps a state bound to another revision a plan mismatch", async () => {
+    await withHarness(LINEAR, async ({ runtime, ledger, graphId }) => {
+      runtime.start(NOW);
+      const started = storedState(ledger, graphId);
+      ledger.writeGraphState({
+        ...started,
+        planRevision: "revision-from-elsewhere",
+        updatedAt: NOW + 1,
+      });
+
+      const resumed = runtime.resume(NOW + 2);
+      expect(resumed.kind).toBe("refused");
+      if (resumed.kind === "refused") {
+        expect(resumed.refusals.map((refusal) => refusal.code)).toEqual([
+          "plan-revision-mismatch",
+        ]);
+      }
+    });
+  });
+});
 
 describe("legacy v2 graphs keep the file store and their run path", () => {
   it("runs a legacy graph through the state directory unchanged", async () => {

@@ -39,13 +39,18 @@
  * execution identity and replays the persisted decision instead of settling a
  * second time.
  *
- * READING IS STRICT AND TOTAL. `readOutcomeGraphState` accepts exactly the
- * shape this module's writer produces — the plan's node set in plan order, the
- * closed status vocabulary, attempt ids and counters where they are required,
- * and no unknown loop group — and refuses anything else with an
- * {@link OutcomeStateError}. A state this build cannot read is NEVER reset to a
- * clean start: the same "unknown is not fresh" discipline the storage and
- * protocol gates apply.
+ * READING IS STRICT, VERSIONED AND TOTAL. Every persisted body declares the
+ * state-body version it was written in, and `readOutcomeGraphState` accepts
+ * exactly the shape that version defines — the plan's node set in plan order,
+ * the closed status vocabulary, attempt ids and counters where they are
+ * required, no unknown loop group, and NO field the version does not define at
+ * either the body or the node level — and refuses anything else with an
+ * {@link OutcomeStateError}. A version this build has no reader for is refused
+ * with `unsupported-state-version` rather than read partially: the fields this
+ * build does not know would be silently dropped by the next state write, so
+ * the version gate comes first and a state this build cannot read is NEVER
+ * reset to a clean start — the same "unknown is not fresh" discipline the
+ * storage and protocol gates apply.
  *
  * Dependency leaf on the outcome side: the compiler's plan TYPES, the ledger's
  * record TYPE and the acceptance core's decision type, all type-only, so the
@@ -110,6 +115,12 @@ export type OutcomeGraphPhase = "ready" | "executing" | "complete";
  * map to be complete.
  */
 export interface OutcomeGraphState {
+  /**
+   * The state-body format this snapshot is written in. A reader dispatches on
+   * this value: a version with no registered reader is refused, never read
+   * partially and rewritten (see {@link classifyOutcomeStateBody}).
+   */
+  readonly bodyVersion: number;
   readonly graphId: string;
   /** The plan revision this snapshot is bound to. */
   readonly planRevision: string;
@@ -122,13 +133,205 @@ export interface OutcomeGraphState {
   readonly attemptSeq: number;
 }
 
+// ── The state-body format ───────────────────────────────────────────────────
+
+/**
+ * The first versioned state-body layout — what this module's writer produces
+ * today and what a persisted body declares as `bodyVersion: 1`.
+ */
+export const OUTCOME_STATE_BODY_V1 = 1 as const;
+
+/**
+ * The state-body format this build writes — and, today, the only one it reads.
+ *
+ * The body version is its OWN axis, separate from the storage format
+ * (`ENGINE_PERSISTENCE_VERSION`), the execution-protocol identity and the
+ * contract revision: it identifies the LAYOUT of the state body, so adding a
+ * field is declaring a new body version that a reader owns — never extending a
+ * version in place.
+ */
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V1;
+
+/**
+ * What reading one state body with a registered reader produced.
+ *
+ * `ok` carries the hydrated state; `invalid` carries the
+ * {@link OutcomeStateError} the reader's own shape check raised. TOTAL by
+ * contract, like a `StorageFormatDecoder.decode`: the reader answers a DATA
+ * verdict for every body and never throws, so a body it rejects is reported
+ * instead of escaping as an exception the caller did not model. Only a
+ * non-OutcomeStateError (a programming error) still propagates.
+ */
+export type OutcomeStateBodyReading =
+  | { readonly kind: "ok"; readonly state: OutcomeGraphState }
+  | { readonly kind: "invalid"; readonly error: OutcomeStateError };
+
+/**
+ * A registered reader for exactly ONE state-body format.
+ *
+ * `format` is the exact body version this reader owns and `read` hydrates
+ * only that layout. A version is never support by itself: the registry stores
+ * capabilities, not memberships.
+ */
+export interface OutcomeStateBodyReader {
+  /** The exact state-body version this reader hydrates. */
+  readonly format: number;
+  /** Read one body of exactly this format — never throws. */
+  read(body: Record<string, unknown>, plan: CompiledPlan): OutcomeStateBodyReading;
+}
+
+/**
+ * Installable state-body support: the exact reading CAPABILITIES this build has.
+ *
+ * Capability — never a numeric comparison or a bare membership check — decides
+ * support, so a build that reads `1` cannot accidentally accept `2` (or any
+ * other number) under a "less than current" rule. No migration capability is
+ * installed for state bodies: a version this build does not read is
+ * `unsupported` and recovery is blocked, never converted. The
+ * decodable/migratable exclusivity `storage-format.ts` enforces therefore has
+ * no second capability kind to collide with here; a future state-body migrator
+ * must be registered as its own capability, and a version must stay exactly one
+ * of the two.
+ */
+export interface OutcomeStateBodyRegistry {
+  /** The body version this build writes. */
+  readonly current: number;
+  /** The installed readers, one per exact body version. */
+  readonly formats: readonly OutcomeStateBodyReader[];
+}
+
+/** Input accepted by {@link createOutcomeStateBodyRegistry}. */
+export interface OutcomeStateBodyRegistryInput {
+  /** The body version this build writes. */
+  readonly current: number;
+  /** The readers to install; at most one per body version. */
+  readonly formats: readonly OutcomeStateBodyReader[];
+}
+
+/**
+ * Build a deeply frozen state-body registry from explicit reading capabilities.
+ *
+ * Consistency is checked HERE rather than left to the reader, because each
+ * violation is a programmer error with exactly one sensible owner:
+ * - a version that is not a positive safe integer — a capability names an exact
+ *   LEGAL version, and an illegal discriminator is never a capability;
+ * - a duplicate reader format — one exact version has exactly one read owner,
+ *   otherwise which body shape is accepted would depend on array order;
+ * - a `current` version with no registered reader — a build cannot write a body
+ *   it could not read back, so the format it writes must be one of its own
+ *   capabilities.
+ *
+ * Deeply frozen: the outer object, both arrays (fresh copies, so the caller's
+ * arrays cannot be mutated afterwards) and every capability object. An in-place
+ * edit of a frozen registry throws in strict mode, so the accepted set a reader
+ * sees cannot silently move after construction.
+ *
+ * Throws a descriptive `Error` on the first violation.
+ */
+export function createOutcomeStateBodyRegistry(
+  input: OutcomeStateBodyRegistryInput,
+): OutcomeStateBodyRegistry {
+  const installed = new Set<number>();
+  for (const format of input.formats) {
+    if (!Number.isSafeInteger(format.format) || format.format <= 0) {
+      throw new Error(
+        "state-body-format: " + describeValue(format.format) +
+          " is not a legal state-body version — a version identifier is a positive safe integer",
+      );
+    }
+    if (installed.has(format.format)) {
+      throw new Error(
+        "state-body-format: duplicate reader for body version " + format.format +
+          " — one exact version has exactly one read owner",
+      );
+    }
+    installed.add(format.format);
+  }
+  if (!installed.has(input.current)) {
+    throw new Error(
+      "state-body-format: the current body version " + describeValue(input.current) +
+        " has no registered reader — a build cannot write a body it cannot read back",
+    );
+  }
+  for (const format of input.formats) Object.freeze(format);
+  return Object.freeze({
+    current: input.current,
+    formats: Object.freeze([...input.formats]),
+  });
+}
+
+/**
+ * Verdict for one raw `bodyVersion` value.
+ *
+ * - `supported` — an exact registered reader hydrates this body version. The
+ *   verdict CARRIES the reader, so the caller dispatches on a capability
+ *   instead of re-deriving support from a number.
+ * - `unsupported` — a LEGAL version identifier with no installed reader.
+ *   `version` carries the number for diagnostics and the caller REFUSES: this
+ *   build must not read the body partially and write the state back, because
+ *   every field it does not know would be silently dropped.
+ * - `invalid` — not a version identifier at all: missing, `null`, a string, a
+ *   non-integer or non-positive number, `NaN` / `Infinity`, or an integer
+ *   outside the safe range. `value` carries the RAW value because it may hold
+ *   any type; the caller reports it as a malformed body, never as an
+ *   unknown-but-well-formed version.
+ */
+export type OutcomeStateBodyVerdict =
+  | {
+      readonly kind: "supported";
+      readonly version: number;
+      readonly reader: OutcomeStateBodyReader;
+    }
+  | { readonly kind: "unsupported"; readonly version: number }
+  | { readonly kind: "invalid"; readonly value: unknown };
+
+/**
+ * Classify one persisted body version against a registry of exact reading
+ * capabilities.
+ *
+ * Rules (the first matching rule wins) — the same shape `classifyStorageFormat`
+ * applies to the storage axis:
+ * 1. a value that is not a positive safe integer — missing, `null`, a string,
+ *    a non-integer, zero, negative, `NaN` / `Infinity`, or an integer outside
+ *    the safe range — → `invalid`, carrying the raw value: an illegal
+ *    discriminator names no body version at all, so the body is malformed
+ *    rather than "a newer version";
+ * 2. the version of a registered reader → `supported`, carrying that reader;
+ * 3. anything else → `unsupported`: a legal version identifier this build has
+ *    no reader for.
+ *
+ * PURE by contract: no I/O, no logging, never throws.
+ */
+export function classifyOutcomeStateBody(
+  version: unknown,
+  registry: OutcomeStateBodyRegistry,
+): OutcomeStateBodyVerdict {
+  if (
+    typeof version !== "number" ||
+    !Number.isSafeInteger(version) ||
+    version <= 0
+  ) {
+    return { kind: "invalid", value: version };
+  }
+  const reader = registry.formats.find((format) => format.format === version);
+  if (reader !== undefined) {
+    return { kind: "supported", version, reader };
+  }
+  return { kind: "unsupported", version };
+}
+
 // ── Reading a persisted record ──────────────────────────────────────────────
 
 /** Why a persisted graph-state body was refused. Stable identifiers. */
 export type OutcomeStateProblem =
   /** The record names a different graph or plan revision than the plan in hand. */
   | "state-plan-mismatch"
-  /** The body is not the state shape this build writes. */
+  /** The body declares a state-body version this build has no reader for. */
+  | "unsupported-state-version"
+  /**
+   * The body is not the shape its declared state-body version defines —
+   * including a field that version does not define, at the body or node level.
+   */
   | "malformed-state";
 
 /**
@@ -174,6 +377,53 @@ function readOptionalEpoch(
   return value;
 }
 
+/** The node fields body version 1 defines, exactly, per status. */
+const OUTCOME_NODE_STATE_V1_KEYS: Readonly<
+  Record<OutcomeNodeStatus, readonly string[]>
+> = Object.freeze({
+  pending: Object.freeze(["nodeId", "status"]),
+  dispatched: Object.freeze([
+    "nodeId",
+    "status",
+    "attemptId",
+    "attemptSeq",
+    "dispatchedAt",
+  ]),
+  settled: Object.freeze([
+    "nodeId",
+    "status",
+    "attemptId",
+    "attemptSeq",
+    "outcomeId",
+    "dispatchedAt",
+    "settledAt",
+  ]),
+});
+
+/**
+ * Refuse every node field body version 1 does not define for this status.
+ *
+ * An unknown field is a shape this build cannot read, not something to skip: a
+ * reader that ignored it would drop it from the state it writes back. Adding a
+ * field is declaring a new body version.
+ */
+function rejectUnknownNodeFields(
+  raw: Record<string, unknown>,
+  status: OutcomeNodeStatus,
+  where: string,
+): void {
+  const defined = OUTCOME_NODE_STATE_V1_KEYS[status];
+  for (const key of Object.keys(raw)) {
+    if (!defined.includes(key)) {
+      throw malformedState(
+        where + " carries field " + JSON.stringify(key) + ", which body version " +
+          OUTCOME_STATE_BODY_V1 + " does not define for a " + status + " node — " +
+          "an unknown field is refused rather than dropped",
+      );
+    }
+  }
+}
+
 /** Read one node's persisted progress against its plan declaration. */
 function readNodeState(
   raw: unknown,
@@ -197,6 +447,7 @@ function readNodeState(
       where + ".status is " + describeValue(status) + ", not pending, dispatched or settled",
     );
   }
+  rejectUnknownNodeFields(raw, status, where);
   const attemptId = raw.attemptId;
   const attemptSeq = raw.attemptSeq;
   const outcomeId = raw.outcomeId;
@@ -297,39 +548,67 @@ function readLoopTraversals(
   return Object.freeze(counters);
 }
 
+/** The body fields body version 1 defines, exactly — what its writer produces. */
+const OUTCOME_STATE_BODY_V1_KEYS: readonly string[] = Object.freeze([
+  "bodyVersion",
+  "graphId",
+  "planRevision",
+  "phase",
+  "nodes",
+  "loopTraversals",
+  "attemptSeq",
+]);
+
 /**
- * Read one persisted record as this plan's state.
+ * Refuse every body field body version 1 does not define.
  *
- * STRICT and TOTAL: the identity fields must agree with the plan in hand, the
- * node list must be exactly the plan's nodes in plan order, and every field
- * must be the value the reducer would have written. Anything else throws an
- * {@link OutcomeStateError} — a state this build cannot read is never guessed
- * at, and never silently replaced.
+ * An unknown field is a shape this build cannot read, not something to skip: a
+ * reader that ignored it would drop it from the state it writes back. Adding a
+ * field is declaring a new body version, and a version this build does not read
+ * is refused before any field is examined.
  */
-export function readOutcomeGraphState(
-  record: GraphStateRecord,
+function rejectUnknownBodyFields(body: Record<string, unknown>): void {
+  for (const key of Object.keys(body)) {
+    if (!OUTCOME_STATE_BODY_V1_KEYS.includes(key)) {
+      throw malformedState(
+        "the body carries field " + JSON.stringify(key) + ", which body version " +
+          OUTCOME_STATE_BODY_V1 + " does not define — an unknown field is refused rather " +
+          "than dropped; adding a field is a new body version",
+      );
+    }
+  }
+}
+
+/**
+ * Read one body as body version 1 — the shape this module's writer produces.
+ *
+ * STRICT: every field must be the value the version-1 writer would have
+ * written, at the body and the node level, and the plan's node list must match
+ * position by position. Anything else throws an {@link OutcomeStateError} with
+ * problem `malformed-state`. The total capability the registry installs turns
+ * that throw into a reading, so this function is the RAW shape check.
+ */
+function readV1StateBody(
+  body: Record<string, unknown>,
   plan: CompiledPlan,
 ): OutcomeGraphState {
-  if (record.graphId !== plan.graphId) {
-    throw new OutcomeStateError(
-      "state-plan-mismatch",
-      "outcome-state: the persisted state belongs to graph " + JSON.stringify(record.graphId) +
-        ", but the plan in hand is the compiled plan of " + JSON.stringify(plan.graphId),
+  rejectUnknownBodyFields(body);
+  // The body carries the record's identity redundantly. A body that disagrees
+  // with the plan is refused rather than read and rewritten with the plan's
+  // value — silently correcting a field is the same class of loss as dropping
+  // one.
+  if (body.graphId !== plan.graphId) {
+    throw malformedState(
+      "the body names graph " + describeValue(body.graphId) + ", but the record and the plan " +
+        "name " + JSON.stringify(plan.graphId),
     );
   }
-  if (record.planRevision !== plan.planRevision) {
-    throw new OutcomeStateError(
-      "state-plan-mismatch",
-      "outcome-state: the persisted state is bound to plan revision " +
-        JSON.stringify(record.planRevision) + ", but the plan in hand is revision " +
-        JSON.stringify(plan.planRevision) +
-        " — a state is never read as the state of another revision",
+  if (body.planRevision !== plan.planRevision) {
+    throw malformedState(
+      "the body names plan revision " + describeValue(body.planRevision) +
+        ", but the record and the plan name " + JSON.stringify(plan.planRevision),
     );
   }
-  if (!isRecord(record.body)) {
-    throw malformedState("the body is " + describeValue(record.body) + ", not a state record");
-  }
-  const body = record.body;
   const phase = body.phase;
   if (phase !== "ready" && phase !== "executing" && phase !== "complete") {
     throw malformedState(
@@ -356,6 +635,7 @@ export function readOutcomeGraphState(
   }
   const nodes = plan.nodes.map((node, index) => readNodeState(rawNodes[index], node, index));
   return Object.freeze({
+    bodyVersion: OUTCOME_STATE_BODY_V1,
     graphId: plan.graphId,
     planRevision: plan.planRevision,
     phase,
@@ -363,6 +643,99 @@ export function readOutcomeGraphState(
     loopTraversals: readLoopTraversals(body.loopTraversals, plan),
     attemptSeq,
   });
+}
+
+/**
+ * The version-1 read capability: one exact version and one TOTAL reader.
+ *
+ * The shape check raises its own {@link OutcomeStateError}; this wrapper turns
+ * that refusal into the reading the registry contract promises, so a body the
+ * reader rejects is reported as data. Anything that is not an
+ * OutcomeStateError is a programming error and still propagates.
+ */
+const OUTCOME_STATE_BODY_V1_READER: OutcomeStateBodyReader = Object.freeze({
+  format: OUTCOME_STATE_BODY_V1,
+  read(
+    body: Record<string, unknown>,
+    plan: CompiledPlan,
+  ): OutcomeStateBodyReading {
+    try {
+      return { kind: "ok", state: readV1StateBody(body, plan) };
+    } catch (error) {
+      if (error instanceof OutcomeStateError) {
+        return { kind: "invalid", error };
+      }
+      throw error;
+    }
+  },
+});
+
+/** The state-body capabilities this build installs: exactly version 1 today. */
+export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
+  createOutcomeStateBodyRegistry({
+    current: CURRENT_OUTCOME_STATE_BODY,
+    formats: [OUTCOME_STATE_BODY_V1_READER],
+  });
+
+/**
+ * Read one persisted record as this plan's state.
+ *
+ * STRICT, VERSIONED and TOTAL. The identity fields must agree with the plan in
+ * hand; the body must declare a state-body version this build has a registered
+ * reader for; and the body must be exactly the shape that version defines —
+ * every field the value its writer would have written, at the body and the node
+ * level, with no field the version does not define. Anything else throws an
+ * {@link OutcomeStateError}: a version this build cannot read is refused with
+ * `unsupported-state-version` rather than trimmed (the fields it does not know
+ * would be lost on the next write), and a state this build cannot read is never
+ * guessed at and never silently replaced.
+ */
+export function readOutcomeGraphState(
+  record: GraphStateRecord,
+  plan: CompiledPlan,
+  registry: OutcomeStateBodyRegistry = DEFAULT_OUTCOME_STATE_BODY_REGISTRY,
+): OutcomeGraphState {
+  if (record.graphId !== plan.graphId) {
+    throw new OutcomeStateError(
+      "state-plan-mismatch",
+      "outcome-state: the persisted state belongs to graph " + JSON.stringify(record.graphId) +
+        ", but the plan in hand is the compiled plan of " + JSON.stringify(plan.graphId),
+    );
+  }
+  if (record.planRevision !== plan.planRevision) {
+    throw new OutcomeStateError(
+      "state-plan-mismatch",
+      "outcome-state: the persisted state is bound to plan revision " +
+        JSON.stringify(record.planRevision) + ", but the plan in hand is revision " +
+        JSON.stringify(plan.planRevision) +
+        " — a state is never read as the state of another revision",
+    );
+  }
+  if (!isRecord(record.body)) {
+    throw malformedState("the body is " + describeValue(record.body) + ", not a state record");
+  }
+  const body = record.body;
+  const verdict = classifyOutcomeStateBody(body.bodyVersion, registry);
+  if (verdict.kind === "invalid") {
+    throw malformedState(
+      "bodyVersion is " + describeValue(verdict.value) +
+        ", not a state-body version — a persisted state body declares the layout it was " +
+        "written in, and this build writes body version " + registry.current,
+    );
+  }
+  if (verdict.kind === "unsupported") {
+    throw new OutcomeStateError(
+      "unsupported-state-version",
+      "outcome-state: the persisted graph state declares body version " + verdict.version +
+        ", but this build has no reader for it (it reads body version " +
+        registry.formats.map((format) => format.format).join(", ") +
+        ") — the state is refused instead of being read partially and rewritten, so nothing " +
+        "was resumed and no field was dropped",
+    );
+  }
+  const reading = verdict.reader.read(body, plan);
+  if (reading.kind === "invalid") throw reading.error;
+  return reading.state;
 }
 
 /** Project one state into the durable record, timestamped by the caller. */
@@ -690,6 +1063,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       : "ready";
   return Object.freeze({
     state: Object.freeze({
+      bodyVersion: state.bodyVersion,
       graphId: state.graphId,
       planRevision: state.planRevision,
       phase,

@@ -43,7 +43,9 @@ import {
   SqliteAcceptanceLedger,
 } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { proposalDigest } from "../../src/graph/outcome/proposal.ts";
+import { CURRENT_OUTCOME_STATE_BODY } from "../../src/graph/outcome/graph-state.ts";
 import { readPersistedOutcomePlan } from "../../src/graph/outcome/recovery.ts";
+import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 
@@ -388,6 +390,168 @@ describe("outcome-protocol restart recovery", () => {
       expect(receipt?.submissionId).toBe(submissionId);
     } finally {
       ledger.close();
+    }
+  });
+});
+
+// ── A state body this build cannot read blocks recovery ────────────────────
+
+describe("outcome state body — a shape this build cannot read blocks recovery", () => {
+  function storedRecord(
+    ledger: SqliteAcceptanceLedger,
+    graphId: string,
+  ): GraphStateRecord {
+    const record = ledger.readGraphState(graphId);
+    if (record === undefined) throw new Error("fixture: the state row is missing");
+    return record;
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function bodyOf(record: GraphStateRecord): Record<string, unknown> {
+    if (!isRecord(record.body)) {
+      throw new Error("fixture: the state body is not a record");
+    }
+    return record.body;
+  }
+
+  /**
+   * Declare LINEAR, run its first execution through the sweep, and hand back
+   * the state row that first execution left for a later process to read.
+   */
+  async function startLinear(prefix: string): Promise<{
+    readonly dir: string;
+    readonly graphId: string;
+    readonly started: GraphStateRecord;
+  }> {
+    const dir = makeTmpDir(prefix);
+    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    const graphId = declared.graph_id;
+    await sweep(dir, []);
+    const ledger = await openLedger(dir);
+    try {
+      const started = storedRecord(ledger, graphId);
+      expect(bodyOf(started).bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+      return { dir, graphId, started };
+    } finally {
+      ledger.close();
+    }
+  }
+
+  it("resumes a same-version body another process wrote, unmoved", async () => {
+    const { dir, graphId, started } = await startLinear("outcome-recovery-body-ok-");
+    const requests: OutcomeDispatchRequest[] = [];
+    const report = await sweep(dir, requests);
+
+    expect(report.outcomeProtocol?.started).toEqual([]);
+    expect(report.outcomeProtocol?.resumed).toHaveLength(1);
+    expect(report.outcomeProtocol?.refused).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(requests).toEqual([]);
+
+    const after = await openLedger(dir);
+    try {
+      // The same-version round trip loses nothing: the recovery read and write
+      // nothing, and the state row still carries every field it carried.
+      expect(storedRecord(after, graphId)).toEqual(started);
+    } finally {
+      after.close();
+    }
+  });
+
+  it("refuses an unknown body field, leaves it byte-identical and never starts fresh", async () => {
+    const { dir, graphId, started } = await startLinear(
+      "outcome-recovery-body-field-",
+    );
+
+    // PROCESS A: another build writes the same body plus a field this build
+    // does not know.
+    const writer = await openLedger(dir);
+    let extended: GraphStateRecord;
+    try {
+      extended = {
+        ...started,
+        body: {
+          ...bodyOf(started),
+          progressBaselines: { work: { digest: "abc", round: 2 } },
+        },
+        updatedAt: NOW + 1,
+      };
+      writer.writeGraphState(extended);
+    } finally {
+      writer.close();
+    }
+
+    // PROCESS B: the sweep refuses instead of reading it partially.
+    const requests: OutcomeDispatchRequest[] = [];
+    const report = await sweep(dir, requests);
+    expect(report.outcomeProtocol?.refused).toHaveLength(1);
+    expect(report.outcomeProtocol?.refused[0]).toContain("[unreadable-state]");
+    expect(report.outcomeProtocol?.refused[0]).toContain("progressBaselines");
+    expect(report.outcomeProtocol?.started).toEqual([]);
+    expect(report.outcomeProtocol?.resumed).toEqual([]);
+    expect(report.outcomeProtocol?.dispatched).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(report.recovered).toBe(0);
+    expect(requests).toEqual([]);
+
+    // NOT trimmed and NOT rewritten: every field the refusing process was
+    // handed is still in the row.
+    const after = await openLedger(dir);
+    try {
+      expect(storedRecord(after, graphId)).toEqual(extended);
+      expect("progressBaselines" in bodyOf(storedRecord(after, graphId))).toBe(true);
+    } finally {
+      after.close();
+    }
+  });
+
+  it("refuses a newer body version by name and never starts from scratch", async () => {
+    const { dir, graphId, started } = await startLinear(
+      "outcome-recovery-body-version-",
+    );
+
+    const future = CURRENT_OUTCOME_STATE_BODY + 1;
+    const writer = await openLedger(dir);
+    let written: GraphStateRecord;
+    try {
+      written = {
+        ...started,
+        body: { ...bodyOf(started), bodyVersion: future },
+        updatedAt: NOW + 1,
+      };
+      writer.writeGraphState(written);
+    } finally {
+      writer.close();
+    }
+
+    const statePath = engineStatePath(dir, graphId);
+    const before = readFileSync(statePath, "utf-8");
+    const requests: OutcomeDispatchRequest[] = [];
+    const report = await sweep(dir, requests);
+
+    expect(report.outcomeProtocol?.refused).toHaveLength(1);
+    expect(report.outcomeProtocol?.refused[0]).toContain(
+      "[unsupported-state-version]",
+    );
+    expect(report.outcomeProtocol?.refused[0]).toContain(String(future));
+    expect(report.outcomeProtocol?.started).toEqual([]);
+    expect(report.outcomeProtocol?.resumed).toEqual([]);
+    expect(report.outcomeProtocol?.dispatched).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(requests).toEqual([]);
+
+    // The declared record is untouched and the state body is NOT downgraded.
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    const after = await openLedger(dir);
+    try {
+      expect(storedRecord(after, graphId)).toEqual(written);
+      expect(bodyOf(storedRecord(after, graphId)).bodyVersion).toBe(future);
+    } finally {
+      after.close();
     }
   });
 });
