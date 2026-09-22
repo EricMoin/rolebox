@@ -1192,12 +1192,13 @@ arrival of a branch that is being re-armed in the same breath, and round N+1's
 join cannot be satisfied by round N's evidence.
 
 BODY VERSION 3 ADDS THE FIELD, AND VERSIONS 1 AND 2 STAY READABLE. `arrivals`
-is required on every node entry of body version 3 — the layout this build writes
-— and forbidden on versions 1 and 2, whose readers refuse it rather than
-dropping it (a version-2 body carrying an `arrivals` list is
-`malformed-state`). Neither older version can be advanced: version 1 records no
-credential and version 2 no arrivals, and the reducer refuses them with
-`unsupported-state-version` instead of guessing which feeders had arrived. As
+is required on every node entry from body version 3 onward — the current layout
+is version 5 — and forbidden on versions 1 and 2, whose readers refuse it
+rather than dropping it (a version-2 body carrying an `arrivals` list is
+`malformed-state`). No older version can be advanced: version 1 records no
+credential, version 2 no arrivals, and a body below the current version is
+refused with `unsupported-state-version` rather than rewritten in a newer
+layout. As
 with the credential, there is no migrator: an arrival is a fact about an attempt
 that already settled.
 
