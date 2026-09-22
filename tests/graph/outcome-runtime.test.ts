@@ -346,6 +346,85 @@ function loopJoinDeclaration(maxTraversals: number): GraphDeclarationV3 {
   };
 }
 
+/**
+ * A loop whose convergence nodes depend on EACH OTHER: c1's quorum needs two of
+ * {z, e, c3}, c2's join needs e and c1, and c3's needs e and c2 — so c1 depends
+ * on c3, c3 on c2 and c2 on c1, a cycle of candidates. `z` is the outside
+ * satisfier that lets the cycle bootstrap (c1 is armed by e + z) and `w`
+ * withdraws it again, so a later `e` advance finds all three settled with every
+ * one of them depending on another member being re-armed in the same breath.
+ */
+function joinCycleDeclaration(): GraphDeclarationV3 {
+  return {
+    version: 3,
+    name: "graph.join-cycle",
+    nodes: [
+      { id: "a0", agent: "agent.a0", prompt: "Seed.", outcomes: [{ id: "clear" }] },
+      { id: "u", agent: "agent.u", prompt: "Reset.", outcomes: [{ id: "reset" }] },
+      { id: "v", agent: "agent.v", prompt: "Boot.", outcomes: [{ id: "boot" }] },
+      { id: "w", agent: "agent.w", prompt: "Second seed.", outcomes: [{ id: "clear" }] },
+      {
+        id: "z",
+        agent: "agent.z",
+        prompt: "Relay.",
+        outcomes: [{ id: "seed" }],
+        join: { strategy: "any" },
+      },
+      {
+        id: "e",
+        agent: "agent.e",
+        prompt: "Split.",
+        outcomes: [{ id: "go" }],
+        join: { strategy: "any" },
+      },
+      {
+        id: "c1",
+        agent: "agent.c1",
+        prompt: "C1.",
+        outcomes: [{ id: "done" }],
+        join: { strategy: "quorum", quorum: 2 },
+      },
+      {
+        id: "c2",
+        agent: "agent.c2",
+        prompt: "C2.",
+        outcomes: [{ id: "done" }],
+        join: { strategy: "all" },
+      },
+      {
+        id: "c3",
+        agent: "agent.c3",
+        prompt: "C3.",
+        outcomes: [{ id: "done" }, { id: "again" }, { id: "exit" }],
+        join: { strategy: "all" },
+      },
+    ],
+    edges: [
+      { from: "a0", to: "z", outcome: "clear" },
+      { from: "w", to: "z", outcome: "clear" },
+      { from: "z", to: "c1", outcome: "seed" },
+      { from: "u", to: "e", outcome: "reset" },
+      { from: "v", to: "e", outcome: "boot" },
+      { from: "e", to: "c1", outcome: "go" },
+      { from: "e", to: "c2", outcome: "go" },
+      { from: "e", to: "c3", outcome: "go" },
+      { from: "c1", to: "c2", outcome: "done" },
+      { from: "c2", to: "c3", outcome: "done" },
+      { from: "c3", to: "c1", outcome: "done" },
+      { from: "c3", to: "e", outcome: "again" },
+    ],
+    loop_groups: [
+      {
+        id: "rounds",
+        nodes: ["a0", "u", "v", "w", "z", "e", "c1", "c2", "c3"],
+        max_traversals: 20,
+        continuation_outcome: "again",
+        exit_outcome: "exit",
+      },
+    ],
+  };
+}
+
 /** work's only outcome is gated by a validator the tests implement. */
 const GATED: GraphDeclarationV3 = {
   version: 3,
@@ -2371,6 +2450,70 @@ describe("OutcomeGraphRuntime — a loop join is decided per round", () => {
       ]);
       console.log(
         "[probe:loop-join] dispatches=" +
+          JSON.stringify(attemptIds(requests)) +
+          " state=" +
+          stateSummary(runtime.state()),
+      );
+    });
+  });
+});
+
+describe("OutcomeGraphRuntime — a cyclic candidate dependency does not arm itself", () => {
+  it("waits when every candidate's arrival would be superseded by another candidate", async () => {
+    await withHarness(joinCycleDeclaration(), async ({ runtime, requests, credentialOf }) => {
+      runtime.start(NOW);
+      const accept = (nodeId: string, outcomeId: string, attemptId: string, at: number) => {
+        const result = runtime.submit(
+          { nodeId, outcomeId, credential: credentialOf(attemptId) },
+          at,
+        );
+        expect(result.kind).toBe("accepted");
+        if (result.kind !== "accepted") throw new Error("fixture: " + attemptId + " was refused");
+        return result;
+      };
+
+      // ROUND 1 — the outside satisfier z bootstraps c1 (e + z meets the
+      // quorum); c2 and c3 then follow one at a time in dependency order.
+      accept("a0", "clear", "a0#1", NOW + 1);
+      expect(accept("z", "seed", "z#5", NOW + 2).dispatched).toEqual([]);
+      accept("v", "boot", "v#3", NOW + 3);
+      expect(attemptIds(accept("e", "go", "e#6", NOW + 4).dispatched)).toEqual(["c1#7"]);
+      expect(attemptIds(accept("c1", "done", "c1#7", NOW + 5).dispatched)).toEqual(["c2#8"]);
+      expect(attemptIds(accept("c2", "done", "c2#8", NOW + 6).dispatched)).toEqual(["c3#9"]);
+
+      // The satisfier is withdrawn and the splitter re-armed, so every settled
+      // candidate now depends on ANOTHER candidate still being settled.
+      accept("u", "reset", "u#2", NOW + 7);
+      accept("w", "clear", "w#4", NOW + 8);
+      expect(accept("c3", "done", "c3#9", NOW + 9).dispatched).toEqual([]);
+
+      // THE DEFECT: this advance used to mint c1#12, c2#13 and c3#14 together
+      // (an odd number of candidates; an even one armed none), each on a
+      // member's attempt that the same advance supersedes — the cross-round
+      // mixing the join gate exists to prevent.
+      const critical = accept("e", "go", "e#10", NOW + 10);
+      expect(critical.dispatched).toEqual([]);
+      for (const [nodeId, attemptId] of [
+        ["c1", "c1#7"],
+        ["c2", "c2#8"],
+        ["c3", "c3#9"],
+      ] as const) {
+        // Waiting is not an arm and not a failure: each candidate keeps the
+        // attempt it settled on, and its arrival record is the evidence.
+        expect(nodeOf(critical.state, nodeId)).toMatchObject({
+          status: "settled",
+          attemptId,
+        });
+      }
+
+      // Waiting is also not a stall: an arrival that is NOT superseded arms the
+      // cycle one member at a time, in dependency order.
+      expect(attemptIds(accept("z", "seed", "z#11", NOW + 11).dispatched)).toEqual(["c1#12"]);
+      expect(attemptIds(accept("c1", "done", "c1#12", NOW + 12).dispatched)).toEqual(["c2#13"]);
+      expect(attemptIds(accept("c2", "done", "c2#13", NOW + 13).dispatched)).toEqual(["c3#14"]);
+
+      console.log(
+        "[probe:join-cycle] dispatches=" +
           JSON.stringify(attemptIds(requests)) +
           " state=" +
           stateSummary(runtime.state()),

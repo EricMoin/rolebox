@@ -1179,9 +1179,17 @@ counting the moment its new attempt starts. The arm set for one advance is
 computed as a whole: a candidate this advance arms is treated as already in
 flight and is therefore not evidence for another candidate armed beside it, and
 the self-consistent set is found by a monotone fixpoint that does not depend on
-the order candidates are examined in. A loop's convergence node therefore cannot
-be armed on the previous round's arrival of a branch that is being re-armed in
-the same breath, and round N+1's join cannot be satisfied by round N's evidence.
+the order candidates are examined in. The removal is MONOTONE: a candidate that
+fails while the candidates still standing are suppressed is never reconsidered,
+because dropping it can only add arrivals for the rest, so the not-armed set
+grows to its fixpoint in at most one round per candidate and cannot stop on the
+parity of the candidate count. A dependency CYCLE among candidates therefore
+arms NONE of its members on that advance — each member's required arrival
+belongs to another member being re-armed beside it — and the cycle waits for an
+arrival that is not itself superseded, the same WAIT any unsatisfied join gets.
+A loop's convergence node therefore cannot be armed on the previous round's
+arrival of a branch that is being re-armed in the same breath, and round N+1's
+join cannot be satisfied by round N's evidence.
 
 BODY VERSION 3 ADDS THE FIELD, AND VERSIONS 1 AND 2 STAY READABLE. `arrivals`
 is required on every node entry of body version 3 — the layout this build writes
@@ -1200,9 +1208,12 @@ node is in flight leaves its attempt id unchanged (the reproduced overwrite); a
 restart decides the half-arrived join from the persisted arrivals and arms it
 once when the second feeder finally answers; and in a loop the two-branch join
 is re-armed once per round only after BOTH branches have answered in that round,
-so a single round-2 arrival cannot re-arm it. No existing assertion encoded the
-old overwrite; the reducer, reader and version tests were extended rather than
-rewritten.
+so a single round-2 arrival cannot re-arm it. A three-candidate dependency
+cycle arms nothing on the advance that would have re-armed all three together,
+keeps every member on the attempt it settled on, and then advances one member at
+a time once an arrival that is not itself superseded reaches it. No existing
+assertion encoded the old overwrite; the reducer, reader and version tests were
+extended rather than rewritten.
 
 D4 MAKES A HARD LIMIT END THE RUN IN A PERSISTED STOP, IN THE ACCEPTANCE
 TRANSACTION (defect 3).

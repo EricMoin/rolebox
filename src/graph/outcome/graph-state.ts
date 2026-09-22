@@ -2402,13 +2402,19 @@ function joinSatisfiedFor(
  * would be armed on the previous round's answer of a feeder that is being
  * re-armed right beside it.
  *
- * The arm set is therefore the greatest SELF-CONSISTENT set: a candidate is
- * armed exactly when its join is satisfied while every OTHER armed candidate is
- * treated as already in flight. It is computed by the monotone companion of that
- * equation — start from "nothing is armed", recompute the candidates that FAIL
- * with the current arm set suppressed, and repeat. The not-armed set only grows,
- * so it reaches its fixpoint in at most one step per candidate, and the result
- * does not depend on the order the candidates are examined in.
+ * The arm set is therefore SELF-CONSISTENT: a candidate is armed exactly when
+ * its join is satisfied while the whole armed set is treated as already in
+ * flight, so no armed candidate rests on an arrival the same advance supersedes.
+ * It is computed by REMOVING failures from the largest candidate set: every
+ * round marks the candidates that fail with the candidates still standing
+ * suppressed. Removing a candidate makes its settle state available to the
+ * candidates that remain, which can only ADD satisfaction, so the not-armed set
+ * only grows and the iteration reaches its fixpoint in at most one round per
+ * candidate. The result does not depend on the order the candidates are
+ * examined in. A dependency cycle among candidates therefore arms NONE of its
+ * members — each one's required arrival belongs to another member being re-armed
+ * beside it — and the cycle waits for an arrival that is not itself superseded,
+ * the same WAIT any unsatisfied join gets (see {@link joinSatisfiedFor}).
  */
 function resolveArmSet(
   plan: CompiledPlan,
@@ -2417,40 +2423,38 @@ function resolveArmSet(
 ): ReadonlySet<string> {
   const entries = new Map<string, OutcomeNodeState>();
   for (const entry of nodes) entries.set(entry.nodeId, entry);
-  let notArmed = new Set<string>();
+  // The not-armed set only GROWS: a candidate that fails while the current
+  // candidates are suppressed is never reconsidered, because dropping it can
+  // only add arrivals for the rest. Replacing the set instead of accumulating
+  // into it makes the iteration oscillate on a dependency cycle among
+  // candidates and stop on an arbitrary parity of the candidate count — arming
+  // members of the cycle on each other's superseded attempts.
+  const notArmed = new Set<string>();
   for (let round = 0; round <= armable.length; round += 1) {
     const suppressed = new Set<string>();
     for (const node of armable) {
       if (!notArmed.has(node.id)) suppressed.add(node.id);
     }
     const arrivals = materializeArrivals(plan, nodes, suppressed);
-    const next = new Set<string>();
+    let grew = false;
     for (const node of armable) {
+      if (notArmed.has(node.id)) continue;
       const entry = entries.get(node.id);
       const arrived = arrivals.get(node.id) ?? [];
       // A candidate the state does not carry cannot be armed; refusing to arm
       // it is the safe reading of an unreadable entry.
       if (entry === undefined || !joinSatisfiedFor(plan, node, arrived)) {
-        next.add(node.id);
+        notArmed.add(node.id);
+        grew = true;
       }
     }
-    if (sameIdSet(next, notArmed)) break;
-    notArmed = next;
+    if (!grew) break;
   }
   const armed = new Set<string>();
   for (const node of armable) {
     if (!notArmed.has(node.id)) armed.add(node.id);
   }
   return armed;
-}
-
-/** Whether two id sets hold exactly the same members. */
-function sameIdSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const id of a) {
-    if (!b.has(id)) return false;
-  }
-  return true;
 }
 
 /** Whether two arrival lists are field-for-field identical, in order. */
