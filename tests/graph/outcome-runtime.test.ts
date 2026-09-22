@@ -16,8 +16,9 @@
  * distinct submission for a settled attempt never being committed, a forced
  * mid-transaction failure leaving nothing, loop continuation and the durable STOP
  * its hard cap ends the run with (the outcome stays accepted, the refused round is
- * not taken, an in-flight branch is refused rather than settled, and the stop
- * fabricates no accepted event),
+ * not taken, an in-flight branch is refused rather than settled, the stop
+ * fabricates no accepted event, and a stop whose state write fails rolls the
+ * whole acceptance back with it),
  * the missing-handler refusal, and the legacy v2 run path still working through
  * the file store.
  *
@@ -56,7 +57,11 @@ import {
   type OutcomeGraphState,
 } from "../../src/graph/outcome/graph-state.ts";
 import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
-import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
+import type {
+  AcceptanceLedger,
+  AcceptanceLedgerTx,
+  GraphStateRecord,
+} from "../../src/graph/ledger/types.ts";
 import {
   createValidatorRegistry,
   type ValidationOutcome,
@@ -614,6 +619,58 @@ async function stripAcceptanceRows(dir: string): Promise<void> {
   }
 }
 
+/**
+ * The SAME ledger, with `writeGraphState` refused for the state bodies a
+ * predicate names. Every other call — including `runInTransaction`, whose
+ * callback receives this wrapper — is the real store's, so a caller's
+ * acceptance batch really writes its receipt, accepted event and effects before
+ * the refused state write throws and the real transaction rolls the whole batch
+ * back. This aims a storage failure at ONE state write (the stop) instead of
+ * failing every transaction.
+ */
+function ledgerRefusingStateWrites(
+  inner: SqliteAcceptanceLedger,
+  refuse: (record: GraphStateRecord) => boolean,
+): AcceptanceLedger {
+  const refuseWrite = (record: GraphStateRecord): void => {
+    if (refuse(record)) {
+      throw new Error("fixture: the graph-state write was refused (storage failure)");
+    }
+  };
+  const wrapTx = (tx: AcceptanceLedgerTx): AcceptanceLedgerTx => ({
+    commitAccepted: (batch) => tx.commitAccepted(batch),
+    readGraphState: (graphId) => tx.readGraphState(graphId),
+    writeGraphState: (record) => {
+      refuseWrite(record);
+      tx.writeGraphState(record);
+    },
+    lookupReceipt: (key) => tx.lookupReceipt(key),
+    acceptedEvents: (graphId) => tx.acceptedEvents(graphId),
+    pendingEffects: (graphId) => tx.pendingEffects(graphId),
+    markEffectStarted: (graphId, effectId) => tx.markEffectStarted(graphId, effectId),
+    markEffectDone: (graphId, effectId) => tx.markEffectDone(graphId, effectId),
+    markEffectFailed: (graphId, effectId) => tx.markEffectFailed(graphId, effectId),
+  });
+  return {
+    ledgerFormatVersion: inner.ledgerFormatVersion,
+    commitAccepted: (batch) => inner.commitAccepted(batch),
+    readGraphState: (graphId) => inner.readGraphState(graphId),
+    writeGraphState: (record) => {
+      refuseWrite(record);
+      inner.writeGraphState(record);
+    },
+    lookupReceipt: (key) => inner.lookupReceipt(key),
+    acceptedEvents: (graphId) => inner.acceptedEvents(graphId),
+    pendingEffects: (graphId) => inner.pendingEffects(graphId),
+    markEffectStarted: (graphId, effectId) => inner.markEffectStarted(graphId, effectId),
+    markEffectDone: (graphId, effectId) => inner.markEffectDone(graphId, effectId),
+    markEffectFailed: (graphId, effectId) => inner.markEffectFailed(graphId, effectId),
+    runInTransaction: <R>(fn: (tx: AcceptanceLedgerTx) => R): R =>
+      inner.runInTransaction((tx) => fn(wrapTx(tx))),
+    close: () => inner.close(),
+  };
+}
+
 // ── The run path ────────────────────────────────────────────────────────────
 
 describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
@@ -1131,6 +1188,86 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       expect(reread?.phase).toBe("stopped");
       expect(before?.phase).toBe("executing");
     });
+  });
+
+  it("commits the stop and the acceptance in ONE transaction: a state write that fails takes both sides with it", async () => {
+    await withHarness(
+      loopDeclaration(1),
+      async ({ runtime, plan, ledger, graphId, dir, credentialOf }) => {
+        runtime.start(NOW);
+        runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf("work#1") },
+          NOW + 1,
+        );
+        runtime.submit(
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf("review#2") },
+          NOW + 2,
+        );
+        runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf("work#3") },
+          NOW + 3,
+        );
+        const before = runtime.state();
+        expect(before?.phase).toBe("executing");
+        const receiptsBefore = await countTable(dir, "ledger_receipts");
+        const eventsBefore = ledger.acceptedEvents(graphId).length;
+        const effectsBefore = ledger.pendingEffects(graphId).length;
+
+        // THE STOP'S CRASH WINDOW. The stopping submission goes through a ledger
+        // whose graph-state write is refused for the stop body. The acceptance
+        // batch — receipt, accepted event and effects — has ALREADY been written
+        // inside the same transaction when that write throws, so only one shared
+        // atomic boundary keeps the window from leaving "the continuation was
+        // refused but no stop was recorded", or a stop whose state never moved.
+        // `refusedWrites` proves the failure landed ON that write, after the
+        // batch: a batch that failed first would never reach it.
+        const refusedWrites: string[] = [];
+        const guarded = new OutcomeGraphRuntime({
+          plan,
+          ledger: ledgerRefusingStateWrites(ledger, (record) => {
+            const phase = fieldOf(record.body, "phase");
+            if (phase === "stopped") {
+              refusedWrites.push(String(phase));
+              return true;
+            }
+            return false;
+          }),
+          dispatch: () => {},
+          validators: EMPTY_VALIDATORS,
+          artifactRoot: dir,
+          clock: () => NOW,
+          mintCredential: TEST_CREDENTIAL_SOURCE,
+        });
+        expect(() =>
+          guarded.submit(
+            { nodeId: "review", outcomeId: "revise", credential: credentialOf("review#4") },
+            NOW + 4,
+          ),
+        ).toThrow("the graph-state write was refused");
+        expect(refusedWrites).toEqual(["stopped"]);
+
+        // Nothing from the refused transaction survives — no stop, no moved
+        // phase, no receipt, no accepted event, no effect. The store is exactly
+        // the state it held before the submission.
+        expect(runtime.state()).toEqual(before);
+        expect(runtime.state()?.stop).toBeUndefined();
+        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore);
+        expect(ledger.pendingEffects(graphId)).toHaveLength(effectsBefore);
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
+
+        // ...and the rollback left no poisoned replay key: the SAME submission
+        // over the real store commits both halves together.
+        const stopped = runtime.submit(
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf("review#4") },
+          NOW + 5,
+        );
+        expect(stopped.kind).toBe("accepted");
+        if (stopped.kind !== "accepted") return;
+        expect(stopped.state.phase).toBe("stopped");
+        expect(stopped.stop?.reason).toBe("loop-exhausted");
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
+      },
+    );
   });
 
   it("enforces the cap of a continuation whose node also belongs to an earlier-declared loop group", async () => {
