@@ -44,7 +44,7 @@
  * module; the run path that does is `src/graph/outcome/runtime.ts`.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 
 import { errorText } from "../../utils/error-text.ts";
@@ -248,7 +248,15 @@ export type LedgerFormatProblem =
    */
   | "incomplete-store"
   /** A row exists but violates the record model. */
-  | "malformed-row";
+  | "malformed-row"
+  /**
+   * The file is a SQLite store whose journal mode is WAL. A read-only SQLite
+   * open of a WAL database attaches to — and rewrites — its `-shm`
+   * shared-memory side file, so the drain audit refuses it BEFORE any
+   * connection exists instead of changing the store it is reading. The file and
+   * its side files are left exactly as they were found.
+   */
+  | "wal-journal-mode";
 
 /**
  * The ledger file was refused: it is not a store this build may open.
@@ -800,6 +808,44 @@ function closeQuietly(db: DatabaseDriver): void {
   }
 }
 
+/** SQLite's own file magic, the first 16 bytes of every database file. */
+const SQLITE_MAGIC = "SQLite format 3\u0000";
+
+/**
+ * Is this file a SQLite database in WAL journal mode? Decided from the FILE
+ * HEADER, before any connection exists.
+ *
+ * The header's bytes 18/19 are the "file format read version" and "write
+ * version": 2 for a WAL database, 1 for a rollback-journal one, and the mode is
+ * durable in the file. Reading 20 bytes cannot touch a side file, which is
+ * exactly the point: opening a WAL database through SQLite — even read-only —
+ * attaches to its `-shm` shared-memory file and rewrites it.
+ *
+ * A file that cannot be read, or does not carry the magic, is NOT this check's
+ * problem: the open and the format gate report it with their own vocabulary.
+ */
+function isWalStore(filePath: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch {
+    return false;
+  }
+  try {
+    const header = Buffer.alloc(20);
+    const read = readSync(fd, header, 0, 20, 0);
+    return (
+      read === 20 &&
+      header.subarray(0, 16).toString("latin1") === SQLITE_MAGIC &&
+      (header[18] === 2 || header[19] === 2)
+    );
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** The user tables a SQLite file holds, sorted; a foreign file fails here. */
 function inspectTables(db: DatabaseDriver, filePath: string): string[] {
   let rows: unknown[];
@@ -1170,10 +1216,30 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
    * file left exactly as it was found. TOTAL: a throwing open or an unexpected
    * failure is `unreadable` rather than an exception, because the audit must
    * report such a store as a blocker instead of crashing on it.
+   *
+   * A WAL-MODE STORE IS REFUSED BEFORE ANY CONNECTION EXISTS. A read-only
+   * SQLite open of a WAL database still attaches to — and rewrites — its
+   * `-shm` shared-memory side file, so reading one would change the store this
+   * open promises not to touch. {@link isWalStore} decides the journal mode
+   * from the file header, which is a plain read; the store and its side files
+   * are left exactly as found, and the refusal is the named problem
+   * `wal-journal-mode`.
    */
   static async openReadOnly(directory: string): Promise<LedgerReadOpenResult> {
     const filePath = ledgerFilePath(directory);
     if (!existsSync(filePath)) return { kind: "absent", filePath };
+
+    if (isWalStore(filePath)) {
+      return {
+        kind: "refused",
+        filePath,
+        problem: "wal-journal-mode",
+        message:
+          `acceptance-ledger: ${filePath} is a WAL-mode SQLite store; a ` +
+          "read-only open would attach to and rewrite its -shm side file, so " +
+          "this build refuses to read it rather than change the store it reads",
+      };
+    }
 
     let db: DatabaseDriver;
     try {

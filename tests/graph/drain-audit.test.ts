@@ -492,6 +492,39 @@ describe("drain audit — classification", () => {
     expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
   });
 
+  it("reads a workspace with no store at all as drained and creates nothing", async () => {
+    const dir = makeTmpDir("drain-audit-store-absent-");
+    // Nothing is created here: no `.rolebox`, no state directory, no ledger.
+    const stateDir = engineStateDir(dir);
+    expect(existsSync(stateDir)).toBe(false);
+
+    const report = await auditGraphStore({ directory: dir });
+
+    // A missing store is an EMPTY report, not an unreadable one: there is no
+    // graph to drain and nothing to block on. The directory is still named, so
+    // a caller can see WHICH store was read.
+    expect(report.stateDirectory).toBe(stateDir);
+    expect(report.ledger).toBe("absent");
+    expect(report.entries).toEqual([]);
+    expect(report.blockers).toEqual([]);
+    expect(report.totals).toMatchObject({
+      files: 0,
+      terminal: 0,
+      inFlight: 0,
+      blocked: 0,
+      legacyInFlight: 0,
+      outcomeInFlight: 0,
+      unsettledEffects: 0,
+    });
+    expect(report.verdict).toBe("drained");
+    expect(report.drained).toBe(true);
+
+    // Reading is never initializing: neither the state directory nor the
+    // ledger file exists after the audit.
+    expect(existsSync(stateDir)).toBe(false);
+    expect(existsSync(ledgerFilePath(stateDir))).toBe(false);
+  });
+
   it("does not call a store drained while a TERMINAL graph still holds an unsettled effect", async () => {
     const dir = makeTmpDir("drain-audit-effect-");
     const fixture = await startOutcomeGraph(dir, "audit.outcome.complete");
@@ -521,6 +554,49 @@ describe("drain audit — the acceptance ledger", () => {
 
     expect(result.kind).toBe("absent");
     expect(existsSync(ledgerFilePath(engineStateDir(dir)))).toBe(false);
+  });
+
+  it("refuses a WAL-mode ledger before opening it, and touches neither it nor its side files", async () => {
+    const dir = makeTmpDir("drain-audit-ledger-wal-");
+    const fixture = await startOutcomeGraph(dir, "audit.outcome.running");
+    fixture.ledger.close();
+    const ledgerPath = ledgerFilePath(engineStateDir(dir));
+
+    // Switch the VALID store to WAL and leave the writer connected with its
+    // shared-memory index attached: this is the shape a read-only SQLite open
+    // cannot read without attaching to (and rewriting) the -shm side file.
+    const db = await createDatabase(ledgerPath);
+    try {
+      db.run("PRAGMA journal_mode = WAL");
+      db.query("SELECT count(*) AS n FROM ledger_meta").get();
+      // Not vacuous: the WAL store really carries its side files.
+      expect(existsSync(ledgerPath + "-shm")).toBe(true);
+      expect(existsSync(ledgerPath + "-wal")).toBe(true);
+      const before = fingerprintTree(dir);
+
+      // The open refuses it BY NAME, without a connection of its own.
+      const opened = await SqliteAcceptanceLedger.openReadOnly(engineStateDir(dir));
+      expect(opened.kind).toBe("refused");
+      if (opened.kind !== "refused") throw new Error("expected a WAL refusal");
+      expect(opened.problem).toBe("wal-journal-mode");
+
+      // The audit inherits that as a blocker for the graph whose state lives
+      // in it.
+      const report = await auditGraphStore({ directory: dir });
+      expect(report.ledger).toBe("refused");
+      const entry = entryOf(report, "engine-audit.outcome.running.json");
+      expect(entry.classification).toBe("blocked");
+      expect(entry.blockerCodes).toEqual(["ledger-refused"]);
+      expect(report.verdict).toBe("blocked");
+
+      // Zero writes, side files included: the refusal happened before any
+      // connection could attach to the shared-memory file.
+      const after = fingerprintTree(dir);
+      expect(Object.keys(after)).toEqual(Object.keys(before));
+      expect(after).toEqual(before);
+    } finally {
+      db.close();
+    }
   });
 
   it("reports a declared outcome graph with no ledger store as in flight, never as a blocker", async () => {

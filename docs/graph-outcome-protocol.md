@@ -1652,7 +1652,12 @@ READING IS STRUCTURALLY READ-ONLY. The audit opens the acceptance ledger
 through `SqliteAcceptanceLedger.openReadOnly` — an open that does not create
 the directory or the file, never initializes a schema, and holds a connection
 whose writes SQLite itself refuses (`createDatabase` gained the read-only open
-option for it). A store that does not exist answers `absent`, which is a
+option for it). A WAL-mode store is refused before a connection exists
+(`wal-journal-mode` → a `ledger-refused` blocker): SQLite cannot read a WAL
+database without attaching to — and rewriting — its `-shm` side file, so
+reading it would change the store being read. The shipped writer is never WAL
+(delete journal), so that refusal only answers a store this build did not
+write. A store that does not exist answers `absent`, which is a
 reading and never a licence to initialize one; for a protocol-2 record that
 absent store is reported as an in-flight first execution (`hasState: false`),
 not as a blocker, because the run path — never the audit — creates it and

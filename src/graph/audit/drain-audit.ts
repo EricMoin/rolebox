@@ -28,7 +28,11 @@
  * protocol's run state is read through `SqliteAcceptanceLedger.openReadOnly`
  * — an open that does not create the directory, does not create the file, never
  * initializes a schema, and holds a connection on which SQLite itself refuses
- * every write. A store that does not exist is `absent`, which is a reading and
+ * every write. A store the open cannot read without changing — a WAL-mode
+ * ledger, whose read-only open would rewrite its `-shm` side file — is refused
+ * before any connection exists and reported as a `ledger-refused` blocker, so
+ * the no-write promise holds for every store, not only the ones this build
+ * writes. A store that does not exist is `absent`, which is a reading and
  * never a licence to initialize one — and for a protocol-2 record it is not a
  * blocker either: nothing was ever committed, so the graph's first execution is
  * still owed and the run path (not the audit) is what creates the store.
