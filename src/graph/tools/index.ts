@@ -12,7 +12,9 @@
  * C1 adds `graph_declare`, the v3 authoring ingress, and C3c adds
  * `graph_submit_outcome`, the outcome-protocol submission ingress: both are
  * ADDITIVE (a new key in the `graph_*` namespace, nothing repurposed) and every
- * existing tool keeps its exact schema.
+ * existing tool keeps its exact schema. The E-stage entry `graph_audit` (the
+ * read-only drain/migration inventory) is additive in exactly the same way: it
+ * reads the store and writes nothing.
  *
  * The arg schemas mirror `.rolebox/design/tool-merge-map.md` §2.2, adapted to
  * the real TypeScript arg shapes exported by `graph-tools.ts` (which are
@@ -215,6 +217,7 @@ export function createGraphTools(
     graph_add_loop: createGraphAddLoopTool(toolset, opts.getEffectiveAgent),
     graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
     graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
+    graph_audit: createGraphAuditTool(toolset),
     graph_run: createGraphRunTool(toolset, opts.getEffectiveAgent),
     graph_status: createGraphStatusTool(toolset),
     graph_cancel: createGraphCancelTool(toolset),
@@ -621,6 +624,44 @@ function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
     },
   });
 }
+
+/**
+ * graph_audit — the READ-ONLY drain / migration inventory (E stage entry).
+ *
+ * The tool takes no arguments and returns the structured
+ * {@link DrainAuditReport} as JSON: every persisted graph with its
+ * `executionProtocolVersion`, whether it is terminal or still in flight, the
+ * work it still owes (unsettled nodes and ledger effects), and — as explicit
+ * BLOCKERS — every record that cannot be read or whose version is unknown. The
+ * audit opens the acceptance ledger read-only, never creates a store, and
+ * writes nothing; a store with no non-terminal graph but one unreadable record
+ * is reported `blocked`, not `drained`.
+ */
+function createGraphAuditTool(toolset: GraphToolSet): CanonicalToolDef {
+  return defineTool({
+    description:
+      "Read-only drain/migration audit of the persisted graph store. Reports every " +
+      "graph with its executionProtocolVersion, whether it is TERMINAL (quiescent) or " +
+      "still IN FLIGHT, the work it still owes (nodes in flight, effects still " +
+      "pending/started), and — as explicit BLOCKERS — every record that cannot be read " +
+      "or whose version is unknown, plus any accepted-but-unsettled effect. The verdict " +
+      "is 'drained' ONLY when there is no blocker AND nothing in flight: a store with " +
+      "zero non-terminal graphs but one unreadable record is 'blocked', and one " +
+      "unsettled effect is 'in-flight'. Strictly read-only: no graph, state, ledger or " +
+      "file is written, and the acceptance ledger is opened read-only (never created or " +
+      "initialized). Use it as the evidence for retiring the legacy execution path " +
+      "(phase E).",
+    args: {},
+    async execute() {
+      try {
+        return json(await toolset.graph_audit());
+      } catch (err) {
+        return `graph_audit failed: ${errorText(err)}`;
+      }
+    },
+  });
+}
+
 /** graph_run — execute (or dry-run validate) a constructed graph. */
 function createGraphRunTool(
   toolset: GraphToolSet,

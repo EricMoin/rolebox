@@ -1586,6 +1586,62 @@ dispatch seam, storage format 3 with its `2 -> 3` migrator, the
 `src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
 typed-predicate vocabulary, and any `src/dispatch/**` change.
 
+E0 DELIVERS THE READ-ONLY DRAIN AUDIT — THE PHASE-E ENTRY POINT, AND NOTHING
+ELSE. Stage E is "drain or explicitly migrate legacy executions, then retire
+legacy execution support", and its first requirement is evidence: which
+persisted graphs are terminal, which still owe work, and which cannot be read
+at all. `src/graph/audit/drain-audit.ts` (`auditGraphStore`) produces it over
+the same `engine-*.json` set the startup sweep scans, and the additive
+`graph_audit` tool exposes it with no arguments (it reads the configured
+`stateDir`, default cwd — the same store root the persisted `graph_status`
+scan reads). The audit dispatches nothing, recovers nothing, migrates nothing
+and compiles nothing.
+
+THE VERDICT IS NOT A COUNT. Every entry is classified three ways: `terminal`
+(readable AND quiescent — legacy phase `complete`; outcome phase `complete`
+or `stopped`, with the exact phase and the stop reported so "cut short" is
+never read as "finished"); `in-flight` (readable and still owed work — a
+non-`complete` legacy phase, an outcome phase `ready`/`executing`, or a
+declared outcome graph with NO ledger state row yet, whose first execution is
+still owed); or `blocked`. A readable entry names the WORK, not just the
+phase: a legacy entry carries its per-status node counts and the ids of the
+nodes the engine has not settled, an outcome entry carries every node the
+persisted state records in flight (with its attempt, never its credential) and
+every effect still `pending` or `started`. `drained` requires ALL THREE of:
+no blocker, no in-flight entry, and no unsettled effect — a store whose only
+graph is terminal but whose ledger still holds an unsettled effect is
+`in-flight`, not `drained`, so "nothing looked non-terminal" is never the
+completion signal.
+
+UNREADABLE AND VERSION-UNKNOWN RECORDS ARE BLOCKERS, LISTED INDIVIDUALLY. A
+corrupt record, an unknown storage format, an unknown execution protocol, an
+acceptance ledger this build must refuse, an outcome state body whose declared
+version has no reader, a plan identity that is absent or self-contradicting
+(the same three rules recovery applies), and a ledger row the store's own row
+gate refuses each become their own blocker with a stable code, its axis, and
+file/graph attribution — never a skipped file and never a count. A
+`migration-required` snapshot is intact but not executable, so it blocks the
+drain until its registered conversion commits. A VALID record under a
+registered protocol this audit has no terminality rule for is also a blocker:
+an unknown protocol's phase vocabulary is not guessable from outside it.
+
+READING IS STRUCTURALLY READ-ONLY. The audit opens the acceptance ledger
+through `SqliteAcceptanceLedger.openReadOnly` — an open that does not create
+the directory or the file, never initializes a schema, and holds a connection
+whose writes SQLite itself refuses (`createDatabase` gained the read-only open
+option for it). A store that does not exist answers `absent`, which is a
+reading and never a licence to initialize one. The regression test snapshots
+every file under the audited workspace (SHA-256, size, mtime) before and after
+a full audit over a mixed legacy/outcome store INCLUDING the SQLite ledger and
+fails on any new, changed or touched file.
+
+DEFERRED by this slice, and not implied by it: every MIGRATION (a
+`migration-required` record is reported, never converted), storage format 3
+with its `2 -> 3` migrator, the `src/graph/persistence/load.ts` module move,
+draining or converting any graph, retiring any legacy execution path, effect
+EXECUTION beyond the dispatch seam (an unsettled effect is reported, never
+retried or settled by the audit), and any `src/dispatch/**` change.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |

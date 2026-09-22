@@ -3,8 +3,11 @@
  *
  * Phase 4, Subtask 6. Verifies Phase A coexistence: `createGraphTools` wires
  * zod arg schemas around the GraphToolSet, and `buildCanonicalTools` registers
- * all eight `graph_*` tools (when a dispatch manager is present) WITHOUT
- * overriding any existing `dispatch_*` / `loop_*` / core tool.
+ * every `graph_*` tool (when a dispatch manager is present) WITHOUT overriding
+ * any existing `dispatch_*` / `loop_*` / core tool. The list below is the
+ * exact key set, so an additive tool (C1's `graph_declare`, C3c's
+ * `graph_submit_outcome`, the E-stage `graph_audit`) is registered by adding
+ * its key here — never by repurposing one.
  *
  * `graph_approve` is the Phase C (Plan B) GAP-2 fill: a parent-facing
  * approve/reject surface routing to the engine's internal `approveNode` /
@@ -58,6 +61,7 @@ const GRAPH_KEYS = [
   "graph_add_loop",
   "graph_declare",
   "graph_submit_outcome",
+  "graph_audit",
   "graph_run",
   "graph_status",
   "graph_cancel",
@@ -67,7 +71,7 @@ const GRAPH_KEYS = [
 // ── createGraphTools: schema shape ──────────────────────────────────────────
 
 describe("createGraphTools", () => {
-  it("returns exactly the graph_* tools (the eight legacy + the C1 declare and C3c submit ingresses)", () => {
+  it("returns exactly the graph_* tools (the eight legacy + the C1 declare, C3c submit and E-stage audit ingresses)", () => {
     const tools = createGraphTools(makeDispatchManager(), { directory: "/tmp" });
     expect(Object.keys(tools).sort()).toEqual([...GRAPH_KEYS].sort());
   });

@@ -44,7 +44,7 @@
  * module; the run path that does is `src/graph/outcome/runtime.ts`.
  */
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { errorText } from "../../utils/error-text.ts";
@@ -1052,6 +1052,62 @@ function requireFormatVersion(db: DatabaseDriver, filePath: string): void {
   }
 }
 
+// ── Read-only access ────────────────────────────────────────────────────────
+
+/**
+ * The READ-ONLY half of the acceptance ledger: exactly the reads a consumer
+ * that must not change the store needs.
+ *
+ * It is a distinct type rather than a flag on {@link AcceptanceLedger} so a
+ * read-only consumer (the drain audit) cannot reach a write at all: the handle
+ * a read-only open answers is typed as this, and the connection underneath
+ * refuses a write at the SQLite layer as well. Both halves of that are the
+ * point — the type says what the caller may do, the connection says what the
+ * process may do.
+ *
+ * {@link SqliteAcceptanceLedger} satisfies it structurally, so one
+ * implementation serves both surfaces and the read rules cannot drift.
+ */
+export interface AcceptanceLedgerReader {
+  /** The persisted state snapshot of one graph, or `undefined`. */
+  readGraphState(graphId: string): GraphStateRecord | undefined;
+  /** The effects of one graph still `pending` or `started`. */
+  pendingEffects(graphId: string): readonly PendingEffectRecord[];
+  /** Close the substrate. Idempotent. */
+  close(): void;
+}
+
+/**
+ * What {@link SqliteAcceptanceLedger.openReadOnly} produced.
+ *
+ * TOTAL: every way an existing ledger can fail to be readable is a value, never
+ * a throw, because the audit this serves must report an unreadable store as a
+ * BLOCKER instead of crashing on it. An ABSENT store (no file at all) is
+ * deliberately its own kind: it is not an unreadable record, and a read-only
+ * open must never create the file that would turn it into one.
+ */
+export type LedgerReadOpenResult =
+  | {
+      readonly kind: "opened";
+      readonly filePath: string;
+      readonly ledger: AcceptanceLedgerReader;
+    }
+  /** No ledger file exists — nothing has ever been committed here. */
+  | { readonly kind: "absent"; readonly filePath: string }
+  /**
+   * The file exists and is a SQLite store, but not one this build may read:
+   * unknown / newer / older format, a foreign store, or a reshaped layout. The
+   * file is left exactly as it was found.
+   */
+  | {
+      readonly kind: "refused";
+      readonly filePath: string;
+      readonly problem: LedgerFormatProblem;
+      readonly message: string;
+    }
+  /** The file exists but could not be opened or read (I/O, permissions, …). */
+  | { readonly kind: "unreadable"; readonly filePath: string; readonly reason: string };
+
 // ── The store ───────────────────────────────────────────────────────────────
 
 /**
@@ -1090,34 +1146,108 @@ export class SqliteAcceptanceLedger implements AcceptanceLedger {
     mkdirSync(directory, { recursive: true });
     const db = await createDatabase(filePath);
     try {
-      const tables = inspectTables(db, filePath);
-      if (tables.length === 0) {
-        initializeLedger(db);
-        return new SqliteAcceptanceLedger(db, filePath);
-      }
-      if (!tables.includes(LEDGER_TABLES.meta)) {
-        throw new LedgerFormatError(
-          "foreign-store",
-          filePath,
-          `acceptance-ledger: ${filePath} is not this ledger — it holds ${tables.join(", ")} and no ${LEDGER_TABLES.meta} table, and refusing is the only honest answer to a file whose contents this build cannot name`,
-          tables,
-        );
-      }
-      // Identity first: the version row must be READABLE and name exactly this
-      // format before the layout it claims is judged, so a newer store is
-      // refused as newer even when its own layout renames or drops tables.
-      requireTableShape(db, "meta", filePath);
-      requireFormatVersion(db, filePath);
-      requireLedgerTables(tables, filePath);
-      requireTableShape(db, "receipts", filePath);
-      requireTableShape(db, "acceptedEvents", filePath);
-      requireTableShape(db, "pendingEffects", filePath);
-      requireTableShape(db, "graphState", filePath);
-      return new SqliteAcceptanceLedger(db, filePath);
+      return SqliteAcceptanceLedger.openVerified(db, filePath, true);
     } catch (error) {
       closeQuietly(db);
       throw error;
     }
+  }
+
+  /**
+   * Open an EXISTING ledger READ-ONLY, or report why it cannot be read.
+   *
+   * The audit's entry point, and deliberately NOT a variant of {@link create}:
+   * nothing here may change the store. The directory is not created, the file
+   * is not created, the schema is never initialized, and the connection is
+   * opened read-only, so a write attempted later fails at the SQLite layer
+   * instead of landing. A store that does not exist answers `absent` — the
+   * honest reading of "nothing has been committed here", and never a licence to
+   * initialize one.
+   *
+   * An existing file passes the SAME format gate the read/write opener applies
+   * (version identity first, then every table's columns, affinities,
+   * nullability and PRIMARY KEY), and a refusal is returned as data, with the
+   * file left exactly as it was found. TOTAL: a throwing open or an unexpected
+   * failure is `unreadable` rather than an exception, because the audit must
+   * report such a store as a blocker instead of crashing on it.
+   */
+  static async openReadOnly(directory: string): Promise<LedgerReadOpenResult> {
+    const filePath = ledgerFilePath(directory);
+    if (!existsSync(filePath)) return { kind: "absent", filePath };
+
+    let db: DatabaseDriver;
+    try {
+      db = await createDatabase(filePath, { readonly: true });
+    } catch (error) {
+      return { kind: "unreadable", filePath, reason: errorText(error) };
+    }
+    try {
+      return {
+        kind: "opened",
+        filePath,
+        ledger: SqliteAcceptanceLedger.openVerified(db, filePath, false),
+      };
+    } catch (error) {
+      closeQuietly(db);
+      if (error instanceof LedgerFormatError) {
+        return {
+          kind: "refused",
+          filePath,
+          problem: error.problem,
+          message: error.message,
+        };
+      }
+      return { kind: "unreadable", filePath, reason: errorText(error) };
+    }
+  }
+
+  /**
+   * The open-time format gate, shared by both openers.
+   *
+   * `initialize` is true only for {@link create}: a file holding no user tables
+   * is then a fresh store that gets the schema and its version row in one
+   * transaction. The read-only opener passes false, so an empty file — a file
+   * that is not this ledger — is refused instead of being turned into one by a
+   * read. Every check below is READ-ONLY; the only write in this method is the
+   * initialization `create` explicitly asked for.
+   */
+  private static openVerified(
+    db: DatabaseDriver,
+    filePath: string,
+    initialize: boolean,
+  ): SqliteAcceptanceLedger {
+    const tables = inspectTables(db, filePath);
+    if (tables.length === 0) {
+      if (!initialize) {
+        throw new LedgerFormatError(
+          "foreign-store",
+          filePath,
+          `acceptance-ledger: ${filePath} holds no tables, so it is not a ledger this build wrote — a read-only open never initializes a store`,
+          tables,
+        );
+      }
+      initializeLedger(db);
+      return new SqliteAcceptanceLedger(db, filePath);
+    }
+    if (!tables.includes(LEDGER_TABLES.meta)) {
+      throw new LedgerFormatError(
+        "foreign-store",
+        filePath,
+        `acceptance-ledger: ${filePath} is not this ledger — it holds ${tables.join(", ")} and no ${LEDGER_TABLES.meta} table, and refusing is the only honest answer to a file whose contents this build cannot name`,
+        tables,
+      );
+    }
+    // Identity first: the version row must be READABLE and name exactly this
+    // format before the layout it claims is judged, so a newer store is
+    // refused as newer even when its own layout renames or drops tables.
+    requireTableShape(db, "meta", filePath);
+    requireFormatVersion(db, filePath);
+    requireLedgerTables(tables, filePath);
+    requireTableShape(db, "receipts", filePath);
+    requireTableShape(db, "acceptedEvents", filePath);
+    requireTableShape(db, "pendingEffects", filePath);
+    requireTableShape(db, "graphState", filePath);
+    return new SqliteAcceptanceLedger(db, filePath);
   }
 
   // ── Commit ────────────────────────────────────────────────────────────────

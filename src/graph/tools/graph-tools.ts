@@ -141,6 +141,10 @@ import {
 } from "./submit-outcome.ts";
 import type { OutcomeDispatchSeam } from "../outcome/runtime.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
+import {
+  auditGraphStore,
+  type DrainAuditReport,
+} from "../audit/drain-audit.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
@@ -3469,6 +3473,28 @@ export class GraphToolSet {
     throw new Error(
       `graph_status: ${nodeId ? `node "${nodeId}"` : `loop "${loopId}"`} not found in any graph.`,
     );
+  }
+
+  // ── graph_audit ────────────────────────────────────────────────────────────
+
+  /**
+   * Audit the on-disk graph store READ-ONLY (E stage entry): which graphs are
+   * terminal, which are still in flight, and which cannot be read at all.
+   *
+   * The audit is STORE-level, not registry-level: it reads the same
+   * `engine-*.json` set the startup sweep scans under the configured
+   * `stateDir` (default cwd) plus the acceptance ledger's read-only open, and
+   * it NEVER writes — no engine save, no ledger commit, no effect transition,
+   * no schema initialization. The report is the evidence release-gate step 5
+   * needs before the legacy execution path may be retired
+   * (docs/graph-outcome-protocol.md § "Implementation order and release
+   * gates"), and its verdict requires BOTH halves: no blocker AND nothing in
+   * flight.
+   */
+  async graph_audit(): Promise<DrainAuditReport> {
+    return auditGraphStore({
+      directory: this.deps.stateDir ?? process.cwd(),
+    });
   }
 
 }

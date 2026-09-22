@@ -16,6 +16,19 @@
  * @module
  */
 
+/** How a database file is opened. */
+export interface DatabaseOpenOptions {
+  /**
+   * Open the file READ-ONLY.
+   *
+   * The connection then refuses every write at the SQLite layer, which is what
+   * makes a read-only consumer (the graph drain audit) read-only BY
+   * CONSTRUCTION rather than by convention. Defaults to `false` — the
+   * existing read/write open is byte-for-byte unchanged.
+   */
+  readonly readonly?: boolean;
+}
+
 /** Thin abstraction over a single prepared statement. */
 export interface StatementDriver {
   get(...params: unknown[]): unknown | undefined;
@@ -51,19 +64,28 @@ function isBunRuntime(): boolean {
  * already exist — callers are responsible for `mkdirSync(dirname(path),
  * { recursive: true })` beforehand).
  */
-export async function createDatabase(path: string): Promise<DatabaseDriver> {
+export async function createDatabase(
+  path: string,
+  options: DatabaseOpenOptions = {},
+): Promise<DatabaseDriver> {
   if (isBunRuntime()) {
-    return createBunDatabase(path);
+    return createBunDatabase(path, options);
   }
-  return createNodeDatabase(path);
+  return createNodeDatabase(path, options);
 }
 
 // ── Bun driver ─────────────────────────────────────────────────────────────
 
-async function createBunDatabase(path: string): Promise<DatabaseDriver> {
+async function createBunDatabase(
+  path: string,
+  options: DatabaseOpenOptions,
+): Promise<DatabaseDriver> {
   // Dynamic import — never evaluated under Node because of the runtime guard
   const { Database } = (await import("bun:sqlite")) as any;
-  const db = new Database(path);
+  const db =
+    options.readonly === true
+      ? new Database(path, { readonly: true })
+      : new Database(path);
 
   return {
     exec(sql: string): void {
@@ -97,11 +119,17 @@ async function createBunDatabase(path: string): Promise<DatabaseDriver> {
 
 // ── Node driver ────────────────────────────────────────────────────────────
 
-async function createNodeDatabase(path: string): Promise<DatabaseDriver> {
+async function createNodeDatabase(
+  path: string,
+  options: DatabaseOpenOptions,
+): Promise<DatabaseDriver> {
   // Dynamic import — never evaluated under Bun because of the runtime guard.
   // `node:sqlite` (DatabaseSync / StatementSync) is available since Node 22.5.
   const { DatabaseSync } = (await import("node:sqlite")) as any;
-  const db = new DatabaseSync(path);
+  const db =
+    options.readonly === true
+      ? new DatabaseSync(path, { readOnly: true })
+      : new DatabaseSync(path);
 
   return {
     exec(sql: string): void {
