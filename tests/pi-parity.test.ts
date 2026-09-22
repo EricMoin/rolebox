@@ -98,6 +98,7 @@ const OPENCODE_SURFACE: readonly string[] = [
   "graph_add_edge",
   "graph_add_loop",
   "graph_declare",
+  "graph_submit_outcome",
   "graph_run",
   "graph_status",
   "graph_cancel",

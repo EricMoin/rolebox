@@ -53,13 +53,17 @@ function makeDispatchManager(): DispatchManager {
 
 // ── Expected tool surface ───────────────────────────────────────────────────
 
-/** The imperative `graph_*` keys produced by createGraphTools (C1 adds declare). */
+/**
+ * The imperative `graph_*` keys produced by createGraphTools (C1 adds declare,
+ * C3c adds the outcome-protocol submission ingress).
+ */
 const GRAPH_KEYS = [
   "graph_create",
   "graph_add_node",
   "graph_add_edge",
   "graph_add_loop",
   "graph_declare",
+  "graph_submit_outcome",
   "graph_run",
   "graph_status",
   "graph_cancel",

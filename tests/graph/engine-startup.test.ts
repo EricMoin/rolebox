@@ -670,18 +670,21 @@ describe("recoverInterruptedGraphs — storage-format buckets (B stage)", () => 
   });
 });
 
-// ── Execution-protocol bucket (B3, C3b) ─────────────────────────────────────
+// ── Execution-protocol routing (B3, C3c) ────────────────────────────────────
 //
 // The sweep reports every non-valid load result by its DIMENSION, so a protocol
 // this build has no handler for lands in failed[] as `unsupported execution`.
 // Since C3b the OUTCOME protocol IS registered, so a declared graph loads as
-// valid — and the sweep still must not resume it: restart recovery for the
-// outcome protocol is a later slice, and the legacy engine must never adopt such
-// a state. It is reported as not resumed, and the file is left exactly as it
-// was: never run under legacy rules and never rewritten to a legacy identity.
+// valid — and since C3c it is routed to the OUTCOME run path, which resumes it
+// from the persisted plan and the ledger state. A protocol-2 record that path
+// CANNOT resume (here: one carrying no compiled plan, because it was not written
+// by graph_declare) is reported explicitly in `outcomeProtocol.refused`, is
+// never handed to the legacy engine and is left byte-for-byte as it was. A
+// resumable declared graph is covered end to end in
+// tests/graph/outcome-recovery.test.ts.
 
-describe("recoverInterruptedGraphs — execution-protocol bucket (B3, C3b)", () => {
-  it("a registered outcome-protocol state is reported as deferred and never resumed", async () => {
+describe("recoverInterruptedGraphs — execution-protocol routing (B3, C3c)", () => {
+  it("reports an un-resumable outcome-protocol state explicitly and never resumes it under legacy rules", async () => {
     const dir = makeTmpDir();
     const state = createEngineState(singleNodeDecl("g-proto2"), "g-proto2");
     provision(state);
@@ -705,13 +708,18 @@ describe("recoverInterruptedGraphs — execution-protocol bucket (B3, C3b)", () 
     expect(report.recovered).toBe(0);
     expect(report.degraded).toEqual([]);
     expect(report.migrationRequired).toEqual([]);
-    expect(report.failed).toHaveLength(1);
-    expect(report.failed[0]).toContain("engine-proto2.json");
-    // C3b: the protocol IS registered, so the bucket names the deferred
-    // recovery rather than a missing handler — and this cannot read as a
-    // storage mismatch.
-    expect(report.failed[0]).toContain("outcome protocol: restart recovery is deferred");
-    expect(report.failed[0]).toContain("not resumed under legacy rules");
+    // Not `failed[]`: the record is valid, it is the RESUME that is refused, so
+    // it lands in the outcome protocol's own refusal bucket.
+    expect(report.failed).toEqual([]);
+    expect(report.outcomeProtocol).toBeDefined();
+    expect(report.outcomeProtocol?.refused).toHaveLength(1);
+    expect(report.outcomeProtocol?.refused[0]).toContain("engine-proto2.json");
+    expect(report.outcomeProtocol?.refused[0]).toContain("missing-persisted-plan");
+    // Nothing was started or dispatched: a graph whose plan is absent is never
+    // recompiled and never rebuilt from the legacy declaration carrier.
+    expect(report.outcomeProtocol?.started).toEqual([]);
+    expect(report.outcomeProtocol?.resumed).toEqual([]);
+    expect(report.outcomeProtocol?.dispatched).toEqual([]);
     // Refused, not downgraded: the snapshot keeps its protocol identity and
     // was neither hydrated nor rewritten.
     const after: Record<string, unknown> = JSON.parse(readFileSync(path, "utf-8"));

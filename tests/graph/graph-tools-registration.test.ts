@@ -57,6 +57,7 @@ const GRAPH_KEYS = [
   "graph_add_edge",
   "graph_add_loop",
   "graph_declare",
+  "graph_submit_outcome",
   "graph_run",
   "graph_status",
   "graph_cancel",
@@ -66,7 +67,7 @@ const GRAPH_KEYS = [
 // ── createGraphTools: schema shape ──────────────────────────────────────────
 
 describe("createGraphTools", () => {
-  it("returns exactly the graph_* tools (the eight legacy + the C1 declare ingress)", () => {
+  it("returns exactly the graph_* tools (the eight legacy + the C1 declare and C3c submit ingresses)", () => {
     const tools = createGraphTools(makeDispatchManager(), { directory: "/tmp" });
     expect(Object.keys(tools).sort()).toEqual([...GRAPH_KEYS].sort());
   });
@@ -116,6 +117,22 @@ describe("createGraphTools", () => {
     expect(declaration.safeParse(42).success).toBe(true);
     // ...but a value that is not JSON at all is still refused by the schema.
     expect(declaration.safeParse(undefined).success).toBe(false);
+  });
+
+  it("graph_submit_outcome exposes exactly the minimum model-facing args", () => {
+    const { graph_submit_outcome } = createGraphTools(undefined, { directory: "/tmp" });
+    expect(Object.keys(graph_submit_outcome.args).sort()).toEqual([
+      "data",
+      "evidence_refs",
+      "graph_id",
+      "node_id",
+      "outcome_id",
+    ]);
+    // Identity and the plan revision are runtime provenance, not args.
+    expect(graph_submit_outcome.args.attempt_id).toBeUndefined();
+    expect(graph_submit_outcome.args.submission_id).toBeUndefined();
+    expect(graph_submit_outcome.args.plan_revision).toBeUndefined();
+    expect(graph_submit_outcome.args.graphId).toBeUndefined();
   });
 
   it("executes graph_declare end-to-end: parses, compiles, persists and reports the run path", async () => {

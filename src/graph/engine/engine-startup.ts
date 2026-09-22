@@ -16,11 +16,20 @@
  * - Parse each via `loadEngineStateForResume` (version-gated through the
  *   storage-format registry; a corrupt / unsupported / migration-required file
  *   is REPORTED as that kind instead of collapsing to a single `null`).
+ * - **Route by execution protocol (C3c).** A record bound to the OUTCOME
+ *   protocol is NOT resumed through the legacy engine: it is handed to
+ *   `resumePersistedOutcomeGraph` (`src/graph/outcome/recovery.ts`), which
+ *   reads the SAVED compiled plan and its binding, continues the graph from the
+ *   state in the acceptance ledger, launches what the state says is armed, and
+ *   reports every unsettled effect. What that path did lands in the optional
+ *   `outcomeProtocol` bucket. A protocol-2 record the outcome path cannot
+ *   resume is reported there — never in `failed[]` (the record is valid) and
+ *   never resumed under legacy rules.
  * - **Skip** graphs whose phase is already `complete` — a terminal graph has
  *   nothing to resume.
- * - For every remaining graph, build `createEngine(declaration, { manager,
- *   graphId, stateDir, onNodeCompletion, onGraphTerminal, graphEvents })` and
- *   `await recover()` **inside a per-graph
+ * - For every remaining LEGACY graph, build `createEngine(declaration, {
+ *   manager, graphId, stateDir, onNodeCompletion, onGraphTerminal,
+ *   graphEvents })` and `await recover()` **inside a per-graph
  *   try/catch**, so one corrupt or failing graph never aborts the sweep.
  *   Failures are captured in `failed[]` and the loop continues to the sibling.
  *
@@ -51,7 +60,12 @@
  * sweep never counts it as a clean resume and never mislabels it as bad data.
  *
  * Idempotency: this sweep is safe to call repeatedly, but it must not be run
- * CONCURRENTLY — two overlapping sweeps would recover the same graph twice.
+ * CONCURRENTLY — two overlapping sweeps would recover the same graph twice. An
+ * OUTCOME graph is idempotent on its own terms: a resumed dispatch effect is
+ * durably marked `started` BEFORE its seam runs, so a second sweep launches
+ * nothing and reports the same unsettled rows (see `OutcomeGraphRuntime.resume`);
+ * a graph with no ledger state gets its FIRST EXECUTION from the saved plan, and
+ * a graph with a state is never started from scratch.
  * `recover()` reconciles every persisted `running` node against the dispatch
  * system: a still-live task is re-attached (never re-dispatched), a vanished
  * task is timed out, and a task that finished during the restart window has
@@ -79,10 +93,21 @@ import { errorText } from "../../utils/error-text.ts";
 import { type StorageFormatRegistry } from "../persistence/storage-format.ts";
 import {
   DEFAULT_STORAGE_FORMAT_REGISTRY,
+  engineStateDir,
   loadEngineStateForResume,
   type EngineLoadResult,
 } from "./engine-persistence.ts";
 import { OUTCOME_PROTOCOL } from "../protocol/execution-protocol.ts";
+import { SqliteAcceptanceLedger } from "../ledger/sqlite-ledger.ts";
+import { resumePersistedOutcomeGraph } from "../outcome/recovery.ts";
+import {
+  createValidatorRegistry,
+  type ValidatorRegistry,
+} from "../outcome/validators.ts";
+import type {
+  OutcomeDispatchSeam,
+  OutcomeResumeResult,
+} from "../outcome/runtime.ts";
 import { logWarn } from "./log-warn.ts";
 import type {
   NodeCompletionEvent,
@@ -98,6 +123,54 @@ import type { GraphEventRecorder } from "./graph-events.ts";
 import { createEngine } from "./index.ts";
 
 // ── Types ───────────────────────────────────────────────────────────────────
+
+/**
+ * What one sweep did with the OUTCOME-protocol (declared) graphs it found
+ * (C3c).
+ *
+ * A declared graph is not resumed through the legacy engine, so it has its own
+ * bucket rather than being counted in `recovered` (which means "a legacy engine
+ * adopted its snapshot and reconciled") or reported in `failed` (which means
+ * "unreadable or corrupt"). Every line names the graph so the report is
+ * evidence, not a count:
+ *
+ * - `started` — the graph had NO ledger state, so this sweep performed its
+ *   FIRST EXECUTION from the SAVED plan. The line names the plan revision.
+ * - `resumed` — the graph had a ledger state and was continued from it: the
+ *   line names the plan revision, the phase and every armed node/attempt.
+ * - `dispatched` — the dispatch requests this sweep actually launched
+ *   (`graph:node#attempt`). A launch happens only for a `pending` dispatch
+ *   effect the state corroborates, and the effect is marked `started` first,
+ *   which is what keeps a second sweep from launching it again.
+ * - `armed` — every node the persisted state records as in flight
+ *   (`graph:node#attempt`), including one whose effect is already `started`
+ *   (a dead process began it) and one recorded by an earlier `start()`.
+ * - `unsettledEffects` — every effect still `pending` or `started` after the
+ *   sweep (`graph:effectId@status`). A `started` row from a dead process is
+ *   REPORTED here; it is never re-launched and never dropped.
+ * - `refused` — an outcome graph this sweep could not resume, with the reason
+ *   (no persisted plan, a plan/binding revision disagreement, a state bound to
+ *   another revision, a protocol this build cannot run). The record is
+ *   preserved exactly as it was.
+ *
+ * The whole bucket is absent from a report when the sweep saw no
+ * outcome-protocol record at all, so a legacy-only store keeps the exact report
+ * shape it had before C3c.
+ */
+export interface OutcomeRecoveryReport {
+  /** First executions performed from the saved plan. */
+  started: string[];
+  /** Graphs continued from their persisted ledger state. */
+  resumed: string[];
+  /** Dispatch effects actually launched by this sweep. */
+  dispatched: string[];
+  /** Nodes the persisted state records as in flight, with their attempts. */
+  armed: string[];
+  /** Effects still pending or started after this sweep. */
+  unsettledEffects: string[];
+  /** Outcome graphs that could not be resumed, with the reason. */
+  refused: string[];
+}
 
 /** Outcome of a startup recovery sweep over the on-disk engine store. */
 export interface RecoveryStartupReport {
@@ -136,6 +209,13 @@ export interface RecoveryStartupReport {
    * Never empty a sweep — it is a diagnostic log, not a blocker.
    */
   failed: string[];
+  /**
+   * What this sweep did with the OUTCOME-protocol (declared) graphs it found
+   * (C3c). PRESENT exactly when the sweep encountered at least one valid
+   * protocol-2 record; absent for a legacy-only store, so an existing caller
+   * that deep-compares the report keeps its exact shape.
+   */
+  outcomeProtocol?: OutcomeRecoveryReport;
 }
 
 /** Options for {@link recoverInterruptedGraphs}. */
@@ -215,6 +295,120 @@ export interface RecoverInterruptedGraphsOptions {
    * behavior).
    */
   graphEvents?: GraphEventRecorder;
+
+  /**
+   * Optional dispatch seam for resumed/first-run OUTCOME-protocol graphs
+   * (C3c). The outcome run path launches a node by calling this seam; executing
+   * the node's agent is the deferred effect-EXECUTION work, so the default is a
+   * no-op and a launched effect stays `started` (and therefore reported in
+   * `outcomeProtocol.unsettledEffects`) for a later process to reconcile.
+   * Injecting a real seam here is what wires an outcome graph's nodes to actual
+   * work.
+   */
+  outcomeDispatch?: OutcomeDispatchSeam;
+
+  /**
+   * Optional installed validator implementations for outcome-protocol graphs
+   * (C3c). The plan pins each acceptance requirement at an exact
+   * `{ validator, version }`; a requirement with no registered implementation
+   * is REFUSED by the acceptance core rather than skipped, so the default is an
+   * EMPTY registry (a plan whose gates need a capability this process does not
+   * have must not read as accepted).
+   */
+  outcomeValidators?: ValidatorRegistry;
+
+  /**
+   * Root every outcome evidence reference must resolve inside (C3c). Defaults
+   * to `directory` — the workspace whose `.rolebox/state` store was scanned.
+   */
+  outcomeArtifactRoot?: string;
+
+  /**
+   * Epoch milliseconds the outcome resume stamps on a FIRST-EXECUTION state
+   * snapshot (C3c). Time is an explicit protocol input, so a caller may pin it;
+   * omitted → `Date.now()`. Resuming an EXISTING state writes no state, so the
+   * value only matters when the sweep performs a graph's first execution.
+   */
+  outcomeNow?: number;
+}
+
+// ── Outcome-protocol recovery (C3c) ─────────────────────────────────────────
+
+/**
+ * The dispatch seam used when the caller injects none.
+ *
+ * A no-op on purpose: launching a node's agent is the deferred effect-EXECUTION
+ * work, and the effect row is durably marked `started` before this seam runs, so
+ * the launch is reported as unsettled instead of being lost. A caller with a
+ * real dispatcher injects it via `outcomeDispatch`.
+ */
+const NOOP_OUTCOME_DISPATCH: OutcomeDispatchSeam = () => undefined;
+
+/**
+ * The validator capability used when the caller injects none: EMPTY.
+ *
+ * Not a silent pass: the acceptance core refuses a requirement whose exact
+ * `{ validator, version }` has no registered implementation, so an empty
+ * registry can only produce refusals — never an accepted gate nobody checked.
+ */
+const NO_OUTCOME_VALIDATORS: ValidatorRegistry = createValidatorRegistry([]);
+
+/** An empty outcome bucket; created on the first protocol-2 record. */
+function emptyOutcomeRecoveryReport(): OutcomeRecoveryReport {
+  return {
+    started: [],
+    resumed: [],
+    dispatched: [],
+    armed: [],
+    unsettledEffects: [],
+    refused: [],
+  };
+}
+
+/**
+ * Record one outcome resume result into the sweep's outcome bucket.
+ *
+ * Every line names the graph, and every launched dispatch, armed node and
+ * unsettled effect is listed individually: this bucket IS the restart-recovery
+ * evidence, so a count would not be enough to tell what was continued, what was
+ * launched, and what a dead process left behind.
+ */
+function recordOutcomeRecovery(
+  bucket: OutcomeRecoveryReport,
+  label: string,
+  graphId: string,
+  result: OutcomeResumeResult,
+): void {
+  if (result.kind === "refused") {
+    for (const refusal of result.refusals) {
+      bucket.refused.push(
+        `${label} (graph ${graphId}: [${refusal.code}] ${refusal.message})`,
+      );
+    }
+    return;
+  }
+  const armed = result.armed.map((node) => node.attemptId).join(", ");
+  const line =
+    `${label} (graph ${graphId}: plan revision ${result.state.planRevision}, ` +
+    `phase ${result.state.phase}` +
+    (armed.length === 0 ? "" : `, armed [${armed}]`) +
+    ")";
+  if (result.kind === "started") bucket.started.push(line);
+  else bucket.resumed.push(line);
+  for (const request of result.dispatched) {
+    bucket.dispatched.push(`${graphId}:${request.attemptId}`);
+  }
+  for (const node of result.armed) {
+    bucket.armed.push(`${graphId}:${node.attemptId}`);
+  }
+  for (const effect of result.unsettledEffects) {
+    bucket.unsettledEffects.push(`${graphId}:${effect.effectId}@${effect.status}`);
+  }
+  for (const refusal of result.refusals) {
+    bucket.refused.push(
+      `${label} (graph ${graphId}: [${refusal.code}] ${refusal.message})`,
+    );
+  }
 }
 
 // ── Startup recovery sweep ──────────────────────────────────────────────────
@@ -250,7 +444,7 @@ export async function recoverInterruptedGraphs(
     };
   }
 
-  const stateDir = join(opts.directory, ".rolebox", "state");
+  const stateDir = engineStateDir(opts.directory);
   const registry =
     opts.storageFormatRegistry ?? DEFAULT_STORAGE_FORMAT_REGISTRY;
 
@@ -276,6 +470,12 @@ export async function recoverInterruptedGraphs(
   const degraded: string[] = [];
   const migrationRequired: string[] = [];
   let recovered = 0;
+  /**
+   * The outcome-protocol half of the report (C3c). Created lazily on the first
+   * valid protocol-2 record, so a legacy-only store keeps the exact report shape
+   * it had before this slice (an absent optional field).
+   */
+  let outcome: OutcomeRecoveryReport | undefined;
 
   // 2. Parse + recover each file in isolation.
   for (const file of files) {
@@ -348,18 +548,48 @@ export async function recoverInterruptedGraphs(
       continue;
     }
 
-    // 2a-v. C3b: the outcome protocol now HAS a registered handler, so a
-    //       declared graph loads as `valid` — but its restart recovery is a
-    //       LATER slice, and this legacy sweep must never resume it under
-    //       legacy rules. The record is reported and preserved exactly as it
-    //       was; the outcome run path is the only thing that may start it.
+    // 2a-v. C3c: a DECLARED (protocol 2) graph is resumed through the OUTCOME
+    //       run path — never through the legacy engine below. Recovery reads
+    //       the SAVED plan and its binding out of this record and the graph
+    //       state out of the ledger: a graph with a state is CONTINUED from it,
+    //       and a graph with NO state is started — its FIRST EXECUTION — from
+    //       that same saved plan. Neither path builds a legacy engine, and
+    //       nothing here rewrites the record. A record this path cannot resume
+    //       (no persisted plan, a plan/binding disagreement, a state bound to
+    //       another revision) is REPORTED in `outcomeProtocol.refused` and left
+    //       exactly as it is.
     if (loaded.executionProtocol === OUTCOME_PROTOCOL) {
-      logWarn(
-        `engine-startup: skipped outcome-protocol state file ${label}: restart recovery for the outcome protocol is not implemented in this build`,
-      );
-      failed.push(
-        `${label} (outcome protocol: restart recovery is deferred in this build; the record was preserved and not resumed under legacy rules)`,
-      );
+      if (outcome === undefined) outcome = emptyOutcomeRecoveryReport();
+      const bucket = outcome;
+      let ledger: SqliteAcceptanceLedger | undefined;
+      try {
+        ledger = await SqliteAcceptanceLedger.create(stateDir);
+        recordOutcomeRecovery(
+          bucket,
+          label,
+          loaded.state.graphId,
+          resumePersistedOutcomeGraph({
+            state: loaded.state,
+            ledger,
+            dispatch: opts.outcomeDispatch ?? NOOP_OUTCOME_DISPATCH,
+            validators: opts.outcomeValidators ?? NO_OUTCOME_VALIDATORS,
+            artifactRoot: opts.outcomeArtifactRoot ?? opts.directory,
+            ...(opts.outcomeNow === undefined ? {} : { now: opts.outcomeNow }),
+          }),
+        );
+      } catch (err) {
+        logWarn(
+          `engine-startup: outcome recovery failed for ${label}: ${errorText(err)}`,
+        );
+        bucket.refused.push(
+          `${label} (graph ${loaded.state.graphId}: ${errorText(err)})`,
+        );
+      } finally {
+        // Per-graph handle: the ledger is opened only for an outcome record and
+        // closed here, so a sweep never leaks a store handle and a legacy-only
+        // store never grows one.
+        ledger?.close();
+      }
       continue;
     }
 
@@ -408,6 +638,13 @@ export async function recoverInterruptedGraphs(
     }
   }
 
-  return { scanned, recovered, degraded, migrationRequired, failed };
+  return {
+    scanned,
+    recovered,
+    degraded,
+    migrationRequired,
+    failed,
+    ...(outcome === undefined ? {} : { outcomeProtocol: outcome }),
+  };
 }
 

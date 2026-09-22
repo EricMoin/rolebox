@@ -1,0 +1,580 @@
+/**
+ * `graph_submit_outcome` — the model-facing submission ingress (C3c).
+ *
+ * Covers the vertical path end to end through the TOOL: declare a plan, run its
+ * first execution from that same saved plan (the startup sweep), submit an
+ * outcome, watch the graph advance, and settle at the terminal. Also covered:
+ * the caller cannot supply execution identity or the plan revision (forged args
+ * are never read), a refusal returns structured repair diagnostics and writes
+ * nothing, a REJECTED decision returns its per-requirement outcomes and leaves
+ * the attempt open so a repaired submission can be accepted, pointing the tool
+ * at a legacy v2 graph fails with a clear error, the registered tool exposes
+ * exactly the minimum args, and the submission ingress is the ONLY completion
+ * source for a declared graph (every legacy entry point refuses it and the
+ * legacy dispatch port is never called).
+ *
+ * Every case runs in its own mkdtemp directory and removes it in a finally
+ * block; nothing here writes outside a temp dir.
+ */
+
+import { describe, expect, it, afterEach } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
+import { engineStateDir } from "../../src/graph/engine/engine-persistence.ts";
+import { recoverInterruptedGraphs } from "../../src/graph/engine/engine-startup.ts";
+import { SqliteAcceptanceLedger } from "../../src/graph/ledger/sqlite-ledger.ts";
+import { proposalDigest } from "../../src/graph/outcome/proposal.ts";
+import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
+import {
+  createValidatorRegistry,
+  type ValidationOutcome,
+} from "../../src/graph/outcome/validators.ts";
+import { OutcomeProtocolUnavailableError } from "../../src/graph/tools/declare-graph.ts";
+import {
+  OutcomeSubmissionRefusedError,
+  type GraphSubmitOutcomeResult,
+} from "../../src/graph/tools/submit-outcome.ts";
+import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
+import { createGraphTools } from "../../src/graph/tools/index.ts";
+import type { DispatchManager } from "../../src/dispatch/core/manager.ts";
+import type { DispatchTask } from "../../src/dispatch/types.ts";
+import type { NodeDispatchPort } from "../../src/graph/engine/engine-advance.ts";
+import type { NodeRuntimeState } from "../../src/types.engine-v2.ts";
+
+// ── Fixtures ────────────────────────────────────────────────────────────────
+
+const NOW = 1_700_000_000_000;
+
+/** work -> ship: one successor edge, one terminal outcome. */
+const LINEAR: GraphDeclarationV3 = {
+  version: 3,
+  name: "tool.linear",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    { id: "ship", agent: "agent.ship", prompt: "Ship it.", outcomes: [{ id: "delivered" }] },
+  ],
+  edges: [{ from: "work", to: "ship", outcome: "done" }],
+};
+
+/** The same shape, but "done" is gated by an exact validator identity. */
+const GATED: GraphDeclarationV3 = {
+  version: 3,
+  name: "tool.gated",
+  nodes: [
+    {
+      id: "work",
+      agent: "agent.work",
+      prompt: "Do the work.",
+      outcomes: [{ id: "done", acceptance: [{ validator: "gate.check", version: 1 }] }],
+    },
+  ],
+  edges: [],
+};
+
+const GATE_ID = "gate.check";
+const GATE_VERSION = 1;
+
+const tmpDirs: string[] = [];
+
+function makeTmpDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+/** The dispatch surface the sweep touches for legacy graphs; nothing here. */
+function idleManager(): DispatchManager {
+  const surface: Partial<DispatchManager> = {
+    getTask: () => undefined,
+    getTasksByParent: () => [],
+    getEventState: () => new Map(),
+  };
+  return surface as DispatchManager;
+}
+
+/** A legacy dispatch port that counts every launch (and never completes). */
+class CountingDispatch implements NodeDispatchPort {
+  calls = 0;
+  executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
+    this.calls += 1;
+    return Promise.resolve({
+      id: "task-" + node.nodeId,
+      sessionId: "sess-" + node.nodeId,
+      parentSessionId: "g",
+      depth: 1,
+      status: "running",
+      agent: node.agent,
+      prompt: node.prompt,
+      startedAt: new Date(),
+      progress: { lastUpdate: new Date(), toolCalls: 0 },
+      priority: 0,
+    });
+  }
+}
+
+/** A recorder for the outcome run path's dispatch seam. */
+function recorder(into: OutcomeDispatchRequest[]) {
+  return (request: OutcomeDispatchRequest): void => {
+    into.push(request);
+  };
+}
+
+/** Run the startup sweep against one temp workspace. */
+function sweep(
+  dir: string,
+  requests: OutcomeDispatchRequest[],
+): ReturnType<typeof recoverInterruptedGraphs> {
+  return recoverInterruptedGraphs({
+    directory: dir,
+    manager: idleManager(),
+    stateDir: dir,
+    outcomeNow: NOW,
+    outcomeDispatch: recorder(requests),
+  });
+}
+
+/** Read the ledger of a workspace; the caller closes it. */
+function openLedger(dir: string): Promise<SqliteAcceptanceLedger> {
+  return SqliteAcceptanceLedger.create(engineStateDir(dir));
+}
+
+/** A minimal canonical tool context, mirroring the registration test helper. */
+function makeContext() {
+  return {
+    sessionID: "s1",
+    messageID: "m1",
+    agent: "test-agent",
+    directory: "/tmp",
+    worktree: "/tmp",
+    abort: new AbortController().signal,
+    metadata: () => {},
+    ask: async () => {},
+  };
+}
+
+afterEach(() => {
+  for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+  tmpDirs.length = 0;
+});
+
+// ── The vertical path through the tool ──────────────────────────────────────
+
+describe("graph_submit_outcome — the vertical path", () => {
+  it("declares, runs the saved plan, accepts an outcome and settles at the terminal", async () => {
+    const dir = makeTmpDir("submit-outcome-");
+    const toolRequests: OutcomeDispatchRequest[] = [];
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      outcomeDispatch: recorder(toolRequests),
+    });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    const graphId = declared.graph_id;
+
+    // FIRST EXECUTION: the sweep starts the graph from the SAVED plan.
+    const startRequests: OutcomeDispatchRequest[] = [];
+    const first = await sweep(dir, startRequests);
+    expect(first.failed).toEqual([]);
+    expect(first.outcomeProtocol?.started).toHaveLength(1);
+    expect(first.outcomeProtocol?.started[0]).toContain(declared.plan_revision);
+    expect(first.outcomeProtocol?.dispatched).toEqual([graphId + ":work#1"]);
+    expect(startRequests.map((request) => request.attemptId)).toEqual(["work#1"]);
+
+    // The worker reports its outcome through the model-facing ingress.
+    const accepted: GraphSubmitOutcomeResult = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+    });
+    expect(accepted.decision).toBe("accepted");
+    expect(accepted.verdict).toBe("committed");
+    expect(accepted.plan_revision).toBe(declared.plan_revision);
+    expect(accepted.attempt_id).toBe("work#1");
+    // Runtime provenance: the submission id is the canonical digest, and the
+    // successor was launched in-process through the toolset's seam.
+    expect(accepted.submission_id).toBe(
+      "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+    );
+    expect(accepted.settled_nodes).toEqual(["work"]);
+    expect(accepted.phase).toBe("executing");
+    expect(accepted.refusals).toEqual([]);
+    expect(toolRequests.map((request) => request.attemptId)).toEqual(["ship#2"]);
+
+    // Terminal outcome ends the run.
+    const last = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "ship",
+      outcome_id: "delivered",
+    });
+    expect(last.decision).toBe("accepted");
+    expect(last.phase).toBe("complete");
+    // Plan order, not declaration order: the compiler fixes the node order.
+    expect([...(last.settled_nodes ?? [])].sort()).toEqual(["ship", "work"]);
+
+    // The durable record is the ledger: two accepted events, one pending
+    // successor dispatch effect, one graph-state row.
+    const ledger = await openLedger(dir);
+    try {
+      // Both submissions were pinned to the same clock, so the ledger's
+      // (accepted_at, attempt_id) order is the attempt-id tiebreak.
+      expect(
+        ledger
+          .acceptedEvents(graphId)
+          .map((event) => event.attemptId)
+          .sort(),
+      ).toEqual(["ship#2", "work#1"]);
+      expect(
+        ledger.pendingEffects(graphId).map((effect) => effect.effectId + "@" + effect.status),
+      ).toEqual(["dispatch:ship#2@pending"]);
+      expect(ledger.readGraphState(graphId)?.planRevision).toBe(declared.plan_revision);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("derives identity and the plan revision itself: forged args cannot move them", async () => {
+    const dir = makeTmpDir("submit-outcome-forge-");
+    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    const graphId = declared.graph_id;
+    await sweep(dir, []);
+
+    // A caller CAN put these keys on the object it passes (the toolset method
+    // reads only graph_id / node_id / outcome_id / data / evidence_refs). Every
+    // forged value is wrong on purpose.
+    const forged = {
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+      attempt_id: "forged-attempt",
+      submission_id: "forged-submission",
+      plan_revision: "forged-revision",
+    };
+    const first = await ts.graph_submit_outcome(forged);
+    expect(first.decision).toBe("accepted");
+    expect(first.plan_revision).toBe(declared.plan_revision);
+    expect(first.attempt_id).toBe("work#1");
+    expect(first.submission_id).toBe(
+      "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+    );
+
+    // The receipt is stored under the DERIVED key, and the state is bound to the
+    // real plan revision — neither forged value exists in the store.
+    const ledger = await openLedger(dir);
+    try {
+      const receipt = ledger.lookupReceipt({
+        graphId,
+        attemptId: "work#1",
+        submissionId:
+          "submission:" + proposalDigest({ nodeId: "work", outcomeId: "done" }),
+      });
+      expect(receipt?.attemptId).toBe("work#1");
+      expect(receipt?.planRevision).toBe(declared.plan_revision);
+      expect(ledger.readGraphState(graphId)?.planRevision).toBe(declared.plan_revision);
+      expect(
+        ledger.lookupReceipt({
+          graphId,
+          attemptId: "forged-attempt",
+          submissionId: "forged-submission",
+        }),
+      ).toBeUndefined();
+    } finally {
+      ledger.close();
+    }
+
+    // Repeating the submission with DIFFERENT forged identity replays the same
+    // persisted receipt: the forged fields never entered the key.
+    const again = await ts.graph_submit_outcome({
+      ...forged,
+      attempt_id: "another-forged-attempt",
+      submission_id: "another-forged-submission",
+      plan_revision: "another-forged-revision",
+    });
+    expect(again.verdict).toBe("replayed");
+    expect(again.submission_id).toBe(first.submission_id);
+  });
+
+  it("returns structured repair diagnostics for a refusal and writes nothing", async () => {
+    const dir = makeTmpDir("submit-outcome-refusal-");
+    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    const graphId = declared.graph_id;
+    await sweep(dir, []);
+
+    // "ship" has no attempt in flight yet: the runtime refuses rather than
+    // settling an execution that does not exist.
+    const refused = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "ship",
+      outcome_id: "delivered",
+    });
+    expect(refused.decision).toBeUndefined();
+    expect(refused.refusals.map((entry) => entry.code)).toContain("node-not-dispatched");
+    expect(refused.refusals[0]?.message).toContain("ship");
+
+    // An outcome the node does not declare is refused with its own code.
+    const undeclared = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "ghost",
+    });
+    expect(undeclared.refusals.map((entry) => entry.code)).toContain(
+      "undeclared-outcome",
+    );
+
+    // A malformed proposal (empty node id) is refused by the shape gate.
+    const malformed = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "",
+      outcome_id: "done",
+    });
+    expect(malformed.refusals.map((entry) => entry.code)).toContain(
+      "malformed-proposal",
+    );
+
+    // Nothing was written by any of the three refusals.
+    const ledger = await openLedger(dir);
+    try {
+      expect(ledger.acceptedEvents(graphId)).toEqual([]);
+      expect(ledger.pendingEffects(graphId)).toEqual([]);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("reports a rejected decision's per-requirement outcomes and accepts a repaired submission", async () => {
+    const dir = makeTmpDir("submit-outcome-rejected-");
+    let gate: ValidationOutcome = { kind: "fail", reason: "evidence is insufficient" };
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      outcomeValidators: createValidatorRegistry([
+        { id: GATE_ID, version: GATE_VERSION, implementation: () => gate },
+      ]),
+    });
+    const declared = ts.graph_declare({
+      declaration: GATED,
+      supported_validators: [{ validator: GATE_ID, version: GATE_VERSION }],
+    });
+    const graphId = declared.graph_id;
+    await sweep(dir, []);
+
+    const rejected = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+    });
+    expect(rejected.decision).toBe("rejected");
+    expect(rejected.verdict).toBe("committed");
+    expect(rejected.requirements).toEqual([
+      {
+        validator: GATE_ID,
+        version: GATE_VERSION,
+        outcome: "fail",
+        reason: "evidence is insufficient",
+      },
+    ]);
+    expect(rejected.refusals).toEqual([]);
+    // The attempt stays OPEN: a rejected receipt is not an accepted event.
+    const afterRejection = await openLedger(dir);
+    try {
+      expect(afterRejection.acceptedEvents(graphId)).toEqual([]);
+    } finally {
+      afterRejection.close();
+    }
+
+    // Repair: the gate passes and the RESUBMISSION (different content, so a
+    // different submission id) is accepted.
+    gate = { kind: "pass" };
+    const accepted = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+      data: { repaired: true },
+    });
+    expect(accepted.decision).toBe("accepted");
+    expect(accepted.verdict).toBe("committed");
+    expect(accepted.requirements).toEqual([
+      { validator: GATE_ID, version: GATE_VERSION, outcome: "pass" },
+    ]);
+    const afterAcceptance = await openLedger(dir);
+    try {
+      expect(afterAcceptance.acceptedEvents(graphId)).toHaveLength(1);
+    } finally {
+      afterAcceptance.close();
+    }
+  });
+});
+
+// ── Addressing: declaration-only graphs, legacy graphs ──────────────────────
+
+describe("graph_submit_outcome — the graphs it serves", () => {
+  it("refuses a legacy v2 graph by name, without opening a ledger", async () => {
+    const dir = makeTmpDir("submit-outcome-legacy-");
+    const ts = createGraphToolSet({ stateDir: dir });
+    const legacy = ts.graph_create({ name: "legacy.graph" });
+
+    let caught: unknown;
+    try {
+      await ts.graph_submit_outcome({
+        graph_id: legacy.graph_id,
+        node_id: "A",
+        outcome_id: "done",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    if (!(caught instanceof OutcomeSubmissionRefusedError)) {
+      throw new Error("expected OutcomeSubmissionRefusedError, got " + String(caught));
+    }
+    expect(caught.reason).toBe("legacy-graph");
+    expect(caught.graphId).toBe(legacy.graph_id);
+    expect(caught.message).toContain("LEGACY");
+    expect(caught.message).toContain("signal protocol");
+    // The refusal happened BEFORE the ledger was opened.
+    expect(existsSync(join(engineStateDir(dir), "graph-acceptance-ledger.sqlite"))).toBe(
+      false,
+    );
+  });
+
+  it("refuses an unknown graph with a clear next step", async () => {
+    const dir = makeTmpDir("submit-outcome-unknown-");
+    const ts = createGraphToolSet({ stateDir: dir });
+    let caught: unknown;
+    try {
+      await ts.graph_submit_outcome({
+        graph_id: "never.declared",
+        node_id: "work",
+        outcome_id: "done",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    if (!(caught instanceof OutcomeSubmissionRefusedError)) {
+      throw new Error("expected OutcomeSubmissionRefusedError, got " + String(caught));
+    }
+    expect(caught.reason).toBe("unknown-graph");
+    expect(caught.message).toContain("graph_declare");
+  });
+
+  it("refuses a graph whose declared plan never reached the store", async () => {
+    const ts = createGraphToolSet();
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    let caught: unknown;
+    try {
+      await ts.graph_submit_outcome({
+        graph_id: declared.graph_id,
+        node_id: "work",
+        outcome_id: "done",
+      });
+    } catch (error) {
+      caught = error;
+    }
+    if (!(caught instanceof OutcomeSubmissionRefusedError)) {
+      throw new Error("expected OutcomeSubmissionRefusedError, got " + String(caught));
+    }
+    expect(caught.reason).toBe("no-state-directory");
+  });
+});
+
+// ── Registration and the single completion source ───────────────────────────
+
+describe("graph_submit_outcome — registration and completion authority", () => {
+  it("registers additively with exactly the minimum model-facing args", () => {
+    const tools = createGraphTools(undefined, { directory: "/tmp" });
+    expect(Object.keys(tools)).toContain("graph_submit_outcome");
+    const def = tools.graph_submit_outcome;
+    expect(def).toBeDefined();
+    if (def === undefined) return;
+    expect(Object.keys(def.args).sort()).toEqual([
+      "data",
+      "evidence_refs",
+      "graph_id",
+      "node_id",
+      "outcome_id",
+    ]);
+    // No attempt, submission or plan-revision arg exists to supply.
+    expect(def.args.attempt_id).toBeUndefined();
+    expect(def.args.submission_id).toBeUndefined();
+    expect(def.args.plan_revision).toBeUndefined();
+    expect(def.args.graphId).toBeUndefined();
+  });
+
+  it("executes through the registered tool and renders a legacy refusal as a clear failure", async () => {
+    const dir = makeTmpDir("submit-outcome-registered-");
+    const ts = createGraphToolSet({ stateDir: dir, outcomeNow: NOW });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    await sweep(dir, []);
+    const tools = createGraphTools(undefined, { toolset: ts });
+    const def = tools.graph_submit_outcome;
+    if (def === undefined) throw new Error("graph_submit_outcome is not registered");
+    const out = await def.execute(
+      { graph_id: declared.graph_id, node_id: "work", outcome_id: "done" },
+      makeContext(),
+    );
+    const parsed: unknown = JSON.parse(String(out));
+    expect(parsed).toMatchObject({ decision: "accepted", attempt_id: "work#1" });
+
+    const legacy = ts.graph_create({ name: "legacy.registered" });
+    const failed = await def.execute(
+      { graph_id: legacy.graph_id, node_id: "A", outcome_id: "done" },
+      makeContext(),
+    );
+    expect(String(failed)).toContain("graph_submit_outcome failed:");
+    expect(String(failed)).toContain("LEGACY");
+  });
+
+  it("is the ONLY completion source: every legacy entry point refuses and the legacy port is never called", async () => {
+    const dir = makeTmpDir("submit-outcome-authority-");
+    const legacyPort = new CountingDispatch();
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      dispatch: legacyPort,
+      outcomeNow: NOW,
+    });
+    const declared = ts.graph_declare({ declaration: LINEAR });
+    const graphId = declared.graph_id;
+    await sweep(dir, []);
+
+    // Every legacy operation refuses the declared graph before touching a node.
+    const refusals: unknown[] = [];
+    for (const call of [
+      () => ts.graph_run({ graph_id: graphId }),
+      () => ts.graph_run({ graph_id: graphId, dry_run: true }),
+      () => ts.graph_cancel({ graph_id: graphId }),
+      () => ts.graph_add_node({ graph_id: graphId, id: "X", agent: "a", prompt: "p" }),
+      () => ts.graph_approve({ graph_id: graphId, node_id: "work", action: "approve" }),
+    ]) {
+      try {
+        await call();
+        refusals.push(undefined);
+      } catch (error) {
+        refusals.push(error);
+      }
+    }
+    expect(refusals.every((entry) => entry instanceof OutcomeProtocolUnavailableError)).toBe(
+      true,
+    );
+    expect(legacyPort.calls).toBe(0);
+
+    // The only settlement on record came from the submission ingress.
+    const accepted = await ts.graph_submit_outcome({
+      graph_id: graphId,
+      node_id: "work",
+      outcome_id: "done",
+    });
+    expect(accepted.decision).toBe("accepted");
+    const ledger = await openLedger(dir);
+    try {
+      const events = ledger.acceptedEvents(graphId);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.attemptId).toBe("work#1");
+    } finally {
+      ledger.close();
+    }
+    expect(legacyPort.calls).toBe(0);
+  });
+});

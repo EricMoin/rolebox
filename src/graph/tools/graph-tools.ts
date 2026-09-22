@@ -134,6 +134,13 @@ import {
   type GraphDeclareArgs,
   type GraphDeclareResult,
 } from "./declare-graph.ts";
+import {
+  submitDeclaredOutcome,
+  type GraphSubmitOutcomeArgs,
+  type GraphSubmitOutcomeResult,
+} from "./submit-outcome.ts";
+import type { OutcomeDispatchSeam } from "../outcome/runtime.ts";
+import type { ValidatorRegistry } from "../outcome/validators.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { enqueueNotify } from "../../dispatch/notification.ts";
@@ -368,6 +375,33 @@ export interface GraphToolSetDeps {
    * `unresolved-contract` rather than bound to something unverified.
    */
   contracts?: ContractRegistry;
+  /**
+   * Optional dispatch seam the OUTCOME run path launches a node through
+   * (`graph_submit_outcome`). Executing the node's agent is the deferred
+   * effect-EXECUTION work, so the default is a no-op: the dispatch effect is
+   * durably recorded `pending`/`started` and a later recovery reconciles it.
+   */
+  outcomeDispatch?: OutcomeDispatchSeam;
+  /**
+   * Optional installed validator implementations for outcome-protocol graphs.
+   * The plan pins every acceptance requirement at an exact
+   * `{ validator, version }`; a requirement with no registered implementation is
+   * REFUSED rather than skipped, so absent means an EMPTY registry — a plan whose
+   * gates need a capability this process does not have can never read as
+   * accepted.
+   */
+  outcomeValidators?: ValidatorRegistry;
+  /**
+   * Root every outcome evidence reference must resolve inside. Defaults to
+   * `directory` (the same working directory graph dispatches use).
+   */
+  outcomeArtifactRoot?: string;
+  /**
+   * Epoch-millisecond clock for an outcome submission. Time is an explicit
+   * protocol input, so a caller may pin it; absent → the runtime reads
+   * `Date.now()`. The receipt records exactly this value.
+   */
+  outcomeNow?: number;
 }
 
 // ── Tool parameter shapes (plain objects — subtask 6 wraps with zod) ─────────
@@ -1704,6 +1738,62 @@ export class GraphToolSet {
     const persisted = persistDeclaredGraph(built, this.deps.stateDir);
     this.declaredGraphs.set(built.graphId, { graph: built, persisted });
     return declaredGraphResult(built, { persisted, preserved: false });
+  }
+
+  // ── graph_submit_outcome ───────────────────────────────────────────────────
+
+  /**
+   * Submit one worker proposal to a DECLARED graph's outcome run path (C3c).
+   *
+   * This is the model-facing `submit_outcome` capability of the outcome
+   * protocol, and it is the ONLY completion source for such a graph: an
+   * accepted outcome committed through this ingress is what settles a node.
+   * There is no legacy completion on this path — a declared graph has no legacy
+   * runtime instance, every legacy entry point refuses it
+   * ({@link refuseDeclaredGraph}), and no severity-ranked signal is read, merged
+   * or synthesized into an answer here.
+   *
+   * The caller supplies the minimum a worker knows: graph, node, outcome,
+   * optional data, optional evidence references. Attempt id, submission id and
+   * plan revision are NOT accepted; {@link submitDeclaredOutcome} resolves the
+   * node's contract from the graph's PERSISTED compiled plan and the outcome
+   * runtime derives the execution identity from its own state and the
+   * proposal's canonical digest. An extra key on the caller's object is never
+   * read.
+   *
+   * Refusals that must be repaired and retried are RETURNED in the result
+   * (`refusals`), together with a rejected decision's per-requirement outcomes.
+   * A graph this ingress does not serve at all — an unknown id, a LEGACY v2
+   * graph, a plan that never reached the store — throws
+   * {@link OutcomeSubmissionRefusedError} BEFORE a ledger is opened, so nothing
+   * is written.
+   */
+  async graph_submit_outcome(
+    args: GraphSubmitOutcomeArgs,
+    _invokingSessionId?: string,
+    _agent?: string,
+  ): Promise<GraphSubmitOutcomeResult> {
+    return submitDeclaredOutcome(
+      {
+        workspaceDir: this.deps.stateDir,
+        graphId: args.graph_id,
+        declaredInMemory: this.declaredGraphs.has(args.graph_id),
+        legacyInMemory: this.registry.has(args.graph_id),
+      },
+      args,
+      {
+        ...(this.deps.outcomeDispatch === undefined
+          ? {}
+          : { dispatch: this.deps.outcomeDispatch }),
+        ...(this.deps.outcomeValidators === undefined
+          ? {}
+          : { validators: this.deps.outcomeValidators }),
+        artifactRoot: this.deps.outcomeArtifactRoot ?? this.deps.directory ?? ".",
+        ...(this.deps.outcomeNow === undefined
+          ? {}
+          : { now: this.deps.outcomeNow }),
+      },
+    );
   }
 
   // ── graph_run ──────────────────────────────────────────────────────────────

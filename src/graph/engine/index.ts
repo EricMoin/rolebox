@@ -147,9 +147,11 @@ export interface RecoveryReport {
    *   ({@link executionProtocol} names it). Since C3b the shipped loader BINDS
    *   the outcome protocol through a registered handler, so such a record loads
    *   as `valid`; adopting it here would run a declared graph under legacy
-   *   signal rules, and restart recovery for the outcome protocol is a later
-   *   slice. Nothing is adopted, dispatched or written — the record is
-   *   preserved exactly as it is.
+   *   signal rules. Restart recovery for the outcome protocol lives on the
+   *   OUTCOME path instead (`src/graph/outcome/recovery.ts`, driven by the
+   *   startup sweep, which reads the SAVED plan and the ledger state), so this
+   *   refusal is a routing guard, not a missing capability. Nothing is adopted,
+   *   dispatched or written — the record is preserved exactly as it is.
    */
   status: "no_state" | "recovered" | "degraded" | "protocol_refused";
   /**
@@ -1254,10 +1256,13 @@ class EngineRuntimeImpl implements EngineRuntime {
    *    a clean no-op (first run), and a VALID record bound to a protocol this
    *    legacy path does not own (since C3b: the outcome protocol) is REFUSED as
    *    `protocol_refused` without adopting or writing anything (see
-   *    {@link RecoveryReport}). A non-ENOENT read failure (unreadable-but-
-   *    present file) propagates out of `recover()` — recovery fails explicitly
-   *    instead of silently re-provisioning a graph whose completed nodes would
-   *    be re-executed (review 05-F6/L22).
+   *    {@link RecoveryReport}). That record is not un-recoverable: the outcome
+   *    path resumes it (`src/graph/outcome/recovery.ts`), and this refusal is
+   *    what keeps a declared graph from being re-entered under legacy rules.
+   *    A non-ENOENT read failure (unreadable-but-present file) propagates out of
+   *    `recover()` — recovery fails explicitly instead of silently
+   *    re-provisioning a graph whose completed nodes would be re-executed
+   *    (review 05-F6/L22).
    * 2. Adopt the loaded state in place (the advance engine keeps referencing
    *    this object), clear the stale critical-section state the crashed
    *    process left behind (a stuck `advancingLock`, orphaned deferred
@@ -1295,16 +1300,18 @@ class EngineRuntimeImpl implements EngineRuntime {
     // DECLARED graph's record loads as `valid`. This LEGACY recovery path owns
     // protocol 1 alone: adopting that state would re-enter a declared graph
     // under legacy signal rules — reconciling, re-dispatching and ultimately
-    // REWRITING its persisted body through the legacy writer — and restart
-    // recovery for the outcome protocol is a LATER slice. Refuse the protocol
-    // BEFORE anything is adopted, dispatched or written; the record is
-    // preserved exactly as the declaration wrote it.
+    // REWRITING its persisted body through the legacy writer. C3c gives that
+    // record its own recovery (the startup sweep routes a protocol-2 record to
+    // `resumePersistedOutcomeGraph`, which reads the saved plan and the ledger
+    // state), so this is a ROUTING guard, not a missing capability: refuse the
+    // protocol BEFORE anything is adopted, dispatched or written, and leave the
+    // record exactly as the declaration wrote it.
     if (loaded.executionProtocol !== LEGACY_SIGNAL_PROTOCOL) {
       logWarn(
         `engine-recover: refused the state of graph "${this.state.graphId}": it is bound to ` +
           `execution protocol ${loaded.executionProtocol}, which this legacy recovery path does ` +
-          "not own — restart recovery for the outcome protocol is not implemented in this build, " +
-          "and the record was neither adopted nor rewritten",
+          "not own — the outcome protocol resumes through the outcome run path, and the record " +
+          "was neither adopted nor rewritten",
       );
       return {
         status: "protocol_refused",

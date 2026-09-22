@@ -688,14 +688,23 @@ export function engineStateSlug(graphId: string): string {
   return graphId.replace(SAFE_SLUG, "-");
 }
 
+/**
+ * Absolute path to a workspace's engine-state DIRECTORY:
+ * `<workspace>/.rolebox/state`.
+ *
+ * The one owner of the layout. The per-graph JSON files and the outcome
+ * protocol's acceptance ledger both live here, so a caller that must place
+ * either beside the other (the startup sweep, the `graph_submit_outcome`
+ * ingress) derives the directory from this function instead of re-spelling
+ * `.rolebox/state`.
+ */
+export function engineStateDir(directory: string): string {
+  return join(directory, ".rolebox", "state");
+}
+
 /** Absolute path to a graph's engine state file: `.rolebox/state/engine-{slug}.json`. */
 export function engineStatePath(directory: string, graphId: string): string {
-  return join(
-    directory,
-    ".rolebox",
-    "state",
-    `engine-${engineStateSlug(graphId)}.json`,
-  );
+  return join(engineStateDir(directory), `engine-${engineStateSlug(graphId)}.json`);
 }
 
 // ── Structured load results (storage-format-aware) ──────────────────────────
@@ -987,11 +996,22 @@ export class EnginePersistence {
    * normalized to `{ quorum: 1 }` with a `logWarn` (contract C1) — see
    * `normalizeJoinStrategy`.
    *
-   * This is the legacy null-only compatibility shell: it delegates to
+   * This is the legacy null-only compatibility WRAPPER: it delegates to
    * {@link loadForResume} and projects every non-`valid` kind onto `null`, so
    * callers that treat "no valid state" as one clean-start signal keep their
    * exact behavior. A caller that must distinguish the kinds (the startup
    * sweep) uses {@link loadForResume} instead.
+   *
+   * It is NOT a protocol filter, and it must not be read as one. The shipped
+   * execution-protocol registry registers BOTH protocols, so a persisted
+   * protocol-2 (outcome) state loads as `valid` and this method returns it
+   * exactly like a legacy record. The guard that keeps a declared graph out of
+   * the legacy runtime lives at the RECOVERY boundary, never here:
+   * `EngineRuntime.recover()` refuses any protocol but the legacy one, and the
+   * startup sweep routes a protocol-2 record to the outcome run path instead of
+   * building a legacy engine. Correcting this comment rather than the loader is
+   * deliberate — a loader that filtered protocols would be a second, weaker
+   * owner of a decision the recovery boundary already makes explicit.
    *
    * Non-ENOENT READ failures are NOT clean starts (review 05-F6 / L22): an
    * unreadable-but-present state file (EACCES, EISDIR, ...) is rethrown so the

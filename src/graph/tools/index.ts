@@ -9,9 +9,10 @@
  * so the imperative `graph_*` tools become platform-agnostic
  * {@link CanonicalToolDef}s consumable by `buildCanonicalTools`.
  *
- * C1 adds `graph_declare`, the v3 authoring ingress: it is ADDITIVE (a new
- * key in the `graph_*` namespace, nothing repurposed) and the eight original
- * tools keep their exact schemas.
+ * C1 adds `graph_declare`, the v3 authoring ingress, and C3c adds
+ * `graph_submit_outcome`, the outcome-protocol submission ingress: both are
+ * ADDITIVE (a new key in the `graph_*` namespace, nothing repurposed) and every
+ * existing tool keeps its exact schema.
  *
  * The arg schemas mirror `.rolebox/design/tool-merge-map.md` §2.2, adapted to
  * the real TypeScript arg shapes exported by `graph-tools.ts` (which are
@@ -213,6 +214,7 @@ export function createGraphTools(
     graph_add_edge: createGraphAddEdgeTool(toolset, opts.getEffectiveAgent),
     graph_add_loop: createGraphAddLoopTool(toolset, opts.getEffectiveAgent),
     graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
+    graph_submit_outcome: createGraphSubmitOutcomeTool(toolset),
     graph_run: createGraphRunTool(toolset, opts.getEffectiveAgent),
     graph_status: createGraphStatusTool(toolset),
     graph_cancel: createGraphCancelTool(toolset),
@@ -537,6 +539,70 @@ function createGraphDeclareTool(
   });
 }
 
+/**
+ * graph_submit_outcome — the outcome-protocol submission ingress (C3c).
+ *
+ * The model-facing `submit_outcome` capability: a worker claims one declared
+ * outcome on one node of a DECLARED (protocol 2) graph and the outcome runtime
+ * derives the execution identity, judges the plan's pinned gates and commits
+ * the decision atomically with the graph state. The args are the minimum a
+ * worker may supply — attempt id, submission id and plan revision are not
+ * accepted and cannot be supplied.
+ */
+function createGraphSubmitOutcomeTool(toolset: GraphToolSet): CanonicalToolDef {
+  return defineTool({
+    description:
+      "Submit a worker's claimed outcome for one node of a DECLARED " +
+      "(outcome-protocol) graph declared with graph_declare. This is the ONLY " +
+      "completion source for such a graph: the outcome runtime resolves the node's " +
+      "contract from the graph's SAVED compiled plan, derives the execution " +
+      "identity (graph, attempt, submission) from its own state and the proposal " +
+      "digest, runs every acceptance requirement the plan pins, and commits the " +
+      "decision together with the graph state. Supply graph_id, node_id, " +
+      "outcome_id and — only if the outcome declares them — data and " +
+      "evidence_refs. Attempt/submission identity and the plan revision are " +
+      "runtime provenance and are not accepted here. A refusal returns structured " +
+      "repair diagnostics (refusals) and writes nothing; a rejection returns the " +
+      "per-requirement outcomes that failed and leaves the attempt open. A LEGACY " +
+      "v2 graph is refused by name — it completes through the legacy signal " +
+      "protocol, never through this ingress.",
+    args: {
+      graph_id: z
+        .string()
+        .min(1)
+        .describe("The declared (outcome-protocol) graph to submit to."),
+      node_id: z
+        .string()
+        .min(1)
+        .describe("The plan node whose outcome is claimed."),
+      outcome_id: z
+        .string()
+        .min(1)
+        .describe("The outcome id that node declares in the compiled plan."),
+      data: z
+        .json()
+        .optional()
+        .describe(
+          "Optional outcome payload (any JSON value). The outcome's own gates " +
+            "decide what it must contain; it is digested into the submission id.",
+        ),
+      evidence_refs: z
+        .array(z.string().min(1))
+        .optional()
+        .describe(
+          "Optional artifact references the outcome's acceptance gates validate, " +
+            "each resolving inside the workspace artifact root.",
+        ),
+    },
+    async execute(args, context) {
+      try {
+        return json(await toolset.graph_submit_outcome(args, context?.sessionID));
+      } catch (err) {
+        return `graph_submit_outcome failed: ${errorText(err)}`;
+      }
+    },
+  });
+}
 /** graph_run — execute (or dry-run validate) a constructed graph. */
 function createGraphRunTool(
   toolset: GraphToolSet,

@@ -26,16 +26,16 @@
  *    store (`EnginePersistence`, the same version-2 layout and the same loader
  *    gates).
  *
- * THE BOUNDARY, STATED PLAINLY (C3b): the outcome protocol now HAS a registered
- * handler, and a declared graph runs through the outcome run path
+ * THE BOUNDARY, STATED PLAINLY (C3c): the outcome protocol has a registered
+ * handler, a declared graph runs through the outcome run path
  * (`src/graph/outcome/runtime.ts`) — entry nodes dispatched from THIS plan,
  * submissions accepted through the graph-scoped ingress, and the graph state
- * committed with the acceptance. The plan is persisted so that run path (and the
- * deferred restart-recovery slice) consumes THIS record. Every LEGACY entry
- * point still refuses the graph with {@link OutcomeProtocolUnavailableError}
- * instead of falling back to the legacy signal protocol, and restart recovery
- * for the outcome protocol is deferred. Nothing HERE dispatches, reduces or
- * accepts anything: this module only authors, compiles and persists.
+ * committed with the acceptance — and restart recovery resumes that SAME saved
+ * plan (`src/graph/outcome/recovery.ts`, driven by the startup sweep). Every
+ * LEGACY entry point still refuses the graph with
+ * {@link OutcomeProtocolUnavailableError} instead of falling back to the legacy
+ * signal protocol. Nothing HERE dispatches, reduces or accepts anything: this
+ * module only authors, compiles and persists.
  *
  * The state's `graphDeclaration` is a deliberately EMPTY legacy carrier: the
  * v3 declaration is not a v2 declaration, so none is fabricated. The compiled

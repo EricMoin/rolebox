@@ -123,7 +123,7 @@ export const PI_SUBAGENT_TOOLS: string[] = [
   "context_assemble",
   "signal",
   "graph_create", "graph_add_node", "graph_add_edge", "graph_add_loop",
-  "graph_declare",
+  "graph_declare", "graph_submit_outcome",
   "graph_run", "graph_status", "graph_cancel", "graph_approve",
   "task_search", "task_budget", "task_graph",
 ];
@@ -896,7 +896,11 @@ export default async function (pi: any): Promise<void> {
       graphRecoveryReport.recovered > 0 ||
       graphRecoveryReport.degraded.length > 0 ||
       graphRecoveryReport.migrationRequired.length > 0 ||
-      graphRecoveryReport.failed.length > 0
+      graphRecoveryReport.failed.length > 0 ||
+      // C3c: a first execution, a resume, or a refused outcome graph is
+      // operational evidence too — logging only when a legacy bucket moved
+      // would drop the outcome protocol's report on a restart that had none.
+      graphRecoveryReport.outcomeProtocol !== undefined
     ) {
       log.info("Interrupted graph engines recovered", {
         enabled: graphRecoveryEnabled,
@@ -910,6 +914,13 @@ export default async function (pi: any): Promise<void> {
         // counted as neither recovered nor failed.
         migrationRequired: graphRecoveryReport.migrationRequired,
         failed: graphRecoveryReport.failed.length,
+        // C3c: what the outcome protocol did — every graph started or resumed,
+        // every dispatch launched, every node left armed and every effect left
+        // UNSETTLED (a `started` row from a dead process is reported, never
+        // dropped). Absent for a legacy-only store.
+        ...(graphRecoveryReport.outcomeProtocol === undefined
+          ? {}
+          : { outcomeProtocol: graphRecoveryReport.outcomeProtocol }),
       });
     }
 

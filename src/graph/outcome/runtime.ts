@@ -34,14 +34,33 @@
  * sees the node already settled, contributes no effects and no state write, and
  * the graph stays where the first acceptance put it.
  *
- * SCOPE, STATED PLAINLY. This slice delivers the run path and its state seam.
- * The model-facing `submit_outcome` tool and its generated schema, the
- * protocol-aware dispatch COMPLETION BRIDGE (this runtime drives a synchronous
- * scripted seam instead), effect EXECUTION beyond calling that seam, and
- * restart recovery switched onto the persisted state are deliberately DEFERRED.
- * Nothing under `src/graph/engine`, `src/graph/tools` or `src/dispatch`
- * imports this module; a caller drives it directly, and a declared graph still
- * refuses every legacy entry point.
+ * RESTART RECOVERY IS `resume()` (C3c). It reads the graph state from the
+ * LEDGER, refuses a state bound to another plan revision, and continues the
+ * graph from that state: every UNSETTLED dispatch effect is launched through
+ * the seam (a pending effect is the crash-after-commit-before-launch window;
+ * a `started` effect from a dead process is reported, never re-run and never
+ * dropped), and every node the state records as in flight is reported as armed.
+ * Running it twice dispatches nothing the second time, because a launched
+ * effect is durably marked `started` BEFORE the seam runs. A graph with no
+ * state at all is STARTED from this runtime's plan — the same SAVED plan a
+ * later recovery continues (the review's D5), never a fresh reinterpretation.
+ *
+ * THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE. A graph bound to this
+ * protocol has no legacy runtime instance anywhere: it is not an entry of the
+ * toolset's legacy registry, every legacy tool entry point refuses it, and this
+ * module never imports `src/graph/engine/**` or `src/dispatch/**`. No
+ * severity-ranked signal and no synthesized answer can settle one of its nodes;
+ * only an accepted outcome committed through this runtime can (see
+ * `src/graph/tools/submit-outcome.ts`, which is the model-facing ingress into
+ * this same `submit`).
+ *
+ * SCOPE, STATED PLAINLY. C3c delivers `resume` here, the model-facing
+ * `graph_submit_outcome` ingress (`src/graph/tools/submit-outcome.ts`), and the
+ * startup sweep's route onto this runtime. Still DEFERRED: the protocol-aware
+ * dispatch COMPLETION BRIDGE (this runtime drives a synchronous scripted seam
+ * instead), effect EXECUTION beyond calling that seam, storage format 3 with
+ * its `2 -> 3` migrator, and the stage-D/E routing, loop and legacy-retirement
+ * work. The legacy v2 run and recovery paths are untouched.
  */
 
 import type { CompiledPlan } from "../compiler/plan.ts";
@@ -49,6 +68,7 @@ import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
   GraphStateRecord,
+  PendingEffectRecord,
   ReceiptRecord,
 } from "../ledger/types.ts";
 import {
@@ -145,7 +165,15 @@ export type OutcomeRuntimeRefusalCode =
   /** The route re-enters a settled node outside its declared loop group. */
   | "reentry-outside-loop"
   /** The state says an attempt settled and the ledger holds no such event. */
-  | "state-ledger-disagreement";
+  | "state-ledger-disagreement"
+  /**
+   * The persisted record is bound to the outcome protocol but carries no
+   * compiled plan (or no plan binding), so the run had nothing to resume FROM.
+   * Recovery never guesses a plan: an absent one is reported, not recompiled.
+   */
+  | "missing-persisted-plan"
+  /** A dispatch seam threw while launching an unsettled effect (C3c resume). */
+  | "dispatch-failed";
 
 /** One structured reason the runtime refused. */
 export interface OutcomeRuntimeRefusal {
@@ -199,6 +227,57 @@ export type OutcomeSubmissionResult =
       readonly kind: "not-committed";
       readonly decision: AcceptanceDecision;
       readonly verdict: Extract<SubmissionResult, { kind: "submitted" }>["verdict"];
+    };
+
+/** One node the persisted state records as in flight, awaiting an outcome. */
+export interface OutcomeArmedNode {
+  readonly nodeId: string;
+  /** The attempt a submission for this node must settle (runtime-minted). */
+  readonly attemptId: string;
+}
+
+/**
+ * What {@link OutcomeGraphRuntime.resume} produced.
+ *
+ * `started` and `resumed` carry the SAME three reports, because the first
+ * execution and a restart recovery must be indistinguishable to the caller that
+ * owns the effects:
+ * - `dispatched` — the dispatch requests this call actually launched (every
+ *   one a formerly `pending` effect, whose node the state already records as
+ *   in flight). A `started` effect is NEVER re-launched.
+ * - `armed` — every node the state records as dispatched, with its attempt, so
+ *   a caller can see what is awaiting a submission even when nothing was
+ *   launched (an entry dispatch recorded by `start()`, or work a dead process
+ *   began).
+ * - `unsettledEffects` — every effect still `pending` or `started` after this
+ *   call, read from the ledger. Nothing in this set is dropped or silently
+ *   rewound; a `started` row from a dead process is reported here.
+ *
+ * `refusals` on a started/resumed answer are per-effect diagnostics (an effect
+ * whose payload is unreadable, or whose node the state does not corroborate).
+ * They do not stop the rest of the resume; the effect they name stays unsettled
+ * and therefore also appears in `unsettledEffects`.
+ */
+export type OutcomeResumeResult =
+  | {
+      readonly kind: "started";
+      readonly state: OutcomeGraphState;
+      readonly dispatched: readonly OutcomeDispatchRequest[];
+      readonly armed: readonly OutcomeArmedNode[];
+      readonly unsettledEffects: readonly PendingEffectRecord[];
+      readonly refusals: readonly OutcomeRuntimeRefusal[];
+    }
+  | {
+      readonly kind: "resumed";
+      readonly state: OutcomeGraphState;
+      readonly dispatched: readonly OutcomeDispatchRequest[];
+      readonly armed: readonly OutcomeArmedNode[];
+      readonly unsettledEffects: readonly PendingEffectRecord[];
+      readonly refusals: readonly OutcomeRuntimeRefusal[];
+    }
+  | {
+      readonly kind: "refused";
+      readonly refusals: readonly OutcomeRuntimeRefusal[];
     };
 
 /** What the join reduced inside the acceptance transaction. */
@@ -330,8 +409,9 @@ export class OutcomeGraphRuntime {
       attemptSeq,
     });
     // ONE transaction for the starting snapshot. There is no acceptance to join
-    // yet, and the entry dispatches are recorded in the state (attempt ids) for
-    // the deferred restart-recovery slice; the seam runs only after the commit.
+    // yet, and the entry dispatches are recorded in the state (attempt ids), so
+    // `resume` reads them back as the armed set and reports each one; the seam
+    // runs only after the commit.
     this.ledger.runInTransaction((tx) => {
       tx.writeGraphState(stateRecordOf(state, at));
     });
@@ -462,6 +542,128 @@ export class OutcomeGraphRuntime {
   }
 
   /**
+   * Continue this graph from its PERSISTED state — the restart-recovery entry
+   * point (C3c).
+   *
+   * `start()` answers "begin this plan"; `submit()` answers "here is an
+   * outcome"; this answers "this process died — pick the run up from what is
+   * durably true", and it is the ONLY entry point that may do so. It:
+   *
+   * 1. reads the state from the LEDGER (never from a caller, never from a
+   *    fresh plan-derived default) and refuses a record bound to another graph
+   *    or another plan revision;
+   * 2. LAUNCHES every `pending` dispatch effect whose node the state records
+   *    as dispatched on exactly that attempt — the crash-after-commit-before-
+   *    launch window — after durably marking it `started`;
+   * 3. reports every effect still `pending` or `started` afterwards, so a
+   *    `started` effect a dead process left behind is never dropped and never
+   *    silently re-run;
+   * 4. reports every node the state records as in flight ("armed") with the
+   *    attempt a submission must settle.
+   *
+   * IDEMPOTENT. Nothing here re-applies a state: the only write is the effect
+   * status transition, and it moves `pending -> started` before the seam runs,
+   * so a second call finds the effect `started`, launches nothing, and reports
+   * the same ledger rows.
+   *
+   * NEVER STARTS FROM SCRATCH WHEN A STATE EXISTS. A state that cannot be read,
+   * or that is bound to another revision, is a REFUSAL — never a fresh run and
+   * never a rewritten record. Only a graph with NO state at all is started, and
+   * it is started from this runtime's plan (the saved one).
+   */
+  resume(now?: number): OutcomeResumeResult {
+    const at = this.readClock(now);
+    if (typeof at !== "number") return refused([at]);
+    const unavailable = this.protocolRefusal();
+    if (unavailable !== undefined) return refused([unavailable]);
+
+    let record: GraphStateRecord | undefined;
+    try {
+      record = this.ledger.readGraphState(this.graphId);
+    } catch (error) {
+      return refused([this.ledgerRefusal(error)]);
+    }
+
+    if (record === undefined) {
+      // FIRST EXECUTION. No state has ever been written for this graph, so the
+      // run begins from the SAVED plan — the same plan a later recovery reads
+      // back and continues (the review's D5), not a second interpretation of
+      // it. A concurrent process that started the graph between the read above
+      // and this write makes start() answer `already-started`; that state is
+      // then resumed below instead of being reported as a fresh start.
+      const started = this.start(at);
+      if (started.kind === "refused") return started;
+      if (started.kind === "started") {
+        const effects = this.unsettledEffectReading();
+        if ("code" in effects) return refused([effects]);
+        return {
+          kind: "started",
+          state: started.state,
+          dispatched: started.dispatched,
+          armed: armedNodesOf(started.state),
+          unsettledEffects: effects,
+          refusals: Object.freeze([]),
+        };
+      }
+      try {
+        record = this.ledger.readGraphState(this.graphId);
+      } catch (error) {
+        return refused([this.ledgerRefusal(error)]);
+      }
+      if (record === undefined) {
+        return refused([
+          {
+            code: "unreadable-state",
+            message:
+              "outcome-runtime: graph " +
+              JSON.stringify(this.graphId) +
+              " was reported already started, but the ledger holds no state snapshot for it — " +
+              "refusing to guess which state to continue",
+          },
+        ]);
+      }
+    }
+
+    // The state belongs to THIS graph before it is read as this plan's state:
+    // a record for another graph is a different, nameable disagreement than a
+    // record bound to another revision of this one.
+    if (record.graphId !== this.graphId) {
+      return refused([
+        {
+          code: "graph-mismatch",
+          path: "$.graphId",
+          message:
+            "outcome-runtime: the persisted state of " +
+            JSON.stringify(record.graphId) +
+            " was read for graph " +
+            JSON.stringify(this.graphId) +
+            " — the state names a different graph, so nothing was resumed",
+        },
+      ]);
+    }
+
+    let state: OutcomeGraphState;
+    try {
+      state = readOutcomeGraphState(record, this.plan);
+    } catch (error) {
+      return refused([this.stateRefusal(error)]);
+    }
+
+    const launched = this.launchUnsettledDispatches(state);
+    if ("refusal" in launched) return refused([launched.refusal]);
+    const effects = this.unsettledEffectReading();
+    if ("code" in effects) return refused([effects]);
+    return {
+      kind: "resumed",
+      state,
+      dispatched: Object.freeze(launched.launched),
+      armed: armedNodesOf(state),
+      unsettledEffects: effects,
+      refusals: Object.freeze(launched.refusals),
+    };
+  }
+
+  /**
    * The persisted state of this graph, or `undefined` when it never started.
    *
    * Throws an {@link OutcomeStateError} for a snapshot this build cannot read —
@@ -553,6 +755,123 @@ export class OutcomeGraphRuntime {
     return undefined;
   }
 
+  /**
+   * Launch the unsettled dispatch effects the STATE corroborates (C3c resume).
+   *
+   * Only a `pending` effect is a launch: the acceptance committed it and no
+   * process has begun it. `started` is deliberately NOT launched — a dead
+   * process began that work, and the protocol's answer to the
+   * crash-after-launch window is reconciliation by the effect's stable id, not
+   * a second launch; the row is reported as unsettled instead.
+   *
+   * The transition to `started` is written BEFORE the seam runs. That ordering
+   * is what makes a resume idempotent: a crash between the write and the launch
+   * leaves a `started` row the next recovery REPORTS rather than re-launches.
+   * The STATE is the authority on the arm set — an effect the state does not
+   * corroborate (wrong node, wrong attempt, node not dispatched) is never
+   * launched and is reported as a refusal; it stays unsettled.
+   */
+  private launchUnsettledDispatches(state: OutcomeGraphState):
+    | {
+        readonly launched: readonly OutcomeDispatchRequest[];
+        readonly refusals: readonly OutcomeRuntimeRefusal[];
+      }
+    | { readonly refusal: OutcomeRuntimeRefusal } {
+    let effects: readonly PendingEffectRecord[];
+    try {
+      effects = this.ledger.pendingEffects(this.graphId);
+    } catch (error) {
+      return { refusal: this.ledgerRefusal(error) };
+    }
+    const launched: OutcomeDispatchRequest[] = [];
+    const refusals: OutcomeRuntimeRefusal[] = [];
+    for (const effect of effects) {
+      if (effect.kind !== "dispatch" || effect.status !== "pending") continue;
+      const reading = readDispatchRequest(
+        effect.payload,
+        this.graphId,
+        this.planRevision,
+      );
+      if (reading.kind === "malformed") {
+        refusals.push({
+          code: "malformed-effect",
+          path: "$.payload",
+          message: reading.message,
+        });
+        continue;
+      }
+      const armed = armedNodeOf(state, reading.request.nodeId);
+      if (armed === undefined || armed.attemptId !== reading.request.attemptId) {
+        refusals.push({
+          code: "state-ledger-disagreement",
+          path: "$.attemptId",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effect.effectId) +
+            " names node " +
+            JSON.stringify(reading.request.nodeId) +
+            " on attempt " +
+            JSON.stringify(reading.request.attemptId) +
+            ", but the persisted state does not record that attempt as in flight — " +
+            "the effect was not launched and stays unsettled",
+        });
+        continue;
+      }
+      const transition = this.ledger.markEffectStarted(this.graphId, effect.effectId);
+      if (transition.kind === "missing" || transition.kind === "refused") {
+        refusals.push({
+          code: "state-ledger-disagreement",
+          path: "$.effectId",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effect.effectId) +
+            " could not be marked started (" +
+            transition.reason +
+            ") — it was not launched and stays unsettled",
+        });
+        continue;
+      }
+      try {
+        this.dispatch(reading.request);
+      } catch (error) {
+        refusals.push({
+          code: "dispatch-failed",
+          path: "$.effectId",
+          message:
+            "outcome-runtime: the dispatch seam threw while launching effect " +
+            JSON.stringify(effect.effectId) +
+            " (" +
+            errorText(error) +
+            ") — the effect is durably 'started' and is reported as unsettled rather " +
+            "than silently re-launched or dropped",
+        });
+        continue;
+      }
+      launched.push(reading.request);
+    }
+    return {
+      launched: Object.freeze(launched),
+      refusals: Object.freeze(refusals),
+    };
+  }
+
+  /**
+   * Every effect the ledger still holds UNSETTLED (`pending` or `started`), or
+   * a refusal when the ledger cannot answer.
+   *
+   * This is the reporting half of recovery: a `started` row a dead process
+   * left behind is surfaced here, exactly as a `pending` row that could not be
+   * launched is. Neither is ever dropped, and neither is silently rewound.
+   */
+  private unsettledEffectReading():
+    | readonly PendingEffectRecord[]
+    | OutcomeRuntimeRefusal {
+    try {
+      return this.ledger.pendingEffects(this.graphId);
+    } catch (error) {
+      return this.ledgerRefusal(error);
+    }
+  }
   /**
    * Derive the trusted execution identity of one submission.
    *
@@ -724,10 +1043,20 @@ export class OutcomeGraphRuntime {
     });
   }
 
-  /** Map a state-reading failure onto the runtime's refusal vocabulary. */
+  /**
+   * Map a state-reading failure onto the runtime's refusal vocabulary.
+   *
+   * A state the strict reader refuses for an IDENTITY disagreement (another
+   * graph or another plan revision) is reported as exactly that — the message
+   * names which one — while a body this build cannot read stays
+   * `unreadable-state`. Collapsing both would hide the one recovery failure a
+   * caller can actually act on (a state bound to a superseded plan revision).
+   */
   private stateRefusal(error: unknown): OutcomeRuntimeRefusal {
     if (error instanceof OutcomeStateError) {
-      return { code: "unreadable-state", message: error.message };
+      return error.problem === "state-plan-mismatch"
+        ? { code: "plan-revision-mismatch", message: error.message }
+        : { code: "unreadable-state", message: error.message };
     }
     return {
       code: "unreadable-state",
@@ -756,6 +1085,118 @@ export class OutcomeGraphRuntime {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Every node the state records as in flight, with the attempt that must settle it. */
+function armedNodesOf(state: OutcomeGraphState): readonly OutcomeArmedNode[] {
+  const armed: OutcomeArmedNode[] = [];
+  for (const node of state.nodes) {
+    if (node.status !== "dispatched" || node.attemptId === undefined) continue;
+    armed.push(Object.freeze({ nodeId: node.nodeId, attemptId: node.attemptId }));
+  }
+  return Object.freeze(armed);
+}
+
+/** The state's progress for one node, when that node is currently in flight. */
+function armedNodeOf(
+  state: OutcomeGraphState,
+  nodeId: string,
+): OutcomeArmedNode | undefined {
+  for (const node of state.nodes) {
+    if (node.nodeId !== nodeId) continue;
+    if (node.status !== "dispatched" || node.attemptId === undefined) return undefined;
+    return Object.freeze({ nodeId: node.nodeId, attemptId: node.attemptId });
+  }
+  return undefined;
+}
+
+/** What reading a persisted dispatch-effect payload produced. */
+type DispatchPayloadReading =
+  | { readonly kind: "ok"; readonly request: OutcomeDispatchRequest }
+  | { readonly kind: "malformed"; readonly message: string };
+
+/**
+ * Read one dispatch effect's persisted payload as a dispatch request.
+ *
+ * The payload is JSON the ledger stored verbatim, so it is UNTRUSTED here
+ * even though this runtime wrote it: the graph and plan revision it names must
+ * be this runtime's own, every field must be a non-empty string, and anything
+ * else is a malformed effect that is REPORTED rather than launched at a
+ * guessed target.
+ */
+function readDispatchRequest(
+  payload: unknown,
+  graphId: string,
+  planRevision: string,
+): DispatchPayloadReading {
+  if (!isRecord(payload)) {
+    return {
+      kind: "malformed",
+      message:
+        "a dispatch effect payload is " +
+        describeValue(payload) +
+        ", not a dispatch request record",
+    };
+  }
+  const namedGraph = nonEmptyString(payload.graphId);
+  if (namedGraph !== graphId) {
+    return {
+      kind: "malformed",
+      message:
+        "dispatch request names graph " +
+        describeValue(payload.graphId) +
+        ", not " +
+        JSON.stringify(graphId),
+    };
+  }
+  const namedRevision = nonEmptyString(payload.planRevision);
+  if (namedRevision !== planRevision) {
+    return {
+      kind: "malformed",
+      message:
+        "dispatch request names plan revision " +
+        describeValue(payload.planRevision) +
+        ", not " +
+        JSON.stringify(planRevision),
+    };
+  }
+  const nodeId = nonEmptyString(payload.nodeId);
+  const attemptId = nonEmptyString(payload.attemptId);
+  const agent = nonEmptyString(payload.agent);
+  const prompt = nonEmptyString(payload.prompt);
+  if (
+    nodeId === undefined ||
+    attemptId === undefined ||
+    agent === undefined ||
+    prompt === undefined
+  ) {
+    return {
+      kind: "malformed",
+      message:
+        "a dispatch request carries a node, attempt, agent and prompt that are not all " +
+        "non-empty strings",
+    };
+  }
+  return {
+    kind: "ok",
+    request: Object.freeze({
+      graphId,
+      planRevision,
+      nodeId,
+      attemptId,
+      agent,
+      prompt,
+    }),
+  };
+}
+
+/** A non-empty string, or `undefined` — the dispatch payload's field rule. */
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Whether a value is a non-array record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 /**
  * The submission id of one proposal: its canonical content digest.
  *

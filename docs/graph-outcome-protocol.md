@@ -936,6 +936,84 @@ typed-predicate vocabulary, progress evaluators, and the schema, command-check
 and approval validators. Legacy v2 graphs keep their file persistence and their
 run path unchanged: nothing here imports or alters them.
 
+(SUPERSEDED IN PART BY C3c, below: the model-facing `graph_submit_outcome`
+ingress and restart recovery onto the persisted state are DELIVERED there. The
+completion-bridge selection rule and effect execution beyond the dispatch seam
+remain deferred.)
+
+C3c COMPLETES THE VERTICAL PATH FOR OUTCOME-PROTOCOL GRAPHS — declare, save
+the plan, submit, accept, duplicate receipt, restart recovery — WITH THE FIRST
+EXECUTION AND THE RECOVERY SHARING ONE SAVED PLAN.
+
+`src/graph/tools/submit-outcome.ts` is the model-facing ingress
+(`graph_submit_outcome`, the doc's graph-scoped `submit_outcome` capability).
+Its args are the MINIMUM a worker may supply — `graph_id`, `node_id`,
+`outcome_id`, optional `data`, optional `evidence_refs` — and it is registered
+additively beside the existing `graph_*` tools, whose schemas are unchanged.
+Attempt id, submission id and plan revision are NOT args: the tool resolves the
+node's contract from the graph's PERSISTED compiled plan (never from a
+declaration argument and never by recompiling), and
+`OutcomeGraphRuntime.submit` derives the attempt from the state and the
+submission id from the proposal's canonical digest, so forging any of them
+cannot move the execution (a test forges all of them). The result carries the
+decision, the ledger verdict (including `replayed`), a rejected decision's
+per-requirement outcomes, and structured repair diagnostics on a refusal — which
+writes nothing. A LEGACY v2 graph is refused BY NAME before a ledger is opened:
+the signal protocol owns that graph, and this ingress never synthesizes an
+answer for it.
+
+RESTART RECOVERY IS REAL, AND IT REUSES THE SAME PLAN.
+`OutcomeGraphRuntime.resume` reads the graph state from the LEDGER, refuses a
+record bound to another graph or another plan revision, and continues from that
+state: a `pending` dispatch effect the state corroborates is launched (the
+crash-after-commit-before-launch window) after being durably marked `started`,
+a `started` effect a dead process left behind is REPORTED as unsettled and
+never re-launched or dropped, and every node the state records as in flight is
+reported as armed with the attempt a submission must settle. Marking the effect
+`started` BEFORE the seam runs is what makes a second resume dispatch nothing.
+A graph with NO state is a FIRST EXECUTION from the runtime's plan — the same
+saved plan a later recovery reads back. `src/graph/outcome/recovery.ts` is the
+composition seam: it reads the persisted plan and its binding, refuses a
+missing plan (`missing-persisted-plan`) or a plan/binding revision
+disagreement (`plan-revision-mismatch`) by name, and hands the runtime that
+plan. `engine-startup.ts` routes every valid protocol-2 record there instead
+of skipping it, and reports the optional `outcomeProtocol` bucket —
+`started`, `resumed`, `dispatched`, `armed`, `unsettledEffects`,
+`refused` — so a resume is evidence rather than a count. A graph whose state
+exists is never started from scratch, and a mismatched state is reported and
+left exactly as it was. The LEGACY resume entry `EngineRuntime.recover()`
+keeps refusing protocol 2 with `protocol_refused`: that guard is the routing
+boundary, not a missing capability, and a legacy-only store keeps exactly its
+old report shape (the bucket is absent).
+
+THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE — verified, not assumed.
+A declared graph is never an entry of the legacy registry, every legacy tool
+entry point (`graph_run` including `dry_run`, construction, cancel, approve,
+targeted status) refuses it before a node is read, no legacy engine is built for
+it, and the outcome runtime neither imports `src/graph/engine/**` nor reads a
+severity-ranked signal or a synthesized answer. A test declares and starts a
+graph, submits through the ingress, and shows every legacy entry point refusing
+with the legacy dispatch port never called.
+
+`EnginePersistence.load()` is NOT a protocol filter: under the shipped registry
+a protocol-2 record loads as `valid` and is returned like any other. The guard
+lives at the RECOVERY boundary (the legacy `recover()` refusal above, and the
+sweep's protocol routing); the stale "legacy null-only compatibility shell"
+comment was corrected in C3c to say exactly that.
+
+DEFERRED by this slice, and not implied by it: stage D — moving outcome ROUTING,
+loops and natural-completion policy onto the new path, progress evaluators, and
+the protocol-aware dispatch COMPLETION BRIDGE (the run path drives a synchronous
+scripted seam and performs no bridge selection); stage E — draining or
+migrating legacy executions and retiring the legacy execution path; effect
+EXECUTION beyond calling the dispatch seam (an effect is recorded and launched,
+never retried by a second process); and the contract/validator registries'
+POLICY layer (which requirements are mandatory, and the schema,
+command-check and approval validators). Storage format 3 with its `2 -> 3`
+migrator and the `src/graph/persistence/load.ts` module move also remain
+deferred. Legacy v2 graphs keep their file persistence and their run and
+recovery paths unchanged: nothing in C3c alters them.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |
