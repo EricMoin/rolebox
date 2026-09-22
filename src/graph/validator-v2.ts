@@ -75,8 +75,9 @@
  *     discovery (`checkLoopGroupRoots`), so the cycle can never activate and
  *     the graph deadlocks at runtime.
  *
- * Reuses the Tarjan SCC approach from ./loop-detector.ts (which operates on v1
- * FlowEdge) by way of a self-contained v2 EdgeDeclaration adaptation.
+ * The Tarjan SCC itself lives in the shared `./cycle-detection.ts` module, so
+ * this validator and the v3 compiled plan's cycle-containment rule apply one
+ * cycle semantics rather than two adaptations of the same algorithm.
  *
  * Design reference: .rolebox/design/dag-yaml-schema.md §5, graph-model.md §4.
  */
@@ -84,6 +85,11 @@
 import type { EdgeDeclaration } from "../types.graph-v2.ts";
 import type { GraphDocument } from "./parser-v2.ts";
 import { KNOWN_CONDITIONS } from "../function/conditions.ts";
+import {
+  hasDirectedCycle,
+  isCyclicComponent,
+  stronglyConnectedComponents,
+} from "./cycle-detection.ts";
 
 /**
  * Matches a `name(arg)` condition call — mirrors `CALL_RE` in
@@ -670,7 +676,7 @@ function checkCycleContainment(
   for (const group of graph.loop_groups ?? []) {
     for (const nodeId of group.nodes) covered.add(nodeId);
   }
-  const { components, selfLoop } = tarjanScc(graph.edges);
+  const { components, selfLoop } = stronglyConnectedComponents(graph.edges);
   for (const component of components.values()) {
     if (!isCyclicComponent(component, selfLoop)) continue;
     const nodes = new Set(component);
@@ -695,88 +701,13 @@ function checkCycleContainment(
 
 // ── Tarjan SCC over v2 EdgeDeclaration ───────────────────────────────────
 
-interface TarjanResult {
-  components: Map<number, string[]>;
-  selfLoop: Set<string>;
-}
-
 /**
- * Compute strongly-connected components over a set of v2 edges. Nodes are
- * derived from the edges themselves (a node absent from every edge is acyclic
- * by definition and needs no component).
+ * True when the given edge set contains at least one directed cycle.
+ *
+ * The algorithm itself lives in the shared `./cycle-detection.ts` module so the
+ * v3 compiled plan applies the SAME cycle semantics; this export is retained
+ * (and re-exported as `hasCycleV2` by the package barrel) for the v2 surface.
  */
-function tarjanScc(edges: EdgeDeclaration[]): TarjanResult {
-  const nodeSet = new Set<string>();
-  for (const edge of edges) {
-    nodeSet.add(edge.from);
-    nodeSet.add(edge.to);
-  }
-  const nodes = [...nodeSet];
-
-  const adj = new Map<string, string[]>();
-  const selfLoop = new Set<string>();
-  for (const node of nodes) adj.set(node, []);
-  for (const edge of edges) {
-    if (edge.from === edge.to) selfLoop.add(edge.from);
-    adj.get(edge.from)!.push(edge.to);
-  }
-
-  const indices = new Map<string, number>();
-  const lowlink = new Map<string, number>();
-  const onStack = new Set<string>();
-  const stack: string[] = [];
-  const components = new Map<number, string[]>();
-
-  let index = 0;
-  let componentId = 0;
-
-  function strongConnect(node: string): void {
-    indices.set(node, index);
-    lowlink.set(node, index);
-    index++;
-    stack.push(node);
-    onStack.add(node);
-
-    for (const neighbor of adj.get(node) ?? []) {
-      if (!indices.has(neighbor)) {
-        strongConnect(neighbor);
-        lowlink.set(node, Math.min(lowlink.get(node)!, lowlink.get(neighbor)!));
-      } else if (onStack.has(neighbor)) {
-        lowlink.set(node, Math.min(lowlink.get(node)!, indices.get(neighbor)!));
-      }
-    }
-
-    if (lowlink.get(node) === indices.get(node)) {
-      const component: string[] = [];
-      let popped: string;
-      do {
-        popped = stack.pop()!;
-        onStack.delete(popped);
-        component.push(popped);
-      } while (popped !== node);
-      components.set(componentId, component);
-      componentId++;
-    }
-  }
-
-  for (const node of nodes) {
-    if (!indices.has(node)) strongConnect(node);
-  }
-
-  return { components, selfLoop };
-}
-
-/** A component is cyclic when it has >1 node or is a self-loop. */
-function isCyclicComponent(component: string[], selfLoop: Set<string>): boolean {
-  if (component.length > 1) return true;
-  return selfLoop.has(component[0]);
-}
-
-/** True when the given edge set contains at least one directed cycle. */
 export function hasCycle(edges: EdgeDeclaration[]): boolean {
-  const { components, selfLoop } = tarjanScc(edges);
-  for (const component of components.values()) {
-    if (isCyclicComponent(component, selfLoop)) return true;
-  }
-  return false;
+  return hasDirectedCycle(edges);
 }

@@ -28,10 +28,12 @@
  * - `contractRefsEqual` / `isContractRef` — identity comparison and the
  *   structural guard trust boundaries use.
  *
- * Binding a `ContractRef` to a node or a retained compiled plan, and refusing
- * a mismatched binding at load, needs the compiled-plan record shape that does
- * not exist yet: that is the NEXT slice, so no declaration, engine-state,
- * loader or compiler change is made here.
+ * B8 adds the CONTENT / IDENTITY split a durable record needs:
+ * `ContractContentSnapshot` is a snapshot with no identity (one body can
+ * belong to several `(id, revision)` identities) and `ContractIdentityIndex`
+ * maps each identity to the content digest it names. The persisted plan record
+ * and plan binding key content by digest and carry that index separately, so
+ * two identities sharing one body verify instead of overwriting each other.
  *
  * Dependency leaf: the single import is `node:crypto`, so any persistence,
  * loader, dispatch or engine module may depend on it without creating a cycle
@@ -72,6 +74,38 @@ export interface ContractSnapshot {
   readonly ref: ContractRef;
   readonly body: unknown;
 }
+
+/**
+ * CONTENT ONLY: the body of one contract snapshot, with no identity attached.
+ *
+ * A durable record keys its content by the canonical digest of this body, and
+ * one body can legitimately belong to SEVERAL `(id, revision)` identities
+ * (two identities republishing byte-identical content). Carrying a single
+ * `ref` on the entry would therefore have to pick one identity and silently
+ * overwrite the other; the identity mapping lives in
+ * {@link ContractIdentityIndex} instead, so content is deduplicated and
+ * identity stays a separate index.
+ */
+export interface ContractContentSnapshot {
+  readonly body: unknown;
+}
+
+/**
+ * The identity index of a persisted contract record: `id` → `revision` →
+ * content digest. Every own entry names one exact `(id, revision)` identity
+ * and the digest of the content it resolves to.
+ *
+ * `revision` is an OPAQUE IMMUTABLE identifier and a plain string key here:
+ * it is never ordered, never a range, and two different revisions are simply
+ * two keys. The nested record shape makes "one identity, one digest" structural
+ * (a flat composite key could collide for ids containing the separator), and
+ * the digest it names must have a content snapshot whose body hashes back to
+ * it — a binding resolves THROUGH this index, so an identity that is absent
+ * from it cannot resolve.
+ */
+export type ContractIdentityIndex = Readonly<
+  Record<string, Readonly<Record<string, string>>>
+>;
 
 // ── Canonical digest ────────────────────────────────────────────────────────
 

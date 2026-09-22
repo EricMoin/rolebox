@@ -409,7 +409,10 @@ Topology: the plan module's own rule owner `inspectCompiledTopology` applies the
 compiler plan-level rules — unique node ids, every edge endpoint declared,
 every edge outcome declared by its source, loop members and routes declared, a
 positive traversal cap — and every topology node id must be one the persisted
-state declares. The record `nodeBindings` index is the ONE field the plan
+state declares. (EXTENDED BY B9: the same inspector now owns the complete rule
+set — required outcomes, cycle containment, continuation paths, explicit
+terminals and acceptance pinning — and the compiler runs it over its own output
+too. See the B9 paragraph below.) The record `nodeBindings` index is the ONE field the plan
 revision does not cover, so it is checked as the projection of the plan nodes
 it claims to be: every node declaring a `contractRef` must appear with that
 same ref, a node declaring none must not appear, and every key must be a
@@ -423,17 +426,97 @@ recomputed at load from the persisted values, so a tampered body or a
 revision copied from another plan is refused. When BOTH records are present
 they must AGREE: equal `planRevision`, every digest the binding references
 (snapshot keys and node binding refs) is pinned by the plan, and every node
-the binding binds is bound by the plan to the same ref. EITHER record alone is
+the binding binds is bound by the plan to the same ref.
+(SUPERSEDED BY B8: the contract rules above are re-meant on a content/identity
+split — a snapshot entry carries no `ref`, a node binding resolves through the
+`contractIdentities` index, and the plan body the revision addresses includes
+that index. See the B8 paragraph below. The topology, index-projection,
+identity and agreement checks themselves are unchanged.) EITHER record alone is
 legal and verified on its own terms; requiring both would refuse states this
 build can still verify, and refusing a lone binding would silently drop the
 set B6 accepted. Every failure is `corrupt(contract)` naming the failed check,
 and the decoder and loader stay total, so a hostile record (a throwing getter,
 a Proxy, a reference cycle, a `BigInt`) is contained rather than thrown.
 
-RECOVERY IS NOT SWITCHED ONTO THE PLAN by this slice. The engine still resumes
-from the retained declaration, nothing consumes `compiledPlan`, no producer
-writes one at graph creation, and a comment at the field says so. B7 makes the
-record, its rules and its cross-checks exist before anything depends on them.
+B8 FIXES TWO REPRODUCED DEFECTS against the B stage without switching recovery
+onto the plan.
+
+DEFECT 1 — recovery and adoption silently DROPPED the new persisted identity
+fields. `hydrateEngineState` and `adoptPriorNodeStates` copied a fixed field
+set and knew nothing about `executionProtocolVersion`, `compiledPlan` or
+`planBinding`, and `snapshotEngineState` (the `status()` snapshot the adopt
+path receives) dropped them too, so a state loaded with a plan came back
+without one and re-serialized with no plan key. The required semantics are NOT
+a mechanical copy:
+
+- HYDRATE (same graph, same persisted state) carries all three intact and
+  DEEP-CLONED, so the target and the source never share a record or a contract
+  body.
+- ADOPT (a rebuild from a declaration plus a prior state) carries them ONLY
+  when the prior state belongs to the SAME graph AND its declaration is
+  unchanged, compared by the canonical digest of the PERSISTED declaration
+  through the ONE B4 `contractDigest` (`JSON` round trip = the writer's own
+  projection; no second digest is added). A compiled plan is bound to the
+  declaration it was compiled from, and the same `graphId` is NOT sufficient
+  evidence that it still matches.
+- When the declaration CHANGED, adoption REFUSES EXPLICITLY: it throws a typed
+  `AdoptPlanRefusalError` naming the carried fields, the two digests and the
+  required next step, BEFORE mutating either state. It never silently drops the
+  plan and never mechanically copies one that no longer matches. A state with
+  no plan identity to carry is never refused, so a legacy rebuild is unchanged.
+
+The refusal is handled deliberately at every caller: `EngineRuntime.adoptPrior`
+propagates it; `graph_run`'s existing dispose-and-rethrow block surfaces it and
+leaves the prior registry entry untouched; `graph-tools.commit` (the
+construction/extension path, where the declaration changed BY CONSTRUCTION)
+pre-checks with `planAdoptionRefusal` and throws before the rebuilt runtime
+replaces the live one, disposing that runtime first; and the persisted-approval
+path rethrows a refusal instead of continuing with a rebuilt engine whose plan
+it could not adopt. Nothing in production produces a plan record yet, so the
+refusal is unreachable for plans today; it exists so the producer slice cannot
+inherit a silent drop.
+
+DEFECT 2 — the compiler could produce a plan its own loader REJECTED. Two
+different contract identities with byte-identical bodies compiled fine, but the
+digest-keyed snapshot entry held ONE `ref`, so the second identity overwrote
+the first while both node bindings kept their own refs, and the load refused the
+compiler's own output as `corrupt(contract)`. The model is now explicit and the
+identity is separated from the content:
+
+- `contractSnapshots` is CONTENT ONLY, keyed by digest, and its value is
+  `{ body }` with no `ref`: one body can belong to several identities, so a
+  single ref would have to name one of them and drop the rest. Identical bodies
+  hash to one digest and share one entry.
+- `contractIdentities` is the IDENTITY INDEX: `id` → `revision` → content
+  digest, in BOTH the plan record (inside the plan body, so `planRevision`
+  covers it) and the plan binding, and the agreement gate requires the two
+  indexes to match exactly. The nested shape makes "one identity, one digest"
+  structural. `revision` stays an OPAQUE IMMUTABLE identifier: never ordered,
+  never a range.
+- COMPILE deduplicates identical bodies to one snapshot and gives every
+  identity its own index entry: an existing content entry and an existing
+  identity entry are never overwritten (a contradictory rebind is reported as
+  `contract-digest-mismatch`).
+- LOAD/VERIFY resolves a node binding THROUGH the identity index to a digest
+  and then requires that digest to have a snapshot whose body hashes back to it
+  (the ONE `contractDigest`, reused). Two identities sharing one digest verify
+  CLEAN — that is a regression test, not a tolerated oddity. An identity index
+  that disagrees with the snapshot content, a binding whose identity is absent
+  from the index, and a binding whose declared digest disagrees with the index
+  are each `corrupt(contract)` with their own reason.
+
+The persisted record SHAPE changes. Nothing in production writes a plan record
+or a binding (no producer exists at graph creation), so NO MIGRATION is written
+and none is required: an older-shape record, if one ever existed on disk, is
+refused as `corrupt(contract)` rather than reinterpreted, and the storage
+format stays the literal `2` with no on-disk format field added.
+
+RECOVERY IS STILL NOT SWITCHED ONTO THE PLAN. The engine resumes from the
+retained declaration, nothing consumes `compiledPlan`, no producer writes one
+at graph creation, and a comment at the field says so. B7 made the record, its
+rules and its cross-checks exist; B8 makes recovery CARRY and re-serialize them
+honestly and separates content from identity, so the slice that finally depends
+on a plan cannot lose it in a rebuild.
 
 DEFERRED by this slice, and not implied by it: producing the record (or a
 binding) at graph creation, switching recovery onto the persisted plan,
@@ -447,9 +530,111 @@ Still unimplemented: storage format 3 with its `2 -> 3` migrator, the outcome
 protocol itself (the compiler builds an in-memory plan in B5, but no runtime
 consumes one: no submission ingress, reducer or receipt store exists), and the
 `src/graph/persistence/load.ts` target module. B6 made the load-side refusal
-of the contract binding real and B7 persists and verifies the full
-compiled-plan record; what remains is producing a plan record at graph
-creation and switching recovery onto the persisted plan.
+of the contract binding real, B7 persists and verifies the full
+compiled-plan record, B8 carries that record through hydration, adoption
+and `status()` while separating contract content from contract identity, and
+B9 makes one plan-level inspector own every structural invariant, puts the
+compiler's own output under it, and separates an executable plan from a draft;
+what remains is producing a plan record at graph creation and switching
+recovery onto the persisted plan.
+
+B9 FIXES TWO STRUCTURAL DEFECTS the B stage left open, without enabling the
+outcome protocol anywhere.
+
+DEFECT 3 — the compiler could produce a plan its own reader refuses, because
+the plan-level rules were only checked at ONE boundary and were incomplete.
+The rule set now lives in exactly one implementation,
+`src/graph/compiler/plan.ts`'s `inspectCompiledTopology`, and both boundaries
+call it: `compile.ts` runs it over the body it just assembled and refuses its
+own output as compile errors carrying the inspector's OWN codes, and the load
+gate runs it over the persisted body. The compiler's error union is composed
+from the inspector's `CompiledTopologyIssueCode` (`| CompiledTopologyIssueCode`),
+so one defect has one code on both sides rather than two parallel vocabularies.
+The inspection runs after the declaration-level rules have already refused, so
+a defect the compiler named itself is not reported a second time.
+
+Rules added to the inspector, each with its stable code:
+
+- CYCLE CONTAINMENT — `cycle-not-in-loop-group`. Every cycle in the compiled
+  edge set must lie inside a declared loop group; a cyclic strongly-connected
+  component any of whose nodes is not a loop member is an error. The SCC
+  computation is the v2 validator's own Tarjan algorithm, EXTRACTED into the
+  dependency-leaf module `src/graph/cycle-detection.ts`
+  (`stronglyConnectedComponents` / `isCyclicComponent` / `hasDirectedCycle`),
+  and `validator-v2.ts` now imports it instead of holding a private copy, so
+  the tree has ONE cycle semantics rather than two adaptations of one
+  algorithm. The v2 behaviour is unchanged: `hasCycle` keeps its name,
+  signature and result, the v2 cycle-containment rule keeps its node-coverage
+  semantics and its construct/execution severity split, and the shared module
+  reproduces the original traversal order. The v3 rule drops only what is
+  v2-specific — the revise-back-edge warning exemption, which names a v2 marker
+  that v3 does not have, because v3 loop groups declare their routes.
+- CONTINUATION PATH — `loop-continuation-without-edge`. A loop group's
+  `continuationOutcome` must be carried by at least one edge that stays INSIDE
+  the group (a declared member to a declared member). Declaring a continuation
+  outcome with no such edge is an error: the loop could never continue. It is
+  checked only once the route is a real member outcome, so a bogus route is
+  reported once as `unknown-loop-continuation-outcome` instead of cascading.
+- REQUIRED OUTCOMES AT LOAD — `missing-outcomes`. A node with an empty outcomes
+  list is an error at BOTH boundaries, with the compiler's own code. The
+  compiler already refused it at declaration level; the inspector re-derives it
+  from the body, so a persisted `outcomes: []` is `corrupt(contract)` naming
+  `missing-outcomes` rather than verifying.
+- EXPLICIT TERMINAL — `missing-terminal-outcome` and
+  `terminal-outcomes-inconsistent`. A graph states its exits positively instead
+  of leaving them to the absence of an edge. An outcome with NO outbound edge
+  from its declaring node terminates that node; the compiler computes a
+  deterministic `terminalOutcomes` list (canonical order: node id, then outcome
+  id) for the plan body, so `planRevision` covers it, and the inspector requires
+  the list to be NON-EMPTY and to be exactly the set the edges imply. The
+  derivation is one exported function, `terminalOutcomesOf`, used by the
+  compiler to write the list and by the inspector to check it. The former
+  `unused-outcome` WARNING described exactly this case and is RETIRED, not
+  renamed: an outcome that goes nowhere is now a declared exit, and no warning
+  code remains (`CompileWarningCode` is `never`; the `warnings` field stays so
+  the result shape does not churn).
+
+DEFECT 4 — acceptance capabilities were not resolved, so a syntax-only result
+could look executable. Compilation now resolves acceptance against the
+installed capability set and PINS what it resolved:
+
+- With `CompileOptions.supportedValidators` provided, every acceptance
+  requirement must resolve to a capability at an EXACT version. A VERSIONED
+  requirement is satisfied only by a capability declaring that exact version; an
+  UNVERSIONED capability can only mark it covered, which is the distinct error
+  `unpinned-validator-version` ("covered but not version-pinned"), while a name
+  no capability declares stays `unsupported-validator` ("nothing covers it").
+  An UNVERSIONED requirement is pinned to the exact version of the first
+  matching versioned capability in declared order, and the RESOLVED version is
+  written back into the plan, so a bare requirement no longer silently means
+  "any version" and the plan records what was checked.
+- With NO capability set, compilation still answers, but as an explicitly
+  NON-EXECUTABLE DRAFT. The two success shapes have different discriminants —
+  `{ ok: true, kind: "executable" }` and
+  `{ ok: true, kind: "draft", unresolved }` — and a draft carries the plan
+  body's own frozen `unresolved` list. `ok` alone is not a licence to execute
+  or persist a plan; `kind` is the discriminator. A plan with no acceptance
+  requirements has nothing unresolved and is executable without a capability
+  set, so declarations that never used acceptance are unaffected.
+- The distinction is PERSISTED. `CompiledPlanBody.executability` is
+  `{ kind: "executable" }` or `{ kind: "draft", unresolved: [...] }`, inside
+  the plan body so `planRevision` covers it. The load gate REFUSES a non-
+  executable record: a persisted draft is `corrupt(contract)` carrying the
+  stable code `plan-not-executable`, and a malformed executability value is
+  refused as a malformed record. The choice is refusal, not silent marking: a
+  state whose persisted `compiledPlan` is a draft never becomes `valid`, so it
+  cannot reach `adoptPrior`, dispatch or automatic provisioning. The inspector
+  itself accepts a draft as a well-formed plan, because the compiler
+  legitimately PRODUCES one — the executability requirement is a load policy on
+  top of the structural rules, defined once in `readPlanExecutability`.
+
+DEFERRED by this slice, and not implied by it: producing a plan record at graph
+creation, switching recovery onto the persisted plan, a YAML/JSON authoring
+front-end for v3, adapters/schema compatibility, the typed-predicate
+vocabulary, and any `src/dispatch/**` change. The plan is still not an
+execution authority — the inspector proves structure, not that a model will
+emit a valid result.
+
 The dispatch completion bridge switch-over is deliberately DEFERRED:
 `src/dispatch/completion/completion-evaluator.ts` is not modified in this
 slice, because with only the legacy protocol registered there is nothing to
@@ -459,6 +644,139 @@ exactly ONE authoritative completion source and must not merge severity-ranked
 legacy signals with accepted outcomes or synthesize a second answer. Protocol
 selection is enforced where it belongs today — at the load boundary, which
 refuses an unregistered protocol instead of running it under legacy rules.
+
+C1 DELIVERS THE AUTHORING INGRESS — the first PRODUCER of a compiled plan —
+without enabling the outcome protocol anywhere.
+
+`src/graph/compiler/parse-declaration-v3.ts` is the front-end B5 deferred: JSON
+text or an already-parsed value in, a validated `GraphDeclarationV3` or a list
+of STRUCTURED issues out (`code`, `message`, `path`), never an exception. It
+owns the strictness the compiler's shallow guard deliberately does not — the
+grammar is CLOSED (`unknown-key` at every level, reported in canonical key
+order), a field must have the JSON type the grammar declares (`wrong-type`), an
+absent required field is `missing-field`, a value the grammar does not admit
+(a non-positive or fractional `max_traversals`, an empty identifier, a name
+that is blank after trimming, an out-of-bound per-node budget — a negative
+`timeout_ms` or ceiling, a negative or fractional `max_retries` — a
+non-finite number, a completion policy that is not one policy object, a
+`quorum` on the wrong strategy) is `invalid-value`, and `version` other than 3
+is `unsupported-version`. Every issue names its path
+(`$.nodes[1].outcomes[0].id`). `isGraphDeclarationV3` is reused as the final
+agreement check over the value the front-end BUILT, and that value is fresh and
+deeply frozen, so it never aliases the caller's containers.
+
+`src/graph/tools/declare-graph.ts` and the additive `graph_declare` tool are
+the producer. It parses, compiles with the caller's capability options
+(`supported_validators`; the toolset's optional `contracts` dependency
+resolves node contract refs), and on success writes the compiled-plan RECORD,
+the plan BINDING and the EXECUTION-PROTOCOL identity
+(`executionProtocolVersion = OUTCOME_PROTOCOL`) onto a fresh engine state,
+persisted through the existing `EnginePersistence` store — no format bump, the
+same format-2 layout and the same loader gates. The state's legacy
+`graphDeclaration` is a deliberately EMPTY carrier: no v2 declaration is
+fabricated for a v3 graph, the compiled plan is the topology authority, and the
+state registers one pending runtime node per compiled node so the B7
+topology/binding gate verifies against the state that carries the record. A
+DRAFT is REFUSED by name with every unresolved acceptance entry and nothing is
+persisted; a malformed declaration is refused with its structured codes; an
+UNCHANGED re-declaration preserves the stored plan while a changed one refuses
+with both declaration digests and the stored plan revision (the B8 adoption
+rule); across a restart, where the declaration itself is not persisted, the
+comparison is the persisted plan revision, so a record is never overwritten
+silently and an unreadable or foreign state file is refused rather than
+replaced; an id that already names a legacy graph refuses
+(`legacy-graph-conflict`), because a graph's execution protocol is pinned and
+is never switched in place. The id reservation is DURABLE, not merely
+in-memory: `graph_create` also consults the persisted record, so in a fresh
+process it suffixes the name (`name-2`) instead of handing back an id whose
+first legacy save would replace the persisted plan, and an on-disk file that
+cannot be shown to belong to the requested id (including a slug collision such
+as `"a/b"` and `"a b"` sharing one state file) is treated as reserved too. A
+legacy record this build can resume is deliberately NOT a reservation, so
+same-id legacy resume is unchanged.
+
+A DECLARED GRAPH IS DELIBERATELY NOT RUNNABLE. This build registers exactly one
+execution-protocol handler (protocol 1), so the loader refuses a persisted
+protocol-2 state as `unsupported(execution)` before hydration: the declaration
+is durable, but it cannot be resumed under legacy rules. Inside the toolset a
+declared graph lives OUTSIDE the legacy registry, and every legacy operation —
+`graph_run` (including `dry_run`), the construction tools, cancel, approve and
+targeted status — refuses with `OutcomeProtocolUnavailableError`, naming the
+missing protocol handler and dispatching no node. That holds after a restart
+too: when the in-memory map is empty and a declared record owns the requested
+id, the refusal is resolved from the persisted plan revision instead of
+degrading to "does not exist". Nothing falls back to the legacy signal
+protocol. `graph_declare` also returns the plan revision with
+`runnable: false` and the same reason, so the boundary is visible to the
+caller, not only enforced.
+
+DEFERRED by this slice, and not implied by it: the entire outcome EXECUTION
+path — the graph-scoped `submit_outcome` ingress, protocol/contract validation,
+evidence validators, the deterministic reducer, the atomic acceptance/receipt
+store with its idempotency keys, effect execution, and restart recovery
+switched onto the persisted plan — plus the protocol-aware dispatch completion
+bridge, storage format 3 with its `2 -> 3` migrator, the
+`src/graph/persistence/load.ts` module move, adapters/schema compatibility,
+the typed-predicate vocabulary, progress evaluators, and any `src/dispatch/**`
+change. The plan is not an execution authority in this slice, and no runtime
+consumer reads the record yet.
+
+C2 DELIVERS THE DURABLE ACCEPTANCE LEDGER — the atomic receipt/event/effect
+store the execution path requires — and NOTHING ROUTES INTO IT.
+
+`src/graph/ledger/types.ts` owns the record model and the PORT. `ReceiptRecord`
+is one committed decision keyed by `(graphId, attemptId, submissionId)` — the
+submission's idempotency key; `AcceptedEventRecord` is the accepted-event
+stream, at most one event per `(graphId, attemptId)`; `PendingEffectRecord` is
+one effect keyed by `(graphId, effectId)` with a
+`pending | started | done | failed` status and an opaque payload. `CommitResult`
+encodes the protocol rules verbatim: the same logical submission with the same
+`proposalDigest` is `replayed` with the PERSISTED receipt and writes no second
+row, the same key with a different digest is a `conflict` that writes nothing,
+a distinct terminal submission for an already-settled attempt is `settled` and
+never overwrites the accepted result, and otherwise the batch is `committed`.
+Timestamps are epoch milliseconds supplied by the CALLER: time is an explicit
+protocol input, and the store never reads a clock.
+
+`src/graph/ledger/sqlite-ledger.ts` is the durable substrate over the portable
+in-tree driver (`src/memory/db-driver.ts`), on the same delete-journal default
+the driver was verified under — no journal pragma, no module-level connection,
+no singleton. `SqliteAcceptanceLedger.create(directory)` derives its file from
+an injected directory (tests use `mkdtemp`), initializes the schema and format
+row in one transaction, and thereafter opens only a file whose format version
+is EXACTLY `LEDGER_FORMAT_VERSION` and whose schema is intact — every table
+present AND every column present with the affinity, nullability and PRIMARY KEY
+position this format writes, so a store reshaped at the column level is refused
+at open instead of failing later with a raw driver error. An unknown, newer,
+older, incomplete, reshaped or foreign store is refused with a typed
+`LedgerFormatError` and left untouched — never recreated, never downgraded.
+
+ATOMICITY IS THE POINT. Every commit writes the receipt, the accepted event and
+all pending effects inside ONE transaction that commits before the verdict is
+returned. A constraint violation, an effect row that cannot be stored, or a
+payload JSON cannot represent throws a typed `LedgerWriteError` and the
+transaction ROLLS BACK — no receipt, no event and no effect from that batch
+survive — and `committed` is never reported for an uncommitted batch. Effects
+are BOOKKEEPING ONLY and are never executed here: a restart is a read, and
+`pendingEffects` answers the rows a previous process left `pending` or
+`started`, which IS the resume path. `runInTransaction` is the documented
+EXTENSION POINT for the single atomic boundary the protocol requires —
+acceptance receipt + accepted event + engine state change + pending effects in
+ONE transaction — and it exposes the same read/write surface inside the
+caller's transaction. THE ENGINE STATE DOES NOT YET JOIN IT: the callback's
+transaction and its rollback are real, but only the ledger's own tables are
+written through it today.
+
+DEFERRED by this slice, and not implied by it: the entire outcome EXECUTION
+path — the graph-scoped `submit_outcome` ingress, protocol/contract validation,
+evidence validators, the deterministic reducer, and effect execution — plus
+restart recovery switched onto the persisted plan and its ledger, the
+protocol-aware dispatch completion bridge, storage format 3 with its `2 -> 3`
+migrator, the `src/graph/persistence/load.ts` module move, adapters/schema
+compatibility, the typed-predicate vocabulary, and progress evaluators. Nothing
+under `src/graph/engine`, `src/graph/tools` or `src/dispatch` imports the
+ledger, and the outcome protocol still has no registered handler: a declared
+graph remains un-runnable and the ledger is a substrate no runtime consumes yet.
 
 ### Definitions, locations, and comparison owners
 
@@ -561,6 +879,8 @@ loader failures rather than relabeled as bad user data.
 | Format 3 is missing its protocol field or protocol-bound state is internally inconsistent | `corrupt(execution)`. Only the explicit format-2 decoder may infer protocol 1. |
 | Registry latest contract revision differs from a pinned snapshot, or the registry no longer contains the old entry | Continue using the valid persisted snapshot; no migration and no latest-registry dependency. |
 | Stored contract snapshot fails its digest, is missing, or disagrees with a node/attempt binding | `corrupt(contract)`. |
+| A persisted compiled plan is a DRAFT, or its executability marker is malformed | `corrupt(contract)`; a draft is refused by name (`plan-not-executable`) and never loaded as executable. |
+| A persisted plan carries an acceptance requirement without an exact validator version | `corrupt(contract)` naming `unpinned-validator-version`; never loaded as executable. |
 | Intact contract requires an unavailable validator version or unsupported schema capability | `unsupported(capability)`; never weaken acceptance to load. |
 | An exact registry identity is republished with different content | Reject new compilation with `CONTRACT_IDENTITY_CONFLICT`; existing valid snapshots remain authoritative on recovery. |
 

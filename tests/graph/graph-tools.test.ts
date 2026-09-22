@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, jest } from "bun:test";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,6 +34,15 @@ import type { ISessionClient } from "../../src/platform/ports/session-client.ts"
 import { graphEventsPath } from "../../src/graph/engine/graph-events.ts";
 import { GraphEventRecorder } from "../../src/graph/engine/graph-events.ts";
 import { clearParentQueues, GRAPH_BLOCKED_MARKER } from "../../src/dispatch/notification.ts";
+import {
+  GraphDeclareRefusedError,
+  OutcomeProtocolUnavailableError,
+  type DeclareRefusalReason,
+} from "../../src/graph/tools/declare-graph.ts";
+import { engineStatePath } from "../../src/graph/engine/engine-persistence.ts";
+import { OUTCOME_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
+import { contractDigest, type ContractRef } from "../../src/graph/contracts/contract-definition.ts";
+import { createContractRegistry } from "../../src/graph/contracts/resolve.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -1561,3 +1570,755 @@ describe("subtask 2: commit-path adoptPrior containment", () => {
     }
   });
 });
+
+// ── graph_declare — the v3 authoring ingress (C1) ───────────────────────────
+
+describe("graph_declare — v3 declaration ingress (C1)", () => {
+  /** A valid v3 declaration: two nodes and one outcome-bound edge. */
+  function v3Declaration(): Record<string, unknown> {
+    return {
+      version: 3,
+      name: "declared-graph",
+      nodes: [
+        { id: "plan", agent: "agent.plan", prompt: "Plan.", outcomes: [{ id: "planned" }] },
+        { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+      ],
+      edges: [{ from: "plan", to: "ship", outcome: "planned" }],
+    };
+  }
+
+  /** Dispatch seam that completes every node on the next tick (legacy runs). */
+  class CompletingDispatch implements NodeDispatchPort {
+    private subs = new Map<string, TaskTerminatedCallback>();
+    private tasks = new Map<string, DispatchTask>();
+    private seq = 0;
+
+    executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
+      const id = `task-${node.nodeId}-${++this.seq}`;
+      const task: DispatchTask = {
+        id,
+        sessionId: `sess-${id}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      };
+      this.tasks.set(id, task);
+      setTimeout(() => {
+        task.status = "completed";
+        this.subs.get(id)?.(id, "completed");
+      }, 0);
+      return Promise.resolve(task);
+    }
+
+    onTaskTerminated(
+      taskId: string,
+      cb: TaskTerminatedCallback,
+    ): TaskTerminatedCallback {
+      this.subs.set(taskId, cb);
+      return cb;
+    }
+
+    getTask(taskId: string): DispatchTask | undefined {
+      return this.tasks.get(taskId);
+    }
+  }
+
+  /** Dispatch seam that counts every dispatch attempt (and never completes). */
+  class CountingDispatch implements NodeDispatchPort {
+    calls = 0;
+    executeNode(node: NodeRuntimeState): Promise<DispatchTask> {
+      this.calls += 1;
+      return Promise.resolve({
+        id: `task-${node.nodeId}`,
+        sessionId: `sess-${node.nodeId}`,
+        parentSessionId: "g",
+        depth: 1,
+        status: "running",
+        agent: node.agent,
+        prompt: node.prompt,
+        startedAt: new Date(),
+        progress: { lastUpdate: new Date(), toolCalls: 0 },
+        priority: 0,
+      });
+    }
+  }
+
+  const settle = () => new Promise((r) => setTimeout(r, 25));
+
+  let tempDirs: string[] = [];
+  function tempDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  /** Declare and return the typed refusal (failing the test when none came). */
+  function refusalFrom(
+    action: () => unknown,
+    expected: DeclareRefusalReason,
+  ): GraphDeclareRefusedError {
+    let caught: unknown;
+    try {
+      action();
+    } catch (err) {
+      caught = err;
+    }
+    if (!(caught instanceof GraphDeclareRefusedError)) {
+      throw new Error("expected a GraphDeclareRefusedError, got: " + String(caught));
+    }
+    expect(caught.reason).toBe(expected);
+    return caught;
+  }
+
+  afterEach(() => {
+    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    tempDirs = [];
+  });
+
+  it("declares, compiles and persists the plan with its binding and protocol identity", () => {
+    const stateDir = tempDir("graph-declare-");
+    const ts = createGraphToolSet({ stateDir });
+
+    const result = ts.graph_declare({ declaration: v3Declaration() });
+
+    expect(result.graph_id).toBe("declared-graph");
+    expect(result.plan_revision).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.executability).toBe("executable");
+    expect(result.declaration_version).toBe(3);
+    expect(result.execution_protocol).toBe(OUTCOME_PROTOCOL);
+    expect(result.nodes).toBe(2);
+    expect(result.edges).toBe(1);
+    expect(result.loop_groups).toBe(0);
+    expect(result.terminal_outcomes).toBe(1);
+    expect(result.contract_bindings).toBe(0);
+    expect(result.persisted).toBe(true);
+    expect(result.preserved).toBe(false);
+    // The boundary is REPORTED, not merely enforced elsewhere.
+    expect(result.runnable).toBe(false);
+    expect(result.not_runnable_reason).toMatch(
+      /no registered execution-protocol handler/,
+    );
+
+    // The REGISTERED runtime state carries the plan, binding and protocol...
+    const registered = ts["declaredGraphs"].get("declared-graph");
+    expect(registered?.graph.plan.planRevision).toBe(result.plan_revision);
+    expect(registered?.graph.state.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(registered?.graph.state.compiledPlan?.planRevision).toBe(
+      result.plan_revision,
+    );
+    expect(registered?.graph.state.planBinding?.planRevision).toBe(
+      result.plan_revision,
+    );
+
+    // ...and so does the file the store wrote.
+    const dto = JSON.parse(
+      readFileSync(engineStatePath(stateDir, "declared-graph"), "utf-8"),
+    ) as Record<string, unknown>;
+    expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    const plan = dto.compiledPlan as { planRevision?: string; declarationVersion?: number };
+    const binding = dto.planBinding as { planRevision?: string };
+    expect(plan.planRevision).toBe(result.plan_revision);
+    expect(plan.declarationVersion).toBe(3);
+    expect(binding.planRevision).toBe(result.plan_revision);
+  });
+
+  it("accepts JSON text as well as an already-parsed value", () => {
+    const ts = createGraphToolSet();
+    const fromText = ts.graph_declare({
+      declaration: JSON.stringify(v3Declaration()),
+    });
+    const fromValue = ts.graph_declare({ declaration: v3Declaration() });
+    // An unchanged re-declaration is preserved, so the revision is identical.
+    expect(fromValue.preserved).toBe(true);
+    expect(fromValue.plan_revision).toBe(fromText.plan_revision);
+  });
+
+  it("refuses a DRAFT, names every unresolved entry and persists nothing", () => {
+    const stateDir = tempDir("graph-declare-draft-");
+    const ts = createGraphToolSet({ stateDir });
+    const draft = {
+      version: 3,
+      name: "draft-graph",
+      nodes: [
+        {
+          id: "a",
+          agent: "agent.a",
+          prompt: "Do a.",
+          outcomes: [
+            { id: "done", acceptance: [{ validator: "schema.check", version: 1 }] },
+          ],
+        },
+      ],
+      edges: [],
+    };
+
+    const refusal = refusalFrom(
+      () => ts.graph_declare({ declaration: draft }),
+      "draft-plan",
+    );
+    expect(refusal.unresolved).toEqual([
+      { nodeId: "a", outcomeId: "done", validator: "schema.check", version: 1 },
+    ]);
+    expect(refusal.message).toContain("nodes.a");
+    expect(refusal.message).toContain("schema.check");
+    expect(refusal.message).toContain("supported_validators");
+    expect(refusal.message).toContain("NON-EXECUTABLE DRAFT");
+    // Nothing was persisted and nothing was registered.
+    expect(existsSync(engineStatePath(stateDir, "draft-graph"))).toBe(false);
+    expect(ts["declaredGraphs"].has("draft-graph")).toBe(false);
+
+    // The SAME declaration is executable once the capability is supplied.
+    const declared = ts.graph_declare({
+      declaration: draft,
+      supported_validators: [{ validator: "schema.check", version: 1 }],
+    });
+    expect(declared.executability).toBe("executable");
+    expect(declared.persisted).toBe(true);
+  });
+
+  it("refuses malformed declarations with stable codes and persists nothing", () => {
+    const stateDir = tempDir("graph-declare-bad-");
+    const ts = createGraphToolSet({ stateDir });
+
+    const missingOutcome = v3Declaration();
+    delete (missingOutcome.edges as Array<Record<string, unknown>>)[0]?.outcome;
+
+    const cases: ReadonlyArray<{ input: unknown; code: string }> = [
+      { input: "not json {", code: "not-json" },
+      { input: 42, code: "not-an-object" },
+      { input: { ...v3Declaration(), extra: 1 }, code: "unknown-key" },
+      { input: { ...v3Declaration(), version: 2 }, code: "unsupported-version" },
+      { input: missingOutcome, code: "missing-field" },
+      {
+        input: {
+          ...v3Declaration(),
+          edges: [{ from: "plan", to: "ship", outcome: "ghost" }],
+        },
+        code: "unknown-outcome-reference",
+      },
+      {
+        input: {
+          ...v3Declaration(),
+          loop_groups: [
+            {
+              id: "L",
+              nodes: ["plan"],
+              max_traversals: 0,
+              continuation_outcome: "planned",
+              exit_outcome: "shipped",
+            },
+          ],
+        },
+        code: "invalid-value",
+      },
+    ];
+
+    for (const { input, code } of cases) {
+      const refusal = refusalFrom(
+        () => ts.graph_declare({ declaration: input }),
+        "invalid-declaration",
+      );
+      expect(refusal.diagnostics.some((entry) => entry.code === code)).toBe(true);
+      expect(refusal.message).toContain("graph_declare refused");
+    }
+    // No partial graph was registered or persisted by any refusal.
+    expect(ts["declaredGraphs"].size).toBe(0);
+    expect(existsSync(engineStatePath(stateDir, "declared-graph"))).toBe(false);
+  });
+
+  it("refuses out-of-bound budgets and a blank graph name before persisting anything", () => {
+    const stateDir = tempDir("graph-declare-bounds-");
+    const ts = createGraphToolSet({ stateDir });
+
+    const budgetCases: ReadonlyArray<{ field: string; value: unknown }> = [
+      { field: "timeout_ms", value: -5 },
+      { field: "max_retries", value: -1 },
+      { field: "max_retries", value: 1.5 },
+      { field: "max_input_tokens", value: -1 },
+      { field: "max_output_tokens", value: -0.5 },
+      { field: "max_cost_usd", value: -1 },
+    ];
+    for (const { field, value } of budgetCases) {
+      const declaration = v3Declaration();
+      declaration.nodes = [
+        {
+          id: "plan",
+          agent: "agent.plan",
+          prompt: "Plan.",
+          outcomes: [{ id: "planned" }],
+          budget: { [field]: value },
+        },
+        { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+      ];
+      const refusal = refusalFrom(
+        () => ts.graph_declare({ declaration }),
+        "invalid-declaration",
+      );
+      expect(
+        refusal.diagnostics.some(
+          (entry) =>
+            entry.code === "invalid-value" &&
+            entry.path === `$.nodes[0].budget.${field}`,
+        ),
+      ).toBe(true);
+    }
+
+    // A blank name names no graph — graph_create refuses it too, so the
+    // declared ingress must not mint an unaddressable id.
+    const blankName = { ...v3Declaration(), name: "   " };
+    const blankRefusal = refusalFrom(
+      () => ts.graph_declare({ declaration: blankName }),
+      "invalid-declaration",
+    );
+    expect(
+      blankRefusal.diagnostics.some(
+        (entry) => entry.code === "invalid-value" && entry.path === "$.name",
+      ),
+    ).toBe(true);
+
+    // Nothing was registered or written by any of those refusals.
+    expect(ts["declaredGraphs"].size).toBe(0);
+    expect(existsSync(engineStatePath(stateDir, "declared-graph"))).toBe(false);
+
+    // The boundary values the runtime documents stay executable: a 0 timeout
+    // is the staleness-watchdog opt-out and 0 retries/ceilings are valid.
+    const boundary = v3Declaration();
+    boundary.nodes = [
+      {
+        id: "plan",
+        agent: "agent.plan",
+        prompt: "Plan.",
+        outcomes: [{ id: "planned" }],
+        budget: {
+          timeout_ms: 0,
+          max_retries: 0,
+          max_input_tokens: 0,
+          max_output_tokens: 0,
+          max_cost_usd: 0,
+        },
+      },
+      { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+    ];
+    const accepted = createGraphToolSet({ stateDir }).graph_declare({
+      declaration: boundary,
+    });
+    expect(accepted.executability).toBe("executable");
+  });
+
+  it("refuses a graph_id that disagrees with the declaration name", () => {
+    const ts = createGraphToolSet();
+    const refusal = refusalFrom(
+      () => ts.graph_declare({ declaration: v3Declaration(), graph_id: "other" }),
+      "graph-id-mismatch",
+    );
+    expect(refusal.message).toContain("other");
+    expect(refusal.message).toContain("declared-graph");
+  });
+
+  it("refuses to declare over a legacy graph id (protocol is pinned, never switched)", () => {
+    const ts = createGraphToolSet();
+    ts.graph_create({ name: "taken" });
+    const refusal = refusalFrom(
+      () =>
+        ts.graph_declare({
+          declaration: { ...v3Declaration(), name: "taken" },
+        }),
+      "legacy-graph-conflict",
+    );
+    expect(refusal.message).toContain("LEGACY (v2) graph");
+  });
+
+  it("reserves a declared graph id against graph_create", () => {
+    const ts = createGraphToolSet();
+    ts.graph_declare({ declaration: v3Declaration() });
+    const created = ts.graph_create({ name: "declared-graph" });
+    expect(created.graph_id).toBe("declared-graph-2");
+  });
+
+  it("preserves an unchanged re-declaration and refuses a changed one", () => {
+    const ts = createGraphToolSet();
+    const first = ts.graph_declare({ declaration: v3Declaration() });
+
+    const again = ts.graph_declare({ declaration: v3Declaration() });
+    expect(again.preserved).toBe(true);
+    expect(again.plan_revision).toBe(first.plan_revision);
+
+    const changed = {
+      ...v3Declaration(),
+      nodes: [
+        { id: "plan", agent: "agent.plan", prompt: "Plan DIFFERENTLY.", outcomes: [{ id: "planned" }] },
+        { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+      ],
+    };
+    const refusal = refusalFrom(
+      () => ts.graph_declare({ declaration: changed }),
+      "declaration-changed",
+    );
+    expect(refusal.message).toContain(first.plan_revision);
+    expect(refusal.message).toContain("DIFFERENT declaration");
+
+    // The stored plan is untouched by the refused change.
+    const after = ts.graph_declare({ declaration: v3Declaration() });
+    expect(after.plan_revision).toBe(first.plan_revision);
+  });
+
+  it("preserves a persisted declared plan across a fresh toolset (same content)", () => {
+    const stateDir = tempDir("graph-declare-restart-");
+    const first = createGraphToolSet({ stateDir });
+    const declared = first.graph_declare({ declaration: v3Declaration() });
+    const path = engineStatePath(stateDir, "declared-graph");
+    const before = readFileSync(path, "utf-8");
+
+    // A NEW process has no in-memory entry: the persisted plan is the only
+    // record, and identical content preserves it in place (no rewrite).
+    const second = createGraphToolSet({ stateDir });
+    const again = second.graph_declare({ declaration: v3Declaration() });
+    expect(again.preserved).toBe(true);
+    expect(again.persisted).toBe(true);
+    expect(again.plan_revision).toBe(declared.plan_revision);
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    expect(second["declaredGraphs"].has("declared-graph")).toBe(true);
+  });
+
+  it("refuses a changed declaration over a persisted declared plan (fresh toolset)", () => {
+    const stateDir = tempDir("graph-declare-changed-");
+    const first = createGraphToolSet({ stateDir });
+    const declared = first.graph_declare({ declaration: v3Declaration() });
+    const path = engineStatePath(stateDir, "declared-graph");
+    const before = readFileSync(path, "utf-8");
+
+    const second = createGraphToolSet({ stateDir });
+    const refusal = refusalFrom(
+      () =>
+        second.graph_declare({
+          declaration: {
+            ...v3Declaration(),
+            nodes: [
+              { id: "plan", agent: "agent.plan", prompt: "Plan DIFFERENTLY.", outcomes: [{ id: "planned" }] },
+              { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+            ],
+          },
+        }),
+      "declaration-changed",
+    );
+    expect(refusal.message).toContain(declared.plan_revision);
+    expect(refusal.message).toContain("PERSISTED compiled");
+    // The persisted plan was NOT overwritten by the refused declaration.
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    expect(second["declaredGraphs"].has("declared-graph")).toBe(false);
+  });
+
+  it("refuses to declare over a persisted legacy graph id", async () => {
+    const stateDir = tempDir("graph-declare-legacy-disk-");
+    const legacy = new GraphToolSet({
+      dispatch: new CompletingDispatch(),
+      stateDir,
+    });
+    const { graph_id } = legacy.graph_create({ name: "legacy-on-disk" });
+    legacy.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    await legacy.graph_run({ graph_id });
+    await settle();
+    expect(existsSync(engineStatePath(stateDir, "legacy-on-disk"))).toBe(true);
+
+    // A fresh toolset has no registry entry, but the persisted legacy record
+    // still pins the id to the legacy protocol.
+    const fresh = createGraphToolSet({ stateDir });
+    const refusal = refusalFrom(
+      () =>
+        fresh.graph_declare({
+          declaration: { ...v3Declaration(), name: "legacy-on-disk" },
+        }),
+      "legacy-graph-conflict",
+    );
+    expect(refusal.message).toContain("LEGACY (v2) state file");
+  });
+
+  it("refuses to overwrite a state file it cannot read", () => {
+    const stateDir = tempDir("graph-declare-unreadable-");
+    mkdirSync(join(stateDir, ".rolebox", "state"), { recursive: true });
+    writeFileSync(engineStatePath(stateDir, "declared-graph"), "{ not json", "utf-8");
+
+    const ts = createGraphToolSet({ stateDir });
+    const refusal = refusalFrom(
+      () => ts.graph_declare({ declaration: v3Declaration() }),
+      "persisted-state-unreadable",
+    );
+    expect(refusal.message).toContain("not valid JSON");
+    // The file was left exactly as it was found.
+    expect(readFileSync(engineStatePath(stateDir, "declared-graph"), "utf-8")).toBe(
+      "{ not json",
+    );
+  });
+
+  it("is content-addressed: the same content always yields the same plan revision", () => {
+    const one = createGraphToolSet().graph_declare({ declaration: v3Declaration() });
+    const two = createGraphToolSet().graph_declare({ declaration: v3Declaration() });
+    expect(two.plan_revision).toBe(one.plan_revision);
+  });
+
+  it("reports persisted=false when no state directory is configured", () => {
+    const ts = createGraphToolSet();
+    const result = ts.graph_declare({ declaration: v3Declaration() });
+    expect(result.persisted).toBe(false);
+    expect(ts["declaredGraphs"].has("declared-graph")).toBe(true);
+  });
+
+  it("refuses a contractRef when no contract capability is installed", () => {
+    const ts = createGraphToolSet();
+    const refusal = refusalFrom(
+      () =>
+        ts.graph_declare({
+          declaration: {
+            ...v3Declaration(),
+            nodes: [
+              {
+                id: "plan",
+                agent: "agent.plan",
+                prompt: "Plan.",
+                outcomes: [{ id: "planned" }],
+                contractRef: { id: "c", revision: "1", digest: "deadbeef" },
+              },
+              { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+            ],
+          },
+        }),
+      "invalid-declaration",
+    );
+    expect(refusal.diagnostics.some((entry) => entry.code === "unresolved-contract")).toBe(true);
+  });
+
+  it("binds a resolved contract through the toolset's contract capability", () => {
+    const body = { gates: ["schema"], policy: "strict" };
+    const ref: ContractRef = {
+      id: "contract.review",
+      revision: "1",
+      digest: contractDigest(body),
+    };
+    const contracts = createContractRegistry({ contracts: [{ ref, body }] });
+    const ts = new GraphToolSet({ contracts });
+
+    const result = ts.graph_declare({
+      declaration: {
+        ...v3Declaration(),
+        nodes: [
+          {
+            id: "plan",
+            agent: "agent.plan",
+            prompt: "Plan.",
+            outcomes: [{ id: "planned" }],
+            contractRef: ref,
+          },
+          { id: "ship", agent: "agent.ship", prompt: "Ship.", outcomes: [{ id: "shipped" }] },
+        ],
+      },
+    });
+    expect(result.contract_bindings).toBe(1);
+    const state = ts["declaredGraphs"].get("declared-graph")?.graph.state;
+    expect(state?.compiledPlan?.contractIdentities["contract.review"]?.["1"]).toBe(
+      ref.digest,
+    );
+    expect(state?.planBinding?.nodeBindings["plan"]).toEqual(ref);
+  });
+
+  it("refuses to run a declared graph: the missing-handler error, nothing dispatched", async () => {
+    const dispatch = new CountingDispatch();
+    const ts = new GraphToolSet({ dispatch });
+    const declared = ts.graph_declare({ declaration: v3Declaration() });
+
+    let caught: unknown;
+    try {
+      await ts.graph_run({ graph_id: "declared-graph" });
+    } catch (err) {
+      caught = err;
+    }
+    if (!(caught instanceof OutcomeProtocolUnavailableError)) {
+      throw new Error("expected OutcomeProtocolUnavailableError, got: " + String(caught));
+    }
+    expect(caught.graphId).toBe("declared-graph");
+    expect(caught.planRevision).toBe(declared.plan_revision);
+    expect(caught.message).toMatch(/no registered execution-protocol handler/);
+    expect(caught.message).toMatch(/executionProtocolVersion 2/);
+    // NO node was dispatched, and the legacy protocol was never substituted.
+    expect(dispatch.calls).toBe(0);
+
+    // dry_run refuses too (there is nothing this build can validate/run).
+    await expect(
+      ts.graph_run({ graph_id: "declared-graph", dry_run: true }),
+    ).rejects.toThrow(/no registered execution-protocol handler/);
+    expect(dispatch.calls).toBe(0);
+
+    // The construction / observability surface refuses the same way.
+    expect(() =>
+      ts.graph_add_node({ graph_id: "declared-graph", id: "x", agent: "a", prompt: "p" }),
+    ).toThrow(/no registered execution-protocol handler/);
+    expect(() => ts.graph_status({ graph_id: "declared-graph" })).toThrow(
+      /no registered execution-protocol handler/,
+    );
+    await expect(
+      ts.graph_approve({
+        graph_id: "declared-graph",
+        node_id: "plan",
+        action: "approve",
+      }),
+    ).rejects.toThrow(/no registered execution-protocol handler/);
+    expect(dispatch.calls).toBe(0);
+  });
+
+  it("leaves a legacy v2 graph completely unaffected (its run still works)", async () => {
+    const ts = new GraphToolSet({ dispatch: new CompletingDispatch() });
+    const { graph_id } = ts.graph_create({ name: "legacy-graph" });
+    ts.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+
+    // A declared graph exists in the SAME toolset, and refuses to run.
+    const declared = ts.graph_declare({ declaration: v3Declaration() });
+    await expect(ts.graph_run({ graph_id: "declared-graph" })).rejects.toThrow(
+      /no registered execution-protocol handler/,
+    );
+
+    // The legacy graph runs exactly as before: the node dispatches and completes.
+    await ts.graph_run({ graph_id });
+    await settle();
+    const state = ts["getEntry"](graph_id).runtime.status();
+    expect(state.phase).toBe("complete");
+    expect(state.nodes.get("A")?.status).toBe("completed");
+
+    // The declared graph is registered but still NOT runnable.
+    expect(ts["declaredGraphs"].get("declared-graph")?.graph.plan.planRevision).toBe(
+      declared.plan_revision,
+    );
+  });
+
+  // ── C1-01: the id reservation must be DURABLE, not just in-memory ──────────
+
+  it("reserves a PERSISTED declared id against graph_create in a fresh process", async () => {
+    const stateDir = tempDir("graph-declare-reserve-");
+    const first = createGraphToolSet({ stateDir });
+    const declared = first.graph_declare({ declaration: v3Declaration() });
+    const path = engineStatePath(stateDir, "declared-graph");
+    const before = readFileSync(path, "utf-8");
+
+    // A NEW process has an empty `declaredGraphs` map, so the reservation can
+    // only come from the persisted record. Without it graph_create would return
+    // the declared id and the first legacy save would replace the record
+    // (execution protocol, compiled plan and plan binding all gone).
+    const second = new GraphToolSet({
+      dispatch: new CompletingDispatch(),
+      stateDir,
+    });
+    const created = second.graph_create({ name: "declared-graph" });
+    expect(created.graph_id).toBe("declared-graph-2");
+
+    // Running the freshly created LEGACY graph writes its OWN file; the
+    // declared record keeps its protocol, plan and binding byte for byte.
+    second.graph_add_node({
+      graph_id: created.graph_id,
+      id: "A",
+      agent: "a",
+      prompt: "pA",
+    });
+    await second.graph_run({ graph_id: created.graph_id });
+    await settle();
+
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    const dto = JSON.parse(before) as {
+      executionProtocolVersion?: number;
+      compiledPlan?: { planRevision?: string };
+      planBinding?: { planRevision?: string };
+    };
+    expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(dto.compiledPlan?.planRevision).toBe(declared.plan_revision);
+    expect(dto.planBinding?.planRevision).toBe(declared.plan_revision);
+    expect(existsSync(engineStatePath(stateDir, "declared-graph-2"))).toBe(true);
+  });
+
+  it("reserves a declared id whose state-file slug collides with a legacy name", async () => {
+    const stateDir = tempDir("graph-declare-slug-");
+    const first = createGraphToolSet({ stateDir });
+    const declared = first.graph_declare({
+      declaration: { ...v3Declaration(), name: "a/b" },
+    });
+    const path = engineStatePath(stateDir, "a/b");
+    const before = readFileSync(path, "utf-8");
+    // "a b" slugs to the SAME file as "a/b", so the legacy id must not be
+    // handed a name whose save would replace the declared record.
+    expect(engineStatePath(stateDir, "a b")).toBe(path);
+
+    const second = new GraphToolSet({
+      dispatch: new CompletingDispatch(),
+      stateDir,
+    });
+    const created = second.graph_create({ name: "a b" });
+    expect(created.graph_id).toBe("a b-2");
+
+    second.graph_add_node({
+      graph_id: created.graph_id,
+      id: "A",
+      agent: "a",
+      prompt: "pA",
+    });
+    await second.graph_run({ graph_id: created.graph_id });
+    await settle();
+
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    const dto = JSON.parse(before) as {
+      executionProtocolVersion?: number;
+      compiledPlan?: { planRevision?: string };
+    };
+    expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(dto.compiledPlan?.planRevision).toBe(declared.plan_revision);
+    expect(existsSync(engineStatePath(stateDir, "a b-2"))).toBe(true);
+  });
+
+  it("names the missing handler when a persisted declared graph is run after a restart", async () => {
+    const stateDir = tempDir("graph-declare-restart-run-");
+    const first = createGraphToolSet({ stateDir });
+    const declared = first.graph_declare({ declaration: v3Declaration() });
+
+    const dispatch = new CountingDispatch();
+    const second = new GraphToolSet({ dispatch, stateDir });
+    let caught: unknown;
+    try {
+      await second.graph_run({ graph_id: "declared-graph" });
+    } catch (err) {
+      caught = err;
+    }
+    if (!(caught instanceof OutcomeProtocolUnavailableError)) {
+      throw new Error(
+        "expected OutcomeProtocolUnavailableError, got: " + String(caught),
+      );
+    }
+    expect(caught.planRevision).toBe(declared.plan_revision);
+    expect(caught.message).toMatch(/no registered execution-protocol handler/);
+    // The legacy signal protocol was never substituted: nothing dispatched.
+    expect(dispatch.calls).toBe(0);
+  });
+
+  it("does NOT treat a persisted LEGACY record as a collision (same-id resume)", async () => {
+    const stateDir = tempDir("graph-declare-legacy-resume-");
+    const legacy = new GraphToolSet({
+      dispatch: new CompletingDispatch(),
+      stateDir,
+    });
+    const { graph_id } = legacy.graph_create({ name: "legacy-resume" });
+    legacy.graph_add_node({ graph_id, id: "A", agent: "a", prompt: "pA" });
+    await legacy.graph_run({ graph_id });
+    await settle();
+    expect(existsSync(engineStatePath(stateDir, "legacy-resume"))).toBe(true);
+
+    // A legacy record this build can resume is NOT a reservation: a fresh
+    // process re-creating the same name still resolves to the same id.
+    const fresh = new GraphToolSet({
+      dispatch: new CompletingDispatch(),
+      stateDir,
+    });
+    expect(fresh.graph_create({ name: "legacy-resume" }).graph_id).toBe(
+      "legacy-resume",
+    );
+  });
+});
+

@@ -71,6 +71,8 @@ import {
 import defaultConditionResolver from "./condition-resolver.ts";
 import {
   EnginePersistence,
+  clonePersistedCompiledPlan,
+  clonePlanBinding,
 } from "./engine-persistence.ts";
 import type { GraphEventRecorder } from "./graph-events.ts";
 import {
@@ -91,6 +93,8 @@ import {
   adoptPriorNodeStates,
   clearStaleCriticalSection,
   hydrateEngineState,
+  planAdoptionRefusal,
+  AdoptPlanRefusalError,
   isDispatchTaskLive,
   reconcileEngine,
   rebuildFrontier,
@@ -208,6 +212,14 @@ export interface EngineRuntime {
    * corrects the frontier, and reconciles adopted `running` nodes against the
    * dispatch system (vanished → timeout, finished-during-window → re-emit,
    * live → re-subscribe). Never re-dispatches an already-progressed node.
+   *
+   * B8: a prior state that carries a plan identity
+   * (`executionProtocolVersion` / `compiledPlan` / `planBinding`) is adopted
+   * only when it belongs to this graph and its declaration is unchanged;
+   * otherwise this REJECTS with an {@link AdoptPlanRefusalError} —
+   * `adoptPriorNodeStates` throws before mutating anything — and the caller
+   * decides whether to surface the refusal or keep the current runtime. It is
+   * never silently dropped and never copied across a changed declaration.
    */
   adoptPrior(prior: EngineState, opts?: AdoptPriorOptions): Promise<void>;
 
@@ -768,6 +780,22 @@ function snapshotEngineState(state: EngineState): EngineState {
     terminalNotified: state.terminalNotified
       ? { ...state.terminalNotified }
       : undefined,
+    // B8 plan identity: the execution-protocol identity and the persisted
+    // compiled plan / plan binding are durable graph state, so a snapshot
+    // carries them too — the adopt path receives a prior state through
+    // `status()`, and dropping them here would lose the plan before
+    // `adoptPriorNodeStates` could carry it. DEEP clones: a snapshot consumer
+    // (or the adopting engine) must never alias the live state's records or
+    // contract bodies. Absent → undefined (no fabricated record).
+    executionProtocolVersion: state.executionProtocolVersion,
+    compiledPlan:
+      state.compiledPlan === undefined
+        ? undefined
+        : clonePersistedCompiledPlan(state.compiledPlan),
+    planBinding:
+      state.planBinding === undefined
+        ? undefined
+        : clonePlanBinding(state.planBinding),
   };
 }
 
@@ -1819,6 +1847,17 @@ export {
 // ── Re-exports for tool-layer consumers (barrel-only access) ─────────────────
 
 export { loadEngineStateFromJson } from "./engine-persistence.ts";
+
+/**
+ * The B8 adoption-refusal surface. The tool layer pre-checks a rebuild with
+ * {@link planAdoptionRefusal} (so an extension that cannot carry a plan fails
+ * before it replaces a live runtime) and rethrows
+ * {@link AdoptPlanRefusalError} instead of swallowing it.
+ */
+export {
+  AdoptPlanRefusalError,
+  planAdoptionRefusal,
+} from "./engine-recovery.ts";
 
 export { graphParentContext } from "./dispatch-bridge.ts";
 export type { DispatchParentContext } from "./dispatch-bridge.ts";

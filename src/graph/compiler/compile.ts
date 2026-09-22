@@ -25,20 +25,48 @@
  *
  * Contract resolution is DELEGATED, never re-implemented: a node's
  * `contractRef` goes through B4's `resolveContractRef` against
- * `CompileOptions.contracts`, and a resolved snapshot lands in
- * `plan.contractSnapshots[digest]` while the node carries the exact ref. A node
- * WITHOUT a contractRef is legal in this slice; contracts become mandatory for
- * outcome nodes in a later slice, once load-time refusal exists.
+ * `CompileOptions.contracts`, the resolved CONTENT lands once in
+ * `plan.contractSnapshots[digest]` (deduplicated by digest), the identity
+ * `(id, revision) → digest` lands in `plan.contractIdentities` (one entry per
+ * identity, never overwriting another), and the node carries the exact ref. Two
+ * identities whose bodies are byte-identical therefore share one snapshot and
+ * keep two index entries. A node WITHOUT a contractRef is legal in this slice;
+ * contracts become mandatory for outcome nodes in a later slice, once load-time
+ * refusal exists.
+ *
+ * ACCEPTANCE CAPABILITY is RESOLVED and PINNED (B9). With
+ * `CompileOptions.supportedValidators` supplied, every acceptance requirement
+ * must resolve to an installed capability at an EXACT version: a versioned
+ * requirement is satisfied only by that exact version, an unversioned one is
+ * pinned to the version of the first matching installed capability, and
+ * anything else is an error — `unsupported-validator` when nothing has the
+ * name, `unpinned-validator-version` when only an unversioned capability has
+ * it. The resolved version is written back into the plan, so the plan records
+ * what was checked and a syntactically fine requirement never silently means
+ * "any version". With NO capability set the compilation still answers, but as
+ * an explicitly NON-EXECUTABLE DRAFT whose `executability` records what is
+ * unresolved.
+ *
+ * THE PLAN IS INSPECTED BEFORE IT IS RETURNED. The body the compiler assembles
+ * goes through `plan.ts`'s `inspectCompiledTopology` — the SAME plan-level
+ * inspector and the SAME codes the load gate uses — and a rejection is returned
+ * as compile errors. Cycles must be inside a declared loop group, a loop's
+ * continuation outcome must have an edge that stays inside it, a node must
+ * declare outcomes, the body must state non-empty and edge-consistent terminal
+ * outcomes, and an executable plan must pin every acceptance requirement. The
+ * writer therefore satisfies its own reader structurally, not by convention.
  *
  * Dependencies: `declaration-v3.ts` (the grammar and its structural guard),
- * `plan.ts` (the immutable plan model and its ONE content-addressed revision)
- * and `contracts/` (the ONE digest and the resolution surface).
+ * `plan.ts` (the immutable plan model, its ONE content-addressed revision and
+ * its ONE plan-level inspector) and `contracts/` (the ONE digest and the
+ * resolution surface).
  */
 
 import {
   isContractRef,
+  type ContractContentSnapshot,
+  type ContractIdentityIndex,
   type ContractRef,
-  type ContractSnapshot,
 } from "../contracts/contract-definition.ts";
 import {
   resolveContractRef,
@@ -54,6 +82,8 @@ import {
 } from "./declaration-v3.ts";
 import {
   createCompiledPlan,
+  inspectCompiledTopology,
+  terminalOutcomesOf,
   type CompiledCompletionPolicy,
   type CompiledEdge,
   type CompiledLoopGroup,
@@ -61,6 +91,9 @@ import {
   type CompiledOutcome,
   type CompiledOutcomeData,
   type CompiledPlan,
+  type CompiledPlanBody,
+  type CompiledTopologyIssueCode,
+  type CompiledUnresolvedRequirement,
 } from "./plan.ts";
 
 // ── Issues ──────────────────────────────────────────────────────────────────
@@ -68,29 +101,37 @@ import {
 /**
  * Stable error codes. The later load/refusal slices branch on these strings, so
  * they are part of the contract; message wording is not.
+ *
+ * The PLAN-LEVEL half of this union is `CompiledTopologyIssueCode`, imported
+ * from `plan.ts` rather than restated: the compiler reports the inspector's own
+ * codes for a plan-level defect, and the load gate reports the same codes for
+ * the same defect, so no rule can acquire two names.
  */
 export type CompileErrorCode =
+  | CompiledTopologyIssueCode
   | "malformed-declaration"
-  | "duplicate-node-id"
-  | "unknown-edge-endpoint"
-  | "missing-outcomes"
   | "duplicate-outcome-id"
   | "missing-edge-outcome"
-  | "unknown-outcome-reference"
   | "natural-completion-unknown-outcome"
   | "duplicate-natural-completion"
   | "duplicate-loop-group-id"
-  | "loop-group-missing-limits"
-  | "unknown-loop-member"
-  | "unknown-loop-exit-outcome"
-  | "unknown-loop-continuation-outcome"
   | "loop-continuation-outside-group"
   | "unresolved-contract"
   | "contract-digest-mismatch"
   | "unsupported-validator";
 
-/** Stable non-blocking warning codes. */
-export type CompileWarningCode = "unused-outcome";
+/**
+ * Stable non-blocking warning codes.
+ *
+ * RETIRED (B9): the one warning was `unused-outcome` — an outcome no edge binds
+ * and that is not the natural-completion outcome. That is EXACTLY the case the
+ * plan now states positively in `terminalOutcomes`, where an outcome with no
+ * outbound edge is a declared EXIT rather than a suspected mistake, so the
+ * warning was retired rather than renamed. No warning code is currently
+ * defined; the `warnings` list stays in the result so the shape does not churn
+ * and a future warning needs no new shape.
+ */
+export type CompileWarningCode = never;
 
 /** Every code `compileGraph` can report. */
 export type CompileCode = CompileErrorCode | CompileWarningCode;
@@ -108,11 +149,13 @@ export interface CompileIssue {
 /**
  * A validator capability the caller declares this build has installed.
  *
- * A bare capability (no version) covers every version of that validator; a
- * versioned capability covers exactly that version. A bare REQUIREMENT is
- * covered by any installed version. Matching is identity, never ordering — the
- * same capability-not-membership rule as the storage-format, execution-protocol
- * and contract registries.
+ * A VERSIONED capability satisfies a versioned requirement only at that exact
+ * version, and pins an unversioned requirement to it. An UNVERSIONED capability
+ * can never complete a resolution: it can only cover an unversioned
+ * requirement, and because an executable plan must pin an exact version,
+ * covering without a version is `unpinned-validator-version`. Matching is
+ * identity, never ordering — the same capability-not-membership rule as the
+ * storage-format, execution-protocol and contract registries.
  */
 export interface SupportedValidatorV3 {
   /** Validator name. */
@@ -130,23 +173,43 @@ export interface CompileOptions {
    */
   readonly contracts?: ContractRegistry;
   /**
-   * The installed validator capability. Omitted, acceptance requirements are
-   * not capability-checked (unknown validators pass); provided, every
-   * requirement must be covered or compilation fails as
-   * `unsupported-validator`. An empty array therefore declares "no validators
+   * The installed validator capability.
+   *
+   * PROVIDED: every acceptance requirement must resolve to an exact installed
+   * version, or compilation fails — `unsupported-validator` when no capability
+   * has the name, `unpinned-validator-version` when only an unversioned
+   * capability has it. An empty array therefore declares "no validators
    * installed" and refuses every requirement.
+   *
+   * OMITTED: acceptance requirements cannot be resolved, so compilation answers
+   * a structurally complete but NON-EXECUTABLE DRAFT (`kind: "draft"`)
+   * carrying what is unresolved. It is never silently treated as executable.
    */
   readonly supportedValidators?: readonly SupportedValidatorV3[];
 }
 
 /**
- * The compilation result: a plan with warnings, or the errors that prevented
- * one (with the warnings that were already known).
+ * The compilation result: an executable plan, a non-executable DRAFT, or the
+ * errors that prevented a plan (with the warnings that were already known).
+ *
+ * The two success shapes are DELIBERATELY distinct (B9): `kind` is the
+ * discriminator, and only `"executable"` licenses persisting or running the
+ * plan. A draft carries `unresolved` — the same frozen list the plan body
+ * records — so a caller never has to infer executability from the presence of a
+ * version somewhere.
  */
 export type CompileResult =
   | {
       readonly ok: true;
+      readonly kind: "executable";
       readonly plan: CompiledPlan;
+      readonly warnings: readonly CompileIssue[];
+    }
+  | {
+      readonly ok: true;
+      readonly kind: "draft";
+      readonly plan: CompiledPlan;
+      readonly unresolved: readonly CompiledUnresolvedRequirement[];
       readonly warnings: readonly CompileIssue[];
     }
   | {
@@ -190,9 +253,21 @@ export type CompileResult =
  *   the ref's digest;
  * - `unsupported-validator` — an acceptance requirement no declared capability
  *   covers (only when `supportedValidators` is provided);
+ * - `unpinned-validator-version` — an acceptance requirement covered only by an
+ *   unversioned capability, so no exact version can be pinned (only when
+ *   `supportedValidators` is provided);
  *
- * and the non-blocking warning `unused-outcome` — an outcome no edge binds and
- * that is not the natural-completion outcome. Warnings never block a plan.
+ * and the PLAN-LEVEL rules of `plan.ts`'s `inspectCompiledTopology`, applied to
+ * the body the compiler just built and reported with the SAME codes the load
+ * gate uses: `cycle-not-in-loop-group`, `loop-continuation-without-edge`,
+ * `missing-outcomes`, `missing-terminal-outcome`,
+ * `terminal-outcomes-inconsistent`, `unpinned-validator-version` and the
+ * shape/topology members of `CompiledTopologyIssueCode`. A declaration whose
+ * body the inspector would reject is a compile error, so the compiler can never
+ * return a plan its own reader refuses.
+ *
+ * There is no warning code: `unused-outcome` was retired because an outcome
+ * with no outbound edge is now the plan's explicit `terminalOutcomes` entry.
  *
  * PURE and TOTAL: no I/O, no mutation of the declaration, and no exception for
  * any input.
@@ -272,14 +347,17 @@ function compileDeclaration(
     declaredOutcomes.set(node.id, declaredOutcomeIds(node));
   }
   const edges = readEdges(declaration);
-  const boundOutcomes = boundOutcomeKeys(edges);
-  const snapshots = new Map<string, ContractSnapshot>();
+  // CONTENT is keyed by digest (deduplicated); IDENTITY is the separate
+  // `(id, revision) → digest` index. See `bindContract`.
+  const snapshots = new Map<string, ContractContentSnapshot>();
+  const identities = new Map<string, Map<string, string>>();
+  // Every acceptance requirement left unresolved because no capability set was
+  // supplied. A non-empty list makes the result a DRAFT, never executable.
+  const unresolved: CompiledUnresolvedRequirement[] = [];
 
   const nodes: CompiledNode[] = [];
   for (const node of nodesById.values()) {
-    nodes.push(
-      compileNode(node, options, log, boundOutcomes, snapshots),
-    );
+    nodes.push(compileNode(node, options, log, snapshots, identities, unresolved));
   }
   const compiledEdges = compileEdges(edges, nodesById, declaredOutcomes, log);
   const loopGroups = compileLoopGroups(
@@ -293,17 +371,44 @@ function compileDeclaration(
   if (log.errors.length > 0) {
     return failed(log.errors, log.warnings);
   }
-  return succeeded(
-    createCompiledPlan({
-      graphId: declaration.name,
-      declarationVersion: 3,
-      nodes,
-      edges: compiledEdges,
-      loopGroups,
-      contractSnapshots: snapshotIndex(snapshots),
-    }),
-    log.warnings,
+
+  const body: CompiledPlanBody = {
+    graphId: declaration.name,
+    declarationVersion: 3,
+    nodes,
+    edges: compiledEdges,
+    loopGroups,
+    contractSnapshots: snapshotIndex(snapshots),
+    contractIdentities: identityIndex(identities),
+    // The explicit terminal is DERIVED from the body the compiler built, with
+    // the same helper the inspector checks the list with.
+    terminalOutcomes: terminalOutcomesOf(nodes, compiledEdges),
+    executability:
+      unresolved.length === 0
+        ? { kind: "executable" }
+        : { kind: "draft", unresolved },
+  };
+
+  // THE WRITER SATISFIES ITS OWN READER: the body the compiler just assembled
+  // is inspected by the SAME plan-level rule owner the load gate calls, and a
+  // rejection becomes a compile error carrying the inspector's own code. This
+  // runs after the declaration-level rules have already passed, so a defect the
+  // compiler named itself is never reported twice with a second code.
+  const inspection = inspectCompiledTopology(
+    body.nodes,
+    body.edges,
+    body.loopGroups,
+    body.terminalOutcomes,
+    body.executability,
   );
+  if (inspection.issues.length > 0) {
+    return failed(
+      inspection.issues.map((found) => issue(found.code, found.message, "$plan")),
+      log.warnings,
+    );
+  }
+
+  return succeeded(createCompiledPlan(body), log.warnings);
 }
 
 // ── Nodes ───────────────────────────────────────────────────────────────────
@@ -354,12 +459,12 @@ function compileNode(
   node: NodeDeclarationV3,
   options: CompileOptions | undefined,
   log: IssueLog,
-  boundOutcomes: ReadonlySet<string>,
-  snapshots: Map<string, ContractSnapshot>,
+  snapshots: Map<string, ContractContentSnapshot>,
+  identities: Map<string, Map<string, string>>,
+  unresolved: CompiledUnresolvedRequirement[],
 ): CompiledNode {
   const base = nodePath(node.id);
-  const outcomeEntries = compileOutcomes(node, options, log);
-  const outcomes = outcomeEntries.map((entry) => entry.outcome);
+  const outcomes = compileOutcomes(node, options, log, unresolved);
 
   if (node.outcomes.length === 0) {
     log.errors.push(
@@ -402,7 +507,7 @@ function compileNode(
     );
   }
 
-  const contractRef = bindContract(node, options, log, snapshots);
+  const contractRef = bindContract(node, options, log, snapshots, identities);
 
   const join = readJoin(node.join);
   if (node.join !== undefined && join === null) {
@@ -426,23 +531,6 @@ function compileNode(
     );
   }
 
-  for (const entry of outcomeEntries) {
-    const outcome = entry.outcome;
-    const natural =
-      planCompletion !== undefined &&
-      planCompletion.mode === "natural" &&
-      planCompletion.outcome === outcome.id;
-    if (!natural && !boundOutcomes.has(outcomeKey(node.id, outcome.id))) {
-      log.warnings.push(
-        issue(
-          "unused-outcome",
-          `outcome ${JSON.stringify(outcome.id)} of node ${JSON.stringify(node.id)} is never bound by an edge and is not the natural-completion outcome`,
-          `${base}.outcomes[${entry.declaredIndex}]`,
-        ),
-      );
-    }
-  }
-
   return {
     id: node.id,
     agent: node.agent,
@@ -455,27 +543,19 @@ function compileNode(
   };
 }
 
-/** One accepted outcome plus the declaration slot it came from. */
-interface OutcomeEntry {
-  readonly outcome: CompiledOutcome;
-  /** Position in the node's declaration — the path a diagnostic points at. */
-  readonly declaredIndex: number;
-}
-
 /**
  * Compile a node's outcomes in declaration order for DIAGNOSTICS, then sort the
  * accepted ones by id for the plan: outcomes are an addressable set, so
  * canonical order is id order regardless of how the declaration wrote them.
- * Each entry keeps its DECLARATION index, so a warning still points at the slot
- * the author wrote rather than at the canonical position.
  */
 function compileOutcomes(
   node: NodeDeclarationV3,
   options: CompileOptions | undefined,
   log: IssueLog,
-): OutcomeEntry[] {
+  unresolved: CompiledUnresolvedRequirement[],
+): CompiledOutcome[] {
   const base = nodePath(node.id);
-  const accepted: OutcomeEntry[] = [];
+  const accepted: CompiledOutcome[] = [];
   const seen = new Set<string>();
   for (let index = 0; index < node.outcomes.length; index++) {
     const path = `${base}.outcomes[${index}]`;
@@ -521,17 +601,20 @@ function compileOutcomes(
     }
 
     accepted.push({
-      outcome: {
+      id,
+      ...(data === null ? {} : { data }),
+      acceptance: readAcceptance(
+        raw.acceptance,
+        path,
+        node.id,
         id,
-        ...(data === null ? {} : { data }),
-        acceptance: readAcceptance(raw.acceptance, path, options, log),
-      },
-      declaredIndex: index,
+        options,
+        log,
+        unresolved,
+      ),
     });
   }
-  return accepted.sort((a, b) =>
-    compareText(a.outcome.id, b.outcome.id),
-  );
+  return accepted.sort((a, b) => compareText(a.id, b.id));
 }
 
 /** Read one outcome's optional data contract. */
@@ -547,14 +630,23 @@ function readOutcomeData(raw: unknown): CompiledOutcomeData | null {
 
 /**
  * Read an outcome's acceptance requirements, preserving their declared order
- * (they are an ordered gate sequence), and capability-check each one when the
- * caller declared installed validators.
+ * (they are an ordered gate sequence), and RESOLVE each one against the
+ * installed capability set.
+ *
+ * With a capability set, a requirement that does not resolve to an exact
+ * installed version is an error and the plan is not produced. With NO capability
+ * set, every requirement is recorded as unresolved: the compilation still
+ * answers, as a non-executable draft that records what it could not check
+ * rather than one that pretends the gates are satisfied.
  */
 function readAcceptance(
   raw: unknown,
   outcomePath: string,
+  nodeId: string,
+  outcomeId: string,
   options: CompileOptions | undefined,
   log: IssueLog,
+  unresolved: CompiledUnresolvedRequirement[],
 ): AcceptanceRequirementV3[] {
   if (raw === undefined) return [];
   const base = `${outcomePath}.acceptance`;
@@ -583,16 +675,50 @@ function readAcceptance(
       continue;
     }
     const supported = options?.supportedValidators;
-    if (supported !== undefined && !isValidatorSupported(requirement, supported)) {
-      log.errors.push(
-        issue(
-          "unsupported-validator",
-          `validator ${describeValidator(requirement)} is not installed: no declared supported validator covers it`,
-          path,
-        ),
-      );
+    if (supported === undefined) {
+      unresolved.push({
+        nodeId,
+        outcomeId,
+        validator: requirement.validator,
+        ...(requirement.version === undefined
+          ? {}
+          : { version: requirement.version }),
+      });
+      acceptance.push(requirement);
+      continue;
     }
-    acceptance.push(requirement);
+    const resolution = resolveValidatorCapability(requirement, supported);
+    switch (resolution.kind) {
+      case "resolved":
+        // The EXACT resolved version is written back, whether the declaration
+        // named it or the installed capability supplied it: the plan records
+        // what was checked, and a bare requirement never means "any version".
+        acceptance.push({
+          validator: requirement.validator,
+          version: resolution.version,
+        });
+        break;
+      case "unpinned":
+        log.errors.push(
+          issue(
+            "unpinned-validator-version",
+            `validator ${describeValidator(requirement)} is covered only by an unversioned capability — an executable plan pins every requirement to an exact installed version`,
+            path,
+          ),
+        );
+        acceptance.push(requirement);
+        break;
+      case "unsupported":
+        log.errors.push(
+          issue(
+            "unsupported-validator",
+            `validator ${describeValidator(requirement)} is not installed: no declared supported validator covers it`,
+            path,
+          ),
+        );
+        acceptance.push(requirement);
+        break;
+    }
   }
   return acceptance;
 }
@@ -610,19 +736,43 @@ function readAcceptanceRequirement(
   return { validator, version };
 }
 
-/** Whether a declared capability covers a requirement (identity, not ordering). */
-function isValidatorSupported(
+/** What one acceptance requirement resolves to against the installed set. */
+type ValidatorResolution =
+  | { readonly kind: "resolved"; readonly version: number }
+  | { readonly kind: "unpinned" }
+  | { readonly kind: "unsupported" };
+
+/**
+ * Resolve one acceptance requirement to an EXACT installed capability version.
+ *
+ * Matching is identity, never ordering:
+ * - a VERSIONED requirement is satisfied only by a capability declaring that
+ *   exact version; an unversioned capability can only mark it COVERED without a
+ *   version, which is `unpinned`;
+ * - an UNVERSIONED requirement is pinned to the version of the FIRST matching
+ *   versioned capability in the caller's declared order (deterministic for a
+ *   given capability set, and never a numeric range);
+ * - a name no capability declares is `unsupported`.
+ */
+function resolveValidatorCapability(
   requirement: AcceptanceRequirementV3,
   supported: readonly SupportedValidatorV3[],
-): boolean {
-  return supported.some((capability) => {
-    if (capability.validator !== requirement.validator) return false;
-    if (requirement.version === undefined) return true;
-    return (
-      capability.version === undefined ||
+): ValidatorResolution {
+  let coveredWithoutVersion = false;
+  for (const capability of supported) {
+    if (capability.validator !== requirement.validator) continue;
+    if (capability.version === undefined) {
+      coveredWithoutVersion = true;
+      continue;
+    }
+    if (
+      requirement.version === undefined ||
       capability.version === requirement.version
-    );
-  });
+    ) {
+      return { kind: "resolved", version: capability.version };
+    }
+  }
+  return coveredWithoutVersion ? { kind: "unpinned" } : { kind: "unsupported" };
 }
 
 /**
@@ -736,18 +886,33 @@ function readBudget(raw: unknown): NodeBudgetSpec | null {
 // ── Contracts ───────────────────────────────────────────────────────────────
 
 /**
- * Resolve a node's `contractRef` through B4's resolver and record the resolved
- * snapshot by digest, returning the binding the plan carries.
+ * Resolve a node's `contractRef` through B4's resolver and record what the plan
+ * pins, returning the binding the node carries.
  *
  * The compiler never looks a contract up itself and never re-hashes a body: it
  * asks `resolveContractRef` and maps its four-way verdict onto the two compile
  * codes. A node with no ref is legal in this slice and simply has no binding.
+ *
+ * A resolved contract is recorded in TWO places, and they are not the same
+ * thing (B8):
+ * - `snapshots[digest]` is CONTENT. Two identities whose bodies are
+ *   byte-identical hash to the same digest and therefore share one entry: the
+ *   first write wins and an existing entry is never replaced, so the plan
+ *   cannot hold two different bodies under one content address.
+ * - `identities[id][revision]` is IDENTITY. Every resolved identity gets its
+ *   own entry, and an entry is never overwritten either: `resolveContractRef`
+ *   only answers `resolved` when the registry body hashes to the ref's digest,
+ *   and a registry admits at most one snapshot per `(id, revision)`, so one
+ *   identity cannot be bound to two different digests by this compiler. A
+ *   contradiction is reported as `contract-digest-mismatch` rather than
+ *   silently rebinding the identity.
  */
 function bindContract(
   node: NodeDeclarationV3,
   options: CompileOptions | undefined,
   log: IssueLog,
-  snapshots: Map<string, ContractSnapshot>,
+  snapshots: Map<string, ContractContentSnapshot>,
+  identities: Map<string, Map<string, string>>,
 ): ContractRef | undefined {
   const raw: unknown = node.contractRef;
   if (raw === undefined) return undefined;
@@ -789,9 +954,29 @@ function bindContract(
   }
 
   switch (resolution.kind) {
-    case "resolved":
-      snapshots.set(raw.digest, resolution.snapshot);
+    case "resolved": {
+      // CONTENT: deduplicated by digest, first write wins. The body comes from
+      // the registry's proven snapshot — never a re-derived copy.
+      if (!snapshots.has(raw.digest)) {
+        snapshots.set(raw.digest, { body: resolution.snapshot.body });
+      }
+      // IDENTITY: one entry per exact (id, revision); never overwriting.
+      const revisions = identities.get(raw.id) ?? new Map<string, string>();
+      const known = revisions.get(raw.revision);
+      if (known !== undefined && known !== raw.digest) {
+        log.errors.push(
+          issue(
+            "contract-digest-mismatch",
+            `contract ${describeRef(raw)} would rebind identity to content digest ${raw.digest} from ${known} — one exact (id, revision) identity has exactly one content digest`,
+            path,
+          ),
+        );
+        return undefined;
+      }
+      revisions.set(raw.revision, raw.digest);
+      identities.set(raw.id, revisions);
       return { id: raw.id, revision: raw.revision, digest: raw.digest };
+    }
     case "unknown-contract":
       log.errors.push(
         issue(
@@ -850,15 +1035,6 @@ function compareEdgeReadings(a: EdgeReading, b: EdgeReading): number {
     compareText(a.to, b.to) ||
     compareText(a.outcome ?? "", b.outcome ?? "")
   );
-}
-
-/** Every (source node, outcome) pair an edge binds, for unused-outcome. */
-function boundOutcomeKeys(edges: readonly EdgeReading[]): ReadonlySet<string> {
-  const keys = new Set<string>();
-  for (const edge of edges) {
-    if (edge.outcome !== null) keys.add(outcomeKey(edge.from, edge.outcome));
-  }
-  return keys;
 }
 
 /** Compile the edges in canonical order. */
@@ -1092,14 +1268,14 @@ function membersDeclareOutcome(
 // ── Snapshots and result assembly ───────────────────────────────────────────
 
 /**
- * Build the plan's contract index, keyed by digest in digest order. Digest keys
- * are SHA-256 hex produced by `contractDigest`, so a prototype-shaped key
- * cannot occur.
+ * Build the plan's contract CONTENT index, keyed by digest in digest order.
+ * Digest keys are SHA-256 hex produced by `contractDigest`, so a
+ * prototype-shaped key cannot occur.
  */
 function snapshotIndex(
-  snapshots: ReadonlyMap<string, ContractSnapshot>,
-): Readonly<Record<string, ContractSnapshot>> {
-  const index: Record<string, ContractSnapshot> = {};
+  snapshots: ReadonlyMap<string, ContractContentSnapshot>,
+): Readonly<Record<string, ContractContentSnapshot>> {
+  const index: Record<string, ContractContentSnapshot> = {};
   for (const digest of [...snapshots.keys()].sort(compareText)) {
     const snapshot = snapshots.get(digest);
     if (snapshot !== undefined) index[digest] = snapshot;
@@ -1107,15 +1283,60 @@ function snapshotIndex(
   return index;
 }
 
-/** Assemble a successful result with a frozen issue list. */
+/**
+ * Build the plan's contract IDENTITY index: `id` → `revision` → digest.
+ *
+ * Entries are inserted in canonical node order (nodes are compiled in id
+ * order), so the index is deterministic for the same declaration; the order is
+ * not load-bearing because `contractDigest` sorts object keys, so it never
+ * moves the plan revision.
+ *
+ * Built through `Object.fromEntries` — a data property definition — so an id
+ * such as `__proto__` lands in the record instead of on its prototype. The
+ * nested shape makes one-identity-one-digest structural, and identity strings
+ * are never concatenated into a composite key that could collide.
+ */
+function identityIndex(
+  identities: ReadonlyMap<string, ReadonlyMap<string, string>>,
+): ContractIdentityIndex {
+  return Object.fromEntries(
+    [...identities].map(
+      ([id, revisions]): [string, Readonly<Record<string, string>>] => [
+        id,
+        Object.fromEntries(revisions),
+      ],
+    ),
+  );
+}
+
+/**
+ * Assemble a successful result with a frozen issue list.
+ *
+ * The two success shapes are built HERE and nowhere else, so an executable plan
+ * and a draft can never be confused for one another at the source: the draft
+ * variant carries the plan body's OWN frozen unresolved list (the same array
+ * instance), and neither shape has the other's discriminant.
+ */
 function succeeded(
   plan: CompiledPlan,
   warnings: readonly CompileIssue[],
 ): CompileResult {
+  const frozenWarnings = Object.freeze([...warnings]);
+  const executability = plan.executability;
+  if (executability.kind === "draft") {
+    return Object.freeze({
+      ok: true as const,
+      kind: "draft" as const,
+      plan,
+      unresolved: executability.unresolved,
+      warnings: frozenWarnings,
+    });
+  }
   return Object.freeze({
     ok: true as const,
+    kind: "executable" as const,
     plan,
-    warnings: Object.freeze([...warnings]),
+    warnings: frozenWarnings,
   });
 }
 
@@ -1141,13 +1362,6 @@ function issue(code: CompileCode, message: string, path: string): CompileIssue {
 /** The diagnostic path of a node. */
 function nodePath(id: string): string {
   return `nodes.${id}`;
-}
-
-/** The flat key of one (source node, outcome) binding. */
-function outcomeKey(nodeId: string, outcomeId: string): string {
-  // A NUL separator cannot occur in either id, so two different pairs can never
-  // collide in one flat key.
-  return `${nodeId}\u0000${outcomeId}`;
 }
 
 /** UTF-16 code-unit order: locale-independent, so ids sort the same everywhere. */

@@ -6,8 +6,12 @@
  *
  * Phase 4, Subtask 6. Wraps the {@link GraphToolSet} tool-logic layer (subtask
  * 5, `graph-tools.ts`) with zod `args` schemas and `defineTool` registrations
- * so the eight imperative `graph_*` tools become platform-agnostic
+ * so the imperative `graph_*` tools become platform-agnostic
  * {@link CanonicalToolDef}s consumable by `buildCanonicalTools`.
+ *
+ * C1 adds `graph_declare`, the v3 authoring ingress: it is ADDITIVE (a new
+ * key in the `graph_*` namespace, nothing repurposed) and the eight original
+ * tools keep their exact schemas.
  *
  * The arg schemas mirror `.rolebox/design/tool-merge-map.md` §2.2, adapted to
  * the real TypeScript arg shapes exported by `graph-tools.ts` (which are
@@ -32,6 +36,7 @@ import { defineTool } from "../../platform/ports/tool-factory.ts";
 import { errorText } from "../../utils/error-text.ts";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
+import type { ContractRegistry } from "../contracts/resolve.ts";
 import {
   createGraphToolSet,
   type GraphToolSet,
@@ -113,8 +118,8 @@ const statusFormatEnum = z.enum(["summary", "tree", "json"]) satisfies z.ZodType
 // ── createGraphTools ────────────────────────────────────────────────────────
 
 /**
- * Build the eight imperative `graph_*` tools bound to a dispatch manager and
- * a single in-memory graph registry (one shared `GraphToolSet` instance).
+ * Build the imperative `graph_*` tools bound to a dispatch manager and a
+ * single in-memory graph registry (one shared `GraphToolSet` instance).
  *
  * @param manager - Active {@link DispatchManager}; required for non dry-run
  *                  execution. Optional for construction/status/cancel/dry-run.
@@ -175,6 +180,13 @@ export function createGraphTools(
      * session. Absent → `context.agent`-only (opencode, unchanged).
      */
     getEffectiveAgent?: (sessionID?: string) => string;
+    /**
+     * Optional installed CONTRACT capability (C1), threaded into a toolset
+     * constructed HERE so `graph_declare` can resolve a declaration's node
+     * `contractRef`s. Ignored when a prebuilt `toolset` is provided — that
+     * instance carries its own deps.
+     */
+    contracts?: ContractRegistry;
   } = {},
 ): Record<string, CanonicalToolDef> {
   const toolset: GraphToolSet = opts.toolset ?? createGraphToolSet({
@@ -183,6 +195,7 @@ export function createGraphTools(
     directory: opts.directory,
     stateDir: opts.stateDir,
     graphNotify: opts.graphNotify,
+    ...(opts.contracts !== undefined ? { contracts: opts.contracts } : {}),
     ...(opts.nodeStallWarnMs !== undefined
       ? { nodeStallWarnMs: opts.nodeStallWarnMs }
       : {}),
@@ -199,6 +212,7 @@ export function createGraphTools(
     graph_add_node: createGraphAddNodeTool(toolset, opts.getEffectiveAgent),
     graph_add_edge: createGraphAddEdgeTool(toolset, opts.getEffectiveAgent),
     graph_add_loop: createGraphAddLoopTool(toolset, opts.getEffectiveAgent),
+    graph_declare: createGraphDeclareTool(toolset, opts.getEffectiveAgent),
     graph_run: createGraphRunTool(toolset, opts.getEffectiveAgent),
     graph_status: createGraphStatusTool(toolset),
     graph_cancel: createGraphCancelTool(toolset),
@@ -449,6 +463,72 @@ function createGraphAddLoopTool(
         );
       } catch (err) {
         return `graph_add_loop failed: ${errorText(err)}`;
+      }
+    },
+  });
+}
+
+/** graph_declare — author a v3 (outcome-protocol) graph and persist its plan. */
+function createGraphDeclareTool(
+  toolset: GraphToolSet,
+  getEffectiveAgent?: (sessionID?: string) => string,
+): CanonicalToolDef {
+  return defineTool({
+    description:
+      "Declare a graph from a full v3 declaration (JSON text or an already-parsed " +
+      "value): parse, compile, and persist the compiled plan with its contract " +
+      "binding and the outcome-protocol identity. NOT RUNNABLE yet — this build has " +
+      "no registered outcome-protocol handler, so graph_run (and every legacy " +
+      "construction/status/cancel call) on a declared graph fails with the " +
+      "missing-handler error and dispatches nothing; the graph never falls back to " +
+      "the legacy signal protocol. A declaration that compiles only as a DRAFT " +
+      "(acceptance requirements with no resolved validator capability) is refused " +
+      "with every unresolved entry named and nothing is persisted; pass " +
+      "supported_validators to resolve them. Unknown keys, wrong types and bad loop " +
+      "limits are refused with stable codes and the failing path. Re-declaring an " +
+      "existing id preserves an unchanged plan and refuses a changed one — a " +
+      "persisted plan is never overwritten silently.",
+    args: {
+      declaration: z
+        .json()
+        .describe(
+          "The v3 declaration as JSON text or an already-parsed JSON value: " +
+            "{ version: 3, name, nodes[], edges[], loop_groups?[] } with the closed " +
+            "v3 grammar (nodes declare outcomes; every edge binds one).",
+        ),
+      graph_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional graph id. The v3 grammar carries no separate identifier, so it " +
+            "must equal the declaration's name; a mismatch is refused.",
+        ),
+      supported_validators: z
+        .array(
+          z.object({
+            validator: z.string().min(1),
+            version: z.number().int().positive().optional(),
+          }),
+        )
+        .optional()
+        .describe(
+          "The validator capabilities this caller declares installed, used to " +
+            "resolve every acceptance requirement at an EXACT version. Omitted, " +
+            "acceptance requirements stay unresolved, compilation answers a " +
+            "non-executable DRAFT and graph_declare refuses it.",
+        ),
+    },
+    async execute(args, context) {
+      try {
+        return json(
+          toolset.graph_declare(
+            args,
+            context?.sessionID,
+            resolveEffectiveAgent(context?.agent, context?.sessionID, getEffectiveAgent),
+          ),
+        );
+      } catch (err) {
+        return `graph_declare failed: ${errorText(err)}`;
       }
     },
   });

@@ -58,6 +58,10 @@ import {
   type CompiledPlan,
   type PersistedCompiledPlan,
 } from "../../src/graph/compiler/plan.ts";
+import {
+  buildDeclaredOutcomeGraph,
+  persistDeclaredGraph,
+} from "../../src/graph/tools/declare-graph.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
 import {
   checkGraphTermination,
@@ -2592,6 +2596,9 @@ describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
     return {
       planRevision: plan.planRevision,
       contractSnapshots: plan.contractSnapshots,
+      // B8: the identity index is part of the projection — content is
+      // deduplicated by digest, identity is this separate mapping.
+      contractIdentities: plan.contractIdentities,
       nodeBindings,
     };
   }
@@ -2624,7 +2631,8 @@ describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
   /** The mutable binding shape a tamper case edits. */
   interface MutableBinding {
     planRevision?: string;
-    contractSnapshots: Record<string, ContractSnapshot>;
+    contractSnapshots: Record<string, { body: unknown }>;
+    contractIdentities: Record<string, Record<string, unknown>>;
     nodeBindings: Record<string, ContractRef>;
   }
 
@@ -2725,10 +2733,12 @@ describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
     if (result.kind === "valid") {
       const reloaded =
         result.state.planBinding?.contractSnapshots[snapshot.ref.digest];
-      expect(reloaded?.ref).toEqual(snapshot.ref);
-      // -0 and 0 are the same JSON value, which is why the digest conflates
-      // them: the reloaded body is the STORED body, and it verifies.
-      expect(reloaded?.body).toEqual({ threshold: 0, label: "z" });
+      // B8: the content entry carries no ref — the identity index proves which
+      // identity resolves to this content.
+      expect(reloaded).toEqual({ body: { threshold: 0, label: "z" } });
+      expect(
+        result.state.planBinding?.contractIdentities["contract.zero"]?.["1"],
+      ).toBe(snapshot.ref.digest);
       expect(result.state.planBinding?.planRevision).toBe(
         zeroBinding.planRevision,
       );
@@ -2759,59 +2769,40 @@ describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
       {
         label: "(b) snapshot body no longer hashes to its key",
         raw: tamperedRaw((b) => {
-          b.contractSnapshots[contractKey] = {
-            ref: CONTRACT_SNAPSHOT.ref,
-            body: { tampered: true },
-          };
+          b.contractSnapshots[contractKey] = { body: { tampered: true } };
         }),
         reason: `contract snapshot "${contractKey}" body hashes to`,
       },
       {
-        label: "(b) snapshot ref.digest disagrees with its key",
-        raw: tamperedRaw((b) => {
-          b.contractSnapshots[contractKey] = {
-            ref: { ...CONTRACT_SNAPSHOT.ref, digest: "0".repeat(64) },
-            body: CONTRACT_SNAPSHOT.body,
-          };
-        }),
-        reason: "declares ref.digest",
-      },
-      {
-        label: "(b) one (id, revision) identity carries two digests",
-        raw: tamperedRaw((b) => {
-          // The shape createContractRegistry refuses: a second digest for the
-          // SAME (id, revision). The node is rebound to the new digest so the
-          // snapshot and binding rules all pass, and ONLY the
-          // identity-uniqueness rule can catch this file.
-          const otherBody = { ...CONTRACT_BODY, policy: "lenient" };
-          const otherDigest = contractDigest(otherBody);
-          b.contractSnapshots[otherDigest] = {
-            ref: { ...CONTRACT_SNAPSHOT.ref, digest: otherDigest },
-            body: otherBody,
-          };
-          b.nodeBindings["review"] = {
-            ...CONTRACT_SNAPSHOT.ref,
-            digest: otherDigest,
-          };
-        }),
-        reason: "one exact (id, revision) identity has exactly one snapshot",
-      },
-      {
-        label: "(c) bound digest is not in contractSnapshots",
+        label: "(b) identity maps to a digest with no snapshot",
         raw: tamperedRaw((b) => {
           b.contractSnapshots = {};
         }),
         reason: "which contractSnapshots does not contain",
       },
       {
-        label: "(c) bound ref differs from the snapshot ref",
+        label: "(b) identity maps to a non-digest value",
+        raw: tamperedRaw((b) => {
+          b.contractIdentities["contract.review"]["1"] = 7;
+        }),
+        reason: "not a content digest",
+      },
+      {
+        label: "(c) bound identity is absent from the index",
+        raw: tamperedRaw((b) => {
+          delete b.contractIdentities["contract.review"];
+        }),
+        reason: "which the contract identity index does not carry",
+      },
+      {
+        label: "(c) bound ref declares a digest the index disagrees with",
         raw: tamperedRaw((b) => {
           b.nodeBindings["review"] = {
             ...CONTRACT_SNAPSHOT.ref,
-            id: "contract.other",
+            digest: "0".repeat(64),
           };
         }),
-        reason: "but the snapshot at digest",
+        reason: "but the contract identity index maps",
       },
       {
         label: "(d) binding names a node the state does not declare",
@@ -2852,15 +2843,37 @@ describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
         bindingValue: {
           planRevision: "x",
           contractSnapshots: [],
+          contractIdentities: {},
           nodeBindings: {},
         },
         reason: "contractSnapshots is not a record",
+      },
+      {
+        label: "string contractIdentities",
+        bindingValue: {
+          planRevision: "x",
+          contractSnapshots: {},
+          contractIdentities: "nope",
+          nodeBindings: {},
+        },
+        reason: "contractIdentities is not a record keyed by contract id",
+      },
+      {
+        label: "string identity revisions",
+        bindingValue: {
+          planRevision: "x",
+          contractSnapshots: {},
+          contractIdentities: { "contract.review": "nope" },
+          nodeBindings: {},
+        },
+        reason: 'contract identity "contract.review" is not a record keyed by revision',
       },
       {
         label: "string nodeBindings",
         bindingValue: {
           planRevision: "x",
           contractSnapshots: {},
+          contractIdentities: {},
           nodeBindings: "nope",
         },
         reason: "nodeBindings is not a record",
@@ -3022,7 +3035,7 @@ describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
       const path = engineStatePath(dir, "graph-bound");
       const file = JSON.parse(readFileSync(path, "utf-8")) as {
         planBinding: {
-          contractSnapshots: Record<string, { ref: ContractRef; body: unknown }>;
+          contractSnapshots: Record<string, { body: unknown }>;
         };
       };
       const storedSnapshot = file.planBinding.contractSnapshots[contractKey];
@@ -3121,6 +3134,7 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
   const binding: PlanBinding = {
     planRevision: plan.planRevision,
     contractSnapshots: plan.contractSnapshots,
+    contractIdentities: plan.contractIdentities,
     nodeBindings: record.nodeBindings,
   };
   const reviewKey = REVIEW_SNAPSHOT.ref.digest;
@@ -3160,6 +3174,11 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
     edges: Record<string, unknown>[];
     loopGroups: Record<string, unknown>[];
     contractSnapshots: Record<string, unknown>;
+    contractIdentities: Record<string, Record<string, unknown>>;
+    // B9: the explicit terminal list and the executability marker are body
+    // fields a tamper case moves with the topology it changes.
+    terminalOutcomes: { nodeId: string; outcome: string }[];
+    executability: Record<string, unknown>;
     nodeBindings: Record<string, unknown>;
     /** Extra own keys a fidelity case adds to test the writer's copy. */
     [extra: string]: unknown;
@@ -3169,7 +3188,8 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
     compiledPlan: MutablePlanRecord;
     planBinding: {
       planRevision?: string;
-      contractSnapshots: Record<string, ContractSnapshot>;
+      contractSnapshots: Record<string, { body: unknown }>;
+      contractIdentities: Record<string, Record<string, unknown>>;
       nodeBindings: Record<string, ContractRef>;
       /** Extra own keys a fidelity case adds to test the writer's copy. */
       [extra: string]: unknown;
@@ -3190,6 +3210,11 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
       edges: record.edges,
       loopGroups: record.loopGroups,
       contractSnapshots: record.contractSnapshots,
+      // B8: the identity index is part of the plan body the revision addresses.
+      contractIdentities: record.contractIdentities,
+      // B9: so are the explicit terminal list and the executability marker.
+      terminalOutcomes: record.terminalOutcomes,
+      executability: record.executability,
     });
   }
 
@@ -3212,8 +3237,20 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         edges: plan.edges,
         loopGroups: plan.loopGroups,
         contractSnapshots: plan.contractSnapshots,
+        contractIdentities: plan.contractIdentities,
+        terminalOutcomes: plan.terminalOutcomes,
+        executability: plan.executability,
       }),
     );
+    // B8: content is deduplicated by digest, identity is a separate index —
+    // both fixture contracts have distinct bodies, so one identity each.
+    expect(Object.keys(record.contractSnapshots).sort()).toEqual(
+      [reviewKey, APPLY_SNAPSHOT.ref.digest].sort(),
+    );
+    expect(record.contractIdentities).toEqual({
+      "contract.review": { "1": reviewKey },
+      "contract.apply": { "2": APPLY_SNAPSHOT.ref.digest },
+    });
     // The node->contract index is a projection of the plan nodes.
     expect(record.nodeBindings).toEqual({
       review: REVIEW_SNAPSHOT.ref,
@@ -3267,8 +3304,14 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         futureField: "kept",
       };
       planRecord.edges[0].futureField = "kept";
-      // A loop group the topology accepts — its members and both routes are
-      // declared by the fixture — so the record stays load-valid with one.
+      // A loop group the plan-level rules accept — its members and both routes
+      // are declared by the fixture, and its continuation outcome is carried by
+      // an edge INSIDE the group (B9) — so the record stays load-valid with one.
+      planRecord.edges.push({
+        from: "review",
+        to: "apply",
+        outcome: "revise",
+      });
       planRecord.loopGroups.push({
         id: "revision",
         nodes: ["review", "apply"],
@@ -3277,6 +3320,9 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         exitOutcome: "done",
         futureField: "kept",
       });
+      // The new edge binds review.revise, so the explicit terminal list the
+      // inspector requires to agree with the edges is recomputed with it.
+      planRecord.terminalOutcomes = [{ nodeId: "apply", outcome: "done" }];
       planRecord.contractSnapshots[reviewKey] = {
         ...(planRecord.contractSnapshots[reviewKey] as Record<string, unknown>),
         futureField: "kept",
@@ -3434,12 +3480,23 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         label: "plan snapshot body no longer hashes to its key",
         raw: tamperedPlanRaw((file) => {
           file.compiledPlan.contractSnapshots[reviewKey] = {
-            ref: REVIEW_SNAPSHOT.ref,
             body: { tampered: true },
           };
           file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
         }),
         reason: `compiled plan contract snapshot "${reviewKey}" body hashes to`,
+      },
+      {
+        label: "plan identity index disagrees with the snapshot content",
+        raw: tamperedPlanRaw((file) => {
+          // The identity resolves to a digest the plan pins NO content for, so
+          // the index disagrees with what contractSnapshots can prove.
+          file.compiledPlan.contractIdentities["contract.review"]["1"] =
+            "0".repeat(64);
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason:
+          'compiled plan contract identity "contract.review"@"1" maps to digest',
       },
       {
         label: "duplicate node id",
@@ -3478,6 +3535,13 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         raw: tamperedPlanRaw((file) => {
           file.compiledPlan.nodes[1].id = "ghost";
           file.compiledPlan.edges = [];
+          // Keep the body's other plan-level invariants satisfied (B9) so the
+          // rule under test — the state/topology node check — is what fails.
+          file.compiledPlan.terminalOutcomes = [
+            { nodeId: "apply", outcome: "done" },
+            { nodeId: "ghost", outcome: "accepted" },
+            { nodeId: "ghost", outcome: "revise" },
+          ];
           file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
         }),
         reason:
@@ -3500,6 +3564,12 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
             (node) => node.id !== "apply",
           );
           file.compiledPlan.edges = [];
+          // As above: the terminal list moves with the topology so the index
+          // projection is the rule under test.
+          file.compiledPlan.terminalOutcomes = [
+            { nodeId: "review", outcome: "accepted" },
+            { nodeId: "review", outcome: "revise" },
+          ];
           file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
         }),
         reason: "which its topology does not declare",
@@ -3516,12 +3586,40 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         raw: tamperedPlanRaw((file) => {
           const body = { extra: true };
           const digest = contractDigest(body);
-          file.planBinding.contractSnapshots[digest] = {
-            ref: { id: "contract.extra", revision: "1", digest },
-            body,
-          };
+          file.planBinding.contractSnapshots[digest] = { body };
         }),
         reason: "which the compiled plan contractSnapshots does not contain",
+      },
+      {
+        label: "binding identity index disagrees with the plan identity index",
+        raw: tamperedPlanRaw((file) => {
+          // Move the binding's review identity to the apply content AND move
+          // the node binding with it, so the binding's OWN gate passes and only
+          // the plan/binding identity-index agreement can catch the difference.
+          file.planBinding.contractIdentities["contract.review"]["1"] =
+            APPLY_SNAPSHOT.ref.digest;
+          file.planBinding.nodeBindings["review"] = {
+            ...REVIEW_SNAPSHOT.ref,
+            digest: APPLY_SNAPSHOT.ref.digest,
+          };
+        }),
+        reason:
+          'plan binding maps contract "contract.review"@"1" to',
+      },
+      {
+        label: "compiled plan carries an identity the binding index lacks",
+        raw: tamperedPlanRaw((file) => {
+          // A second identity republishing the SAME body is legal on its own —
+          // the failure here is the binding index not carrying it, which is
+          // exactly the agreement rule (b2).
+          file.compiledPlan.contractIdentities["contract.alias"] = {
+            "1": reviewKey,
+          };
+          const recomputed = revisionOf(file.compiledPlan);
+          file.compiledPlan.planRevision = recomputed;
+          file.planBinding.planRevision = recomputed;
+        }),
+        reason: "which the plan binding identity index does not carry",
       },
       {
         label: "binding binds a node to a different ref than the plan",
@@ -3584,10 +3682,20 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
         arm: (record) => {
           const cycle: Record<string, unknown> = {};
           cycle.self = cycle;
-          record.contractSnapshots[reviewKey] = {
-            ref: REVIEW_SNAPSHOT.ref,
-            body: cycle,
-          };
+          record.contractSnapshots[reviewKey] = { body: cycle };
+        },
+      },
+      {
+        label: "throwing getter on an identity index entry",
+        boom: "boom-identity",
+        arm: (record) => {
+          Object.defineProperty(record.contractIdentities["contract.review"], "1", {
+            get() {
+              throw new Error("boom-identity");
+            },
+            enumerable: true,
+            configurable: true,
+          });
         },
       },
       {
@@ -3635,4 +3743,527 @@ describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
     }
   });
 });
+
+// ── B8: contract content is deduplicated, identity is a separate index ──────
+
+describe("B8 — contract content / identity separation", () => {
+  const BODY = { outcomes: ["done"] };
+  const DIGEST = contractDigest(BODY);
+  const REF_A: ContractRef = { id: "contract-a", revision: "1", digest: DIGEST };
+  const REF_B: ContractRef = { id: "contract-b", revision: "1", digest: DIGEST };
+  // Two DISTINCT identities whose bodies are byte-identical: legal, and the
+  // exact case the digest-keyed-with-a-single-ref shape could not represent.
+  const ALIAS_REGISTRY = createContractRegistry({
+    contracts: [
+      { ref: REF_A, body: BODY },
+      { ref: REF_B, body: BODY },
+    ],
+  });
+  const NODE_IDS: ReadonlySet<string> = new Set(["a", "b"]);
+
+  function aliasedPlan(): CompiledPlan {
+    const result = compileGraph(
+      {
+        version: 3,
+        name: "graph-alias",
+        nodes: [
+          {
+            id: "a",
+            agent: "worker",
+            prompt: "work",
+            outcomes: [{ id: "done" }],
+            contractRef: REF_A,
+          },
+          {
+            id: "b",
+            agent: "worker",
+            prompt: "work",
+            outcomes: [{ id: "done" }],
+            contractRef: REF_B,
+          },
+        ],
+        edges: [],
+      },
+      { contracts: ALIAS_REGISTRY },
+    );
+    if (!result.ok) {
+      throw new Error(
+        "the aliased-contract fixture must compile: " +
+          result.errors.map((error) => error.code).join(", "),
+      );
+    }
+    return result.plan;
+  }
+
+  function aliasState(): EngineState {
+    const plan = aliasedPlan();
+    const record = createPersistedCompiledPlan(plan);
+    const state = createEngineState(
+      {
+        version: 2,
+        name: "graph-alias",
+        nodes: [
+          { id: "a", agent: "worker", prompt: "work" },
+          { id: "b", agent: "worker", prompt: "work" },
+        ],
+        edges: [],
+      },
+      "graph-alias",
+    );
+    provision(state);
+    state.compiledPlan = record;
+    state.planBinding = {
+      planRevision: record.planRevision,
+      contractSnapshots: record.contractSnapshots,
+      contractIdentities: record.contractIdentities,
+      nodeBindings: record.nodeBindings,
+    };
+    return state;
+  }
+
+  it("compiles two identities sharing one body to one snapshot and two index entries", () => {
+    const plan = aliasedPlan();
+    // CONTENT: deduplicated by digest — one entry for one body.
+    expect(Object.keys(plan.contractSnapshots)).toEqual([DIGEST]);
+    expect(plan.contractSnapshots[DIGEST]).toEqual({ body: BODY });
+    // IDENTITY: one entry per exact (id, revision), no entry overwritten.
+    expect(plan.contractIdentities).toEqual({
+      "contract-a": { "1": DIGEST },
+      "contract-b": { "1": DIGEST },
+    });
+    expect(plan.nodes.find((node) => node.id === "a")?.contractRef).toEqual(
+      REF_A,
+    );
+    expect(plan.nodes.find((node) => node.id === "b")?.contractRef).toEqual(
+      REF_B,
+    );
+  });
+
+  it("verifyPersistedCompiledPlan VERIFIES the two-identities-one-body record", () => {
+    const record = createPersistedCompiledPlan(aliasedPlan());
+    // The regression: this used to be corrupt("... the snapshot at digest D is
+    // contract-b@1") because the digest-keyed entry held only one ref.
+    expect(verifyPersistedCompiledPlan(record, "graph-alias", NODE_IDS)).toEqual(
+      { kind: "verified" },
+    );
+  });
+
+  it("loads the two-identities-one-body record through the loader and back", () => {
+    const state = aliasState();
+    const raw = JSON.stringify(serializeEngineState(state));
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind !== "valid") return;
+    expect(result.state.compiledPlan).toEqual(state.compiledPlan);
+    expect(result.state.planBinding).toEqual(state.planBinding);
+    expect(result.state.compiledPlan?.contractIdentities).toEqual({
+      "contract-a": { "1": DIGEST },
+      "contract-b": { "1": DIGEST },
+    });
+    // Re-serializing the loaded state produces a file the same gate accepts.
+    const reloaded = loadEngineStateForResume(
+      JSON.stringify(serializeEngineState(result.state)),
+    );
+    expect(reloaded.kind).toBe("valid");
+  });
+
+  it("refuses an identity index that disagrees with the snapshot content", () => {
+    const state = aliasState();
+    const record = JSON.parse(
+      JSON.stringify(state.compiledPlan),
+    ) as Record<string, unknown>;
+    const identities = record.contractIdentities as Record<
+      string,
+      Record<string, string>
+    >;
+    identities["contract-a"]["1"] = "0".repeat(64);
+    // Recompute the revision over the tampered body, so ONLY the
+    // index/content agreement rule can fire — not the identity gate.
+    record.planRevision = contractDigest({
+      graphId: record.graphId,
+      declarationVersion: record.declarationVersion,
+      nodes: record.nodes,
+      edges: record.edges,
+      loopGroups: record.loopGroups,
+      contractSnapshots: record.contractSnapshots,
+      contractIdentities: record.contractIdentities,
+    });
+    const verdict = verifyPersistedCompiledPlan(record, "graph-alias", NODE_IDS);
+    expect(verdict.kind).toBe("corrupt");
+    if (verdict.kind === "corrupt") {
+      expect(verdict.dimension).toBe("contract");
+      expect(verdict.reason).toContain("which contractSnapshots does not contain");
+    }
+  });
+
+  it("refuses a binding whose identity is absent from the index", () => {
+    const state = aliasState();
+    const binding = JSON.parse(
+      JSON.stringify(state.planBinding),
+    ) as Record<string, unknown>;
+    const identities = binding.contractIdentities as Record<string, unknown>;
+    delete identities["contract-a"];
+    const verdict = verifyPersistedPlanBinding(binding, NODE_IDS);
+    expect(verdict.kind).toBe("corrupt");
+    if (verdict.kind === "corrupt") {
+      expect(verdict.dimension).toBe("contract");
+      expect(verdict.reason).toContain(
+        "which the contract identity index does not carry",
+      );
+    }
+  });
+
+  it("does NOT refuse two identities sharing one body", () => {
+    const state = aliasState();
+    const binding = JSON.parse(
+      JSON.stringify(state.planBinding),
+    ) as Record<string, unknown>;
+    const verdict = verifyPersistedPlanBinding(binding, NODE_IDS);
+    expect(verdict).toEqual({ kind: "verified" });
+    const planVerdict = verifyPersistedPlan(
+      state.compiledPlan,
+      state.planBinding,
+      "graph-alias",
+      NODE_IDS,
+    );
+    expect(planVerdict).toEqual({ kind: "verified" });
+  });
+});
+
+// ── B9: executability is pinned and persisted ───────────────────────────────
+
+describe("B9 — executable vs draft plans at the load boundary", () => {
+  /** A one-node v3 declaration whose outcome carries two acceptance gates. */
+  function acceptanceDeclaration(): GraphDeclarationV3 {
+    return {
+      version: 3,
+      name: "graph-gates",
+      nodes: [
+        {
+          id: "review",
+          agent: "agent.review",
+          prompt: "Review.",
+          outcomes: [
+            {
+              id: "accepted",
+              acceptance: [
+                { validator: "schema.answer", version: 9 },
+                { validator: "artifact.exists" },
+              ],
+            },
+          ],
+        },
+      ],
+      edges: [],
+    };
+  }
+
+  function gateState(record: PersistedCompiledPlan): EngineState {
+    const state = createEngineState(
+      {
+        version: 2,
+        name: "graph-gates",
+        nodes: [{ id: "review", agent: "agent.review", prompt: "Review." }],
+        edges: [],
+      },
+      "graph-gates",
+    );
+    provision(state);
+    state.compiledPlan = record;
+    return state;
+  }
+
+  const EXACT_CAPABILITIES = [
+    { validator: "schema.answer", version: 9 },
+    { validator: "artifact.exists", version: 3 },
+  ] as const;
+
+  it("round-trips a PINNED-version plan through the loader", () => {
+    const result = compileGraph(acceptanceDeclaration(), {
+      supportedValidators: EXACT_CAPABILITIES,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.kind).toBe("executable");
+    const record = createPersistedCompiledPlan(result.plan);
+    const raw = JSON.stringify(serializeEngineState(gateState(record)));
+
+    const loaded = loadEngineStateForResume(raw);
+    expect(loaded.kind).toBe("valid");
+    if (loaded.kind !== "valid") return;
+    const plan = loaded.state.compiledPlan;
+    expect(plan?.executability).toEqual({ kind: "executable" });
+    // The pinned versions SURVIVE the round trip: the loaded plan records the
+    // exact capability versions it was checked against.
+    expect(plan?.nodes[0]?.outcomes[0]?.acceptance).toEqual([
+      { validator: "schema.answer", version: 9 },
+      { validator: "artifact.exists", version: 3 },
+    ]);
+    // And the loaded state re-serializes into a file the same gate accepts.
+    const reloaded = loadEngineStateForResume(
+      JSON.stringify(serializeEngineState(loaded.state)),
+    );
+    expect(reloaded.kind).toBe("valid");
+  });
+
+  it("distinguishes a draft from an executable plan and refuses the draft at load", () => {
+    const draft = compileGraph(acceptanceDeclaration());
+    expect(draft.ok).toBe(true);
+    if (!draft.ok) return;
+    expect(draft.kind).toBe("draft");
+    if (draft.kind !== "draft") return;
+    expect(draft.unresolved.map((entry) => entry.validator)).toEqual([
+      "schema.answer",
+      "artifact.exists",
+    ]);
+
+    const executable = compileGraph(acceptanceDeclaration(), {
+      supportedValidators: EXACT_CAPABILITIES,
+    });
+    expect(executable.ok).toBe(true);
+    if (!executable.ok) return;
+    expect(executable.kind).toBe("executable");
+    // The two are different CONTENT, not just different labels.
+    expect(executable.plan.planRevision).not.toBe(draft.plan.planRevision);
+    expect(executable.plan.executability).toEqual({ kind: "executable" });
+    expect(executable.plan.nodes[0]?.outcomes[0]?.acceptance).toEqual([
+      { validator: "schema.answer", version: 9 },
+      { validator: "artifact.exists", version: 3 },
+    ]);
+
+    // A persisted DRAFT is refused BY NAME: it must never be loaded as the
+    // executable plan of a state.
+    const record = createPersistedCompiledPlan(draft.plan);
+    const raw = JSON.stringify(serializeEngineState(gateState(record)));
+    const loaded = loadEngineStateForResume(raw);
+    expect(loaded.kind).toBe("corrupt");
+    if (loaded.kind === "corrupt") {
+      expect(loaded.dimension).toBe("contract");
+      expect(loaded.reason).toContain("plan-not-executable");
+      expect(loaded.reason).toContain("DRAFT");
+    }
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+    // The exported gate refuses it too, without the loader around it.
+    const verdict = verifyPersistedCompiledPlan(
+      record,
+      "graph-gates",
+      new Set(["review"]),
+    );
+    expect(verdict.kind).toBe("corrupt");
+    if (verdict.kind === "corrupt") {
+      expect(verdict.reason).toContain("plan-not-executable");
+    }
+  });
+
+  it("refuses a persisted plan whose executability is malformed", () => {
+    const result = compileGraph(acceptanceDeclaration(), {
+      supportedValidators: EXACT_CAPABILITIES,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const record = JSON.parse(
+      JSON.stringify(createPersistedCompiledPlan(result.plan)),
+    ) as Record<string, unknown>;
+    record.executability = "executable";
+    // The revision is recomputed over the tampered body, so the executability
+    // gate — not the identity gate — is what refuses it.
+    record.planRevision = contractDigest({
+      graphId: record.graphId,
+      declarationVersion: record.declarationVersion,
+      nodes: record.nodes,
+      edges: record.edges,
+      loopGroups: record.loopGroups,
+      contractSnapshots: record.contractSnapshots,
+      contractIdentities: record.contractIdentities,
+      terminalOutcomes: record.terminalOutcomes,
+      executability: record.executability,
+    });
+    const verdict = verifyPersistedCompiledPlan(
+      record,
+      "graph-gates",
+      new Set(["review"]),
+    );
+    expect(verdict.kind).toBe("corrupt");
+    if (verdict.kind === "corrupt") {
+      expect(verdict.reason).toContain("executability");
+    }
+  });
+});
+// ── C1: the declared graph's state through the existing loader gates ────────
+
+describe("C1 — a declared graph's state round-trips through the loader", () => {
+  const CONTRACT_BODY = { gates: ["schema", "artifact"], policy: "strict" };
+  const CONTRACT_REF: ContractRef = {
+    id: "contract.declared",
+    revision: "7",
+    digest: contractDigest(CONTRACT_BODY),
+  };
+  const CONTRACTS = createContractRegistry({
+    contracts: [
+      { ref: CONTRACT_REF, body: CONTRACT_BODY } satisfies ContractSnapshot,
+    ],
+  });
+
+  const DECLARATION: GraphDeclarationV3 = {
+    version: 3,
+    name: "declared.graph",
+    nodes: [
+      {
+        id: "plan",
+        agent: "agent.plan",
+        prompt: "Plan.",
+        contractRef: CONTRACT_REF,
+        outcomes: [{ id: "planned" }],
+      },
+      {
+        id: "ship",
+        agent: "agent.ship",
+        prompt: "Ship.",
+        outcomes: [
+          {
+            id: "shipped",
+            acceptance: [{ validator: "schema.check", version: 4 }],
+          },
+        ],
+      },
+    ],
+    edges: [{ from: "plan", to: "ship", outcome: "planned" }],
+  };
+
+  /**
+   * The ONLY registry under which a protocol-2 file can classify as valid: the
+   * shipped build registers protocol 1 only, so a protocol-2 declaration is
+   * refused at load by design (asserted below). Registering a MARKER handler
+   * here proves the record itself survives every other gate — it implements no
+   * outcome semantics.
+   */
+  function outcomeCapableRegistry(): ExecutionProtocolRegistry {
+    return createExecutionProtocolRegistry({
+      handlers: [
+        { version: LEGACY_SIGNAL_PROTOCOL },
+        { version: OUTCOME_PROTOCOL },
+      ],
+    });
+  }
+
+  /** The real producer: parse + compile + bind, exactly as graph_declare does. */
+  function declared() {
+    return buildDeclaredOutcomeGraph({
+      declaration: DECLARATION,
+      contracts: CONTRACTS,
+      supportedValidators: [{ validator: "schema.check", version: 4 }],
+    });
+  }
+
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "declared-plan-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("round-trips serialize -> load as VALID with plan, binding and protocol intact", () => {
+    const graph = declared();
+    expect(persistDeclaredGraph(graph, dir)).toBe(true);
+
+    const path = engineStatePath(dir, "declared.graph");
+    const result = loadEngineStateForResume(
+      readFileSync(path, "utf-8"),
+      path,
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      outcomeCapableRegistry(),
+    );
+
+    expect(result.kind).toBe("valid");
+    if (result.kind !== "valid") return;
+    expect(result.executionProtocol).toBe(OUTCOME_PROTOCOL);
+    expect(result.state.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(result.state.compiledPlan?.planRevision).toBe(graph.plan.planRevision);
+    expect(result.state.compiledPlan?.contractIdentities).toEqual(
+      graph.plan.contractIdentities,
+    );
+    expect(result.state.compiledPlan?.terminalOutcomes).toEqual(
+      graph.plan.terminalOutcomes,
+    );
+    expect(result.state.planBinding?.planRevision).toBe(graph.plan.planRevision);
+    expect(result.state.planBinding?.nodeBindings).toEqual(
+      graph.record.nodeBindings,
+    );
+    expect(result.state.planBinding?.contractSnapshots).toEqual(
+      graph.plan.contractSnapshots,
+    );
+    // The topology nodes are declared by the very state that carries the plan.
+    expect([...result.state.nodes.keys()].sort()).toEqual(["plan", "ship"]);
+  });
+
+  it("is REFUSED at the store boundary by the shipped registry: unsupported(execution)", () => {
+    const graph = declared();
+    const store = new EnginePersistence(dir);
+    expect(store.save(graph.state)).toBe(true);
+
+    const result = store.loadForResume("declared.graph");
+    expect(result.kind).toBe("unsupported");
+    if (result.kind === "unsupported") {
+      expect(result.dimension).toBe("execution");
+      expect(result.detail).toBe(String(OUTCOME_PROTOCOL));
+    }
+    // Nothing hydrates, and the snapshot KEEPS its identity on disk.
+    expect(store.load("declared.graph")).toBeNull();
+    const dto = JSON.parse(
+      readFileSync(engineStatePath(dir, "declared.graph"), "utf-8"),
+    ) as Record<string, unknown>;
+    expect(dto.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(dto.compiledPlan !== undefined).toBe(true);
+    expect(dto.planBinding !== undefined).toBe(true);
+  });
+
+  it("refuses a tampered plan body as corrupt(contract), even at protocol 2", () => {
+    // The plan gate runs BEFORE the protocol gate, so a declared graph's plan
+    // is verified by the same owner that verifies a legacy graph's.
+    const graph = declared();
+    const dto = JSON.parse(
+      JSON.stringify(serializeEngineState(graph.state)),
+    ) as { compiledPlan: { terminalOutcomes: unknown } };
+    dto.compiledPlan.terminalOutcomes = [];
+
+    const result = loadEngineStateForResume(
+      JSON.stringify(dto),
+      "tampered",
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      outcomeCapableRegistry(),
+    );
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.dimension).toBe("contract");
+    }
+  });
+
+  it("refuses a DRAFT at the producer: there is no record to persist", () => {
+    const draft: GraphDeclarationV3 = {
+      version: 3,
+      name: "declared.draft",
+      nodes: [
+        {
+          id: "a",
+          agent: "agent.a",
+          prompt: "A.",
+          outcomes: [
+            {
+              id: "done",
+              acceptance: [{ validator: "schema.check", version: 4 }],
+            },
+          ],
+        },
+      ],
+      edges: [],
+    };
+    expect(() => buildDeclaredOutcomeGraph({ declaration: draft })).toThrow(
+      /NON-EXECUTABLE DRAFT/,
+    );
+    expect(existsSync(engineStatePath(dir, "declared.draft"))).toBe(false);
+  });
+});
+
+
 

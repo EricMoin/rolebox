@@ -120,7 +120,21 @@ import {
   type GraphTerminalHandler,
   graphParentContext,
   type DispatchParentContext,
+  AdoptPlanRefusalError,
+  planAdoptionRefusal,
 } from "../engine/index.ts";
+import {
+  buildDeclaredOutcomeGraph,
+  declaredGraphResult,
+  GraphDeclareRefusedError,
+  OutcomeProtocolUnavailableError,
+  persistDeclaredGraph,
+  readExistingDeclaredGraph,
+  type DeclaredOutcomeGraph,
+  type GraphDeclareArgs,
+  type GraphDeclareResult,
+} from "./declare-graph.ts";
+import type { ContractRegistry } from "../contracts/resolve.ts";
 import type { ISessionClient } from "../../platform/ports/session-client.ts";
 import { enqueueNotify } from "../../dispatch/notification.ts";
 import { createSubLogger } from "../../logger.ts";
@@ -202,6 +216,21 @@ interface GraphEntry {
    * {@link GraphToolSet.commit}.
    */
   agent?: string;
+}
+
+/**
+ * One DECLARED graph (C1): a v3 declaration that was parsed, compiled and bound
+ * to a persisted engine state under the outcome protocol — plus whether that
+ * state actually reached the on-disk store.
+ *
+ * Declared graphs are deliberately NOT entries of the legacy
+ * {@link GraphToolSet.registry}: they have no legacy runtime, and every legacy
+ * operation on one is refused by {@link GraphToolSet.getEntry} instead of being
+ * answered from a fabricated engine.
+ */
+interface DeclaredGraphEntry {
+  readonly graph: DeclaredOutcomeGraph;
+  readonly persisted: boolean;
 }
 
 /**
@@ -332,6 +361,13 @@ export interface GraphToolSetDeps {
    * `DshDispatchAdapter.resolveSessionChain` (its dispatch-parent index).
    */
   resolveSessionChain?: (sessionId: string) => string[] | undefined;
+  /**
+   * Optional installed CONTRACT capability (C1). A v3 declaration's node
+   * `contractRef` resolves against it during `graph_declare`; absent means no
+   * contract is installed, so a node that declares a ref is refused as
+   * `unresolved-contract` rather than bound to something unverified.
+   */
+  contracts?: ContractRegistry;
 }
 
 // ── Tool parameter shapes (plain objects — subtask 6 wraps with zod) ─────────
@@ -838,6 +874,16 @@ export class GraphToolSet {
   private readonly registry = new Map<string, GraphEntry>();
 
   /**
+   * Declared (v3, outcome-protocol) graphs by graph id (C1). A separate map on
+   * purpose: these graphs have no legacy runtime, and keeping them out of
+   * {@link registry} means no engine-state consumer (status aggregation, the
+   * in-flight queries, the terminal observers) can observe one as a legacy
+   * graph. Every legacy operation resolves ids through {@link getEntry}, which
+   * refuses a declared id BEFORE consulting the legacy registry.
+   */
+  private readonly declaredGraphs = new Map<string, DeclaredGraphEntry>();
+
+  /**
    * Graph-terminal observers. Consumed by the dsh dispatch adapter to hold an
    * outer dispatch open until a graph the dispatched agent launched from its
    * own session reaches a terminal state (nested-graph propagation). Empty by
@@ -1108,8 +1154,65 @@ export class GraphToolSet {
     });
   }
 
+  /**
+   * Refuse a legacy operation on a DECLARED (outcome-protocol) graph.
+   *
+   * DECLARED GRAPHS ARE NOT LEGACY GRAPHS. This build has no registered handler
+   * for the outcome protocol, so every legacy operation on a declared graph —
+   * run, dry-run, construction, cancel, approve, targeted status — refuses
+   * HERE, before a node is read or dispatched, and never falls back to the
+   * legacy signal protocol. Nothing about a declared graph is fabricated into a
+   * legacy runtime.
+   *
+   * A declared graph outlives this process: `declaredGraphs` is empty after a
+   * restart while the persisted plan is still on disk, so a registry miss also
+   * consults the store. That keeps the refusal the SAME missing-handler error
+   * instead of the misleading "call graph_create first" — which would now open
+   * a fresh LEGACY graph under a suffixed id rather than resume this one. The
+   * probe runs only when neither the declared map nor the legacy registry knows
+   * the id, so a registered legacy graph pays no I/O.
+   */
+  private refuseDeclaredGraph(graphId: string): void {
+    const declared = this.declaredGraphs.get(graphId);
+    if (declared !== undefined) {
+      throw new OutcomeProtocolUnavailableError(
+        declared.graph.graphId,
+        declared.graph.plan.planRevision,
+      );
+    }
+    if (this.registry.has(graphId)) return;
+    const onDisk = readExistingDeclaredGraph(this.deps.stateDir, graphId);
+    if (onDisk.kind === "declared") {
+      throw new OutcomeProtocolUnavailableError(graphId, onDisk.planRevision);
+    }
+  }
+
+  /**
+   * Whether `graphId` is already reserved by a record this process cannot see.
+   *
+   * `registry` and `declaredGraphs` are process-local, so a declared plan
+   * persisted by a PREVIOUS process owns its id only on disk. `graph_create`
+   * must reserve that id too — otherwise it hands back an id whose first legacy
+   * save overwrites the persisted plan (execution protocol, compiled plan and
+   * plan binding all gone, with the loader then reporting a perfectly valid
+   * legacy record).
+   *
+   * `declared` and `unreadable` reserve the id. `unreadable` includes a file
+   * whose slugified path belongs to a DIFFERENT graph id (`"a/b"` and
+   * `"a b"` share `engine-a-b.json`): the record cannot be shown to belong to
+   * this id, so it is reserved rather than risked. `legacy` deliberately does
+   * NOT reserve — an id whose on-disk record is a legacy graph this build can
+   * resume is the normal same-id resume path. `absent`, and a toolset with no
+   * state directory, reserve nothing.
+   */
+  private idReservedOnDisk(graphId: string): boolean {
+    const onDisk = readExistingDeclaredGraph(this.deps.stateDir, graphId);
+    return onDisk.kind === "declared" || onDisk.kind === "unreadable";
+  }
+
   /** Look up a graph entry or throw a descriptive error. */
   private getEntry(graphId: string): GraphEntry {
+    this.refuseDeclaredGraph(graphId);
     const entry = this.registry.get(graphId);
     if (!entry) {
       throw new Error(
@@ -1145,6 +1248,10 @@ export class GraphToolSet {
     graphId: string,
     nodeId: string,
   ): Promise<GraphEntry> {
+    // A declared graph has no legacy approval gate and is not resumable under
+    // the legacy protocol, so the missing-handler refusal comes FIRST — never
+    // the generic "does not exist" error, and never a fabricated entry.
+    this.refuseDeclaredGraph(graphId);
     const existing = this.registry.get(graphId);
     if (existing) return existing;
 
@@ -1159,13 +1266,20 @@ export class GraphToolSet {
       // Fire-and-forget is unacceptable here (constructors are sync), but
       // adoption's async half is only the dispatch reconcile — safe to await:
       // no node is re-dispatched, only the `blocked` gate is carried across.
-      // A throwing adoptPrior is contained (logged), never surfaced raw.
+      // A throwing adoptPrior is contained (logged), never surfaced raw —
+      // EXCEPT an explicit B8 plan refusal: continuing here would register a
+      // rebuilt engine whose persisted plan was silently dropped (and whose
+      // `blocked` gate may no longer be authoritative), so the refusal is
+      // rethrown for the approval tool to surface. The engine was built from
+      // the persisted declaration, so this path cannot actually disagree with
+      // itself — the rethrow is the honest behaviour if it ever does.
       try {
         await runtime.adoptPrior(found);
       } catch (err) {
         log.warn(
           `graph-tools: adoptPrior (approval recovery) failed for graph "${graphId}": ${errorText(err)}`,
         );
+        if (err instanceof AdoptPlanRefusalError) throw err;
       }
       const entry: GraphEntry = {
         declaration: found.graphDeclaration,
@@ -1221,6 +1335,20 @@ export class GraphToolSet {
     const runtime = this.buildEngine(candidate, graphId, sessionId, resolvedAgent);
     if (prior) {
       const priorState = prior.runtime.status();
+      // B8: an extension CHANGES the declaration by construction, so a prior
+      // state that carries a pinned plan identity (executionProtocolVersion /
+      // compiledPlan / planBinding) cannot be adopted across it. Refuse BEFORE
+      // the rebuild replaces the live runtime — dispose the freshly built
+      // engine (it must not leak dispatch listeners) and throw the actionable
+      // refusal, leaving the previous registry entry as the consistent
+      // runtime. Nothing is silently dropped, and the same check applies even
+      // when the prior state has no node progress, because a rebuild that
+      // adopted nothing would still lose the plan.
+      const refusal = planAdoptionRefusal(priorState, graphId, candidate);
+      if (refusal !== null) {
+        runtime.dispose();
+        throw refusal;
+      }
       const hasProgress = [...priorState.nodes.values()].some(
         (n) => n.status !== NodeStatus.Pending && n.status !== NodeStatus.Ready,
       );
@@ -1274,9 +1402,19 @@ export class GraphToolSet {
 
     // Generate a unique graph id. Deterministic for tests when a single graph
     // is created; collision-free for multiple graphs via a suffix counter.
+    // A declared (outcome-protocol) graph owns its id just as a legacy one
+    // does, so the collision loop reserves both namespaces — and the persisted
+    // store too (idReservedOnDisk), because `declaredGraphs` is empty in a
+    // fresh process while the declared plan is still on disk: a legacy graph
+    // can never be created over a declared graph's identity, in this process or
+    // in the next one.
     let graphId = name.trim();
     let seq = 2;
-    while (this.registry.has(graphId)) {
+    while (
+      this.registry.has(graphId) ||
+      this.declaredGraphs.has(graphId) ||
+      this.idReservedOnDisk(graphId)
+    ) {
       graphId = `${name.trim()}-${seq}`;
       seq += 1;
     }
@@ -1435,6 +1573,137 @@ export class GraphToolSet {
       nodes: loop.nodes,
       max_traversals: loop.max_traversals,
     };
+  }
+
+  // ── graph_declare ──────────────────────────────────────────────────────────
+
+  /**
+   * Declare a v3 graph: parse, compile, and — on success — BIND the compiled
+   * plan, its plan binding and the outcome-protocol identity to a persisted
+   * engine state (C1).
+   *
+   * This is the first producer of a compiled plan. It does NOT execute, and it
+   * cannot: the outcome protocol has no registered handler in this build.
+   *
+   * Refusals (all typed {@link GraphDeclareRefusedError}s carrying structured
+   * diagnostics — nothing is persisted on any of them):
+   * - the authored value is not a strict v3 declaration (unknown key, wrong
+   *   type, bad loop limits, …);
+   * - the declaration does not compile;
+   * - compilation returned a NON-EXECUTABLE DRAFT (unresolved acceptance
+   *   capabilities), named entry by entry — a draft is never persisted as if it
+   *   were executable;
+   * - `graph_id` disagrees with the declaration's `name`;
+   * - the id already names a LEGACY graph (the execution protocol is pinned per
+   *   graph and is never switched in place);
+   * - the id already names a declared graph with DIFFERENT content. An
+   *   UNCHANGED re-declaration deliberately PRESERVES the stored plan and its
+   *   persisted state instead (the B8 adoption rule: a compiled plan is bound
+   *   to the declaration it was compiled from);
+   * - a PERSISTED record already owns the id (a previous process declared it):
+   *   identical plan content preserves it in place, different content refuses,
+   *   a legacy record refuses, and a file this build cannot read refuses rather
+   *   than risk overwriting a plan it cannot see. The record is never
+   *   overwritten silently.
+   *
+   * The invoking session / agent are accepted for tool-layer signature symmetry
+   * and deliberately UNUSED: a declared graph dispatches nothing, so it has no
+   * notification seam to target.
+   */
+  graph_declare(
+    args: GraphDeclareArgs,
+    _invokingSessionId?: string,
+    _agent?: string,
+  ): GraphDeclareResult {
+    const built = buildDeclaredOutcomeGraph({
+      declaration: args.declaration,
+      ...(args.graph_id === undefined ? {} : { graphId: args.graph_id }),
+      ...(args.supported_validators === undefined
+        ? {}
+        : { supportedValidators: args.supported_validators }),
+      ...(this.deps.contracts === undefined
+        ? {}
+        : { contracts: this.deps.contracts }),
+    });
+
+    // A graph id belongs to exactly ONE execution protocol. A legacy graph is
+    // never converted in place (protocol conversion is a separate, explicit
+    // operation), and a declared graph is never extended by the legacy
+    // construction tools — getEntry refuses those first.
+    const legacy = this.registry.get(built.graphId);
+    if (legacy !== undefined) {
+      throw new GraphDeclareRefusedError(
+        "legacy-graph-conflict",
+        `graph_declare refused: graph "${built.graphId}" already exists as a LEGACY (v2) graph. ` +
+          "The execution protocol is pinned per graph/plan revision and is never switched in " +
+          "place; declare the v3 graph under a different name instead.",
+      );
+    }
+
+    const existing = this.declaredGraphs.get(built.graphId);
+    if (existing !== undefined) {
+      if (existing.graph.declarationDigest !== built.declarationDigest) {
+        throw new GraphDeclareRefusedError(
+          "declaration-changed",
+          `graph_declare refused: graph "${built.graphId}" is already declared from a DIFFERENT ` +
+            `declaration (stored digest ${existing.graph.declarationDigest}, incoming digest ` +
+            `${built.declarationDigest}, stored plan revision ${existing.graph.plan.planRevision}). ` +
+            "A compiled plan is bound to the declaration it was compiled from, so a changed " +
+            "declaration is neither adopted over it nor allowed to silently drop it. Declare " +
+            "under a new graph name; replacing a plan is a separate replanning decision.",
+        );
+      }
+      // UNCHANGED declaration: preserve the stored plan and its persisted state
+      // — never rebuild (and never rewrite the file) for identical content.
+      return declaredGraphResult(existing.graph, {
+        persisted: existing.persisted,
+        preserved: true,
+      });
+    }
+
+    // No in-memory entry — but a PREVIOUS process may have persisted a record
+    // under this id. It is never overwritten silently: the same plan content is
+    // preserved in place, different content refuses, a legacy record refuses,
+    // and a file this build cannot read refuses rather than risk destroying a
+    // plan it cannot see. (In-process the comparison is the declaration digest,
+    // B8's rule; across a restart the declaration itself is not persisted, so
+    // the comparison is the persisted plan revision — the only identity on
+    // disk. Both refuse rather than drop.)
+    const onDisk = readExistingDeclaredGraph(this.deps.stateDir, built.graphId);
+    if (onDisk.kind === "legacy") {
+      throw new GraphDeclareRefusedError(
+        "legacy-graph-conflict",
+        `graph_declare refused: graph "${built.graphId}" already owns a LEGACY (v2) state ` +
+          "file in this store, and the execution protocol is pinned per graph/plan revision " +
+          "and is never switched in place; declare the v3 graph under a different name instead.",
+      );
+    }
+    if (onDisk.kind === "unreadable") {
+      throw new GraphDeclareRefusedError(
+        "persisted-state-unreadable",
+        `graph_declare refused: ${onDisk.reason}. Resolve or move that file before ` +
+          `declaring graph "${built.graphId}" — it is never overwritten blindly.`,
+      );
+    }
+    if (onDisk.kind === "declared") {
+      if (onDisk.planRevision !== built.plan.planRevision) {
+        throw new GraphDeclareRefusedError(
+          "declaration-changed",
+          `graph_declare refused: graph "${built.graphId}" already owns a PERSISTED compiled ` +
+            `plan (revision ${onDisk.planRevision}) and the incoming declaration compiles to ` +
+            `${built.plan.planRevision}. The persisted plan is authoritative for the declaration ` +
+            "it was compiled from — it is neither overwritten nor silently dropped. Declare " +
+            "under a new graph name; replacing a plan is a separate replanning decision.",
+        );
+      }
+      // Same plan content: PRESERVE the file (no write) and register the entry.
+      this.declaredGraphs.set(built.graphId, { graph: built, persisted: true });
+      return declaredGraphResult(built, { persisted: true, preserved: true });
+    }
+
+    const persisted = persistDeclaredGraph(built, this.deps.stateDir);
+    this.declaredGraphs.set(built.graphId, { graph: built, persisted });
+    return declaredGraphResult(built, { persisted, preserved: false });
   }
 
   // ── graph_run ──────────────────────────────────────────────────────────────

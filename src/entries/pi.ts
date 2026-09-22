@@ -123,6 +123,7 @@ export const PI_SUBAGENT_TOOLS: string[] = [
   "context_assemble",
   "signal",
   "graph_create", "graph_add_node", "graph_add_edge", "graph_add_loop",
+  "graph_declare",
   "graph_run", "graph_status", "graph_cancel", "graph_approve",
   "task_search", "task_budget", "task_graph",
 ];

@@ -56,6 +56,7 @@ const GRAPH_KEYS = [
   "graph_add_node",
   "graph_add_edge",
   "graph_add_loop",
+  "graph_declare",
   "graph_run",
   "graph_status",
   "graph_cancel",
@@ -65,7 +66,7 @@ const GRAPH_KEYS = [
 // ── createGraphTools: schema shape ──────────────────────────────────────────
 
 describe("createGraphTools", () => {
-  it("returns exactly the 8 graph_* tools", () => {
+  it("returns exactly the graph_* tools (the eight legacy + the C1 declare ingress)", () => {
     const tools = createGraphTools(makeDispatchManager(), { directory: "/tmp" });
     expect(Object.keys(tools).sort()).toEqual([...GRAPH_KEYS].sort());
   });
@@ -102,6 +103,56 @@ describe("createGraphTools", () => {
     expect(() => inner.parse("json")).not.toThrow();
   });
 
+  it("graph_declare exposes the declaration ingress args", () => {
+    const { graph_declare } = createGraphTools(undefined, { directory: "/tmp" });
+    expect(graph_declare.args.declaration).toBeDefined();
+    expect(graph_declare.args.graph_id).toBeInstanceOf(z.ZodOptional);
+    expect(graph_declare.args.supported_validators).toBeInstanceOf(z.ZodOptional);
+    // The declaration arg accepts JSON text and an already-parsed value alike
+    // (the strict v3 front-end, not the zod schema, decides what is valid).
+    const declaration = graph_declare.args.declaration as z.ZodType<unknown>;
+    expect(declaration.safeParse("not json {").success).toBe(true);
+    expect(declaration.safeParse({ version: 3 }).success).toBe(true);
+    expect(declaration.safeParse(42).success).toBe(true);
+    // ...but a value that is not JSON at all is still refused by the schema.
+    expect(declaration.safeParse(undefined).success).toBe(false);
+  });
+
+  it("executes graph_declare end-to-end: parses, compiles, persists and reports not-runnable", async () => {
+    const { graph_declare } = createGraphTools(undefined, { directory: "/tmp" });
+    const out = await graph_declare.execute(
+      {
+        declaration: {
+          version: 3,
+          name: "reg-declare",
+          nodes: [
+            { id: "a", agent: "agent.a", prompt: "Do a.", outcomes: [{ id: "done" }] },
+          ],
+          edges: [],
+        },
+      },
+      makeContext(),
+    );
+    expect(typeof out).toBe("string");
+    const parsed = JSON.parse(out as string);
+    expect(parsed.graph_id).toBe("reg-declare");
+    expect(parsed.executability).toBe("executable");
+    expect(parsed.runnable).toBe(false);
+    // No stateDir is configured for this tool set → the plan is registered in
+    // memory only, reported honestly.
+    expect(parsed.persisted).toBe(false);
+  });
+
+  it("surfaces a declaration refusal as a tool result, not a raw throw", async () => {
+    const { graph_declare } = createGraphTools(undefined, { directory: "/tmp" });
+    const out = await graph_declare.execute(
+      { declaration: { version: 3, name: "bad", nodes: [], edges: [], extra: 1 } },
+      makeContext(),
+    );
+    expect(out).toContain("graph_declare failed");
+    expect(out).toContain("unknown-key");
+  });
+
   it("executes graph_create end-to-end and returns a graph_id", async () => {
     const { graph_create } = createGraphTools(undefined, { directory: "/tmp" });
     const out = await graph_create.execute({ name: "reg-test" }, makeContext());
@@ -115,7 +166,7 @@ describe("createGraphTools", () => {
 // ── buildCanonicalTools: Phase A coexistence ────────────────────────────────
 
 describe("buildCanonicalTools graph registration (Phase A coexistence)", () => {
-  it("registers all 7 graph_* tools when a dispatchManager is present", () => {
+  it("registers every graph_* tool when a dispatchManager is present", () => {
     const opts = makeBaseOpts();
     opts.dispatchManager = makeDispatchManager();
     opts.resolvedSubagents = new Map();
@@ -134,7 +185,7 @@ describe("buildCanonicalTools graph registration (Phase A coexistence)", () => {
     }
   });
 
-  it("produces exactly 7 graph_* keys and coexists with loop_*/core keys", () => {
+  it("produces exactly the graph_* keys and coexists with loop_*/core keys", () => {
     const opts = makeBaseOpts();
     opts.dispatchManager = makeDispatchManager();
     opts.resolvedSubagents = new Map();

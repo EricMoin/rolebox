@@ -21,8 +21,9 @@ import type { EnginePhase, NodeStatus } from "./constants.ts";
 import type { MaterializedResultRef } from "./dispatch/types.ts";
 import type { UsageRecord } from "./dispatch/budget/budget-tracker.ts";
 import type {
+  ContractContentSnapshot,
+  ContractIdentityIndex,
   ContractRef,
-  ContractSnapshot,
 } from "./graph/contracts/contract-definition.ts";
 import type { PersistedCompiledPlan } from "./graph/compiler/plan.ts";
 
@@ -208,11 +209,14 @@ export interface EngineState {
    * held to the same rules as the persisted binding. Any violation is
    * `corrupt(contract)`; a record is never repaired or fabricated.
    *
-   * RECOVERY DOES NOT READ THIS FIELD YET. The engine still resumes from the
-   * retained `graphDeclaration`; nothing consumes the plan, and switching
-   * recovery onto it is a later slice. The field is written and verified so the
-   * record's identity and rules exist before a producer or a recovery switch
-   * depends on them, and so nobody assumes the plan is already authoritative.
+   * RECOVERY DOES NOT READ THIS FIELD AS AUTHORITY YET. The engine still resumes
+   * from the retained `graphDeclaration`; nothing consumes the plan, and
+   * switching recovery onto it is a later slice. B8 makes recovery CARRY the
+   * record (deep-cloned, never aliased) across `hydrateEngineState` and
+   * `adoptPriorNodeStates`, and `snapshotEngineState` carries it through
+   * `status()`, so a plan a state was loaded with cannot be silently dropped by
+   * the next rebuild. Adoption refuses explicitly when the declaration changed
+   * instead of carrying a record that no longer matches it.
    */
   compiledPlan?: PersistedCompiledPlan;
 
@@ -252,19 +256,27 @@ export interface EngineState {
  * as an unverifiable foreign key rather than a self-address, because there is
  * no plan body to recompute it from.
  *
- * `contractSnapshots` is keyed by CONTRACT DIGEST: each entry's body must hash
- * to its own key and its `ref.digest` must equal that key, so a snapshot's
- * content identity is proven rather than declared; and one `(id, revision)`
- * identity maps to exactly one digest, the same rule
- * `createContractRegistry` enforces at construction. `nodeBindings` maps each
- * bound node id to the exact `ContractRef` the plan resolved for it; the
- * bound ref must equal the snapshot's ref by identity, never by ordering.
+ * `contractSnapshots` is CONTENT keyed by CONTRACT DIGEST: each entry's body
+ * must hash to its own key, so a snapshot's content identity is proven rather
+ * than declared. The entry carries NO `ref` (B8): one body can belong to
+ * several `(id, revision)` identities, and a single ref would have to name one
+ * of them and silently drop the others.
+ *
+ * `contractIdentities` is the IDENTITY index: `id` → `revision` → content
+ * digest. One exact identity maps to exactly one digest, every digest it names
+ * must have a snapshot whose body hashes back to it, and two identities may
+ * share one digest. `nodeBindings` maps each bound node id to the exact
+ * `ContractRef` the plan resolved for it; the bound ref resolves THROUGH the
+ * identity index — never by matching a snapshot's single ref, which no longer
+ * exists.
  */
 export interface PlanBinding {
   /** The compiled plan's content address, shared with `compiledPlan`. */
   readonly planRevision: string;
-  /** The immutable contract snapshots this plan binds, keyed by digest. */
-  readonly contractSnapshots: Readonly<Record<string, ContractSnapshot>>;
+  /** The immutable contract CONTENT this plan binds, keyed by digest. */
+  readonly contractSnapshots: Readonly<Record<string, ContractContentSnapshot>>;
+  /** The contract identity index this plan binds: id → revision → digest. */
+  readonly contractIdentities: ContractIdentityIndex;
   /** Each bound node's exact contract reference, keyed by node id. */
   readonly nodeBindings: Readonly<Record<string, ContractRef>>;
 }

@@ -8,6 +8,7 @@ import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
 import type {
   EngineState,
   NodeRuntimeState,
+  PlanBinding,
 } from "../../src/types.engine-v2.ts";
 import type { DispatchTask } from "../../src/dispatch/types.ts";
 import type {
@@ -22,7 +23,22 @@ import {
   createEngineState,
   provision,
 } from "../../src/graph/engine/engine-state.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import {
+  EnginePersistence,
+  serializeEngineState,
+} from "../../src/graph/engine/engine-persistence.ts";
+import {
+  contractDigest,
+  type ContractSnapshot,
+} from "../../src/graph/contracts/contract-definition.ts";
+import { createContractRegistry } from "../../src/graph/contracts/resolve.ts";
+import { compileGraph } from "../../src/graph/compiler/compile.ts";
+import {
+  createPersistedCompiledPlan,
+  type CompiledPlan,
+  type PersistedCompiledPlan,
+} from "../../src/graph/compiler/plan.ts";
+import { LEGACY_SIGNAL_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 import { createEngine, type EngineRuntime } from "../../src/graph/engine/index.ts";
 import {
   mapDispatchStatusToSignal,
@@ -32,6 +48,8 @@ import {
   clearStaleCriticalSection,
   captureNodeUsage,
   adoptPriorNodeStates,
+  AdoptPlanRefusalError,
+  planAdoptionRefusal,
   EngineLockSweeper,
   NodeStalenessWatcher,
   NodeLivenessMonitor,
@@ -1697,6 +1715,218 @@ describe("M10 — terminalNotified hydration & adoption", () => {
     const t2 = buildState(singleNodeGraph(), "adopt-tn-absent");
     adoptPriorNodeStates(t2, barePrior);
     expect(t2.terminalNotified).toBeUndefined();
+  });
+});
+
+// ── B8: persisted plan identity survives hydration and adoption ─────────────
+
+describe("B8 — plan identity hydration & adoption", () => {
+  const BODY = { outcomes: ["done"], policy: "strict" };
+  const SNAPSHOT: ContractSnapshot = {
+    ref: { id: "contract.plan", revision: "1", digest: contractDigest(BODY) },
+    body: BODY,
+  };
+  const REGISTRY = createContractRegistry({ contracts: [SNAPSHOT] });
+
+  function planDeclaration(): GraphDeclaration {
+    return {
+      version: 2,
+      name: "plan-identity",
+      nodes: [{ id: "A", agent: "a1", prompt: "p1" }],
+      edges: [],
+    };
+  }
+
+  function planArtifacts(): {
+    plan: CompiledPlan;
+    record: PersistedCompiledPlan;
+    binding: PlanBinding;
+  } {
+    const result = compileGraph(
+      {
+        version: 3,
+        name: "plan-identity",
+        nodes: [
+          {
+            id: "A",
+            agent: "a1",
+            prompt: "p1",
+            outcomes: [{ id: "done" }],
+            contractRef: SNAPSHOT.ref,
+          },
+        ],
+        edges: [],
+      },
+      { contracts: REGISTRY },
+    );
+    if (!result.ok) {
+      throw new Error(
+        "the plan-identity fixture must compile: " +
+          result.errors.map((error) => error.code).join(", "),
+      );
+    }
+    const plan = result.plan;
+    const record = createPersistedCompiledPlan(plan);
+    return {
+      plan,
+      record,
+      binding: {
+        planRevision: record.planRevision,
+        contractSnapshots: record.contractSnapshots,
+        contractIdentities: record.contractIdentities,
+        nodeBindings: record.nodeBindings,
+      },
+    };
+  }
+
+  it("hydrateEngineState carries protocol + plan record + binding, deep and unaliased", () => {
+    const { record, binding } = planArtifacts();
+    const source = buildState(planDeclaration(), "plan-identity");
+    source.executionProtocolVersion = LEGACY_SIGNAL_PROTOCOL;
+    source.compiledPlan = record;
+    source.planBinding = binding;
+    const target = createEngineState(planDeclaration(), "plan-identity");
+
+    hydrateEngineState(target, source);
+
+    expect(target.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+    expect(target.compiledPlan).toEqual(record);
+    expect(target.planBinding).toEqual(binding);
+    // DEEP copies, not aliases: the target's record, its snapshot entry and the
+    // contract BODY are all distinct objects from the source's.
+    expect(target.compiledPlan).not.toBe(record);
+    expect(target.compiledPlan?.nodes).not.toBe(record.nodes);
+    const digest = SNAPSHOT.ref.digest;
+    expect(target.compiledPlan?.contractSnapshots[digest]).not.toBe(
+      record.contractSnapshots[digest],
+    );
+    expect(target.compiledPlan?.contractSnapshots[digest]?.body).not.toBe(
+      record.contractSnapshots[digest]?.body,
+    );
+    expect(target.planBinding).not.toBe(binding);
+    expect(target.planBinding?.contractIdentities).not.toBe(
+      binding.contractIdentities,
+    );
+
+    // The hydrated state RE-SERIALIZES with all three identity fields.
+    const saved = serializeEngineState(target);
+    expect(saved.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+    expect(saved.compiledPlan).toEqual(record);
+    expect(saved.planBinding).toEqual(binding);
+  });
+
+  it("hydrateEngineState leaves an absent plan identity absent (no fabrication)", () => {
+    const source = buildState(planDeclaration(), "plan-identity-absent");
+    const target = createEngineState(planDeclaration(), "plan-identity-absent");
+    hydrateEngineState(target, source);
+    expect(target.executionProtocolVersion).toBeUndefined();
+    expect(target.compiledPlan).toBeUndefined();
+    expect(target.planBinding).toBeUndefined();
+  });
+
+  it("adoptPriorNodeStates carries them when the declaration is unchanged", () => {
+    const { record, binding } = planArtifacts();
+    const prior = buildState(planDeclaration(), "plan-identity");
+    prior.executionProtocolVersion = LEGACY_SIGNAL_PROTOCOL;
+    prior.compiledPlan = record;
+    prior.planBinding = binding;
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+    const target = buildState(planDeclaration(), "plan-identity");
+
+    adoptPriorNodeStates(target, prior);
+
+    expect(target.nodes.get("A")!.status).toBe(NodeStatus.Completed);
+    expect(target.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+    expect(target.compiledPlan).toEqual(record);
+    expect(target.planBinding).toEqual(binding);
+    // Deep copies, never aliases of the still-live prior runtime.
+    expect(target.compiledPlan).not.toBe(record);
+    expect(target.planBinding).not.toBe(binding);
+    expect(target.compiledPlan?.contractSnapshots[SNAPSHOT.ref.digest]).not.toBe(
+      record.contractSnapshots[SNAPSHOT.ref.digest],
+    );
+  });
+
+  it("adoptPriorNodeStates REFUSES when the declaration changed, and adopts nothing", () => {
+    const { record, binding } = planArtifacts();
+    const prior = buildState(planDeclaration(), "plan-identity");
+    prior.executionProtocolVersion = LEGACY_SIGNAL_PROTOCOL;
+    prior.compiledPlan = record;
+    prior.planBinding = binding;
+    prior.nodes.get("A")!.status = NodeStatus.Completed;
+
+    const changed: GraphDeclaration = {
+      ...planDeclaration(),
+      nodes: [{ id: "A", agent: "a1", prompt: "p1 CHANGED" }],
+    };
+    const target = buildState(changed, "plan-identity");
+    const before = target.nodes.get("A")!.status;
+
+    let refusal: unknown;
+    try {
+      adoptPriorNodeStates(target, prior);
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal).toBeInstanceOf(AdoptPlanRefusalError);
+    const message = refusal instanceof Error ? refusal.message : "";
+    // The refusal is actionable: it names the carried fields and the digests.
+    expect(message).toContain("compiledPlan");
+    expect(message).toContain("planBinding");
+    expect(message).toContain("executionProtocolVersion");
+    expect(message).toContain(contractDigest(JSON.parse(JSON.stringify(planDeclaration()))));
+    expect(message).toContain(contractDigest(JSON.parse(JSON.stringify(changed))));
+
+    // NOTHING was silently dropped or partially adopted: the target still has
+    // its provisioned status and no plan identity, and the source is intact.
+    expect(target.nodes.get("A")!.status).toBe(before);
+    expect(target.compiledPlan).toBeUndefined();
+    expect(target.planBinding).toBeUndefined();
+    expect(target.executionProtocolVersion).toBeUndefined();
+    expect(prior.compiledPlan).toBe(record);
+    expect(prior.planBinding).toBe(binding);
+  });
+
+  it("status() carries the plan identity after adoption, and a rebuild adopts it again", async () => {
+    const { record, binding } = planArtifacts();
+    const prior = buildState(planDeclaration(), "plan-identity");
+    prior.executionProtocolVersion = LEGACY_SIGNAL_PROTOCOL;
+    prior.compiledPlan = record;
+    prior.planBinding = binding;
+
+    const runtime = createEngine(planDeclaration(), { graphId: "plan-identity" });
+    await runtime.adoptPrior(prior);
+
+    // Pre-fix the snapshot dropped all three (snapshotEngineState omission), so
+    // the next rebuild had nothing to adopt.
+    const snapshot = runtime.status();
+    expect(snapshot.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+    expect(snapshot.compiledPlan).toEqual(record);
+    expect(snapshot.planBinding).toEqual(binding);
+
+    // A second rebuild adopts the SNAPSHOT and still holds the plan identity.
+    const second = createEngine(planDeclaration(), { graphId: "plan-identity" });
+    await second.adoptPrior(snapshot);
+    const secondSnapshot = second.status();
+    expect(secondSnapshot.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+    expect(secondSnapshot.compiledPlan).toEqual(record);
+    expect(secondSnapshot.planBinding).toEqual(binding);
+  });
+
+  it("planAdoptionRefusal also refuses a foreign graphId and an unknown-plan prior is never refused", () => {
+    const { record, binding } = planArtifacts();
+    const foreign = buildState(planDeclaration(), "plan-identity");
+    foreign.executionProtocolVersion = LEGACY_SIGNAL_PROTOCOL;
+    foreign.compiledPlan = record;
+    foreign.planBinding = binding;
+    expect(
+      planAdoptionRefusal(foreign, "other-graph", planDeclaration()),
+    ).toBeInstanceOf(AdoptPlanRefusalError);
+
+    // A state with no plan identity to carry is never refused — the legacy
+    // rebuild path keeps its exact behaviour.
+    const bare = buildState(planDeclaration(), "plan-identity");
+    expect(planAdoptionRefusal(bare, "plan-identity", planDeclaration())).toBeNull();
   });
 });
 

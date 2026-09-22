@@ -76,7 +76,6 @@ import {
   contractRefsEqual,
   isContractRef,
   type ContractRef,
-  type ContractSnapshot,
 } from "../contracts/contract-definition.ts";
 import {
   classifyStorageFormat,
@@ -97,6 +96,8 @@ import {
 import { logWarn } from "./log-warn.ts";
 import {
   inspectCompiledTopology,
+  NON_EXECUTABLE_PLAN_CODE,
+  readPlanExecutability,
   type CompiledNode,
   type PersistedCompiledPlan,
 } from "../compiler/plan.ts";
@@ -346,119 +347,46 @@ export function cloneCheckpointHistory(
 }
 
 /**
- * Defensive copy of one persisted plan binding (B6).
+ * Defensive DEEP copy of one persisted plan binding (B6; B8 makes it deep).
  *
- * The two records are rebuilt so the writer never aliases the live state's
- * containers, and they are assembled with `Object.fromEntries` — a data
- * property definition — so a digest- or node-shaped key such as `__proto__`
- * cannot land on the object's prototype instead of in the record.
+ * `structuredClone` copies every own key of the record — including a key the
+ * binding model does not declare, and including a `__proto__` own property,
+ * which it preserves as an own data property rather than letting it land on the
+ * prototype — and it copies nested containers all the way down. Source and
+ * result therefore share NO object: a body the target later mutates cannot
+ * rewrite the source's content (and vice versa), which is exactly the guarantee
+ * hydration and adoption need.
  *
- * Contract BODIES are carried by reference: a compiler-produced body is a
- * deeply frozen tree whose digest is what makes the binding durable, and a
- * hydrated body is already a fresh `JSON.parse` result. Copying a body would
- * buy nothing the digest does not already prove.
+ * The values are JSON data: `contractDigest` accepted every body of a
+ * VERIFIED binding, so a plan record the load admitted is cloneable. This
+ * helper is also used by the writer, where the same property holds — and where
+ * a copy that shared a body reference would let a caller edit the DTO it was
+ * handed and the live state behind it at once.
  *
- * The copy is KEY-PRESERVING — the source record is spread first and only the
- * containers the writer must not alias are rebuilt — so a top-level own key the
- * binding carries is copied rather than dropped. For the binding this is
- * fidelity only (its `planRevision` addresses the compiled plan, not this
- * body); {@link clonePersistedCompiledPlan} states why the same rule is
- * load-bearing for the plan record.
+ * For the binding, key preservation is fidelity only (its `planRevision`
+ * addresses the compiled plan, not this body); {@link clonePersistedCompiledPlan}
+ * states why the same rule is load-bearing for the plan record.
  */
-function clonePlanBinding(binding: PlanBinding): PlanBinding {
-  const contractSnapshots = Object.fromEntries(
-    Object.entries(binding.contractSnapshots).map(
-      ([digest, snapshot]): [string, ContractSnapshot] => [
-        digest,
-        { ...snapshot, ref: { ...snapshot.ref } },
-      ],
-    ),
-  );
-  const nodeBindings = Object.fromEntries(
-    Object.entries(binding.nodeBindings).map(
-      ([nodeId, ref]): [string, ContractRef] => [nodeId, { ...ref }],
-    ),
-  );
-  return {
-    ...binding,
-    planRevision: binding.planRevision,
-    contractSnapshots,
-    nodeBindings,
-  };
+export function clonePlanBinding(binding: PlanBinding): PlanBinding {
+  return structuredClone(binding);
 }
 
 /**
- * Defensive copy of one persisted compiled-plan record (B7).
+ * Defensive DEEP copy of one persisted compiled-plan record (B7; deep since B8).
  *
- * Every plan container the writer hands to the DTO is rebuilt so the exported
- * serializer never aliases the live state — the same reason as
- * {@link clonePlanBinding}. Contract BODIES are carried by reference: a body
- * the canonical digest accepted is JSON data whose identity is what makes the
- * record durable, and a hydrated body is already a fresh `JSON.parse` result.
- *
- * The copy is KEY-PRESERVING, and here that is load-bearing rather than
- * cosmetic: the source record is spread first and only the containers the
- * writer must not alias are rebuilt, so an own key the record carries —
- * whether the plan model declares it or not — is COPIED instead of dropped.
- * `planRevision` addresses the body AS PERSISTED (`contractDigest` hashes
- * `Object.keys`), so a closed-field projection would drop an unknown key while
- * keeping the revision, and the writer's own output would be refused as
- * `corrupt(contract)` on the next load.
+ * Same discipline and same guarantee as {@link clonePlanBinding}:
+ * `structuredClone` copies the whole record — every own key, declared or not,
+ * and every nested container — so neither the serializer, a hydrated engine nor
+ * an adopting engine ever aliases the record it copied. Key preservation is
+ * load-bearing rather than cosmetic: `planRevision` addresses the body AS
+ * PERSISTED (`contractDigest` hashes `Object.keys`), so a closed-field
+ * projection would drop an own key while keeping the revision, and the writer's
+ * own output would be refused as `corrupt(contract)` on the next load.
  */
-function clonePersistedCompiledPlan(
+export function clonePersistedCompiledPlan(
   plan: PersistedCompiledPlan,
 ): PersistedCompiledPlan {
-  return {
-    ...plan,
-    graphId: plan.graphId,
-    declarationVersion: plan.declarationVersion,
-    planRevision: plan.planRevision,
-    nodes: plan.nodes.map(cloneCompiledNode),
-    edges: plan.edges.map((edge) => ({ ...edge })),
-    loopGroups: plan.loopGroups.map((group) => ({
-      ...group,
-      nodes: [...group.nodes],
-    })),
-    contractSnapshots: Object.fromEntries(
-      Object.entries(plan.contractSnapshots).map(
-        ([digest, snapshot]): [string, ContractSnapshot] => [
-          digest,
-          { ...snapshot, ref: { ...snapshot.ref } },
-        ],
-      ),
-    ),
-    nodeBindings: Object.fromEntries(
-      Object.entries(plan.nodeBindings).map(
-        ([nodeId, ref]): [string, ContractRef] => [nodeId, { ...ref }],
-      ),
-    ),
-  };
-}
-
-/**
- * Defensive copy of one compiled node: its own records are rebuilt, fields
- * verbatim, and every own key the node carries is preserved — see
- * {@link clonePersistedCompiledPlan} for why that is load-bearing.
- */
-function cloneCompiledNode(node: CompiledNode): CompiledNode {
-  return {
-    ...node,
-    outcomes: node.outcomes.map((outcome) => ({
-      ...outcome,
-      ...(outcome.data === undefined ? {} : { data: { ...outcome.data } }),
-      acceptance: outcome.acceptance.map((requirement) => ({
-        ...requirement,
-      })),
-    })),
-    ...(node.completion === undefined
-      ? {}
-      : { completion: { ...node.completion } }),
-    ...(node.contractRef === undefined
-      ? {}
-      : { contractRef: { ...node.contractRef } }),
-    ...(node.join === undefined ? {} : { join: { ...node.join } }),
-    ...(node.budget === undefined ? {} : { budget: { ...node.budget } }),
-  };
+  return structuredClone(plan);
 }
 
 // ── Serialize / Deserialize (pure, exportable for tests) ────────────────────
@@ -1135,13 +1063,14 @@ export class EnginePersistence {
  *   a legacy graph with no compiled plan. Nothing is verified and nothing is
  *   fabricated.
  * - `verified` — every gate passed for the record(s) that ARE present:
- *   `planRevision` is a non-empty string, every snapshot body hashes to its own
- *   key, no two snapshots name one `(id, revision)` identity with different
- *   digests, every bound ref resolves to an equal snapshot ref and every bound
- *   node exists in the state — plus, for a compiled-plan record, that its whole
- *   body hashes to its `planRevision` and its topology satisfies the plan-level
- *   rules in `compiler/plan.ts`. When BOTH records are present they must also
- *   agree.
+ *   `planRevision` is a non-empty string, every snapshot entry is content whose
+ *   body hashes to its own digest key, every `(id, revision)` in the identity
+ *   index maps to exactly one digest that has such proven content (two
+ *   identities sharing one digest are legal), every bound ref resolves through
+ *   that index and every bound node exists in the state — plus, for a
+ *   compiled-plan record, that its whole body hashes to its `planRevision` and
+ *   its topology satisfies the plan-level rules in `compiler/plan.ts`. When
+ *   BOTH records are present they must also agree.
  * - `corrupt` — a persisted record violated one of those invariants. The
  *   `reason` names the failed check and the offending digest key / node id.
  *   This is the ONLY producer of the `contract` load dimension.
@@ -1179,7 +1108,8 @@ function describeContractRef(ref: ContractRef): string {
 }
 
 /**
- * The snapshot + node-binding rules, applied to ONE contract-bearing record.
+ * The content + identity + node-binding rules, applied to ONE contract-bearing
+ * record.
  *
  * This is the ONE owner of those rules: the B6 `planBinding` gate and the B7
  * compiled-plan gate both call it, so a rule cannot drift between the two
@@ -1187,18 +1117,28 @@ function describeContractRef(ref: ContractRef): string {
  * `label` names the record in every diagnostic ("plan binding" / "compiled
  * plan"), so a failure says which record broke the rule.
  *
+ * B8 SPLIT CONTENT FROM IDENTITY. `contractSnapshots` is content only, keyed
+ * by the canonical digest of its body; `contractIdentities` is the separate
+ * `id` → `revision` → digest index. A node binding no longer matches "the
+ * snapshot's ref" (there is none): it resolves THROUGH the identity index.
+ *
  * Checks, in this order (the first failure wins):
- * (a) every `contractSnapshots` entry keyed by digest D has `ref.digest === D`
- *     and a body whose `contractDigest` is D — the B4 digest is REUSED, never
+ * (a) every `contractSnapshots` entry is a `{ body }` record keyed by digest D
+ *     whose `contractDigest` is D — the B4 digest is REUSED, never
  *     re-implemented, and a body it rejects (a cycle, an accessor, an
- *     unrepresentable value, an oversized tree) is contained here — and no two
- *     entries name one `(id, revision)` identity with DIFFERENT digests, the
- *     same one-identity-one-snapshot rule `createContractRegistry` enforces at
- *     construction;
- * (b) every `nodeBindings` entry resolves: its `ref.digest` keys a snapshot and
- *     that snapshot ref equals the bound ref by identity (`contractRefsEqual`),
- *     never by ordering;
- * (c) no `nodeBindings` key names a node the persisted state does not declare.
+ *     unrepresentable value, an oversized tree) is contained here. Content is
+ *     deduplicated by digest, so two identities sharing one body are one entry
+ *     and are NOT a violation;
+ * (b) `contractIdentities` is a record of records: every `(id, revision)` maps
+ *     to one non-empty digest, and that digest has a `contractSnapshots` entry
+ *     (whose body (a) proved hashes back to the key). The nested shape makes
+ *     "one identity, one digest" structural — ids and revisions are arbitrary
+ *     persisted strings, so a concatenated flat key could collide — and two
+ *     IDENTITIES MAY SHARE ONE DIGEST: that is the case this split exists for;
+ * (c) every `nodeBindings` entry is a contract ref whose `(id, revision)` the
+ *     identity index carries, whose `digest` the index maps it to, and whose
+ *     digest has proven content through (a) + (b) — never by ordering;
+ * (d) no `nodeBindings` key names a node the persisted state does not declare.
  *
  * It does NOT check `planRevision`: what that field addresses differs by record
  * (the plan body for a compiled plan, the plan revision for a binding), so each
@@ -1216,6 +1156,13 @@ function verifyContractRecord(
       reason: `${label} contractSnapshots is not a record keyed by contract digest`,
     };
   }
+  const contractIdentities = value.contractIdentities;
+  if (!isPlainObject(contractIdentities)) {
+    return {
+      ok: false,
+      reason: `${label} contractIdentities is not a record keyed by contract id`,
+    };
+  }
   const nodeBindings = value.nodeBindings;
   if (!isPlainObject(nodeBindings)) {
     return {
@@ -1224,46 +1171,18 @@ function verifyContractRecord(
     };
   }
 
-  // (a) — digest-first, in key order, so a diagnostic is stable.
-  const snapshotsByDigest = new Map<string, ContractSnapshot>();
-  // One (id, revision) identity must have exactly ONE digest, or a consumer
-  // that resolves by identity (rather than by digest key) faces an ambiguous
-  // contract. Keyed id → revision → digest: ids and revisions are arbitrary
-  // persisted strings, so a concatenated key could collide.
-  const digestByIdentity = new Map<string, Map<string, string>>();
+  // (a) — content, digest-first, in key order, so a diagnostic is stable. The
+  // set holds the digests whose body has PROVEN to hash to its own key.
+  const provenDigests = new Set<string>();
   for (const digest of Object.keys(contractSnapshots).sort()) {
     try {
       const entry = contractSnapshots[digest];
       if (!isPlainObject(entry)) {
         return {
           ok: false,
-          reason: `${label} contract snapshot ${JSON.stringify(digest)} is not a { ref, body } record`,
+          reason: `${label} contract snapshot ${JSON.stringify(digest)} is not a { body } record`,
         };
       }
-      const ref = entry.ref;
-      if (!isContractRef(ref)) {
-        return {
-          ok: false,
-          reason: `${label} contract snapshot ${JSON.stringify(digest)} has no contract ref { id, revision, digest } of non-empty strings`,
-        };
-      }
-      if (ref.digest !== digest) {
-        return {
-          ok: false,
-          reason: `${label} contract snapshot ${JSON.stringify(digest)} declares ref.digest ${JSON.stringify(ref.digest)}, not its own key`,
-        };
-      }
-      const knownDigests =
-        digestByIdentity.get(ref.id) ?? new Map<string, string>();
-      const knownDigest = knownDigests.get(ref.revision);
-      if (knownDigest !== undefined && knownDigest !== digest) {
-        return {
-          ok: false,
-          reason: `${label} contract snapshots ${JSON.stringify(knownDigest)} and ${JSON.stringify(digest)} both name contract ${JSON.stringify(ref.id)}@${JSON.stringify(ref.revision)} — one exact (id, revision) identity has exactly one snapshot`,
-        };
-      }
-      knownDigests.set(ref.revision, digest);
-      digestByIdentity.set(ref.id, knownDigests);
       // Read the body ONCE: the digest and the stored body must come from the
       // same read, or a getter could pass one and answer another.
       const body = entry.body;
@@ -1274,10 +1193,7 @@ function verifyContractRecord(
           reason: `${label} contract snapshot ${JSON.stringify(digest)} body hashes to ${actual}, not its own key`,
         };
       }
-      snapshotsByDigest.set(digest, {
-        ref: { id: ref.id, revision: ref.revision, digest: ref.digest },
-        body,
-      });
+      provenDigests.add(digest);
     } catch (err) {
       return {
         ok: false,
@@ -1286,7 +1202,41 @@ function verifyContractRecord(
     }
   }
 
-  // (b) + (c) — one pass over the bound nodes, in node-id order.
+  // (b) — identity, id order then revision order. One identity has exactly one
+  // digest by construction, and every digest it names must be proven content.
+  for (const id of Object.keys(contractIdentities).sort()) {
+    try {
+      const revisions = contractIdentities[id];
+      if (!isPlainObject(revisions)) {
+        return {
+          ok: false,
+          reason: `${label} contract identity ${JSON.stringify(id)} is not a record keyed by revision`,
+        };
+      }
+      for (const revision of Object.keys(revisions).sort()) {
+        const digest = revisions[revision];
+        if (typeof digest !== "string" || digest.length === 0) {
+          return {
+            ok: false,
+            reason: `${label} contract identity ${JSON.stringify(id)}@${JSON.stringify(revision)} maps to ${describeBindingValue(digest)}, not a content digest`,
+          };
+        }
+        if (!provenDigests.has(digest)) {
+          return {
+            ok: false,
+            reason: `${label} contract identity ${JSON.stringify(id)}@${JSON.stringify(revision)} maps to digest ${JSON.stringify(digest)}, which contractSnapshots does not contain`,
+          };
+        }
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `${label} contract identity ${JSON.stringify(id)} was rejected: ${errorText(err)}`,
+      };
+    }
+  }
+
+  // (c) + (d) — one pass over the bound nodes, in node-id order.
   for (const nodeId of Object.keys(nodeBindings).sort()) {
     try {
       const boundRef = nodeBindings[nodeId];
@@ -1296,17 +1246,21 @@ function verifyContractRecord(
           reason: `${label} node binding ${JSON.stringify(nodeId)} is not a contract ref { id, revision, digest } of non-empty strings`,
         };
       }
-      const snapshot = snapshotsByDigest.get(boundRef.digest);
-      if (snapshot === undefined) {
+      const revisions = contractIdentities[boundRef.id];
+      const indexed =
+        isPlainObject(revisions) && typeof revisions[boundRef.revision] === "string"
+          ? revisions[boundRef.revision]
+          : undefined;
+      if (indexed === undefined) {
         return {
           ok: false,
-          reason: `${label} node binding ${JSON.stringify(nodeId)} references contract digest ${JSON.stringify(boundRef.digest)}, which contractSnapshots does not contain`,
+          reason: `${label} node binding ${JSON.stringify(nodeId)} names contract ${describeContractRef(boundRef)}, which the contract identity index does not carry`,
         };
       }
-      if (!contractRefsEqual(snapshot.ref, boundRef)) {
+      if (indexed !== boundRef.digest) {
         return {
           ok: false,
-          reason: `${label} node binding ${JSON.stringify(nodeId)} is ${describeContractRef(boundRef)}, but the snapshot at digest ${JSON.stringify(boundRef.digest)} is ${describeContractRef(snapshot.ref)}`,
+          reason: `${label} node binding ${JSON.stringify(nodeId)} declares digest ${JSON.stringify(boundRef.digest)}, but the contract identity index maps ${JSON.stringify(boundRef.id)}@${JSON.stringify(boundRef.revision)} to ${JSON.stringify(indexed)}`,
         };
       }
       if (!nodeIds.has(nodeId)) {
@@ -1345,7 +1299,11 @@ function verifyContractRecord(
  * never means two identities.
  *
  * Every other rule comes from {@link verifyContractRecord} — the single owner
- * of the snapshot and node-binding invariants.
+ * of the content, identity and node-binding invariants. B8 changed that
+ * record's SHAPE: snapshots are content only and a node binding resolves
+ * through the `contractIdentities` index. Nothing in production writes a
+ * binding yet, so no migration is written or required; an older-shape binding
+ * is refused as `corrupt(contract)` rather than reinterpreted.
  */
 export function verifyPersistedPlanBinding(
   value: unknown,
@@ -1388,24 +1346,34 @@ const COMPILED_DECLARATION_VERSION = 3;
  *     strings, `graphId` is the persisted graph's own id, the declaration version
  *     is the grammar this build compiles (3), and `nodes` / `edges` /
  *     `loopGroups` are arrays;
- * (b) topology — {@link inspectCompiledTopology} applies the plan-level rules
- *     the compiler guarantees (unique node ids, every edge endpoint declared,
- *     every edge outcome declared by its source, loop membership and routes, a
- *     positive traversal cap), and every node id the topology declares must be
- *     one the persisted state declares;
+ * (a2) executability — the record must be the plan this state may RUN. The
+ *     `executability` field is read by the plan module's own reader; a DRAFT is
+ *     refused by name (`plan-not-executable`) and a malformed value is refused
+ *     as a malformed record. A draft's acceptance requirements were never
+ *     resolved, so loading one as executable would run gates that were never
+ *     checked (B9);
+ * (b) topology — {@link inspectCompiledTopology} applies EVERY plan-level rule
+ *     the compiler guarantees — unique node ids, at least one outcome per node,
+ *     every edge endpoint declared, every edge outcome declared by its source,
+ *     loop membership and routes, a positive traversal cap, a continuation
+ *     outcome carried by an edge inside its group, cycle containment, the
+ *     explicit non-empty and edge-consistent `terminalOutcomes` list, and a
+ *     pinned acceptance version on every requirement of an executable plan —
+ *     and every node id the topology declares must be one the persisted state
+ *     declares;
  * (b2) index — `nodeBindings` is the projection of the plan nodes it claims to
  *     be: a node that declares a `contractRef` must appear with the same ref, a
  *     node that declares none must not appear, and every key must be a topology
  *     node id. The plan revision does not cover this field, so without the
  *     projection a rebinding could hide behind an otherwise valid snapshot;
- * (c) contracts — {@link verifyContractRecord} owns the snapshot and
+ * (c) contracts — {@link verifyContractRecord} owns the content, identity and
  *     node-binding rules for the record;
  * (d) identity — `planRevision` is `contractDigest` over the record's own plan
  *     body (`graphId`, `declarationVersion`, `nodes`, `edges`, `loopGroups`,
- *     `contractSnapshots`), recomputed here from the persisted values, so a
- *     tampered body or a revision copied from another plan is refused.
- *     `nodeBindings` is deliberately NOT part of that body: it is the
- *     projection checked in (b2).
+ *     `contractSnapshots`, `contractIdentities`, `terminalOutcomes`,
+ *     `executability`), recomputed here from the persisted values, so a tampered
+ *     body or a revision copied from another plan is refused. `nodeBindings` is
+ *     deliberately NOT part of that body: it is the projection checked in (b2).
  *
  * NOT proven here: the field-level schema of node and edge internals beyond
  * the ids, outcomes, contract refs and topology the rules read (a node agent,
@@ -1464,8 +1432,31 @@ export function verifyPersistedCompiledPlan(
       return contractCorrupt("compiled plan loopGroups is not an array of compiled loop groups");
     }
 
-    // (b) TOPOLOGY — the plan-level rules, owned next to the plan shape.
-    const topology = inspectCompiledTopology(nodes, edges, loopGroups);
+    // (a2) EXECUTABILITY — a persisted `compiledPlan` means "the plan this
+    // state may run". A DRAFT never had its acceptance requirements resolved,
+    // so it is refused BY NAME here instead of being loaded as executable; a
+    // malformed value is refused as a malformed record. The reading is the plan
+    // module's own, so the compiler's marker and this gate cannot drift.
+    const executability = readPlanExecutability(value.executability);
+    if (executability.kind !== "executable") {
+      if (executability.kind === "draft") {
+        return contractCorrupt(
+          `compiled plan is not executable (${NON_EXECUTABLE_PLAN_CODE}): it is a DRAFT whose acceptance requirements were never resolved — a draft must not be loaded as an executable plan`,
+        );
+      }
+      return contractCorrupt(
+        `compiled plan executability is ${describeBindingValue(value.executability)}, not { kind: "executable" }`,
+      );
+    }
+
+    // (b) TOPOLOGY — every plan-level rule, owned next to the plan shape.
+    const topology = inspectCompiledTopology(
+      nodes,
+      edges,
+      loopGroups,
+      value.terminalOutcomes,
+      value.executability,
+    );
     if (topology.issues.length > 0) {
       const issue = topology.issues[0];
       return contractCorrupt(
@@ -1543,6 +1534,9 @@ export function verifyPersistedCompiledPlan(
         edges,
         loopGroups,
         contractSnapshots: value.contractSnapshots,
+        contractIdentities: value.contractIdentities,
+        terminalOutcomes: value.terminalOutcomes,
+        executability: value.executability,
       });
     } catch (err) {
       return contractCorrupt(
@@ -1605,8 +1599,13 @@ export function verifyPersistedPlan(
  * would already have refused, and keeping them means a direct caller cannot
  * make this throw. Checks:
  * (a) the binding `planRevision` equals the plan `planRevision`;
- * (b) every contract digest the binding REFERENCES — its snapshot keys and its
- *     node binding refs — is one the plan pins;
+ * (b) every contract digest the binding REFERENCES — its snapshot keys, its
+ *     identity-index digests and its node binding refs — is one the plan pins;
+ * (b2) the two identity indexes AGREE exactly: every `(id, revision)` the
+ *     binding maps is mapped by the plan to the same digest, and every identity
+ *     the plan maps is mapped by the binding. Both records are projections of
+ *     ONE plan, so a missing or extra identity is a disagreement rather than a
+ *     tolerated projection difference;
  * (c) every node the binding binds is bound by the plan to the SAME ref.
  */
 function verifyPersistedPlanAgreement(
@@ -1628,11 +1627,15 @@ function verifyPersistedPlanAgreement(
     }
     const planSnapshots = compiledPlan.contractSnapshots;
     const bindingSnapshots = planBinding.contractSnapshots;
+    const planIdentities = compiledPlan.contractIdentities;
+    const bindingIdentities = planBinding.contractIdentities;
     const planBindings = compiledPlan.nodeBindings;
     const bindingBindings = planBinding.nodeBindings;
     if (
       !isPlainObject(planSnapshots) ||
       !isPlainObject(bindingSnapshots) ||
+      !isPlainObject(planIdentities) ||
+      !isPlainObject(bindingIdentities) ||
       !isPlainObject(planBindings) ||
       !isPlainObject(bindingBindings)
     ) {
@@ -1640,11 +1643,20 @@ function verifyPersistedPlanAgreement(
         "compiled plan and plan binding carry records the agreement check cannot compare",
       );
     }
-    // (b) Every digest the binding references, read from BOTH kinds of
-    // reference: a binding that keeps a snapshot the plan does not pin is a
+    // (b) Every digest the binding references, read from EVERY kind of
+    // reference — content keys, identity-index values and node binding refs: a
+    // binding that keeps content or an identity the plan does not pin is a
     // projection that disagrees with its plan, whether or not a node still
     // binds it.
     const referenced = new Set<string>(Object.keys(bindingSnapshots));
+    for (const revisions of Object.values(bindingIdentities)) {
+      if (!isPlainObject(revisions)) continue;
+      for (const digest of Object.values(revisions)) {
+        if (typeof digest === "string" && digest.length > 0) {
+          referenced.add(digest);
+        }
+      }
+    }
     for (const boundRef of Object.values(bindingBindings)) {
       if (isContractRef(boundRef)) referenced.add(boundRef.digest);
     }
@@ -1652,6 +1664,41 @@ function verifyPersistedPlanAgreement(
       if (!Object.prototype.hasOwnProperty.call(planSnapshots, digest)) {
         return contractCorrupt(
           `plan binding references contract digest ${JSON.stringify(digest)}, which the compiled plan contractSnapshots does not contain`,
+        );
+      }
+    }
+    // (b2) The two identity indexes must agree EXACTLY. The binding is a
+    // projection of the plan, so an identity only one of them maps is a
+    // disagreement (a stale or tampered projection), not a legal difference —
+    // and two identities sharing one digest still compare equal here.
+    for (const id of Object.keys(bindingIdentities).sort()) {
+      const bindingRevisions = bindingIdentities[id];
+      const planRevisions = planIdentities[id];
+      if (!isPlainObject(bindingRevisions) || !isPlainObject(planRevisions)) {
+        return contractCorrupt(
+          `plan binding contract identity ${JSON.stringify(id)} does not match the compiled plan identity index`,
+        );
+      }
+      for (const revision of Object.keys(bindingRevisions).sort()) {
+        const bindingDigest = bindingRevisions[revision];
+        if (planRevisions[revision] !== bindingDigest) {
+          return contractCorrupt(
+            `plan binding maps contract ${JSON.stringify(id)}@${JSON.stringify(revision)} to ${describeBindingValue(bindingDigest)}, but the compiled plan maps it to ${describeBindingValue(planRevisions[revision])}`,
+          );
+        }
+      }
+      for (const revision of Object.keys(planRevisions).sort()) {
+        if (!Object.prototype.hasOwnProperty.call(bindingRevisions, revision)) {
+          return contractCorrupt(
+            `compiled plan maps contract ${JSON.stringify(id)}@${JSON.stringify(revision)}, which the plan binding identity index does not carry`,
+          );
+        }
+      }
+    }
+    for (const id of Object.keys(planIdentities).sort()) {
+      if (!Object.prototype.hasOwnProperty.call(bindingIdentities, id)) {
+        return contractCorrupt(
+          `compiled plan carries contract identity ${JSON.stringify(id)}, which the plan binding identity index does not carry`,
         );
       }
     }

@@ -36,12 +36,17 @@
  * unbounded `setInterval` on their own — `start()` is opt-in so tests never
  * leak a timer.
  *
- * Hydrate/adopt completeness (H3 / L7 / M10): `hydrateEngineState` and
- * `adoptPriorNodeStates` carry the monitor-relevant graph state across
- * recovery and rebuilds — the append-only `checkpointHistory` (H3), per-node
- * `artifacts` / `evidence` and loop-group `convergenceFingerprint` (L7), and
- * the cross-restart `terminalNotified` dedup flags (M10). `subscribeTaskTermination`
- * returns its registered callback (M4) so callers can later
+ * Hydrate/adopt completeness (H3 / L7 / M10 / B8): `hydrateEngineState` and
+ * `adoptPriorNodeStates` carry the durable graph state across recovery and
+ * rebuilds — the append-only `checkpointHistory` (H3), per-node
+ * `artifacts` / `evidence` and loop-group `convergenceFingerprint` (L7), the
+ * cross-restart `terminalNotified` dedup flags (M10), and the persisted plan
+ * identity: `executionProtocolVersion`, `compiledPlan` and `planBinding` (B8).
+ * Hydration carries them unconditionally (same graph, same persisted state,
+ * deep-cloned); adoption carries them only when the prior state belongs to the
+ * same graph and its declaration is unchanged, and otherwise REFUSES with an
+ * `AdoptPlanRefusalError` instead of silently dropping or misapplying them.
+ * `subscribeTaskTermination` returns its registered callback (M4) so callers can later
  * `removeTaskTerminatedListener`; `reconcileEngine` surfaces the re-subscribed
  * `{ taskId, callback }` pairs through an optional out-parameter.
  *
@@ -65,14 +70,18 @@ import type {
   EngineState,
   NodeRuntimeState,
 } from "../../types.engine-v2.ts";
+import type { GraphDeclaration } from "../../types.graph-v2.ts";
 import { computeInDegrees, releaseAdvancingLock, removeFromFrontier, applyBudgetDelta } from "./engine-state.ts";
 import { markCancelled, markTimedOut } from "./node-lifecycle.ts";
 import {
   clearNonCriticalDirty,
   cloneCheckpointHistory,
+  clonePersistedCompiledPlan,
+  clonePlanBinding,
   markDirty,
   markNonCriticalDirty,
 } from "./engine-persistence.ts";
+import { contractDigest } from "../contracts/contract-definition.ts";
 import { recordCheckpointForNode } from "./recorder.ts";
 import { logWarn } from "./log-warn.ts";
 import type { SignalType } from "./signal-bridge.ts";
@@ -838,6 +847,21 @@ export function hydrateEngineState(
   target.terminalNotified = source.terminalNotified
     ? { ...source.terminalNotified }
     : undefined;
+  // OPTIONAL-ADDITIVE (B8 plan identity): the execution-protocol identity and
+  // the persisted compiled plan / plan binding are durable graph state. They
+  // are carried UNCONDITIONALLY here — hydration adopts the very state that was
+  // persisted for this graph — and DEEP-CLONED so the target can never alias
+  // the source record (or its contract bodies) and mutate the state a caller
+  // still holds. Absent → undefined (no fabricated record).
+  target.executionProtocolVersion = source.executionProtocolVersion;
+  target.compiledPlan =
+    source.compiledPlan === undefined
+      ? undefined
+      : clonePersistedCompiledPlan(source.compiledPlan);
+  target.planBinding =
+    source.planBinding === undefined
+      ? undefined
+      : clonePlanBinding(source.planBinding);
   // M10 restart-refire correction: a graph the persisted state shows as
   // QUIESCENT-BLOCKED (≥1 blocked node, no running/ready/pending) survives a
   // restart with its durable `terminalNotified.blocked` claim still true, so
@@ -907,6 +931,110 @@ export function clearRecoveredQuiescentBlockedGuard(
 // ── Prior-state adoption (incremental graph rebuild) ────────────────────────
 
 /**
+ * The refusal an adoption raises when it cannot carry the prior state's plan
+ * identity (B8).
+ *
+ * A plan is compiled FROM a declaration: carrying one across a declaration that
+ * has changed would either silently drop the plan or mechanically pin a plan
+ * that no longer describes the graph. Adoption therefore refuses explicitly and
+ * mutates nothing, and the caller surfaces the error (or refuses the rebuild
+ * before it replaces a live runtime).
+ */
+export class AdoptPlanRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AdoptPlanRefusalError";
+  }
+}
+
+/** Whether an engine state carries any persisted plan identity to adopt. */
+function carriesPlanIdentity(state: EngineState): boolean {
+  return (
+    state.executionProtocolVersion !== undefined ||
+    state.compiledPlan !== undefined ||
+    state.planBinding !== undefined
+  );
+}
+
+/** Name the plan-identity fields a state carries, for a diagnostic. */
+function describeCarriedPlanIdentity(state: EngineState): string {
+  const fields: string[] = [];
+  if (state.executionProtocolVersion !== undefined) {
+    fields.push("executionProtocolVersion");
+  }
+  if (state.compiledPlan !== undefined) fields.push("compiledPlan");
+  if (state.planBinding !== undefined) fields.push("planBinding");
+  return fields.join(", ");
+}
+
+/**
+ * The canonical digest of a graph declaration AS PERSISTED.
+ *
+ * The JSON round trip is the projection the writer stores, so an own key whose
+ * value is `undefined` (which JSON drops) cannot make an otherwise identical
+ * declaration incomparable, and a declaration that carries a value the
+ * canonical form cannot represent fails loudly instead of comparing equal. The
+ * digest itself is the ONE B4 `contractDigest`; no second digest exists.
+ */
+function persistedDeclarationDigest(declaration: GraphDeclaration): string {
+  return contractDigest(JSON.parse(JSON.stringify(declaration)) as unknown);
+}
+
+/**
+ * The refusal rule for adopting a prior state's plan identity, or `null` when
+ * adoption may carry it.
+ *
+ * The prior state's plan identity may be carried ONLY when the prior state
+ * belongs to the SAME graph AND its declaration is unchanged — compared by the
+ * canonical digest of the persisted declaration. The same `graphId` is NOT
+ * sufficient evidence: a declaration can gain, drop or rename nodes and edges
+ * while the graph id stays the same, and a plan bound to the old declaration
+ * would then pin contracts and topology the new declaration no longer
+ * describes. A state with no plan identity to carry is never refused, so a
+ * legacy rebuild behaves exactly as before.
+ *
+ * PURE and non-mutating: it reads the two states, never writes either, so a
+ * caller that refuses leaves both untouched.
+ */
+export function planAdoptionRefusal(
+  prior: EngineState,
+  graphId: string,
+  declaration: GraphDeclaration,
+): AdoptPlanRefusalError | null {
+  if (!carriesPlanIdentity(prior)) return null;
+  const carried = describeCarriedPlanIdentity(prior);
+
+  if (prior.graphId !== graphId) {
+    return new AdoptPlanRefusalError(
+      `adopt: refusing to carry the prior state's plan identity (${carried}) into graph ${JSON.stringify(graphId)} — the prior state belongs to graph ${JSON.stringify(prior.graphId)}, and a plan is bound to the graph it was compiled for. Nothing was adopted.`,
+    );
+  }
+  const recordGraphId = prior.compiledPlan?.graphId;
+  if (recordGraphId !== undefined && recordGraphId !== graphId) {
+    return new AdoptPlanRefusalError(
+      `adopt: refusing to carry the prior state's plan identity (${carried}) into graph ${JSON.stringify(graphId)} — the persisted compiled plan declares graphId ${JSON.stringify(recordGraphId)}. A plan does not migrate between graphs. Nothing was adopted.`,
+    );
+  }
+
+  let priorDigest: string;
+  let incomingDigest: string;
+  try {
+    priorDigest = persistedDeclarationDigest(prior.graphDeclaration);
+    incomingDigest = persistedDeclarationDigest(declaration);
+  } catch (err) {
+    return new AdoptPlanRefusalError(
+      `adopt: refusing to carry the prior state's plan identity (${carried}) into graph ${JSON.stringify(graphId)} — a declaration digest could not be computed (${errorText(err)}), so the two declarations cannot be proven identical. Nothing was adopted.`,
+    );
+  }
+  if (priorDigest !== incomingDigest) {
+    return new AdoptPlanRefusalError(
+      `adopt: refusing to carry the prior state's plan identity (${carried}) into graph ${JSON.stringify(graphId)} — the prior declaration (digest ${priorDigest}) differs from the incoming declaration (digest ${incomingDigest}), so the persisted plan no longer belongs to this declaration. Recompile the graph and publish a new plan revision; adoption never silently drops or rebinds a plan. Nothing was adopted.`,
+    );
+  }
+  return null;
+}
+
+/**
  * Adopt a *prior* engine run's per-node progress into a freshly provisioned
  * state (same graph id, possibly a superset declaration).
  *
@@ -930,11 +1058,27 @@ export function clearRecoveredQuiescentBlockedGuard(
  * Graph-level progress is carried too: budget counters, the signal ledger,
  * checkpoints, and loop-group traversal counts (so loop caps stay honest
  * across rebuilds).
+ *
+ * B8: the prior state's plan identity — `executionProtocolVersion`,
+ * `compiledPlan` and `planBinding` — is carried too, DEEP-CLONED so the target
+ * never aliases the prior state. It is carried only when
+ * {@link planAdoptionRefusal} proves the prior state belongs to this graph and
+ * its declaration is unchanged; otherwise this function THROWS an
+ * {@link AdoptPlanRefusalError} BEFORE mutating anything, so the caller can
+ * surface the refusal instead of a rebuilt engine silently losing (or
+ * misapplying) the plan.
  */
 export function adoptPriorNodeStates(
   target: EngineState,
   prior: EngineState,
 ): void {
+  const refusal = planAdoptionRefusal(
+    prior,
+    target.graphId,
+    target.graphDeclaration,
+  );
+  if (refusal !== null) throw refusal;
+
   for (const [nodeId, prev] of prior.nodes) {
     const node = target.nodes.get(nodeId);
     if (!node) continue; // node removed / renamed — nothing to adopt
@@ -1063,6 +1207,21 @@ export function adoptPriorNodeStates(
   target.terminalNotified = prior.terminalNotified
     ? { ...prior.terminalNotified }
     : undefined;
+
+  // OPTIONAL-ADDITIVE (B8 plan identity): the prior state's identity is carried
+  // only now that {@link planAdoptionRefusal} proved the prior state belongs to
+  // this graph and its declaration is unchanged. DEEP clones: the target must
+  // never share a record or a contract body with the prior state, whose runtime
+  // keeps running until the caller disposes it. Absent → undefined.
+  target.executionProtocolVersion = prior.executionProtocolVersion;
+  target.compiledPlan =
+    prior.compiledPlan === undefined
+      ? undefined
+      : clonePersistedCompiledPlan(prior.compiledPlan);
+  target.planBinding =
+    prior.planBinding === undefined
+      ? undefined
+      : clonePlanBinding(prior.planBinding);
 
   // Loop-group traversal counters (caps stay honest across rebuilds).
   for (const [groupId, prevGroup] of prior.loopGroups) {

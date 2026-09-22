@@ -53,12 +53,13 @@ function makeDispatchManager(): DispatchManager {
 
 // ── Expected tool surface ───────────────────────────────────────────────────
 
-/** The eight imperative `graph_*` keys produced by createGraphTools. */
+/** The imperative `graph_*` keys produced by createGraphTools (C1 adds declare). */
 const GRAPH_KEYS = [
   "graph_create",
   "graph_add_node",
   "graph_add_edge",
   "graph_add_loop",
+  "graph_declare",
   "graph_run",
   "graph_status",
   "graph_cancel",
@@ -136,10 +137,10 @@ async function initStack(dispatchManager?: DispatchManager): Promise<{
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe("PiLightweightServiceStack graph_* wiring", () => {
-  it("registers exactly the 8 graph_* tools when a dispatchManager is provided", async () => {
+  it("registers exactly the graph_* tools when a dispatchManager is provided", async () => {
     const { registeredNames, count } = await initStack(makeDispatchManager());
 
-    // Graph merge is additive: legacy 19 + 8 graph_* = 27.
+    // Graph merge is additive: legacy 19 + the graph_* surface.
     expect(count).toBe(BASE_TOOL_COUNT + GRAPH_KEYS.length);
 
     const graphKeys = registeredNames.filter((name) => name.startsWith("graph_"));
