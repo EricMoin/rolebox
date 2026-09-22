@@ -778,6 +778,75 @@ under `src/graph/engine`, `src/graph/tools` or `src/dispatch` imports the
 ledger, and the outcome protocol still has no registered handler: a declared
 graph remains un-runnable and the ledger is a substrate no runtime consumes yet.
 
+C3a DELIVERS THE SUBMISSION AND ACCEPTANCE CORE — proposal, validators and the
+decision/commit path — and NOTHING IS WIRED TO DISPATCH.
+
+`src/graph/outcome/proposal.ts` owns the ONLY shape a worker may supply:
+`{ nodeId, outcomeId, data?, evidenceRefs? }`. It carries no graph, attempt or
+submission identity and no plan revision, so provenance comes from the trusted
+runtime context and impersonating another execution is impossible BY
+CONSTRUCTION rather than by a check a later caller could forget — the shape is
+closed, and a proposal that tries to name its own execution is refused as an
+unknown key. `readOutcomeProposal` is the total shape gate, `normalizeProposal`
+is the canonical deeply frozen form (fixed key order, `data` present exactly
+when supplied, `evidenceRefs` a sorted de-duplicated set), and `proposalDigest`
+is the digest of that form through the ONE existing `contractDigest` — no second
+digest exists, and key order cannot move the result because the canonical form
+sorts keys itself.
+
+`src/graph/outcome/validators.ts` owns the CLOSED, versioned registry: an
+implementation is keyed by EXACT `{ id, version }`, the caller supplies the
+implementations, and the plan pins `{ validator, version }` per acceptance
+requirement. `ValidationOutcome` is pass, fail or indeterminate/error, and an
+indeterminate result never satisfies a required gate. The shipped
+`artifact-reference` v1 implementation reads every declared evidence reference,
+requires each to be a regular file that RESOLVES inside the configured root (a
+`..` escape or a symlink out of the root is refused), and records the SHA-256
+digest and byte size of the bytes it actually read — a digest is never recorded
+for a file the check did not read. An empty evidence set FAILS: a required
+artifact gate whose subject set is empty is the trivial check the protocol
+forbids.
+
+`src/graph/outcome/acceptance.ts` is the decision core. It consumes the committed
+compiled plan and the committed ledger and re-implements neither: the plan
+supplies the topology and the pinned gates (`readPlanExecutability` classifies
+executability), the ledger port supplies the atomic commit and the idempotency
+rules, and `contractDigest` supplies the digest. The request gates refuse —
+writing nothing — a malformed proposal, an unknown node, an outcome its declaring
+node does not declare, a draft plan, a plan revision or graph identity that
+disagrees with the submitted/trusted binding, an effect batch with an empty or
+duplicated id, and a clock that is not epoch milliseconds; a requirement whose
+implementation is not registered is ALSO a refusal, and every implementation is
+resolved BEFORE any gate runs, so a missing capability can never read as a pass
+and a partially checked submission is never evaluated. `validateSubmission` runs
+the gates outside any transaction, binds every result to the proposal digest,
+the plan revision and the execution identity, and decides: every required gate
+passing is `accepted`, any fail or indeterminate is `rejected`.
+`commitSubmission` commits ONE batch inside the ledger's transaction — accepted:
+receipt + accepted event + pending effects; rejected: receipt ONLY, so the
+attempt stays open — and RECHECKS the live binding inside the transaction,
+refusing a superseded proposal, plan revision or execution instead of settling a
+newer execution with stale evidence. `submitOutcome` composes the two phases for
+the ordinary caller. The ledger verdict is returned with the decision
+(`committed` / `replayed` / `conflict` / `settled`), so a repeated submission
+answers with the persisted receipt rather than a second row. Time is an explicit
+input; the core never reads a clock, and effects are recorded, never executed.
+The recheck binds the submission's identity — proposal digest, plan revision,
+execution — and deliberately not the validator registry, the artifact root or
+the clock, which are caller-supplied infrastructure rather than part of what the
+submission IS.
+
+DEFERRED by this slice, and not implied by it: dispatch wiring, the deterministic
+reducer and the engine state's place in the acceptance transaction, the
+model-facing `submit_outcome` tool and its generated schema, effect execution,
+restart recovery switched onto the persisted plan and its ledger, the
+protocol-aware dispatch completion bridge, storage format 3 with its `2 -> 3`
+migrator, and the schema, command-check and approval validators. Nothing under
+`src/graph/engine`, `src/graph/tools` or `src/dispatch` imports the new modules,
+and the outcome protocol still has no registered handler: a declared graph
+remains un-runnable and the acceptance core is a decision no runtime consumes
+yet.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |
