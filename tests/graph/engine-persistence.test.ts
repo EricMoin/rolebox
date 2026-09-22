@@ -6,20 +6,58 @@ import { Worker } from "node:worker_threads";
 
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
-import type { EngineState, NodeRuntimeState } from "../../src/types.engine-v2.ts";
+import type {
+  EngineState,
+  NodeRuntimeState,
+  PlanBinding,
+} from "../../src/types.engine-v2.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
+  DEFAULT_STORAGE_FORMAT_REGISTRY,
   EnginePersistence,
   ENGINE_PERSISTENCE_VERSION,
   NON_CRITICAL_DEBOUNCE_MS,
   serializeEngineState,
   deserializeEngineState,
   loadEngineStateFromJson,
+  loadEngineStateForResume,
+  verifyPersistedPlan,
+  verifyPersistedCompiledPlan,
+  verifyPersistedPlanBinding,
   engineStatePath,
   markDirty,
   clearDirty,
   shouldPersist,
 } from "../../src/graph/engine/engine-persistence.ts";
+import {
+  classifyStorageFormat,
+  createStorageFormatRegistry,
+  CURRENT_STORAGE_FORMAT,
+  STORAGE_FORMAT_V2,
+  type StorageFormatDecoder,
+  type StorageFormatMigration,
+} from "../../src/graph/persistence/storage-format.ts";
+import {
+  classifyExecutionProtocol,
+  createExecutionProtocolRegistry,
+  LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+  LEGACY_SIGNAL_PROTOCOL,
+  OUTCOME_PROTOCOL,
+  type ExecutionProtocolRegistry,
+} from "../../src/graph/protocol/execution-protocol.ts";
+import {
+  contractDigest,
+  type ContractRef,
+  type ContractSnapshot,
+} from "../../src/graph/contracts/contract-definition.ts";
+import { createContractRegistry } from "../../src/graph/contracts/resolve.ts";
+import { compileGraph } from "../../src/graph/compiler/compile.ts";
+import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
+import {
+  createPersistedCompiledPlan,
+  type CompiledPlan,
+  type PersistedCompiledPlan,
+} from "../../src/graph/compiler/plan.ts";
 import { createEngine } from "../../src/graph/engine/index.ts";
 import {
   checkGraphTermination,
@@ -295,11 +333,13 @@ describe("EnginePersistence", () => {
     store.save(state);
     const loaded = store.load("graph-1")!;
     // The FIRST hydration normalizes only the runtime-only critical-section
-    // fields (R2(c)); every other serialized field must be lossless.
+    // fields (R2(c)) and materializes the bound execution-protocol identity
+    // (B3) — every other serialized field must be lossless.
     expect(serializeEngineState(loaded)).toEqual({
       ...dtoBefore,
       advancingLock: false,
       pendingCompletions: [],
+      executionProtocolVersion: LEGACY_SIGNAL_PROTOCOL,
     });
     // From the second generation on, the round trip is an exact fixpoint.
     store.save(loaded);
@@ -788,11 +828,13 @@ describe("EnginePersistence — subtask 1 optional-additive fields", () => {
     const loaded = store.load("graph-1")!;
 
     // DTO-level lossless equality across the whole container, except for the
-    // runtime-only critical-section fields reset by R2(c).
+    // runtime-only critical-section fields reset by R2(c) and the
+    // execution-protocol identity the format-2 decoder backfills (B3).
     expect(serializeEngineState(loaded)).toEqual({
       ...dtoBefore,
       advancingLock: false,
       pendingCompletions: [],
+      executionProtocolVersion: LEGACY_SIGNAL_PROTOCOL,
     });
     // Version unchanged.
     expect(dtoBefore.version).toBe(ENGINE_PERSISTENCE_VERSION);
@@ -1574,3 +1616,2023 @@ describe("C1 — persisted joinStrategy normalization at the trust boundary", ()
     expect(quorum!.nodes.get("A")!.joinStrategy).toEqual({ quorum: 3 });
   });
 });
+
+// ── Structured load results: loadEngineStateForResume (B stage) ─────────────
+//
+// The legacy loader answers one `null` for four different situations: no file,
+// a corrupt file, an unsupported storage format, and a recognized file that
+// needs a format migration. `loadEngineStateForResume` keeps them
+// distinguishable WITHOUT changing the accepted input set — with the default
+// registry exactly the same files hydrate as before — and
+// `loadEngineStateFromJson` stays the null-shaped compatibility shell, so
+// every existing caller keeps its exact behavior.
+
+describe("loadEngineStateForResume — structured, non-collapsing load results", () => {
+  /** The raw on-disk text of a rich, valid v2 snapshot. */
+  function validRaw(): string {
+    return JSON.stringify(serializeEngineState(buildRichState()));
+  }
+
+  /** The valid snapshot with its `version` field replaced (or stripped). */
+  function rawWithVersion(version: unknown): string {
+    const dto: Record<string, unknown> = JSON.parse(validRaw());
+    if (version === undefined) {
+      delete dto.version;
+    } else {
+      dto.version = version;
+    }
+    return JSON.stringify(dto);
+  }
+
+  /**
+   * The valid snapshot with its `version` replaced by a RAW JSON number token.
+   * Needed for values JSON.stringify cannot emit (Infinity becomes `null`).
+   * The placeholder is a unique quoted string, so exactly one token is swapped.
+   */
+  function rawWithVersionLiteral(token: string): string {
+    const dto: Record<string, unknown> = JSON.parse(validRaw());
+    dto.version = "__VERSION_TOKEN__";
+    const raw = JSON.stringify(dto).replace('"__VERSION_TOKEN__"', token);
+    expect(raw).toContain('"version":' + token);
+    return raw;
+  }
+
+  it("a serialized snapshot still carries storage format version 2 (writer unchanged)", () => {
+    expect(JSON.parse(validRaw()).version).toBe(2);
+    expect(STORAGE_FORMAT_V2).toBe(2);
+    expect(CURRENT_STORAGE_FORMAT).toBe(STORAGE_FORMAT_V2);
+    expect(DEFAULT_STORAGE_FORMAT_REGISTRY.decoders.map((d) => d.format)).toEqual([2]);
+  });
+
+  it("valid: a round trip through serializeEngineState reports storageFormat 2", () => {
+    const result = loadEngineStateForResume(validRaw());
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.storageFormat).toBe(CURRENT_STORAGE_FORMAT);
+      expect(result.state.graphId).toBe("graph-1");
+      const nodeA = result.state.nodes.get("A");
+      expect(nodeA?.status).toBe(NodeStatus.Completed);
+      // The compatibility shell returns exactly the same hydrated state.
+      expect(loadEngineStateFromJson(validRaw())).toEqual(result.state);
+    }
+  });
+
+  it("corrupt JSON: kind 'corrupt' with a reason, and the shell still returns null", () => {
+    const raw = "{ not valid json !!";
+    expect(() => loadEngineStateForResume(raw)).not.toThrow();
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.reason.length).toBeGreaterThan(0);
+    }
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("corrupt shape: a v2 file missing `nodes` is corrupt, not absent/unsupported", () => {
+    const dto: Record<string, unknown> = JSON.parse(validRaw());
+    const { nodes: _nodes, ...incomplete } = dto;
+    const raw = JSON.stringify(incomplete);
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.reason).toContain("required field");
+    }
+    // The shell maps it to the same null it always did.
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("corrupt shape: a missing / non-numeric version is corrupt (no format discriminator)", () => {
+    for (const raw of [rawWithVersion(undefined), rawWithVersion("2")]) {
+      const result = loadEngineStateForResume(raw);
+      expect(result.kind).toBe("corrupt");
+      if (result.kind === "corrupt") {
+        expect(result.dimension).toBe("storage");
+      }
+      expect(loadEngineStateFromJson(raw)).toBeNull();
+    }
+  });
+
+  it("illegal version identifiers are corrupt(storage) — never unsupported", () => {
+    // A version identifier MUST be a positive safe integer. Every non-legal
+    // value is a malformed discriminator: corrupt(storage), with a reason that
+    // names what was received. The compatibility shell still answers null for
+    // each, so the set of files that LOAD is unchanged.
+    const cases: { label: string; raw: string; reason: string }[] = [
+      { label: "missing", raw: rawWithVersion(undefined), reason: "is missing" },
+      { label: "null", raw: rawWithVersion(null), reason: "is null" },
+      { label: '"2"', raw: rawWithVersion("2"), reason: 'the string "2"' },
+      {
+        label: "2.5",
+        raw: rawWithVersion(2.5),
+        reason: "the non-integer number 2.5",
+      },
+      { label: "0", raw: rawWithVersion(0), reason: "the non-positive number 0" },
+      {
+        label: "-1",
+        raw: rawWithVersion(-1),
+        reason: "the non-positive number -1",
+      },
+      {
+        label: "2**53",
+        raw: rawWithVersion(2 ** 53),
+        reason: "the unsafe integer 9007199254740992",
+      },
+      {
+        // JSON has no Infinity token; `1e999` is a legal JSON number that
+        // JSON.parse converts to Infinity.
+        label: "Infinity",
+        raw: rawWithVersionLiteral("1e999"),
+        reason: "is Infinity",
+      },
+    ];
+    const reasons: string[] = [];
+    for (const c of cases) {
+      const result = loadEngineStateForResume(c.raw);
+      expect(result.kind).toBe("corrupt");
+      if (result.kind === "corrupt") {
+        expect(result.dimension).toBe("storage");
+        expect(result.reason).toContain(c.reason);
+        reasons.push(result.reason);
+      }
+      expect(loadEngineStateFromJson(c.raw)).toBeNull();
+    }
+    // The diagnostics distinguish the cases instead of collapsing them.
+    expect(new Set(reasons).size).toBe(cases.length);
+
+    // An unknown but LEGAL identifier stays unsupported(storage)...
+    const unknown = loadEngineStateForResume(rawWithVersion(7));
+    expect(unknown.kind).toBe("unsupported");
+    if (unknown.kind === "unsupported") {
+      expect(unknown.dimension).toBe("storage");
+      expect(unknown.detail).toBe("7");
+    }
+    expect(loadEngineStateFromJson(rawWithVersion(7))).toBeNull();
+    // ...and format 2 still loads.
+    expect(loadEngineStateForResume(validRaw()).kind).toBe("valid");
+  });
+
+  it("unrecognized numeric version: unsupported(storage) carrying the raw format", () => {
+    const raw = rawWithVersion(7);
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("unsupported");
+    if (result.kind === "unsupported") {
+      expect(result.dimension).toBe("storage");
+      expect(result.detail).toBe("7"); // the RAW value, as found on disk
+    }
+    // Version 1 is likewise unsupported (never hydrated under a numeric rule).
+    expect(loadEngineStateForResume(rawWithVersion(1)).kind).toBe("unsupported");
+    // The shell collapses the non-valid kinds to null — the compat proof.
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+    expect(loadEngineStateFromJson(rawWithVersion(1))).toBeNull();
+  });
+
+  it("migration-required: an injected MIGRATION CAPABILITY whose validateSource accepts the source", () => {
+    // A registered migration capability — not list membership — is what makes
+    // version 7 migratable. The body is deliberately NOT a v2 shape: proof
+    // that a source format is not validated against the TARGET layout (it
+    // belongs to the other format, and the conversion owns the rest).
+    const raw = JSON.stringify({ version: 7 });
+    const registry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: DEFAULT_STORAGE_FORMAT_REGISTRY.decoders,
+      migrations: [
+        {
+          from: 7,
+          to: STORAGE_FORMAT_V2,
+          validateSource: () => ({ ok: true }),
+          migrate: (parsed) => parsed,
+        },
+      ],
+    });
+    const result = loadEngineStateForResume(raw, undefined, registry);
+    expect(result.kind).toBe("migration-required");
+    if (result.kind === "migration-required") {
+      expect(result.dimension).toBe("storage");
+      expect(result.from).toBe(7);
+      expect(result.to).toBe(STORAGE_FORMAT_V2);
+    }
+    // Same input under the shipped registry: unsupported — no decoder and no
+    // migration capability is installed for 7.
+    expect(loadEngineStateForResume(raw).kind).toBe("unsupported");
+    // The shell returns null for the migration-required file too.
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("migration semantics: a source that fails its OWN validation is corrupt, never migration-required", () => {
+    const raw = JSON.stringify({ version: 7 });
+    const registry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: DEFAULT_STORAGE_FORMAT_REGISTRY.decoders,
+      migrations: [
+        {
+          from: 7,
+          to: STORAGE_FORMAT_V2,
+          validateSource: () => ({
+            ok: false,
+            reason: "format 7 requires a root object",
+          }),
+          migrate: (parsed) => parsed,
+        },
+      ],
+    });
+    const result = loadEngineStateForResume(raw, undefined, registry);
+    // NOT migration-required: there is no safe conversion to promise for a
+    // body that violates the format it claims to be.
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.dimension).toBe("storage");
+      // The SOURCE-validation reason is surfaced, and the diagnostic names the
+      // source format whose check failed.
+      expect(result.reason).toContain("format 7 requires a root object");
+      expect(result.reason).toContain("migration source (format 7)");
+    }
+    // The null-shaped shell collapses it like every other corrupt file.
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+  });
+
+  it("migration semantics: a validateSource that THROWS is corrupt, not a loader failure", () => {
+    const raw = JSON.stringify({ version: 7 });
+    const registry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: DEFAULT_STORAGE_FORMAT_REGISTRY.decoders,
+      migrations: [
+        {
+          from: 7,
+          to: STORAGE_FORMAT_V2,
+          validateSource: () => {
+            throw new Error("boom");
+          },
+          migrate: (parsed) => parsed,
+        },
+      ],
+    });
+    // Total hydration holds even for a hostile capability: the loader contains
+    // the throw instead of letting it escape as a loader failure.
+    expect(() => loadEngineStateForResume(raw, undefined, registry)).not.toThrow();
+    const result = loadEngineStateForResume(raw, undefined, registry);
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.dimension).toBe("storage");
+      expect(result.reason).toContain("validateSource threw: boom");
+    }
+  });
+
+  it("classifyStorageFormat is pure and capability-driven (never a numeric rule)", () => {
+    // A value that is not a positive safe integer is an ILLEGAL identifier →
+    // `invalid`, carrying the raw value. 0 / -1 / 2**53 are the cases the old
+    // rule mismapped to `unsupported`: malformed discriminators, not unknown
+    // formats.
+    for (const raw of [undefined, null, "2", 2.5, 0, -1, 2 ** 53, {}, [], true]) {
+      const verdict = classifyStorageFormat(raw, DEFAULT_STORAGE_FORMAT_REGISTRY);
+      expect(verdict.kind).toBe("invalid");
+      if (verdict.kind === "invalid") {
+        expect(verdict.value).toBe(raw);
+      }
+    }
+    // NaN needs its own comparison (and never arrives through JSON text:
+    // JSON has no NaN token, so the classifier is the boundary that owns it).
+    expect(classifyStorageFormat(NaN, DEFAULT_STORAGE_FORMAT_REGISTRY)).toEqual({
+      kind: "invalid",
+      value: NaN,
+    });
+    expect(
+      classifyStorageFormat(Infinity, DEFAULT_STORAGE_FORMAT_REGISTRY),
+    ).toEqual({ kind: "invalid", value: Infinity });
+    expect(
+      classifyStorageFormat(-Infinity, DEFAULT_STORAGE_FORMAT_REGISTRY).kind,
+    ).toBe("invalid");
+    // 2 → the registered format-2 DECODER, carried by the verdict.
+    const decodable = classifyStorageFormat(
+      STORAGE_FORMAT_V2,
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+    );
+    expect(decodable.kind).toBe("decodable");
+    if (decodable.kind === "decodable") {
+      expect(decodable.format).toBe(STORAGE_FORMAT_V2);
+      expect(decodable.decoder).toBe(
+        DEFAULT_STORAGE_FORMAT_REGISTRY.decoders[0],
+      );
+    }
+    // 1 is in NEITHER capability set — no "less than current" rule.
+    expect(
+      classifyStorageFormat(1, DEFAULT_STORAGE_FORMAT_REGISTRY),
+    ).toEqual({ kind: "unsupported", format: 1 });
+    // The shipped registry registers no migrations.
+    expect(DEFAULT_STORAGE_FORMAT_REGISTRY.migrations).toEqual([]);
+    // An injected migration CAPABILITY is what makes the branch reachable —
+    // and the verdict carries that capability, not just the number.
+    const migration: StorageFormatMigration = {
+      from: 1,
+      to: STORAGE_FORMAT_V2,
+      validateSource: () => ({ ok: true }),
+      migrate: (parsed) => parsed,
+    };
+    const withMigration = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: DEFAULT_STORAGE_FORMAT_REGISTRY.decoders,
+      migrations: [migration],
+    });
+    const migratable = classifyStorageFormat(1, withMigration);
+    expect(migratable.kind).toBe("migratable");
+    if (migratable.kind === "migratable") {
+      expect(migratable.from).toBe(1);
+      expect(migratable.to).toBe(STORAGE_FORMAT_V2);
+      expect(migratable.migration).toBe(migration);
+    }
+  });
+
+  it("the default registry is deeply frozen: both capability arrays reject mutation", () => {
+    expect(Object.isFrozen(DEFAULT_STORAGE_FORMAT_REGISTRY)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_STORAGE_FORMAT_REGISTRY.decoders)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_STORAGE_FORMAT_REGISTRY.migrations)).toBe(
+      true,
+    );
+    // The registered capability itself is frozen too — a decoder cannot be
+    // swapped after the registry that installed it exists.
+    expect(Object.isFrozen(DEFAULT_STORAGE_FORMAT_REGISTRY.decoders[0])).toBe(
+      true,
+    );
+
+    // bun runs modules in strict mode, so a write to a frozen array throws
+    // (TypeError). A runtime that silently ignored it instead would leave the
+    // array unchanged — either way the loader's accepted set must not move;
+    // widening support stays the injectable `registry` parameter's job.
+    let threw = false;
+    try {
+      Object.assign(DEFAULT_STORAGE_FORMAT_REGISTRY.decoders, [
+        { format: 3, decode: () => ({ kind: "invalid", reason: "no" }) },
+      ]);
+      Object.assign(DEFAULT_STORAGE_FORMAT_REGISTRY.migrations, []);
+    } catch {
+      threw = true;
+    }
+    const arraysUnchanged =
+      DEFAULT_STORAGE_FORMAT_REGISTRY.decoders.length === 1 &&
+      DEFAULT_STORAGE_FORMAT_REGISTRY.decoders[0].format === STORAGE_FORMAT_V2 &&
+      DEFAULT_STORAGE_FORMAT_REGISTRY.migrations.length === 0;
+    expect(threw || arraysUnchanged).toBe(true);
+    expect(DEFAULT_STORAGE_FORMAT_REGISTRY.decoders.map((d) => d.format)).toEqual(
+      [STORAGE_FORMAT_V2],
+    );
+    expect(DEFAULT_STORAGE_FORMAT_REGISTRY.migrations).toEqual([]);
+    // Observable classification is unchanged: the rejected write did not make
+    // 3 decodable or migratable.
+    expect(
+      classifyStorageFormat(3, DEFAULT_STORAGE_FORMAT_REGISTRY),
+    ).toEqual({ kind: "unsupported", format: 3 });
+  });
+
+  it("capability, not membership: a registered decoder for format 9 is ROUTED TO, not reported unsupported", () => {
+    // The body is not a v2 shape at all — proof that the loader dispatched to
+    // the registered decoder instead of validating it against format 2.
+    const state = buildRichState();
+    // B3: a decoded record must resolve its own protocol identity. This test
+    // decoder stands in for a format whose record carries one explicitly —
+    // only the format-2 decoder may BACKFILL the legacy identity, and the
+    // absent-identity probe lives in the execution-protocol describe below.
+    state.executionProtocolVersion = LEGACY_SIGNAL_PROTOCOL;
+    const decoder: StorageFormatDecoder = {
+      format: 9,
+      decode: () => ({ kind: "ok", state }),
+    };
+    const registry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: [...DEFAULT_STORAGE_FORMAT_REGISTRY.decoders, decoder],
+    });
+    const routed = loadEngineStateForResume(
+      JSON.stringify({ version: 9, anything: true }),
+      undefined,
+      registry,
+    );
+    expect(routed.kind).toBe("valid");
+    if (routed.kind === "valid") {
+      expect(routed.storageFormat).toBe(9);
+      expect(routed.state).toBe(state);
+    }
+
+    // The decoder's OWN invalid verdict reaches the caller as corrupt(storage)
+    // — a rejected body is corrupt data, not a missing capability.
+    const rejecting: StorageFormatDecoder = {
+      format: 10,
+      decode: () => ({
+        kind: "invalid",
+        reason: "format 10 needs a root object",
+      }),
+    };
+    const rejectingRegistry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: [...DEFAULT_STORAGE_FORMAT_REGISTRY.decoders, rejecting],
+    });
+    const rejected = loadEngineStateForResume(
+      JSON.stringify({ version: 10 }),
+      undefined,
+      rejectingRegistry,
+    );
+    expect(rejected.kind).toBe("corrupt");
+    if (rejected.kind === "corrupt") {
+      expect(rejected.dimension).toBe("storage");
+      expect(rejected.reason).toBe("format 10 needs a root object");
+    }
+
+    // A version with NEITHER capability stays unsupported: a number alone
+    // never becomes support, even in a registry that installs other formats.
+    expect(
+      loadEngineStateForResume(
+        JSON.stringify({ version: 7 }),
+        undefined,
+        registry,
+      ),
+    ).toEqual({ kind: "unsupported", dimension: "storage", detail: "7" });
+  });
+});
+
+// ── B2: the factory refuses capability sets that would make support ambiguous ─
+
+describe("createStorageFormatRegistry — capability registration (B2)", () => {
+  /** A decoder capability for one format; the body itself is irrelevant here. */
+  function decoder(format: number): StorageFormatDecoder {
+    return {
+      format,
+      decode: () => ({
+        kind: "invalid",
+        reason: `format ${format} body rejected`,
+      }),
+    };
+  }
+
+  /** A migration capability from `from` to `to` that accepts any source. */
+  function migration(from: number, to: number): StorageFormatMigration {
+    return {
+      from,
+      to,
+      validateSource: () => ({ ok: true }),
+      migrate: (parsed) => parsed,
+    };
+  }
+
+  it("rejects a duplicate decoder format — one format has one decode owner", () => {
+    expect(() =>
+      createStorageFormatRegistry({
+        current: STORAGE_FORMAT_V2,
+        decoders: [decoder(STORAGE_FORMAT_V2), decoder(STORAGE_FORMAT_V2)],
+      }),
+    ).toThrow(/duplicate decoder/);
+  });
+
+  it("rejects a duplicate migration source — one source has one converter", () => {
+    expect(() =>
+      createStorageFormatRegistry({
+        current: STORAGE_FORMAT_V2,
+        decoders: [decoder(STORAGE_FORMAT_V2)],
+        migrations: [
+          migration(1, STORAGE_FORMAT_V2),
+          migration(1, STORAGE_FORMAT_V2),
+        ],
+      }),
+    ).toThrow(/duplicate migration source/);
+  });
+
+  it("rejects a migration whose target has no decoder — a dead-end conversion", () => {
+    expect(() =>
+      createStorageFormatRegistry({
+        current: STORAGE_FORMAT_V2,
+        decoders: [decoder(STORAGE_FORMAT_V2)],
+        migrations: [migration(1, 9)],
+      }),
+    ).toThrow(/no decoder/);
+  });
+
+  it("rejects a format that is both decodable and a migration source", () => {
+    expect(() =>
+      createStorageFormatRegistry({
+        current: STORAGE_FORMAT_V2,
+        decoders: [decoder(STORAGE_FORMAT_V2), decoder(7)],
+        migrations: [migration(7, STORAGE_FORMAT_V2)],
+      }),
+    ).toThrow(/both decodable and a migration source/);
+  });
+});
+
+// ── EnginePersistence.loadForResume: the store keeps the kinds apart ────────
+
+describe("EnginePersistence.loadForResume — non-collapsing store results", () => {
+  let dir: string;
+  let store: EnginePersistence;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "engine-persist-resume-"));
+    store = new EnginePersistence(dir);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("maps ENOENT to absent, corrupt text to corrupt, and a valid file to valid", () => {
+    expect(store.loadForResume("never-written").kind).toBe("absent");
+
+    const corruptPath = engineStatePath(dir, "graph-corrupt");
+    mkdirSync(join(corruptPath, ".."), { recursive: true });
+    writeFileSync(corruptPath, "{ not valid json !!");
+    expect(store.loadForResume("graph-corrupt").kind).toBe("corrupt");
+
+    store.save(buildRichState());
+    const valid = store.loadForResume("graph-1");
+    expect(valid.kind).toBe("valid");
+    if (valid.kind === "valid") {
+      expect(valid.storageFormat).toBe(CURRENT_STORAGE_FORMAT);
+      expect(valid.state.graphId).toBe("graph-1");
+    }
+    // The legacy null-only method keeps its exact contract.
+    expect(store.load("graph-1")).not.toBeNull();
+  });
+
+  it("rethrows a non-ENOENT read failure (EISDIR) instead of reporting absent", () => {
+    const path = engineStatePath(dir, "graph-dir");
+    mkdirSync(path, { recursive: true });
+    expect(() => store.loadForResume("graph-dir")).toThrow();
+  });
+});
+
+// ── Execution-protocol identity (B3): bound at load, refused when unregistered ─
+//
+// The protocol axis is decided by exact handler REGISTRATION, never by
+// comparing a persisted number with a latest-version constant. The format-2
+// decoder is the only component allowed to backfill the legacy identity for an
+// absent field (format 2 IS the legacy layout); every other identity — and any
+// illegal value — is refused at load, so a protocol-2 graph is never run under
+// legacy rules.
+
+describe("loadEngineStateForResume — execution-protocol identity (B3)", () => {
+  /** The raw on-disk text of a rich, valid v2 snapshot (no protocol field). */
+  function validRaw(): string {
+    return JSON.stringify(serializeEngineState(buildRichState()));
+  }
+
+  /** The valid snapshot with its protocol field set (or removed). */
+  function rawWithProtocol(protocol: unknown): string {
+    const dto: Record<string, unknown> = JSON.parse(validRaw());
+    if (protocol === undefined) {
+      delete dto.executionProtocolVersion;
+    } else {
+      dto.executionProtocolVersion = protocol;
+    }
+    return JSON.stringify(dto);
+  }
+
+  it("absence backfills legacy: a v2 file without the field binds protocol 1", () => {
+    const raw = validRaw();
+    expect(
+      (JSON.parse(raw) as Record<string, unknown>).executionProtocolVersion,
+    ).toBeUndefined();
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      // The loader answers the BOUND protocol...
+      expect(result.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      // ...and the hydrated state carries it explicitly.
+      expect(result.state.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+      // Acceptance is unchanged: the compatibility shell still returns the
+      // same state, so no existing caller loses a resume.
+      expect(loadEngineStateFromJson(raw)).toEqual(result.state);
+      expect(loadEngineStateFromJson(raw)).not.toBeNull();
+    }
+  });
+
+  it("explicit legacy: a file carrying executionProtocolVersion 1 loads identically", () => {
+    const explicit = loadEngineStateForResume(
+      rawWithProtocol(LEGACY_SIGNAL_PROTOCOL),
+    );
+    expect(explicit.kind).toBe("valid");
+    if (explicit.kind === "valid") {
+      expect(explicit.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      expect(explicit.state.executionProtocolVersion).toBe(
+        LEGACY_SIGNAL_PROTOCOL,
+      );
+    }
+    // Backfilled and explicit legacy hydrate to the SAME state.
+    expect(
+      loadEngineStateFromJson(rawWithProtocol(LEGACY_SIGNAL_PROTOCOL)),
+    ).toEqual(loadEngineStateFromJson(validRaw()));
+  });
+
+  it("unregistered protocol: protocol 2 is refused at load, never run under legacy rules", () => {
+    const raw = rawWithProtocol(OUTCOME_PROTOCOL);
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("unsupported");
+    if (result.kind === "unsupported") {
+      // The first reachable use of the EXECUTION dimension: the storage
+      // dimension stays what it is.
+      expect(result.dimension).toBe("execution");
+      expect(result.detail).toBe(String(OUTCOME_PROTOCOL));
+    }
+    // Nothing hydrates and the shell refuses: the LOAD boundary is the gate.
+    expect(loadEngineStateFromJson(raw)).toBeNull();
+    // Naming the identity does not make it runnable: no handler is registered
+    // for it, and the verdict carries a number, not a capability.
+    expect(
+      classifyExecutionProtocol(OUTCOME_PROTOCOL, LEGACY_EXECUTION_PROTOCOL_REGISTRY),
+    ).toEqual({ kind: "unsupported", version: OUTCOME_PROTOCOL });
+    expect(
+      LEGACY_EXECUTION_PROTOCOL_REGISTRY.handlers.map((h) => h.version),
+    ).toEqual([LEGACY_SIGNAL_PROTOCOL]);
+  });
+
+  it("illegal identities are corrupt(execution) with distinct reasons, shell null", () => {
+    const cases: { label: string; raw: string; reason: string }[] = [
+      { label: "0", raw: rawWithProtocol(0), reason: "is the non-positive number 0" },
+      { label: "-1", raw: rawWithProtocol(-1), reason: "is the non-positive number -1" },
+      { label: "1.5", raw: rawWithProtocol(1.5), reason: "is the non-integer number 1.5" },
+      { label: '"1"', raw: rawWithProtocol("1"), reason: "is the string" },
+      { label: "null", raw: rawWithProtocol(null), reason: "is null" },
+      {
+        label: "2**53",
+        raw: rawWithProtocol(2 ** 53),
+        reason: "is the unsafe integer 9007199254740992",
+      },
+    ];
+    const reasons: string[] = [];
+    for (const c of cases) {
+      const result = loadEngineStateForResume(c.raw);
+      expect(result.kind).toBe("corrupt");
+      if (result.kind === "corrupt") {
+        expect(result.dimension).toBe("execution");
+        expect(result.reason).toContain(c.reason);
+        reasons.push(result.reason);
+      }
+      // The shell refuses every one of them — acceptance is not widened.
+      expect(loadEngineStateFromJson(c.raw)).toBeNull();
+    }
+    // Each defect reads differently: distinct diagnostics, not one reason.
+    expect(new Set(reasons).size).toBe(cases.length);
+    // The storage discriminator is untouched: a legal v2 file still loads.
+    expect(loadEngineStateForResume(validRaw()).kind).toBe("valid");
+  });
+
+  it("a non-legacy decoder does NOT inherit the backfill: an absent identity is corrupt", () => {
+    // Format 8 is a registered capability whose record carries no protocol
+    // identity. Only the format-2 decoder may infer the legacy protocol, so
+    // this must be corrupt(execution) — never a silent legacy run.
+    const state = buildRichState(); // deliberately no executionProtocolVersion
+    const decoder: StorageFormatDecoder = {
+      format: 8,
+      decode: () => ({ kind: "ok", state }),
+    };
+    const registry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: [...DEFAULT_STORAGE_FORMAT_REGISTRY.decoders, decoder],
+    });
+    const result = loadEngineStateForResume(
+      JSON.stringify({ version: 8 }),
+      undefined,
+      registry,
+    );
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.dimension).toBe("execution");
+      expect(result.reason).toContain("execution protocol version is missing");
+    }
+  });
+
+  it("round-trip: a hydrated state re-serialized and re-loaded keeps protocol 1", () => {
+    const first = loadEngineStateForResume(validRaw());
+    expect(first.kind).toBe("valid");
+    if (first.kind !== "valid") return;
+    const reserialized = JSON.stringify(serializeEngineState(first.state));
+    // The identity is durable state, not a load-time decoration.
+    expect(
+      (JSON.parse(reserialized) as Record<string, unknown>).executionProtocolVersion,
+    ).toBe(LEGACY_SIGNAL_PROTOCOL);
+    const second = loadEngineStateForResume(reserialized);
+    expect(second.kind).toBe("valid");
+    if (second.kind === "valid") {
+      expect(second.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+    }
+  });
+
+  it("additive only: a state that never bound an identity serializes exactly as before", () => {
+    // A fresh state has no identity, so the writer emits NO key at all and the
+    // on-disk JSON text is unchanged. ENGINE_PERSISTENCE_VERSION stays 2.
+    const dto: Record<string, unknown> = JSON.parse(
+      JSON.stringify(serializeEngineState(buildRichState())),
+    );
+    expect("executionProtocolVersion" in dto).toBe(false);
+    expect(dto.version).toBe(ENGINE_PERSISTENCE_VERSION);
+    expect(ENGINE_PERSISTENCE_VERSION).toBe(2);
+  });
+
+  it("empty handler registry: even protocol 1 becomes unsupported — no membership shortcut", () => {
+    const empty = createExecutionProtocolRegistry({ handlers: [] });
+    expect(classifyExecutionProtocol(LEGACY_SIGNAL_PROTOCOL, empty)).toEqual({
+      kind: "unsupported",
+      version: LEGACY_SIGNAL_PROTOCOL,
+    });
+    // The format-2 backfill only NAMES the identity; it installs no handler,
+    // so the load is still refused under a registry that has none.
+    const result = loadEngineStateForResume(
+      validRaw(),
+      undefined,
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      empty,
+    );
+    expect(result.kind).toBe("unsupported");
+    if (result.kind === "unsupported") {
+      expect(result.dimension).toBe("execution");
+      expect(result.detail).toBe("1");
+    }
+    // Under the shipped registry the same file is valid — the only difference
+    // is that a handler is installed.
+    expect(loadEngineStateForResume(validRaw()).kind).toBe("valid");
+  });
+
+  it("totality: a throwing handler probe is contained as corrupt(execution)", () => {
+    const hostile: ExecutionProtocolRegistry = {
+      handlers: [
+        {
+          get version(): number {
+            throw new Error("probe exploded");
+          },
+        },
+      ],
+    };
+    const raw = validRaw();
+    expect(() =>
+      loadEngineStateForResume(
+        raw,
+        undefined,
+        DEFAULT_STORAGE_FORMAT_REGISTRY,
+        hostile,
+      ),
+    ).not.toThrow();
+    const result = loadEngineStateForResume(
+      raw,
+      undefined,
+      DEFAULT_STORAGE_FORMAT_REGISTRY,
+      hostile,
+    );
+    expect(result.kind).toBe("corrupt");
+    if (result.kind === "corrupt") {
+      expect(result.dimension).toBe("execution");
+      expect(result.reason).toContain("probe exploded");
+    }
+  });
+});
+
+// ── Execution-protocol registry: registration legality and frozen membership ─
+
+describe("createExecutionProtocolRegistry — handler registration (B3)", () => {
+  it("rejects a duplicate version — one exact protocol has one handler", () => {
+    expect(() =>
+      createExecutionProtocolRegistry({
+        handlers: [{ version: 1 }, { version: 1 }],
+      }),
+    ).toThrow(/duplicate handler/);
+  });
+
+  it("rejects a version that is not a positive safe integer", () => {
+    for (const version of [0, -1, 1.5, 2 ** 53]) {
+      expect(() =>
+        createExecutionProtocolRegistry({ handlers: [{ version }] }),
+      ).toThrow(/positive safe integer/);
+    }
+    expect(() =>
+      createExecutionProtocolRegistry({ handlers: [{ version: NaN }] }),
+    ).toThrow(/positive safe integer/);
+    expect(() =>
+      createExecutionProtocolRegistry({
+        handlers: [{ version: Number.POSITIVE_INFINITY }],
+      }),
+    ).toThrow(/positive safe integer/);
+  });
+
+  it("is deeply frozen and rejects in-place widening", () => {
+    const registry = createExecutionProtocolRegistry({
+      handlers: [{ version: LEGACY_SIGNAL_PROTOCOL }],
+    });
+    expect(Object.isFrozen(registry)).toBe(true);
+    expect(Object.isFrozen(registry.handlers)).toBe(true);
+    expect(Object.isFrozen(registry.handlers[0])).toBe(true);
+    let threw = false;
+    try {
+      Object.assign(registry.handlers, [{ version: OUTCOME_PROTOCOL }]);
+    } catch {
+      threw = true;
+    }
+    const unchanged =
+      registry.handlers.length === 1 &&
+      registry.handlers[0].version === LEGACY_SIGNAL_PROTOCOL;
+    expect(threw || unchanged).toBe(true);
+    // Observable classification is unchanged: the rejected write did not make
+    // the reserved identity runnable.
+    expect(classifyExecutionProtocol(OUTCOME_PROTOCOL, registry)).toEqual({
+      kind: "unsupported",
+      version: OUTCOME_PROTOCOL,
+    });
+    // The shipped registry is frozen the same way.
+    expect(Object.isFrozen(LEGACY_EXECUTION_PROTOCOL_REGISTRY)).toBe(true);
+    expect(Object.isFrozen(LEGACY_EXECUTION_PROTOCOL_REGISTRY.handlers)).toBe(
+      true,
+    );
+    expect(
+      Object.isFrozen(LEGACY_EXECUTION_PROTOCOL_REGISTRY.handlers[0]),
+    ).toBe(true);
+  });
+
+  it("classifyExecutionProtocol carries the matched handler (capability, not a number)", () => {
+    const verdict = classifyExecutionProtocol(
+      LEGACY_SIGNAL_PROTOCOL,
+      LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+    );
+    expect(verdict.kind).toBe("bound");
+    if (verdict.kind === "bound") {
+      expect(verdict.version).toBe(LEGACY_SIGNAL_PROTOCOL);
+      // Identity is preserved: the verdict carries the SAME frozen handler.
+      expect(verdict.handler).toBe(
+        LEGACY_EXECUTION_PROTOCOL_REGISTRY.handlers[0],
+      );
+    }
+    // Illegal values are invalid with the RAW value — never unsupported.
+    for (const raw of [undefined, null, "1", 1.5, 0, -1, 2 ** 53, {}, [], true]) {
+      const invalid = classifyExecutionProtocol(
+        raw,
+        LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+      );
+      expect(invalid.kind).toBe("invalid");
+      if (invalid.kind === "invalid") {
+        expect(invalid.value).toBe(raw);
+      }
+    }
+    // A legal number with no handler is unsupported — the reserved identity
+    // included.
+    expect(
+      classifyExecutionProtocol(
+        OUTCOME_PROTOCOL,
+        LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+      ),
+    ).toEqual({ kind: "unsupported", version: OUTCOME_PROTOCOL });
+  });
+});
+
+// ── EnginePersistence: the protocol identity survives the store boundary ─────
+
+describe("EnginePersistence.loadForResume — protocol identity through the store (B3)", () => {
+  let dir: string;
+  let store: EnginePersistence;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "engine-persist-proto-"));
+    store = new EnginePersistence(dir);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("an existing v2 file with no protocol field loads valid with executionProtocol 1", () => {
+    store.save(buildRichState());
+    const result = store.loadForResume("graph-1");
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      expect(result.state.executionProtocolVersion).toBe(LEGACY_SIGNAL_PROTOCOL);
+    }
+    // The legacy null-only shell still returns the state.
+    expect(store.load("graph-1")).not.toBeNull();
+  });
+
+  it("a persisted protocol-2 file is refused at the store boundary and not run", () => {
+    store.save(buildRichState());
+    const path = engineStatePath(dir, "graph-1");
+    const dto: Record<string, unknown> = JSON.parse(readFileSync(path, "utf-8"));
+    dto.executionProtocolVersion = OUTCOME_PROTOCOL;
+    writeFileSync(path, JSON.stringify(dto), "utf-8");
+
+    const result = store.loadForResume("graph-1");
+    expect(result.kind).toBe("unsupported");
+    if (result.kind === "unsupported") {
+      expect(result.dimension).toBe("execution");
+      expect(result.detail).toBe("2");
+    }
+    // Nothing hydrates and nothing is rewritten: the snapshot keeps its
+    // identity instead of being silently downgraded to legacy.
+    expect(store.load("graph-1")).toBeNull();
+    expect(
+      (JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>)
+        .executionProtocolVersion,
+    ).toBe(OUTCOME_PROTOCOL);
+  });
+});
+
+// ── B6: the persisted plan binding — written, verified at load, never repaired ─
+
+describe("loadEngineStateForResume — persisted plan binding (B6)", () => {
+  const CONTRACT_BODY = { outcomes: ["revise", "accepted"], policy: "strict" };
+  const CONTRACT_SNAPSHOT: ContractSnapshot = {
+    ref: {
+      id: "contract.review",
+      revision: "1",
+      digest: contractDigest(CONTRACT_BODY),
+    },
+    body: CONTRACT_BODY,
+  };
+  const CONTRACT_REGISTRY = createContractRegistry({
+    contracts: [CONTRACT_SNAPSHOT],
+  });
+
+  /** A one-node v3 declaration whose node binds the fixture contract. */
+  function boundDeclaration(): GraphDeclarationV3 {
+    return {
+      version: 3,
+      name: "graph-bound",
+      nodes: [
+        {
+          id: "review",
+          agent: "agent.review",
+          prompt: "Review.",
+          outcomes: [{ id: "accepted" }],
+          contractRef: CONTRACT_SNAPSHOT.ref,
+        },
+      ],
+      edges: [],
+    };
+  }
+
+  /** Compile the fixture declaration — the plan is the binding's source. */
+  function boundPlan(): CompiledPlan {
+    const result = compileGraph(boundDeclaration(), {
+      contracts: CONTRACT_REGISTRY,
+    });
+    if (!result.ok) {
+      throw new Error(
+        "the binding fixture must compile: " +
+          result.errors.map((error) => error.code).join(", "),
+      );
+    }
+    return result.plan;
+  }
+
+  /**
+   * Derive the persistable binding from a compiled plan.
+   *
+   * Since B7 the revision is the COMPILED PLAN's own content address — the
+   * same value `compiledPlan.planRevision` carries — and NOT a digest of this
+   * record's binding body. The B6 rule that hashed
+   * `{ contractSnapshots, nodeBindings }` is deleted, not renamed: one name
+   * means one identity. A binding that stands ALONE keeps the revision as a
+   * foreign key the load cannot resolve (there is no plan body to recompute it
+   * from); when both records are present the load requires them to agree.
+   */
+  function bindingFromPlan(plan: CompiledPlan): PlanBinding {
+    const nodeBindings: Record<string, ContractRef> = {};
+    for (const node of plan.nodes) {
+      if (node.contractRef !== undefined) {
+        nodeBindings[node.id] = node.contractRef;
+      }
+    }
+    return {
+      planRevision: plan.planRevision,
+      contractSnapshots: plan.contractSnapshots,
+      nodeBindings,
+    };
+  }
+
+  const plan = boundPlan();
+  const binding = bindingFromPlan(plan);
+  const contractKey = CONTRACT_SNAPSHOT.ref.digest;
+
+  /** A state whose node set contains the binding's one bound node. */
+  function boundState(): EngineState {
+    const state = createEngineState(
+      {
+        version: 2,
+        name: "graph-bound",
+        nodes: [{ id: "review", agent: "agent.review", prompt: "Review." }],
+        edges: [],
+      },
+      "graph-bound",
+    );
+    provision(state);
+    state.planBinding = binding;
+    return state;
+  }
+
+  /** The serialized on-disk text of the bound state. */
+  function boundRaw(): string {
+    return JSON.stringify(serializeEngineState(boundState()));
+  }
+
+  /** The mutable binding shape a tamper case edits. */
+  interface MutableBinding {
+    planRevision?: string;
+    contractSnapshots: Record<string, ContractSnapshot>;
+    nodeBindings: Record<string, ContractRef>;
+  }
+
+  /**
+   * Parse the valid bound file, let `mutate` tamper with it, and re-serialize.
+   * A fixture file without a binding would make a tamper case unsatisfiable, so
+   * that is asserted before the mutation.
+   */
+  function tamperedRaw(mutate: (binding: MutableBinding) => void): string {
+    const file = JSON.parse(boundRaw()) as { planBinding: MutableBinding };
+    const planBinding: MutableBinding | undefined = file.planBinding;
+    if (planBinding === undefined) {
+      throw new Error("the fixture file must carry a planBinding");
+    }
+    mutate(planBinding);
+    return JSON.stringify(file);
+  }
+
+  it("round-trips a compiler-produced binding: serialize -> load -> valid, deep-equal", () => {
+    const state = boundState();
+    expect(state.planBinding).toEqual(binding);
+    // B7 re-meaning: the revision IS the compiled plan's content address —
+    // not a digest of the binding body the state happens to carry.
+    expect(binding.planRevision).toBe(plan.planRevision);
+
+    const raw = boundRaw();
+    expect("planBinding" in (JSON.parse(raw) as Record<string, unknown>)).toBe(
+      true,
+    );
+
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.storageFormat).toBe(CURRENT_STORAGE_FORMAT);
+      expect(result.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      // The reloaded binding is deep-equal to the one the plan produced.
+      expect(result.state.planBinding).toEqual(binding);
+    }
+    // The null-only compatibility shell still returns the same state.
+    const shell = loadEngineStateFromJson(raw);
+    expect(shell).not.toBeNull();
+    expect(shell?.planBinding).toEqual(binding);
+  });
+
+  it("round-trips a binding whose contract body carries -0: the writer's output is loadable", () => {
+    // -0 is the one value JSON text cannot preserve: JSON.stringify(-0) is "0".
+    // The canonical digest is JSON-stable for it, so the state a writer
+    // produces from a -0 body re-hashes to the SAME revision and digest at
+    // load. Without that, this binding would serialize as 0 and be refused as
+    // corrupt(contract) — a writer producing its own unloadable state.
+    const body = { threshold: -0, label: "z" };
+    const snapshot: ContractSnapshot = {
+      ref: { id: "contract.zero", revision: "1", digest: contractDigest(body) },
+      body,
+    };
+    const compiled = compileGraph(
+      {
+        version: 3,
+        name: "graph-zero",
+        nodes: [
+          {
+            id: "review",
+            agent: "agent.review",
+            prompt: "Review.",
+            outcomes: [{ id: "accepted" }],
+            contractRef: snapshot.ref,
+          },
+        ],
+        edges: [],
+      },
+      { contracts: createContractRegistry({ contracts: [snapshot] }) },
+    );
+    if (!compiled.ok) {
+      throw new Error(
+        "the -0 fixture must compile: " +
+          compiled.errors.map((error) => error.code).join(", "),
+      );
+    }
+    const zeroBinding = bindingFromPlan(compiled.plan);
+    const state = createEngineState(
+      {
+        version: 2,
+        name: "graph-zero",
+        nodes: [{ id: "review", agent: "agent.review", prompt: "Review." }],
+        edges: [],
+      },
+      "graph-zero",
+    );
+    provision(state);
+    state.planBinding = zeroBinding;
+
+    const raw = JSON.stringify(serializeEngineState(state));
+    // The writer stores JSON's own text: the sign of zero is gone.
+    expect(raw).toContain('"threshold":0');
+
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      const reloaded =
+        result.state.planBinding?.contractSnapshots[snapshot.ref.digest];
+      expect(reloaded?.ref).toEqual(snapshot.ref);
+      // -0 and 0 are the same JSON value, which is why the digest conflates
+      // them: the reloaded body is the STORED body, and it verifies.
+      expect(reloaded?.body).toEqual({ threshold: 0, label: "z" });
+      expect(result.state.planBinding?.planRevision).toBe(
+        zeroBinding.planRevision,
+      );
+    }
+    expect(loadEngineStateFromJson(raw)).not.toBeNull();
+  });
+
+  // Since B7 a LONE binding's planRevision is a foreign key into a plan record
+  // the state does not carry, so it is only required to be a non-empty string
+  // here; the B6 binding-body digest rule is gone. Agreement between the two
+  // records is covered by the B7 suite below.
+  it("tampering (a)-(d) is corrupt(contract) with a distinct reason and shell null", () => {
+    const cases: { label: string; raw: string; reason: string }[] = [
+      {
+        label: "(a) empty planRevision",
+        raw: tamperedRaw((b) => {
+          b.planRevision = "";
+        }),
+        reason: 'planRevision is "", not a non-empty string',
+      },
+      {
+        label: "(a) missing planRevision",
+        raw: tamperedRaw((b) => {
+          delete b.planRevision;
+        }),
+        reason: "planRevision is undefined, not a non-empty string",
+      },
+      {
+        label: "(b) snapshot body no longer hashes to its key",
+        raw: tamperedRaw((b) => {
+          b.contractSnapshots[contractKey] = {
+            ref: CONTRACT_SNAPSHOT.ref,
+            body: { tampered: true },
+          };
+        }),
+        reason: `contract snapshot "${contractKey}" body hashes to`,
+      },
+      {
+        label: "(b) snapshot ref.digest disagrees with its key",
+        raw: tamperedRaw((b) => {
+          b.contractSnapshots[contractKey] = {
+            ref: { ...CONTRACT_SNAPSHOT.ref, digest: "0".repeat(64) },
+            body: CONTRACT_SNAPSHOT.body,
+          };
+        }),
+        reason: "declares ref.digest",
+      },
+      {
+        label: "(b) one (id, revision) identity carries two digests",
+        raw: tamperedRaw((b) => {
+          // The shape createContractRegistry refuses: a second digest for the
+          // SAME (id, revision). The node is rebound to the new digest so the
+          // snapshot and binding rules all pass, and ONLY the
+          // identity-uniqueness rule can catch this file.
+          const otherBody = { ...CONTRACT_BODY, policy: "lenient" };
+          const otherDigest = contractDigest(otherBody);
+          b.contractSnapshots[otherDigest] = {
+            ref: { ...CONTRACT_SNAPSHOT.ref, digest: otherDigest },
+            body: otherBody,
+          };
+          b.nodeBindings["review"] = {
+            ...CONTRACT_SNAPSHOT.ref,
+            digest: otherDigest,
+          };
+        }),
+        reason: "one exact (id, revision) identity has exactly one snapshot",
+      },
+      {
+        label: "(c) bound digest is not in contractSnapshots",
+        raw: tamperedRaw((b) => {
+          b.contractSnapshots = {};
+        }),
+        reason: "which contractSnapshots does not contain",
+      },
+      {
+        label: "(c) bound ref differs from the snapshot ref",
+        raw: tamperedRaw((b) => {
+          b.nodeBindings["review"] = {
+            ...CONTRACT_SNAPSHOT.ref,
+            id: "contract.other",
+          };
+        }),
+        reason: "but the snapshot at digest",
+      },
+      {
+        label: "(d) binding names a node the state does not declare",
+        raw: tamperedRaw((b) => {
+          b.nodeBindings["ghost"] = { ...CONTRACT_SNAPSHOT.ref };
+        }),
+        reason: 'node id "ghost", which the persisted state does not declare',
+      },
+    ];
+
+    const reasons: string[] = [];
+    for (const c of cases) {
+      const result = loadEngineStateForResume(c.raw);
+      expect(result.kind).toBe("corrupt");
+      if (result.kind === "corrupt") {
+        // The contract dimension's first producer: each failure is attributed
+        // to the binding gate, never folded into the storage axis.
+        expect(result.dimension).toBe("contract");
+        expect(result.reason).toContain(c.reason);
+        reasons.push(result.reason);
+      }
+      // Non-executable: the null-only shell refuses every tampered file too.
+      expect(loadEngineStateFromJson(c.raw)).toBeNull();
+    }
+    // Every check reads differently — a collapsed reason would hide which
+    // invariant a file broke.
+    expect(new Set(reasons).size).toBe(cases.length);
+    // The untampered file still loads: the refusal is caused by the tampering.
+    expect(loadEngineStateForResume(boundRaw()).kind).toBe("valid");
+  });
+
+  it("a present but malformed binding is corrupt(contract), never ignored", () => {
+    const cases: { label: string; bindingValue: unknown; reason: string }[] = [
+      { label: "null", bindingValue: null, reason: "not a record of" },
+      { label: "number", bindingValue: 7, reason: "not a record of" },
+      {
+        label: "array contractSnapshots",
+        bindingValue: {
+          planRevision: "x",
+          contractSnapshots: [],
+          nodeBindings: {},
+        },
+        reason: "contractSnapshots is not a record",
+      },
+      {
+        label: "string nodeBindings",
+        bindingValue: {
+          planRevision: "x",
+          contractSnapshots: {},
+          nodeBindings: "nope",
+        },
+        reason: "nodeBindings is not a record",
+      },
+    ];
+    for (const c of cases) {
+      const dto: Record<string, unknown> = JSON.parse(boundRaw());
+      dto.planBinding = c.bindingValue;
+      const raw = JSON.stringify(dto);
+      const result = loadEngineStateForResume(raw);
+      expect(result.kind).toBe("corrupt");
+      if (result.kind === "corrupt") {
+        expect(result.dimension).toBe("contract");
+        expect(result.reason).toContain(c.reason);
+      }
+      expect(loadEngineStateFromJson(raw)).toBeNull();
+    }
+  });
+
+  it("an absent binding is legal: no key is written and the load is unchanged", () => {
+    const state = buildRichState();
+    expect(state.planBinding).toBeUndefined();
+    const raw = JSON.stringify(serializeEngineState(state));
+    // The writer emits NO key at all, so a graph without a binding serializes
+    // exactly as it did before this field existed.
+    expect(raw).not.toContain('"planBinding"');
+    expect(JSON.parse(raw).version).toBe(ENGINE_PERSISTENCE_VERSION);
+    expect(ENGINE_PERSISTENCE_VERSION).toBe(2);
+
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.storageFormat).toBe(CURRENT_STORAGE_FORMAT);
+      // The B3 protocol backfill is untouched by this slice.
+      expect(result.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      expect(result.state.planBinding).toBeUndefined();
+    }
+    expect(loadEngineStateFromJson(raw)).not.toBeNull();
+  });
+
+  it("totality: a hostile binding is corrupt(contract), never a throw", () => {
+    // JSON TEXT cannot carry a getter, a Proxy or a cycle, so these shapes are
+    // only reachable in memory: the registered format-2 decoder (the exact
+    // object the loader routes to) and the verification step it calls are
+    // driven directly here.
+    const decoder = DEFAULT_STORAGE_FORMAT_REGISTRY.decoders[0];
+    expect(decoder.format).toBe(STORAGE_FORMAT_V2);
+    const nodeIds: ReadonlySet<string> = new Set(["review"]);
+
+    const hostile: {
+      label: string;
+      boom: string;
+      arm: (snapshot: Record<string, unknown>) => void;
+    }[] = [
+      {
+        label: "throwing getter on the snapshot body",
+        boom: "boom-body",
+        arm: (snapshot) => {
+          Object.defineProperty(snapshot, "body", {
+            get() {
+              throw new Error("boom-body");
+            },
+            enumerable: true,
+            configurable: true,
+          });
+        },
+      },
+      {
+        label: "cyclic body",
+        boom: "reference cycle",
+        arm: (snapshot) => {
+          const cycle: Record<string, unknown> = {};
+          cycle.self = cycle;
+          snapshot.body = cycle;
+        },
+      },
+      {
+        label: "Proxy body",
+        boom: "boom-proxy",
+        arm: (snapshot) => {
+          snapshot.body = new Proxy(
+            {},
+            {
+              getPrototypeOf() {
+                throw new Error("boom-proxy");
+              },
+            },
+          );
+        },
+      },
+      {
+        label: "BigInt body (unrepresentable to the canonical digest)",
+        boom: "BigInt",
+        arm: (snapshot) => {
+          snapshot.body = 1n;
+        },
+      },
+      {
+        label: "function body (executable, never contract data)",
+        boom: "function",
+        arm: (snapshot) => {
+          snapshot.body = () => "not contract data";
+        },
+      },
+    ];
+
+    for (const c of hostile) {
+      const file: Record<string, unknown> = JSON.parse(boundRaw());
+      const rawBinding = file.planBinding;
+      if (rawBinding === undefined) {
+        throw new Error("the fixture file must carry a planBinding");
+      }
+      const planBinding = rawBinding as {
+        contractSnapshots: Record<string, Record<string, unknown>>;
+      };
+      const snapshot = planBinding.contractSnapshots[contractKey];
+      expect(snapshot).toBeDefined();
+      c.arm(snapshot);
+
+      // The exported verification step: a corrupt verdict, never an escape.
+      expect(() =>
+        verifyPersistedPlanBinding(planBinding, nodeIds),
+      ).not.toThrow();
+      const verdict = verifyPersistedPlanBinding(planBinding, nodeIds);
+      expect(verdict.kind).toBe("corrupt");
+      if (verdict.kind === "corrupt") {
+        expect(verdict.dimension).toBe("contract");
+        expect(verdict.reason).toContain(contractKey);
+        expect(verdict.reason).toContain(c.boom);
+      }
+
+      // The registered decoder contains it as well and marks the axis the
+      // loader maps onto corrupt(contract) for every tamper case above.
+      expect(() => decoder.decode(file)).not.toThrow();
+      const decoded = decoder.decode(file);
+      expect(decoded.kind).toBe("invalid");
+      if (decoded.kind === "invalid") {
+        expect(decoded.dimension).toBe("contract");
+        expect(decoded.reason).toContain(contractKey);
+      }
+    }
+  });
+
+  it("through the store: a verified binding survives save -> loadForResume, a tampered one is refused", () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-persist-binding-"));
+    try {
+      const store = new EnginePersistence(dir);
+      expect(store.save(boundState())).toBe(true);
+      const loaded = store.loadForResume("graph-bound");
+      expect(loaded.kind).toBe("valid");
+      if (loaded.kind === "valid") {
+        expect(loaded.state.planBinding).toEqual(binding);
+      }
+
+      // Tamper the file in place: the same gates run at the store boundary, the
+      // snapshot is preserved rather than repaired, and the shell refuses it.
+      // The tamper breaks a rule that still exists — a snapshot body that no
+      // longer hashes to its key — not the deleted binding-body revision rule.
+      const path = engineStatePath(dir, "graph-bound");
+      const file = JSON.parse(readFileSync(path, "utf-8")) as {
+        planBinding: {
+          contractSnapshots: Record<string, { ref: ContractRef; body: unknown }>;
+        };
+      };
+      const storedSnapshot = file.planBinding.contractSnapshots[contractKey];
+      if (storedSnapshot === undefined) {
+        throw new Error("the fixture file must carry the contract snapshot");
+      }
+      storedSnapshot.body = { tampered: true };
+      writeFileSync(path, JSON.stringify(file), "utf-8");
+
+      const refused = store.loadForResume("graph-bound");
+      expect(refused.kind).toBe("corrupt");
+      if (refused.kind === "corrupt") {
+        expect(refused.dimension).toBe("contract");
+      }
+      expect(store.load("graph-bound")).toBeNull();
+      expect(
+        (
+          JSON.parse(readFileSync(path, "utf-8")) as {
+            planBinding: {
+              contractSnapshots: Record<string, { body: unknown }>;
+            };
+          }
+        ).planBinding.contractSnapshots[contractKey]?.body,
+      ).toEqual({ tampered: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── B7: the persisted compiled plan — written, verified, cross-checked ──────
+
+describe("loadEngineStateForResume — persisted compiled plan (B7)", () => {
+  const REVIEW_BODY = { outcomes: ["revise", "accepted"], policy: "strict" };
+  const APPLY_BODY = { outcomes: ["done"], policy: "lenient" };
+  const REVIEW_SNAPSHOT: ContractSnapshot = {
+    ref: {
+      id: "contract.review",
+      revision: "1",
+      digest: contractDigest(REVIEW_BODY),
+    },
+    body: REVIEW_BODY,
+  };
+  const APPLY_SNAPSHOT: ContractSnapshot = {
+    ref: {
+      id: "contract.apply",
+      revision: "2",
+      digest: contractDigest(APPLY_BODY),
+    },
+    body: APPLY_BODY,
+  };
+  const CONTRACTS = createContractRegistry({
+    contracts: [REVIEW_SNAPSHOT, APPLY_SNAPSHOT],
+  });
+
+  /** A two-node v3 declaration: review --accepted--> apply, both contracted. */
+  function planDeclaration(): GraphDeclarationV3 {
+    return {
+      version: 3,
+      name: "graph-plan",
+      nodes: [
+        {
+          id: "review",
+          agent: "agent.review",
+          prompt: "Review.",
+          outcomes: [{ id: "revise" }, { id: "accepted" }],
+          completion: { mode: "natural", outcome: "accepted" },
+          contractRef: REVIEW_SNAPSHOT.ref,
+        },
+        {
+          id: "apply",
+          agent: "agent.apply",
+          prompt: "Apply.",
+          outcomes: [{ id: "done" }],
+          contractRef: APPLY_SNAPSHOT.ref,
+        },
+      ],
+      edges: [{ from: "review", to: "apply", outcome: "accepted" }],
+    };
+  }
+
+  /** Compile the fixture declaration — the plan record source. */
+  function compiledPlan(): CompiledPlan {
+    const result = compileGraph(planDeclaration(), { contracts: CONTRACTS });
+    if (!result.ok) {
+      throw new Error(
+        "the plan fixture must compile: " +
+          result.errors.map((error) => error.code).join(", "),
+      );
+    }
+    return result.plan;
+  }
+
+  const plan = compiledPlan();
+  const record: PersistedCompiledPlan = createPersistedCompiledPlan(plan);
+  const binding: PlanBinding = {
+    planRevision: plan.planRevision,
+    contractSnapshots: plan.contractSnapshots,
+    nodeBindings: record.nodeBindings,
+  };
+  const reviewKey = REVIEW_SNAPSHOT.ref.digest;
+  const planNodeIds: ReadonlySet<string> = new Set(["review", "apply"]);
+
+  /** A state whose runtime nodes match the plan topology node ids. */
+  function planState(): EngineState {
+    const state = createEngineState(
+      {
+        version: 2,
+        name: "graph-plan",
+        nodes: [
+          { id: "review", agent: "agent.review", prompt: "Review." },
+          { id: "apply", agent: "agent.apply", prompt: "Apply." },
+        ],
+        edges: [{ from: "review", to: "apply", type: "always" }],
+      },
+      "graph-plan",
+    );
+    provision(state);
+    state.compiledPlan = record;
+    state.planBinding = binding;
+    return state;
+  }
+
+  /** The serialized on-disk text of the state carrying both records. */
+  function planRaw(): string {
+    return JSON.stringify(serializeEngineState(planState()));
+  }
+
+  /** The mutable record shapes a tamper case edits. */
+  interface MutablePlanRecord {
+    graphId?: string;
+    declarationVersion?: number;
+    planRevision?: string;
+    nodes: Record<string, unknown>[];
+    edges: Record<string, unknown>[];
+    loopGroups: Record<string, unknown>[];
+    contractSnapshots: Record<string, unknown>;
+    nodeBindings: Record<string, unknown>;
+    /** Extra own keys a fidelity case adds to test the writer's copy. */
+    [extra: string]: unknown;
+  }
+
+  interface MutablePlanFile {
+    compiledPlan: MutablePlanRecord;
+    planBinding: {
+      planRevision?: string;
+      contractSnapshots: Record<string, ContractSnapshot>;
+      nodeBindings: Record<string, ContractRef>;
+      /** Extra own keys a fidelity case adds to test the writer's copy. */
+      [extra: string]: unknown;
+    };
+  }
+
+  /**
+   * Recompute a record plan revision over its OWN body, the way the load does.
+   * A tamper case that must isolate an inner rule (topology, contracts) calls
+   * this, so the failure it observes is the rule under test rather than the
+   * identity gate that a body change would otherwise trip first.
+   */
+  function revisionOf(record: MutablePlanRecord): string {
+    return contractDigest({
+      graphId: record.graphId,
+      declarationVersion: record.declarationVersion,
+      nodes: record.nodes,
+      edges: record.edges,
+      loopGroups: record.loopGroups,
+      contractSnapshots: record.contractSnapshots,
+    });
+  }
+
+  /** Parse the valid plan file, tamper with it, and re-serialize. */
+  function tamperedPlanRaw(mutate: (file: MutablePlanFile) => void): string {
+    const file = JSON.parse(planRaw()) as MutablePlanFile;
+    mutate(file);
+    return JSON.stringify(file);
+  }
+
+  it("round-trips a compiler-produced plan record: serialize -> load -> valid, deep-equal", () => {
+    // The record carries the COMPILER's own content address, computed over the
+    // plan body — no second digest and no recomputation at production time.
+    expect(record.planRevision).toBe(plan.planRevision);
+    expect(record.planRevision).toBe(
+      contractDigest({
+        graphId: plan.graphId,
+        declarationVersion: plan.declarationVersion,
+        nodes: plan.nodes,
+        edges: plan.edges,
+        loopGroups: plan.loopGroups,
+        contractSnapshots: plan.contractSnapshots,
+      }),
+    );
+    // The node->contract index is a projection of the plan nodes.
+    expect(record.nodeBindings).toEqual({
+      review: REVIEW_SNAPSHOT.ref,
+      apply: APPLY_SNAPSHOT.ref,
+    });
+
+    const raw = planRaw();
+    expect("compiledPlan" in (JSON.parse(raw) as Record<string, unknown>)).toBe(
+      true,
+    );
+    expect("planBinding" in (JSON.parse(raw) as Record<string, unknown>)).toBe(
+      true,
+    );
+
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.storageFormat).toBe(CURRENT_STORAGE_FORMAT);
+      expect(result.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      expect(result.state.compiledPlan).toEqual(record);
+      expect(result.state.planBinding).toEqual(binding);
+    }
+    const shell = loadEngineStateFromJson(raw);
+    expect(shell).not.toBeNull();
+    expect(shell?.compiledPlan).toEqual(record);
+    expect(shell?.planBinding).toEqual(binding);
+  });
+
+  it("the writer keeps a load-valid record key-for-key: it never drops a key its revision addresses", () => {
+    // The plan revision addresses the body AS PERSISTED — contractDigest hashes
+    // Object.keys, unknown own keys included. A record the load ACCEPTED
+    // therefore has to survive serialize -> load: a closed-field defensive copy
+    // in the writer would drop an unknown key while keeping the revision, and
+    // the writer's own output would be refused as corrupt(contract) on the next
+    // load (the B7 review's falsification case).
+    const withExtras = tamperedPlanRaw((file) => {
+      const planRecord = file.compiledPlan;
+      planRecord.futureField = "kept";
+      planRecord.nodes[0].futureField = "kept";
+      const outcome = (
+        planRecord.nodes[0].outcomes as Record<string, unknown>[]
+      )[0];
+      outcome.futureField = "kept";
+      // Nodes are in id order, so find the bound node by id rather than index.
+      const reviewNode = planRecord.nodes.find((node) => node.id === "review");
+      if (reviewNode === undefined) {
+        throw new Error("the fixture must declare node review");
+      }
+      reviewNode.contractRef = {
+        ...REVIEW_SNAPSHOT.ref,
+        futureField: "kept",
+      };
+      planRecord.edges[0].futureField = "kept";
+      // A loop group the topology accepts — its members and both routes are
+      // declared by the fixture — so the record stays load-valid with one.
+      planRecord.loopGroups.push({
+        id: "revision",
+        nodes: ["review", "apply"],
+        maxTraversals: 2,
+        continuationOutcome: "revise",
+        exitOutcome: "done",
+        futureField: "kept",
+      });
+      planRecord.contractSnapshots[reviewKey] = {
+        ...(planRecord.contractSnapshots[reviewKey] as Record<string, unknown>),
+        futureField: "kept",
+      };
+      planRecord.nodeBindings["review"] = {
+        ...REVIEW_SNAPSHOT.ref,
+        futureField: "kept",
+      };
+      file.planBinding.futureField = "kept";
+      // The revision is recomputed over the tampered body and the binding is
+      // moved with it, so the file is load-valid and the only thing under test
+      // is the writer's copy.
+      const recomputed = revisionOf(planRecord);
+      planRecord.planRevision = recomputed;
+      file.planBinding.planRevision = recomputed;
+    });
+
+    const first = loadEngineStateForResume(withExtras);
+    expect(first.kind).toBe("valid");
+    if (first.kind !== "valid") return;
+    // Vacuity guard: the unknown keys really are in the ACCEPTED record.
+    const accepted = JSON.parse(
+      JSON.stringify(first.state.compiledPlan),
+    ) as Record<string, unknown>;
+    expect(accepted.futureField).toBe("kept");
+    expect(
+      (accepted.nodes as Record<string, unknown>[])[0].futureField,
+    ).toBe("kept");
+    expect(
+      (accepted.loopGroups as Record<string, unknown>[])[0].futureField,
+    ).toBe("kept");
+
+    // Rewriting the accepted state must produce a file the SAME gate accepts,
+    // record for record: if the copy had projected the body, the unchanged
+    // revision would no longer address the rewritten one.
+    const rewritten = JSON.stringify(serializeEngineState(first.state));
+    const second = loadEngineStateForResume(rewritten);
+    expect(second.kind).toBe("valid");
+    if (second.kind === "valid") {
+      expect(second.state.compiledPlan).toEqual(first.state.compiledPlan);
+      expect(second.state.planBinding).toEqual(first.state.planBinding);
+    }
+    expect(loadEngineStateFromJson(rewritten)).not.toBeNull();
+  });
+
+  it("the store round-trip keeps both records and verifies them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "engine-persist-plan-"));
+    try {
+      const store = new EnginePersistence(dir);
+      expect(store.save(planState())).toBe(true);
+      const loaded = store.loadForResume("graph-plan");
+      expect(loaded.kind).toBe("valid");
+      if (loaded.kind === "valid") {
+        expect(loaded.state.compiledPlan).toEqual(record);
+        expect(loaded.state.planBinding).toEqual(binding);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the exported gates verify a compiler-produced record alone and together with the binding", () => {
+    expect(
+      verifyPersistedCompiledPlan(record, "graph-plan", planNodeIds),
+    ).toEqual({ kind: "verified" });
+    expect(
+      verifyPersistedPlan(record, binding, "graph-plan", planNodeIds),
+    ).toEqual({ kind: "verified" });
+    // Absent means absent — the gate fabricates nothing.
+    expect(
+      verifyPersistedCompiledPlan(undefined, "graph-plan", planNodeIds),
+    ).toEqual({ kind: "absent" });
+    expect(
+      verifyPersistedPlan(undefined, undefined, "graph-plan", planNodeIds),
+    ).toEqual({ kind: "absent" });
+  });
+
+  it("an absent plan record is legal: no key is written and the previous acceptance is unchanged", () => {
+    const state = buildRichState();
+    expect(state.compiledPlan).toBeUndefined();
+    const raw = JSON.stringify(serializeEngineState(state));
+    // The writer emits NO key at all, so a graph without a compiled plan
+    // serializes exactly as it did before this field existed.
+    expect(raw).not.toContain('"compiledPlan"');
+    expect(raw).not.toContain('"planBinding"');
+    expect(JSON.parse(raw).version).toBe(ENGINE_PERSISTENCE_VERSION);
+    expect(ENGINE_PERSISTENCE_VERSION).toBe(2);
+
+    const result = loadEngineStateForResume(raw);
+    expect(result.kind).toBe("valid");
+    if (result.kind === "valid") {
+      expect(result.storageFormat).toBe(CURRENT_STORAGE_FORMAT);
+      expect(result.executionProtocol).toBe(LEGACY_SIGNAL_PROTOCOL);
+      expect(result.state.compiledPlan).toBeUndefined();
+      expect(result.state.planBinding).toBeUndefined();
+    }
+    expect(loadEngineStateFromJson(raw)).not.toBeNull();
+  });
+
+  it("either record alone is legal and verified; only both together must agree", () => {
+    // Plan record without a binding: the complete durable plan, verified from
+    // its own body.
+    const planOnly = planState();
+    planOnly.planBinding = undefined;
+    const rawPlanOnly = JSON.stringify(serializeEngineState(planOnly));
+    expect(rawPlanOnly).toContain('"compiledPlan"');
+    expect(rawPlanOnly).not.toContain('"planBinding"');
+    const planResult = loadEngineStateForResume(rawPlanOnly);
+    expect(planResult.kind).toBe("valid");
+    if (planResult.kind === "valid") {
+      expect(planResult.state.compiledPlan).toEqual(record);
+      expect(planResult.state.planBinding).toBeUndefined();
+    }
+
+    // Binding without a plan record: the B6 record, verified on its own terms.
+    // Its planRevision is a foreign key no plan body is present to resolve, so
+    // the load verifies the snapshots and node bindings and ACCEPTS it —
+    // refusing a lone binding would silently drop the set B6 accepted.
+    const bindingOnly = planState();
+    bindingOnly.compiledPlan = undefined;
+    const rawBindingOnly = JSON.stringify(serializeEngineState(bindingOnly));
+    expect(rawBindingOnly).not.toContain('"compiledPlan"');
+    expect(rawBindingOnly).toContain('"planBinding"');
+    const bindingResult = loadEngineStateForResume(rawBindingOnly);
+    expect(bindingResult.kind).toBe("valid");
+    if (bindingResult.kind === "valid") {
+      expect(bindingResult.state.planBinding).toEqual(binding);
+      expect(bindingResult.state.compiledPlan).toBeUndefined();
+    }
+    // The exported gate agrees: with no plan record to compare against, the
+    // lone binding verifies.
+    expect(
+      verifyPersistedPlan(undefined, binding, "graph-plan", planNodeIds),
+    ).toEqual({ kind: "verified" });
+  });
+
+  it("tampering each verified plan rule is corrupt(contract) with a distinct reason and shell null", () => {
+    const cases: { label: string; raw: string; reason: string }[] = [
+      {
+        label: "planRevision does not address the persisted body",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.planRevision = "0".repeat(64);
+        }),
+        reason: "is not the digest (",
+      },
+      {
+        label: "plan graphId is not the state graphId",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.graphId = "graph-other";
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason: "is not the persisted graphId",
+      },
+      {
+        label: "plan snapshot body no longer hashes to its key",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.contractSnapshots[reviewKey] = {
+            ref: REVIEW_SNAPSHOT.ref,
+            body: { tampered: true },
+          };
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason: `compiled plan contract snapshot "${reviewKey}" body hashes to`,
+      },
+      {
+        label: "duplicate node id",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.nodes.push({ ...file.compiledPlan.nodes[0] });
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason: "(duplicate-node-id)",
+      },
+      {
+        label: "edge to an unknown node",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.edges.push({
+            from: "review",
+            to: "ghost",
+            outcome: "accepted",
+          });
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason: "(unknown-edge-endpoint)",
+      },
+      {
+        label: "edge outcome its source does not declare",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.edges.push({
+            from: "apply",
+            to: "review",
+            outcome: "accepted",
+          });
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason: "(unknown-outcome-reference)",
+      },
+      {
+        label: "topology declares a node the state does not",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.nodes[1].id = "ghost";
+          file.compiledPlan.edges = [];
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason:
+          'declares node id "ghost", which the persisted state does not declare',
+      },
+      {
+        label: "plan index disagrees with the node contractRef",
+        raw: tamperedPlanRaw((file) => {
+          // The plan revision does NOT cover nodeBindings, so a rebound index
+          // is invisible to the identity gate — the projection rule refuses it
+          // even though the ref names a snapshot the plan really pins.
+          file.compiledPlan.nodeBindings["review"] = { ...APPLY_SNAPSHOT.ref };
+        }),
+        reason: "but the node declares",
+      },
+      {
+        label: "plan index binds a node the topology does not declare",
+        raw: tamperedPlanRaw((file) => {
+          file.compiledPlan.nodes = file.compiledPlan.nodes.filter(
+            (node) => node.id !== "apply",
+          );
+          file.compiledPlan.edges = [];
+          file.compiledPlan.planRevision = revisionOf(file.compiledPlan);
+        }),
+        reason: "which its topology does not declare",
+      },
+      {
+        label: "binding planRevision disagrees with the plan",
+        raw: tamperedPlanRaw((file) => {
+          file.planBinding.planRevision = "f".repeat(64);
+        }),
+        reason: "does not equal the compiled plan planRevision",
+      },
+      {
+        label: "binding references a digest the plan does not pin",
+        raw: tamperedPlanRaw((file) => {
+          const body = { extra: true };
+          const digest = contractDigest(body);
+          file.planBinding.contractSnapshots[digest] = {
+            ref: { id: "contract.extra", revision: "1", digest },
+            body,
+          };
+        }),
+        reason: "which the compiled plan contractSnapshots does not contain",
+      },
+      {
+        label: "binding binds a node to a different ref than the plan",
+        raw: tamperedPlanRaw((file) => {
+          file.planBinding.nodeBindings["review"] = { ...APPLY_SNAPSHOT.ref };
+        }),
+        reason: "but the compiled plan binds it to",
+      },
+    ];
+
+    const reasons: string[] = [];
+    for (const c of cases) {
+      const result = loadEngineStateForResume(c.raw);
+      expect(result.kind).toBe("corrupt");
+      if (result.kind === "corrupt") {
+        // Every plan-record failure is attributed to the contract gate, never
+        // folded into the storage axis.
+        expect(result.dimension).toBe("contract");
+        expect(result.reason).toContain(c.reason);
+        reasons.push(result.reason);
+      }
+      // Non-executable: the null-only shell refuses every tampered file too.
+      expect(loadEngineStateFromJson(c.raw)).toBeNull();
+    }
+    // Every check reads differently — a collapsed reason would hide which
+    // invariant a file broke.
+    expect(new Set(reasons).size).toBe(cases.length);
+    // The untampered file still loads: the refusal is caused by the tampering.
+    expect(loadEngineStateForResume(planRaw()).kind).toBe("valid");
+  });
+
+  it("totality: a hostile plan record is corrupt(contract), never a throw", () => {
+    // JSON TEXT cannot carry a getter, a Proxy or a cycle, so these shapes are
+    // only reachable in memory: the registered format-2 decoder (the exact
+    // object the loader routes to) and the exported gate are driven directly.
+    const decoder = DEFAULT_STORAGE_FORMAT_REGISTRY.decoders[0];
+    expect(decoder.format).toBe(STORAGE_FORMAT_V2);
+
+    const hostile: {
+      label: string;
+      boom: string;
+      arm: (record: MutablePlanRecord) => void;
+    }[] = [
+      {
+        label: "throwing getter on a node id",
+        boom: "boom-id",
+        arm: (record) => {
+          Object.defineProperty(record.nodes[0], "id", {
+            get() {
+              throw new Error("boom-id");
+            },
+            enumerable: true,
+            configurable: true,
+          });
+        },
+      },
+      {
+        label: "cyclic contract body",
+        boom: "reference cycle",
+        arm: (record) => {
+          const cycle: Record<string, unknown> = {};
+          cycle.self = cycle;
+          record.contractSnapshots[reviewKey] = {
+            ref: REVIEW_SNAPSHOT.ref,
+            body: cycle,
+          };
+        },
+      },
+      {
+        label: "BigInt in the plan body",
+        boom: "BigInt",
+        arm: (record) => {
+          record.nodes[0].prompt = 1n;
+        },
+      },
+    ];
+
+    for (const c of hostile) {
+      const file = JSON.parse(planRaw()) as MutablePlanFile;
+      c.arm(file.compiledPlan);
+
+      // The exported gate: a corrupt verdict, never an escape.
+      expect(() =>
+        verifyPersistedPlan(
+          file.compiledPlan,
+          file.planBinding,
+          "graph-plan",
+          planNodeIds,
+        ),
+      ).not.toThrow();
+      const verdict = verifyPersistedPlan(
+        file.compiledPlan,
+        file.planBinding,
+        "graph-plan",
+        planNodeIds,
+      );
+      expect(verdict.kind).toBe("corrupt");
+      if (verdict.kind === "corrupt") {
+        expect(verdict.dimension).toBe("contract");
+        expect(verdict.reason).toContain(c.boom);
+      }
+
+      // The registered decoder contains it as well and marks the axis the
+      // loader maps onto corrupt(contract).
+      expect(() => decoder.decode(file)).not.toThrow();
+      const decoded = decoder.decode(file);
+      expect(decoded.kind).toBe("invalid");
+      if (decoded.kind === "invalid") {
+        expect(decoded.dimension).toBe("contract");
+      }
+    }
+  });
+});
+

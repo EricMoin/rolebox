@@ -322,7 +322,14 @@ describe("recoverInterruptedGraphs under seeded failure modes", () => {
       })(),
     ).resolves.toBeUndefined();
 
-    // B3: the no-op report carries the (empty) degraded bucket too.
-    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], failed: [] });
+    // B3: the no-op report carries the (empty) degraded + migration-required
+    // buckets too.
+    expect(report).toEqual({
+      scanned: 0,
+      recovered: 0,
+      degraded: [],
+      migrationRequired: [],
+      failed: [],
+    });
   });
 });

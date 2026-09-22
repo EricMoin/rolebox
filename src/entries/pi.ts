@@ -894,6 +894,7 @@ export default async function (pi: any): Promise<void> {
     if (
       graphRecoveryReport.recovered > 0 ||
       graphRecoveryReport.degraded.length > 0 ||
+      graphRecoveryReport.migrationRequired.length > 0 ||
       graphRecoveryReport.failed.length > 0
     ) {
       log.info("Interrupted graph engines recovered", {
@@ -903,6 +904,10 @@ export default async function (pi: any): Promise<void> {
         // B3: a graph whose state was adopted but whose reconcile pass threw is
         // reported here with its error text — never counted as recovered.
         degraded: graphRecoveryReport.degraded,
+        // B stage: a recognized format with a registered migration is intact
+        // data that cannot execute yet. Surfaced at the entry point too — it is
+        // counted as neither recovered nor failed.
+        migrationRequired: graphRecoveryReport.migrationRequired,
         failed: graphRecoveryReport.failed.length,
       });
     }

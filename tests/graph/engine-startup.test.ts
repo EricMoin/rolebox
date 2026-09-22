@@ -12,12 +12,21 @@ import { join } from "node:path";
 
 import { EnginePhase, NodeStatus } from "../../src/constants.ts";
 import type { GraphDeclaration } from "../../src/types.graph-v2.ts";
-import { EnginePersistence } from "../../src/graph/engine/engine-persistence.ts";
+import {
+  DEFAULT_STORAGE_FORMAT_REGISTRY,
+  EnginePersistence,
+  serializeEngineState,
+} from "../../src/graph/engine/engine-persistence.ts";
 import { createEngineState, provision } from "../../src/graph/engine/engine-state.ts";
 import {
   recoverInterruptedGraphs,
   type RecoveryStartupReport,
 } from "../../src/graph/engine/engine-startup.ts";
+import {
+  createStorageFormatRegistry,
+  STORAGE_FORMAT_V2,
+} from "../../src/graph/persistence/storage-format.ts";
+import { OUTCOME_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 import {
   GraphEventRecorder,
   graphEventsPath,
@@ -170,7 +179,7 @@ describe("recoverInterruptedGraphs", () => {
       stateDir: dir,
     });
 
-    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], migrationRequired: [], failed: [] });
     // The resumed engine persisted its terminal phase — recovery actually did work.
     const persisted = new EnginePersistence(dir).load("g-exec");
     expect(persisted!.phase).toBe(EnginePhase.Complete);
@@ -192,7 +201,7 @@ describe("recoverInterruptedGraphs", () => {
     });
 
     // Scanned but neither recovered nor failed — a terminal graph is skipped.
-    expect(report).toEqual({ scanned: 1, recovered: 0, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 0, degraded: [], migrationRequired: [], failed: [] });
   });
 
   it("(c) a corrupt engine file does not abort recovery of a valid sibling", async () => {
@@ -360,7 +369,7 @@ describe("recoverInterruptedGraphs", () => {
       stateDir: dir,
     });
 
-    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], migrationRequired: [], failed: [] });
     // The on-disk state was left untouched (still executing, not resumed).
     expect(new EnginePersistence(dir).load("g-exec")!.phase).toBe(
       EnginePhase.Executing,
@@ -403,7 +412,7 @@ describe("recoverInterruptedGraphs", () => {
       manager: fake as unknown as DispatchManager,
       stateDir: dir,
     });
-    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 0, recovered: 0, degraded: [], migrationRequired: [], failed: [] });
   });
 });
 
@@ -442,7 +451,7 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
     });
 
     // Report semantics unchanged by the observer wiring.
-    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], migrationRequired: [], failed: [] });
 
     // The recovered engine wrote the node's terminal transition into the log.
     const lines = readEventLines(dir, "g-exec");
@@ -490,7 +499,7 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
       },
     });
 
-    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], migrationRequired: [], failed: [] });
     // The recovered node's completion re-announced through the seam.
     expect(completions).toContainEqual({
       graphId: "g-exec",
@@ -520,7 +529,7 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
       // No onNodeCompletion / onGraphTerminal / graphEvents → old behavior.
     });
 
-    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], failed: [] });
+    expect(report).toEqual({ scanned: 1, recovered: 1, degraded: [], migrationRequired: [], failed: [] });
     // No event log is produced (the recorder is only constructed when wired).
     expect(existsSync(graphEventsPath(dir, "g-exec"))).toBe(false);
     // The engine state itself still recovered to terminal.
@@ -529,3 +538,180 @@ describe("recoverInterruptedGraphs — observer seam passthrough (S10)", () => {
     );
   });
 });
+
+// ── Storage-format buckets (B stage): unsupported vs migration-required ──────
+//
+// The sweep must not conflate a file it cannot DECODE with one it merely cannot
+// EXECUTE yet: an unknown numeric storage version is a build limitation and
+// lands in `failed[]` as `unsupported storage`, while a version with a
+// REGISTERED migration is intact data that lands in `migrationRequired[]` — a
+// bucket counted as neither recovered nor failed. An ILLEGAL version
+// identifier (not a positive safe integer) is neither: it is a malformed
+// discriminator and lands in `failed[]` as `corrupt storage`.
+
+describe("recoverInterruptedGraphs — storage-format buckets (B stage)", () => {
+  /**
+   * Write a valid executing single-node snapshot whose `version` header is an
+   * arbitrary value — an on-disk file this build cannot decode.
+   */
+  function persistVersionedFile(
+    dir: string,
+    graphId: string,
+    file: string,
+    version: unknown,
+  ): string {
+    const state = createEngineState(singleNodeDecl(graphId), graphId);
+    provision(state);
+    state.phase = EnginePhase.Executing;
+    const dto: Record<string, unknown> = JSON.parse(
+      JSON.stringify(serializeEngineState(state)),
+    );
+    dto.version = version;
+    const stateDir = stateDirFor(dir);
+    mkdirSync(stateDir, { recursive: true });
+    const path = join(stateDir, file);
+    writeFileSync(path, JSON.stringify(dto), "utf-8");
+    return path;
+  }
+
+  it("an unknown numeric storage version is reported in failed[] as unsupported, not skipped", async () => {
+    const dir = makeTmpDir();
+    const path = persistVersionedFile(dir, "g-unknown", "engine-unknown.json", 7);
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: manager(),
+      stateDir: dir,
+    });
+
+    expect(report.scanned).toBe(1);
+    expect(report.recovered).toBe(0);
+    expect(report.migrationRequired).toEqual([]);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0]).toContain("engine-unknown.json");
+    expect(report.failed[0]).toContain("unsupported storage: 7");
+    // Intact data is never rewritten: the file still carries its version.
+    expect(JSON.parse(readFileSync(path, "utf-8")).version).toBe(7);
+  });
+
+  it("an illegal version identifier is reported as corrupt storage, not unsupported", async () => {
+    const dir = makeTmpDir();
+    const path = persistVersionedFile(
+      dir,
+      "g-fractional",
+      "engine-fractional.json",
+      2.5,
+    );
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: manager(),
+      stateDir: dir,
+    });
+
+    expect(report.scanned).toBe(1);
+    expect(report.recovered).toBe(0);
+    expect(report.migrationRequired).toEqual([]);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0]).toContain("engine-fractional.json");
+    // The label carries the axis and names what was received — the mirror of
+    // `unsupported <dimension>: <detail>` above.
+    expect(report.failed[0]).toContain(
+      "corrupt storage: storage format version is the non-integer number 2.5",
+    );
+    // Intact data is never rewritten: the file still carries its version.
+    expect(JSON.parse(readFileSync(path, "utf-8")).version).toBe(2.5);
+  });
+
+  it("a registered migration capability lands in migrationRequired[], recovered nowhere", async () => {
+    const dir = makeTmpDir();
+    const path = persistVersionedFile(
+      dir,
+      "g-migratable",
+      "engine-migratable.json",
+      7,
+    );
+    // A migration CAPABILITY (source validation included), not list
+    // membership: the sweep routes an intact registered predecessor into
+    // `migrationRequired[]` and never hydrates it here.
+    const registry = createStorageFormatRegistry({
+      current: STORAGE_FORMAT_V2,
+      decoders: DEFAULT_STORAGE_FORMAT_REGISTRY.decoders,
+      migrations: [
+        {
+          from: 7,
+          to: STORAGE_FORMAT_V2,
+          validateSource: () => ({ ok: true }),
+          migrate: (parsed) => parsed,
+        },
+      ],
+    });
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: manager(),
+      stateDir: dir,
+      storageFormatRegistry: registry,
+    });
+
+    expect(report.scanned).toBe(1);
+    // Neither a clean resume nor a failure: the snapshot is intact but not
+    // executable until the registered conversion commits.
+    expect(report.recovered).toBe(0);
+    expect(report.failed).toEqual([]);
+    expect(report.migrationRequired).toHaveLength(1);
+    expect(report.migrationRequired[0]).toContain("engine-migratable.json");
+    expect(report.migrationRequired[0]).toContain(
+      "migration-required storage: 7 -> 2",
+    );
+    // NOT silently skipped: it is reported, and its body was neither hydrated
+    // nor rewritten (the file is still the version-7 snapshot written above).
+    expect(JSON.parse(readFileSync(path, "utf-8")).version).toBe(7);
+  });
+});
+
+// ── Execution-protocol bucket (B3): an unregistered protocol is never resumed ─
+//
+// The sweep reports every non-valid load result by its DIMENSION, so a protocol
+// this build has no handler for lands in failed[] as `unsupported execution`.
+// That is neither a clean resume nor a storage mismatch: the load is refused at
+// the boundary and the file is left exactly as it was, never run under legacy
+// rules and never rewritten to a legacy identity.
+
+describe("recoverInterruptedGraphs — execution-protocol bucket (B3)", () => {
+  it("an unregistered protocol is reported as unsupported execution and never resumed", async () => {
+    const dir = makeTmpDir();
+    const state = createEngineState(singleNodeDecl("g-proto2"), "g-proto2");
+    provision(state);
+    state.phase = EnginePhase.Executing;
+    const dto: Record<string, unknown> = JSON.parse(
+      JSON.stringify(serializeEngineState(state)),
+    );
+    dto.executionProtocolVersion = OUTCOME_PROTOCOL;
+    const stateDir = stateDirFor(dir);
+    mkdirSync(stateDir, { recursive: true });
+    const path = join(stateDir, "engine-proto2.json");
+    writeFileSync(path, JSON.stringify(dto), "utf-8");
+
+    const report = await recoverInterruptedGraphs({
+      directory: dir,
+      manager: manager(),
+      stateDir: dir,
+    });
+
+    expect(report.scanned).toBe(1);
+    expect(report.recovered).toBe(0);
+    expect(report.degraded).toEqual([]);
+    expect(report.migrationRequired).toEqual([]);
+    expect(report.failed).toHaveLength(1);
+    expect(report.failed[0]).toContain("engine-proto2.json");
+    // The axis is named, so this cannot read as a storage mismatch.
+    expect(report.failed[0]).toContain("unsupported execution: 2");
+    // Refused, not downgraded: the snapshot keeps its protocol identity and
+    // was neither hydrated nor rewritten.
+    const after: Record<string, unknown> = JSON.parse(readFileSync(path, "utf-8"));
+    expect(after.executionProtocolVersion).toBe(OUTCOME_PROTOCOL);
+    expect(after.phase).toBe(EnginePhase.Executing);
+  });
+});
+

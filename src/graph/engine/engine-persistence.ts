@@ -30,6 +30,13 @@
  *   mirroring `TaskStateStore.load()` (`src/dispatch/persistence/task-store.ts:125`).
  *   Any other read failure is rethrown — an unreadable state file is an
  *   explicit error, never a silent clean start (review 05-F6, L22).
+ * - `loadForResume(graphId)` — the same read + validate path with the non-valid
+ *   outcomes kept distinguishable ({@link EngineLoadResult}: absent / corrupt /
+ *   unsupported / migration-required / valid). Added for the startup sweep,
+ *   which must report those cases differently instead of collapsing them into
+ *   one `null` (docs/graph-outcome-protocol.md § Version ownership and load
+ *   contract). `load()` delegates to it and stays the null-only compatibility
+ *   wrapper.
  *
  * Two-tier durability policy (Q2 Option A): critical mutations write through
  * synchronously so a crash never loses node/phase/frontier progress; non-critical
@@ -60,10 +67,39 @@ import type {
   GraphBudgetState,
   LoopGroupRuntimeState,
   NodeRuntimeState,
+  PlanBinding,
   ResolvedJoinStrategy,
   SignalLedgerEntry,
 } from "../../types.engine-v2.ts";
+import {
+  contractDigest,
+  contractRefsEqual,
+  isContractRef,
+  type ContractRef,
+  type ContractSnapshot,
+} from "../contracts/contract-definition.ts";
+import {
+  classifyStorageFormat,
+  createStorageFormatRegistry,
+  STORAGE_FORMAT_V2,
+  type StorageDecodeResult,
+  type StorageFormatDecoder,
+  type StorageFormatMigration,
+  type StorageFormatRegistry,
+} from "../persistence/storage-format.ts";
+import {
+  classifyExecutionProtocol,
+  LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+  LEGACY_SIGNAL_PROTOCOL,
+  type ExecutionProtocolRegistry,
+  type ExecutionProtocolVerdict,
+} from "../protocol/execution-protocol.ts";
 import { logWarn } from "./log-warn.ts";
+import {
+  inspectCompiledTopology,
+  type CompiledNode,
+  type PersistedCompiledPlan,
+} from "../compiler/plan.ts";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -309,6 +345,122 @@ export function cloneCheckpointHistory(
   return out;
 }
 
+/**
+ * Defensive copy of one persisted plan binding (B6).
+ *
+ * The two records are rebuilt so the writer never aliases the live state's
+ * containers, and they are assembled with `Object.fromEntries` — a data
+ * property definition — so a digest- or node-shaped key such as `__proto__`
+ * cannot land on the object's prototype instead of in the record.
+ *
+ * Contract BODIES are carried by reference: a compiler-produced body is a
+ * deeply frozen tree whose digest is what makes the binding durable, and a
+ * hydrated body is already a fresh `JSON.parse` result. Copying a body would
+ * buy nothing the digest does not already prove.
+ *
+ * The copy is KEY-PRESERVING — the source record is spread first and only the
+ * containers the writer must not alias are rebuilt — so a top-level own key the
+ * binding carries is copied rather than dropped. For the binding this is
+ * fidelity only (its `planRevision` addresses the compiled plan, not this
+ * body); {@link clonePersistedCompiledPlan} states why the same rule is
+ * load-bearing for the plan record.
+ */
+function clonePlanBinding(binding: PlanBinding): PlanBinding {
+  const contractSnapshots = Object.fromEntries(
+    Object.entries(binding.contractSnapshots).map(
+      ([digest, snapshot]): [string, ContractSnapshot] => [
+        digest,
+        { ...snapshot, ref: { ...snapshot.ref } },
+      ],
+    ),
+  );
+  const nodeBindings = Object.fromEntries(
+    Object.entries(binding.nodeBindings).map(
+      ([nodeId, ref]): [string, ContractRef] => [nodeId, { ...ref }],
+    ),
+  );
+  return {
+    ...binding,
+    planRevision: binding.planRevision,
+    contractSnapshots,
+    nodeBindings,
+  };
+}
+
+/**
+ * Defensive copy of one persisted compiled-plan record (B7).
+ *
+ * Every plan container the writer hands to the DTO is rebuilt so the exported
+ * serializer never aliases the live state — the same reason as
+ * {@link clonePlanBinding}. Contract BODIES are carried by reference: a body
+ * the canonical digest accepted is JSON data whose identity is what makes the
+ * record durable, and a hydrated body is already a fresh `JSON.parse` result.
+ *
+ * The copy is KEY-PRESERVING, and here that is load-bearing rather than
+ * cosmetic: the source record is spread first and only the containers the
+ * writer must not alias are rebuilt, so an own key the record carries —
+ * whether the plan model declares it or not — is COPIED instead of dropped.
+ * `planRevision` addresses the body AS PERSISTED (`contractDigest` hashes
+ * `Object.keys`), so a closed-field projection would drop an unknown key while
+ * keeping the revision, and the writer's own output would be refused as
+ * `corrupt(contract)` on the next load.
+ */
+function clonePersistedCompiledPlan(
+  plan: PersistedCompiledPlan,
+): PersistedCompiledPlan {
+  return {
+    ...plan,
+    graphId: plan.graphId,
+    declarationVersion: plan.declarationVersion,
+    planRevision: plan.planRevision,
+    nodes: plan.nodes.map(cloneCompiledNode),
+    edges: plan.edges.map((edge) => ({ ...edge })),
+    loopGroups: plan.loopGroups.map((group) => ({
+      ...group,
+      nodes: [...group.nodes],
+    })),
+    contractSnapshots: Object.fromEntries(
+      Object.entries(plan.contractSnapshots).map(
+        ([digest, snapshot]): [string, ContractSnapshot] => [
+          digest,
+          { ...snapshot, ref: { ...snapshot.ref } },
+        ],
+      ),
+    ),
+    nodeBindings: Object.fromEntries(
+      Object.entries(plan.nodeBindings).map(
+        ([nodeId, ref]): [string, ContractRef] => [nodeId, { ...ref }],
+      ),
+    ),
+  };
+}
+
+/**
+ * Defensive copy of one compiled node: its own records are rebuilt, fields
+ * verbatim, and every own key the node carries is preserved — see
+ * {@link clonePersistedCompiledPlan} for why that is load-bearing.
+ */
+function cloneCompiledNode(node: CompiledNode): CompiledNode {
+  return {
+    ...node,
+    outcomes: node.outcomes.map((outcome) => ({
+      ...outcome,
+      ...(outcome.data === undefined ? {} : { data: { ...outcome.data } }),
+      acceptance: outcome.acceptance.map((requirement) => ({
+        ...requirement,
+      })),
+    })),
+    ...(node.completion === undefined
+      ? {}
+      : { completion: { ...node.completion } }),
+    ...(node.contractRef === undefined
+      ? {}
+      : { contractRef: { ...node.contractRef } }),
+    ...(node.join === undefined ? {} : { join: { ...node.join } }),
+    ...(node.budget === undefined ? {} : { budget: { ...node.budget } }),
+  };
+}
+
 // ── Serialize / Deserialize (pure, exportable for tests) ────────────────────
 
 /**
@@ -414,6 +566,36 @@ export function serializeEngineState(state: EngineState): EnginePersistenceFile 
     terminalNotified: state.terminalNotified
       ? { ...state.terminalNotified }
       : undefined,
+    // OPTIONAL-ADDITIVE (B3 execution protocol): the bound protocol identity,
+    // written only when the state actually holds one. A state that never set
+    // the field produces NO key at all — the object and its JSON text are
+    // exactly what the previous writer produced — while a hydrated legacy
+    // state keeps the identity its decoder backfilled across the round trip.
+    ...(state.executionProtocolVersion !== undefined
+      ? { executionProtocolVersion: state.executionProtocolVersion }
+      : {}),
+    // OPTIONAL-ADDITIVE (B6 plan binding): the persisted contract binding of
+    // the compiled plan, written only when the state actually holds one. A
+    // state that never carried one produces NO key at all — its object and its
+    // JSON text are exactly what the previous writer produced — while a
+    // hydrated graph keeps the binding its decoder verified across the round
+    // trip. The compiled topology is not part of this field (see PlanBinding).
+    ...(state.planBinding !== undefined
+      ? { planBinding: clonePlanBinding(state.planBinding) }
+      : {}),
+    // OPTIONAL-ADDITIVE (B7 compiled plan): the durable compiled-plan record,
+    // written only when the state actually holds one. A state that never
+    // carried one produces NO key at all — its object and its JSON text are
+    // exactly what the previous writer produced — while a hydrated graph keeps
+    // the record its decoder verified across the round trip.
+    //
+    // RECOVERY DOES NOT READ THIS FIELD: the engine still resumes from the
+    // retained `graphDeclaration` (see `EngineState.compiledPlan`). The record
+    // is written and verified so its identity and its rules exist before a
+    // producer or a recovery switch depends on them.
+    ...(state.compiledPlan !== undefined
+      ? { compiledPlan: clonePersistedCompiledPlan(state.compiledPlan) }
+      : {}),
   };
 }
 
@@ -538,6 +720,26 @@ export function deserializeEngineState(file: EnginePersistenceFile): EngineState
     terminalNotified: file.terminalNotified
       ? { ...file.terminalNotified }
       : undefined,
+    // OPTIONAL-ADDITIVE (B3 execution protocol): carried through verbatim, NOT
+    // defaulted here. This function is a pure DTO→state projection; the
+    // format-2 decoder owns the one legitimate backfill (see
+    // STORAGE_FORMAT_V2_DECODER) and the loader owns classification, so an
+    // absent value stays absent until the decoder resolves it.
+    executionProtocolVersion: file.executionProtocolVersion,
+    // OPTIONAL-ADDITIVE (B6 plan binding): carried through VERBATIM, never
+    // copied, defaulted or inspected here. This function is a pure DTO→state
+    // projection; the format-2 decoder owns the verification, and that gate is
+    // total for a hostile binding (a getter or Proxy that throws while being
+    // read). Touching the binding's internals here would duplicate the gate and
+    // relabel its contract failures as storage hydration failures.
+    planBinding: file.planBinding,
+    // OPTIONAL-ADDITIVE (B7 compiled plan): carried through VERBATIM for the
+    // same reason as the binding above — this function is a pure DTO→state
+    // projection, and the format-2 decoder owns the verification, which is
+    // total for a hostile record (a getter or Proxy that throws while being
+    // read). Touching the plan internals here would duplicate that gate and
+    // relabel its contract failures as storage hydration failures.
+    compiledPlan: file.compiledPlan,
     // isDirty / isNonCriticalDirty are runtime-only — a recovered state always
     // starts clean.
     isDirty: false,
@@ -567,6 +769,92 @@ export function engineStatePath(directory: string, graphId: string): string {
     `engine-${engineStateSlug(graphId)}.json`,
   );
 }
+
+// ── Structured load results (storage-format-aware) ──────────────────────────
+
+/**
+ * Version axis a non-executable load result is attributed to.
+ *
+ * `storage` describes the on-disk storage format; `execution` describes the
+ * graph's execution protocol, whose identity the format-2 decoder resolves and
+ * the loader then classifies against the protocol registry. The two are
+ * separate axes on purpose — an unregistered protocol is not a storage
+ * mismatch, and an unreadable format is not a protocol mismatch. `contract`
+ * is the axis of a persisted plan binding (B6) or compiled-plan record (B7)
+ * that fails verification: the format-2 decoder observes it and the loader
+ * reports it, so a bad record can never read as a storage defect. `capability`
+ * remains the reserved
+ * vocabulary for the later capability gate
+ * (docs/graph-outcome-protocol.md § "Structured loading results"), so that
+ * mismatch can never be conflated with today's three.
+ */
+export type EngineLoadDimension =
+  | "storage"
+  | "execution"
+  | "contract"
+  | "capability";
+
+/**
+ * Outcome of {@link loadEngineStateForResume} / {@link EnginePersistence.loadForResume}.
+ *
+ * The legacy load path answers a single `null` for four different situations —
+ * no file, a corrupt file, an unsupported storage format, and a recognized file
+ * that requires a format migration. Callers that must ACT differently (the
+ * startup sweep) need those separated; callers that only need "state or clean
+ * start" keep using {@link EnginePersistence.load}, which collapses every
+ * non-`valid` kind to `null` exactly as before.
+ *
+ * Every non-`valid` result is non-executable by contract: none may reach
+ * `adoptPrior`, dispatch, or automatic fresh-engine provisioning.
+ *
+ * - `valid` — every gate passed; `storageFormat` is the classified format the
+ *   state was hydrated from (today always `STORAGE_FORMAT_V2`) and
+ *   `executionProtocol` is the bound protocol identity (today always
+ *   `LEGACY_SIGNAL_PROTOCOL` — the only registered handler). The hydrated
+ *   state carries the same identity explicitly.
+ * - `absent` — no state file exists (ENOENT only). Creation of a graph is a
+ *   separate explicit action, never implied by a load.
+ * - `corrupt` — a recognized representation violates its schema, required
+ *   shape, enum vocabulary, format discriminator, protocol identity, or
+ *   persisted plan record (binding and/or compiled plan). `dimension` names
+ *   the violated axis
+ *   ({@link EngineLoadDimension}). The file is preserved; it is never rerun as
+ *   fresh.
+ * - `unsupported` — a well-formed discriminator with no installed capability:
+ *   a storage format with no decoder and no registered migration
+ *   (`storage`), or a legal execution protocol with no registered handler
+ *   (`execution`). It needs compatible code, never an inferred default.
+ * - `migration-required` — a recognized storage format has a registered
+ *   conversion path but cannot execute until that conversion is committed. The
+ *   source body has already passed the migration's own `validateSource` gate;
+ *   a source that fails it is `corrupt`, not migration-required.
+ */
+export type EngineLoadResult =
+  | {
+      kind: "valid";
+      state: EngineState;
+      storageFormat: number;
+      /**
+       * The exact protocol the loader BOUND to this graph — the registered
+       * handler's version, never a latest-version constant. The caller runs
+       * the state under this identity or refuses it; it never substitutes a
+       * different one.
+       */
+      executionProtocol: number;
+    }
+  | { kind: "absent" }
+  | { kind: "corrupt"; dimension: EngineLoadDimension; reason: string }
+  | {
+      kind: "unsupported";
+      dimension: EngineLoadDimension;
+      detail: string;
+    }
+  | {
+      kind: "migration-required";
+      dimension: "storage";
+      from: number;
+      to: number;
+    };
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
@@ -689,12 +977,68 @@ export class EnginePersistence {
   }
 
   /**
+   * Load a graph's persisted engine state WITHOUT collapsing the non-valid
+   * outcomes. Same gates and same total-hydration contract as {@link load};
+   * only the return shape differs. `load` answers `null` for all four
+   * non-valid situations, so a caller cannot tell a clean start (missing file)
+   * from a corrupt file, an unsupported storage format, or a snapshot that
+   * requires a format migration. The startup sweep needs exactly that
+   * distinction, so it uses this method.
+   *
+   * - ENOENT → `{ kind: "absent" }` (first run / never persisted).
+   * - Any other read failure (EACCES / EISDIR / …) is RETHROWN: a file that
+   *   EXISTS but cannot be read is an explicit error, never "no state" —
+   *   treating it as absent would re-provision a graph whose completed nodes
+   *   would then be re-executed (review 05-F6 / L22).
+   * - Hydration failures come back as their {@link EngineLoadResult} kind
+   *   (corrupt / unsupported / migration-required), attributed to their axis:
+   *   a storage-format mismatch is `dimension: "storage"`, an unregistered or
+   *   malformed execution-protocol identity is `dimension: "execution"`.
+   *   Either way the result is non-executable and the file is preserved. The
+   *   defensive containment catch is unreachable while
+   *   `loadEngineStateForResume` stays total; it exists for the same reason as
+   *   `load`'s and maps an impossible escape to `corrupt` instead of letting
+   *   it crash the sweep.
+   */
+  loadForResume(graphId: string): EngineLoadResult {
+    const filePath = engineStatePath(this.directory, graphId);
+    let raw: string;
+    try {
+      raw = readFileSync(filePath, "utf-8");
+    } catch (err) {
+      // ENOENT — first run / never persisted. Absent, not corrupt.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { kind: "absent" };
+      }
+      // Anything else means the file EXISTS but is unreadable — an explicit
+      // failure, never "no state" (see the method doc).
+      throw err;
+    }
+    try {
+      return loadEngineStateForResume(raw, filePath);
+    } catch (err) {
+      // Defensive containment: hydration must never throw past the store. A
+      // structurally invalid file surfaces as `corrupt` (non-executable),
+      // never as a crash that would make the graph permanently unrecoverable.
+      return {
+        kind: "corrupt",
+        dimension: "storage",
+        reason: `containment: ${errorText(err)}`,
+      };
+    }
+  }
+
+  /**
    * Load a graph's persisted engine state.
    *
    * Returns `null` (clean start / caller should provision a fresh engine) when:
    * - the state file does not exist (ENOENT);
    * - the JSON is corrupt / not an object;
-   * - the schema version does not match `ENGINE_PERSISTENCE_VERSION`;
+   * - the schema version is not decodable under the storage-format registry
+   *   (`DEFAULT_STORAGE_FORMAT_REGISTRY` registers exactly one decoder, for
+   *   `STORAGE_FORMAT_V2` — the version `ENGINE_PERSISTENCE_VERSION` writes —
+   *   and no migrations) — including a version that only a migration could
+   *   convert;
    * - the file is structurally invalid / missing a required field (total
    *   hydration — this method NEVER throws, so `recover()` can rely on `null`
    *   meaning "no valid persisted state");
@@ -711,6 +1055,12 @@ export class EnginePersistence {
    * normalized to `{ quorum: 1 }` with a `logWarn` (contract C1) — see
    * `normalizeJoinStrategy`.
    *
+   * This is the legacy null-only compatibility shell: it delegates to
+   * {@link loadForResume} and projects every non-`valid` kind onto `null`, so
+   * callers that treat "no valid state" as one clean-start signal keep their
+   * exact behavior. A caller that must distinguish the kinds (the startup
+   * sweep) uses {@link loadForResume} instead.
+   *
    * Non-ENOENT READ failures are NOT clean starts (review 05-F6 / L22): an
    * unreadable-but-present state file (EACCES, EISDIR, ...) is rethrown so the
    * caller surfaces the error explicitly instead of silently re-provisioning a
@@ -719,26 +1069,12 @@ export class EnginePersistence {
    * failure accounting of `recoverInterruptedGraphs` (engine-startup.ts).
    */
   load(graphId: string): EngineState | null {
-    const filePath = engineStatePath(this.directory, graphId);
-    let raw: string;
-    try {
-      raw = readFileSync(filePath, "utf-8");
-    } catch (err) {
-      // ENOENT — first run / never persisted. Clean start.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-      // Anything else means the file EXISTS but is unreadable — treat it as an
-      // explicit failure, never as "no state" (an EACCES/EISDIR file is not a
-      // clean start; treating it as one would re-execute completed nodes).
-      throw err;
-    }
-    try {
-      return loadEngineStateFromJson(raw, filePath);
-    } catch {
-      // Defensive containment: hydration must never throw past `load()`. A
-      // structurally invalid file surfaces as `null` (clean start), never as a
-      // crash that would make the graph permanently unrecoverable.
-      return null;
-    }
+    // Zero-behavior-change projection of the structured result: `valid` yields
+    // the state, and absent / corrupt / unsupported / migration-required all
+    // yield the same `null` this method always returned. Read errors still
+    // propagate (loadForResume rethrows them).
+    const result = this.loadForResume(graphId);
+    return result.kind === "valid" ? result.state : null;
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -790,9 +1126,1044 @@ export class EnginePersistence {
   }
 }
 
+// ── Persisted plan verification (B6 binding + B7 compiled plan) ─────────────
+
+/**
+ * Verdict of the load-side persisted-plan verification.
+ *
+ * - `absent` — neither a `planBinding` nor a `compiledPlan` is present. LEGAL:
+ *   a legacy graph with no compiled plan. Nothing is verified and nothing is
+ *   fabricated.
+ * - `verified` — every gate passed for the record(s) that ARE present:
+ *   `planRevision` is a non-empty string, every snapshot body hashes to its own
+ *   key, no two snapshots name one `(id, revision)` identity with different
+ *   digests, every bound ref resolves to an equal snapshot ref and every bound
+ *   node exists in the state — plus, for a compiled-plan record, that its whole
+ *   body hashes to its `planRevision` and its topology satisfies the plan-level
+ *   rules in `compiler/plan.ts`. When BOTH records are present they must also
+ *   agree.
+ * - `corrupt` — a persisted record violated one of those invariants. The
+ *   `reason` names the failed check and the offending digest key / node id.
+ *   This is the ONLY producer of the `contract` load dimension.
+ */
+export type PlanBindingVerdict =
+  | { readonly kind: "absent" }
+  | { readonly kind: "verified" }
+  | {
+      readonly kind: "corrupt";
+      readonly dimension: "contract";
+      readonly reason: string;
+    };
+
+/** Build a corrupt plan verdict — the `contract` axis is its only one. */
+function contractCorrupt(reason: string): PlanBindingVerdict {
+  return { kind: "corrupt", dimension: "contract", reason };
+}
+
+/** Describe a rejected persisted value for a diagnostic without ever throwing. */
+function describeBindingValue(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (typeof value === "object") return "an object";
+  try {
+    return String(value);
+  } catch {
+    return `a ${typeof value}`;
+  }
+}
+
+/** A contract ref as a diagnostic token: `"id"@"revision" (digest "…")`. */
+function describeContractRef(ref: ContractRef): string {
+  return `${JSON.stringify(ref.id)}@${JSON.stringify(ref.revision)} (digest ${JSON.stringify(ref.digest)})`;
+}
+
+/**
+ * The snapshot + node-binding rules, applied to ONE contract-bearing record.
+ *
+ * This is the ONE owner of those rules: the B6 `planBinding` gate and the B7
+ * compiled-plan gate both call it, so a rule cannot drift between the two
+ * records and a load can never admit a record a compiler could not produce.
+ * `label` names the record in every diagnostic ("plan binding" / "compiled
+ * plan"), so a failure says which record broke the rule.
+ *
+ * Checks, in this order (the first failure wins):
+ * (a) every `contractSnapshots` entry keyed by digest D has `ref.digest === D`
+ *     and a body whose `contractDigest` is D — the B4 digest is REUSED, never
+ *     re-implemented, and a body it rejects (a cycle, an accessor, an
+ *     unrepresentable value, an oversized tree) is contained here — and no two
+ *     entries name one `(id, revision)` identity with DIFFERENT digests, the
+ *     same one-identity-one-snapshot rule `createContractRegistry` enforces at
+ *     construction;
+ * (b) every `nodeBindings` entry resolves: its `ref.digest` keys a snapshot and
+ *     that snapshot ref equals the bound ref by identity (`contractRefsEqual`),
+ *     never by ordering;
+ * (c) no `nodeBindings` key names a node the persisted state does not declare.
+ *
+ * It does NOT check `planRevision`: what that field addresses differs by record
+ * (the plan body for a compiled plan, the plan revision for a binding), so each
+ * caller owns its own identity check.
+ */
+function verifyContractRecord(
+  value: Record<string, unknown>,
+  nodeIds: ReadonlySet<string>,
+  label: string,
+): { readonly ok: true } | { readonly ok: false; readonly reason: string } {
+  const contractSnapshots = value.contractSnapshots;
+  if (!isPlainObject(contractSnapshots)) {
+    return {
+      ok: false,
+      reason: `${label} contractSnapshots is not a record keyed by contract digest`,
+    };
+  }
+  const nodeBindings = value.nodeBindings;
+  if (!isPlainObject(nodeBindings)) {
+    return {
+      ok: false,
+      reason: `${label} nodeBindings is not a record keyed by node id`,
+    };
+  }
+
+  // (a) — digest-first, in key order, so a diagnostic is stable.
+  const snapshotsByDigest = new Map<string, ContractSnapshot>();
+  // One (id, revision) identity must have exactly ONE digest, or a consumer
+  // that resolves by identity (rather than by digest key) faces an ambiguous
+  // contract. Keyed id → revision → digest: ids and revisions are arbitrary
+  // persisted strings, so a concatenated key could collide.
+  const digestByIdentity = new Map<string, Map<string, string>>();
+  for (const digest of Object.keys(contractSnapshots).sort()) {
+    try {
+      const entry = contractSnapshots[digest];
+      if (!isPlainObject(entry)) {
+        return {
+          ok: false,
+          reason: `${label} contract snapshot ${JSON.stringify(digest)} is not a { ref, body } record`,
+        };
+      }
+      const ref = entry.ref;
+      if (!isContractRef(ref)) {
+        return {
+          ok: false,
+          reason: `${label} contract snapshot ${JSON.stringify(digest)} has no contract ref { id, revision, digest } of non-empty strings`,
+        };
+      }
+      if (ref.digest !== digest) {
+        return {
+          ok: false,
+          reason: `${label} contract snapshot ${JSON.stringify(digest)} declares ref.digest ${JSON.stringify(ref.digest)}, not its own key`,
+        };
+      }
+      const knownDigests =
+        digestByIdentity.get(ref.id) ?? new Map<string, string>();
+      const knownDigest = knownDigests.get(ref.revision);
+      if (knownDigest !== undefined && knownDigest !== digest) {
+        return {
+          ok: false,
+          reason: `${label} contract snapshots ${JSON.stringify(knownDigest)} and ${JSON.stringify(digest)} both name contract ${JSON.stringify(ref.id)}@${JSON.stringify(ref.revision)} — one exact (id, revision) identity has exactly one snapshot`,
+        };
+      }
+      knownDigests.set(ref.revision, digest);
+      digestByIdentity.set(ref.id, knownDigests);
+      // Read the body ONCE: the digest and the stored body must come from the
+      // same read, or a getter could pass one and answer another.
+      const body = entry.body;
+      const actual = contractDigest(body);
+      if (actual !== digest) {
+        return {
+          ok: false,
+          reason: `${label} contract snapshot ${JSON.stringify(digest)} body hashes to ${actual}, not its own key`,
+        };
+      }
+      snapshotsByDigest.set(digest, {
+        ref: { id: ref.id, revision: ref.revision, digest: ref.digest },
+        body,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `${label} contract snapshot ${JSON.stringify(digest)} was rejected: ${errorText(err)}`,
+      };
+    }
+  }
+
+  // (b) + (c) — one pass over the bound nodes, in node-id order.
+  for (const nodeId of Object.keys(nodeBindings).sort()) {
+    try {
+      const boundRef = nodeBindings[nodeId];
+      if (!isContractRef(boundRef)) {
+        return {
+          ok: false,
+          reason: `${label} node binding ${JSON.stringify(nodeId)} is not a contract ref { id, revision, digest } of non-empty strings`,
+        };
+      }
+      const snapshot = snapshotsByDigest.get(boundRef.digest);
+      if (snapshot === undefined) {
+        return {
+          ok: false,
+          reason: `${label} node binding ${JSON.stringify(nodeId)} references contract digest ${JSON.stringify(boundRef.digest)}, which contractSnapshots does not contain`,
+        };
+      }
+      if (!contractRefsEqual(snapshot.ref, boundRef)) {
+        return {
+          ok: false,
+          reason: `${label} node binding ${JSON.stringify(nodeId)} is ${describeContractRef(boundRef)}, but the snapshot at digest ${JSON.stringify(boundRef.digest)} is ${describeContractRef(snapshot.ref)}`,
+        };
+      }
+      if (!nodeIds.has(nodeId)) {
+        return {
+          ok: false,
+          reason: `${label} node binding references node id ${JSON.stringify(nodeId)}, which the persisted state does not declare`,
+        };
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `${label} node binding ${JSON.stringify(nodeId)} was rejected: ${errorText(err)}`,
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Verify one persisted plan binding (B6; re-meant by B7).
+ *
+ * This is the gate the format-2 decoder has always run for a `planBinding`,
+ * and it is exported because JSON TEXT cannot express the shapes its totality
+ * contract must survive (a getter that throws, a Proxy, a reference cycle), so
+ * those cases are reachable only by calling this — or the registered format-2
+ * decoder — with an in-memory value. It is PURE and TOTAL: every violation is a
+ * `corrupt` verdict, and a throw is contained rather than passed on.
+ *
+ * `planRevision` is only required to be a non-empty string HERE: since B7 it is
+ * the COMPILED PLAN content address — a foreign key into the `compiledPlan`
+ * record — not a digest of this record's own body, so a binding that stands
+ * alone has no body a load could recompute it from. When both records are
+ * present, {@link verifyPersistedPlan} requires the two revisions to be equal.
+ * The binding-body digest rule B6 applied is DELETED, not renamed: one name
+ * never means two identities.
+ *
+ * Every other rule comes from {@link verifyContractRecord} — the single owner
+ * of the snapshot and node-binding invariants.
+ */
+export function verifyPersistedPlanBinding(
+  value: unknown,
+  nodeIds: ReadonlySet<string>,
+): PlanBindingVerdict {
+  if (value === undefined) return { kind: "absent" };
+  try {
+    if (!isPlainObject(value)) {
+      return contractCorrupt(
+        "plan binding is not a record of { planRevision, contractSnapshots, nodeBindings }",
+      );
+    }
+    const planRevision = value.planRevision;
+    if (typeof planRevision !== "string" || planRevision.length === 0) {
+      return contractCorrupt(
+        `plan binding planRevision is ${describeBindingValue(planRevision)}, not a non-empty string`,
+      );
+    }
+    const record = verifyContractRecord(value, nodeIds, "plan binding");
+    if (!record.ok) return contractCorrupt(record.reason);
+    return { kind: "verified" };
+  } catch (err) {
+    // Totality backstop: a hostile container (a Proxy trap, a throwing getter
+    // on the binding record itself) is corrupt contract data, never a loader
+    // failure.
+    return contractCorrupt(`plan binding verification failed: ${errorText(err)}`);
+  }
+}
+
+/** The authoring grammar a compiled plan is always built from (B5). */
+const COMPILED_DECLARATION_VERSION = 3;
+
+/**
+ * Verify one persisted compiled-plan record (B7) against its own body.
+ *
+ * Same contract as {@link verifyPersistedPlanBinding}: PURE and TOTAL, every
+ * violation is `corrupt(contract)`, and a hostile record is contained rather
+ * than thrown. Checks, in this order:
+ * (a) shape — the record is an object, `planRevision` / `graphId` are non-empty
+ *     strings, `graphId` is the persisted graph's own id, the declaration version
+ *     is the grammar this build compiles (3), and `nodes` / `edges` /
+ *     `loopGroups` are arrays;
+ * (b) topology — {@link inspectCompiledTopology} applies the plan-level rules
+ *     the compiler guarantees (unique node ids, every edge endpoint declared,
+ *     every edge outcome declared by its source, loop membership and routes, a
+ *     positive traversal cap), and every node id the topology declares must be
+ *     one the persisted state declares;
+ * (b2) index — `nodeBindings` is the projection of the plan nodes it claims to
+ *     be: a node that declares a `contractRef` must appear with the same ref, a
+ *     node that declares none must not appear, and every key must be a topology
+ *     node id. The plan revision does not cover this field, so without the
+ *     projection a rebinding could hide behind an otherwise valid snapshot;
+ * (c) contracts — {@link verifyContractRecord} owns the snapshot and
+ *     node-binding rules for the record;
+ * (d) identity — `planRevision` is `contractDigest` over the record's own plan
+ *     body (`graphId`, `declarationVersion`, `nodes`, `edges`, `loopGroups`,
+ *     `contractSnapshots`), recomputed here from the persisted values, so a
+ *     tampered body or a revision copied from another plan is refused.
+ *     `nodeBindings` is deliberately NOT part of that body: it is the
+ *     projection checked in (b2).
+ *
+ * NOT proven here: the field-level schema of node and edge internals beyond
+ * the ids, outcomes, contract refs and topology the rules read (a node agent,
+ * prompt, completion policy, join or budget is opaque JSON covered by the plan
+ * revision), and the deliberately partial topology rule set
+ * (`inspectCompiledTopology` names the compiler rules it does not re-derive).
+ * The plan is not an execution authority in this slice (recovery still resumes
+ * from the declaration), so this gate proves identity and structure; a later
+ * consumer that makes the plan authoritative must extend this gate rather than
+ * trust it.
+ */
+export function verifyPersistedCompiledPlan(
+  value: unknown,
+  graphId: string,
+  nodeIds: ReadonlySet<string>,
+): PlanBindingVerdict {
+  if (value === undefined) return { kind: "absent" };
+  try {
+    if (!isPlainObject(value)) {
+      return contractCorrupt(
+        "compiled plan record is not a record of { graphId, declarationVersion, planRevision, nodes, edges, loopGroups, contractSnapshots, nodeBindings }",
+      );
+    }
+    const planRevision = value.planRevision;
+    if (typeof planRevision !== "string" || planRevision.length === 0) {
+      return contractCorrupt(
+        `compiled plan planRevision is ${describeBindingValue(planRevision)}, not a non-empty string`,
+      );
+    }
+    const recordGraphId = value.graphId;
+    if (typeof recordGraphId !== "string" || recordGraphId.length === 0) {
+      return contractCorrupt(
+        `compiled plan graphId is ${describeBindingValue(recordGraphId)}, not a non-empty string`,
+      );
+    }
+    if (recordGraphId !== graphId) {
+      return contractCorrupt(
+        `compiled plan graphId ${JSON.stringify(recordGraphId)} is not the persisted graphId ${JSON.stringify(graphId)}`,
+      );
+    }
+    if (value.declarationVersion !== COMPILED_DECLARATION_VERSION) {
+      return contractCorrupt(
+        `compiled plan declarationVersion is ${describeBindingValue(value.declarationVersion)}, not the compiled grammar ${COMPILED_DECLARATION_VERSION}`,
+      );
+    }
+    const nodes = value.nodes;
+    const edges = value.edges;
+    const loopGroups = value.loopGroups;
+    if (!Array.isArray(nodes)) {
+      return contractCorrupt("compiled plan nodes is not an array of compiled nodes");
+    }
+    if (!Array.isArray(edges)) {
+      return contractCorrupt("compiled plan edges is not an array of compiled edges");
+    }
+    if (!Array.isArray(loopGroups)) {
+      return contractCorrupt("compiled plan loopGroups is not an array of compiled loop groups");
+    }
+
+    // (b) TOPOLOGY — the plan-level rules, owned next to the plan shape.
+    const topology = inspectCompiledTopology(nodes, edges, loopGroups);
+    if (topology.issues.length > 0) {
+      const issue = topology.issues[0];
+      return contractCorrupt(
+        `compiled plan topology is inconsistent (${issue.code}): ${issue.message}`,
+      );
+    }
+    const topologyNodeIds = new Set(topology.nodeIds);
+    for (const nodeId of topology.nodeIds) {
+      if (!nodeIds.has(nodeId)) {
+        return contractCorrupt(
+          `compiled plan topology declares node id ${JSON.stringify(nodeId)}, which the persisted state does not declare`,
+        );
+      }
+    }
+
+    // (b2) INDEX — `nodeBindings` is the ONE record field the plan revision
+    // does not cover, so it is checked as what the type says it is: the
+    // projection of the plan nodes (`createPersistedCompiledPlan` builds it
+    // with `nodeBindingsOf`). Every node that declares a `contractRef` must
+    // appear with the SAME ref, a node that declares none must not appear, and
+    // every key must be a topology node id — otherwise a rebinding could hide
+    // behind an otherwise valid snapshot.
+    const rawNodeBindings = value.nodeBindings;
+    if (isPlainObject(rawNodeBindings)) {
+      const indexKeys = Object.keys(rawNodeBindings);
+      for (const raw of nodes) {
+        if (!isPlainObject(raw) || typeof raw.id !== "string") continue;
+        const nodeRef = raw.contractRef;
+        if (nodeRef === undefined) {
+          if (indexKeys.includes(raw.id)) {
+            return contractCorrupt(
+              `compiled plan node binding ${JSON.stringify(raw.id)} binds a node that declares no contractRef`,
+            );
+          }
+          continue;
+        }
+        if (!isContractRef(nodeRef)) {
+          return contractCorrupt(
+            `compiled plan node ${JSON.stringify(raw.id)} contractRef is not a contract ref { id, revision, digest } of non-empty strings`,
+          );
+        }
+        const boundRef = rawNodeBindings[raw.id];
+        if (!isContractRef(boundRef)) {
+          return contractCorrupt(
+            `compiled plan node ${JSON.stringify(raw.id)} declares a contractRef the nodeBindings index does not carry`,
+          );
+        }
+        if (!contractRefsEqual(boundRef, nodeRef)) {
+          return contractCorrupt(
+            `compiled plan node binding ${JSON.stringify(raw.id)} is ${describeContractRef(boundRef)}, but the node declares ${describeContractRef(nodeRef)}`,
+          );
+        }
+      }
+      for (const nodeId of [...indexKeys].sort()) {
+        if (!topologyNodeIds.has(nodeId)) {
+          return contractCorrupt(
+            `compiled plan node binding references node id ${JSON.stringify(nodeId)}, which its topology does not declare`,
+          );
+        }
+      }
+    }
+
+    // (c) CONTRACTS — the same rules the persisted binding is held to.
+    const contracts = verifyContractRecord(value, nodeIds, "compiled plan");
+    if (!contracts.ok) return contractCorrupt(contracts.reason);
+
+    // (d) IDENTITY — the compiler's own content address, recomputed over the
+    // record's plan body. `contractDigest` is reused, never re-implemented.
+    let bodyDigest: string;
+    try {
+      bodyDigest = contractDigest({
+        graphId: recordGraphId,
+        declarationVersion: value.declarationVersion,
+        nodes,
+        edges,
+        loopGroups,
+        contractSnapshots: value.contractSnapshots,
+      });
+    } catch (err) {
+      return contractCorrupt(
+        `compiled plan body was rejected by contractDigest: ${errorText(err)}`,
+      );
+    }
+    if (bodyDigest !== planRevision) {
+      return contractCorrupt(
+        `compiled plan planRevision ${JSON.stringify(planRevision)} is not the digest (${bodyDigest}) of its plan body`,
+      );
+    }
+    return { kind: "verified" };
+  } catch (err) {
+    return contractCorrupt(
+      `compiled plan verification failed: ${errorText(err)}`,
+    );
+  }
+}
+
+/**
+ * Verify everything a state persists about its compiled plan: the B7
+ * `compiledPlan` record, the B6 `planBinding`, and their agreement when both
+ * are present.
+ *
+ * Either record ALONE is legal and verified on its own terms: the plan record is
+ * the complete durable plan (its identity is recomputed from its own body),
+ * while a binding without a plan is the B6 record of a graph whose topology was
+ * never persisted — its snapshots and node bindings are verified, and its
+ * `planRevision` stays an unverifiable foreign key because no plan body is
+ * present to recompute it from. Requiring both would refuse states this build
+ * can still verify, and refusing a lone binding would silently drop the B6
+ * accepted set.
+ *
+ * When BOTH are present they must AGREE, and disagreement is corrupt(contract):
+ * the two records are projections of one compiled plan, so any difference means
+ * one of them was tampered with or copied from another plan. See
+ * {@link verifyPersistedPlanAgreement}.
+ */
+export function verifyPersistedPlan(
+  compiledPlan: unknown,
+  planBinding: unknown,
+  graphId: string,
+  nodeIds: ReadonlySet<string>,
+): PlanBindingVerdict {
+  const binding = verifyPersistedPlanBinding(planBinding, nodeIds);
+  if (binding.kind === "corrupt") return binding;
+  const plan = verifyPersistedCompiledPlan(compiledPlan, graphId, nodeIds);
+  if (plan.kind === "corrupt") return plan;
+  if (plan.kind === "absent" || binding.kind === "absent") {
+    return plan.kind === "absent" ? binding : plan;
+  }
+  return verifyPersistedPlanAgreement(compiledPlan, planBinding);
+}
+
+/**
+ * The agreement rules for a state that persists BOTH records.
+ *
+ * Reached only after both records passed their own gates, and still written as
+ * a TOTAL function: the shape guards below can only fire for a shape the gates
+ * would already have refused, and keeping them means a direct caller cannot
+ * make this throw. Checks:
+ * (a) the binding `planRevision` equals the plan `planRevision`;
+ * (b) every contract digest the binding REFERENCES — its snapshot keys and its
+ *     node binding refs — is one the plan pins;
+ * (c) every node the binding binds is bound by the plan to the SAME ref.
+ */
+function verifyPersistedPlanAgreement(
+  compiledPlan: unknown,
+  planBinding: unknown,
+): PlanBindingVerdict {
+  try {
+    if (!isPlainObject(compiledPlan) || !isPlainObject(planBinding)) {
+      return contractCorrupt(
+        "compiled plan and plan binding are both present but not comparable records",
+      );
+    }
+    const planRevision = compiledPlan.planRevision;
+    const bindingRevision = planBinding.planRevision;
+    if (bindingRevision !== planRevision) {
+      return contractCorrupt(
+        `plan binding planRevision ${JSON.stringify(bindingRevision)} does not equal the compiled plan planRevision ${JSON.stringify(planRevision)}`,
+      );
+    }
+    const planSnapshots = compiledPlan.contractSnapshots;
+    const bindingSnapshots = planBinding.contractSnapshots;
+    const planBindings = compiledPlan.nodeBindings;
+    const bindingBindings = planBinding.nodeBindings;
+    if (
+      !isPlainObject(planSnapshots) ||
+      !isPlainObject(bindingSnapshots) ||
+      !isPlainObject(planBindings) ||
+      !isPlainObject(bindingBindings)
+    ) {
+      return contractCorrupt(
+        "compiled plan and plan binding carry records the agreement check cannot compare",
+      );
+    }
+    // (b) Every digest the binding references, read from BOTH kinds of
+    // reference: a binding that keeps a snapshot the plan does not pin is a
+    // projection that disagrees with its plan, whether or not a node still
+    // binds it.
+    const referenced = new Set<string>(Object.keys(bindingSnapshots));
+    for (const boundRef of Object.values(bindingBindings)) {
+      if (isContractRef(boundRef)) referenced.add(boundRef.digest);
+    }
+    for (const digest of [...referenced].sort()) {
+      if (!Object.prototype.hasOwnProperty.call(planSnapshots, digest)) {
+        return contractCorrupt(
+          `plan binding references contract digest ${JSON.stringify(digest)}, which the compiled plan contractSnapshots does not contain`,
+        );
+      }
+    }
+    // (c) The plan and the binding must bind each node to the same identity.
+    for (const nodeId of Object.keys(bindingBindings).sort()) {
+      const boundRef = bindingBindings[nodeId];
+      if (!isContractRef(boundRef)) {
+        return contractCorrupt(
+          `plan binding node binding ${JSON.stringify(nodeId)} is not a contract ref`,
+        );
+      }
+      const planRef = planBindings[nodeId];
+      if (planRef === undefined) {
+        return contractCorrupt(
+          `plan binding binds node ${JSON.stringify(nodeId)}, which the compiled plan does not bind`,
+        );
+      }
+      if (!isContractRef(planRef)) {
+        return contractCorrupt(
+          `compiled plan node binding ${JSON.stringify(nodeId)} is not a contract ref`,
+        );
+      }
+      if (!contractRefsEqual(planRef, boundRef)) {
+        return contractCorrupt(
+          `plan binding binds node ${JSON.stringify(nodeId)} to ${describeContractRef(boundRef)}, but the compiled plan binds it to ${describeContractRef(planRef)}`,
+        );
+      }
+    }
+    return { kind: "verified" };
+  } catch (err) {
+    return contractCorrupt(
+      `compiled plan / plan binding agreement check failed: ${errorText(err)}`,
+    );
+  }
+}
+
+// ── Format-2 decoder and the default registry (B2) ──────────────────────────
+
+/**
+ * The registered decoder for storage format 2 — the SINGLE owner of the v2
+ * hydration gates.
+ *
+ * Every gate the loader used to run inline now lives in `decode`:
+ * `graphId` / `phase` presence, the top-level + node-level required-shape gate,
+ * the enum-vocabulary gate and `deserializeEngineState`. The method is TOTAL by
+ * contract (the registry capability's documented promise): each rejection path
+ * it owns answers `{ kind: "invalid", reason }` with the SAME diagnostic text
+ * the legacy loader emitted, and the surrounding try/catch contains anything a
+ * deeper malformation throws. It never returns a partial or unvalidated state,
+ * and it never throws — the loader maps `invalid` onto `corrupt` on the axis
+ * the verdict names: `storage` when it names none, and `contract` for a
+ * persisted plan binding or compiled-plan record that fails verification (see
+ * {@link verifyPersistedPlan}).
+ *
+ * It is ALSO the single owner of the one legitimate execution-protocol
+ * BACKFILL: format 2 IS the legacy signal protocol, so when a validated v2
+ * record carries no `executionProtocolVersion`, this decoder — and only this
+ * decoder — infers {@link LEGACY_SIGNAL_PROTOCOL} and the hydrated state
+ * carries it explicitly. A future format-3 decoder may not do the same: an
+ * absent identity there is resolved by nobody, stays `undefined`, and the
+ * loader reports `corrupt(execution)` — a new format never inherits the
+ * legacy identity by default.
+ *
+ * Kept module-private: the only supported way to obtain it is through
+ * {@link DEFAULT_STORAGE_FORMAT_REGISTRY}, which hands out the same frozen
+ * object.
+ */
+const STORAGE_FORMAT_V2_DECODER: StorageFormatDecoder = {
+  format: STORAGE_FORMAT_V2,
+  decode(parsed: unknown): StorageDecodeResult {
+    const file = parsed as Partial<EnginePersistenceFile>;
+    try {
+      if (typeof file.graphId !== "string") {
+        return {
+          kind: "invalid",
+          reason: "graphId is missing or not a string",
+        };
+      }
+      if (typeof file.phase !== "string") {
+        return {
+          kind: "invalid",
+          reason: "phase is missing or not a string",
+        };
+      }
+      // Required-field gate — a parseable-but-structurally-incomplete file is
+      // treated as corrupt. Absent fields would make deserializeEngineState
+      // throw on Object.entries / array-spread (see the module finding);
+      // gating presence here keeps the total-hydration contract total.
+      if (!hasRequiredShape(file)) {
+        return {
+          kind: "invalid",
+          reason: "required field missing or wrong type",
+        };
+      }
+      // R2: reject out-of-vocabulary enums BEFORE hydration — a
+      // corrupt-but-shape-valid file (`status:'bogus'`) must surface as
+      // corrupt, never as a state that crashes later in canTransitionNode.
+      assertValidEnums(file);
+      const state = deserializeEngineState(file as EnginePersistenceFile);
+      // B6/B7 CONTRACT GATE — the persisted plan binding and the persisted
+      // compiled-plan record are verified BEFORE this decoder may answer `ok`,
+      // so a tampered, stale, hostile or mutually inconsistent record is
+      // refused here and never becomes an executable state. EITHER record
+      // being ABSENT is legal (a legacy graph with no compiled plan, or a plan
+      // whose binding was never written) and skips the gates that need it. The
+      // verdict's axis is carried on the decoder's `invalid` result, so the
+      // loader reports corrupt(contract) instead of folding the failure into
+      // the storage axis.
+      const plan = verifyPersistedPlan(
+        state.compiledPlan,
+        state.planBinding,
+        state.graphId,
+        new Set(state.nodes.keys()),
+      );
+      if (plan.kind === "corrupt") {
+        return {
+          kind: "invalid",
+          reason: plan.reason,
+          dimension: "contract",
+        };
+      }
+      // B3 BACKFILL — owned HERE, by the format-2 (legacy) decoder, and
+      // nowhere else. If the record predates the field, format 2 IS the legacy
+      // signal protocol, so the hydrated state is given that identity
+      // explicitly; an explicit value is carried through untouched and the
+      // loader classifies it (bound / unsupported / corrupt). A decoder for a
+      // NEWER format deliberately does not do this, so a missing identity
+      // there surfaces as corrupt(execution) rather than a silent legacy run.
+      return {
+        kind: "ok",
+        state:
+          state.executionProtocolVersion === undefined
+            ? { ...state, executionProtocolVersion: LEGACY_SIGNAL_PROTOCOL }
+            : state,
+      };
+    } catch (err) {
+      // Deep structural invalidity (malformed nested shapes) or an
+      // out-of-vocabulary enum value is still corrupt — contained here, never
+      // thrown past the decoder or the loader.
+      return {
+        kind: "invalid",
+        reason: `hydration failed: ${errorText(err)}`,
+      };
+    }
+  },
+};
+
+/**
+ * The registry this build ships: exactly one decoder (format 2) and no
+ * migrations.
+ *
+ * `migrations` is intentionally empty — no on-disk predecessor format has a
+ * registered conversion, and this delivery deliberately ships no migrator. It
+ * stays a capability LIST rather than a hard-coded branch so a test (or a later
+ * release) can install a real migration and exercise the `migration-required`
+ * path without editing this module.
+ *
+ * Assembled HERE, not in `storage-format.ts`: that module owns the capability
+ * vocabulary and must stay a runtime dependency leaf, while the format-2
+ * decoder needs v2 hydration — which lives in this module. The registry is
+ * deeply frozen by {@link createStorageFormatRegistry}, so its accepted set
+ * cannot move after construction; widening support stays the injectable
+ * `registry` parameter's job.
+ */
+export const DEFAULT_STORAGE_FORMAT_REGISTRY: StorageFormatRegistry =
+  createStorageFormatRegistry({
+    current: STORAGE_FORMAT_V2,
+    decoders: [STORAGE_FORMAT_V2_DECODER],
+    migrations: [],
+  });
+
 // ── Standalone load (exported for direct, testable use) ─────────────────────
 
 /**
+ * Diagnostic for an `invalid` storage-format verdict: name what was received.
+ *
+ * The cases are worded separately on purpose — a missing field, a quoted `"2"`,
+ * a fractional `2.5`, `NaN` and `Infinity` are different defects, and the
+ * startup report must not make them read alike.
+ */
+function invalidFormatReason(value: unknown): string {
+  const expected = ": expected a positive safe integer";
+  if (value === undefined) return `storage format version is missing${expected}`;
+  if (value === null) return `storage format version is null${expected}`;
+  if (typeof value === "string") {
+    return `storage format version is the string ${JSON.stringify(value)}${expected}`;
+  }
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return `storage format version is NaN${expected}`;
+    if (value === Number.POSITIVE_INFINITY) {
+      return `storage format version is Infinity${expected}`;
+    }
+    if (value === Number.NEGATIVE_INFINITY) {
+      return `storage format version is -Infinity${expected}`;
+    }
+    if (!Number.isInteger(value)) {
+      return `storage format version is the non-integer number ${value}${expected}`;
+    }
+    if (value <= 0) {
+      return `storage format version is the non-positive number ${value}${expected}`;
+    }
+    return `storage format version is the unsafe integer ${value}${expected}`;
+  }
+  if (Array.isArray(value)) {
+    return `storage format version is an array${expected}`;
+  }
+  if (typeof value === "object") {
+    return `storage format version is an object${expected}`;
+  }
+  return `storage format version is a ${typeof value}${expected}`;
+}
+
+/**
+ * Diagnostic for an `invalid` execution-protocol verdict: name what was
+ * received.
+ *
+ * The mirror of {@link invalidFormatReason} on the execution axis — the same
+ * separate wording for a missing field, a quoted `"1"`, a fractional `1.5`,
+ * a non-positive `0`, `NaN` and `Infinity`, so a malformed protocol identity
+ * does not read like a malformed storage version.
+ */
+function invalidExecutionProtocolReason(value: unknown): string {
+  const expected = ": expected a positive safe integer";
+  if (value === undefined) {
+    return `execution protocol version is missing${expected}`;
+  }
+  if (value === null) {
+    return `execution protocol version is null${expected}`;
+  }
+  if (typeof value === "string") {
+    return `execution protocol version is the string ${JSON.stringify(value)}${expected}`;
+  }
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) {
+      return `execution protocol version is NaN${expected}`;
+    }
+    if (value === Number.POSITIVE_INFINITY) {
+      return `execution protocol version is Infinity${expected}`;
+    }
+    if (value === Number.NEGATIVE_INFINITY) {
+      return `execution protocol version is -Infinity${expected}`;
+    }
+    if (!Number.isInteger(value)) {
+      return `execution protocol version is the non-integer number ${value}${expected}`;
+    }
+    if (value <= 0) {
+      return `execution protocol version is the non-positive number ${value}${expected}`;
+    }
+    return `execution protocol version is the unsafe integer ${value}${expected}`;
+  }
+  if (Array.isArray(value)) {
+    return `execution protocol version is an array${expected}`;
+  }
+  if (typeof value === "object") {
+    return `execution protocol version is an object${expected}`;
+  }
+  return `execution protocol version is a ${typeof value}${expected}`;
+}
+
+/**
+ * Classify one decoded protocol identity with containment.
+ *
+ * {@link classifyExecutionProtocol} is total for a well-formed registry, so
+ * the `probe-failed` arm is unreachable today; it exists for the same reason
+ * as {@link validateMigrationSource}: a handler probe is a registered
+ * capability and COULD throw (a hostile or hand-built registry whose
+ * `version` getter rejects), and the loader documents a total contract. A
+ * throw maps onto `corrupt(execution)`: the file is preserved, the graph
+ * stays non-executable, and an identity that could not be verified is never
+ * bound to a handler and never silently run under legacy rules.
+ */
+function classifyProtocolContained(
+  value: unknown,
+  registry: ExecutionProtocolRegistry,
+): ExecutionProtocolVerdict | { kind: "probe-failed"; reason: string } {
+  try {
+    return classifyExecutionProtocol(value, registry);
+  } catch (err) {
+    return { kind: "probe-failed", reason: errorText(err) };
+  }
+}
+
+/**
+ * Parse a raw state-file string and return a structured {@link EngineLoadResult}
+ * that keeps every non-valid outcome distinguishable. Shared by
+ * {@link EnginePersistence.loadForResume} so the full version / malformation
+ * gate is testable without touching the filesystem.
+ *
+ * **Total hydration**: this function NEVER throws. A file that is corrupt JSON,
+ * missing a usable version discriminator, structurally invalid at any deeper
+ * level, or carrying an out-of-vocabulary enum value (`status` / `joinStrategy`
+ * / `phase`) comes back as `corrupt`; a numeric version the registry does not
+ * decode comes back as `unsupported` (storage) or `migration-required`. A
+ * parseable-but-field-incomplete file must never make recovery throw, because
+ * that would leave the graph permanently unrecoverable (re-failing every
+ * restart). Missing required fields are treated as CORRUPT, not as a migration
+ * point — `ENGINE_PERSISTENCE_VERSION` stays `2`.
+ *
+ * Gate order — the SAME accepted input set as the legacy null-shaped loader
+ * for every file the legacy loader already accepted; the execution-protocol
+ * gate (4) is the one new gate that can refuse a file it would have run:
+ * 1. JSON.parse failure / non-object → `corrupt(storage)`;
+ * 2. a `version` that is not a legal format identifier — missing, `null`, a
+ *    string, a non-integer, a non-positive number, `NaN` / `Infinity`, or an
+ *    integer outside the safe range — → `corrupt(storage)`, via the
+ *    classifier's `invalid` verdict (a file with no usable discriminator is
+ *    malformed, not an unsupported format);
+ * 3. a legal identifier → {@link classifyStorageFormat} selects the registered
+ *    CAPABILITY for it, and the loader dispatches on that capability — it never
+ *    re-derives support from the number:
+ *    - `decodable` → the registered decoder's `decode(parsed)` owns every gate
+ *      of its own format (graphId / phase presence, the required-shape gate
+ *      including its node level, the enum gate and hydration) and is total:
+ *      `ok` → the protocol gate below; `invalid` → `corrupt(storage)`
+ *      carrying the decoder's reason. The decoder also RESOLVES the record's
+ *      execution-protocol identity — the format-2 decoder backfills
+ *      `LEGACY_SIGNAL_PROTOCOL` when the field is absent, any other decoder
+ *      leaves it unresolved — and VERIFIES the persisted plan records (the B6
+ *      binding and the B7 compiled plan), marking the `invalid` verdict with
+ *      the `contract` axis when one fails or the two disagree;
+ *    - `migratable` → the registered migration's `validateSource(parsed)` runs
+ *      FIRST: a rejected source is `corrupt(storage)` (the body violates the
+ *      format it claims to be, so there is nothing safe to convert), and only
+ *      an accepted source is `migration-required`. The body is never validated
+ *      against the TARGET layout — that belongs to the conversion. Protocol
+ *      selection for a conversion is pinned by the conversion itself, so no
+ *      protocol identity is guessed here;
+ *    - `unsupported` → `unsupported` carrying the raw value, WITHOUT validating
+ *      the body ("Unknown, structurally valid storage version →
+ *      `unsupported(storage)`; do not validate its body against today's
+ *      layout").
+ * 4. EXECUTION-PROTOCOL gate — the identity the decoder resolved is classified
+ *    by {@link classifyExecutionProtocol} against the protocol registry, with
+ *    the SAME legality rule as the storage classifier (positive safe integer,
+ *    membership decides support):
+ *    - `bound` → `valid{state, storageFormat, executionProtocol}`;
+ *    - `invalid` → `corrupt(execution)` naming what was received; an
+ *      unresolved identity (a future format that lacks the field) lands here
+ *      too, so it is never guessed as legacy;
+ *    - `unsupported` → `unsupported(execution)` carrying the legal version —
+ *      a protocol without a registered handler is REFUSED, never run under
+ *      legacy rules.
+ *
+ * `_sourceLabel` is retained for signature compatibility with the read path
+ * (the file path) and is currently unused — the raw string is the whole input.
+ */
+export function loadEngineStateForResume(
+  raw: string,
+  _sourceLabel?: string,
+  registry: StorageFormatRegistry = DEFAULT_STORAGE_FORMAT_REGISTRY,
+  protocolRegistry: ExecutionProtocolRegistry = LEGACY_EXECUTION_PROTOCOL_REGISTRY,
+): EngineLoadResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      kind: "corrupt",
+      dimension: "storage",
+      reason: `corrupt JSON: ${errorText(err)}`,
+    };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      kind: "corrupt",
+      dimension: "storage",
+      reason: "not a JSON object",
+    };
+  }
+  const file = parsed as Partial<EnginePersistenceFile>;
+  // Version gate — the classifier owns which values are legal format
+  // identifiers; the loader only maps its verdict onto a load result. An
+  // illegal identifier is a malformed discriminator, hence corrupt(storage) —
+  // NOT a format this build does not support. `invalid` is handled explicitly
+  // (no `default:`): a future verdict member must be classified here rather
+  // than silently folded into one of today's outcomes.
+  const verdict = classifyStorageFormat(file.version, registry);
+  if (verdict.kind === "invalid") {
+    return {
+      kind: "corrupt",
+      dimension: "storage",
+      reason: invalidFormatReason(verdict.value),
+    };
+  }
+  if (verdict.kind === "decodable") {
+    // The registered decoder owns this exact format AND every gate that
+    // decides whether the body is a member of it. Its total contract means a
+    // rejected body is a DATA verdict (corrupt), never a missing capability.
+    const decoded = verdict.decoder.decode(parsed);
+    if (decoded.kind === "invalid") {
+      return {
+        kind: "corrupt",
+        // The decoder OBSERVED the violation, so it owns the axis: a decoder
+        // that names none rejected the body against its own format (the
+        // historical storage verdict), while the format-2 decoder names
+        // `contract` only when a persisted plan record fails verification.
+        dimension: decoded.dimension ?? "storage",
+        reason: decoded.reason,
+      };
+    }
+    // EXECUTION-PROTOCOL gate (B3). The decoder resolved this format's
+    // protocol identity; the classifier — the single owner of which protocol
+    // identifiers are legal, and of whether one has a registered handler —
+    // turns it into a verdict. The format-2 decoder backfills the legacy
+    // identity for an absent field; a decoder for any other format resolves
+    // nothing, so an absent value is a malformed identity here (corrupt),
+    // never a silent legacy run.
+    const protocol = classifyProtocolContained(
+      decoded.state.executionProtocolVersion,
+      protocolRegistry,
+    );
+    // Defensive arm, kept deliberately: classification is total for a
+    // well-formed registry, but a hand-built / hostile one whose handler
+    // probe throws must still surface as a non-executable load result
+    // (corrupt execution), never as a crash that would make the graph
+    // permanently unrecoverable.
+    if (protocol.kind === "probe-failed") {
+      return {
+        kind: "corrupt",
+        dimension: "execution",
+        reason: `execution protocol handler probe threw: ${protocol.reason}`,
+      };
+    }
+    if (protocol.kind === "invalid") {
+      return {
+        kind: "corrupt",
+        dimension: "execution",
+        reason: invalidExecutionProtocolReason(protocol.value),
+      };
+    }
+    if (protocol.kind === "unsupported") {
+      // A legal protocol identity with no registered handler: the file is
+      // intact but this build has no decision rules for it — refuse, never
+      // substitute the legacy handler.
+      return {
+        kind: "unsupported",
+        dimension: "execution",
+        detail: String(protocol.version),
+      };
+    }
+    return {
+      kind: "valid",
+      state: decoded.state,
+      storageFormat: verdict.format,
+      executionProtocol: protocol.version,
+    };
+  }
+  if (verdict.kind === "migratable") {
+    // Source validation FIRST, before any migration promise: an intact source
+    // is merely missing a capability (migration-required), while a source that
+    // violates its own format is corrupt data. Collapsing the two would either
+    // promise a conversion for garbage or report a build limitation as bad
+    // data.
+    const source = validateMigrationSource(verdict.migration, parsed);
+    if (!source.ok) {
+      return {
+        kind: "corrupt",
+        dimension: "storage",
+        reason: `migration source (format ${verdict.from}) failed validation: ${source.reason}`,
+      };
+    }
+    // The source passed ITS format's check. The body is still never validated
+    // against today's layout — it belongs to the source format, and the
+    // conversion owns the rest.
+    return {
+      kind: "migration-required",
+      dimension: "storage",
+      from: verdict.from,
+      to: verdict.to,
+    };
+  }
+  return {
+    kind: "unsupported",
+    dimension: "storage",
+    detail: String(verdict.format),
+  };
+}
+
+/**
+ * Run a migration's `validateSource` with containment.
+ *
+ * `validateSource` is a registered capability, so it could throw; this loader
+ * documents a total contract ("this function NEVER throws"). A throw is
+ * therefore mapped onto the same `{ ok: false, reason }` shape a returned
+ * rejection uses, keeping the caller's corrupt-vs-migration-required decision
+ * intact and the diagnostic honest about what happened.
+ */
+function validateMigrationSource(
+  migration: StorageFormatMigration,
+  parsed: unknown,
+): { ok: true } | { ok: false; reason: string } {
+  try {
+    return migration.validateSource(parsed);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `validateSource threw: ${errorText(err)}`,
+    };
+  }
+}
+
+/**
+ * Legacy null-shaped compatibility wrapper around
+ * {@link loadEngineStateForResume}.
+ *
+ * New callers that must distinguish `absent` / `corrupt` / `unsupported` /
+ * `migration-required` should call {@link loadEngineStateForResume} (or
+ * {@link EnginePersistence.loadForResume}) directly. This function exists only
+ * so callers that treat "not a valid state" as one clean-start signal keep
+ * their exact behavior: it is a strict projection of the structured result —
+ * `valid` → the hydrated state, every other kind → `null`.
+ *
  * Parse a raw state-file string and return the hydrated {@link EngineState},
  * or `null` when it is not a valid version-`2` engine state file. Shared by
  * {@link EnginePersistence.load} so the version/malformation gate is testable
@@ -812,35 +2183,8 @@ export function loadEngineStateFromJson(
   raw: string,
   _sourceLabel?: string,
 ): EngineState | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null; // corrupt JSON
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const file = parsed as Partial<EnginePersistenceFile>;
-  // Version gate — a mismatched schema is a migration/clean-start point.
-  if (file.version !== ENGINE_PERSISTENCE_VERSION) return null;
-  if (typeof file.graphId !== "string") return null;
-  if (typeof file.phase !== "string") return null;
-  // Required-field gate — a parseable-but-structurally-incomplete file is
-  // treated as corrupt. Absent fields would make deserializeEngineState throw
-  // on Object.entries / array-spread (see the module finding); gating presence
-  // here keeps the corrupt-to-null contract total (never throws).
-  if (!hasRequiredShape(file)) return null;
-  try {
-    // R2: reject out-of-vocabulary enums BEFORE hydration — a
-    // corrupt-but-shape-valid file (`status:'bogus'`) must surface as `null`
-    // (clean start), never as a state that crashes later in canTransitionNode.
-    assertValidEnums(file);
-    return deserializeEngineState(file as EnginePersistenceFile);
-  } catch {
-    // Deep structural invalidity (malformed nested shapes) or an
-    // out-of-vocabulary enum value is still corrupt — contained to `null`,
-    // never thrown past the loader.
-    return null;
-  }
+  const result = loadEngineStateForResume(raw, _sourceLabel);
+  return result.kind === "valid" ? result.state : null;
 }
 
 /**

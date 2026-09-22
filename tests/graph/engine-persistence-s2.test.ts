@@ -35,6 +35,7 @@ import {
   cloneCheckpointHistory,
   type EnginePersistenceFile,
 } from "../../src/graph/engine/engine-persistence.ts";
+import { LEGACY_SIGNAL_PROTOCOL } from "../../src/graph/protocol/execution-protocol.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -189,8 +190,14 @@ describe("M10 — terminalNotified persistence", () => {
       const loaded = store.load("g-s2-4")!;
       expect(loaded.terminalNotified).toEqual({ complete: true, blocked: false });
 
-      // DTO-level lossless: serialize(load(save(state))) === serialize(state).
-      expect(serializeEngineState(loaded)).toEqual(dto);
+      // DTO-level lossless: serialize(load(save(state))) === serialize(state),
+      // except that hydration materializes the bound execution-protocol
+      // identity (B3) the fresh state never set. The identity is additive:
+      // the state went in without a key and came back explicitly legacy.
+      expect(serializeEngineState(loaded)).toEqual({
+        ...dto,
+        executionProtocolVersion: LEGACY_SIGNAL_PROTOCOL,
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

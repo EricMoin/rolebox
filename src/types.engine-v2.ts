@@ -20,6 +20,11 @@ import type { GraphDeclaration, LoopGroupDecl, NodeBudgetSpec } from "./types.gr
 import type { EnginePhase, NodeStatus } from "./constants.ts";
 import type { MaterializedResultRef } from "./dispatch/types.ts";
 import type { UsageRecord } from "./dispatch/budget/budget-tracker.ts";
+import type {
+  ContractRef,
+  ContractSnapshot,
+} from "./graph/contracts/contract-definition.ts";
+import type { PersistedCompiledPlan } from "./graph/compiler/plan.ts";
 
 // ── Engine State ────────────────────────────────────────────────────────
 
@@ -172,6 +177,96 @@ export interface EngineState {
    * again across engine instances (monitor-audit F15 / M10 exact-once).
    */
   terminalNotified?: { complete: boolean; blocked: boolean };
+
+  /**
+   * The execution protocol this graph's semantics belong to — an identity on
+   * its own axis, independent of the storage format and the authoring
+   * declaration version.
+   *
+   * OPTIONAL-ADDITIVE — absent in files written before this field existed, and
+   * for states that never bound one. Absence is deliberately NOT
+   * self-describing: the format-2 decoder is the one component allowed to
+   * infer `LEGACY_SIGNAL_PROTOCOL` for it, because format 2 IS the
+   * legacy layout. A future storage format that lacks the field is corrupt,
+   * never guessed as legacy. When present, the loader classifies the value
+   * against the execution-protocol registry and refuses an unregistered one
+   * instead of running it under legacy rules.
+   */
+  executionProtocolVersion?: number;
+
+  /**
+   * The durable compiled-plan record this graph runs under (B7): the plan's
+   * identity, its compiled topology, its pinned contract snapshots and its
+   * node→contract index, exactly as `CompiledPlan` compiles them.
+   *
+   * OPTIONAL-ADDITIVE — absent means "no compiled plan was ever persisted" and
+   * is LEGAL: such a state serializes with no key at all and loads exactly as
+   * it did before this field existed. When present, the format-2 decoder
+   * verifies it before the load may answer `valid`: the record's
+   * `planRevision` is recomputed from its own body, its topology is checked
+   * against the compiler's plan-level rules, and its snapshots/bindings are
+   * held to the same rules as the persisted binding. Any violation is
+   * `corrupt(contract)`; a record is never repaired or fabricated.
+   *
+   * RECOVERY DOES NOT READ THIS FIELD YET. The engine still resumes from the
+   * retained `graphDeclaration`; nothing consumes the plan, and switching
+   * recovery onto it is a later slice. The field is written and verified so the
+   * record's identity and rules exist before a producer or a recovery switch
+   * depends on them, and so nobody assumes the plan is already authoritative.
+   */
+  compiledPlan?: PersistedCompiledPlan;
+
+  /**
+   * The persisted binding of the compiled plan this graph runs under: the
+   * plan's revision, the immutable contract snapshots it binds, and each node's
+   * contract reference.
+   *
+   * OPTIONAL-ADDITIVE — absent means "legacy graph with no compiled plan" and
+   * is LEGAL: such a state serializes with no key at all and loads exactly as
+   * it did before this field existed. When present, the format-2 decoder
+   * verifies it before the load may answer `valid` and refuses a tampered or
+   * stale binding as `corrupt(contract)`; a binding is never repaired,
+   * re-resolved or fabricated.
+   *
+   * `planRevision` is the COMPILED PLAN's content address — the same identity
+   * `compiledPlan.planRevision` carries — and therefore a foreign key into
+   * that record, NOT a digest recomputed from this record's own body (see
+   * {@link PlanBinding}). A binding that stands alone has no plan body to
+   * resolve the key against; when both records are present the load requires
+   * the two revisions to be equal.
+   */
+  planBinding?: PlanBinding;
+}
+
+/**
+ * The persisted contract binding of one compiled plan (B6; RE-MEANT in B7).
+ *
+ * `planRevision` is the COMPILED PLAN's content address — the same
+ * `CompiledPlan.planRevision` the `compiledPlan` record carries. B6 computed
+ * it over this record's own binding body `{ contractSnapshots, nodeBindings }`
+ * because the topology was not persisted, so the field name claimed one
+ * identity (the plan's revision) while holding another (a digest of the
+ * binding). B7 removes that second meaning: the binding-body digest rule is
+ * DELETED, not renamed, and the load compares this revision with the plan
+ * record's when both are present. A binding that stands alone keeps the field
+ * as an unverifiable foreign key rather than a self-address, because there is
+ * no plan body to recompute it from.
+ *
+ * `contractSnapshots` is keyed by CONTRACT DIGEST: each entry's body must hash
+ * to its own key and its `ref.digest` must equal that key, so a snapshot's
+ * content identity is proven rather than declared; and one `(id, revision)`
+ * identity maps to exactly one digest, the same rule
+ * `createContractRegistry` enforces at construction. `nodeBindings` maps each
+ * bound node id to the exact `ContractRef` the plan resolved for it; the
+ * bound ref must equal the snapshot's ref by identity, never by ordering.
+ */
+export interface PlanBinding {
+  /** The compiled plan's content address, shared with `compiledPlan`. */
+  readonly planRevision: string;
+  /** The immutable contract snapshots this plan binds, keyed by digest. */
+  readonly contractSnapshots: Readonly<Record<string, ContractSnapshot>>;
+  /** Each bound node's exact contract reference, keyed by node id. */
+  readonly nodeBindings: Readonly<Record<string, ContractRef>>;
 }
 
 // ── Join Strategy (runtime) ─────────────────────────────────────────────
