@@ -1192,6 +1192,114 @@ so a single round-2 arrival cannot re-arm it. No existing assertion encoded the
 old overwrite; the reducer, reader and version tests were extended rather than
 rewritten.
 
+D4 MAKES A HARD LIMIT END THE RUN IN A PERSISTED STOP, IN THE ACCEPTANCE
+TRANSACTION (defect 3).
+
+The defect this closes was reproduced end to end: a continuation past a loop
+group's `max_traversals` was refused (`loop-limit-exceeded`, zero writes) and
+the graph then stayed `phase: executing` FOREVER with the emitting node
+`dispatched` — no durable stop, no reason, no round, no recovery rule and no
+legal way to finish short of a forged approval. The refusal was right; what was
+missing was an ending.
+
+A CAP NO LONGER ROLLS THE ACCEPTANCE BACK. The outcome that asks for the
+over-cap round is a real, ACCEPTED result: its node settles, its receipt and
+its accepted event commit, and the reducer refuses only the CONTINUATION — the
+round is not taken, the group's counter does not move (it stands ON the cap)
+and NO successor of that outcome is armed, so not even a branch the outcome
+also routes to is started. The stop travels out of the reducer inside the state
+the same acceptance transaction writes, so the commit is one batch: receipt +
+accepted event + pending effects + graph state. A crash therefore leaves either
+the previous state with nothing committed (the submission is retryable) or the
+stopped state with its receipt — never "the continuation was refused and no
+stop was recorded", and never "the stop was recorded and the state did not
+move". `phase` becomes `stopped`, which is deliberately NOT `complete`:
+`complete` says the run has no work left, while `stopped` says it was cut short.
+
+THE REASON VOCABULARY IS CLOSED AND MACHINE-DECIDABLE.
+`src/graph/outcome/graph-state.ts` owns `OUTCOME_STOP_REASONS` — today exactly
+`loop-exhausted` — and `OutcomeStop`, a union discriminated by it. Every member
+is a condition the runtime decides from the plan and the persisted state, never
+a judgement about the work ("review passed", "failed") and never something
+derived from a worker's prose. A persisted body carrying a reason this build
+does not define is `malformed-state`, so a reader never reports a stop whose
+meaning it does not have. `loop-limit-exceeded` is RETIRED as a refusal code:
+the decision it named is now the stop REASON, and keeping a refusal code no
+path can produce would claim a vocabulary this build does not have. A further
+stopping policy (the deferred progress evaluator, which needs a declared
+stopping policy in the plan) extends the union with a member, its shape and a
+reader case — it never widens an existing reason.
+
+THE STOP FABRICATES NO SETTLEMENT. It settles exactly the node whose outcome
+was accepted and writes exactly that outcome's accepted event: it substitutes
+no exit outcome for the continuation it refused, invents no attempt, and
+settles no node that did not answer. A node still recorded in flight stays in
+flight — no outcome settled it, so nothing is written for it. A test asserts
+the accepted-event stream is exactly the workers' answers in order, with no
+event for the loop's exit outcome, and that every settled node is corroborated
+by exactly its own event.
+
+THE STOP IS THE WHOLE RUN'S, AND THAT IS A STATED DECISION. A capped loop
+could in principle be stopped on its own while other branches keep running;
+this protocol does not do that. The reasons are where the decision lives (the
+reducer's own comment): an accepted outcome routes as ONE transition, so
+arming only part of its successors is a state the model cannot describe; the
+declared caps are run-level resources of one graph; and a graph that continued
+past a capped loop would eventually report `complete` — the phase a run that
+finished properly reports — for a run that was cut short. So `phase` becomes
+`stopped`, in-flight branches are left exactly where they are (not settled, not
+dropped, not re-armed), and `advanceOutcomeGraph` refuses to advance a stopped
+state at all: a submission from any branch is refused with `graph-stopped`
+(naming the reason, the group and the cap) and writes nothing.
+
+RECOVERY READS THE STOP, REPORTS IT AND CONTINUES NOTHING. `resume` reads the
+graph state from the ledger as before and, when it carries a stop, launches NO
+effect (not even a `pending` one the crash window left behind), marks no effect
+`started`, arms NOTHING, and answers `resumed` with the `stop` record itself, an
+empty armed list and a `graph-stopped` refusal per node still recorded in
+flight. Reading and reporting are the whole call, so a second resume is
+idempotent by construction: the same report, the same row, no writes. The
+startup sweep reports the stop twice over — in the resume line (`phase stopped,
+STOPPED by loop-exhausted (loop …, round n/m, attempt …)`) and in its own
+`outcomeProtocol.stopped[]` bucket — so a run that ended on a declared hard
+limit is never counted as one that merely continued.
+
+STATE-BODY VERSION 4 ADDS THE FIELD, AND VERSIONS 1 TO 3 STAY READABLE. The
+body gains a `stop` record that is present EXACTLY when `phase` is `stopped`;
+a `stopped` body without one and a running body that carries one are both
+`malformed-state`, because the phase and the record are one fact written twice.
+The phase vocabulary is per-layout too: versions 1 to 3 cannot produce
+`stopped`, so a version-3 body carrying either the phase or the field is
+refused rather than read with a meaning its writer never had. The reader
+verifies the stop against the plan and the very entries it is stored beside —
+the group must be declared, its cap must be the plan's, the node must be a
+member, the outcome must be that group's continuation, the node's entry must
+be SETTLED on that attempt with that outcome, the round must equal the recorded
+counter, and that counter must equal the cap (the round that would have
+exceeded it was never taken) — so an invented stop is refused rather than
+trusted and a self-contradicting one is refused rather than corrected. There is
+no migrator, as with the credential and the arrivals: a stop is a fact about a
+decision the run took, and one invented on read would fabricate the ending.
+
+ENFORCED BY TESTS. The over-cap submission is accepted with a durable
+`loop-exhausted` stop (reason, group, round, cap and trigger attempt) and zero
+dispatches; the counter stands on the cap; a branch that is still in flight is
+left in flight and its outcome is refused with `graph-stopped`; repeating the
+stopping submission replays its receipt, moves nothing and clears nothing; the
+accepted-event stream contains only the workers' answers; the three existing
+assertions that encoded "refused, still executing, nothing written" were
+REWRITTEN to the new contract (each carries the reason it changed); the reader
+refuses every self-contradicting or out-of-vocabulary stop; and a restart
+reports the stop, launches and arms nothing, dispatches nothing on a second
+sweep, and leaves the row byte-identical.
+
+DEFERRED by this slice, and not implied by it: the progress evaluator and the
+declared stopping policy that would produce a `progress-stalled` reason, effect
+EXECUTION beyond the dispatch seam, the protocol-aware dispatch completion
+bridge, storage format 3 with its `2 -> 3` migrator, the
+`src/graph/persistence/load.ts` module move, adapters/schema compatibility, the
+typed-predicate vocabulary, and any `src/dispatch/**` change.
+
 ### Definitions, locations, and comparison owners
 
 | Axis | Definition owner | Durable location | Comparison owner and rule |

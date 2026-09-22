@@ -24,14 +24,41 @@
  * the group is the loop's exit. A settled target outside the source's group is
  * refused rather than silently reset, and the declared `continuationOutcome` is
  * what advances the group's bounded traversal counter — a cap that would be
- * exceeded refuses the whole acceptance instead of running one round past it.
+ * exceeded is never run: the round is not taken, the counter does not move, and
+ * the run STOPS with that cap recorded as the reason.
  * A node may belong to SEVERAL declared loop groups, so the groups a
  * continuation advances are selected by DECLARATION — the groups that declare
  * this outcome as their continuation and contain the emitting node — never by
  * position: selecting the first group that merely contains the node can select a
  * group this outcome is not the continuation of, leaving the loop that was
- * actually re-entered unbounded. Every selected group advances, and any cap that
- * would be exceeded refuses.
+ * actually re-entered unbounded. Every selected group advances together, and
+ * the continuation is refused as a whole when ANY of their caps would be
+ * exceeded — a hard cap a node could route around is not hard.
+ *
+ * A HARD CAP ENDS THE RUN IN A PERSISTED STOP — NEVER IN A STUCK RUN. The
+ * outcome that asked for the over-cap round is still a real, ACCEPTED result:
+ * its node settles, its receipt and accepted event are committed, and the
+ * reducer writes a {@link OutcomeStop} into the SAME state body and the SAME
+ * acceptance transaction, so a crash can never separate "the continuation was
+ * refused" from "the stop was recorded". The stop names a reason from the
+ * CLOSED, machine-decidable vocabulary {@link OUTCOME_STOP_REASONS} — never a
+ * judgement about the work — together with the loop group, the round it had
+ * reached and the cap it hit. Nothing else is settled and nothing is dispatched:
+ * the stop fabricates no accepted event and substitutes no outcome for the one
+ * the worker reported.
+ *
+ * THE STOP IS THE WHOLE GRAPH'S, AND THAT IS A DECISION, NOT AN OVERSIGHT. A
+ * capped loop could in principle be stopped on its own while other branches keep
+ * running, but this protocol does not do that: the graph is a run whose limits
+ * are declared per loop, an accepted outcome routes as ONE transition (arming
+ * only part of its successors is a state the model cannot describe), and a
+ * graph that continued past a capped loop would report `complete` — the same
+ * phase a run that finished properly reports — for a run that was cut short.
+ * So a capped loop stops the RUN: `phase` becomes `stopped`, every other node
+ * stays exactly where it was (an in-flight branch is NOT settled, because no
+ * outcome settled it), and {@link advanceOutcomeGraph} refuses to advance a
+ * stopped state at all, so a stopped run never quietly becomes an executing one
+ * again.
  *
  * ATTEMPT IDENTITY. Attempt ids are minted HERE, from a graph-wide counter the
  * state carries, never supplied by a worker: `<nodeId>#<seq>`. A settled node
@@ -203,8 +230,77 @@ export interface OutcomeArrival {
  * attempt is in flight. `complete` — the run has started, nothing is in flight,
  * and every node that was ever dispatched has settled. A node the run never
  * reached stays `pending` and does not hold the graph open.
+ *
+ * `stopped` — the run ENDED without finishing: a declared hard limit refused a
+ * continuation, so the graph will take no further step. It is deliberately NOT
+ * `complete`: `complete` says the run has no work left, while `stopped` says
+ * the run was cut short and why (see {@link OutcomeStop}). An in-flight branch
+ * may still be recorded on a node entry — the stop settles nothing that no
+ * outcome settled — and the run path refuses every submission such an attempt
+ * makes.
  */
-export type OutcomeGraphPhase = "ready" | "executing" | "complete";
+export type OutcomeGraphPhase =
+  | "ready"
+  | "executing"
+  | "complete"
+  | "stopped";
+
+/**
+ * Why an outcome-protocol run STOPPED. A CLOSED, MACHINE-DECIDABLE vocabulary.
+ *
+ * Every member names a condition the runtime decided from the plan and the
+ * persisted state alone — `loop-exhausted` is "a declared loop group's hard
+ * `max_traversals` cap refused the next continuation". No member is a judgement
+ * about the work ("review passed", "failed") and no member is derived from a
+ * worker's prose: a stop reasons about a DECLARED limit, never about a result.
+ *
+ * The set is closed PER BUILD — {@link OUTCOME_STOP_REASONS} is the one source a
+ * reader and a writer share, and a body carrying a reason this build does not
+ * define is refused rather than read with an unknown reason. A further stopping
+ * policy (a progress evaluator, say) adds a member to the union, its shape and
+ * a case in the reader's switch — it never widens a reason in place.
+ */
+export type OutcomeStopReason = "loop-exhausted";
+
+/** The stop reasons this build defines, in canonical order. */
+export const OUTCOME_STOP_REASONS: readonly OutcomeStopReason[] = Object.freeze([
+  "loop-exhausted",
+]);
+
+/**
+ * The stop one declared loop group's hard cap produces.
+ *
+ * It records the DECISION, not a narrative: which group's cap bound, which
+ * accepted outcome asked to continue past it, the round the group had reached
+ * and the cap itself. `traversals` is the counter as it stands — the number of
+ * continuations the group actually took — and it equals `maxTraversals`
+ * precisely because the round that would have exceeded the cap was NOT taken and
+ * the counter did not move. A reader refuses a stop whose numbers disagree with
+ * the state it is stored in.
+ */
+export interface OutcomeLoopExhaustedStop {
+  readonly reason: "loop-exhausted";
+  /** The declared loop group whose hard cap binds this run. */
+  readonly loopGroupId: string;
+  /** The node whose accepted outcome could not continue. */
+  readonly nodeId: string;
+  /** The continuation outcome that asked for the refused round. */
+  readonly outcomeId: string;
+  /** The attempt of {@link nodeId} that was settled by that outcome. */
+  readonly attemptId: string;
+  /** Continuations this group has taken: equal to {@link maxTraversals}. */
+  readonly traversals: number;
+  /** The declared hard cap the refused continuation would have exceeded. */
+  readonly maxTraversals: number;
+  /** Epoch milliseconds the stop was committed at. */
+  readonly stoppedAt: number;
+}
+
+/**
+ * The persisted record of a stopped run: a closed union discriminated by
+ * {@link OutcomeStopReason}. This build defines exactly one member.
+ */
+export type OutcomeStop = OutcomeLoopExhaustedStop;
 
 /**
  * The persisted state of one outcome-protocol graph.
@@ -230,6 +326,17 @@ export interface OutcomeGraphState {
   readonly loopTraversals: Readonly<Record<string, number>>;
   /** The graph-wide attempt counter the last mint advanced. */
   readonly attemptSeq: number;
+  /**
+   * The durable stop this run ended on, present EXACTLY when
+   * {@link phase} is `stopped` (body version 4 and later).
+   *
+   * A version that does not define this field cannot record a stop at all, which
+   * is why such a body can never report one and a body of a version that does
+   * define it must agree with its own phase: a reader refuses a `stopped` body
+   * with no stop and a running body that carries one, instead of trusting one of
+   * two representations over the other.
+   */
+  readonly stop?: OutcomeStop;
 }
 
 // ── The state-body format ───────────────────────────────────────────────────
@@ -245,11 +352,11 @@ export const OUTCOME_STATE_BODY_V1 = 1 as const;
  * node entry carries the runtime-issued `attemptCredential` the attempt's
  * worker must present when it submits an outcome.
  *
- * This is the layout this build writes. Version 1 stays readable (a reader is
- * installed for it) but its attempts carry no credential and therefore cannot
- * be settled by this build; no migrator exists, because a credential is issued
- * at dispatch and a value invented on read would not be the one the worker
- * holds.
+ * This was the layout this build wrote before version 3 added join arrivals.
+ * Version 1 stays readable (a reader is installed for it) but its attempts carry
+ * no credential and therefore cannot be settled by this build; no migrator
+ * exists, because a credential is issued at dispatch and a value invented on
+ * read would not be the one the worker holds.
  */
 export const OUTCOME_STATE_BODY_V2 = 2 as const;
 
@@ -272,6 +379,26 @@ export const OUTCOME_STATE_BODY_V2 = 2 as const;
 export const OUTCOME_STATE_BODY_V3 = 3 as const;
 
 /**
+ * The fourth versioned state-body layout: the body carries a `stop` record
+ * exactly when the run ENDED on a declared hard limit, and `phase` gains
+ * `stopped` (see {@link OutcomeStop}).
+ *
+ * WHY A STOP IS LAYOUT AND NOT AN EXTRA. Until this version a capped loop left
+ * the graph `executing` forever: the refusal rolled back with the whole
+ * acceptance, so nothing durable said the run could not continue, and no reader
+ * could tell a run that was cut short from one that was still working. Version 3
+ * cannot describe that state at all — it has no field for a reason and no phase
+ * for it — so this is a new layout rather than a new meaning for an old one.
+ * Versions 1 to 3 stay READABLE (their completed graphs report cleanly and their
+ * in-flight attempts are still recoverable), are never advanced, and are not
+ * migrated: a stop is a fact about a decision the run actually took, and
+ * inventing one on read would fabricate the ending.
+ *
+ * This is the layout this build writes.
+ */
+export const OUTCOME_STATE_BODY_V4 = 4 as const;
+
+/**
  * The state-body format this build writes.
  *
  * The body version is its OWN axis, separate from the storage format
@@ -280,7 +407,7 @@ export const OUTCOME_STATE_BODY_V3 = 3 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V3;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V4;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -508,15 +635,19 @@ function readOptionalEpoch(
 }
 
 /**
- * One state-body layout's node shape: the fields the version defines per
- * status, and whether it requires the attempt credential the run path checks a
- * submission against.
+ * One state-body layout: the NODE fields the version defines per status, the
+ * BODY fields it defines, the phases its writer can produce, and whether it
+ * requires the attempt credential the run path checks a submission against.
  */
-interface OutcomeNodeLayout {
+interface OutcomeStateLayout {
   /** The exact body version this layout belongs to, for diagnostics. */
   readonly version: number;
   /** The fields the version defines, exactly, per status. */
   readonly keys: Readonly<Record<OutcomeNodeStatus, readonly string[]>>;
+  /** The BODY-level fields the version defines, exactly. */
+  readonly bodyKeys: readonly string[];
+  /** The phases this version's writer can produce, in canonical order. */
+  readonly phases: readonly OutcomeGraphPhase[];
   /**
    * `required` — every dispatched/settled entry must carry
    * `attemptCredential`; `forbidden` — the version does not define the field.
@@ -529,13 +660,50 @@ interface OutcomeNodeLayout {
    * wrote.
    */
   readonly arrivals: "required" | "forbidden";
+  /**
+   * `defined` — the version defines the body-level `stop` field (version 4
+   * and later), which its writer writes EXACTLY when the run stopped;
+   * `forbidden` — the version does not define it, so a body that carries one
+   * is refused rather than read with a field this version never wrote.
+   */
+  readonly stop: "defined" | "forbidden";
 }
 
+/**
+ * The BODY-level fields versions 1 to 3 define, exactly. Versions 1 and 2 add a
+ * NODE-level field only (the credential, then the arrival list), so the three
+ * layouts share this list; version 4 adds the body-level `stop`.
+ */
+const OUTCOME_STATE_BODY_KEYS_THROUGH_V3: readonly string[] = Object.freeze([
+  "bodyVersion",
+  "graphId",
+  "planRevision",
+  "phase",
+  "nodes",
+  "loopTraversals",
+  "attemptSeq",
+]);
+
+/** The phases versions 1 to 3 can produce: no version before 4 can stop. */
+const OUTCOME_STATE_PHASES_THROUGH_V3: readonly OutcomeGraphPhase[] =
+  Object.freeze(["ready", "executing", "complete"]);
+
+/** The phases version 4 can produce: the three above, plus the stop. */
+const OUTCOME_STATE_PHASES_V4: readonly OutcomeGraphPhase[] = Object.freeze([
+  "ready",
+  "executing",
+  "complete",
+  "stopped",
+]);
+
 /** The node fields body version 1 defines, exactly, per status. */
-const OUTCOME_NODE_LAYOUT_V1: OutcomeNodeLayout = Object.freeze({
+const OUTCOME_STATE_LAYOUT_V1: OutcomeStateLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V1,
+  bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
+  phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "forbidden" as const,
   arrivals: "forbidden" as const,
+  stop: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status"]),
     dispatched: Object.freeze([
@@ -562,10 +730,13 @@ const OUTCOME_NODE_LAYOUT_V1: OutcomeNodeLayout = Object.freeze({
  * runtime-issued `attemptCredential`, which a dispatched or settled entry
  * MUST carry and a pending entry must not.
  */
-const OUTCOME_NODE_LAYOUT_V2: OutcomeNodeLayout = Object.freeze({
+const OUTCOME_STATE_LAYOUT_V2: OutcomeStateLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V2,
+  bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
+  phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "required" as const,
   arrivals: "forbidden" as const,
+  stop: "forbidden" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status"]),
     dispatched: Object.freeze([
@@ -596,10 +767,53 @@ const OUTCOME_NODE_LAYOUT_V2: OutcomeNodeLayout = Object.freeze({
  * dispatched or settled one keeps the arrivals that armed it, because they are
  * the record of what the join saw.
  */
-const OUTCOME_NODE_LAYOUT_V3: OutcomeNodeLayout = Object.freeze({
+const OUTCOME_STATE_LAYOUT_V3: OutcomeStateLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V3,
+  bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
+  phases: OUTCOME_STATE_PHASES_THROUGH_V3,
   credential: "required" as const,
   arrivals: "required" as const,
+  stop: "forbidden" as const,
+  keys: Object.freeze({
+    pending: Object.freeze(["nodeId", "status", "arrivals"]),
+    dispatched: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "dispatchedAt",
+      "arrivals",
+    ]),
+    settled: Object.freeze([
+      "nodeId",
+      "status",
+      "attemptId",
+      "attemptSeq",
+      "attemptCredential",
+      "outcomeId",
+      "dispatchedAt",
+      "settledAt",
+      "arrivals",
+    ]),
+  }),
+});
+
+/**
+ * The node fields body version 4 defines: version 3's fields, unchanged. The
+ * new axis is at the BODY level — the `stop` record a capped run ends on — so
+ * an entry of this version is exactly an entry of version 3.
+ */
+const OUTCOME_STATE_LAYOUT_V4: OutcomeStateLayout = Object.freeze({
+  version: OUTCOME_STATE_BODY_V4,
+  bodyKeys: Object.freeze([
+    ...OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
+    "stop",
+  ]),
+  phases: OUTCOME_STATE_PHASES_V4,
+  credential: "required" as const,
+  arrivals: "required" as const,
+  stop: "defined" as const,
   keys: Object.freeze({
     pending: Object.freeze(["nodeId", "status", "arrivals"]),
     dispatched: Object.freeze([
@@ -637,7 +851,7 @@ function rejectUnknownNodeFields(
   raw: Record<string, unknown>,
   status: OutcomeNodeStatus,
   where: string,
-  layout: OutcomeNodeLayout,
+  layout: OutcomeStateLayout,
 ): void {
   const defined = layout.keys[status];
   for (const key of Object.keys(raw)) {
@@ -664,7 +878,7 @@ function readNodeState(
   raw: unknown,
   expected: CompiledNode,
   index: number,
-  layout: OutcomeNodeLayout,
+  layout: OutcomeStateLayout,
   plan: CompiledPlan,
 ): OutcomeNodeState {
   const where = "nodes[" + index + "]";
@@ -914,40 +1128,263 @@ function readLoopTraversals(
 }
 
 /**
- * The BODY-level fields every registered layout defines, exactly — what the
- * writer produces. Version 2 adds a NODE-level field only, so both layouts
- * share this list.
- */
-const OUTCOME_STATE_BODY_V1_KEYS: readonly string[] = Object.freeze([
-  "bodyVersion",
-  "graphId",
-  "planRevision",
-  "phase",
-  "nodes",
-  "loopTraversals",
-  "attemptSeq",
-]);
-
-/**
- * Refuse every body field the layouts this build reads do not define.
+ * Refuse every body field the DECLARED body version does not define.
  *
  * An unknown field is a shape this build cannot read, not something to skip: a
  * reader that ignored it would drop it from the state it writes back. Adding a
  * field is declaring a new body version, and a version this build does not read
- * is refused before any field is examined. Every layout this build registers
- * defines the same BODY-level fields (version 2 adds a node-level field), so
- * this check is deliberately version-independent.
+ * is refused before any field is examined. The check is per-layout rather than
+ * version-independent because version 4 adds a BODY-level field: a version-3
+ * body carrying `stop` is a shape version 3 never wrote, not a version-4 body.
  */
-function rejectUnknownBodyFields(body: Record<string, unknown>): void {
+function rejectUnknownBodyFields(
+  body: Record<string, unknown>,
+  layout: OutcomeStateLayout,
+): void {
   for (const key of Object.keys(body)) {
-    if (!OUTCOME_STATE_BODY_V1_KEYS.includes(key)) {
+    if (!layout.bodyKeys.includes(key)) {
       throw malformedState(
-        "the body carries field " + JSON.stringify(key) + ", which the registered state-body " +
-          "layouts do not define — an unknown field is refused rather than dropped; adding a " +
+        "the body carries field " + JSON.stringify(key) + ", which body version " +
+          layout.version +
+          " does not define — an unknown field is refused rather than dropped; adding a " +
           "field is a new body version",
       );
     }
   }
+}
+
+/**
+ * Read one stop record, or refuse the body that carries it.
+ *
+ * The stop is present EXACTLY when the run stopped: a `stopped` body must carry
+ * one (otherwise the state says the run ended and cannot say why), and a body
+ * that is not stopped must not (otherwise the state claims an ending that never
+ * happened). A version that does not define the field refuses one outright.
+ *
+ * The vocabulary is closed: `reason` is dispatched against
+ * {@link OUTCOME_STOP_REASONS}, and a reason this build does not define is a
+ * malformed body rather than a stop read with an unknown meaning.
+ */
+function readStop(
+  raw: unknown,
+  phase: OutcomeGraphPhase,
+  layout: OutcomeStateLayout,
+  where: string,
+): OutcomeStop | undefined {
+  if (layout.stop === "forbidden") {
+    if (raw !== undefined) {
+      throw malformedState(
+        where + ".stop is present, but body version " + layout.version +
+          " does not define a stop record — a version that cannot represent a stop never " +
+          "recorded one, so the field is refused rather than read",
+      );
+    }
+    return undefined;
+  }
+  if (phase !== "stopped") {
+    if (raw !== undefined) {
+      throw malformedState(
+        where + ".stop is present, but phase is " + describeValue(phase) +
+          " — a stop record and the phase of `stopped` are the same fact written twice, and " +
+          "this body states them differently",
+      );
+    }
+    return undefined;
+  }
+  if (!isRecord(raw)) {
+    throw malformedState(
+      where + ".stop is " + describeValue(raw) +
+        ", not the stop record a stopped run carries — a body that ended cannot leave the " +
+        "reason unrecorded",
+    );
+  }
+  const reason = readStopReason(raw.reason, where);
+  switch (reason) {
+    case "loop-exhausted":
+      return readLoopExhaustedStop(raw, where);
+    default: {
+      // Unreachable while the vocabulary is what `readStopReason` admits; kept
+      // so a member added to the union without a reader is a COMPILE error here
+      // rather than a stop silently read as unknown.
+      const unread: never = reason;
+      throw malformedState(
+        where + ".stop.reason is " + describeValue(unread) + ", which has no reader",
+      );
+    }
+  }
+}
+
+/**
+ * Read one stop reason against the CLOSED vocabulary, or refuse it.
+ *
+ * The membership test is the whole check: a reason the plan and the state did not
+ * decide is malformed data, not a stop with a meaning this build does not know.
+ */
+function readStopReason(value: unknown, where: string): OutcomeStopReason {
+  const declared = OUTCOME_STOP_REASONS.find((candidate) => candidate === value);
+  if (declared === undefined) {
+    throw malformedState(
+      where + ".stop.reason is " + describeValue(value) + ", not a stop reason this build " +
+        "defines — the vocabulary is closed and every member is a condition decided from the " +
+        "plan and the state [" + OUTCOME_STOP_REASONS.join(", ") + "]",
+    );
+  }
+  return declared;
+}
+
+/** The fields one {@link OutcomeLoopExhaustedStop} defines, exactly. */
+const OUTCOME_LOOP_EXHAUSTED_STOP_KEYS: readonly string[] = Object.freeze([
+  "reason",
+  "loopGroupId",
+  "nodeId",
+  "outcomeId",
+  "attemptId",
+  "traversals",
+  "maxTraversals",
+  "stoppedAt",
+]);
+
+/** Read the one stop reason this build decides, field by field. */
+function readLoopExhaustedStop(
+  raw: Record<string, unknown>,
+  where: string,
+): OutcomeLoopExhaustedStop {
+  const at = where + ".stop";
+  for (const key of Object.keys(raw)) {
+    if (!OUTCOME_LOOP_EXHAUSTED_STOP_KEYS.includes(key)) {
+      throw malformedState(
+        at + " carries field " + JSON.stringify(key) +
+          ", which a loop-exhausted stop does not define — an unknown field is refused rather " +
+          "than dropped",
+      );
+    }
+  }
+  const loopGroupId = readNonEmptyId(raw.loopGroupId, at, "loopGroupId");
+  const nodeId = readNonEmptyId(raw.nodeId, at, "nodeId");
+  const outcomeId = readNonEmptyId(raw.outcomeId, at, "outcomeId");
+  const attemptId = readNonEmptyId(raw.attemptId, at, "attemptId");
+  const traversals = readPositiveCount(raw.traversals, at, "traversals");
+  const maxTraversals = readPositiveCount(raw.maxTraversals, at, "maxTraversals");
+  const stoppedAt = readOptionalEpoch(raw, "stoppedAt", at);
+  if (stoppedAt === undefined) {
+    throw malformedState(at + " carries no stoppedAt timestamp");
+  }
+  return Object.freeze({
+    reason: "loop-exhausted" as const,
+    loopGroupId,
+    nodeId,
+    outcomeId,
+    attemptId,
+    traversals,
+    maxTraversals,
+    stoppedAt,
+  });
+}
+
+/** Read one required non-empty identifier field, or refuse it. */
+function readNonEmptyId(value: unknown, where: string, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw malformedState(
+      where + "." + field + " is " + describeValue(value) + ", not a non-empty identifier",
+    );
+  }
+  return value;
+}
+
+/** Read one required positive-safe-integer field, or refuse it. */
+function readPositiveCount(value: unknown, where: string, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw malformedState(
+      where + "." + field + " is " + describeValue(value) + ", not a positive safe integer",
+    );
+  }
+  return value;
+}
+
+/**
+ * Verify one stop against the plan and the entries it is stored beside.
+ *
+ * The stop is a MATERIALIZATION of a decision the run took, exactly as the
+ * arrival list is: the named group must be declared, its cap must be the cap the
+ * plan declares, the named node must be a member of it, the outcome must be that
+ * group's declared continuation, the node's own entry must be SETTLED by that
+ * outcome on that attempt, and the round must be the counter the state records.
+ * That counter EQUALS the cap, because the round that would have exceeded it was
+ * never taken — a stop whose numbers say otherwise is a body this writer could
+ * not have produced, so it is refused rather than trusted (an invented stop
+ * would end a run that never hit a limit) or silently corrected.
+ */
+function verifyStop(
+  plan: CompiledPlan,
+  nodes: readonly OutcomeNodeState[],
+  loopTraversals: Readonly<Record<string, number>>,
+  stop: OutcomeStop,
+): void {
+  const group = plan.loopGroups.find((entry) => entry.id === stop.loopGroupId);
+  if (group === undefined) {
+    throw malformedState(
+      "the stop names loop group " + JSON.stringify(stop.loopGroupId) +
+        ", which plan revision " + plan.planRevision + " does not declare",
+    );
+  }
+  if (group.maxTraversals !== stop.maxTraversals) {
+    throw malformedState(
+      "the stop records a hard cap of " + stop.maxTraversals + " for loop group " +
+        JSON.stringify(stop.loopGroupId) + ", but the plan declares " + group.maxTraversals,
+    );
+  }
+  if (!group.nodes.includes(stop.nodeId)) {
+    throw malformedState(
+      "the stop names node " + JSON.stringify(stop.nodeId) + ", which is not a member of loop " +
+        "group " + JSON.stringify(stop.loopGroupId),
+    );
+  }
+  if (group.continuationOutcome !== stop.outcomeId) {
+    throw malformedState(
+      "the stop names outcome " + JSON.stringify(stop.outcomeId) + ", but loop group " +
+        JSON.stringify(stop.loopGroupId) + " declares " +
+        JSON.stringify(group.continuationOutcome) + " as its continuation",
+    );
+  }
+  const entry = nodes.find((node) => node.nodeId === stop.nodeId);
+  if (
+    entry === undefined ||
+    entry.status !== "settled" ||
+    entry.outcomeId !== stop.outcomeId ||
+    entry.attemptId !== stop.attemptId
+  ) {
+    throw malformedState(
+      "the stop records attempt " + JSON.stringify(stop.attemptId) + " of node " +
+        JSON.stringify(stop.nodeId) + " settling with outcome " +
+        JSON.stringify(stop.outcomeId) + ", but the node entries do not " +
+        "(entry: " + describeNodeEntry(entry) +
+        ") — a stop no accepted outcome corroborates is refused rather than trusted",
+    );
+  }
+  const recorded = loopTraversals[stop.loopGroupId] ?? 0;
+  if (recorded !== stop.traversals) {
+    throw malformedState(
+      "the stop records " + stop.traversals + " traversal(s) of loop group " +
+        JSON.stringify(stop.loopGroupId) + ", but loopTraversals records " + recorded,
+    );
+  }
+  if (stop.traversals !== stop.maxTraversals) {
+    throw malformedState(
+      "the stop records traversal " + stop.traversals + " of a cap of " + stop.maxTraversals +
+        " — a cap refused the round that would have EXCEEDED it, so the counter it stopped on " +
+        "is the cap itself",
+    );
+  }
+}
+
+/** Describe one node entry for a diagnostic, without inventing fields. */
+function describeNodeEntry(entry: OutcomeNodeState | undefined): string {
+  if (entry === undefined) return "none";
+  return (
+    entry.status +
+    (entry.attemptId === undefined ? "" : " on " + entry.attemptId) +
+    (entry.outcomeId === undefined ? "" : " by " + entry.outcomeId)
+  );
 }
 
 /**
@@ -963,9 +1400,9 @@ function rejectUnknownBodyFields(body: Record<string, unknown>): void {
 function readStateBody(
   body: Record<string, unknown>,
   plan: CompiledPlan,
-  layout: OutcomeNodeLayout,
+  layout: OutcomeStateLayout,
 ): OutcomeGraphState {
-  rejectUnknownBodyFields(body);
+  rejectUnknownBodyFields(body, layout);
   // The body carries the record's identity redundantly. A body that disagrees
   // with the plan is refused rather than read and rewritten with the plan's
   // value — silently correcting a field is the same class of loss as dropping
@@ -982,12 +1419,17 @@ function readStateBody(
         ", but the record and the plan name " + JSON.stringify(plan.planRevision),
     );
   }
-  const phase = body.phase;
-  if (phase !== "ready" && phase !== "executing" && phase !== "complete") {
+  const phase = layout.phases.find((declared) => declared === body.phase);
+  if (phase === undefined) {
     throw malformedState(
-      "phase is " + describeValue(phase) + ", not ready, executing or complete",
+      "phase is " + describeValue(body.phase) + ", not " + layout.phases.join(", ") +
+        " — the phase vocabulary of body version " + layout.version + " is closed",
     );
   }
+  // The stop is read before the entries so a `stopped` body that carries no
+  // reason is refused as such, and it is cross-checked against the entries once
+  // they are readable (below).
+  const stop = readStop(body.stop, phase, layout, "the body");
   const attemptSeq = body.attemptSeq;
   if (
     typeof attemptSeq !== "number" ||
@@ -1014,14 +1456,19 @@ function readStateBody(
   // corroborate (a stalled join) or invents one they do not (an unearned arm)
   // is refused rather than trusted or silently corrected.
   if (layout.arrivals === "required") verifyArrivals(plan, nodes);
+  const loopTraversals = readLoopTraversals(body.loopTraversals, plan);
+  // The stop is a materialization of the decision it records, so it is checked
+  // against the plan and the very entries it is stored beside.
+  if (stop !== undefined) verifyStop(plan, nodes, loopTraversals, stop);
   return Object.freeze({
     bodyVersion: layout.version,
     graphId: plan.graphId,
     planRevision: plan.planRevision,
     phase,
     nodes: Object.freeze(nodes),
-    loopTraversals: readLoopTraversals(body.loopTraversals, plan),
+    loopTraversals,
     attemptSeq,
+    ...(stop === undefined ? {} : { stop }),
   });
 }
 
@@ -1035,7 +1482,7 @@ function readStateBody(
  * OutcomeStateError is a programming error and still propagates.
  */
 function stateBodyReader(
-  layout: OutcomeNodeLayout,
+  layout: OutcomeStateLayout,
 ): OutcomeStateBodyReader {
   return Object.freeze({
     format: layout.version,
@@ -1055,15 +1502,17 @@ function stateBodyReader(
   });
 }
 
-const OUTCOME_STATE_BODY_V1_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V1);
-const OUTCOME_STATE_BODY_V2_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V2);
-const OUTCOME_STATE_BODY_V3_READER = stateBodyReader(OUTCOME_NODE_LAYOUT_V3);
+const OUTCOME_STATE_BODY_V1_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V1);
+const OUTCOME_STATE_BODY_V2_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V2);
+const OUTCOME_STATE_BODY_V3_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V3);
+const OUTCOME_STATE_BODY_V4_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V4);
 
 /**
- * The state-body capabilities this build installs: version 3 (what it writes,
- * with attempt credentials AND join arrivals), and versions 2 and 1 as readable
- * older layouts whose attempts the run path refuses to advance — version 2
- * records no arrivals and version 1 no credential, and neither is migrated.
+ * The state-body capabilities this build installs: version 4 (what it writes,
+ * with attempt credentials, join arrivals AND the stop a capped run ends on),
+ * and versions 3, 2 and 1 as readable older layouts whose attempts the run path
+ * refuses to advance — version 3 cannot record a stop, version 2 records no
+ * arrivals and version 1 no credential, and none is migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
@@ -1072,6 +1521,7 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
       OUTCOME_STATE_BODY_V1_READER,
       OUTCOME_STATE_BODY_V2_READER,
       OUTCOME_STATE_BODY_V3_READER,
+      OUTCOME_STATE_BODY_V4_READER,
     ],
   });
 
@@ -1086,7 +1536,9 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
  * {@link OutcomeStateError}: a version this build cannot read is refused with
  * `unsupported-state-version` rather than trimmed (the fields it does not know
  * would be lost on the next write), and a state this build cannot read is never
- * guessed at and never silently replaced.
+ * guessed at and never silently replaced. A version that DOES define the stop
+ * field must agree with itself about it: `phase: stopped` and a stop record are
+ * one fact written twice.
  */
 export function readOutcomeGraphState(
   record: GraphStateRecord,
@@ -1446,10 +1898,18 @@ export type OutcomeAdvanceRefusalCode =
   | "attempt-mismatch"
   /** The outcome is not terminal and no edge routes it. */
   | "no-route"
-  /** Applying this continuation would exceed the loop group's hard cap. */
-  | "loop-limit-exceeded"
-  /** The route re-enters a settled node outside its declared loop group. */
+  /**
+   * The route re-enters a settled node outside its declared loop group.
+   */
   | "reentry-outside-loop"
+  /**
+   * The run is STOPPED: a declared hard limit already ended it, so no further
+   * outcome advances this state — not on the node that hit the limit (which is
+   * settled and replays its receipt instead) and not on any branch that is
+   * still recorded in flight. A stopped run is never quietly resumed by a
+   * submission; the stop is reported and left exactly as it is.
+   */
+  | "graph-stopped"
   /**
    * The state says an attempt settled and the ledger holds no accepted event
    * for it. Thrown by the run path's join, not by {@link advanceOutcomeGraph}:
@@ -1472,6 +1932,10 @@ export type OutcomeAdvanceRefusalCode =
  * Thrown from inside the acceptance transaction, so the refusal rolls back the
  * receipt, the accepted event and every pending effect with it: a state that
  * cannot legally advance leaves the graph exactly where it was.
+ *
+ * A HARD CAP IS NOT ONE OF THESE. Running one round past a declared limit is
+ * refused, but the outcome that asked for it is still ACCEPTED and the run ends
+ * on a persisted {@link OutcomeStop} instead — see {@link advanceOutcomeGraph}.
  */
 export class OutcomeAdvanceRefusedError extends Error {
   readonly code: OutcomeAdvanceRefusalCode;
@@ -1570,15 +2034,22 @@ function continuationGroups(
  * The rules, in order:
  * 0. the state must be written in the CURRENT body layout — a version that
  *    cannot carry attempt credentials and join arrivals is refused instead of
- *    being advanced and rewritten in a newer one;
+ *    being advanced and rewritten in a newer one — and it must not already be
+ *    STOPPED: a stopped run takes no further step, so the advance is refused
+ *    with the reason the run ended rather than quietly clearing it;
  * 1. the decision's node must be a plan node, currently dispatched, on the
  *    attempt the decision names — otherwise the acceptance does not describe
  *    the state in hand and the advance is refused;
  * 2. a terminal outcome settles the node and arms nothing;
  * 3. any other outcome must route somewhere (the plan's terminal list is the
  *    complement of its edges, so a non-terminal with no edge is a defect);
- * 4. a declared loop continuation advances that group's counter and refuses
- *    when the hard cap would be exceeded — one round past the cap is never run;
+ * 4. a declared loop continuation advances that group's counter — and when the
+ *    hard cap would be exceeded the round is NOT taken, the counter does not
+ *    move, and the run STOPS: the outcome is still accepted, its node settles,
+ *    no successor of that outcome is armed, and the stop is written into the
+ *    returned state so the same transaction that accepted the outcome records
+ *    why the run can go no further (one round past the cap is never run, and a
+ *    capped run is never left `executing` with nothing able to move it);
  * 5. a successor is armed only when its declared JOIN is satisfied by the
  *    arrivals its feeders have produced, and only when it is not already in
  *    flight: an unsatisfied join arms NOTHING (it waits — see
@@ -1601,6 +2072,22 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         ", which cannot carry the attempt credentials and join arrivals this build writes on " +
         "every attempt — the state is refused rather than advanced and rewritten in body " +
         "version " + CURRENT_OUTCOME_STATE_BODY,
+    );
+  }
+  // A STOPPED RUN TAKES NO FURTHER STEP. The stop is a decision the run already
+  // committed to, so a later acceptance on ANY branch — the branch that hit the
+  // limit included — is refused rather than applied, and the refusal names the
+  // reason instead of silently clearing it. (A repeat of the very submission
+  // that stopped the run does not reach here: the run path's join settles an
+  // already-settled node by replaying its receipt.)
+  if (state.stop !== undefined) {
+    throw new OutcomeAdvanceRefusedError(
+      "graph-stopped",
+      "outcome-advance: graph " + JSON.stringify(plan.graphId) + " STOPPED (" +
+        state.stop.reason + ": loop group " + JSON.stringify(state.stop.loopGroupId) +
+        " reached its hard cap of " + state.stop.maxTraversals + " traversals at attempt " +
+        JSON.stringify(state.stop.attemptId) + ") — a stopped run advances no further, so this " +
+        "outcome was not applied and the stop is left exactly as it is",
     );
   }
   const position = plan.nodes.findIndex((node) => node.id === decision.nodeId);
@@ -1665,6 +2152,13 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
   let loopTraversals = state.loopTraversals;
   let attemptSeq = state.attemptSeq;
   const dispatches: OutcomeDispatchIntent[] = [];
+  /**
+   * The stop this advance produces, if it hits a declared hard cap. Set BEFORE
+   * any successor is armed, and the successor block below is skipped entirely
+   * once it is set: a capped conversion routes NOTHING, so no part of the
+   * outcome is applied and no effect is written.
+   */
+  let stop: OutcomeStop | undefined;
 
   const terminal = plan.terminalOutcomes.some(
     (entry) => entry.nodeId === decision.nodeId && entry.outcome === decision.outcomeId,
@@ -1684,33 +2178,62 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     // Which loop this continuation re-enters is decided by the DECLARATION
     // (the groups that declare this outcome as their continuation), not by the
     // first group that happens to contain the emitting node. Every matching
-    // group advances and the acceptance is refused when ANY of their caps would
-    // be exceeded — a hard cap that a shared node could route around is not
-    // hard. The counters are staged and assigned only once every cap has been
-    // checked, so a refusal leaves the counters exactly as it found them.
+    // group advances TOGETHER and the continuation is refused as a whole when
+    // ANY of their caps would be exceeded — a hard cap that a shared node could
+    // route around is not hard. The counters are staged and assigned only once
+    // every cap has been checked, so a refusal leaves the counters exactly as it
+    // found them; the group that binds is the FIRST over-cap group in the plan's
+    // own (id) order, so the stop a caller sees is deterministic.
     const groups = continuationGroups(plan, decision.nodeId, decision.outcomeId);
     if (groups.length > 0) {
       const next: Record<string, number> = { ...loopTraversals };
+      let bound: CompiledPlan["loopGroups"][number] | undefined;
       for (const group of groups) {
         const traversals = (next[group.id] ?? 0) + 1;
         if (traversals > group.maxTraversals) {
-          throw new OutcomeAdvanceRefusedError(
-            "loop-limit-exceeded",
-            "outcome-advance: loop group " + JSON.stringify(group.id) +
-              " would reach traversal " + traversals + ", beyond its hard cap of " +
-              group.maxTraversals +
-              " — the acceptance is refused rather than run one round past the limit",
-          );
+          bound = group;
+          break;
         }
         next[group.id] = traversals;
       }
-      loopTraversals = Object.freeze(next);
+      if (bound === undefined) {
+        loopTraversals = Object.freeze(next);
+      } else {
+        // THE HARD CAP ENDS THE RUN. The round is NOT taken (the counters stay
+        // exactly where they were), NOTHING this outcome routes is armed — and
+        // the stop is carried out of this function in the state, so the very
+        // transaction that accepted the outcome also records why the run can go
+        // no further. The emitting node is already settled above: its outcome is
+        // a real, accepted result, and the stop fabricates no outcome and no
+        // accepted event of its own.
+        stop = Object.freeze({
+          reason: "loop-exhausted" as const,
+          loopGroupId: bound.id,
+          nodeId: decision.nodeId,
+          outcomeId: decision.outcomeId,
+          attemptId: decision.identity.attemptId,
+          // The counter the group stopped on: the cap itself, because the round
+          // that would have exceeded it was never taken.
+          traversals: loopTraversals[bound.id] ?? 0,
+          maxTraversals: bound.maxTraversals,
+          stoppedAt: now,
+        });
+      }
     }
+    // A STOPPED ADVANCE ROUTES NOTHING. When the hard cap above bound, this
+    // outcome arms NO successor — not even one whose join its arrival would
+    // satisfy — because a stop is the whole run's ending and a partially routed
+    // outcome is a state the model cannot describe. The candidate set is
+    // therefore empty, so no re-entry check, no join gate and no arm runs and no
+    // effect is written; the emitting node's arrival record is still
+    // materialized below, because it IS settled and an arrival is a fact about
+    // the entries, not about the arming.
+    const routed = stop === undefined ? successors : [];
     // The candidates this outcome routes to, as PLAN nodes in plan order. The
     // order is the state's own node order, so the same advance always mints the
     // same attempt ids; a target the plan does not declare is refused with the
     // vocabulary the single-successor rule used.
-    const candidateIds = new Set(successors.map((edge) => edge.to));
+    const candidateIds = new Set(routed.map((edge) => edge.to));
     for (const targetId of candidateIds) {
       if (!plan.nodes.some((entry) => entry.id === targetId)) {
         throw new OutcomeAdvanceRefusedError(
@@ -1814,11 +2337,18 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
 
   const dispatched = nodes.some((entry) => entry.status === "dispatched");
   const attempted = nodes.some((entry) => entry.status !== "pending");
-  const phase: OutcomeGraphPhase = dispatched
-    ? "executing"
-    : attempted
-      ? "complete"
-      : "ready";
+  // A STOP takes precedence over the derived phase: `complete` says the run has
+  // no work left, while `stopped` says it was cut short — a graph that hit a
+  // declared cap must never report the phase a run that finished properly
+  // reports, even when nothing is in flight any more.
+  const phase: OutcomeGraphPhase =
+    stop !== undefined
+      ? "stopped"
+      : dispatched
+        ? "executing"
+        : attempted
+          ? "complete"
+          : "ready";
   return Object.freeze({
     state: Object.freeze({
       // The guard above admitted only the current layout, so the advanced state
@@ -1830,6 +2360,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       nodes: Object.freeze(nodes),
       loopTraversals,
       attemptSeq,
+      ...(stop === undefined ? {} : { stop }),
     }),
     dispatches: Object.freeze(dispatches),
   });

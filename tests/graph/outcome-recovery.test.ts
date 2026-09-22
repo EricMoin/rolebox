@@ -47,6 +47,7 @@ import { CURRENT_OUTCOME_STATE_BODY } from "../../src/graph/outcome/graph-state.
 import { readPersistedOutcomePlan } from "../../src/graph/outcome/recovery.ts";
 import type { GraphStateRecord } from "../../src/graph/ledger/types.ts";
 import type { OutcomeDispatchRequest } from "../../src/graph/outcome/runtime.ts";
+import type { GraphSubmitOutcomeResult } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -86,11 +87,14 @@ function managerWith(
     getTasksByParent: () => [],
     getEventState: () => new Map(),
     // The legacy recovery path reads the budget tracker while it rebuilds the
-    // frontier; an unlimited tracker keeps the run unchanged.
-    getBudgetTracker: () => ({
-      isRequestBudgetExceeded: () => ({ exceeded: false }),
-      getRequestUsage: () => ({ inputTokens: 0, outputTokens: 0, cost: 0 }),
-    }),
+    // frontier; an unlimited tracker keeps the run unchanged. Only the two
+    // methods the rebuild calls are stubbed (the repo's convention for this
+    // surface — see tests/graph-tools-deps.test.ts).
+    getBudgetTracker: () =>
+      ({
+        isRequestBudgetExceeded: () => ({ exceeded: false }),
+        getRequestUsage: () => ({ inputTokens: 0, outputTokens: 0, cost: 0 }),
+      }) as never,
   };
   return surface as DispatchManager;
 }
@@ -229,7 +233,7 @@ describe("outcome-protocol restart recovery", () => {
     expect(accepted.decision).toBe("accepted");
 
     const beforeRestart = await openLedger(dir);
-    let stateBefore: unknown;
+    let stateBefore: GraphStateRecord | undefined;
     try {
       stateBefore = beforeRestart.readGraphState(graphId);
       expect(beforeRestart.pendingEffects(graphId).map((effect) => effect.status)).toEqual([
@@ -436,6 +440,171 @@ describe("outcome-protocol restart recovery", () => {
       expect(receipt?.submissionId).toBe(submissionId);
     } finally {
       ledger.close();
+    }
+  });
+});
+
+// ── A stopped run across a restart ──────────────────────────────────────────
+
+/** work -> review -> (revise) -> work, with review.approve as the exit. */
+function loopDeclaration(maxTraversals: number): GraphDeclarationV3 {
+  return {
+    version: 3,
+    name: "recovery.loop",
+    nodes: [
+      { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+      {
+        id: "review",
+        agent: "agent.review",
+        prompt: "Review the work.",
+        outcomes: [{ id: "revise" }, { id: "approve" }],
+      },
+    ],
+    edges: [
+      { from: "work", to: "review", outcome: "done" },
+      { from: "review", to: "work", outcome: "revise" },
+    ],
+    loop_groups: [
+      {
+        id: "revise-loop",
+        nodes: ["work", "review"],
+        max_traversals: maxTraversals,
+        continuation_outcome: "revise",
+        exit_outcome: "approve",
+      },
+    ],
+  };
+}
+
+describe("a stopped run across a restart", () => {
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function storedBody(
+    ledger: SqliteAcceptanceLedger,
+    graphId: string,
+  ): Record<string, unknown> {
+    const record = ledger.readGraphState(graphId);
+    if (record === undefined) throw new Error("fixture: the state row is missing");
+    if (!isRecord(record.body)) throw new Error("fixture: the state body is not a record");
+    return record.body;
+  }
+
+  it("reports the persisted stop, dispatches nothing and stays stopped on a second sweep", async () => {
+    const dir = makeTmpDir("outcome-recovery-stopped-");
+    const requests: OutcomeDispatchRequest[] = [];
+    const ts = createGraphToolSet({
+      stateDir: dir,
+      outcomeNow: NOW,
+      outcomeDispatch: (request) => {
+        requests.push(request);
+      },
+    });
+    const declared = ts.graph_declare({ declaration: loopDeclaration(1) });
+    const graphId = declared.graph_id;
+    const submit = (
+      nodeId: string,
+      outcomeId: string,
+      attemptId: string,
+    ): Promise<GraphSubmitOutcomeResult> =>
+      ts.graph_submit_outcome({
+        graph_id: graphId,
+        node_id: nodeId,
+        outcome_id: outcomeId,
+        credential: credentialOf(requests, attemptId),
+      });
+
+    // FIRST EXECUTION, then the loop is driven to its cap: one revision round,
+    // and the continuation that would be the second.
+    const first = await sweep(dir, requests);
+    expect(first.outcomeProtocol?.started).toHaveLength(1);
+    expect(requests.map((request) => request.attemptId)).toEqual(["work#1"]);
+    expect((await submit("work", "done", "work#1")).decision).toBe("accepted");
+    expect((await submit("review", "revise", "review#2")).decision).toBe("accepted");
+    expect((await submit("work", "done", "work#3")).decision).toBe("accepted");
+
+    const stopping = await submit("review", "revise", "review#4");
+    // The outcome is accepted; the round past the cap is not taken, and the stop
+    // travels back through the model-facing ingress with its reason and round.
+    expect(stopping.decision).toBe("accepted");
+    expect(stopping.phase).toBe("stopped");
+    expect(stopping.stop).toEqual({
+      reason: "loop-exhausted",
+      loop_group_id: "revise-loop",
+      node_id: "review",
+      outcome_id: "revise",
+      attempt_id: "review#4",
+      traversals: 1,
+      max_traversals: 1,
+      stopped_at: NOW,
+    });
+    expect(stopping.settled_nodes?.slice().sort()).toEqual(["review", "work"]);
+
+    // THE PERSISTED ROW is where a later process reads it from.
+    const writer = await openLedger(dir);
+    let stoppedRow: GraphStateRecord | undefined;
+    try {
+      stoppedRow = writer.readGraphState(graphId);
+      const body = storedBody(writer, graphId);
+      expect(body.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+      expect(body.phase).toBe("stopped");
+      expect(body.stop).toEqual({
+        reason: "loop-exhausted",
+        loopGroupId: "revise-loop",
+        nodeId: "review",
+        outcomeId: "revise",
+        attemptId: "review#4",
+        traversals: 1,
+        maxTraversals: 1,
+        stoppedAt: NOW,
+      });
+      expect(body.loopTraversals).toEqual({ "revise-loop": 1 });
+    } finally {
+      writer.close();
+    }
+
+    // RESTART — a fresh process sweeps the same store. The stop is READ and
+    // REPORTED, and the run is continued in no other sense: nothing is launched.
+    const restartRequests: OutcomeDispatchRequest[] = [];
+    const restarted = await sweep(dir, restartRequests);
+    expect(restarted.outcomeProtocol?.started).toEqual([]);
+    expect(restarted.outcomeProtocol?.resumed).toHaveLength(1);
+    expect(restarted.outcomeProtocol?.resumed[0]).toContain("phase stopped");
+    expect(restarted.outcomeProtocol?.resumed[0]).toContain("STOPPED by loop-exhausted");
+    expect(restarted.outcomeProtocol?.resumed[0]).toContain("round 1/1");
+    expect(restarted.outcomeProtocol?.stopped).toHaveLength(1);
+    expect(restarted.outcomeProtocol?.stopped[0]).toContain("[loop-exhausted]");
+    expect(restarted.outcomeProtocol?.stopped[0]).toContain("revise-loop");
+    expect(restarted.outcomeProtocol?.stopped[0]).toContain("round 1/1");
+    expect(restarted.outcomeProtocol?.dispatched).toEqual([]);
+    // NOTHING is offered as awaiting an outcome: no submission can settle an
+    // attempt of a run that has ended.
+    expect(restarted.outcomeProtocol?.armed).toEqual([]);
+    expect(restarted.outcomeProtocol?.refused).toEqual([]);
+    // THE EVIDENCE FOR "ZERO RE-DISPATCH": every dispatch effect the run
+    // committed is still PENDING — a launch would have durably marked it
+    // `started` BEFORE calling the seam.
+    expect([...(restarted.outcomeProtocol?.unsettledEffects ?? [])].sort()).toEqual([
+      graphId + ":dispatch:review#2@pending",
+      graphId + ":dispatch:review#4@pending",
+      graphId + ":dispatch:work#3@pending",
+    ]);
+    expect(restartRequests).toEqual([]);
+
+    // A SECOND resume is idempotent: same report, same row, still nothing to do.
+    const secondRequests: OutcomeDispatchRequest[] = [];
+    const second = await sweep(dir, secondRequests);
+    expect(second.outcomeProtocol?.resumed).toEqual(restarted.outcomeProtocol?.resumed);
+    expect(second.outcomeProtocol?.stopped).toEqual(restarted.outcomeProtocol?.stopped);
+    expect(second.outcomeProtocol?.dispatched).toEqual([]);
+    expect(second.outcomeProtocol?.armed).toEqual([]);
+    expect(secondRequests).toEqual([]);
+    const after = await openLedger(dir);
+    try {
+      expect(after.readGraphState(graphId)).toEqual(stoppedRow);
+    } finally {
+      after.close();
     }
   });
 });

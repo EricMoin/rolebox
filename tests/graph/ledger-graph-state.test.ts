@@ -47,15 +47,18 @@ import {
   LedgerWriteError,
   SqliteAcceptanceLedger,
   ledgerFilePath,
+  type LedgerWriteProblem,
 } from "../../src/graph/ledger/sqlite-ledger.ts";
 import { buildDeclaredOutcomeGraph } from "../../src/graph/tools/declare-graph.ts";
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import {
   CURRENT_OUTCOME_STATE_BODY,
   DEFAULT_OUTCOME_STATE_BODY_REGISTRY,
+  OUTCOME_STOP_REASONS,
   OUTCOME_STATE_BODY_V1,
   OUTCOME_STATE_BODY_V2,
   OUTCOME_STATE_BODY_V3,
+  OUTCOME_STATE_BODY_V4,
   OutcomeAdvanceRefusedError,
   OutcomeStateError,
   advanceOutcomeGraph,
@@ -329,7 +332,10 @@ describe("SqliteAcceptanceLedger — the state commits with the acceptance", () 
    * deliberately written first so the failure lands after rows exist — the
    * window a non-atomic design would leave half-committed.
    */
-  async function expectWholeTransactionRolledBack(body: unknown, problem: string) {
+  async function expectWholeTransactionRolledBack(
+    body: unknown,
+    problem: LedgerWriteProblem,
+  ) {
     await withLedger(async (ledger, dir) => {
       const batch = makeBatch();
       const error = thrownError(() =>
@@ -701,6 +707,110 @@ function refusalOf(run: () => unknown): OutcomeStateError {
   throw new Error("the state reader accepted a body it must refuse");
 }
 
+// ── A stopped body (version 4) ──────────────────────────────────────────────
+
+/** work -> review -> (revise) -> work, capped at ONE traversal. */
+const STOP_BODY_DECLARATION: GraphDeclarationV3 = {
+  version: 3,
+  name: "graph.state-stop",
+  nodes: [
+    { id: "work", agent: "agent.work", prompt: "Do the work.", outcomes: [{ id: "done" }] },
+    {
+      id: "review",
+      agent: "agent.review",
+      prompt: "Review the work.",
+      outcomes: [{ id: "revise" }, { id: "approve" }],
+    },
+  ],
+  edges: [
+    { from: "work", to: "review", outcome: "done" },
+    { from: "review", to: "work", outcome: "revise" },
+  ],
+  loop_groups: [
+    {
+      id: "revise-loop",
+      nodes: ["work", "review"],
+      max_traversals: 1,
+      continuation_outcome: "revise",
+      exit_outcome: "approve",
+    },
+  ],
+};
+
+const STOP_BODY_PLAN = buildDeclaredOutcomeGraph({
+  declaration: STOP_BODY_DECLARATION,
+}).plan;
+
+/**
+ * The body the version-4 writer produces when `revise-loop` hits its cap:
+ * "work" settled with `done` on work#3, "review" settled with `revise` on
+ * review#4, the counter standing ON the cap (the refused round was not taken)
+ * and the stop naming exactly those facts.
+ *
+ * Node entries are built in PLAN order, which the compiled plan sorts by id.
+ */
+function stoppedBodyFixture(): Record<string, unknown> {
+  return {
+    bodyVersion: CURRENT_OUTCOME_STATE_BODY,
+    graphId: STOP_BODY_PLAN.graphId,
+    planRevision: STOP_BODY_PLAN.planRevision,
+    phase: "stopped",
+    nodes: [
+      {
+        nodeId: "review",
+        status: "settled",
+        attemptId: "review#4",
+        attemptSeq: 4,
+        attemptCredential: "fixture-credential:review#4",
+        outcomeId: "revise",
+        dispatchedAt: NOW,
+        settledAt: NOW + 4,
+        arrivals: [{ from: "work", outcome: "done", attemptId: "work#3" }],
+      },
+      {
+        nodeId: "work",
+        status: "settled",
+        attemptId: "work#3",
+        attemptSeq: 3,
+        attemptCredential: "fixture-credential:work#3",
+        outcomeId: "done",
+        dispatchedAt: NOW,
+        settledAt: NOW + 3,
+        arrivals: [{ from: "review", outcome: "revise", attemptId: "review#4" }],
+      },
+    ],
+    loopTraversals: { "revise-loop": 1 },
+    attemptSeq: 4,
+    stop: {
+      reason: "loop-exhausted",
+      loopGroupId: "revise-loop",
+      nodeId: "review",
+      outcomeId: "revise",
+      attemptId: "review#4",
+      traversals: 1,
+      maxTraversals: 1,
+      stoppedAt: NOW + 4,
+    },
+  };
+}
+
+/** The record an outside writer would store for one STOP_BODY_PLAN body. */
+function stopRecord(body: unknown): GraphStateRecord {
+  return {
+    graphId: STOP_BODY_PLAN.graphId,
+    planRevision: STOP_BODY_PLAN.planRevision,
+    body,
+    updatedAt: NOW,
+  };
+}
+
+/** One mutation of the stopped fixture, for the refusal cases. */
+function withStoppedBody(
+  change: (body: Record<string, unknown>) => Record<string, unknown>,
+): Record<string, unknown> {
+  return change(stoppedBodyFixture());
+}
+
 describe("outcome state body — versioned capability, no silent trimming", () => {
   it("round-trips a same-version body through the store with zero field loss", async () => {
     await withLedger(async (ledger) => {
@@ -934,17 +1044,19 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(extended.message).toContain("round");
   });
 
-  it("installs a reader for versions 1, 2 AND 3, and writes version 3", () => {
-    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V3);
+  it("installs a reader for versions 1 to 4, and writes version 4", () => {
+    expect(CURRENT_OUTCOME_STATE_BODY).toBe(OUTCOME_STATE_BODY_V4);
     expect(DEFAULT_OUTCOME_STATE_BODY_REGISTRY.formats.map((reader) => reader.format)).toEqual([
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
       OUTCOME_STATE_BODY_V3,
+      OUTCOME_STATE_BODY_V4,
     ]);
     for (const version of [
       OUTCOME_STATE_BODY_V1,
       OUTCOME_STATE_BODY_V2,
       OUTCOME_STATE_BODY_V3,
+      OUTCOME_STATE_BODY_V4,
     ]) {
       const verdict = classifyOutcomeStateBody(version, DEFAULT_OUTCOME_STATE_BODY_REGISTRY);
       expect(verdict.kind).toBe("supported");
@@ -1088,6 +1200,146 @@ describe("outcome state body — versioned capability, no silent trimming", () =
     expect(() =>
       createOutcomeStateBodyRegistry({ current: 1, formats: [stub(0)] }),
     ).toThrow(/not a legal state-body version/);
+  });
+
+  it("reads a stopped body: the stop is the phase written as a record", async () => {
+    await withLedger(async (ledger) => {
+      const body = stoppedBodyFixture();
+      ledger.writeGraphState(stopRecord(body));
+      const stored = ledger.readGraphState(STOP_BODY_PLAN.graphId);
+      if (stored === undefined) throw new Error("fixture: the state row is missing");
+      const state = readOutcomeGraphState(stored, STOP_BODY_PLAN);
+      expect(state.phase).toBe("stopped");
+      expect(state.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+      expect(state.stop).toEqual({
+        reason: "loop-exhausted",
+        loopGroupId: "revise-loop",
+        nodeId: "review",
+        outcomeId: "revise",
+        attemptId: "review#4",
+        traversals: 1,
+        maxTraversals: 1,
+        stoppedAt: NOW + 4,
+      });
+      // write -> read -> write loses nothing, field by field.
+      expect(fieldLines(stateRecordOf(state, NOW + 5).body)).toEqual(fieldLines(stored.body));
+    });
+  });
+
+  it("keeps the stop vocabulary closed", () => {
+    expect(OUTCOME_STOP_REASONS).toEqual(["loop-exhausted"]);
+    const error = refusalOf(() =>
+      readOutcomeGraphState(
+        stopRecord(
+          withStoppedBody((body) => ({
+            ...body,
+            stop: { ...(body.stop as Record<string, unknown>), reason: "review-passed" },
+          })),
+        ),
+        STOP_BODY_PLAN,
+      ),
+    );
+    expect(error.problem).toBe("malformed-state");
+    expect(error.message).toContain("review-passed");
+    expect(error.message).toContain("vocabulary is closed");
+  });
+
+  it("refuses a stopped body with no stop, and a running body that carries one", () => {
+    const { stop: _dropped, ...noStop } = stoppedBodyFixture();
+    const missing = refusalOf(() =>
+      readOutcomeGraphState(stopRecord(noStop), STOP_BODY_PLAN),
+    );
+    expect(missing.problem).toBe("malformed-state");
+    expect(missing.message).toContain("stop");
+
+    const running = refusalOf(() =>
+      readOutcomeGraphState(
+        stopRecord(withStoppedBody((body) => ({ ...body, phase: "complete" }))),
+        STOP_BODY_PLAN,
+      ),
+    );
+    expect(running.problem).toBe("malformed-state");
+    expect(running.message).toContain("phase");
+  });
+
+  it("refuses a stop on a body version that does not define one, and its stopped phase", () => {
+    // Version 3 cannot represent a stop at all: the FIELD is refused...
+    const withField = refusalOf(() =>
+      readOutcomeGraphState(
+        stopRecord({ ...stoppedBodyFixture(), bodyVersion: OUTCOME_STATE_BODY_V3 }),
+        STOP_BODY_PLAN,
+      ),
+    );
+    expect(withField.problem).toBe("malformed-state");
+    expect(withField.message).toContain("stop");
+
+    // ...and so is the phase that only the stop’s own version defines, even with
+    // the record removed: a version that cannot end this way never wrote it.
+    const { stop: _dropped, ...body } = stoppedBodyFixture();
+    const withPhase = refusalOf(() =>
+      readOutcomeGraphState(
+        stopRecord({ ...body, bodyVersion: OUTCOME_STATE_BODY_V2 }),
+        STOP_BODY_PLAN,
+      ),
+    );
+    expect(withPhase.problem).toBe("malformed-state");
+    expect(withPhase.message).toContain("phase");
+  });
+
+  it("refuses a stop the plan does not declare or the entries do not corroborate", () => {
+    const cases: readonly { readonly change: (stop: Record<string, unknown>) => Record<string, unknown>; readonly contains: string }[] = [
+      { change: (stop) => ({ ...stop, loopGroupId: "no-such-loop" }), contains: "does not declare" },
+      { change: (stop) => ({ ...stop, maxTraversals: 9 }), contains: "plan declares" },
+      { change: (stop) => ({ ...stop, nodeId: "no-such-node" }), contains: "not a member" },
+      { change: (stop) => ({ ...stop, outcomeId: "approve" }), contains: "continuation" },
+      { change: (stop) => ({ ...stop, attemptId: "review#9" }), contains: "do not" },
+      { change: (stop) => ({ ...stop, traversals: 0 }), contains: "positive safe integer" },
+      { change: (stop) => ({ ...stop, stoppedAt: -1 }), contains: "epoch milliseconds" },
+    ];
+    for (const entry of cases) {
+      const error = refusalOf(() =>
+        readOutcomeGraphState(
+          stopRecord(
+            withStoppedBody((body) => ({
+              ...body,
+              stop: entry.change(body.stop as Record<string, unknown>),
+            })),
+          ),
+          STOP_BODY_PLAN,
+        ),
+      );
+      expect(error.problem).toBe("malformed-state");
+      expect(error.message).toContain(entry.contains);
+    }
+
+    // A stop whose round disagrees with the counter it is stored beside, and one
+    // that stopped anywhere but ON the cap (the round past it was never taken).
+    const counterDisagreement = refusalOf(() =>
+      readOutcomeGraphState(
+        stopRecord(withStoppedBody((body) => ({ ...body, loopTraversals: { "revise-loop": 0 } }))),
+        STOP_BODY_PLAN,
+      ),
+    );
+    expect(counterDisagreement.problem).toBe("malformed-state");
+    expect(counterDisagreement.message).toContain("loopTraversals records");
+
+    const notOnTheCap = refusalOf(() =>
+      readOutcomeGraphState(
+        stopRecord(
+          withStoppedBody((body) => {
+            const stop = body.stop as Record<string, unknown>;
+            return {
+              ...body,
+              loopTraversals: { "revise-loop": 3 },
+              stop: { ...stop, traversals: 3 },
+            };
+          }),
+        ),
+        STOP_BODY_PLAN,
+      ),
+    );
+    expect(notOnTheCap.problem).toBe("malformed-state");
+    expect(notOnTheCap.message).toContain("cap refused the round");
   });
 
   it("reads through the registered capability, not through the number", () => {

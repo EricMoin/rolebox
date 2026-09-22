@@ -73,7 +73,10 @@ import {
   type OutcomeRuntimeRefusal,
   type OutcomeSubmissionResult,
 } from "../outcome/runtime.ts";
-import type { OutcomeGraphState } from "../outcome/graph-state.ts";
+import type {
+  OutcomeGraphState,
+  OutcomeStop,
+} from "../outcome/graph-state.ts";
 import {
   createValidatorRegistry,
   type ValidatorRegistry,
@@ -164,6 +167,39 @@ export interface GraphSubmitOutcomeResult {
   readonly phase?: string;
   /** Nodes settled in the resulting state. */
   readonly settled_nodes?: readonly string[];
+  /**
+   * Present exactly when the accepted outcome STOPPED the run: the declared hard
+   * limit it hit, the round it had reached and the cap itself. The outcome was
+   * still accepted (so `decision` is `accepted`) — the stop is why the graph can
+   * go no further, and no successor was dispatched. A submission to a stopped
+   * graph is refused with `graph-stopped` in `refusals` instead.
+   */
+  readonly stop?: SubmitOutcomeStop;
+}
+
+/**
+ * One stop as the tool reports it, in the tool's snake_case surface.
+ *
+ * `reason` comes from the closed vocabulary `graph-state.ts` owns
+ * (`OUTCOME_STOP_REASONS`) — a condition decided from the plan and the state,
+ * never a judgement about the work.
+ */
+export interface SubmitOutcomeStop {
+  readonly reason: string;
+  /** The declared loop group whose hard cap binds. */
+  readonly loop_group_id: string;
+  /** The node whose accepted outcome could not continue. */
+  readonly node_id: string;
+  /** The continuation outcome that asked for the refused round. */
+  readonly outcome_id: string;
+  /** The attempt of `node_id` that the outcome settled. */
+  readonly attempt_id: string;
+  /** Continuations the group took: equal to `max_traversals`. */
+  readonly traversals: number;
+  /** The declared hard cap the refused continuation would have exceeded. */
+  readonly max_traversals: number;
+  /** Epoch milliseconds the stop was committed at. */
+  readonly stopped_at: number;
 }
 
 // ── Refusals at the tool boundary ───────────────────────────────────────────
@@ -491,7 +527,22 @@ function renderResult(
     refusals: [],
     phase: result.state.phase,
     settled_nodes: settledNodesOf(result.state),
+    ...(result.stop === undefined ? {} : { stop: stopOf(result.stop) }),
   };
+}
+
+/** Project one persisted stop into the model-facing shape. */
+function stopOf(stop: OutcomeStop): SubmitOutcomeStop {
+  return Object.freeze({
+    reason: stop.reason,
+    loop_group_id: stop.loopGroupId,
+    node_id: stop.nodeId,
+    outcome_id: stop.outcomeId,
+    attempt_id: stop.attemptId,
+    traversals: stop.traversals,
+    max_traversals: stop.maxTraversals,
+    stopped_at: stop.stoppedAt,
+  });
 }
 
 /** Project every requirement evaluation into the model-facing shape. */

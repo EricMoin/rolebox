@@ -69,6 +69,17 @@
  * state at all is STARTED from this runtime's plan — the same SAVED plan a
  * later recovery continues (the review's D5), never a fresh reinterpretation.
  *
+ * A HARD LIMIT ENDS THE RUN IN A DURABLE STOP. When an accepted outcome asks to
+ * continue a declared loop past its `max_traversals` cap, the round is NOT taken:
+ * the outcome stays accepted, its node settles, no successor is armed, and the
+ * reducer writes the stop into the state the SAME transaction commits — so the
+ * receipt, the accepted event and the reason the run ended cannot come apart in a
+ * crash window. `phase` becomes `stopped` and a `stop` report is carried by the
+ * accepted result; `resume` reports the persisted stop and launches NOTHING (a
+ * stopped run is never re-dispatched, and its stop is never cleared), and an
+ * outcome from any branch still recorded in flight is refused with
+ * `graph-stopped` rather than settled into a run that has ended.
+ *
  * THE SUBMISSION INGRESS IS THE ONLY COMPLETION SOURCE. A graph bound to this
  * protocol has no legacy runtime instance anywhere: it is not an entry of the
  * toolset's legacy registry, every legacy tool entry point refuses it, and this
@@ -123,6 +134,7 @@ import {
   type OutcomeDispatchIntent,
   type OutcomeGraphState,
   type OutcomeNodeState,
+  type OutcomeStop,
 } from "./graph-state.ts";
 import {
   RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
@@ -238,10 +250,15 @@ export type OutcomeRuntimeRefusalCode =
   | "attempt-mismatch"
   /** No edge routes a non-terminal outcome. */
   | "no-route"
-  /** Applying this continuation would exceed the loop's hard cap. */
-  | "loop-limit-exceeded"
   /** The route re-enters a settled node outside its declared loop group. */
   | "reentry-outside-loop"
+  /**
+   * The run is already STOPPED by a declared hard limit (body version 4), so
+   * a submission for a node that is still recorded in flight is refused and
+   * no settlement is fabricated for it. The stop itself is reported by
+   * resume() and by the persisted state; it is never cleared.
+   */
+  | "graph-stopped"
   /** The state says an attempt settled and the ledger holds no such event. */
   | "state-ledger-disagreement"
   /**
@@ -293,6 +310,14 @@ export type OutcomeSubmissionResult =
       readonly state: OutcomeGraphState;
       readonly dispatched: readonly OutcomeDispatchRequest[];
       readonly replayed: boolean;
+      /**
+       * Present exactly when this acceptance STOPPED the run: a declared hard
+       * limit refused the continuation the outcome asked for, so no successor
+       * was armed and `state.phase` is `stopped`. The outcome itself is a real,
+       * accepted result — the stop is the run's ending, not a fabricated
+       * settlement — and a repeated submission of it still replays this receipt.
+       */
+      readonly stop?: OutcomeStop;
     }
   /** A gate failed: the receipt records the rejection, the attempt stays open. */
   | {
@@ -362,6 +387,15 @@ export type OutcomeResumeResult =
       readonly armed: readonly OutcomeArmedNode[];
       readonly unsettledEffects: readonly PendingEffectRecord[];
       readonly refusals: readonly OutcomeRuntimeRefusal[];
+      /**
+       * Present exactly when the run this call continued is STOPPED (body
+       * version 4): the persisted stop, with its reason and the round it hit.
+       * A stopped run launches NOTHING and arms NOTHING — a second resume
+       * reports the same stop, clears nothing and dispatches nothing. A
+       * `started` answer cannot carry one: a first execution has nothing to
+       * have stopped.
+       */
+      readonly stop?: OutcomeStop;
     }
   | {
       readonly kind: "refused";
@@ -659,6 +693,10 @@ export class OutcomeGraphRuntime {
       state: persisted,
       dispatched: Object.freeze(dispatched),
       replayed: !committed,
+      // The stop is reported from the state the transaction just committed (or,
+      // for a replay, from the state it replayed against), never from a second
+      // derivation: `state.stop` IS the durable stop.
+      ...(persisted.stop === undefined ? {} : { stop: persisted.stop }),
     };
   }
 
@@ -686,6 +724,13 @@ export class OutcomeGraphRuntime {
    * status transition, and it moves `pending -> started` before the seam runs,
    * so a second call finds the effect `started`, launches nothing, and reports
    * the same ledger rows.
+   *
+   * A STOPPED RUN IS REPORTED, NEVER CONTINUED. A state carrying a stop (body
+   * version 4) short-circuits before any effect is read for launch: the call
+   * reports the stop, dispatches nothing, arms nothing, and writes nothing at
+   * all — so a second resume is idempotent by construction and the stop is never
+   * cleared. The nodes still recorded in flight are reported as refused, with
+   * the stop as the reason.
    *
    * NEVER STARTS FROM SCRATCH WHEN A STATE EXISTS. A state that cannot be read,
    * or that is bound to another revision, is a REFUSAL — never a fresh run and
@@ -769,6 +814,26 @@ export class OutcomeGraphRuntime {
       state = readOutcomeGraphState(record, this.plan);
     } catch (error) {
       return refused([this.stateRefusal(error)]);
+    }
+
+    // A STOPPED RUN IS REPORTED, NOT CONTINUED. Nothing is launched — not even a
+    // `pending` effect the crash window left behind — and nothing is offered as
+    // armed, because no submission can settle anything once the run has stopped.
+    // Reading and reporting are the only things this call does, so a second
+    // resume reports the same stop and dispatches nothing (the `started` effect
+    // bookkeeping below is what would otherwise move a row).
+    if (state.stop !== undefined) {
+      const effects = this.unsettledEffectReading();
+      if ("code" in effects) return refused([effects]);
+      return {
+        kind: "resumed",
+        state,
+        dispatched: Object.freeze([]),
+        armed: Object.freeze([]),
+        unsettledEffects: effects,
+        refusals: stoppedInFlightRefusals(state),
+        stop: state.stop,
+      };
     }
 
     const launched = this.launchUnsettledDispatches(state);
@@ -1368,6 +1433,49 @@ function armedReading(state: OutcomeGraphState): {
     armed: Object.freeze(armed),
     refusals: Object.freeze(refusals),
   };
+}
+
+/**
+ * What a STOPPED run reports for the nodes still recorded in flight.
+ *
+ * Every one of them is a refusal, never an "armed" entry: `armed` promises that
+ * a submission can settle the attempt, and on a stopped run no submission can —
+ * the run path refuses it with the same `graph-stopped` code. The nodes are NOT
+ * settled and NOT dropped: no outcome settled them, so fabricating a settlement
+ * would invent a result, and the entries stay exactly as the stop left them.
+ * Credential-free by construction, like every other report here.
+ */
+function stoppedInFlightRefusals(
+  state: OutcomeGraphState,
+): readonly OutcomeRuntimeRefusal[] {
+  const stop = state.stop;
+  if (stop === undefined) return Object.freeze([]);
+  const refusals: OutcomeRuntimeRefusal[] = [];
+  state.nodes.forEach((node, index) => {
+    if (node.status !== "dispatched") return;
+    refusals.push(
+      Object.freeze({
+        code: "graph-stopped" as const,
+        path: "$.nodes[" + index + "].status",
+        message:
+          "outcome-runtime: node " +
+          JSON.stringify(node.nodeId) +
+          " is still recorded in flight" +
+          (node.attemptId === undefined ? "" : " on attempt " + JSON.stringify(node.attemptId)) +
+          ", but graph " +
+          JSON.stringify(state.graphId) +
+          " STOPPED (" +
+          stop.reason +
+          ": loop group " +
+          JSON.stringify(stop.loopGroupId) +
+          " reached its hard cap of " +
+          stop.maxTraversals +
+          " traversals) — a stopped run dispatches nothing and no submission can settle " +
+          "this attempt, so it is reported as refused rather than armed",
+      }),
+    );
+  });
+  return Object.freeze(refusals);
 }
 
 /** The state's progress for one node, when that node is currently in flight. */

@@ -168,6 +168,15 @@ export interface OutcomeRecoveryReport {
   armed: string[];
   /** Effects still pending or started after this sweep. */
   unsettledEffects: string[];
+  /**
+   * Graphs the persisted state reports as STOPPED (body version 4), each with
+   * the reason and the round it hit. A stopped graph is resumed in the sense
+   * that it is READ and reported, and in no other: nothing is launched and no
+   * node is offered as armed. Listed separately from `resumed[]` so a run that
+   * ended on a declared hard limit is never counted as one that merely
+   * continued.
+   */
+  stopped: string[];
   /** Outcome graphs that could not be resumed, with the reason. */
   refused: string[];
 }
@@ -361,6 +370,7 @@ function emptyOutcomeRecoveryReport(): OutcomeRecoveryReport {
     dispatched: [],
     armed: [],
     unsettledEffects: [],
+    stopped: [],
     refused: [],
   };
 }
@@ -388,13 +398,26 @@ function recordOutcomeRecovery(
     return;
   }
   const armed = result.armed.map((node) => node.attemptId).join(", ");
+  const stop = result.kind === "resumed" ? result.stop : undefined;
   const line =
     `${label} (graph ${graphId}: plan revision ${result.state.planRevision}, ` +
     `phase ${result.state.phase}` +
+    (stop === undefined
+      ? ""
+      : `, STOPPED by ${stop.reason} (loop ${stop.loopGroupId}, ` +
+        `round ${stop.traversals}/${stop.maxTraversals}, ` +
+        `attempt ${stop.attemptId})`) +
     (armed.length === 0 ? "" : `, armed [${armed}]`) +
     ")";
   if (result.kind === "started") bucket.started.push(line);
   else bucket.resumed.push(line);
+  if (stop !== undefined) {
+    bucket.stopped.push(
+      `${label} (graph ${graphId}: [${stop.reason}] loop ${stop.loopGroupId}, ` +
+        `round ${stop.traversals}/${stop.maxTraversals}, node ${stop.nodeId}, ` +
+        `outcome ${stop.outcomeId}, attempt ${stop.attemptId})`,
+    );
+  }
   for (const request of result.dispatched) {
     bucket.dispatched.push(`${graphId}:${request.attemptId}`);
   }

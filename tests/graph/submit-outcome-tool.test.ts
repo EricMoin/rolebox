@@ -36,6 +36,7 @@ import {
 import { OutcomeProtocolUnavailableError } from "../../src/graph/tools/declare-graph.ts";
 import {
   OutcomeSubmissionRefusedError,
+  type GraphSubmitOutcomeArgs,
   type GraphSubmitOutcomeResult,
 } from "../../src/graph/tools/submit-outcome.ts";
 import { createGraphToolSet } from "../../src/graph/tools/graph-tools.ts";
@@ -288,6 +289,10 @@ describe("graph_submit_outcome — the vertical path", () => {
     // evidence_refs). Every forged value is wrong on purpose; the credential is
     // the one it genuinely holds, and it still cannot name the attempt.
     const workCredential = credentialOf(startRequests, "work#1");
+    // Deliberately carries keys the args type does not declare (the forgery
+    // this case is about). `satisfies` keeps the extra keys visible to the
+    // test while the value stays assignable to the args type, so the object is
+    // not narrowed into a shape the tool could rely on.
     const forged = {
       graph_id: graphId,
       node_id: "work",
@@ -296,7 +301,7 @@ describe("graph_submit_outcome — the vertical path", () => {
       attempt_id: "forged-attempt",
       submission_id: "forged-submission",
       plan_revision: "forged-revision",
-    };
+    } satisfies GraphSubmitOutcomeArgs & Record<string, string>;
     const first = await ts.graph_submit_outcome(forged);
     expect(first.decision).toBe("accepted");
     expect(first.plan_revision).toBe(declared.plan_revision);
@@ -333,12 +338,13 @@ describe("graph_submit_outcome — the vertical path", () => {
 
     // Repeating the submission with DIFFERENT forged identity replays the same
     // persisted receipt: the forged fields never entered the key.
-    const again = await ts.graph_submit_outcome({
+    const forgedAgain = {
       ...forged,
       attempt_id: "another-forged-attempt",
       submission_id: "another-forged-submission",
       plan_revision: "another-forged-revision",
-    });
+    };
+    const again = await ts.graph_submit_outcome(forgedAgain);
     expect(again.verdict).toBe("replayed");
     expect(again.submission_id).toBe(first.submission_id);
   });

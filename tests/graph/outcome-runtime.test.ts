@@ -14,7 +14,10 @@
  * advance,
  * a rejected gate and a refused proposal leaving the graph where it was, a
  * distinct submission for a settled attempt never being committed, a forced
- * mid-transaction failure leaving nothing, loop continuation and its hard cap,
+ * mid-transaction failure leaving nothing, loop continuation and the durable STOP
+ * its hard cap ends the run with (the outcome stays accepted, the refused round is
+ * not taken, an in-flight branch is refused rather than settled, and the stop
+ * fabricates no accepted event),
  * the missing-handler refusal, and the legacy v2 run path still working through
  * the file store.
  *
@@ -227,6 +230,29 @@ function sharedContinuationDeclaration(outerCap: number): GraphDeclarationV3 {
         exit_outcome: "approve",
       },
     ],
+  };
+}
+
+/**
+ * The loop of {@link loopDeclaration} plus an INDEPENDENT branch: "work" also
+ * routes to "side", so the run arms a second branch beside the loop.
+ *
+ * The branch is what makes the stop's SCOPE observable. When the loop hits its
+ * cap while "side" is still in flight, the run must decide whether it stops only
+ * the loop or the whole run; this build stops the run (see the decision stated
+ * in graph-state.ts), so the branch is left in flight rather than settled and no
+ * successor of the capped outcome is armed.
+ */
+function sideBranchLoopDeclaration(maxTraversals: number): GraphDeclarationV3 {
+  const loop = loopDeclaration(maxTraversals);
+  return {
+    ...loop,
+    name: "graph.loop-side",
+    nodes: [
+      ...loop.nodes,
+      { id: "side", agent: "agent.side", prompt: "Side work.", outcomes: [{ id: "finish" }] },
+    ],
+    edges: [...loop.edges, { from: "work", to: "side", outcome: "done" }],
   };
 }
 
@@ -647,6 +673,9 @@ describe("OutcomeGraphRuntime — a declared graph runs its plan", () => {
       if (first.kind !== "accepted") return;
       expect(first.replayed).toBe(false);
       const stateAfterFirst = runtime.state();
+      if (stateAfterFirst === undefined) {
+        throw new Error("fixture: graph " + graphId + " wrote no state");
+      }
       const dispatchesAfterFirst = attemptIds(requests);
 
       const second = runtime.submit(proposal, NOW + 2);
@@ -940,7 +969,7 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
     });
   });
 
-  it("refuses the continuation that would exceed the hard cap, writing nothing", async () => {
+  it("stops the run at the hard cap: the outcome is accepted, the stop is durable and no round past the limit runs", async () => {
     await withHarness(loopDeclaration(1), async ({ runtime, ledger, requests, graphId, dir }) => {
       runtime.start(NOW);
       runtime.submit(
@@ -960,21 +989,63 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
       );
       const before = runtime.state();
       const receiptsBefore = await countTable(dir, "ledger_receipts");
+      const eventsBefore = ledger.acceptedEvents(graphId).length;
+      const dispatchesBefore = attemptIds(requests);
 
       const overCap = runtime.submit(
         { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
         NOW + 4,
       );
-      expect(overCap.kind).toBe("refused");
-      if (overCap.kind !== "refused") return;
-      expect(overCap.refusals.map((refusal) => refusal.code)).toContain(
-        "loop-limit-exceeded",
-      );
-      // The whole acceptance rolled back: the graph is still where it was and
-      // no receipt was written for the refused round.
-      expect(runtime.state()).toEqual(before);
-      expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
-      expect(ledger.acceptedEvents(graphId)).toHaveLength(3);
+      // CHANGED (defect 3): this used to be `refused` with the whole acceptance
+      // rolled back, which left the graph executing forever with no durable
+      // record of why. The outcome that asks for an over-cap round is a real,
+      // ACCEPTED result; what the cap refuses is the CONTINUATION.
+      expect(overCap.kind).toBe("accepted");
+      if (overCap.kind !== "accepted") return;
+      expect(overCap.replayed).toBe(false);
+      expect(overCap.decision.kind).toBe("accepted");
+      expect(overCap.receipt.decision).toBe("accepted");
+      // The refused round is NOT taken: the counter stays on the cap and no
+      // attempt is minted, so nothing runs one round past the limit.
+      expect(overCap.state.loopTraversals["revise-loop"]).toBe(1);
+      expect(overCap.dispatched).toEqual([]);
+      expect(attemptIds(requests)).toEqual(dispatchesBefore);
+      // CHANGED: the durable stop replaces "the graph is still where it was".
+      // The reason is from the closed vocabulary, the round and cap are the
+      // declared numbers, and the trigger is the attempt that asked to continue.
+      expect(overCap.state.phase).toBe("stopped");
+      expect(overCap.stop).toEqual({
+        reason: "loop-exhausted",
+        loopGroupId: "revise-loop",
+        nodeId: "review",
+        outcomeId: "revise",
+        attemptId: "review#4",
+        traversals: 1,
+        maxTraversals: 1,
+        stoppedAt: NOW + 4,
+      });
+      // The accepted outcome settled its own node — that is the acceptance, and
+      // the stop fabricates nothing beyond it.
+      expect(nodeOf(overCap.state, "review")).toMatchObject({
+        status: "settled",
+        outcomeId: "revise",
+        attemptId: "review#4",
+      });
+      // CHANGED: one receipt and one accepted event ARE committed now, in the
+      // SAME transaction as the state that carries the stop — the crash window
+      // cannot separate "the continuation was refused" from "the stop is
+      // recorded". The counts used to be asserted unchanged.
+      expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
+      const events = ledger.acceptedEvents(graphId);
+      expect(events).toHaveLength(eventsBefore + 1);
+      expect(events[events.length - 1]?.attemptId).toBe("review#4");
+      expect(events[events.length - 1]?.outcomeId).toBe("revise");
+      // The committed state IS the state a reader gets back: the stop survives
+      // the store, and the graph no longer reports executing.
+      const reread = runtime.state();
+      expect(reread).toEqual(overCap.state);
+      expect(reread?.phase).toBe("stopped");
+      expect(before?.phase).toBe("executing");
     });
   });
 
@@ -1025,15 +1096,27 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
           { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
           NOW + 4,
         );
-        expect(overCap.kind).toBe("refused");
-        if (overCap.kind !== "refused") return;
-        expect(overCap.refusals[0]?.code).toBe("loop-limit-exceeded");
-        expect(overCap.refusals[0]?.message).toContain("b-inner");
-        // The refusal rolled back with the whole acceptance: no state write, no
-        // receipt, no event, no dispatch.
-        expect(runtime.state()).toEqual(before);
-        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
-        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore);
+        // CHANGED (defect 3): accepted, not refused — and the stop NAMES the
+        // group whose cap actually binds (`b-inner`), which is the assertion the
+        // old refusal message carried. `a-outer` is declared FIRST but does not
+        // take `revise` as its continuation, so its counter must not move.
+        expect(overCap.kind).toBe("accepted");
+        if (overCap.kind !== "accepted") return;
+        expect(overCap.stop?.loopGroupId).toBe("b-inner");
+        expect(overCap.stop?.reason).toBe("loop-exhausted");
+        expect(overCap.stop?.traversals).toBe(1);
+        expect(overCap.stop?.maxTraversals).toBe(1);
+        expect(overCap.state.loopTraversals["b-inner"]).toBe(1);
+        expect(overCap.state.loopTraversals["a-outer"]).toBeUndefined();
+        // CHANGED: the state DID move — it now carries the stop and the settled
+        // trigger — while the counters, the receipts before this submission and
+        // the dispatches are what stays put. One receipt and one accepted event
+        // commit with the stop; no successor is armed.
+        expect(before?.phase).toBe("executing");
+        expect(overCap.state.phase).toBe("stopped");
+        expect(overCap.dispatched).toEqual([]);
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
+        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore + 1);
         expect(attemptIds(requests)).toEqual(dispatchesBefore);
       },
     );
@@ -1064,24 +1147,211 @@ describe("OutcomeGraphRuntime — loop continuation and its hard cap", () => {
           { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
           NOW + 3,
         );
-        const before = runtime.state();
         const receiptsBefore = await countTable(dir, "ledger_receipts");
         const eventsBefore = ledger.acceptedEvents(graphId).length;
+        const dispatchesBefore = attemptIds(requests);
         const overCap = runtime.submit(
           { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
           NOW + 4,
         );
-        expect(overCap.kind).toBe("refused");
-        if (overCap.kind !== "refused") return;
-        // b-loose alone would still admit this round; a-tight's cap is what
-        // binds, and it binds for the whole acceptance.
-        expect(overCap.refusals[0]?.code).toBe("loop-limit-exceeded");
-        expect(overCap.refusals[0]?.message).toContain("a-tight");
-        expect(runtime.state()).toEqual(before);
-        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore);
-        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore);
+        // CHANGED (defect 3): accepted with a stop, not a refusal. b-loose alone
+        // would still admit this round; a-tight's cap is what binds, and it binds
+        // for the WHOLE continuation — the stop names a-tight and NEITHER counter
+        // advances, which is what "the round was not taken" means for a
+        // continuation that re-enters two groups at once.
+        expect(overCap.kind).toBe("accepted");
+        if (overCap.kind !== "accepted") return;
+        expect(overCap.stop?.loopGroupId).toBe("a-tight");
+        expect(overCap.stop?.maxTraversals).toBe(1);
+        expect(overCap.state.loopTraversals).toEqual({
+          "a-tight": 1,
+          "b-loose": 1,
+        });
+        expect(overCap.dispatched).toEqual([]);
+        expect(attemptIds(requests)).toEqual(dispatchesBefore);
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
+        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore + 1);
       },
     );
+  });
+
+  it("stops the WHOLE run: a branch still in flight is refused, never settled", async () => {
+    await withHarness(
+      sideBranchLoopDeclaration(1),
+      async ({ runtime, ledger, requests, graphId, dir }) => {
+        runtime.start(NOW);
+        // work -> {review, side}: the side branch is in flight from here on.
+        const worked = runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+          NOW + 1,
+        );
+        expect(worked.kind).toBe("accepted");
+        if (worked.kind !== "accepted") return;
+        expect(attemptIds(worked.dispatched)).toEqual(["review#2", "side#3"]);
+
+        const revised = runtime.submit(
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
+          NOW + 2,
+        );
+        expect(revised.kind).toBe("accepted");
+        if (revised.kind !== "accepted") return;
+        expect(attemptIds(revised.dispatched)).toEqual(["work#4"]);
+
+        const workedAgain = runtime.submit(
+          { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#4") },
+          NOW + 3,
+        );
+        expect(workedAgain.kind).toBe("accepted");
+        if (workedAgain.kind !== "accepted") return;
+        // The loop re-enters review on a fresh attempt; side stays in flight.
+        expect(attemptIds(workedAgain.dispatched)).toEqual(["review#5"]);
+
+        const receiptsBefore = await countTable(dir, "ledger_receipts");
+        const eventsBefore = ledger.acceptedEvents(graphId).length;
+        const dispatchesBefore = attemptIds(requests);
+
+        const stopped = runtime.submit(
+          { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#5") },
+          NOW + 4,
+        );
+        expect(stopped.kind).toBe("accepted");
+        if (stopped.kind !== "accepted") return;
+        expect(stopped.state.phase).toBe("stopped");
+        expect(stopped.stop?.loopGroupId).toBe("revise-loop");
+        expect(stopped.stop?.attemptId).toBe("review#5");
+        // THE CHOICE, OBSERVED: the independent branch is exactly where it was —
+        // in flight on the attempt it was dispatched with, NOT settled by an
+        // outcome nobody submitted, and NOT re-armed.
+        expect(nodeOf(stopped.state, "side")).toMatchObject({
+          status: "dispatched",
+          attemptId: "side#3",
+        });
+        expect(stopped.dispatched).toEqual([]);
+        expect(attemptIds(requests)).toEqual(dispatchesBefore);
+
+        // Its worker's outcome is refused BY NAME — the run has ended, so the
+        // outcome is not accepted into a graph that cannot carry it.
+        const late = runtime.submit(
+          { nodeId: "side", outcomeId: "finish", credential: credentialOf(requests, "side#3") },
+          NOW + 5,
+        );
+        expect(late.kind).toBe("refused");
+        if (late.kind !== "refused") return;
+        expect(late.refusals.map((refusal) => refusal.code)).toEqual(["graph-stopped"]);
+        expect(late.refusals[0]?.message).toContain("loop-exhausted");
+        // Nothing was written: the branch is still in flight, the stop is intact,
+        // and only the stopping submission added a receipt and an event.
+        expect(runtime.state()).toEqual(stopped.state);
+        expect(await countTable(dir, "ledger_receipts")).toBe(receiptsBefore + 1);
+        expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsBefore + 1);
+        expect(attemptIds(requests)).toEqual(dispatchesBefore);
+      },
+    );
+  });
+
+  it("replays the stopping submission and clears nothing", async () => {
+    await withHarness(loopDeclaration(1), async ({ runtime, ledger, requests, graphId, dir }) => {
+      runtime.start(NOW);
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+        NOW + 1,
+      );
+      runtime.submit(
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
+        NOW + 2,
+      );
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
+        NOW + 3,
+      );
+      const proposal = {
+        nodeId: "review",
+        outcomeId: "revise",
+        credential: credentialOf(requests, "review#4"),
+      };
+      const stopping = runtime.submit(proposal, NOW + 4);
+      expect(stopping.kind).toBe("accepted");
+      if (stopping.kind !== "accepted") return;
+      const receiptsAfter = await countTable(dir, "ledger_receipts");
+      const eventsAfter = ledger.acceptedEvents(graphId).length;
+
+      // The SAME logical submission again: the ledger replays the persisted
+      // receipt, the state does not move and the stop is not cleared or
+      // re-decided — a stopped run is not resumed by repeating its last message.
+      const replay = runtime.submit(proposal, NOW + 5);
+      expect(replay.kind).toBe("accepted");
+      if (replay.kind !== "accepted") return;
+      expect(replay.replayed).toBe(true);
+      expect(replay.decision.identity.submissionId).toBe(
+        stopping.decision.identity.submissionId,
+      );
+      expect(replay.dispatched).toEqual([]);
+      expect(replay.state).toEqual(stopping.state);
+      expect(replay.stop).toEqual(stopping.stop);
+      expect(await countTable(dir, "ledger_receipts")).toBe(receiptsAfter);
+      expect(ledger.acceptedEvents(graphId)).toHaveLength(eventsAfter);
+      expect(attemptIds(requests)).toEqual(["work#1", "review#2", "work#3", "review#4"]);
+    });
+  });
+
+  it("fabricates no accepted event: every settlement is one a worker submitted", async () => {
+    await withHarness(loopDeclaration(1), async ({ runtime, ledger, requests, graphId }) => {
+      runtime.start(NOW);
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#1") },
+        NOW + 1,
+      );
+      runtime.submit(
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#2") },
+        NOW + 2,
+      );
+      runtime.submit(
+        { nodeId: "work", outcomeId: "done", credential: credentialOf(requests, "work#3") },
+        NOW + 3,
+      );
+      const stopping = runtime.submit(
+        { nodeId: "review", outcomeId: "revise", credential: credentialOf(requests, "review#4") },
+        NOW + 4,
+      );
+      expect(stopping.kind).toBe("accepted");
+      if (stopping.kind !== "accepted") return;
+      expect(stopping.state.phase).toBe("stopped");
+
+      // The accepted-event stream is the WORKERS' answers, in order, and nothing
+      // else: the stop substitutes no outcome (the loop's exit "approve" is never
+      // written), invents no attempt, and settles no node that did not answer.
+      const events = ledger.acceptedEvents(graphId);
+      expect(events.map((event) => event.attemptId + ":" + event.outcomeId)).toEqual([
+        "work#1:done",
+        "review#2:revise",
+        "work#3:done",
+        "review#4:revise",
+      ]);
+      expect(events.some((event) => event.outcomeId === "approve")).toBe(false);
+
+      // Every settled node is corroborated by EXACTLY its own event, with the
+      // outcome and attempt the state records — the state cannot settle anything
+      // the event stream does not account for.
+      const settled = stopping.state.nodes.filter((node) => node.status === "settled");
+      expect(settled.map((node) => node.nodeId).sort()).toEqual(["review", "work"]);
+      expect(
+        settled.map((node) => {
+          const own = events.filter((event) => event.attemptId === node.attemptId);
+          expect(own).toHaveLength(1);
+          return {
+            node: node.nodeId,
+            recorded: node.outcomeId,
+            accepted: own[0]?.outcomeId,
+            attempt: node.attemptId,
+          };
+        }),
+      ).toEqual([
+        { node: "review", recorded: "revise", accepted: "revise", attempt: "review#4" },
+        { node: "work", recorded: "done", accepted: "done", attempt: "work#3" },
+      ]);
+      // The loop never advanced past its cap either.
+      expect(stopping.state.loopTraversals["revise-loop"]).toBe(1);
+    });
   });
 });
 
