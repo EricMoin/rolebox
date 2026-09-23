@@ -293,6 +293,20 @@ export function persistedEmptyNote(scan: PersistedStateScan): string {
 }
 
 /**
+ * Note naming the stored definitions a scan could not read, for a list that
+ * ALSO has readable rows: those graphs must not disappear silently while the
+ * audit and the boot sweep call them blocked (A19). The all-unreadable case is
+ * {@link persistedEmptyNote}, which is the whole answer there.
+ */
+export function skippedGraphsNote(ids: readonly string[]): string {
+  return (
+    `  Stored definition(s) skipped — this build cannot read ` +
+    `${ids.length === 1 ? "it" : "them"} (${ids.join(", ")}); ` +
+    `graph_audit names the blocker.`
+  );
+}
+
+/**
  * Extract a node's recorded `progress` signal, if any, from the engine state.
  *
  * The DELETED legacy signal engine recorded every signal a node emitted into

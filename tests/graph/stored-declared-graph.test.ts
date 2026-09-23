@@ -265,6 +265,51 @@ describe("the stored graph record", () => {
       expect(String(caught)).toContain("cannot read it");
       expect(String(caught)).not.toContain("[phase: idle]");
 
+      // THE DECLARING PROCESS — the graph is in THIS process's session
+      // registry, so its declaration-time snapshot (phase idle, every node
+      // pending) is present and must not stand in for the unreadable run. This
+      // is the operator case the reader above deliberately does not cover.
+      for (const scope of ["session", "persisted", "all"] as const) {
+        const list = declaring.graph_status({ scope });
+        expect(list).not.toContain("[phase: idle]");
+        expect(list).toContain(GRAPH_ID);
+        expect(list).not.toContain("No graphs exist");
+      }
+      // The session list is the SAME honest note scope=persisted gives.
+      expect(declaring.graph_status({ scope: "session" })).toBe(
+        declaring.graph_status({ scope: "persisted" }),
+      );
+      // A TARGET refuses by name from every scope, session included, with the
+      // by-name refusal scope=persisted already gave.
+      const refusals = new Map<string, string>();
+      for (const scope of ["session", "persisted", "all"] as const) {
+        let declaringCaught: unknown;
+        try {
+          declaring.graph_status({ graph_id: GRAPH_ID, scope });
+        } catch (error) {
+          declaringCaught = error;
+        }
+        expect(declaringCaught).toBeInstanceOf(Error);
+        const text = String(declaringCaught);
+        expect(text).toContain("cannot read it");
+        expect(text).toContain("graph_audit names the blocker");
+        expect(text).not.toContain("[phase: idle]");
+        refusals.set(scope, text);
+      }
+      expect(refusals.get("session")).toBe(refusals.get("persisted"));
+      expect(refusals.get("all")).toBe(refusals.get("persisted"));
+      // NODE targeting resolves the owning graph from the DECLARATION (the node
+      // set is declaration content) and then refuses the unreadable record — it
+      // never prints the snapshot's pending row.
+      let nodeCaught: unknown;
+      try {
+        declaring.graph_status({ node_id: "work", scope: "session" });
+      } catch (error) {
+        nodeCaught = error;
+      }
+      expect(String(nodeCaught)).toContain("cannot read it");
+      expect(String(nodeCaught)).not.toContain("pending");
+
       // THE AUDIT names the same condition by blocker...
       const audit = await reader.graph_audit();
       expect(audit.ledger).toBe("opened");

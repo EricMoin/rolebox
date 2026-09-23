@@ -106,6 +106,7 @@ import {
   resultText,
   shallowCloneDeclaration,
   signalStreamEntries,
+  skippedGraphsNote,
   visibleNodeMap,
   writeAtomic,
   type GraphBudgetSummary,
@@ -129,6 +130,22 @@ export const log = createSubLogger("graph:tools");
 interface DeclaredGraphEntry {
   readonly graph: DeclaredOutcomeGraph;
   readonly persisted: boolean;
+}
+
+/**
+ * One store scan, indexed for the declared-graph views: the scan itself plus
+ * the readable stored records by graph id.
+ *
+ * The distinction is load-bearing (A19). A declared graph with NO stored record
+ * is still an in-memory fact — the declaration snapshot is the only position
+ * that exists and it may be reported. A stored record the scan SKIPPED (its
+ * definition or its run state failed a gate), or a store the scan could not
+ * read at all, is NOT "no record": the graph has a recorded position and this
+ * build cannot read it, so no position may be invented for it in any scope.
+ */
+interface DeclaredStoreView {
+  readonly scan: PersistedStateScan;
+  readonly recorded: Map<string, EngineState>;
 }
 
 /**
@@ -670,12 +687,7 @@ export class GraphToolSet {
       if (this.declaredGraphs.size === 0) {
         return "No declared graphs exist. Call graph_declare to declare one.";
       }
-      const persisted = this.persistedById();
-      const lines = [...this.declaredGraphs.entries()].map(([id, entry]) => {
-        const s = this.liveDeclaredState(entry, persisted);
-        return `  ${id}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`;
-      });
-      return `Graphs (${this.declaredGraphs.size}):\n${lines.join("\n")}`;
+      return this.renderDeclaredSessionList();
     }
 
     // Resolve the owning graph. Prefer an explicit graph_id; otherwise search
@@ -707,32 +719,72 @@ export class GraphToolSet {
   // ── Cross-session (persisted/all) helpers ─────────────────────────────────
 
   /**
-   * The persisted records of every graph in the store, keyed by graph id — the
-   * run's own record for a declared graph, refreshed by the projection the host
-   * and the submission ingress write after each committed transition.
+   * One scan of the workspace's graph store, indexed by graph id: the readable
+   * stored records (each one a declared graph's own durable record, advanced by
+   * the host and the submission ingress as the run commits) plus the scan's
+   * verdict, so a stored-but-unreadable graph is distinguishable from a graph
+   * with no stored record at all (see {@link liveDeclaredState}).
    */
-  private persistedById(): Map<string, EngineState> {
-    return new Map(this.persistedScan().loaded.map((s) => [s.graphId, s]));
+  private storeView(scan: PersistedStateScan = this.persistedScan()): DeclaredStoreView {
+    return { scan, recorded: new Map(scan.loaded.map((s) => [s.graphId, s])) };
   }
 
   /**
-   * The NEWEST recorded state for a declared graph.
+   * Whether the scan found a stored record for `graphId` that it could not
+   * read: the id is in the skipped set, or the store itself is unreadable (in
+   * which case no stored record can be ruled out).
+   */
+  private storedButUnreadable(graphId: string, view: DeclaredStoreView): boolean {
+    return view.scan.blocked !== undefined || view.scan.skippedGraphs.includes(graphId);
+  }
+
+  /**
+   * The readable state of a declared graph, or `undefined` when the store holds
+   * a record for it that this build cannot READ.
    *
    * The in-memory snapshot is what `graph_declare` built; the run's position is
-   * written back into the graph's own persisted record as it advances. When the
-   * record exists it IS that graph's state — a declaration with no store has
-   * only the snapshot, and a record that a reader refuses never reaches here
-   * (the scan skips it).
+   * written back into the graph's own persisted record as it advances. When a
+   * readable record exists it IS that graph's state, and a declaration with no
+   * stored record at all has only the snapshot — that fallback stays.
+   *
+   * A record the scan SKIPPED is different: the graph has a recorded position
+   * and this build cannot read it, so the declaration snapshot is NOT its
+   * position and `undefined` is how every caller refuses to invent one (A19).
+   * The callers then take the honest path — the skipped-id note for a list, the
+   * by-name "stored at … but this build cannot read it" refusal for a target,
+   * the same answers `scope=persisted` gives.
    */
   private liveDeclaredState(
     entry: DeclaredGraphEntry,
-    persisted: Map<string, EngineState>,
-  ): EngineState {
+    view: DeclaredStoreView,
+  ): EngineState | undefined {
     const base = entry.graph.state;
-    return persisted.get(base.graphId) ?? base;
+    const recorded = view.recorded.get(base.graphId);
+    if (recorded !== undefined) return recorded;
+    if (this.storedButUnreadable(base.graphId, view)) return undefined;
+    return base;
   }
 
-  /** Resolve a DECLARED graph's state, or throw the missing-graph error. */
+  /**
+   * The refusal for a graph the store holds but this build cannot read, shared
+   * by EVERY scope so session, persisted and all answer the same way (A19):
+   * the store's own verdict when the whole store is unreadable, otherwise the
+   * by-name refusal that `graph_audit` corroborates.
+   */
+  private unreadableGraphError(graphId: string, scan: PersistedStateScan): Error {
+    if (scan.blocked !== undefined) {
+      return new Error(
+        `graph_status: the graph store at ${scan.storeDirectory} cannot be read: ${scan.blocked}.`,
+      );
+    }
+    return new Error(
+      `graph_status: graph "${graphId}" is stored at ${scan.storeDirectory} but this build ` +
+        "cannot read it (a stored definition or its run state failed a gate). " +
+        "graph_audit names the blocker; no position is reported for it.",
+    );
+  }
+
+  /** Resolve a DECLARED graph's state, or throw the missing/unreadable error. */
   private resolveDeclaredState(graphId: string): EngineState {
     const entry = this.declaredGraphs.get(graphId);
     if (!entry) {
@@ -741,15 +793,51 @@ export class GraphToolSet {
           "or query scope=persisted for a graph another process declared.",
       );
     }
-    return this.liveDeclaredState(entry, this.persistedById());
+    const view = this.storeView();
+    const state = this.liveDeclaredState(entry, view);
+    if (state !== undefined) return state;
+    throw this.unreadableGraphError(graphId, view.scan);
   }
 
-  /** The declared graphs' states, in declaration order. */
+  /**
+   * The session list: every declared graph's recorded position, in declaration
+   * order.
+   *
+   * A declared graph whose stored record this build cannot read is NOT shown
+   * with its declaration snapshot — that snapshot is the declaration-time
+   * position (`idle`, every node `pending`), and printing it for a graph that
+   * really ran is the fabricated position A19 forbids. When nothing is readable
+   * the honest note names the skipped definitions; when some graphs are
+   * readable the skipped ids are still named beside them.
+   */
+  private renderDeclaredSessionList(): string {
+    const view = this.storeView();
+    const rows: Array<{ id: string; state: EngineState }> = [];
+    const unreadable: string[] = [];
+    for (const [id, entry] of this.declaredGraphs) {
+      const state = this.liveDeclaredState(entry, view);
+      if (state === undefined) {
+        unreadable.push(id);
+        continue;
+      }
+      rows.push({ id, state });
+    }
+    if (rows.length === 0) return persistedEmptyNote(view.scan);
+    const lines = rows.map(
+      (row) => `  ${row.id}\t[phase: ${row.state.phase}]\t${row.state.nodes.size} nodes`,
+    );
+    if (unreadable.length > 0) lines.push(skippedGraphsNote(unreadable));
+    return `Graphs (${rows.length}):\n${lines.join("\n")}`;
+  }
+
+  /** The declared graphs' READABLE states, in declaration order. A stored graph
+   * whose record this build cannot read is not among them (A19). */
   private declaredStates(): EngineState[] {
-    const persisted = this.persistedById();
+    const view = this.storeView();
     const out: EngineState[] = [];
     for (const [, entry] of this.declaredGraphs) {
-      out.push(this.liveDeclaredState(entry, persisted));
+      const state = this.liveDeclaredState(entry, view);
+      if (state !== undefined) out.push(state);
     }
     return out;
   }
@@ -779,19 +867,22 @@ export class GraphToolSet {
   }
 
   /** Declared states followed by persisted states, deduped by graphId (a
-   * declared graph wins) — the node set the `all` scope aggregates over. */
+   * declared graph wins) — the node set the `all` scope aggregates over. A
+   * stored graph this build cannot read contributes nothing: neither the
+   * fabricated declaration snapshot nor a half-decoded row (A19). */
   private collectAllStates(): EngineState[] {
-    const persisted = this.persistedById();
+    const view = this.storeView();
     const seen = new Set<string>();
     const out: EngineState[] = [];
     for (const [, entry] of this.declaredGraphs) {
-      const s = this.liveDeclaredState(entry, persisted);
+      const s = this.liveDeclaredState(entry, view);
+      if (s === undefined) continue;
       if (!seen.has(s.graphId)) {
         seen.add(s.graphId);
         out.push(s);
       }
     }
-    for (const p of persisted.values()) {
+    for (const p of view.recorded.values()) {
       if (!seen.has(p.graphId)) {
         seen.add(p.graphId);
         out.push(p);
@@ -823,6 +914,10 @@ export class GraphToolSet {
     const states = scope === "persisted" ? scan.loaded : this.collectAllStates();
     if (states.length === 0) return this.emptyScopeNote(scan, scope);
     const lines = states.map((s) => `  ${s.graphId}\t[phase: ${s.phase}]\t${s.nodes.size} nodes`);
+    // Readable rows exist, but the store also holds definitions this build
+    // cannot read: name them rather than dropping a graph the audit and the
+    // boot sweep call blocked (A19).
+    if (scan.skipped > 0) lines.push(skippedGraphsNote(scan.skippedGraphs));
     const header =
       scope === "persisted" ? `Persisted graphs (${states.length}):` : `Graphs (${states.length}):`;
     return `${header}\n${lines.join("\n")}`;
@@ -980,26 +1075,23 @@ export class GraphToolSet {
    */
   private resolveState(graphId: string, scope: GraphStatusScope): EngineState {
     const scan = this.persistedScan();
-    const persisted = new Map(scan.loaded.map((s) => [s.graphId, s]));
+    const view = this.storeView(scan);
     if (scope === "all") {
       const entry = this.declaredGraphs.get(graphId);
       // A declared graph resolves through its LIVE record, never the
-      // declaration snapshot the registry holds.
-      if (entry) return this.liveDeclaredState(entry, persisted);
+      // declaration snapshot the registry holds — and never a snapshot for a
+      // record this build cannot read: that gets the same by-name refusal every
+      // other scope gives (A19).
+      if (entry) {
+        const state = this.liveDeclaredState(entry, view);
+        if (state !== undefined) return state;
+        throw this.unreadableGraphError(graphId, scan);
+      }
     }
-    const found = persisted.get(graphId);
+    const found = view.recorded.get(graphId);
     if (found) return found;
-    if (scan.blocked !== undefined) {
-      throw new Error(
-        `graph_status: the graph store at ${scan.storeDirectory} cannot be read: ${scan.blocked}.`,
-      );
-    }
-    if (scan.skippedGraphs.includes(graphId)) {
-      throw new Error(
-        `graph_status: graph "${graphId}" is stored at ${scan.storeDirectory} but this build ` +
-          "cannot read it (a stored definition or its run state failed a gate). " +
-          "graph_audit names the blocker; no position is reported for it.",
-      );
+    if (scan.blocked !== undefined || scan.skippedGraphs.includes(graphId)) {
+      throw this.unreadableGraphError(graphId, scan);
     }
     throw new Error(
       `graph_status: graph "${graphId}" not found in ${scope} scope.`,
@@ -1020,9 +1112,14 @@ export class GraphToolSet {
       }
     };
     if (scope !== "persisted") {
-      consider(this.declaredStates());
+      // Ownership is DECLARATION content, so it resolves from each declared
+      // graph's own node/loop set even when its stored position is unreadable:
+      // the state resolution below then refuses by name instead of reporting
+      // the graph as absent (A19).
+      for (const [, entry] of this.declaredGraphs) consider([entry.graph.state]);
     }
-    consider(this.persistedScan().loaded);
+    const scan = this.persistedScan();
+    consider(scan.loaded);
     const list = [...matches];
     if (list.length === 1) return list[0];
     if (list.length > 1) {
@@ -1031,8 +1128,22 @@ export class GraphToolSet {
           `multiple graphs (${list.join(", ")}); specify graph_id to disambiguate.`,
       );
     }
+    // The id may belong to a stored definition this build cannot read — a store
+    // whose verdict is 'absent' is the only case where the store can be ruled
+    // out as the owner (A19).
+    const unreadable =
+      scan.blocked !== undefined
+        ? `the store at ${scan.storeDirectory} cannot be read: ${scan.blocked}`
+        : scan.skipped > 0
+          ? `${scan.skipped} stored definition(s) this build cannot read ` +
+            `(${scan.skippedGraphs.join(", ")})`
+          : undefined;
     throw new Error(
-      `graph_status: ${nodeId ? `node "${nodeId}"` : `loop "${loopId}"`} not found in any graph.`,
+      `graph_status: ${nodeId ? `node "${nodeId}"` : `loop "${loopId}"`} not found in any ` +
+        `readable graph.` +
+        (unreadable === undefined
+          ? ""
+          : ` The store may hold it in ${unreadable}; graph_audit names the blocker.`),
     );
   }
 
