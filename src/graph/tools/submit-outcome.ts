@@ -88,7 +88,7 @@ import type {
 import {
   credentialIsolationRefusal,
   readCredentialIsolationAdapter,
-  type CredentialIsolationAdapter,
+  type CredentialIsolationCapability,
 } from "../outcome/credential-isolation.ts";
 import {
   hostIdentityRefusal,
@@ -472,7 +472,7 @@ export interface SubmitOutcomeDeps {
    * nothing is written. With it, the ledger is opened at the adapter's
    * declared `credentialStoreRoot` instead of the workspace default.
    */
-  readonly credentialIsolation?: CredentialIsolationAdapter;
+  readonly credentialIsolation?: CredentialIsolationCapability;
   /**
    * The HOST's invocation-identity capability (D9), threaded to the runtime
    * unchanged. It is the ADDITIONAL constraint on top of the bearer credential:

@@ -1,13 +1,24 @@
 /**
  * Credential isolation as the OUTCOME run path's production enablement
- * condition (D7).
+ * condition (D7), now that the ledger stores only a DIGEST.
  *
- * THE REPRODUCED DEFECT THIS FILE PINS. A process that only READS the
- * acceptance ledger — no write, no rebind — obtains another attempt's
- * credential and is ACCEPTED when it submits with it. This build writes that
- * ledger as an ordinary file, so it cannot prevent the read (proved on the real
- * store below, with the file byte-identical across the read); what it CAN do is
- * refuse to enable a run path whose credentials it cannot protect.
+ * THE DEFECT THIS FILE PINNED, AND WHAT CLOSED IT. A process that only READS
+ * the acceptance ledger — no write, no rebind — used to obtain another
+ * attempt's credential and be ACCEPTED when it submitted with it, because the
+ * credential itself was persisted. The state body now records only
+ * `attemptCredentialDigest` (state-body version 8), so the same read yields a
+ * verifier and settles nothing: that is proved below on the real store, with
+ * the file byte-identical across the read and the credential value absent from
+ * its bytes.
+ *
+ * WHAT IS STILL THE HOST'S. The credential itself has to be held somewhere and
+ * delivered to exactly one attempt, which is what the capability's version-2
+ * `{ remember, resolve }` store is for (the shipped host implementation is
+ * `src/graph/host/credential-vault.ts`). A same-account process can still read
+ * the host's store FILE unless the platform isolates it — no mode bit or mount
+ * option this build could inspect would change that, so the declaration stays an
+ * assertion about the host's environment, and the honest boundary is stated in
+ * `credential-isolation.ts`.
  *
  * Covered here, all through real calls:
  * - the refusal: `start`, `resume`, `submit`, the model-facing ingress and
@@ -15,9 +26,8 @@
  *   diagnostic naming the host obligation, and none of them writes anything;
  * - the enablement: a host adapter is the ONLY thing that turns the path on, and
  *   its declared `credentialStoreRoot` is where the ledger is opened;
- * - the honest limitation: with a host adapter declared, reading the store still
- *   yields another attempt's credential — the host, not this build, owns that
- *   boundary;
+ * - the storage boundary this build owns: the ledger and every report carry only
+ *   the digest, and the digest settles nothing;
  * - the exposure surface: the credential reaches the dispatch seam and appears
  *   in NO report channel — the ingress result, `graph_status`, the
  *   `<graph_state>` block, `graph_audit`, the startup sweep's report, the
@@ -36,6 +46,8 @@ import { join } from "node:path";
 
 import type { GraphDeclarationV3 } from "../../src/graph/compiler/declaration-v3.ts";
 import { auditGraphStore } from "../../src/graph/audit/drain-audit.ts";
+import { HostCredentialVault } from "../../src/graph/host/credential-vault.ts";
+import { attemptCredentialDigest } from "../../src/graph/outcome/attempt-credential.ts";
 import {
   engineStateDir,
   engineStatePath,
@@ -157,14 +169,33 @@ function fieldOf(value: unknown, field: string): unknown {
   return (value as Record<string, unknown>)[field];
 }
 
-/** The attempt credential a persisted state BODY records for one node. */
+/**
+ * The PLAINTEXT attempt credential a persisted state body records for one node.
+ *
+ * Only a body version before 8 has this field at all; the current layout records
+ * the digest instead, which is exactly what the theft case below asserts.
+ */
 function credentialInBody(body: unknown, nodeId: string): string | undefined {
+  return fieldInNode(body, nodeId, "attemptCredential");
+}
+
+/** The attempt-credential DIGEST the current layout records for one node. */
+function credentialDigestInBody(body: unknown, nodeId: string): string | undefined {
+  return fieldInNode(body, nodeId, "attemptCredentialDigest");
+}
+
+/** One string field of the persisted entry for `nodeId`, or `undefined`. */
+function fieldInNode(
+  body: unknown,
+  nodeId: string,
+  field: string,
+): string | undefined {
   const nodes = fieldOf(body, "nodes");
   if (!Array.isArray(nodes)) return undefined;
   for (const node of nodes) {
     if (fieldOf(node, "nodeId") !== nodeId) continue;
-    const credential = fieldOf(node, "attemptCredential");
-    if (typeof credential === "string") return credential;
+    const value = fieldOf(node, field);
+    if (typeof value === "string") return value;
   }
   return undefined;
 }
@@ -285,13 +316,38 @@ describe("credential isolation is the outcome run path's enablement condition", 
     expect(Object.isFrozen(read?.guarantees)).toBe(true);
     expect(credentialIsolationRefusal(read)).toBeUndefined();
 
+    // VERSION 2 ADDS THE STORE, AND IT IS READ EXACTLY LIKE VERSION 1: the two
+    // functions, both of them, or no capability at all. The store object is
+    // frozen and hands back the host's own functions.
+    const store = {
+      remember: (): void => undefined,
+      resolve: (): string | undefined => undefined,
+    };
+    const validV2: unknown = {
+      version: 2,
+      id: "host:credential-vault",
+      credentialStoreRoot: "/protected/credential-store",
+      guarantees: { protectedCredentialStore: true, perAttemptDelivery: true },
+      store,
+    };
+    const readV2 = readCredentialIsolationAdapter(validV2);
+    expect(readV2?.version).toBe(2);
+    if (readV2?.version !== 2) {
+      throw new Error("fixture: the version-2 capability was not read");
+    }
+    expect(readV2.store.remember).toBe(store.remember);
+    expect(readV2.store.resolve).toBe(store.resolve);
+    expect(Object.isFrozen(readV2)).toBe(true);
+    expect(Object.isFrozen(readV2.store)).toBe(true);
+    expect(credentialIsolationRefusal(readV2)).toBeUndefined();
+
     const guarantees = { protectedCredentialStore: true, perAttemptDelivery: true };
     const rejected: readonly (readonly [string, unknown])[] = [
       ["absent", undefined],
       ["a non-record", "host:protected-ledger"],
       ["an array", []],
       [
-        "a different version",
+        "a version-2 shape without its store",
         { version: 2, id: "h", credentialStoreRoot: "/p", guarantees },
       ],
       ["an empty id", { version: 1, id: "", credentialStoreRoot: "/p", guarantees }],
@@ -321,6 +377,40 @@ describe("credential isolation is the outcome run path's enablement condition", 
           guarantees: { protectedCredentialStore: true },
         },
       ],
+      [
+        "a version-2 store with no resolve",
+        {
+          version: 2,
+          id: "h",
+          credentialStoreRoot: "/p",
+          guarantees,
+          store: { remember: (): void => undefined },
+        },
+      ],
+      [
+        "a version-2 store with a non-function member",
+        {
+          version: 2,
+          id: "h",
+          credentialStoreRoot: "/p",
+          guarantees,
+          store: { remember: (): void => undefined, resolve: "not-a-function" },
+        },
+      ],
+      [
+        "a version-2 store with an extra key",
+        {
+          version: 2,
+          id: "h",
+          credentialStoreRoot: "/p",
+          guarantees,
+          store: {
+            remember: (): void => undefined,
+            resolve: (): string | undefined => undefined,
+            forget: (): void => undefined,
+          },
+        },
+      ],
     ];
     for (const [label, value] of rejected) {
       expect(readCredentialIsolationAdapter(value), label).toBeUndefined();
@@ -332,10 +422,12 @@ describe("credential isolation is the outcome run path's enablement condition", 
     expect(credentialIsolationRefusal(rejected[7]?.[1])?.message).toContain(
       "refused rather than downgraded",
     );
-    // The absent case explains the fact this build cannot change.
-    expect(credentialIsolationRefusal(undefined)?.message).toContain(
-      "cannot protect the attempt credentials it persists",
-    );
+    // The absent case states what this build DOES protect (the ledger carries
+    // only digests) and the obligation that is left to the host.
+    const absentMessage = credentialIsolationRefusal(undefined)?.message ?? "";
+    expect(absentMessage).toContain("persists only the DIGEST");
+    expect(absentMessage).toContain("held and delivered by the host");
+    expect(absentMessage).toContain("credentialStoreRoot");
   });
 
   it("enables the path with a host capability: dispatch, submit, restart and resume", async () => {
@@ -430,15 +522,19 @@ describe("credential isolation is the outcome run path's enablement condition", 
   });
 });
 
-// ── The limitation the gate exists for ──────────────────────────────────────
+// ── The boundary this build owns, and the one it does not ───────────────────
 
-describe("this build cannot protect the store — so it refuses to run without a host", () => {
-  it("yields another attempt's credential from a read-only ledger read, and that credential is accepted", async () => {
+describe("the ledger yields no usable credential — the value lives in the host's store", () => {
+  it("yields only a DIGEST from a read-only ledger read, and that value settles nothing", async () => {
     const dir = makeTmpDir("credential-read-");
     const plan = buildDeclaredOutcomeGraph({ declaration: TWO_ENTRIES }).plan;
     const ledger = await SqliteAcceptanceLedger.create(dir);
     try {
       const requests: OutcomeDispatchRequest[] = [];
+      const vault = HostCredentialVault.open({
+        root: dir,
+        id: "test-host:credential-vault",
+      });
       const runtime = new OutcomeGraphRuntime({
         plan,
         ledger,
@@ -447,7 +543,7 @@ describe("this build cannot protect the store — so it refuses to run without a
         artifactRoot: dir,
         clock: () => NOW,
         mintCredential: perAttemptCredential,
-        credentialIsolation: testHostCredentialIsolation(dir),
+        credentialIsolation: vault.capability(),
       });
       const started = runtime.start(NOW);
       expect(started.kind).toBe("started");
@@ -465,10 +561,12 @@ describe("this build cannot protect the store — so it refuses to run without a
       if (opened.kind !== "opened") {
         throw new Error("fixture: the ledger did not open read-only (" + opened.kind + ")");
       }
-      let stolen: string | undefined;
+      let stolenPlaintext: string | undefined;
+      let stolenDigest: string | undefined;
       try {
         const record = opened.ledger.readGraphState(plan.graphId);
-        stolen = credentialInBody(record?.body, "beta");
+        stolenPlaintext = credentialInBody(record?.body, "beta");
+        stolenDigest = credentialDigestInBody(record?.body, "beta");
       } finally {
         opened.ledger.close();
       }
@@ -477,14 +575,45 @@ describe("this build cannot protect the store — so it refuses to run without a
         .digest("hex");
       expect(digestAfter).toBe(digestBefore);
 
-      // The credential the alpha worker was never handed is now in hand — and
-      // the protocol ACCEPTS it, because a bearer token cannot tell who read
-      // it. THAT is why the host, not this build, must own the boundary.
-      expect(stolen).toBe(betaCredential);
-      expect(stolen).not.toBe(alphaCredential);
-      const accepted = runtime.submit(
-        { nodeId: "beta", outcomeId: "done", credential: stolen },
+      // WHAT THE READER GOT IS A VERIFIER, NOT A CREDENTIAL. The persisted entry
+      // holds beta's digest; the plaintext field is not written at all, and
+      // neither worker's credential appears in the bytes of the store.
+      expect(stolenPlaintext).toBeUndefined();
+      expect(stolenDigest).toBe(attemptCredentialDigest(betaCredential));
+      const bytes = readFileSync(ledgerFilePath(dir));
+      expect(bytes.includes(Buffer.from(betaCredential, "utf8"))).toBe(false);
+      expect(bytes.includes(Buffer.from(alphaCredential, "utf8"))).toBe(false);
+
+      // THE REPRODUCED DEFECT IS CLOSED AT THE STORAGE LAYER: presenting what
+      // the read yielded resolves no attempt, so a same-account reader cannot
+      // settle another worker's attempt with it.
+      const refused = runtime.submit(
+        { nodeId: "beta", outcomeId: "done", credential: stolenDigest },
         NOW + 1,
+      );
+      expect(refused.kind).toBe("refused");
+      if (refused.kind !== "refused") return;
+      expect(refused.refusals.map((refusal) => refusal.code)).toEqual([
+        "credential-unknown",
+      ]);
+
+      // THE HOST'S STORE IS THE ONE PLACE THE VALUE LIVES, and it answers for
+      // exactly the attempt the credential was issued for.
+      expect(
+        vault.resolve({ graphId: plan.graphId, nodeId: "beta", attemptId: "beta#2" }),
+      ).toBe(betaCredential);
+      expect(
+        vault.resolve({ graphId: plan.graphId, nodeId: "alpha", attemptId: "alpha#1" }),
+      ).toBe(alphaCredential);
+      expect(
+        vault.resolve({ graphId: plan.graphId, nodeId: "beta", attemptId: "beta#1" }),
+      ).toBeUndefined();
+
+      // The legitimate holder still settles its own attempt with the value it
+      // was handed: the digest verifies possession, it does not replace it.
+      const accepted = runtime.submit(
+        { nodeId: "beta", outcomeId: "done", credential: betaCredential },
+        NOW + 2,
       );
       expect(accepted.kind).toBe("accepted");
       if (accepted.kind === "accepted") {

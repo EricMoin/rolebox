@@ -144,7 +144,7 @@ import {
   legacyGraphCreationRefusal,
 } from "./legacy-creation-gate.ts";
 import type { OutcomeDispatchAdapter } from "../outcome/runtime.ts";
-import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
+import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import type { ValidatorRegistry } from "../outcome/validators.ts";
 import {
@@ -432,7 +432,7 @@ export interface GraphToolSetDeps {
    * cannot keep out of a same-account process's reach. With it, the ingress
    * opens the ledger at the adapter's declared `credentialStoreRoot`.
    */
-  credentialIsolation?: CredentialIsolationAdapter;
+  credentialIsolation?: CredentialIsolationCapability;
   /**
    * Optional HOST invocation-identity capability (D9) — the ADDITIONAL
    * constraint a host may declare on top of per-attempt credentials.

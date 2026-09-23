@@ -224,12 +224,17 @@ import {
 import {
   RUNTIME_ATTEMPT_CREDENTIAL_SOURCE,
   attemptCredentialBinding,
+  attemptCredentialDigest,
+  isAttemptCredential,
   mintAttemptCredential,
   type AttemptCredentialSource,
 } from "./attempt-credential.ts";
 import {
+  CREDENTIAL_ISOLATION_VERSION_V2,
   credentialIsolationRefusal,
-  type CredentialIsolationAdapter,
+  readCredentialIsolationAdapter,
+  type CredentialIsolationCapability,
+  type CredentialIsolationStore,
 } from "./credential-isolation.ts";
 import {
   hostIdentityCheckRefusal,
@@ -831,7 +836,7 @@ export interface OutcomeGraphRuntimeOptions {
    * exists to prevent. There is no default adapter and no test-only bypass in
    * this module.
    */
-  readonly credentialIsolation?: CredentialIsolationAdapter;
+  readonly credentialIsolation?: CredentialIsolationCapability;
   /**
    * The HOST's invocation-identity capability (D9) — the ADDITIONAL constraint
    * a host may declare on top of the bearer credential.
@@ -876,8 +881,23 @@ export class OutcomeGraphRuntime {
   private readonly protocols: ExecutionProtocolRegistry | undefined;
   private readonly mintCredential: AttemptCredentialSource;
   private readonly completionPolicies: CompletionPolicyRegistry | undefined;
-  private readonly credentialIsolation: CredentialIsolationAdapter | undefined;
+  private readonly credentialIsolation: CredentialIsolationCapability | undefined;
+  private readonly credentialStore: CredentialIsolationStore | undefined;
   private readonly hostIdentity: HostIdentityCapability | undefined;
+  /**
+   * The credential source the run path uses: the injected generator, wrapped so
+   * that every credential it mints is ADOPTED BY THE HOST'S STORE before the
+   * state recording its digest can be committed.
+   *
+   * WHY THE STORE SEES IT FIRST. The durable state keeps only the digest, so the
+   * store is the only place the credential itself exists once this process is
+   * gone. A credential the store never received would make its attempt
+   * permanently un-deliverable — including in the commit-then-crash window D8
+   * reconciles, where no create call ever ran. A store that throws therefore
+   * fails the mint, and the transaction that would have recorded the attempt
+   * writes nothing.
+   */
+  private readonly credentialSource: AttemptCredentialSource;
 
   constructor(options: OutcomeGraphRuntimeOptions) {
     this.plan = options.plan;
@@ -893,6 +913,19 @@ export class OutcomeGraphRuntime {
       options.mintCredential ?? RUNTIME_ATTEMPT_CREDENTIAL_SOURCE;
     this.completionPolicies = options.completionPolicies;
     this.credentialIsolation = options.credentialIsolation;
+    this.credentialStore = readCredentialStore(options.credentialIsolation);
+    this.credentialSource = (binding) => {
+      const credential = mintAttemptCredential(this.mintCredential, binding);
+      this.credentialStore?.remember(
+        Object.freeze({
+          graphId: binding.graphId,
+          nodeId: binding.nodeId,
+          attemptId: binding.attemptId,
+        }),
+        credential,
+      );
+      return credential;
+    };
     this.hostIdentity = options.hostIdentity;
   }
 
@@ -1009,7 +1042,7 @@ export class OutcomeGraphRuntime {
       // the same transaction that records the dispatch: the binding a later
       // submission is checked against is the state's, not the submission's.
       const credential = mintAttemptCredential(
-        this.mintCredential,
+        this.credentialSource,
         attemptCredentialBinding({
           graphId: this.graphId,
           nodeId: node.id,
@@ -1023,7 +1056,7 @@ export class OutcomeGraphRuntime {
           status: "dispatched" as const,
           attemptId,
           attemptSeq,
-          attemptCredential: credential,
+          attemptCredentialDigest: attemptCredentialDigest(credential),
           // The host attribution this attempt is bound to (D9). Absent when the
           // host declared no identity for this invocation — the absence IS the
           // record, and no later process back-fills one.
@@ -2178,17 +2211,18 @@ export class OutcomeGraphRuntime {
         });
         continue;
       }
-      // THE BINDING IS READ FROM THE PERSISTED STATE, NOT FROM THE EFFECT. The
-      // payload is credential-free on purpose, so the credential a recovered
-      // worker receives is the one the attempt's own state entry records — and
-      // an attempt whose entry carries none (a body version that predates
-      // credentials) is REFUSED rather than launched without one or granted a
-      // fresh credential for a new execution.
-      const credential = armed.attemptCredential;
-      if (credential === undefined) {
+      // THE BINDING IS READ FROM THE PERSISTED STATE, AND THE CREDENTIAL FROM
+      // THE HOST'S STORE. The payload is credential-free on purpose and the
+      // state records only the DIGEST, so the credential a recovered worker
+      // receives is resolved from the capability that adopted it at mint time.
+      // An attempt whose entry carries no digest (a body version that persisted
+      // the credential itself, or none at all) and one whose credential the host
+      // store can no longer produce are BOTH refused rather than launched
+      // without a credential or granted a fresh one for a new execution.
+      if (armed.attemptCredentialDigest === undefined) {
         refusals.push({
           code: "credential-missing",
-          path: "$.attemptCredential",
+          path: "$.attemptCredentialDigest",
           message:
             "outcome-runtime: dispatch effect " +
             JSON.stringify(effect.effectId) +
@@ -2196,12 +2230,38 @@ export class OutcomeGraphRuntime {
             JSON.stringify(target.nodeId) +
             " on attempt " +
             JSON.stringify(target.attemptId) +
-            ", but the persisted state entry for that attempt carries no attempt credential — " +
-            "an attempt the runtime cannot hand a credential to is never launched, and it " +
-            "stays unsettled",
+            ", but the persisted state entry for that attempt carries no attempt-credential " +
+            "digest — a body version before this one persisted the credential itself and is " +
+            "never re-delivered by this build, so the effect stays unsettled",
         });
         continue;
       }
+      const resolvedCredential = this.resolveStoredCredential(
+        target.nodeId,
+        target.attemptId,
+      );
+      if (resolvedCredential.kind === "unavailable") {
+        refusals.push({
+          code: "credential-missing",
+          path: "$.attemptCredentialDigest",
+          message:
+            "outcome-runtime: dispatch effect " +
+            JSON.stringify(effect.effectId) +
+            " targets node " +
+            JSON.stringify(target.nodeId) +
+            " on attempt " +
+            JSON.stringify(target.attemptId) +
+            ", but the host credential store cannot produce the credential this attempt " +
+            "was issued: " +
+            // The reason is runtime-authored text naming the failure category —
+            // never the store's own message or value (see resolveStoredCredential).
+            resolvedCredential.reason +
+            " — the persisted state holds only its digest, so the attempt is NOT " +
+            "re-launched with an invented credential and stays unsettled",
+        });
+        continue;
+      }
+      const credential = resolvedCredential.credential;
       const key = dispatchEffectKeyOf(this.graphId, target.attemptId);
       const lookup = this.lookupExecution(key);
 
@@ -2346,6 +2406,64 @@ export class OutcomeGraphRuntime {
   }
 
   /**
+   * Ask the HOST'S STORE for the credential one attempt was issued.
+   *
+   * This is the only way a recovery can obtain a credential: the durable state
+   * records its digest, so no amount of reading the ledger yields a value a
+   * worker could present or a create could deliver. The store is the version-2
+   * half of the credential-isolation capability; a process that holds only the
+   * version-1 declaration (or no capability at all) has no store, and an effect
+   * it cannot re-deliver is reported as unsettled rather than launched.
+   *
+   * TOTAL, AND NEVER QUOTING THE STORE. A store that throws, or answers
+   * something that is not a credential, is reported as `unavailable` — never
+   * converted into a launch and never replaced by a freshly minted value. The
+   * reason is RUNTIME-AUTHORED text naming the failure category: this is the one
+   * component that legitimately holds credentials, so neither a thrown message
+   * nor an answered value is ever copied into a report (both are exactly where a
+   * credential could surface).
+   */
+  private resolveStoredCredential(
+    nodeId: string,
+    attemptId: string,
+  ):
+    | { readonly kind: "resolved"; readonly credential: string }
+    | { readonly kind: "unavailable"; readonly reason: string } {
+    const store = this.credentialStore;
+    if (store === undefined) {
+      return Object.freeze({
+        kind: "unavailable" as const,
+        reason:
+          "this process holds no version-" +
+          CREDENTIAL_ISOLATION_VERSION_V2 +
+          " credential-isolation capability with a { remember, resolve } store",
+      });
+    }
+    let resolved: unknown;
+    try {
+      resolved = store.resolve(
+        Object.freeze({ graphId: this.graphId, nodeId, attemptId }),
+      );
+    } catch {
+      return Object.freeze({
+        kind: "unavailable" as const,
+        reason:
+          "the host store threw while resolving it (its message is not quoted: this is " +
+          "the component that legitimately holds credentials)",
+      });
+    }
+    if (!isAttemptCredential(resolved)) {
+      return Object.freeze({
+        kind: "unavailable" as const,
+        reason:
+          "the host store did not answer a non-empty credential (the value is not " +
+          "quoted for the same reason)",
+      });
+    }
+    return Object.freeze({ kind: "resolved" as const, credential: resolved });
+  }
+
+  /**
    * Ask the host whether one effect's execution exists, with a failure to
    * answer treated as the honest `unknown` rather than as a decision.
    *
@@ -2472,11 +2590,14 @@ export class OutcomeGraphRuntime {
       };
     }
     // Resolve the attempt the credential was ISSUED for. The scan is over the
-    // persisted binding (the nonce written on one attempt's entry); it is never
-    // an index into the node the proposal happens to name.
+    // persisted binding — the DIGEST written on one attempt's entry — so the
+    // comparison is "does this presented credential hash to a recorded
+    // verifier", never "does it equal a stored copy of itself". It is never an
+    // index into the node the proposal happens to name.
+    const presented = attemptCredentialDigest(credential);
     let holder: OutcomeNodeState | undefined;
     for (const node of state.nodes) {
-      if (node.attemptCredential === credential) {
+      if (node.attemptCredentialDigest === presented) {
         holder = node;
         break;
       }
@@ -2490,9 +2611,11 @@ export class OutcomeGraphRuntime {
             "outcome-runtime: the credential on this submission is not recorded by any attempt " +
             "of graph " +
             JSON.stringify(this.graphId) +
-            " — it was never issued here, or the attempt it was issued for has since been " +
-            "superseded (a body version that predates attempt credentials records none at " +
-            "all); the node's CURRENT attempt is never substituted for it, so nothing was written",
+            " — no attempt's persisted DIGEST matches it, so it was never issued here, or " +
+            "the attempt it was issued for has since been superseded (a body version that " +
+            "persists the credential itself, or none at all, is never compared against a " +
+            "presented value); the node's CURRENT attempt is never substituted for it, so " +
+            "nothing was written",
         },
       };
     }
@@ -2625,7 +2748,7 @@ export class OutcomeGraphRuntime {
       state: current,
       decision,
       now,
-      mintCredential: this.mintCredential,
+      mintCredential: this.credentialSource,
       progress,
       // The invocation identity in effect for THIS submission (D9), written
       // onto every attempt this advance arms. Absent records nothing, which is
@@ -2866,18 +2989,22 @@ function armedReading(state: OutcomeGraphState): {
   const refusals: OutcomeRuntimeRefusal[] = [];
   state.nodes.forEach((node, index) => {
     if (node.status !== "dispatched" || node.attemptId === undefined) return;
-    if (node.attemptCredential === undefined) {
+    if (node.attemptCredentialDigest === undefined) {
+      const legacy = node.attemptCredential !== undefined;
       refusals.push({
         code: "credential-missing",
-        path: "$.nodes[" + index + "].attemptCredential",
+        path: "$.nodes[" + index + "].attemptCredentialDigest",
         message:
           "outcome-runtime: node " +
           JSON.stringify(node.nodeId) +
           " is recorded as in flight on attempt " +
           JSON.stringify(node.attemptId) +
-          " but its persisted state entry carries no attempt credential — the attempt was " +
-          "dispatched by a body version that issues none, so no submission can settle it and " +
-          "it is reported as refused rather than armed",
+          " but its persisted state entry carries no attempt-credential digest — " +
+          (legacy
+            ? "it was dispatched by a body version that persisted the credential itself, " +
+              "which this build never compares against a presentation and never re-delivers, "
+            : "the attempt was dispatched by a body version that issues none, ") +
+          "so no submission can settle it and it is reported as refused rather than armed",
       });
       return;
     }
@@ -3082,6 +3209,27 @@ function submissionIdOf(proposal: unknown, source: SettlementSource): string {
   } catch {
     return "unrepresentable-submission";
   }
+}
+
+/**
+ * The STORE half of a credential-isolation capability, when the host declared
+ * one — the version-2 addition the recovery path resolves a credential from.
+ *
+ * Read through the module's own strict reader rather than trusted from the
+ * typed option: the capability is host-supplied data, and a version-1 value (or
+ * one this build cannot read) yields NO store. Absence is not an error here —
+ * the run path's enablement gate reports an unreadable capability by name
+ * before this is consulted — it only means a recovery cannot re-deliver.
+ */
+function readCredentialStore(
+  capability: CredentialIsolationCapability | undefined,
+): CredentialIsolationStore | undefined {
+  if (capability === undefined) return undefined;
+  const read = readCredentialIsolationAdapter(capability);
+  if (read === undefined || read.version !== CREDENTIAL_ISOLATION_VERSION_V2) {
+    return undefined;
+  }
+  return read.store;
 }
 
 /** Build the refusal result for a list of refusals. */

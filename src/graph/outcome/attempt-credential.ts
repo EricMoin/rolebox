@@ -55,7 +55,7 @@
  * run path and a test harness may depend on it without a cycle.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 // ── The scope ───────────────────────────────────────────────────────────────
 
@@ -170,6 +170,75 @@ export function mintAttemptCredential(
     );
   }
   return credential;
+}
+
+// ── The persisted form ──────────────────────────────────────────────────────
+
+/**
+ * The prefix every persisted credential DIGEST carries.
+ *
+ * A digest is a value this build can verify against but can never present: the
+ * bearer credential itself is handed to one dispatch channel and kept by the
+ * host store, while the durable record keeps only the verifier. The prefix
+ * makes the two unmistakable in a diagnostic, so a store that receives a digest
+ * where it expects a credential is refused by name rather than used as one.
+ */
+export const ATTEMPT_CREDENTIAL_DIGEST_PREFIX = "sha256:" as const;
+
+/** The digest length in bits — the platform hash, named once. */
+const ATTEMPT_CREDENTIAL_DIGEST_HEX = 64;
+
+/**
+ * The DIGEST of one attempt credential: what the persisted state body records.
+ *
+ * WHY A DIGEST AND NOT THE CREDENTIAL. The credential is a bearer nonce: any
+ * process that can READ the value can present it and be accepted as the attempt
+ * it was issued for. A durable record that carries the nonce therefore IS a
+ * second, unprotected copy of the capability — which is exactly the defect the
+ * credential-isolation capability exists to close (a read-only open of the
+ * acceptance ledger, then a submission with another attempt's credential, was
+ * ACCEPTED before this rule). A digest closes it at the storage layer, without
+ * depending on any host, filesystem permission or mount option: the record
+ * proves possession of the credential (verification hashes what the submitter
+ * presents and compares) while nothing recoverable is written down. It is
+ * also stable across processes and restarts, so a legitimate submission still
+ * settles its attempt after the process that dispatched it is gone.
+ *
+ * WHAT THE DIGEST DOES NOT DO. It cannot be handed back to a worker: a recovered
+ * attempt is re-delivered from the HOST's store, which holds the credential
+ * itself (see `credential-isolation.ts`). A host that cannot produce it is
+ * reported, never handed a fabricated one.
+ *
+ * The hash is the platform digest of the exact credential string (UTF-8); the
+ * nonce's 256 bits of entropy make the digest non-invertible in practice.
+ */
+export function attemptCredentialDigest(credential: string): string {
+  return (
+    ATTEMPT_CREDENTIAL_DIGEST_PREFIX +
+    createHash("sha256").update(credential, "utf8").digest("hex")
+  );
+}
+
+/**
+ * Whether a value has the exact shape this build writes for a digest:
+ * `sha256:` followed by 64 lowercase hexadecimal digits.
+ *
+ * STRICT on purpose: a persisted record that carries the credential itself
+ * (any layout before body version 8) does not satisfy this, so a state written
+ * by that layout is never read as if its nonce were a digest — the version gate
+ * owns that distinction and this predicate keeps it checkable.
+ */
+export function isAttemptCredentialDigest(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (!value.startsWith(ATTEMPT_CREDENTIAL_DIGEST_PREFIX)) return false;
+  const hex = value.slice(ATTEMPT_CREDENTIAL_DIGEST_PREFIX.length);
+  if (hex.length !== ATTEMPT_CREDENTIAL_DIGEST_HEX) return false;
+  for (const character of hex) {
+    if (!((character >= "0" && character <= "9") || (character >= "a" && character <= "f"))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ── Shape ───────────────────────────────────────────────────────────────────

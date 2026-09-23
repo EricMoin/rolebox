@@ -785,7 +785,12 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
       if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
       const v1Nodes = rawNodes.map((node) => {
         if (!isRecord(node)) throw new Error("fixture: a node entry is not a record");
-        const { attemptCredential: _credential, arrivals: _arrivals, ...rest } = node;
+        const {
+          attemptCredentialDigest: _digest,
+          attemptCredential: _credential,
+          arrivals: _arrivals,
+          ...rest
+        } = node;
         return rest;
       });
       // Version 1 defines no progress record either, so it is stripped with the
@@ -815,7 +820,7 @@ describe("outcome state body — a shape this build cannot read blocks recovery"
     expect(report.outcomeProtocol?.refused).toHaveLength(2);
     for (const line of report.outcomeProtocol?.refused ?? []) {
       expect(line).toContain("[credential-missing]");
-      expect(line).toContain("no attempt credential");
+      expect(line).toContain("no attempt-credential digest");
     }
     expect(requests).toEqual([]);
 

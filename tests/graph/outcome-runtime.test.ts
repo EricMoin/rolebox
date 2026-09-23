@@ -58,7 +58,10 @@ import {
   OutcomeStateError,
   type OutcomeGraphState,
 } from "../../src/graph/outcome/graph-state.ts";
-import type { AttemptCredentialSource } from "../../src/graph/outcome/attempt-credential.ts";
+import {
+  attemptCredentialDigest,
+  type AttemptCredentialSource,
+} from "../../src/graph/outcome/attempt-credential.ts";
 import type {
   AcceptanceLedger,
   AcceptanceLedgerTx,
@@ -571,7 +574,7 @@ function stateSummary(state: OutcomeGraphState | undefined): string {
       nodeId: node.nodeId,
       status: node.status,
       attemptId: node.attemptId,
-      hasCredential: node.attemptCredential !== undefined,
+      hasCredentialDigest: node.attemptCredentialDigest !== undefined,
     })),
   });
 }
@@ -2319,7 +2322,7 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
     );
   });
 
-  it("recomputes a version-5 counter instead of trusting a streak that may span an unknown", async () => {
+  it("refuses a version-5 body instead of advancing it, leaving the counter it cannot trust", async () => {
     await withHarness(
       progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 2 }),
       async ({ runtime, ledger, requests, graphId }) => {
@@ -2334,77 +2337,58 @@ describe("OutcomeGraphRuntime — loop progress is compared across rounds", () =
         // An OLDER BUILD wrote this body: body version 5, whose counter did NOT
         // clear on an unknown, so "unchanged: 1" may stand for a streak an
         // unjudged round interrupted. It cannot be told apart from a trustworthy
-        // one, so the count is not trusted at all.
+        // one, so this build never advances it: recomputing the count would be
+        // fabricating a comparison the run never made, and carrying it forward
+        // would let a declared stopping policy fire on repetitions nobody
+        // observed back to back.
         const stored = ledger.readGraphState(graphId);
         if (stored === undefined) throw new Error("fixture: the state row is missing");
         const body = recordOf(stored.body, "the state body");
         expect(body.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
+        const rawNodes = body.nodes;
+        if (!Array.isArray(rawNodes)) throw new Error("fixture: the body carries no nodes");
+        // Version 5 persisted the credential itself, never its digest, so the
+        // entries are re-spelled in that layout: a body handed to the reader is
+        // exactly what that version's writer would have written.
+        const v5Nodes = rawNodes.map((node) => {
+          const entry = recordOf(node, "a node entry");
+          const { attemptCredentialDigest: _digest, ...rest } = entry;
+          return { ...rest, attemptCredential: "fixture-credential:" + String(entry.nodeId) };
+        });
         ledger.writeGraphState({
           ...stored,
-          body: { ...body, bodyVersion: OUTCOME_STATE_BODY_V5 },
+          body: { ...body, bodyVersion: OUTCOME_STATE_BODY_V5, nodes: v5Nodes },
           updatedAt: NOW + 10,
         });
         const seeded = runtime.state();
         expect(seeded?.bodyVersion).toBe(OUTCOME_STATE_BODY_V5);
         expect(progressEntry(seeded ?? same.state, "revise-loop").unchanged).toBe(1);
 
-        // An advance that measures NOTHING still replaces the untrusted count:
-        // the work step below is not a loop continuation, so no comparison runs
-        // and the rewritten body must not carry the old number forward.
-        const workedAgain = workStep(runtime, requests, "work#5", NOW + 11);
-        expect(workedAgain.kind).toBe("accepted");
-        if (workedAgain.kind !== "accepted") return;
-        expect(workedAgain.state.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
-        expect(progressEntry(workedAgain.state, "revise-loop")).toEqual({
-          loopGroupId: "revise-loop",
-          evaluator: "revision-token",
-          version: 1,
-          subject: "revision",
-          unchanged: 0,
-          baseline: "r1",
-        });
-
-        // The next comparable unchanged token: TRUSTED, the old count plus this
-        // one would be the declared threshold and stop the run; RECOMPUTED, it is
-        // one, and the run continues. The baseline is kept, so the comparison
-        // still answers against the same token.
-        const next = runtime.submit(
+        const before = ledger.readGraphState(graphId);
+        const workedAgain = runtime.submit(
           {
-            nodeId: "review",
-            outcomeId: "revise",
-            credential: credentialOf(requests, "review#6"),
-            data: { revision: "r1" },
+            nodeId: "work",
+            outcomeId: "done",
+            credential: credentialOf(requests, "work#5"),
           },
-          NOW + 12,
+          NOW + 11,
         );
-        expect(next.kind).toBe("accepted");
-        if (next.kind !== "accepted") return;
-        expect(onlyProgress(next.progress)).toMatchObject({
-          verdict: "unchanged",
-          unchanged: 1,
-          baseline: "r1",
-          stalled: false,
-        });
-        expect(next.state.phase).toBe("executing");
-        expect(next.stop).toBeUndefined();
+        // The attempt CANNOT BE SETTLED AT ALL: a version-5 entry carries the
+        // credential itself, and this build verifies against a digest, so the
+        // presented credential resolves to no attempt. Nothing is advanced and
+        // nothing is granted in the body's place.
+        expect(workedAgain.kind).toBe("refused");
+        if (workedAgain.kind !== "refused") return;
+        expect(workedAgain.refusals.map((refusal) => refusal.code)).toEqual([
+          "credential-unknown",
+        ]);
 
-        // The recomputation is committed WITH the acceptance and rewrites the
-        // body in the current version, so it happens once per body and a restart
-        // from here trusts a counter this build measured itself.
-        const rewritten = runtime.state();
-        expect(rewritten?.bodyVersion).toBe(CURRENT_OUTCOME_STATE_BODY);
-        expect(progressEntry(rewritten ?? next.state, "revise-loop")).toEqual({
-          loopGroupId: "revise-loop",
-          evaluator: "revision-token",
-          version: 1,
-          subject: "revision",
-          unchanged: 1,
-          baseline: "r1",
-        });
+        // NOTHING was written: the older body keeps the counter it recorded, so
+        // an operator can still read what the run actually measured.
+        expect(ledger.readGraphState(graphId)).toEqual(before);
       },
     );
   });
-
   it("replays a continuation without counting it twice", async () => {
     await withHarness(
       progressLoopDeclaration({ maxTraversals: 20, maxUnchanged: 3 }),
@@ -3051,17 +3035,21 @@ describe("OutcomeGraphRuntime — a cyclic candidate dependency does not arm its
 // ── Attempt credentials ─────────────────────────────────────────────────────
 
 describe("OutcomeGraphRuntime — an attempt is named by the credential it was issued", () => {
-  it("persists the credential on the attempt entry and keeps it off every other record", async () => {
+  it("persists only the credential DIGEST on the attempt entry, and the value itself nowhere", async () => {
     await withHarness(LINEAR, async ({ runtime, ledger, requests, graphId }) => {
       const started = runtime.start(NOW);
       expect(started.kind).toBe("started");
       if (started.kind !== "started") return;
       const request = requests[0];
       if (request === undefined) throw new Error("fixture: work was not dispatched");
-      // Issued by the runtime: the dispatch request carries it, and the
-      // attempt's own persisted entry records the same value.
+      // Issued by the runtime and DELIVERED over the dispatch channel: the
+      // request carries the credential, while the attempt's own persisted entry
+      // records only its digest.
       expect(request.credential).toBe(credentialOf(requests, "work#1"));
-      expect(nodeOf(started.state, "work").attemptCredential).toBe(request.credential);
+      expect(nodeOf(started.state, "work").attemptCredentialDigest).toBe(
+        attemptCredentialDigest(request.credential),
+      );
+      expect(nodeOf(started.state, "work").attemptCredential).toBeUndefined();
 
       const accepted = runtime.submit(
         { nodeId: "work", outcomeId: "done", credential: request.credential },
@@ -3069,30 +3057,42 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
       );
       expect(accepted.kind).toBe("accepted");
       if (accepted.kind !== "accepted") return;
-      // The SETTLED entry keeps the settling attempt's credential, which is what
+      const shipCredential = credentialOf(requests, "ship#2");
+      // The SETTLED entry keeps the settling attempt's DIGEST, which is what
       // lets a repeat resolve to the same attempt and replay its receipt.
-      expect(nodeOf(accepted.state, "work").attemptCredential).toBe(request.credential);
-      expect(nodeOf(accepted.state, "ship").attemptCredential).toBe(
-        credentialOf(requests, "ship#2"),
+      expect(nodeOf(accepted.state, "work").attemptCredentialDigest).toBe(
+        attemptCredentialDigest(request.credential),
+      );
+      expect(nodeOf(accepted.state, "ship").attemptCredentialDigest).toBe(
+        attemptCredentialDigest(shipCredential),
       );
 
-      // The credential lives in the state row and travels over the dispatch
-      // seam; it is in no receipt, no accepted event and no effect payload.
+      // The credential VALUE travels over the dispatch seam and is in no durable
+      // record at all: not the state row, not an effect payload, not a receipt
+      // and not an accepted event. A read-only reader of the store therefore
+      // holds nothing it could present.
       const effects = ledger.pendingEffects(graphId);
       expect(effects).toHaveLength(1);
       expect(fieldOf(effects[0]?.payload, "credential")).toBeUndefined();
-      expect(JSON.stringify(effects[0]?.payload)).not.toContain(request.credential);
       const receipt = ledger.lookupReceipt({
         graphId,
         attemptId: "work#1",
         submissionId: accepted.receipt.submissionId,
       });
-      expect(JSON.stringify(receipt)).not.toContain(request.credential);
-      expect(JSON.stringify(ledger.acceptedEvents(graphId))).not.toContain(
-        request.credential,
-      );
+      for (const record of [
+        JSON.stringify(effects[0]?.payload),
+        JSON.stringify(receipt),
+        JSON.stringify(ledger.acceptedEvents(graphId)),
+        JSON.stringify(ledger.readGraphState(graphId)?.body),
+      ]) {
+        expect(record).not.toContain(request.credential);
+        expect(record).not.toContain(shipCredential);
+        expect(record).not.toContain(credentialOf(requests, "work#1"));
+      }
+      // The VERIFIER is there, though: the digest is what a submission is
+      // checked against, and it is not the credential.
       expect(JSON.stringify(ledger.readGraphState(graphId)?.body)).toContain(
-        request.credential,
+        attemptCredentialDigest(request.credential),
       );
 
       // A recovery report names the armed attempt but never its capability.
@@ -3126,9 +3126,10 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
         status: "dispatched",
         attemptId: "work#3",
       });
-      const current = nodeOf(revised.state, "work").attemptCredential;
+      const current = nodeOf(revised.state, "work").attemptCredentialDigest;
       expect(current).toBeDefined();
-      expect(current).not.toBe(firstCredential);
+      expect(current).not.toBe(attemptCredentialDigest(firstCredential));
+      expect(nodeOf(revised.state, "work").attemptCredential).toBeUndefined();
 
       const before = runtime.state();
       const receiptsBefore = await countTable(dir, "ledger_receipts");
@@ -3390,6 +3391,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
           throw new Error("fixture: a node entry is not a record");
         }
         const {
+          attemptCredentialDigest: _digest,
           attemptCredential: _credential,
           arrivals: _arrivals,
           ...rest
@@ -3423,7 +3425,7 @@ describe("OutcomeGraphRuntime — an attempt is named by the credential it was i
         "credential-missing",
       ]);
       const paths = resumed.refusals.map((refusal) => refusal.path);
-      expect(paths).toContain("$.attemptCredential");
+      expect(paths).toContain("$.attemptCredentialDigest");
       expect(paths.some((path) => path?.startsWith("$.nodes[") === true)).toBe(true);
 
       // SUBMISSION: the credential the worker holds names no recorded attempt,

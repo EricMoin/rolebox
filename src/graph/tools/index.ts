@@ -40,7 +40,7 @@ import { errorText } from "../../utils/error-text.ts";
 import type { DispatchManager } from "../../dispatch/core/manager.ts";
 import type { NodeLivenessFeed, NodeDispatchPort } from "../engine/index.ts";
 import type { ContractRegistry } from "../contracts/resolve.ts";
-import type { CredentialIsolationAdapter } from "../outcome/credential-isolation.ts";
+import type { CredentialIsolationCapability } from "../outcome/credential-isolation.ts";
 import type { HostIdentityCapability } from "../outcome/host-identity.ts";
 import {
   createGraphToolSet,
@@ -201,7 +201,7 @@ export function createGraphTools(
      * (`credential-isolation-unavailable`), which is the intended default for
      * a host that has not provided a protected credential store.
      */
-    credentialIsolation?: CredentialIsolationAdapter;
+    credentialIsolation?: CredentialIsolationCapability;
     /**
      * Optional HOST invocation-identity capability (D9), threaded into a toolset
      * constructed HERE so `graph_submit_outcome` can bind an attempt to the host

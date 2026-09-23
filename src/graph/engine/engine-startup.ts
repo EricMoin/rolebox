@@ -112,7 +112,7 @@ import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
 import {
   credentialIsolationRefusal,
   readCredentialIsolationAdapter,
-  type CredentialIsolationAdapter,
+  type CredentialIsolationCapability,
 } from "../outcome/credential-isolation.ts";
 import {
   hostIdentityRefusal,
@@ -382,7 +382,7 @@ export interface RecoverInterruptedGraphsOptions {
    * written. With one, the ledger is opened at the adapter's declared
    * `credentialStoreRoot` instead of the scanned workspace's default.
    */
-  outcomeCredentialIsolation?: CredentialIsolationAdapter;
+  outcomeCredentialIsolation?: CredentialIsolationCapability;
 
   /**
    * Optional HOST invocation-identity capability (D9) for the outcome run path.

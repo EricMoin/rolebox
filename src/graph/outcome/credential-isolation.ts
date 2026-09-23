@@ -8,30 +8,40 @@
  * (docs/graph-outcome-protocol.md § "D7", and the credential section of
  * § "Submission and acceptance".)
  *
- * WHAT THIS BUILD CANNOT DO, STATED FIRST. An attempt credential is a bearer
- * nonce minted at dispatch and persisted in the attempt's own state entry
- * inside the acceptance ledger (see `attempt-credential.ts`). This build
- * writes that ledger as an ordinary file under a configured root, so ANY
- * process that can read the file can read every resident attempt credential,
- * rebind one to another attempt and be accepted: the repository's default root
- * is the workspace, and moving the file to another directory, mounting it
- * read-only, or checking its path here would change nothing about what a
- * same-account process can read. There is no in-process check this module could
- * perform that would make the store protected, so it does not pretend to make
- * one: the boundary is a property of the HOST, not of this build.
+ * WHAT THIS BUILD NOW DOES, AND WHAT IT STILL CANNOT DO. The acceptance ledger
+ * no longer carries a usable credential: an attempt's own state entry records
+ * the DIGEST of its credential (state-body version 8, `attempt-credential.ts`),
+ * so a process that only READS the ledger file — the reproduced defect this
+ * capability was introduced for — cannot present anything that verifies. That
+ * protection is the build's own and needs no host.
  *
- * THEREFORE THE RUN PATH REQUIRES AN EXPLICIT HOST CAPABILITY. A host that
- * provides (a) a credential store outside every dispatched worker's read and
+ * WHAT IS LEFT IS THE STORE AND THE DELIVERY, AND BOTH ARE THE HOST'S. A digest
+ * verifies a submission but cannot be handed back to a worker: a recovered
+ * attempt (the commit-then-crash window D8 reconciles) has to be re-delivered by
+ * a host that still holds the credential ITSELF, and the credential must reach
+ * exactly one attempt over exactly one channel. A host that provides (a) a
+ * store that keeps the credential outside every dispatched worker's read and
  * write scope and (b) a dispatch channel that hands each attempt ONLY its own
- * credential, declares both by injecting a {@link CredentialIsolationAdapter}.
+ * credential, declares both by injecting a capability. This module owns that
+ * declaration in two versions:
+ *
+ * - version 1 ({@link CredentialIsolationAdapter}): the DECLARATION, with the
+ *   store root the ledger is opened under. It enables the run path and is what
+ *   every deployment that has adopted the contract already injects;
+ * - version 2 ({@link CredentialIsolationAdapterV2}): the declaration PLUS the
+ *   {@link CredentialIsolationStore} — the host's own `remember`/`resolve`
+ *   store for the credential itself. It is what a recovery needs to re-deliver
+ *   an attempt whose execution was never created; without it such an effect is
+ *   REPORTED as unsettled work and never launched with a fabricated credential.
+ *
  * The outcome run path (`runtime.ts` start/resume/submit), the model-facing
  * ingress (`tools/submit-outcome.ts`) and the startup sweep
  * (`engine/engine-startup.ts`) all consult
  * {@link credentialIsolationRefusal} BEFORE they read or write anything: with
- * no adapter, or with a value that is not a readable version-1 adapter, they
- * refuse with {@link CREDENTIAL_ISOLATION_REFUSAL_CODE} and a diagnostic naming
- * exactly what the host must inject. Nothing is started, resumed or settled
- * under a weaker assumption, and no path "runs anyway".
+ * no capability, or with a value that is not a readable version-1 or version-2
+ * adapter, they refuse with {@link CREDENTIAL_ISOLATION_REFUSAL_CODE} and a
+ * diagnostic naming exactly what the host must inject. Nothing is started,
+ * resumed or settled under a weaker assumption, and no path "runs anyway".
  *
  * WHAT THE ADAPTER IS, AND WHAT IT IS NOT. It is an ASSERTION by the host, not
  * a proof: this build checks its SHAPE (exact version, non-empty id and store
@@ -70,6 +80,14 @@ export const CREDENTIAL_ISOLATION_REFUSAL_CODE =
  * never read approximately.
  */
 export const CREDENTIAL_ISOLATION_VERSION = 1;
+
+/**
+ * The adapter-format version that adds the host's store for the credential
+ * itself. Read as its own exact identity, exactly like version 1: the two
+ * shapes are not interchangeable, and a version-2 value whose store is missing
+ * or unreadable is refused rather than downgraded to the declaration alone.
+ */
+export const CREDENTIAL_ISOLATION_VERSION_V2 = 2;
 
 // ── The capability ──────────────────────────────────────────────────────────
 
@@ -125,6 +143,91 @@ export interface CredentialIsolationAdapter {
   readonly guarantees: CredentialIsolationGuarantees;
 }
 
+// ── The store half (version 2) ──────────────────────────────────────────────
+
+/**
+ * The attempt one stored credential belongs to. Runtime provenance only:
+ * every component is minted or compiled by the runtime, never supplied by a
+ * worker or a submission.
+ */
+export interface CredentialStoreIdentity {
+  /** The graph the attempt belongs to. */
+  readonly graphId: string;
+  /** The plan node the attempt executes. */
+  readonly nodeId: string;
+  /** The runtime-minted attempt the credential names. */
+  readonly attemptId: string;
+}
+
+/**
+ * The host's own store for the credential ITSELF — the half a declaration
+ * cannot provide.
+ *
+ * `remember` is called by the runtime the moment a credential is minted, BEFORE
+ * the state that records its digest is committed, so the credential exists in
+ * the store for every attempt the durable state can ever name — including one
+ * whose dispatch the process never got to perform. `resolve` is what a recovery
+ * asks for a credential the state only holds the digest of; a credential the
+ * store can no longer produce is REPORTED as unsettled work and never replaced
+ * by a fresh one.
+ *
+ * THE STORE IS THE HOST'S, AND SO IS ITS PROTECTION. Nothing in this build
+ * inspects where the store keeps its bytes, whether a worker can read them, or
+ * what a mount option says: those are facts about the host's environment that no
+ * value here can attest. What the runtime CAN enforce is what it does with the
+ * store: a credential is written to it before it is anywhere durable, it is
+ * resolved only for the exact attempt it was issued for, and it is never part
+ * of a report — the attempt identity names the record, the value never does.
+ */
+export interface CredentialIsolationStore {
+  /**
+   * Adopt one freshly minted credential for the attempt it is bound to.
+   *
+   * Called before the attempt's state (which records only the digest) is
+   * committed. A store that throws fails the whole mint — the state is not
+   * written, because an attempt whose credential the host never held could
+   * never be re-delivered.
+   */
+  remember(identity: CredentialStoreIdentity, credential: string): void;
+  /**
+   * The credential this store holds for one attempt, or `undefined` when it
+   * cannot produce it (never held, lost with a restart, or pruned). The runtime
+   * reports the effect instead of launching it.
+   */
+  resolve(identity: CredentialStoreIdentity): string | undefined;
+}
+
+/**
+ * The HOST's credential-isolation capability, version 2: the version-1
+ * declaration plus the store that actually holds the credential.
+ *
+ * CLOSED SHAPE — exactly `{ version, id, credentialStoreRoot, guarantees,
+ * store }`, read by {@link readCredentialIsolationAdapter}. A version-2 value
+ * without a readable store is refused exactly like a malformed version-1 value:
+ * a host that declares the store half and omits it is not partly trusted.
+ */
+export interface CredentialIsolationAdapterV2 {
+  /** The adapter-format version — always 2 for this shape. */
+  readonly version: 2;
+  /** The host adapter's own stable identity, for diagnostics. Never a secret. */
+  readonly id: string;
+  /** The store root the host declares as protected. See version 1. */
+  readonly credentialStoreRoot: string;
+  /** The host's explicit declaration of the two guarantees it provides. */
+  readonly guarantees: CredentialIsolationGuarantees;
+  /** The host's store for the credential itself (see the interface). */
+  readonly store: CredentialIsolationStore;
+}
+
+/**
+ * Every shape this build reads as a credential-isolation capability: the
+ * declaration alone (version 1) or the declaration with the host's store
+ * (version 2).
+ */
+export type CredentialIsolationCapability =
+  | CredentialIsolationAdapter
+  | CredentialIsolationAdapterV2;
+
 /**
  * Read one adapter value, or `undefined` when it is not one.
  *
@@ -141,29 +244,96 @@ export interface CredentialIsolationAdapter {
  */
 export function readCredentialIsolationAdapter(
   raw: unknown,
-): CredentialIsolationAdapter | undefined {
+): CredentialIsolationCapability | undefined {
   if (!isRecord(raw)) return undefined;
+  if (raw.version === CREDENTIAL_ISOLATION_VERSION) return readVersion1Adapter(raw);
+  if (raw.version === CREDENTIAL_ISOLATION_VERSION_V2) return readVersion2Adapter(raw);
+  return undefined;
+}
+
+/** Read the version-1 shape (the declaration alone), or `undefined`. */
+function readVersion1Adapter(
+  raw: Record<string, unknown>,
+): CredentialIsolationAdapter | undefined {
   if (!hasExactKeys(raw, ["version", "id", "credentialStoreRoot", "guarantees"])) {
     return undefined;
   }
-  if (raw.version !== CREDENTIAL_ISOLATION_VERSION) return undefined;
+  const shared = readSharedDeclaration(raw);
+  if (shared === undefined) return undefined;
+  return Object.freeze({
+    version: CREDENTIAL_ISOLATION_VERSION,
+    id: shared.id,
+    credentialStoreRoot: shared.credentialStoreRoot,
+    guarantees: shared.guarantees,
+  });
+}
+
+/** Read the version-2 shape (the declaration plus the store), or `undefined`. */
+function readVersion2Adapter(
+  raw: Record<string, unknown>,
+): CredentialIsolationAdapterV2 | undefined {
+  if (
+    !hasExactKeys(raw, [
+      "version",
+      "id",
+      "credentialStoreRoot",
+      "guarantees",
+      "store",
+    ])
+  ) {
+    return undefined;
+  }
+  const shared = readSharedDeclaration(raw);
+  if (shared === undefined) return undefined;
+  const store = readStore(raw.store);
+  if (store === undefined) return undefined;
+  return Object.freeze({
+    version: CREDENTIAL_ISOLATION_VERSION_V2,
+    id: shared.id,
+    credentialStoreRoot: shared.credentialStoreRoot,
+    guarantees: shared.guarantees,
+    store,
+  });
+}
+
+/** The fields both versions share, read strictly, or `undefined`. */
+function readSharedDeclaration(raw: Record<string, unknown>):
+  | {
+      readonly id: string;
+      readonly credentialStoreRoot: string;
+      readonly guarantees: CredentialIsolationGuarantees;
+    }
+  | undefined {
   const id = nonEmptyString(raw.id);
   const credentialStoreRoot = nonEmptyString(raw.credentialStoreRoot);
   if (id === undefined || credentialStoreRoot === undefined) return undefined;
   const guarantees = readGuarantees(raw.guarantees);
   if (guarantees === undefined) return undefined;
-  return Object.freeze({
-    version: CREDENTIAL_ISOLATION_VERSION,
-    id,
-    credentialStoreRoot,
-    guarantees,
-  });
+  return { id, credentialStoreRoot, guarantees };
 }
 
-/** Whether a value is a readable version-1 credential-isolation adapter. */
+/**
+ * Read the version-2 store: exactly `{ remember, resolve }`, both functions.
+ *
+ * The host's own store object may expose more than the capability needs; the
+ * adapter is the CLOSED value this build reads, so a host wraps its store in
+ * these two functions rather than handing over whatever else it has.
+ */
+function readStore(raw: unknown): CredentialIsolationStore | undefined {
+  if (!isRecord(raw)) return undefined;
+  if (!hasExactKeys(raw, ["remember", "resolve"])) return undefined;
+  if (typeof raw.remember !== "function" || typeof raw.resolve !== "function") {
+    return undefined;
+  }
+  const remember = raw.remember as CredentialIsolationStore["remember"];
+  const resolve = raw.resolve as CredentialIsolationStore["resolve"];
+  return Object.freeze({ remember, resolve });
+}
+
+/** Whether a value is a readable credential-isolation capability (either version). */
 export function isCredentialIsolationAdapter(
   value: unknown,
-): value is CredentialIsolationAdapter {
+): value is CredentialIsolationCapability {
   return readCredentialIsolationAdapter(value) !== undefined;
 }
 
@@ -174,11 +344,13 @@ export function isCredentialIsolationAdapter(
  * declaration. It carries no credential.
  */
 export function describeCredentialIsolation(
-  adapter: CredentialIsolationAdapter,
+  adapter: CredentialIsolationCapability,
 ): string {
   return (
     JSON.stringify(adapter.id) +
-    " (protected credential store " +
+    " (version " +
+    adapter.version +
+    ", protected credential store " +
     JSON.stringify(adapter.credentialStoreRoot) +
     ")"
   );
@@ -216,18 +388,22 @@ export function credentialIsolationRefusal(
       path: "$.credentialIsolation" as const,
       message:
         "outcome-runtime: this process was given no host credential-isolation " +
-        "capability, and this build cannot protect the attempt credentials it " +
-        "persists — the acceptance ledger is an ordinary file under the configured " +
-        "store root, so any process that can read it (including a dispatched worker " +
-        "on the same account) can read another attempt's credential, rebind it and " +
-        "be accepted. No path check, read-only mount or directory move performed " +
-        "here would change that, so the outcome run path REFUSES to start, resume " +
-        "or settle anything until the host injects a version-" +
+        "capability. This build persists only the DIGEST of an attempt credential " +
+        "in the acceptance ledger, so a reader of that file cannot present one — but " +
+        "the " +
+        "credential ITSELF still has to be held and delivered by the host: the " +
+        "digest cannot be handed to a recovered worker, and only the host can give " +
+        "each attempt its own credential over its own dispatch channel. The outcome " +
+        "run path therefore REFUSES to start, resume or settle anything until the " +
+        "host injects a credential-isolation adapter — version " +
         CREDENTIAL_ISOLATION_VERSION +
-        " credential-isolation adapter declaring { guarantees: { " +
-        "protectedCredentialStore: true, perAttemptDelivery: true } } and a " +
-        "credentialStoreRoot outside every dispatched worker's read and write " +
-        "scope; nothing was written",
+        " declaring { guarantees: { protectedCredentialStore: true, " +
+        "perAttemptDelivery: true } } and a credentialStoreRoot outside every " +
+        "dispatched worker's read and write scope, or version " +
+        CREDENTIAL_ISOLATION_VERSION_V2 +
+        " adding the { remember, resolve } store that holds the credential and lets " +
+        "a recovery re-deliver an attempt whose execution was never created; " +
+        "nothing was written",
     });
   }
   if (!isCredentialIsolationAdapter(adapter)) {
@@ -236,14 +412,14 @@ export function credentialIsolationRefusal(
       path: "$.credentialIsolation" as const,
       message:
         "outcome-runtime: the injected credential-isolation capability is not a " +
-        "readable version-" +
+        "readable adapter of version " +
         CREDENTIAL_ISOLATION_VERSION +
-        " adapter — it must be exactly { version: " +
-        CREDENTIAL_ISOLATION_VERSION +
-        ", id, credentialStoreRoot, guarantees: { protectedCredentialStore: true, " +
-        "perAttemptDelivery: true } } of non-empty strings. A capability this build " +
-        "cannot read is refused rather than downgraded to an unprotected run, so " +
-        "nothing was started, resumed or settled",
+        " ({ version, id, credentialStoreRoot, guarantees: { " +
+        "protectedCredentialStore: true, perAttemptDelivery: true } }) or version " +
+        CREDENTIAL_ISOLATION_VERSION_V2 +
+        " (the same shape plus a store of exactly { remember, resolve }). A " +
+        "capability this build cannot read is refused rather than downgraded to an " +
+        "unprotected run, so nothing was started, resumed or settled",
     });
   }
   return undefined;

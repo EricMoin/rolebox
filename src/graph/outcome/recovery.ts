@@ -52,7 +52,7 @@ import {
   type OutcomeRuntimeRefusal,
 } from "./runtime.ts";
 import type { CompletionPolicyRegistry } from "../policy/completion-policy.ts";
-import type { CredentialIsolationAdapter } from "./credential-isolation.ts";
+import type { CredentialIsolationCapability } from "./credential-isolation.ts";
 import type { HostIdentityCapability } from "./host-identity.ts";
 import type { ValidatorRegistry } from "./validators.ts";
 
@@ -216,7 +216,7 @@ export interface ResumePersistedOutcomeGraphOptions {
    * of its entry points. Recovery just forwards it; the rule lives in
    * `credential-isolation.ts`.
    */
-  readonly credentialIsolation?: CredentialIsolationAdapter;
+  readonly credentialIsolation?: CredentialIsolationCapability;
   /**
    * The HOST's invocation-identity capability (D9). Recovery forwards it to the
    * outcome run path unchanged: a recovered attempt keeps the dispatch identity

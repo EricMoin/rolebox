@@ -149,6 +149,8 @@ import type { GraphStateRecord } from "../ledger/types.ts";
 import type { AcceptanceDecision } from "./acceptance.ts";
 import {
   attemptCredentialBinding,
+  attemptCredentialDigest,
+  isAttemptCredentialDigest,
   mintAttemptCredential,
   type AttemptCredentialSource,
 } from "./attempt-credential.ts";
@@ -193,16 +195,37 @@ export interface OutcomeNodeState {
   /** The graph-wide sequence number that minted {@link attemptId}. */
   readonly attemptSeq?: number;
   /**
-   * The bearer credential the runtime issued to this attempt's worker, present
-   * exactly when the attempt was dispatched by a build that issues one (body
-   * version 2 and later).
+   * The DIGEST of the bearer credential the runtime issued to this attempt's
+   * worker — what body version 8 records, and the only form of an attempt
+   * credential this build writes down.
    *
-   * A settled node keeps the credential of the attempt that settled it, so a
-   * repeated submission resolves back to that same attempt. A body version
-   * that does not define this field records attempts with NO credential; the
-   * run path refuses to settle or relaunch such an attempt instead of deriving
-   * or inventing a value (see `attempt-credential.ts` for what a bearer
-   * credential does and does not prove).
+   * WHY THE DIGEST, NOT THE CREDENTIAL. A credential is a bearer nonce: whatever
+   * holds the value can be accepted for the attempt it was issued for, so a
+   * durable record carrying the nonce is a second, unprotected copy of the
+   * capability (the read-the-ledger-then-submit defect the credential-isolation
+   * capability exists to close). The digest verifies possession without being
+   * one: `submit` hashes what the worker presents and compares, and a reader of
+   * the state learns nothing it can present.
+   *
+   * A settled node keeps the digest of the attempt that settled it, so a
+   * repeated submission resolves back to that same attempt. An attempt the run
+   * path cannot verify — a body version that records no credential at all, or
+   * one whose legacy plaintext field this build never compares against a digest
+   * — is refused rather than settled, and is never granted a fresh credential
+   * (see `attempt-credential.ts`).
+   */
+  readonly attemptCredentialDigest?: string;
+  /**
+   * The PLAINTEXT credential a body version before 8 persisted on the attempt's
+   * own entry, read ONLY so an older body is not silently trimmed.
+   *
+   * THIS BUILD NEVER USES IT. It is not compared against a submission (a digest
+   * is what version 8 records, and a plaintext can never match one), it is never
+   * re-delivered to a worker (re-delivery comes from the host's credential store
+   * — `credential-isolation.ts`), and it is not carried into a body this build
+   * writes (versions before 8 are readable and never advanced). It is exposed to
+   * no report: the runtime's readings project the attempt and the node, never
+   * this field.
    */
   readonly attemptCredential?: string;
   /**
@@ -579,9 +602,45 @@ export const OUTCOME_STATE_BODY_V6 = 6 as const;
  * record one. A body is never migrated in place, and no identity is ever
  * back-filled onto an attempt that predates the field.
  *
- * This is the layout this build writes.
+ * This was the layout this build wrote before version 8 stopped persisting the
+ * credential itself. It stays READABLE — a completed graph reports cleanly and
+ * an in-flight attempt is still reported by name — but it is NOT advanceable:
+ * every entry of this version carries the credential as a plaintext nonce, and
+ * this build writes only the digest, so carrying one into a version-8 body
+ * would either store the nonce again (the defect version 8 exists to close) or
+ * drop it (the silent loss the version gate exists to prevent).
  */
 export const OUTCOME_STATE_BODY_V7 = 7 as const;
+
+/**
+ * The eighth versioned state-body layout: a dispatched or settled entry carries
+ * `attemptCredentialDigest` — the digest of the attempt's bearer credential —
+ * INSTEAD OF the credential itself.
+ *
+ * WHY THE PERSISTED FORM IS LAYOUT AND NOT AN EXTRA. A reader that received a
+ * body whose entry still carried the plaintext (version 7 and earlier) could not
+ * tell it from a digest by the field's name alone, and the run path would have
+ * to guess whether a presented value must be compared directly or hashed first
+ * — exactly the ambiguity that makes a stolen nonce usable. A version is the
+ * only place a body attests what its credential field IS, so this is a new
+ * layout rather than a reinterpretation of the old one. `isAttemptCredentialDigest`
+ * is the shape rule the reader enforces, so a version-8 entry that carries
+ * anything else is refused by name.
+ *
+ * THE CREDENTIAL ITSELF LIVES IN THE HOST'S STORE. Nothing recoverable is
+ * written here: verification hashes what a submitter presents, and re-delivery
+ * of a recovered attempt resolves the credential from the host capability that
+ * holds it (`credential-isolation.ts`). A host that cannot produce it is
+ * reported as an unsettled effect, never handed a fabricated credential.
+ *
+ * Versions 1 to 7 stay READABLE and are never advanced or migrated: version 7
+ * carries the plaintext this build does not re-persist, versions 5 and 6 carry
+ * it too, and the older ones cannot carry the credentials, arrivals, stop or
+ * progress baselines this build writes.
+ *
+ * This is the layout this build writes.
+ */
+export const OUTCOME_STATE_BODY_V8 = 8 as const;
 
 /**
  * The state-body format this build writes.
@@ -592,7 +651,7 @@ export const OUTCOME_STATE_BODY_V7 = 7 as const;
  * field is declaring a new body version that a reader owns — never extending a
  * version in place.
  */
-export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V7;
+export const CURRENT_OUTCOME_STATE_BODY = OUTCOME_STATE_BODY_V8;
 
 /**
  * What reading one state body with a registered reader produced.
@@ -872,10 +931,12 @@ interface OutcomeStateLayout {
   /** The phases this version's writer can produce, in canonical order. */
   readonly phases: readonly OutcomeGraphPhase[];
   /**
-   * `required` — every dispatched/settled entry must carry
-   * `attemptCredential`; `forbidden` — the version does not define the field.
+   * `plaintext` — every dispatched/settled entry must carry the bearer
+   * `attemptCredential` itself (versions 2 to 7); `digest` — every such entry
+   * must carry `attemptCredentialDigest` instead (version 8); `forbidden` —
+   * the version defines neither field (version 1).
    */
-  readonly credential: "required" | "forbidden";
+  readonly credential: "plaintext" | "digest" | "forbidden";
   /**
    * `required` — every entry must carry the `arrivals` list (version 3);
    * `forbidden` — the version does not define the field, so an entry that
@@ -977,7 +1038,7 @@ const OUTCOME_STATE_LAYOUT_V2: OutcomeStateLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V2,
   bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
-  credential: "required" as const,
+  credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
   arrivals: "forbidden" as const,
   stop: "forbidden" as const,
@@ -1016,7 +1077,7 @@ const OUTCOME_STATE_LAYOUT_V3: OutcomeStateLayout = Object.freeze({
   version: OUTCOME_STATE_BODY_V3,
   bodyKeys: OUTCOME_STATE_BODY_KEYS_THROUGH_V3,
   phases: OUTCOME_STATE_PHASES_THROUGH_V3,
-  credential: "required" as const,
+  credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
   arrivals: "required" as const,
   stop: "forbidden" as const,
@@ -1058,7 +1119,7 @@ const OUTCOME_STATE_LAYOUT_V4: OutcomeStateLayout = Object.freeze({
     "stop",
   ]),
   phases: OUTCOME_STATE_PHASES_V4,
-  credential: "required" as const,
+  credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
@@ -1102,7 +1163,7 @@ const OUTCOME_STATE_LAYOUT_V5: OutcomeStateLayout = Object.freeze({
     "loopProgress",
   ]),
   phases: OUTCOME_STATE_PHASES_V4,
-  credential: "required" as const,
+  credential: "plaintext" as const,
   dispatchIdentity: "forbidden" as const,
   arrivals: "required" as const,
   stop: "defined" as const,
@@ -1169,6 +1230,33 @@ const OUTCOME_STATE_LAYOUT_V7: OutcomeStateLayout = Object.freeze({
 });
 
 /**
+ * The node fields body version 8 defines: version 7's fields, with the
+ * credential field RENAMED and narrowed to the digest — a dispatched or settled
+ * entry carries `attemptCredentialDigest` and must NOT carry the plaintext
+ * `attemptCredential` (see {@link OUTCOME_STATE_BODY_V8}). The key lists are
+ * built FROM version 7's, so the layouts cannot drift apart in the fields they
+ * share.
+ */
+const OUTCOME_STATE_LAYOUT_V8: OutcomeStateLayout = Object.freeze({
+  ...OUTCOME_STATE_LAYOUT_V7,
+  version: OUTCOME_STATE_BODY_V8,
+  credential: "digest" as const,
+  keys: Object.freeze({
+    pending: Object.freeze([...OUTCOME_STATE_LAYOUT_V7.keys.pending]),
+    dispatched: Object.freeze(
+      OUTCOME_STATE_LAYOUT_V7.keys.dispatched.map((key) =>
+        key === "attemptCredential" ? "attemptCredentialDigest" : key,
+      ),
+    ),
+    settled: Object.freeze(
+      OUTCOME_STATE_LAYOUT_V7.keys.settled.map((key) =>
+        key === "attemptCredential" ? "attemptCredentialDigest" : key,
+      ),
+    ),
+  }),
+});
+
+/**
  * Refuse every node field the declared body version does not define for this
  * status.
  *
@@ -1231,6 +1319,7 @@ function readNodeState(
   const attemptId = raw.attemptId;
   const attemptSeq = raw.attemptSeq;
   const attemptCredential = raw.attemptCredential;
+  const attemptCredentialDigest = raw.attemptCredentialDigest;
   const dispatchIdentity = readDispatchIdentity(raw, where, layout);
   const outcomeId = raw.outcomeId;
   const dispatchedAt = readOptionalEpoch(raw, "dispatchedAt", where);
@@ -1251,6 +1340,7 @@ function readNodeState(
       attemptId !== undefined ||
       attemptSeq !== undefined ||
       attemptCredential !== undefined ||
+      attemptCredentialDigest !== undefined ||
       dispatchIdentity !== undefined ||
       outcomeId !== undefined ||
       dispatchedAt !== undefined ||
@@ -1281,8 +1371,15 @@ function readNodeState(
       where + ".attemptSeq is " + describeValue(attemptSeq) + ", not a positive safe integer",
     );
   }
+  // THE CREDENTIAL AXIS IS THE VERSION'S, AND IT IS EXCLUSIVE. A version that
+  // records the bearer credential itself (2 to 7) must carry a non-empty
+  // plaintext; version 8 must carry the DIGEST and must not carry the plaintext
+  // (a plaintext is refused rather than compared as if it were a digest, which
+  // is the ambiguity the version gate exists to remove); version 1 defines
+  // neither field.
   let credential: string | undefined;
-  if (layout.credential === "required") {
+  let credentialDigest: string | undefined;
+  if (layout.credential === "plaintext") {
     if (typeof attemptCredential !== "string" || attemptCredential.length === 0) {
       throw malformedState(
         where + ".attemptCredential is " + describeValue(attemptCredential) +
@@ -1291,7 +1388,18 @@ function readNodeState(
       );
     }
     credential = attemptCredential;
-  } else if (attemptCredential !== undefined) {
+  } else if (layout.credential === "digest") {
+    if (!isAttemptCredentialDigest(attemptCredentialDigest)) {
+      throw malformedState(
+        where + ".attemptCredentialDigest is " + describeValue(attemptCredentialDigest) +
+          ", not the sha256 digest body version " + layout.version + " requires on a " +
+          status + " node — this build persists only the digest of an attempt " +
+          "credential, so a record that carries anything else is refused rather " +
+          "than read as a verifier it is not",
+      );
+    }
+    credentialDigest = attemptCredentialDigest;
+  } else if (attemptCredential !== undefined || attemptCredentialDigest !== undefined) {
     // Unreachable through rejectUnknownNodeFields; kept so the rule does not
     // depend on the key set alone.
     throw malformedState(
@@ -1318,6 +1426,9 @@ function readNodeState(
       attemptId,
       attemptSeq,
       ...(credential === undefined ? {} : { attemptCredential: credential }),
+      ...(credentialDigest === undefined
+        ? {}
+        : { attemptCredentialDigest: credentialDigest }),
       ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
       outcomeId,
       dispatchedAt,
@@ -1336,6 +1447,9 @@ function readNodeState(
     attemptId,
     attemptSeq,
     ...(credential === undefined ? {} : { attemptCredential: credential }),
+    ...(credentialDigest === undefined
+      ? {}
+      : { attemptCredentialDigest: credentialDigest }),
     ...(dispatchIdentity === undefined ? {} : { dispatchIdentity }),
     dispatchedAt,
     ...(recordedArrivals === undefined ? {} : { arrivals: recordedArrivals }),
@@ -2319,18 +2433,17 @@ const OUTCOME_STATE_BODY_V4_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V4);
 const OUTCOME_STATE_BODY_V5_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V5);
 const OUTCOME_STATE_BODY_V6_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V6);
 const OUTCOME_STATE_BODY_V7_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V7);
+const OUTCOME_STATE_BODY_V8_READER = stateBodyReader(OUTCOME_STATE_LAYOUT_V8);
 
 /**
- * The state-body capabilities this build installs: version 7 (what it writes,
- * everything version 6 carries plus the OPTIONAL host invocation identity a
- * dispatched or settled attempt was bound to), version 6 and version 5 as the
- * ADVANCEABLE predecessors (version 5's counters are recomputed before it is
- * advanced — see {@link OUTCOME_STATE_BODY_V6} — and version 6 carries every
- * field version 7 requires except the optional identity, so advancing it
- * invents nothing), and versions 4, 3, 2 and 1 as readable older layouts whose
- * attempts the run path refuses to advance — version 4 records no progress
- * baseline, version 3 cannot record a stop, version 2 records no arrivals and
- * version 1 no credential, and none of those is migrated.
+ * The state-body capabilities this build installs: version 8 (what it writes,
+ * version 7's fields with the credential persisted as a DIGEST instead of the
+ * credential itself) as the only ADVANCEABLE layout, and versions 7 down to 1
+ * as READ-ONLY older layouts — version 7 (and 6 and 5) record the credential
+ * itself, which this build never re-persists, never compares against a digest
+ * and never re-delivers, and the older ones cannot carry the credentials,
+ * arrivals, stop or progress baselines this build writes. None of them is
+ * migrated.
  */
 export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
   createOutcomeStateBodyRegistry({
@@ -2343,6 +2456,7 @@ export const DEFAULT_OUTCOME_STATE_BODY_REGISTRY: OutcomeStateBodyRegistry =
       OUTCOME_STATE_BODY_V5_READER,
       OUTCOME_STATE_BODY_V6_READER,
       OUTCOME_STATE_BODY_V7_READER,
+      OUTCOME_STATE_BODY_V8_READER,
     ],
   });
 
@@ -2714,18 +2828,21 @@ function verifyArrivals(
 // ── The reducer ─────────────────────────────────────────────────────────────
 
 /**
- * The state-body versions this build ADVANCES. A body written by an older
- * layout is advanced only when it carries everything this build writes on an
- * attempt: version 5 (counters recomputed, see {@link OUTCOME_STATE_BODY_V6})
- * and version 6 (which carries every field version 7 requires except the
- * OPTIONAL dispatch identity, so nothing is invented). Versions 1 to 4 cannot
- * carry a credential, a join arrival list or a progress baseline, so they stay
- * readable and are refused by name rather than advanced into a newer layout.
+ * The state-body versions this build ADVANCES: exactly the layout it writes.
+ *
+ * A body written by an older layout is advanced only when advancing it invents
+ * nothing and drops nothing. Version 7 and earlier carry the attempt credential
+ * as a PLAINTEXT nonce on every dispatched and settled entry, and this build
+ * writes only the digest — carrying such an entry forward would either persist
+ * the nonce again (the defect version 8 exists to close) or drop it (the silent
+ * loss the version gate exists to prevent), and re-encoding it is a migration
+ * this build deliberately does not perform (a credential is issued once, at
+ * dispatch). Versions 6 down to 1 share that reason or cannot carry the
+ * arrivals, stop and progress baselines this build writes. They stay READABLE
+ * and are refused by name rather than advanced into a newer layout.
  */
 const ADVANCEABLE_STATE_BODY_VERSIONS: readonly number[] = Object.freeze([
-  OUTCOME_STATE_BODY_V5,
-  OUTCOME_STATE_BODY_V6,
-  OUTCOME_STATE_BODY_V7,
+  OUTCOME_STATE_BODY_V8,
 ]);
 
 /** Why an accepted outcome could not be applied to the state. */
@@ -2894,36 +3011,16 @@ function continuationGroups(
 }
 
 /**
- * The SAME progress record with every counter reset to zero: the entries, their
- * baselines and their evaluator identities are kept, because those are facts this
- * build can still stand behind, while the count is not.
- *
- * This is the version-5 compatibility rule in one function (see
- * {@link OUTCOME_STATE_BODY_V6}): the old build let a streak span an unknown
- * comparison, so the number is replaced rather than trusted. Nothing is invented
- * in its place — a zero counter claims no repetition at all, which is exactly
- * what this build knows about rounds it never compared.
- */
-function recomputedLegacyProgress(
-  record: Readonly<Record<string, OutcomeLoopProgress>>,
-): Readonly<Record<string, OutcomeLoopProgress>> {
-  const entries: Record<string, OutcomeLoopProgress> = {};
-  for (const [groupId, entry] of Object.entries(record)) {
-    entries[groupId] = Object.freeze({ ...entry, unchanged: 0 });
-  }
-  return Object.freeze(entries);
-}
-
-/**
  * Compare every declared progress policy this continuation is measured by.
  *
  * Runs INSIDE the acceptance transaction, against the record that transaction is
  * committing: the entries it returns are written in the same batch that carries
  * the receipt, the accepted event and the stop, so a crash cannot commit an
  * acceptance without the progress it implied (or the progress without it). The
- * record is the caller's TRUSTED one — a version-5 body's counters are recomputed
- * before they reach this function (see {@link OUTCOME_STATE_BODY_V6}), so a
- * comparison here never continues a streak the old build measured by other rules.
+ * record is the caller's TRUSTED one — this build writes only the current layout,
+ * whose counters it measured itself, and every older body is read-only precisely
+ * because a counter of another meaning could not be told apart from one of its
+ * own.
  *
  * Every group with a declared policy is compared — the comparison is a fact
  * about the accepted outcome, so a group that ran the comparison records it even
@@ -3110,11 +3207,13 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       "outcome-advance: the state was written in body version " + state.bodyVersion +
         ", which this build does not advance (it advances body versions " +
         ADVANCEABLE_STATE_BODY_VERSIONS.join(", ") +
-        ") — a version before " + OUTCOME_STATE_BODY_V5 +
-        " cannot carry the attempt credentials, join arrivals and progress baselines this " +
-        "build writes on every attempt, and a newer one is not read by this build — the " +
-        "state is refused rather than advanced and rewritten in body version " +
-        CURRENT_OUTCOME_STATE_BODY,
+        ") — only body version " + CURRENT_OUTCOME_STATE_BODY +
+        " records the attempt credential as the DIGEST this build verifies against, while " +
+        "every earlier version persists the credential itself (never re-persisted, never " +
+        "compared against a presentation and never re-delivered) or cannot carry the join " +
+        "arrivals and progress baselines this build writes on every attempt, and a newer " +
+        "one is not read by this build — the state is refused rather than advanced and " +
+        "rewritten in body version " + CURRENT_OUTCOME_STATE_BODY,
     );
   }
   if (state.loopProgress === undefined) {
@@ -3126,18 +3225,12 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         "this build could not read back",
     );
   }
-  // THE VERSION-5 COUNTER IS NOT TRUSTED; THE BASELINE IS. Version 5 was written
-  // before an unknown comparison cleared the streak, so a persisted count may span
-  // a round nobody judged. It is never carried into this build's state: every
-  // counter is RECOMPUTED from zero (the baseline, the evaluator identity and its
-  // version are kept exactly as they were) in the same transaction that rewrites
-  // the body in the current version. Conservative in one direction only — it can
-  // delay a stop, never fabricate one — and it happens ONCE per body, because a
-  // current-version counter is produced by the comparison alone.
+  // THE COUNTERS ARE THIS BUILD'S OWN. The advance guard above admitted only the
+  // current layout, and this build writes a counter only after a comparison it
+  // performed, so the record is carried forward exactly as it stands — no counter
+  // is recomputed, re-based or invented here.
   const recordedProgress: Readonly<Record<string, OutcomeLoopProgress>> =
-    state.bodyVersion === OUTCOME_STATE_BODY_V5
-      ? recomputedLegacyProgress(state.loopProgress)
-      : state.loopProgress;
+    state.loopProgress;
   // A STOPPED RUN TAKES NO FURTHER STEP. The stop is a decision the run already
   // committed to, so a later acceptance on ANY branch — the branch that hit the
   // limit included — is refused rather than applied, and the refusal names the
@@ -3201,12 +3294,12 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
     status: "settled" as const,
     ...(current.attemptId === undefined ? {} : { attemptId: current.attemptId }),
     ...(current.attemptSeq === undefined ? {} : { attemptSeq: current.attemptSeq }),
-    // The credential of the attempt that SETTLED the node is kept, exactly as
-    // its attempt id is: a repeated submission must resolve back to this same
-    // attempt (and its receipt), never to a newer one.
-    ...(current.attemptCredential === undefined
+    // The credential DIGEST of the attempt that SETTLED the node is kept,
+    // exactly as its attempt id is: a repeated submission must resolve back to
+    // this same attempt (and its receipt), never to a newer one.
+    ...(current.attemptCredentialDigest === undefined
       ? {}
-      : { attemptCredential: current.attemptCredential }),
+      : { attemptCredentialDigest: current.attemptCredentialDigest }),
     // The host identity the attempt was DISPATCHED under is kept for the same
     // reason its credential is: a repeated submission resolves back to this
     // attempt (and its receipt) and must still be checked against the binding
@@ -3378,9 +3471,12 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
       attemptSeq += 1;
       const attemptId = candidate.node.id + "#" + attemptSeq;
       const targetNode = candidate.node;
-      // The credential is issued WITH the attempt and persisted on its entry,
-      // so the binding a submission is checked against comes from the state —
-      // never from the submission, and never re-derived from the attempt id.
+      // The credential is issued WITH the attempt and its DIGEST is persisted on
+      // the entry, so the binding a submission is checked against comes from the
+      // state — never from the submission, and never re-derived from the attempt
+      // id. The credential itself is returned in this advance's dispatch intent
+      // (below), which is the one channel that hands it to the host that
+      // delivers it; nothing durable records it.
       const credential = mintAttemptCredential(
         input.mintCredential,
         attemptCredentialBinding({
@@ -3395,7 +3491,7 @@ export function advanceOutcomeGraph(input: OutcomeAdvanceInput): OutcomeAdvance 
         status: "dispatched" as const,
         attemptId,
         attemptSeq,
-        attemptCredential: credential,
+        attemptCredentialDigest: attemptCredentialDigest(credential),
         // The invocation identity IN EFFECT for this advance, recorded with the
         // attempt so a later process can require the submission to come from the
         // same host attribution (D9). Absent when the host declared none: the
